@@ -7,13 +7,18 @@ This page is the authoritative specification of ry's typing semantics. It is the
 
 ## Typing comment syntax
 
-A typing annotation is written in a `#:` comment. An annotation comes before the binding or expression it describes. This applies to every typing annotation, not only to function annotations.
+A typing annotation is written in a `#:` comment, directly above the binding or expression it describes. Consecutive `#:` lines with no blank line between them form one annotation block.
 
-- Consecutive `#:` lines with no blank line between them form one annotation block.
-- Most annotation blocks attach to the binding or expression that follows them.
-- Attachment works at any statement depth, not only at the top level. A block inside a function body annotates the local assignment or the block-final expression that follows it. The full checked, `@new`, and `@trust` semantics apply there.
+There are four annotation forms:
 
-A function that builds a value of a named type uses this. The `@new` block inside the body annotates the expression the function returns:
+- `#: TYPE` is a checked annotation
+- `#: @trust TYPE` is a trusted coercion
+- `#: @if-unknown TYPE` is an unknown-only coercion
+- `#: @new NOMINAL_TYPE` introduces a nominal value
+
+A block holds exactly one of those lines, or one expanded function annotation written as `@param` and `@return` lines, or one or more `@type` and `@alias` lines. The three kinds cannot be mixed in one block.
+
+A block attaches at any statement depth, not only at the top level. A block inside a function body annotates the assignment or the block-final expression that follows it. A function that builds a value of a named type uses this:
 
 ```r
 #: @type Person {list{name: character}}
@@ -28,50 +33,17 @@ make_person <- function(name) {
 Attachment requires adjacency. The annotated expression must start on the line directly after the block. A block that needs a target and has none is an error, and the annotation does not apply. There are four such cases.
 
 - a blank line separates the block from the expression
-- a plain `#` comment separates the block from the expression, or no expression follows at all
+- a plain `#` comment separates them, or no expression follows at all
 - the block has no content beyond the `#:` marker
-- the block sits inside a call's argument list, for example beside a lambda passed to `lapply`. An argument is not a statement, so nothing there can be annotated
+- the block sits inside a call's argument list, for example beside a lambda passed to `lapply`, because an argument is not a statement
 
-The last case has a remedy. Give the value its own binding, then annotate that binding. Moving the block above the enclosing statement annotates that statement instead. A lambda parameter has no annotatable position at all.
+For the last case, give the value its own binding and annotate that. A braceless function body, a braceless `if` branch, and a parenthesised expression do attach, and are not errors.
 
-Three positions resemble an argument list but do attach, and are not errors: a braceless function body, a braceless `if` branch, and a parenthesised expression.
+A block that contains only `@type` and `@alias` lines is a definition block. It does not attach to anything, and neither does a `@strict` toggle, so the adjacency rules do not apply to them.
 
-A block that contains only `@type` and `@alias` lines is a definition block. A definition block does not attach to the following binding or expression. It is a compact way to write several top-level `@type` or `@alias` declarations together. Definition blocks and `@strict` toggles stand alone, so the adjacency rules above do not apply to them.
+A block is refused whole when it mixes forms, orders directives wrongly, declares a duplicate or unknown type parameter, or gives `@new` a payload that is not nominal. A refused block reports its error and carries no typing payload, so a broken annotation never produces follow-on findings. A block the annotation grammar could not read is refused silently, because the parse error has already reported what was wrong.
 
-There are four annotation forms:
-
-- `#: TYPE`
-  - checked annotation
-- `#: @trust TYPE`
-  - trusted coercion
-- `#: @if-unknown TYPE`
-  - unknown-only coercion
-- `#: @new NOMINAL_TYPE`
-  - nominal introduction
-
-Additional block rules:
-
-- a block may contain exactly one compact annotation line
-- a block may contain an expanded function annotation made of multiple `@param` and `@return` or `@returns` lines
-- a block may contain one or more `@type` and `@alias` lines
-- compact, expanded, and definition forms cannot be mixed in the same block
-
-A block that violates a shape rule is refused whole. A refused block reports its error and carries no typing payload, so a broken annotation never produces follow-on findings. These are the shape rules a block can violate:
-
-- it mixes annotation forms
-- it orders directives wrongly
-- it declares a duplicate or an unknown type parameter
-- it gives `@new` a payload that is not nominal
-- it exceeds the nesting caps below
-
-A block the annotation grammar could not read is refused the same way, and silently. The parse error has already reported what was wrong. A block that did not parse gives no information to report a second error from. A refused higher-rank annotation therefore reports the refusal alone, and the annotated definition types as though it carried no annotation at all.
-
-The form rules above apply to whole `#:` lines. One line commits to one form, and only whole lines are compared. A line that yields a second item did not parse as the form it committed to. The extra item is what error recovery salvaged, not a second annotation, so such a line is a parse failure rather than a form clash.
-
-Annotation types have two nesting caps.
-
-- Past 128 levels, a type is refused for checking. This is a typing finding, so `# typing: off` removes it.
-- Past 160 levels, the annotation shape itself is refused. This finding always reports.
+An annotation type may nest 128 levels deep. Past that the type is refused for checking, which `# typing: off` removes. Past 160 levels the annotation shape itself is refused, and that always reports.
 
 Examples:
 
@@ -81,28 +53,8 @@ value <- 1L
 ```
 
 ```r
-#: list[integer]
-value <- list(1L, 2L, 3L)
-```
-
-```r
 #: fn(count: integer) -> integer
 double_count <- function(count) count + count
-```
-
-```r
-#: @param render_count {fn(integer) -> character}
-#: @param count {integer}
-#: @param [label] {character | NULL}
-#: @returns {character}
-apply_renderer <- function(render_count, count, label = NULL) {
-  if (!is.null(label)) paste0(label, ": ", render_count(count)) else render_count(count)
-}
-```
-
-```r
-#: @type Cat {list{ name: character }}
-#: @type Dog {list{ name: character }}
 ```
 
 ## Types
