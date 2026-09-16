@@ -467,20 +467,37 @@ impl Formatter<'_> {
     }
 
     fn element(&mut self, element: &Element, level: usize, make_multiline: bool) {
-        // Nothing may follow a comment on its line — it would become comment
-        // text. Walks normally break the line themselves; this guard covers
-        // the joins that do not know a comment interposed (an operand
-        // continuing an operator across a commented line break).
-        if let Some(comment_end) = self.comment_end.take()
-            && element.kind() != SyntaxKind::COMMENT
-            && !self.out[comment_end..].contains('\n')
-        {
-            self.newline(level);
+        match element.kind() {
+            // Where a comment goes relative to the comment before it is the
+            // comment walk's own business.
+            SyntaxKind::COMMENT => self.comment_end = None,
+            _ => {
+                self.break_after_comment(level);
+            }
         }
         match element {
             SyntaxElement::Node(node) => self.node(node, level, make_multiline),
             SyntaxElement::Token(token) => self.token(token, level),
         }
+    }
+
+    /// Break the line when a comment holds it, and report whether it did.
+    ///
+    /// Nothing may follow a comment on its line — it would become comment
+    /// text, which is the one formatter mistake that silently deletes code.
+    /// Walks normally break the line themselves; this covers the joins that do
+    /// not know a comment interposed (an operand continuing an operator across
+    /// a commented line break). Every emission goes through it: a token written
+    /// straight into the output has to ask for itself.
+    fn break_after_comment(&mut self, level: usize) -> bool {
+        let Some(comment_end) = self.comment_end.take() else {
+            return false;
+        };
+        if self.out[comment_end..].contains('\n') {
+            return false;
+        }
+        self.newline(level);
+        true
     }
 
     fn token(&mut self, token: &SyntaxToken, level: usize) {
@@ -1263,7 +1280,16 @@ impl Formatter<'_> {
                     }
                     self.element(element, level, false);
                 }
-                SyntaxKind::EQ => self.out.push_str(" ="),
+                SyntaxKind::EQ => match self.break_after_comment(level) {
+                    // A named argument whose name and value straddle a comment
+                    // (`f(y # note` / `= 2)`) continues on the next line, one
+                    // level in, the same as the value would.
+                    true => {
+                        self.out.push_str(&self.indent);
+                        self.out.push('=');
+                    }
+                    false => self.out.push_str(" ="),
+                },
                 _ => {
                     if Self::is_comment(previous) {
                         self.newline(level);

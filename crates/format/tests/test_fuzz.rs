@@ -170,6 +170,7 @@ const REGRESSIONS: &[&str] = &[
     "{ repeat commentt\n}",
     "f <-#: Pers function(x, y) y\non\nx\n",
     "1L --- fn(ier\n#:dL\n----a, bar)\n\n!\n L\n",
+    "f <- fn(x, y \n## banner\n= 2) | + y\n",
 ];
 
 fn iterations() -> usize {
