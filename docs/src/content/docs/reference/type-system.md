@@ -5,9 +5,7 @@ description: The precise static-typing semantics contract for ry's R type checke
 
 This page is the authoritative specification of ry's typing semantics. It is the precise contract that the type checker implements. The [Type Checker guide](/type-checking/tutorial) is a gentler introduction that works through examples.
 
-The page is ordered from the type system outwards. It opens with the notation for writing a type, then the types themselves, then function types, then the forms an annotation can take. Expression typing follows, then naming and scoping, then the modes and boundaries that sit around the whole system.
-
-Two things are deliberately not here. Diagnostic wording lives in the [diagnostic codes reference](/reference/diagnostic-codes), because a message can be reworded without the semantics changing. Gaps in what the checker covers today live in [Limitations](/type-checking/limitations). This page states the rules, not the schedule.
+Two things are not on this page. Diagnostic wording is in the [diagnostic codes reference](/reference/diagnostic-codes), because a message can be reworded without the semantics changing. What the type checker does not cover yet is in [Limitations](/type-checking/limitations).
 
 ## Typing comment syntax
 
@@ -68,7 +66,7 @@ A block that violates a shape rule is refused whole. A refused block reports its
 - it gives `@new` a payload that is not nominal
 - it exceeds the nesting caps below
 
-A block the annotation grammar could not read is refused the same way, and silently. The parse error has already reported what was wrong. A second opinion drawn from a block nobody could read would be a guess. A refused higher-rank annotation therefore reports the refusal alone, and the annotated definition types as though it carried no annotation at all.
+A block the annotation grammar could not read is refused the same way, and silently. The parse error has already reported what was wrong. A block that did not parse gives no information to report a second error from. A refused higher-rank annotation therefore reports the refusal alone, and the annotated definition types as though it carried no annotation at all.
 
 The form rules above apply to whole `#:` lines. One line commits to one form, and only whole lines are compared. A line that yields a second item did not parse as the form it committed to. The extra item is what error recovery salvaged, not a second annotation, so such a line is a parse failure rather than a form clash.
 
@@ -256,18 +254,18 @@ R lets a list name be any string. A field name that is not a syntactic R name is
 When a record-like list is rejected, the finding names the one field that failed rather than the two whole types. There are three cases.
 
 - Both sides declare the field, and the two types do not fit.
-- The expected type declares a field that the value does not have. When the value carries a near-miss of that name, the finding names it, because that is what a renamed field looks like.
+- The expected type declares a field that the value does not have. When the value carries a near-miss of that name, the finding names it, because a renamed field has exactly that shape.
 - The value has a field that the expected type does not declare.
 
 A nested record names the path, outermost field first, as `retry.count`.
 
 Two whole types are printed only when the failure is not about one field. A record against a non-record, and a record against `list[T]`, are the cases two whole types explain well. For a single field they are two long, near-identical strings that the reader must diff by eye, and for a nested field they never name the path at all.
 
-The finding is placed on the field, not on the whole value. A type carries no source ranges, so the field path is walked back against the `list(...)` call that built the record, whose tagged arguments are its fields. The caret then lands on what the message is about.
+The finding is placed on the field, not on the whole value. A type carries no source ranges, so the field path is walked back against the `list(...)` call that built the record, whose tagged arguments are its fields. The caret then points at what the message is about.
 
-- For a field whose type does not fit, the caret lands on the offending value.
-- For a field the type does not declare, the caret lands on the field's name.
-- For a missing field, the caret lands on the innermost list that should have carried it, because there is nothing at the path to point at.
+- For a field whose type does not fit, the caret points at the offending value.
+- For a field the type does not declare, the caret points at the field's name.
+- For a missing field, the caret points at the innermost list that should have contained it, because the path itself has nothing to point at.
 
 Where that walk finds nothing, the whole value stays the blame and the message still names the field. A variable holding a record has no field expression, so it is such a case.
 
@@ -291,7 +289,7 @@ Example:
 
 #### The empty list
 
-`list()` infers as the empty tuple-like shape `list{}`. It is compatible with any element-typed list shape, which covers `list[T]` and `list[named: T]` alike. It has no element whose type or name could conflict. That is what makes `function(options = list())` a usable default for a `list[named: T]` parameter. A record-like expectation with required fields still rejects it, because those fields are genuinely missing.
+`list()` infers as the empty tuple-like shape `list{}`. It is compatible with any element-typed list shape, which covers `list[T]` and `list[named: T]` alike. It has no element whose type or name could conflict. `function(options = list())` is therefore a usable default for a `list[named: T]` parameter. A record-like expectation with required fields still rejects it, because those fields are genuinely missing.
 
 ### `NULL`
 
@@ -319,7 +317,7 @@ Examples:
 - `Unknown` may arise from an unsupported construct, an unresolved name, a partially supported construct, or insufficient type information
 - `Unknown` is compatible with every type, in both directions. This is the same blanket compatibility that `Any` has. It keeps one unmodelled value from cascading into a run of follow-on errors. It is also why a gap in the checker's knowledge means checks are skipped rather than wrong. A value the checker could not type flows into a `double` parameter without complaint
 - `Unknown` differs from `Any` in intent, not in compatibility. `Any` is a declared instruction not to check the value. `Unknown` records that the checker could not tell. The one place that intent changes behaviour is [`@if-unknown`](#unknown-only-coercions), which supplies a type where one is missing. It applies to an `Unknown` and is refused on an `Any`, because overriding a deliberate opt-out is a different act from filling a gap
-- [Strict mode](#strict-mode) is the way to see where checking stopped. It reports the sites where the checker gave up, not the types that happen to be `Unknown`. Each of these records its own origin, and that origin is the finding: an unmodellable construct, a reference with no known type, a binding that does not stabilize across a loop, and a recursive definition. A type is not reported for being `Unknown`. A declaration whose return type is `Unknown` produces no strict finding at its call sites. An `Unknown` nested inside a larger type is not reported either, and the `fn(p: Unknown) -> Unknown` that an aliased generic closes to is such a case. Whether they should be reported is an open question, not a guarantee this page makes
+- [Strict mode](#strict-mode) reports every site where the checker could not determine a type. It does not report a type that happens to be `Unknown`. Each of these records its own origin, and that origin is the finding: an unmodellable construct, a reference with no known type, a binding that does not stabilize across a loop, and a recursive definition. A type is not reported for being `Unknown`. A declaration whose return type is `Unknown` produces no strict finding at its call sites. An `Unknown` nested inside a larger type is not reported either, and the `fn(p: Unknown) -> Unknown` that an aliased generic closes to is such a case. Whether they should be reported is an open question, not a guarantee this page makes
 - `Unknown` is not an explicit opt-out
 - `Unknown` should remain visible in user-facing output and in fixture expectations
 - `Unknown` preserves progress and reduces cascading secondary diagnostics
@@ -454,7 +452,7 @@ Type parameters are also allowed in the atomic vector suffix forms:
 - `T[]`
 - `T[named]`
 
-Using a type parameter as a vector element restricts it. A `T` in `T[]` carries the atomic-element bound, so it can instantiate only to one of the six atomic types: `logical`, `integer`, `double`, `complex`, `character`, and `raw`. This bound is what makes element-preserving signatures expressible. With `sort : <T> fn(x: T[]) -> T[]`, `sort(c("b", "a"))` types as `character[]` and `sort(c(1L))` as `integer[]`. A list argument cannot bind `T` at all, because a list is not an atomic element type.
+Using a type parameter as a vector element restricts it. A `T` in `T[]` carries the atomic-element bound, so it can instantiate only to one of the six atomic types: `logical`, `integer`, `double`, `complex`, `character`, and `raw`. This bound makes element-preserving signatures expressible. With `sort : <T> fn(x: T[]) -> T[]`, `sort(c("b", "a"))` types as `character[]` and `sort(c(1L))` as `integer[]`. A list argument cannot bind `T` at all, because a list is not an atomic element type.
 
 `sort(list(1))` is nonetheless accepted as `Any`. The shipped `sort` ends its [overload set](#overload-sets) with an `Any` fallback, and the first-match rule picks it. A single-candidate `<T> fn(x: T[])` rejects the same call.
 
@@ -654,7 +652,7 @@ A union type `A | B | ...` describes a value that has one of the member types. A
   - a nested function type
   - a list annotation and a map-like list annotation
 - a union describes which shapes a value can take. It does not merge or coerce its members
-- a type may be parenthesized for grouping. `(TYPE)` means exactly `TYPE` and adds no structure of its own. Grouping is what makes a union with a function-type member writable. In `fn() -> integer | NULL` the `->` extends over the whole union, so that type is a function returning `integer | NULL`. An optional callback is therefore written `(fn() -> integer) | NULL`, which is also the form such a union renders as. A `<T>` binder may not appear inside parentheses, because binders stay at the outermost level of an annotation
+- a type may be parenthesized for grouping. `(TYPE)` means exactly `TYPE` and adds no structure of its own. Grouping makes a union with a function-type member writable. In `fn() -> integer | NULL` the `->` extends over the whole union, so that type is a function returning `integer | NULL`. An optional callback is therefore written `(fn() -> integer) | NULL`, which is also the form such a union renders as. A `<T>` binder may not appear inside parentheses, because binders stay at the outermost level of an annotation
 
 Examples:
 
@@ -700,7 +698,7 @@ Unification is stricter than compatibility, and it is the invariant floor. It ap
 
 - an inference variable may be bound to a union, exactly like it is bound to any other type
 - two unions unify only when their member sets are equal. Member order is presentation, not identity
-- the nullable shape is the single member-wise case. `T | NULL` unifies with `U | NULL` by unifying `T` with `U`, when each side has exactly one non-`NULL` member. This is what lets a `<T> ... T | NULL` scheme instantiate against a concrete nullable
+- the nullable shape is the single member-wise case. `T | NULL` unifies with `U | NULL` by unifying `T` with `U`, when each side has exactly one non-`NULL` member. This lets a `<T> ... T | NULL` scheme instantiate against a concrete nullable
 - there is no member-matching search inside unification. Directional member-wise reasoning lives entirely in compatibility
 
 ## Function types
@@ -832,7 +830,7 @@ The `...` in the annotation must appear in the same position as the `...` formal
 
 Both annotation styles allow the return type to be left unwritten. An expanded block with no `@return` or `@returns` line elides it, and so does a compact `fn(...)` with no `-> RETURN_TYPE`. An elided return is not the same as a written `NULL`. What it means depends on whether there is a function body to infer from.
 
-- On a checked annotation of a function definition, the return type is inferred from the body, exactly as it would be with no annotation at all. Such an annotation sits on a `function(...)` literal whose body is checked against it. Annotating only the parameters is the common partial form, and it must not silently pin the return. `@param u {integer}` on `add_one <- function(u) u + 1L` therefore infers `fn(u: integer) -> integer`. A return written as `Unknown` says the same thing out loud, because `Unknown` records that nothing is known, so it never overrides a body that shows otherwise. `Any` is the way to declare that the value should not be checked.
+- On a checked annotation of a function definition, the return type is inferred from the body, exactly as it would be with no annotation at all. Such an annotation is attached to a `function(...)` literal whose body is checked against it. Annotating only the parameters is the common partial form, and it must not silently pin the return. `@param u {integer}` on `add_one <- function(u) u + 1L` therefore infers `fn(u: integer) -> integer`. Writing the return as `Unknown` has the same effect, because `Unknown` records that nothing is known, so it never overrides a body that shows otherwise. `Any` is the annotation that turns checking off for a value.
 - In every position with no body to infer from, an elided return means `NULL`. This matches R functions that are called for their side effects. Three positions have no body. The first is a nested function type, such as a callback parameter written `@param cb {fn(integer)}`. The second is a [trusted coercion](#trusted-coercions) or an [`@if-unknown` coercion](#unknown-only-coercions), both of which adopt exactly the written type without consulting the body. The third is an annotation on a value that is not a function literal, such as `g <- f` with a `#: fn(integer)` annotation.
 
 A function that genuinely returns `NULL` can always say so explicitly, with `@returns {NULL}` or `-> NULL`. That explicit form is enforced, so a body returning anything non-`NULL` against it is a type error.
@@ -885,7 +883,7 @@ An unannotated `function(...)` expression infers a function type directly from i
 - parameter types and return types are inferred. An unconstrained parameter generalizes at a binding boundary, like any other inferred type
 - a constraint that an inference variable still carries at an item's export edge survives as a scheme binder. `mixed_apply <- invoke(mirror)` therefore exports `<T: numeric> fn(x: T) -> T`, so cross-item calls keep checking it. An unconstrained residual variable erases to `Unknown`
 - default value expressions are typechecked. An error inside a default is reported, and a default for an annotated parameter must be compatible with the declared type
-- a `NULL` default is checked like any other default. `function(title = NULL)` is R's usual spelling for an optional argument, and it does not make the parameter optional to the body. When the caller omits the argument, `title` is `NULL` in the body, so a declared `character` is a promise the function does not keep. Declare the parameter `character | NULL` and narrow it with `if (is.null(title))`. That is what makes `if (title == "draft")` an error rather than a run-time `argument is of length zero`. Marking the parameter `[title]` relaxes only the call. It says that callers may omit the argument, not that the body may receive nothing
+- a `NULL` default is checked like any other default. `function(title = NULL)` is R's usual spelling for an optional argument, and it does not make the parameter optional to the body. When the caller omits the argument, `title` is `NULL` in the body, so a declared `character` is a promise the function does not keep. Declare the parameter `character | NULL` and narrow it with `if (is.null(title))`. `if (title == "draft")` is then an error rather than a run-time `argument is of length zero`. Marking the parameter `[title]` relaxes only the call. It says that callers may omit the argument, not that the body may receive nothing
 - an unannotated parameter's type comes from its uses, not from its default, so a non-`NULL` default does not pin the inferred parameter type. `function(x = 1) x` is `<T> fn([x]: T) -> T`, and passing a character to it is not a finding, because R runs it
 - a call that omits the argument takes the default's type, because that is the value R puts in the frame. With `f <- function(x = 1) x`, `f()` is a `double` and `f("a")` is a `character`. The two rules fit together. The parameter is polymorphic, and omitting the argument is the one call where the default chooses the instantiation rather than the caller
 - for the same reason, a default is checked against an instantiation of the declared parameter type rather than against the binder itself. `#: <T> fn([x]: T) -> T` over `function(x = 1) x` is therefore accepted. A concrete declared type is unaffected, so `fn(title: character)` still refuses a `NULL` default, and `<T: numeric>` still refuses a character one
@@ -940,7 +938,7 @@ Examples:
 
 - a function of type `fn(integer | NULL) -> integer` is accepted where `fn(integer) -> integer` is expected, because `integer` is compatible with `integer | NULL`
 - a function of type `fn(integer) -> integer` is rejected where `fn(integer | NULL) -> integer` is expected, because the expected interface may pass `NULL`, which the actual function does not accept
-- `fn(a: integer, [b]: integer) -> integer` is accepted where `fn(integer) -> integer` is expected, because `b` defaults and the one-argument call the interface makes is valid. This is what lets a standard-library reduction serve a callback interface. `lapply(list(mean, sd), function(g) g(1:3))` types as `list[double]`, even though `mean` and `sd` each declare optional formals the callback never passes
+- `fn(a: integer, [b]: integer) -> integer` is accepted where `fn(integer) -> integer` is expected, because `b` defaults and the one-argument call the interface makes is valid. This lets a standard-library reduction serve a callback interface. `lapply(list(mean, sd), function(g) g(1:3))` types as `list[double]`, even though `mean` and `sd` each declare optional formals the callback never passes
 - `fn(a: integer, b: integer) -> integer` is rejected there, because the interface never supplies `b`. `fn() -> integer` is rejected too, because it cannot receive the argument the interface sends
 
 #### Callback forwarding at variadic call sites
@@ -1068,7 +1066,7 @@ value <- external_input
 render_count <- callback
 ```
 
-A trusted coercion can hide a real mistake. Use it only when you know more than the checker does.
+A trusted coercion suppresses a real error as readily as a false one. Use it only when you know more than the checker does.
 
 ### Nominal introduction
 
@@ -1132,7 +1130,7 @@ Examples:
 `if`, `while`, and the operands of `&&` and `||` all take a scalar condition. R decides what a scalar condition admits.
 
 - `logical` is the ordinary case
-- `integer` and `double` are accepted, and they coerce exactly as R coerces them. Zero is false, and anything else is true. This is what makes `if (length(x))`, `if (nrow(df))`, and `while (n)` ordinary R rather than mistakes
+- `integer` and `double` are accepted, and they coerce exactly as R coerces them. Zero is false, and anything else is true. This makes `if (length(x))`, `if (nrow(df))`, and `while (n)` ordinary R rather than mistakes
 - `character`, `complex`, and `raw` are type errors. R refuses `complex` and `raw` outright. In a `character` condition R accepts only the spellings of `TRUE` and `FALSE`, such as `"T"` and `"true"`, and raises at run time on every other string, so `if ("yes")` is reported
 - a vector is a type error, because a condition whose length is not one is an error in R too
 - a condition whose type is still undetermined binds to `logical`. That is the useful default for an unannotated predicate, so `function(flag) if (flag) 1L` infers `flag: logical`
@@ -1206,7 +1204,7 @@ Ten rules and limits apply.
 - A family membership test covers the scalar and the vector of the atomic type. `is.character` is true for `character` and for `character[]`. `is.list` covers every list shape, which is `list[T]`, `list[named: T]`, and the fixed-shape lists. `is.function` covers function types.
 - Narrowing filters union members. A member whose family cannot be decided statically is kept on both edges. An inference variable, a flexible-element vector, and an opaque nominal are such members.
 - `is.null(x)` on an `Any` or `Unknown` variable refines the true edge to `NULL`, because the runtime guarantees it. A family guard does not refine `Any` or `Unknown`. Inventing a concrete shape there would produce false positives against scalar-claim standard-library signatures.
-- `is.null(x)` on a completely unconstrained inference variable shapes it. Such a variable is an unannotated parameter that nothing has used yet. The test asserts that `NULL` is a possible inhabitant, so the variable becomes `T | NULL` for a fresh `T`. The edges then narrow as an ordinary union. The true edge keeps `NULL` and the undecidable `T`, and the false edge is `T`. This is what types the unannotated coalesce idiom, so `function(value, fallback) if (is.null(value)) fallback else value` generalizes to `<T> fn(value: T | NULL, fallback: T) -> T`. That is the same scheme its annotated form declares. There are two consequences. Testing a parameter for `NULL` and then using it unguarded is a genuine finding, because the test itself declared `NULL` possible. The shaping never fires on a variable that already carries a constraint, because a numeric-constrained variable cannot hold `NULL`, and it never fires on a declared rigid type parameter, because an annotation's contract is not reshaped.
+- `is.null(x)` on a completely unconstrained inference variable shapes it. Such a variable is an unannotated parameter that nothing has used yet. The test asserts that `NULL` is a possible inhabitant, so the variable becomes `T | NULL` for a fresh `T`. The edges then narrow as an ordinary union. The true edge keeps `NULL` and the undecidable `T`, and the false edge is `T`. This types the unannotated coalesce idiom, so `function(value, fallback) if (is.null(value)) fallback else value` generalizes to `<T> fn(value: T | NULL, fallback: T) -> T`. That is the same scheme its annotated form declares. There are two consequences. Testing a parameter for `NULL` and then using it unguarded is a genuine finding, because the test itself declared `NULL` possible. The shaping never fires on a variable that already carries a constraint, because a numeric-constrained variable cannot hold `NULL`, and it never fires on a declared rigid type parameter, because an annotation's contract is not reshaped.
 - When a guard cannot fire, no refinement happens. `is.null(x)` on a union with no `NULL` member is such a guard. The checker does not type dead branches specially.
 - Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists after the `if`. This is the idiomatic early-exit guard:
 
@@ -1310,9 +1308,9 @@ Optionality comes from the formals, not from the annotation. A formal with a def
 Argument checking is compatibility-based, not exact-equality-based.
 
 - The ordinary coercions defined in this document apply at parameter positions. Scalar-like `T` into array-like `T[]` is such a coercion, and so is `T` or `NULL` into `T | NULL`.
-- R's numeric promotion ladder widens in compatibility. The ladder is `logical` < `integer` < `double` < `complex`. A lower rung is accepted where a higher one is expected, for scalar-like, array-like, and map-like alike. `mean(1L)`, `sd(c(1L, 2L))`, and `sum(x > threshold)` are therefore not errors. The widening is directional. `double` is never accepted where `integer` is expected, and unification does not widen. `character` and `raw` are deliberately off the ladder. R reaches `character` only through an explicit coercion, and accepting it implicitly would hide argument-order mistakes.
+- R's numeric promotion ladder widens in compatibility. The ladder is `logical` < `integer` < `double` < `complex`. A lower rung is accepted where a higher one is expected, for scalar-like, array-like, and map-like alike. `mean(1L)`, `sd(c(1L, 2L))`, and `sum(x > threshold)` are therefore not errors. The widening is directional. `double` is never accepted where `integer` is expected, and unification does not widen. `character` and `raw` are deliberately off the ladder. R reaches `character` only through an explicit coercion, and accepting it implicitly would leave argument-order mistakes unreported.
 - A whole-number `double` literal counts as `integer` at a parameter position. `10` and `3` are such literals, so `seq_len(10)` and `substr(x, 1, 3)` are as valid as their `10L`, `1L`, and `3L` spellings. This generalizes the rule the `:` operator already applies to its endpoints. A fractional literal such as `2.5` is still rejected at an `integer` parameter, and so is a `double`-typed variable that holds a whole number.
-- An argument whose type is `Unknown` is accepted at any parameter. The reason the value became `Unknown` was already diagnosed where it happened, and repeating that at every later use would only cascade noise.
+- An argument whose type is `Unknown` is accepted at any parameter. The reason the value became `Unknown` was already diagnosed where it happened, and repeating it at every later use would add nothing.
 
 A rest parameter, written `...: TYPE`, changes how surplus arguments are handled. Its position in the signature mirrors the position of `...` in the R formal list. Argument matching follows R's rule for formals around the dots.
 
@@ -1329,8 +1327,8 @@ A standard-library stub name may declare several signatures, which form an order
 
 - candidates are tried in declaration order, and the call commits the first candidate whose parameters accept the arguments. That candidate's return type is the call's type. `sum(1L, 2L)` is therefore `integer`, and `sum(1.5, 2.5)` is `double`
 - each failed candidate is probed in isolation. Nothing a failed candidate bound leaks into the next candidate or into the committed result
-- When an argument's type is still an undetermined inference variable, a candidate may fit only because unification narrowed that variable. An unannotated parameter of an enclosing function is such an argument. Narrowing to make a candidate fit is a guess, not a fact. Every candidate is still tried. A candidate that fits while leaving the caller's undetermined types exactly as they were beats one that does not, whatever their declaration order. Among fits of the same kind, the first declared candidate wins. A wrapper such as `function(x) sum(x)` keeps its parameter unconstrained this way. A candidate whose parameter is `Any` accepts without binding anything, which makes the general fallback a fact and puts it ahead of the narrower candidates above it. A single fitting candidate is never a guess, because it is the only signature that accepts the call. It is selected and its narrowing stands, so `f(function(v) v, 1L)` selects the candidate whose second parameter is `integer`, even though the lambda's parameter type was open
-- The [whole-number literal rule](#function-calls) does not steer selection. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the `double` candidate, matching what R computes. Only if no candidate accepts them is the set retried with the literal-as-integer allowance. A name whose only fitting candidate wants `integer` therefore still accepts `foo(1)`
+- When an argument's type is still an undetermined inference variable, a candidate may fit only because unification narrowed that variable. An unannotated parameter of an enclosing function is such an argument. A candidate accepted only because of that narrowing is not established by the call itself. Every candidate is still tried. A candidate that fits while leaving the caller's undetermined types exactly as they were beats one that does not, whatever their declaration order. Among fits of the same kind, the first declared candidate wins. A wrapper such as `function(x) sum(x)` keeps its parameter unconstrained this way. A candidate whose parameter is `Any` accepts without binding anything, so the general fallback is selected ahead of the narrower candidates declared above it. A single fitting candidate is established by the call, because it is the only signature that accepts it. It is selected and its narrowing stands, so `f(function(v) v, 1L)` selects the candidate whose second parameter is `integer`, even though the lambda's parameter type was open
+- The [whole-number literal rule](#function-calls) does not affect which candidate is selected. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the `double` candidate, matching what R computes. Only if no candidate accepts them is the set retried with the literal-as-integer allowance. A name whose only fitting candidate wants `integer` therefore still accepts `foo(1)`
 - When no candidate accepts the arguments, the call is a type error. The error names the overloaded callee and how many signatures were tried, and it gives the first candidate's failure as the concrete hint. That is the form when the candidates disagree about what is wrong, because then no single candidate's complaint is the answer. One candidate's own finding is reported instead, at that candidate's own argument range, in two cases. The first is when every candidate rejects the call for the identical reason. The second is when one candidate got strictly further into the argument list than every other, which makes it the signature the call meant
 - Every non-call use of an overloaded name sees the last declaration. Passing the name as a value and hovering over it are such uses. By corpus convention the last declaration is the most general one, so a value-use never carries a narrower contract than the calls it might make. Go-to-definition on the name points at the first declaration, where the set begins
 
@@ -1338,7 +1336,7 @@ Only a declaration file can overload a name, and that boundary is deliberate. Ov
 
 A `#:` annotation on your own function therefore declares exactly one signature, and always will. To make one name accept several shapes, give the parameter a [union type](#union-types), or split the shapes into separate functions.
 
-A local or package binding that shadows a stub name disables its overload set. The binding wins everywhere, calls included. A project [override stub](/type-checking/stubs#overriding-a-shipped-declaration) may declare sets, because a `.Rtypes` file is a declaration file for foreign code wherever it lives.
+A local or package binding that shadows a stub name disables its overload set. The binding is used everywhere, calls included. A project [override stub](/type-checking/stubs#overriding-a-shipped-declaration) may declare sets, because a `.Rtypes` file is a declaration file for foreign code wherever it lives.
 
 ### Indexing
 
@@ -1350,7 +1348,7 @@ A local or package binding that shadows a stub name disables its overload set. T
 
 A backtick-quoted name follows the same rule.
 
-A field on a union subject may be absent from some members. R answers `NULL` for a name a list does not carry. A field that exists in some of the subject's shapes and not in others therefore reads as that field's type unioned with `NULL`. This is what makes the accumulator idiom check:
+A field on a union subject may be absent from some members. R answers `NULL` for a name a list does not carry. A field that exists in some of the subject's shapes and not in others therefore reads as that field's type unioned with `NULL`. This makes the accumulator idiom check:
 
 ```r
 args <- list()
@@ -1387,7 +1385,7 @@ For a fixed-shape record-like list, `[[` with a literal field name or a literal 
 
 - when the literal field exists, the result is that field's type
 - when the literal position exists, the result is that position's field type
-- when the index is neither a literal name nor a literal position, the result is the union of the field types. This is what types the dispatch-table idiom `handlers[[name]](...)`
+- when the index is neither a literal name nor a literal position, the result is the union of the field types. This types the dispatch-table idiom `handlers[[name]](...)`
 - when a literal field name or a literal position does not exist, the access is a type error
 
 The type system does not model runtime indexing failures.
@@ -1443,7 +1441,7 @@ For a homogeneous fixed-shape list the union collapses, so the result matches th
 
 `$`, `[[`, and `[` on an unresolved inference variable yield `Unknown`, and they leave the variable unconstrained. Such a variable is an unannotated parameter whose shape nothing pins down, as in `function(node) node$value`, `function(x) x[[1L]]`, and `function(x) x[1L]`. There is no "not a list" error and no "unsupported `[`" error there.
 
-Reading a field, an element, or a slice off a value whose shape the author never wrote down is how idiomatic R walks recursive and generic data. A tree fold and a generic accessor both do it, so refusing here would flag ordinary code. The access is instead sound-by-refusal, and it surfaces as an unsupported construct under [strict mode](#strict-mode), exactly as for an opaque nominal.
+Ordinary R reads a field, an element, or a slice off a value whose shape the author never wrote down. A tree fold and a generic accessor both do it, so refusing here would report correct code. The access is therefore left undescribed rather than refused, and it is reported as an unsupported construct under [strict mode](#strict-mode), exactly as for an opaque nominal.
 
 This covers multi-index subsetting too. `function(m, i, j) m[i, j]` is silent, because such a function is written for a caller that knows the shape when the callee does not. A subject whose shape was written down still refuses a shape no rule covers, so `c(1L, 2L)[1L, 2L]` is an error.
 
@@ -1453,7 +1451,7 @@ An unannotated value used as a numeric operand is constrained to be numeric rath
 
 Two other bounds exist alongside it. The atomic-element bound restricts a variable to a scalar atomic type. Using a type parameter as a vector element introduces it, as `T[]` does. See [Type parameters and generic application](#type-parameters-and-generic-application). It renders as `<T: atomic>`. A variable that acquires both bounds is a generic vector element used arithmetically. It holds the meet of the two bounds, which renders as `<T: scalar numeric>` and admits a scalar `integer` or `double`. It defaults to `double` at a binding boundary, exactly like a plain numeric variable.
 
-All three spellings are writable as well as rendered: `numeric`, `atomic`, and `scalar numeric`. Every type the checker prints is meant to be copyable straight into an annotation, so a bound that renders is a bound the `#:` grammar reads back. There is no fourth, internal-only bound.
+All three spellings are writable as well as rendered: `numeric`, `atomic`, and `scalar numeric`. Every type the checker prints can be copied into an annotation unchanged, so the `#:` grammar accepts every bound that the checker renders. There is no fourth, internal-only bound.
 
 A declared bound is believed inside the annotated body, not merely enforced at the call site. With `<T: numeric> fn(x: T) -> T`, the body may use `x` numerically, because every admissible instantiation of `T` is numeric. That includes a self-recursive call, which instantiates the scheme afresh and passes the body's own rigid `T` back into it.
 
@@ -1789,7 +1787,7 @@ Hosts read the package's `NAMESPACE` and `DESCRIPTION` files at the package root
 - `import(pkg)` of a namespace the stub corpus describes makes exactly `pkg`'s exports known bare reads. When no stubs describe `pkg`, its export set is unknowable. Every otherwise-unresolved bare read in the package is then tolerated rather than guessed at, which is the zero-false-positive rule. Unresolved-name detection for such a package resumes once stubs for `pkg` exist.
 - A `library(pkg)` or `require(pkg)` call anywhere in the project is the script world's equivalent of `import(pkg)`, and follows the same rule. It attaches every export of `pkg` to the search path, so when nothing describes `pkg` its export set is unknowable and every otherwise-unresolved bare read is tolerated. The tolerance is project-wide, because R's search path is project-wide. The tolerance lifts as soon as the package's exports are known, which they now are for a long list of common packages. An [export manifest](/contributing/authoring-stubs#export-manifests) is enough, and types are not required. The tidyverse, `knitr`, `rlang`, `glue`, `jsonlite`, `R6`, and the rest of the shipped manifest set therefore keep unresolved-name detection on. A package nothing describes still switches it off, and a two-line `stubs/<pkg>.Rtypes` of your own turns it back on.
 - Attaching a meta-package activates the packages it attaches rather than the names it exports. `library(tidyverse)` makes `mutate`, `read_csv`, and `str_to_upper` reachable because it attaches `dplyr`, `readr`, and `stringr`. Those namespaces activate with it, including their types where they have them.
-- Attaching or importing the project's own package earns no tolerance, even though no stubs describe it. The project's own package is the name in the `Package` field of `DESCRIPTION`. Its export set is not unknowable, because those exports are the project's own definitions, which the checker already sees. Without this rule, the `library(yourpkg)` that `usethis` writes into `tests/testthat.R` would switch off unresolved-name detection for the whole package.
+- Attaching or importing the project's own package does not switch the tolerance on, even though no stubs describe it. The project's own package is the name in the `Package` field of `DESCRIPTION`. Its export set is not unknowable, because those exports are the project's own definitions, which the checker already sees. Without this rule, the `library(yourpkg)` that `usethis` writes into `tests/testthat.R` would switch off unresolved-name detection for the whole package.
 - A `pkg::name` read of a namespace the stub corpus does not know warns about an unknown namespace. It does not warn when `pkg` is part of the package's declared universe. The declared universe is a `DESCRIPTION` dependency field (`Depends`, `Imports`, `Suggests`, or `Enhances`) and the source namespace of any `NAMESPACE` import. A namespace that is declared but not described stays quiet, and its reads type `Unknown`.
 
 ### Standard-library exports
@@ -1812,7 +1810,7 @@ Manifests follow how R itself exposes each namespace.
 A replacement-form assignment reads the base variable, applies the write, and writes the result back to the base's slot. The slot's type therefore reflects the update. The replacement forms are `x$field <- v`, `x[["name"]] <- v`, `x[[key]] <- v`, and `x@slot <- v`.
 
 - A known-field write on a record-like `x` sets that field's type to the type of `v`, and adds the field if it is absent. A later `x$field` reads the updated type. The known-field writes are `x$field <- v` and `x[["literal"]] <- v`. The same write on an empty `list()` starts a record-like `list{field: V}`.
-- The same write on a nominal `x` is checked rather than applied. A nominal type's representation is fixed, which is what makes `@type` an invariant rather than a label. The write must therefore satisfy the representation. `v` is checked against the field's declared type, a field the representation does not declare is an error, and `x` keeps its nominal type either way. This is the one write that reports rather than retypes. The alternative is a value that still claims a nominal type while no longer matching its representation.
+- The same write on a nominal `x` is checked rather than applied. A nominal type's representation is fixed, which makes `@type` an invariant rather than a label. The write must therefore satisfy the representation. `v` is checked against the field's declared type, a field the representation does not declare is an error, and `x` keeps its nominal type either way. This is the one write that reports rather than retypes. The alternative is a value that still claims a nominal type while no longer matching its representation.
 - A computed-key write cannot name a field statically, so it refines the container's element type rather than a specific field. A computed-key write is `x[[key]] <- v` with a key that is not a literal.
   - an empty `list()` becomes a map-like `list[named: V]`
   - a map-like `list[named: T]` becomes `list[named: T | V]`
@@ -1862,7 +1860,7 @@ A read inside a nested function is a capture. The closure runs after its frame h
 - `f <- function() { x <- 1L; g <- function() x; x <- 2L; g }` is clean. Both writes to the `x` of `f` stay alive through the capture
 - `f <- function() { x <- "outer"; g <- function() { x <- TRUE; function() x } }` warns that `x <- "outer"` is unused. The innermost function reads the `x` of `g`, which shadows it
 
-`on.exit(expr)` reads the same way. R stores the expression and runs it when the function returns, so the expression observes the last value of every name it mentions rather than the value at the `on.exit` line. A read inside it therefore keeps every write of that name in the frame alive, exactly as a capture does. That is what makes the standard rollback guard clean:
+`on.exit(expr)` reads the same way. R stores the expression and runs it when the function returns, so the expression observes the last value of every name it mentions rather than the value at the `on.exit` line. A read inside it therefore keeps every write of that name in the frame alive, exactly as a capture does. The standard rollback guard is therefore clean:
 
 ```r
 with_transaction <- function(con, body) {
@@ -1968,7 +1966,7 @@ The inference algorithm is not the reason. Nominal types, record projection, and
 - **Inheritance is subtyping.** Nominal types match by name, and there is no class hierarchy in the compatibility rules. The `contains=` of S4 and the `inherit=` of R6 both need one. Adding subtyping changes how every type relates to every other type, not only how classes do.
 - **A generic's method set is open.** Any file may add `print.foo`, and so may any package loaded at run time. A static answer is therefore always incomplete. Treating the method set as an input to every call site of a generic would also make one new method re-check an entire workspace.
 
-The consequence is a limit on coverage, not on soundness. An unmodelled construct is `Unknown` and never a guess. [Strict mode](#strict-mode) reports every place where that happened, so a project that wants the full guarantee can see exactly what the checker could not see.
+The consequence is a limit on coverage, not on soundness. An unmodelled construct is `Unknown`, and the checker never substitutes a type it cannot establish. [Strict mode](#strict-mode) reports every place where that happened, so a project that wants the full guarantee can see exactly what the checker could not see.
 
 ## Strict mode
 
@@ -2041,7 +2039,7 @@ Shipped stubs exist for four packages that do not join the resolution universe b
 - `ggplot2`, covering the `ggplot` and `gg` nominals, `+.ggplot`, the geom and scale vocabulary, and the `@masked` `aes`
 - `testthat`, covering the expectation vocabulary and `test_that`
 
-R does not attach these packages by default either, and their names must not steal typo warnings in projects that never use them. A conditional namespace activates in three ways.
+R does not attach these packages by default either, and their names must not suppress typo warnings in projects that never use them. A conditional namespace activates in three ways.
 
 - The project declares the package, through a `DESCRIPTION` dependency field or through any `NAMESPACE` `import` or `importFrom` naming it.
 - Any project file attaches it with a `library()`, `require()`, `requireNamespace()`, or `loadNamespace()` call whose package argument is a literal name or a literal string.
@@ -2051,7 +2049,7 @@ While a namespace is inactive, it behaves exactly like any package the stub corp
 
 The shipped dplyr verbs preserve their data argument's class, as `<T> fn(.data: T, ...) -> T`. A native-pipe chain therefore keeps its class end to end, so `fread(path) |> mutate(r = a / b)` stays a `data.table`. Every column reference inside the `...` of those verbs stays masked.
 
-A project `.Rtypes` stub can declare its own masking function with the `@masked` attribute. This is the way to teach ry a dplyr-style verb:
+A project `.Rtypes` stub can declare its own masking function with the `@masked` attribute. Declare a dplyr-style verb like this:
 
 ```
 filter : @masked fn(.data: Any, ...: Any) -> Any
@@ -2073,7 +2071,7 @@ In strict mode, an expression or a binding whose inferred type is `Unknown` at t
 
 ### Origins, not propagation
 
-`Unknown` is also used internally as an error-recovery value and as a propagation value. A binary operator with an `Unknown` operand yields `Unknown`. A call whose callee or return is `Unknown` yields `Unknown`. A block whose last expression is `Unknown` yields `Unknown`. Unifying with `Unknown` yields the other type. If strict mode flagged every expression that resolves to `Unknown`, a single root cause would spray a duplicate diagnostic across every downstream use.
+`Unknown` is also used internally as an error-recovery value and as a propagation value. A binary operator with an `Unknown` operand yields `Unknown`. A call whose callee or return is `Unknown` yields `Unknown`. A block whose last expression is `Unknown` yields `Unknown`. Unifying with `Unknown` yields the other type. If strict mode flagged every expression that resolves to `Unknown`, a single root cause would produce one duplicate diagnostic at every downstream use.
 
 Strict mode therefore flags an `Unknown` only at its origin, which is the site that first introduces a non-error `Unknown`. It never flags a site that merely propagated `Unknown` from a child, an operand, a callee, or a referenced binding. Each of those is already flagged at its own origin, or will be.
 
@@ -2087,7 +2085,7 @@ These are explicitly not strict origins.
 
 - An `Unknown` that arose from error recovery. The underlying type error was already reported when the expression failed to type-check, and the recovered `Unknown` is not flagged again. There is no double report.
 - An `Unknown` that was merely propagated into a parent expression from a child that is itself an origin or a propagation of one. Binary operators, calls, blocks, indexing, `if` and `else`, and assignments all propagate this way.
-- A reference to a local binding or to a package-global binding whose type is `Unknown`. The origin is the defining site of that binding, in its own file, so the reference propagates rather than re-originates. This is what keeps a single root `Unknown` from producing a diagnostic in every file that references it.
+- A reference to a local binding or to a package-global binding whose type is `Unknown`. The origin is the defining site of that binding, in its own file, so the reference propagates rather than re-originates. This keeps a single root `Unknown` from producing a diagnostic in every file that references it.
 - An unresolved name reference. Naming already reports "could not resolve", so strict mode does not double-report it. An unresolved name is a naming diagnostic, not an `Unknown` origin.
 
 Every downstream use of a flagged `Unknown` is a propagation site rather than an origin, so a single origin used in many later expressions produces exactly one strict diagnostic. That includes a cross-item reference. Reading a name this project defines propagates, because that definition has its own attributable site, and an earlier script statement and a package definition are both such definitions. Only a name with no such site originates at the reference, and a stub or import the corpus cannot type is such a name.

@@ -28,7 +28,7 @@ AI agents drive development on this project, and humans steer it lightly. Agents
 
 Agents write this repository's documentation, code comments, commit messages, and pull request descriptions. Humans read them. The agent does not need the prose, so writing that sounds clever only costs the reader time. There is a second reason to write plainly. Dense prose hides wrong claims, because a reader cannot check a statement they cannot parse. Unreadable text is unreviewable text, and a reviewer who cannot parse a pull request description approves the change without understanding it.
 
-Write plain English, in the spirit of ISO 24495-1. The rules below are the practical form of that goal. They apply to everything an agent writes: answers to the user, documentation, code comments, commit messages, and pull request descriptions.
+Write plain English. The plain-language standard ISO 24495-1 states the goal: the reader finds what they need, understands it, and can use it. The rules below are how to reach that goal here. They apply to everything an agent writes: answers to the user, documentation, code comments, commit messages, and pull request descriptions.
 
 ## Rules
 

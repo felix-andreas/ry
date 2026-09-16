@@ -14,19 +14,19 @@ const capabilities = [
     {
         title: "Language server",
         accent: "cyan",
-        blurb: "Completion, hover, go-to-definition, references, rename and inlay hints, over LSP.",
+        blurb: "Completion, hover, go-to-definition, find references, rename and inline type hints, in your editor.",
         link: { label: "Language server", href: "/features" },
     },
     {
         title: "Code analyzer",
         accent: "violet",
-        blurb: "Lints run by default. Type checking is opt-in, and it is the first static type checker for R.",
+        blurb: "Lints run with no setup. Turn on type checking and get the first static type checker for R.",
         link: { label: "Type checker", href: "/type-checking/tutorial" },
     },
     {
         title: "Formatter",
         accent: "emerald",
-        blurb: "ry fmt formats a whole project to one style. --diff and --check report without writing.",
+        blurb: "Format the whole project in one command. --check reports what would change without touching a file.",
         link: { label: "Formatter", href: "/reference/formatting-rules" },
     },
 ];
@@ -312,11 +312,11 @@ const year = new Date().getFullYear();
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>
-            ry: a language server, type checker and formatter for R
+            ry: editor support, error checking and formatting for R
         </title>
         <meta
             name="description"
-            content="ry is a language tool for R, written in Rust. One binary provides a language server, the first static type checker for R, a linter and a formatter. Type annotations go in comments, so annotated code still runs everywhere."
+            content="ry gives R completion and go-to-definition in your editor, catches mistakes before you run a script, and formats a whole project in one command. It includes the first static type checker for R. Type annotations are ordinary comments, so your code still runs anywhere."
         />
         <link rel="icon" href="/favicon.svg" />
         <script is:inline>
@@ -374,12 +374,14 @@ const year = new Date().getFullYear();
                     <div class="hero-vignette" aria-hidden="true"></div>
                     <div class="hero-copy">
                         <h1 class="hero-heading">
-                            A language server, type checker and formatter for R.
+                            Editor support, error checking and formatting for R.
                         </h1>
                         <p class="subhead">
-                            ry is one binary. It analyses, checks and formats
-                            the R you already write. Type annotations go in
-                            comments, so annotated code still runs everywhere.
+                            Get completion and go-to-definition in your
+                            editor, catch mistakes before you run a script, and
+                            format a whole project in one command. ry reads the
+                            R you already write. Type annotations are ordinary
+                            comments, so your code still runs anywhere.
                         </p>
                         <div class="cta-cluster">
                             <a class="cta cta-lg" href="/getting-started"
@@ -470,13 +472,13 @@ const year = new Date().getFullYear();
             <section id="capabilities" class="band dotted">
                 <div class="col">
                     <p class="eyebrow">what ry does</p>
-                    <h2>One binary does three jobs.</h2>
+                    <h2>One tool replaces three.</h2>
                     <p class="lede">
-                        ry runs as a language server in your editor, checks a
-                        project from the command line, and formats it. The same
-                        analysis backs all three, so an editor and a CI run
-                        report the same thing. R has no static type checker, so
-                        ry defines one.
+                        ry is the language server your editor talks to, the
+                        checker you run before you commit, and the formatter you
+                        run on the whole project. All three read your code the
+                        same way, so your editor and your CI never disagree, and
+                        there is no second tool to configure or keep in sync.
                     </p>
                 </div>
                 <div class="col show-col">
@@ -576,15 +578,15 @@ const year = new Date().getFullYear();
                             <span class="eyebrow-mark" aria-hidden="true"
                             ></span>write
                         </p>
-                        <h2>Editor features from one server.</h2>
+                        <h2>One server drives every editor feature.</h2>
                         <p class="lede">
-                            <code>ry server</code> speaks LSP. It completes a
-                            record's fields, reports a name's inferred type on
-                            hover, jumps to where a name is bound, and renames
-                            every use at once. The VS Code extension is on the
-                            Marketplace. The Zed extension ships in the
-                            repository as a dev extension. Any other LSP client
-                            works too.
+                            Complete a list's fields by name, hover any value
+                            to see its type, jump to where a function is
+                            defined, and rename it everywhere in one step. ry
+                            works this out from your code, so you get it on
+                            files you never annotated. Install the VS Code
+                            extension from the Marketplace, or point any
+                            LSP-capable editor at <code>ry server</code>.
                         </p>
                     </header>
 
@@ -727,12 +729,14 @@ const year = new Date().getFullYear();
                             <span class="eyebrow-mark" aria-hidden="true"
                             ></span>check
                         </p>
-                        <h2>Errors reported without running the code.</h2>
+                        <h2>ry finds the error before you run the code.</h2>
                         <p class="lede">
-                            <code>ry check</code> lints with no configuration.
-                            Set <code>[check] typing = true</code> to add type
-                            errors. Inference runs whether or not you annotate
-                            anything, so an unannotated file is still checked.
+                            Find the typo and the wrong argument before the
+                            script runs for twenty minutes and fails at the end.
+                            <code>ry check</code> lints with no setup at all.
+                            Turn on <code>[check] typing = true</code> and it
+                            checks types too, on files you have not annotated,
+                            because it infers them.
                         </p>
                     </header>
 
@@ -830,13 +834,14 @@ const year = new Date().getFullYear();
                             <span class="eyebrow-mark" aria-hidden="true"
                             ></span>format
                         </p>
-                        <h2>Formatting that keeps your line breaks.</h2>
+                        <h2>The formatter keeps the layout you chose.</h2>
                         <p class="lede">
-                            <code>ry fmt</code> normalizes spacing, braces and
-                            indentation. It preserves the line breaks you wrote,
-                            and it does not split an expression you kept on one
-                            line. Use <code>--diff</code> or
-                            <code>--check</code> in CI.
+                            <code>ry fmt</code> settles spacing, braces and
+                            indentation across the project, so nobody has to
+                            argue about them again. It keeps the line breaks you
+                            chose and never splits a line you wanted on one
+                            line, so the diff stays small. Add
+                            <code>--check</code> to CI to keep it that way.
                         </p>
                     </header>
 
@@ -938,9 +943,11 @@ const year = new Date().getFullYear();
                     <p class="eyebrow">install</p>
                     <h2>Point ry at a project you already have.</h2>
                     <p class="lede">
-                        Your R does not have to change. The VS Code extension
-                        ships the binary, so it needs no Rust toolchain. The
-                        CLI is one <code>cargo install</code>.
+                        Nothing in your project has to change first. The VS
+                        Code extension brings its own ry, so there is no
+                        toolchain to install. On the command line it is one
+                        <code>cargo install</code>, then point ry at the
+                        project you already have.
                     </p>
                     <div class="steps">
                         <div class="step">
