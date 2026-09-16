@@ -836,12 +836,11 @@ const year = new Date().getFullYear();
                         </p>
                         <h2>The formatter keeps the layout you chose.</h2>
                         <p class="lede">
-                            <code>ry fmt</code> settles spacing, braces and
-                            indentation across the project, so nobody has to
-                            argue about them again. It keeps the line breaks you
-                            chose and never splits a line you wanted on one
-                            line, so the diff stays small. Add
-                            <code>--check</code> to CI to keep it that way.
+                            <code>ry fmt</code> fixes spacing, braces and
+                            indentation across the project. It keeps the line
+                            breaks you chose and never splits a line you wanted
+                            on one line, so the diff stays small. Add
+                            <code>--check</code> to CI.
                         </p>
                     </header>
 
@@ -965,15 +964,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         </div>
                     </div>
                     <p class="band-note">
-                        Grab the <a
+                        Settings, lint selection and the typing switch are in
+                        the <a
                             class="inline-link"
-                            href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly"
-                            target="_blank"
-                            rel="noopener">VS Code extension</a
-                        >
-                        from the Marketplace, then tune behavior in <a
-                            class="inline-link"
-                            href="/reference/configuration">configuration</a
+                            href="/reference/configuration">configuration
+                            reference</a
                         >.
                     </p>
                     <div class="cta-cluster">

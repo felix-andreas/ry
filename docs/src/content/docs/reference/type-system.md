@@ -5,8 +5,6 @@ description: The precise static-typing semantics contract for ry's R type checke
 
 This page is the authoritative specification of ry's typing semantics. It is the precise contract that the type checker implements. The [Type Checker guide](/type-checking/tutorial) is a gentler introduction that works through examples.
 
-Two things are not on this page. Diagnostic wording is in the [diagnostic codes reference](/reference/diagnostic-codes), because a message can be reworded without the semantics changing. What the type checker does not cover yet is in [Limitations](/type-checking/limitations).
-
 ## Typing comment syntax
 
 A typing annotation is written in a `#:` comment. An annotation comes before the binding or expression it describes. This applies to every typing annotation, not only to function annotations.
@@ -259,7 +257,7 @@ When a record-like list is rejected, the finding names the one field that failed
 
 A nested record names the path, outermost field first, as `retry.count`.
 
-Two whole types are printed only when the failure is not about one field. A record against a non-record, and a record against `list[T]`, are the cases two whole types explain well. For a single field they are two long, near-identical strings that the reader must diff by eye, and for a nested field they never name the path at all.
+Two whole types are printed only when the failure is not about one field, which covers a record against a non-record and a record against `list[T]`.
 
 The finding is placed on the field, not on the whole value. A type carries no source ranges, so the field path is walked back against the `list(...)` call that built the record, whose tagged arguments are its fields. The caret then points at what the message is about.
 
@@ -317,7 +315,7 @@ Examples:
 - `Unknown` may arise from an unsupported construct, an unresolved name, a partially supported construct, or insufficient type information
 - `Unknown` is compatible with every type, in both directions. This is the same blanket compatibility that `Any` has. It keeps one unmodelled value from cascading into a run of follow-on errors. It is also why a gap in the checker's knowledge means checks are skipped rather than wrong. A value the checker could not type flows into a `double` parameter without complaint
 - `Unknown` differs from `Any` in intent, not in compatibility. `Any` is a declared instruction not to check the value. `Unknown` records that the checker could not tell. The one place that intent changes behaviour is [`@if-unknown`](#unknown-only-coercions), which supplies a type where one is missing. It applies to an `Unknown` and is refused on an `Any`, because overriding a deliberate opt-out is a different act from filling a gap
-- [Strict mode](#strict-mode) reports every site where the checker could not determine a type. It does not report a type that happens to be `Unknown`. Each of these records its own origin, and that origin is the finding: an unmodellable construct, a reference with no known type, a binding that does not stabilize across a loop, and a recursive definition. A type is not reported for being `Unknown`. A declaration whose return type is `Unknown` produces no strict finding at its call sites. An `Unknown` nested inside a larger type is not reported either, and the `fn(p: Unknown) -> Unknown` that an aliased generic closes to is such a case. Whether they should be reported is an open question, not a guarantee this page makes
+- [Strict mode](#strict-mode) reports every site where the checker could not determine a type. It does not report a type that happens to be `Unknown`. Each of these records its own origin, and that origin is the finding: an unmodellable construct, a reference with no known type, a binding that does not stabilize across a loop, and a recursive definition. A type is not reported for being `Unknown`. A declaration whose return type is `Unknown` produces no strict finding at its call sites. An `Unknown` nested inside a larger type is not reported either, and the `fn(p: Unknown) -> Unknown` that an aliased generic closes to is such a case
 - `Unknown` is not an explicit opt-out
 - `Unknown` should remain visible in user-facing output and in fixture expectations
 - `Unknown` preserves progress and reduces cascading secondary diagnostics
@@ -972,7 +970,7 @@ When a function value is rejected at a parameter position, the finding names the
 
 The pairing is the one described above, so the position named is the position R's argument matcher would fill.
 
-Two whole signatures are printed only when the shapes cannot pair at all. A different arity, an optionality disagreement, and a rest parameter on one side are such shapes. That is the only case the signatures explain. For a position mismatch they are actively misleading, because a [constraint](#numeric-inference-variables) is not part of a rendered type. `fn(s: T) -> T` prints the same whether `T` accepts anything or only numbers, so against an expected `fn(character) -> U` it describes a call that should have fit.
+Two whole signatures are printed only when the shapes cannot pair at all, which covers a different arity, an optionality disagreement, and a rest parameter on one side. A rendered signature does not show a [constraint](#numeric-inference-variables), so it cannot explain a position mismatch: `fn(s: T) -> T` prints the same whether `T` accepts anything or only numbers.
 
 ### Higher-order function types
 
@@ -1266,7 +1264,7 @@ Ten rules and limits apply.
 - A namespace is known when stubs declare it. The shipped standard-library packages are known, and so is any namespace a project stub file declares. `stubs/dplyr.Rtypes` declares the namespace `dplyr`. See [Standard library stubs](/type-checking/stubs).
 - The project's own package is always known, whatever the stubs say. Qualifying a name with the package you are editing reads the definition the checker already holds, so the read has that definition's type rather than `Unknown`. `withr::defer()` inside `withr` is such a read, where `DESCRIPTION` names the package `withr`. This case wins over a stub namespace of the same name, in the way a package binding shadows a stub name. The name itself is not validated. A package exports names its sources never bind, such as a re-export, an S4 generic from `setGeneric`, a dataset under `data/`, and a binding installed by `.onLoad`. A name the definitions do not cover is therefore left alone rather than reported.
 - When the stubs declare `name` in `pkg`, the qualified read has the stub's type, exactly like the bare name. A name that only the namespace's [export manifest](#standard-library-exports) lists validates the same way, and it types `Unknown`.
-- An unknown namespace warns. A known namespace that neither declares nor manifest-lists the name warns that the name is not exported. A warning here and an error for the same mistake in a `NAMESPACE` `importFrom` is not an inconsistency. A bad import stops the package from loading at all, while a bad qualified read fails only if that line runs.
+- An unknown namespace warns. A known namespace that neither declares nor manifest-lists the name warns that the name is not exported. The same mistake in a `NAMESPACE` `importFrom` is an error rather than a warning, because a bad import stops the package from loading at all, while a bad qualified read fails only if that line runs.
 - Exports are declaration-level. A project stub that overrides a shipped name's type does not remove the name from its shipped namespace, so `stats::sd` stays valid under an `sd` override.
 - An unvalidated qualified read types as `Unknown`, and that reference is a strict origin.
 - `::` and `:::` are not distinguished. The split between exported and internal names is not modelled.
@@ -1299,7 +1297,7 @@ A call argument that is the enclosing function's bare `...` forwards an unknown 
 
 R's parser rewrites `x |> f(y)` into `f(x, y)` before it evaluates the code. The pipe types as that call and nothing else. The piped value becomes the first positional argument. All call rules above apply to it: arity, argument compatibility, and overload selection. Chains compose from left to right. A type error on the piped value blames the left-hand expression.
 
-The `_` placeholder follows R's rule. It is legal only as the whole value of exactly one named argument. That argument then receives the piped value instead of the first positional slot, so `x |> lm(y ~ z, data = _)` is `lm(y ~ z, data = x)`. Note that `2 |> f(tag = _)` supplies only `tag`, so other required parameters really are missing.
+The `_` placeholder follows R's rule. It is legal only as the whole value of exactly one named argument. That argument then receives the piped value instead of the first positional slot, so `x |> lm(y ~ z, data = _)` is `lm(y ~ z, data = x)`. `2 |> f(tag = _)` supplies only `tag`, so any other required parameter is missing.
 
 A pipe R itself would reject is not guessed at. Three shapes are such pipes: a right-hand side that is not a call, a positional or repeated `_`, and a `_` nested inside a subexpression. Such a pipe stays an opaque operator, so it types as a silent `Unknown` and its reads stay quiet.
 
@@ -1332,7 +1330,7 @@ A standard-library stub name may declare several signatures, which form an order
 - When no candidate accepts the arguments, the call is a type error. The error names the overloaded callee and how many signatures were tried, and it gives the first candidate's failure as the concrete hint. That is the form when the candidates disagree about what is wrong, because then no single candidate's complaint is the answer. One candidate's own finding is reported instead, at that candidate's own argument range, in two cases. The first is when every candidate rejects the call for the identical reason. The second is when one candidate got strictly further into the argument list than every other, which makes it the signature the call meant
 - Every non-call use of an overloaded name sees the last declaration. Passing the name as a value and hovering over it are such uses. By corpus convention the last declaration is the most general one, so a value-use never carries a narrower contract than the calls it might make. Go-to-definition on the name points at the first declaration, where the set begins
 
-Only a declaration file can overload a name, and that boundary is deliberate. Overloading is the one place this type system departs from Hindley-Milner. A name with several signatures has no single most general type, so a call has to be resolved by search rather than inferred. That costs both the principal-type guarantee and the speed that plain unification gives. The cost is acceptable for a fixed, curated corpus describing a standard library nobody designed with types in mind. It is not acceptable across a whole codebase.
+Only a declaration file can overload a name, and that boundary is deliberate. A name with several signatures has no single most general type, so a call must be resolved by search rather than inferred, which gives up the principal-type guarantee.
 
 A `#:` annotation on your own function therefore declares exactly one signature, and always will. To make one name accept several shapes, give the parameter a [union type](#union-types), or split the shapes into separate functions.
 
@@ -1914,7 +1912,7 @@ The type namespace is project-global. A type declared in one package file is nam
 
 ## Object systems (S3, S4, R6)
 
-ry checks the parts of R's object systems that are written down as declarations, and declines the parts that are decided at run time from a value's class attribute. The boundary is deliberate rather than pending work, so this section states both what happens and why.
+ry checks the parts of R's object systems that are written down as declarations, and declines the parts that are decided at run time from a value's class attribute. The boundary is deliberate rather than pending work.
 
 | Construct | What the checker does |
 | --- | --- |
