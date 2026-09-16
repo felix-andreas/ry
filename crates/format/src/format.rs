@@ -11,7 +11,8 @@
 //! (errors inside `#:` annotations do not refuse the file — the affected
 //! block is preserved verbatim instead).
 
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
+use std::ops::Range;
+use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -165,6 +166,305 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
     };
     formatter.source_file(&root);
     Ok(formatter.out)
+}
+
+/// One replacement in a source text: the byte range to overwrite, and what to
+/// write there. An empty range is an insertion, empty text a deletion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEdit {
+    pub range: TextRange,
+    pub new_text: String,
+}
+
+/// The edits that lay out the lines `selection` touches exactly as whole-file
+/// formatting lays them out, leaving every other line of the file byte for
+/// byte as it was.
+///
+/// The text put in is *cut out of* the whole file's formatted form rather than
+/// produced by formatting the selected text on its own, and that is what makes
+/// the two agree by construction. Formatting a slice would lose everything
+/// about the slice's surroundings that decides its layout: the indentation
+/// depth it sits at, a `# fmt: off` region opened above it, a
+/// `# fmt: skip-file` header, and the line endings the rest of the file uses.
+///
+/// The selection widens to whole lines, and a construct the formatter lays out
+/// as one unit is replaced as one unit, so a line just outside the selection
+/// can still change when it shares a construct with a line inside it. That is
+/// the only way an unselected line changes.
+///
+/// Edits are ordered and never overlap or even touch, so a client may apply
+/// them in any order. A file that does not parse refuses exactly as whole-file
+/// formatting refuses: a slice of a file whose structure is unknown has no
+/// trustworthy layout either.
+pub fn format_range(
+    source: &str,
+    config: Config,
+    selection: TextRange,
+) -> Result<Vec<TextEdit>, FormatError> {
+    let formatted = format(source, config)?;
+    let source_lines: Vec<&str> = source.split_inclusive('\n').collect();
+    let formatted_lines: Vec<&str> = formatted.split_inclusive('\n').collect();
+    let source_offsets = line_offsets(&source_lines);
+    let formatted_offsets = line_offsets(&formatted_lines);
+
+    // A selection ending at the first column of a line covers none of that
+    // line — which is exactly what an editor sends for "these whole lines" —
+    // so the last line is the one holding the last selected character. An
+    // empty selection is a bare caret, and takes the line it sits on.
+    let length = *source_offsets.last().unwrap_or(&TextSize::new(0));
+    let start = selection.start().min(length);
+    let end = selection.end().min(length);
+    let line_of = |offset: TextSize| {
+        source_offsets
+            .partition_point(|&line_start| line_start <= offset)
+            .saturating_sub(1)
+            .min(source_lines.len().saturating_sub(1))
+    };
+    let first_line = line_of(start);
+    let last_line = match end > start {
+        true => line_of(end - TextSize::new(1)).max(first_line),
+        false => first_line,
+    };
+
+    let mut edits = Vec::new();
+    for (source_span, formatted_span) in changed_spans(
+        source,
+        &formatted,
+        &source_lines,
+        &formatted_lines,
+        &source_offsets,
+        &formatted_offsets,
+    ) {
+        // A span that only inserts covers no source line, so it counts as
+        // touching the one line it lands on rather than an empty stretch.
+        let touches = source_span.start <= last_line
+            && source_span.end.max(source_span.start + 1) > first_line;
+        if !touches {
+            continue;
+        }
+        let range = TextRange::new(
+            source_offsets[source_span.start],
+            source_offsets[source_span.end],
+        );
+        edits.push(TextEdit {
+            range,
+            new_text: formatted_lines[formatted_span].concat(),
+        });
+    }
+    Ok(edits)
+}
+
+/// `source` with `edits` applied — the document the editor ends up with.
+/// Edits are ordered and disjoint, so applying them back to front leaves every
+/// range still valid when its turn comes.
+pub fn apply_edits(source: &str, edits: &[TextEdit]) -> String {
+    let mut text = source.to_owned();
+    for edit in edits.iter().rev() {
+        text.replace_range(
+            usize::from(edit.range.start())..usize::from(edit.range.end()),
+            &edit.new_text,
+        );
+    }
+    text
+}
+
+/// Where the source and its formatted form differ, as pairs of line spans that
+/// hold the same code — the source lines to replace, and the formatted lines
+/// to put there.
+///
+/// The spans come from splitting both texts at *corresponding* points rather
+/// than from diffing their lines. A line diff answers "which lines look
+/// different", which is not the question: it is free to pair up two lines that
+/// merely read alike, and a span cut that way can be text the formatter would
+/// never produce for any input. Pairing the two parse trees instead — walking
+/// them together and stopping wherever their shapes diverge — means a span
+/// always holds whole constructs on both sides, so swapping one in yields a
+/// document that is still exactly this file, formatted a bit further.
+fn changed_spans(
+    source: &str,
+    formatted: &str,
+    source_lines: &[&str],
+    formatted_lines: &[&str],
+    source_offsets: &[TextSize],
+    formatted_offsets: &[TextSize],
+) -> Vec<(Range<usize>, Range<usize>)> {
+    let mut points = Vec::new();
+    paired_statements(
+        &syntax::parse(source).syntax_node(),
+        &syntax::parse(formatted).syntax_node(),
+        &mut points,
+    );
+
+    // Only a statement starting a line's content can begin a span: the text
+    // before it on its line is its own indentation, which the formatter
+    // rewrites along with it. A statement starting mid-line (`x; y`) shares
+    // its layout with what precedes it, so it is not a place the two texts can
+    // be cut apart.
+    let mut splits = vec![(0usize, 0usize)];
+    for (in_source, in_formatted) in points {
+        let (Some(source_line), Some(formatted_line)) = (
+            line_starting_at(source, source_offsets, in_source),
+            line_starting_at(formatted, formatted_offsets, in_formatted),
+        ) else {
+            continue;
+        };
+        let (last_source, last_formatted) = splits[splits.len() - 1];
+        if source_line > last_source && formatted_line > last_formatted {
+            splits.push((source_line, formatted_line));
+        }
+    }
+    splits.push((source_lines.len(), formatted_lines.len()));
+
+    let mut spans: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+    for window in splits.windows(2) {
+        let [(source_start, formatted_start), (source_end, formatted_end)] = window else {
+            continue;
+        };
+        let (mut source_span, mut formatted_span) =
+            (*source_start..*source_end, *formatted_start..*formatted_end);
+        // Lines that are already identical at either end of the span are not
+        // part of the change, and dropping them is exact: the same swap, just
+        // narrower. It is what keeps a one-space fix inside a long call from
+        // rewriting the whole call.
+        while source_span.start < source_span.end
+            && formatted_span.start < formatted_span.end
+            && source_lines[source_span.start] == formatted_lines[formatted_span.start]
+        {
+            source_span.start += 1;
+            formatted_span.start += 1;
+        }
+        while source_span.start < source_span.end
+            && formatted_span.start < formatted_span.end
+            && source_lines[source_span.end - 1] == formatted_lines[formatted_span.end - 1]
+        {
+            source_span.end -= 1;
+            formatted_span.end -= 1;
+        }
+        if source_span.is_empty() && formatted_span.is_empty() {
+            continue;
+        }
+        // A span that replaces nothing is an insertion, and an insertion at the
+        // offset where another edit starts or ends has no defined order
+        // against it. Merging the two into one replacement is what keeps every
+        // edit unambiguous; spans that both replace text can abut safely,
+        // since their ranges still say which text is whose.
+        let ambiguous = spans.last().is_some_and(|(last_source, last_formatted)| {
+            last_source.end == source_span.start
+                && last_formatted.end == formatted_span.start
+                && (last_source.is_empty() || source_span.is_empty())
+        });
+        match spans.last_mut() {
+            Some((last_source, last_formatted)) if ambiguous => {
+                last_source.end = source_span.end;
+                last_formatted.end = formatted_span.end;
+            }
+            _ => spans.push((source_span, formatted_span)),
+        }
+    }
+    spans
+}
+
+/// Where each statement of `source` starts, paired with where the statement
+/// holding the same code starts in `formatted`, in source order.
+///
+/// Statements are the unit because they are the only thing this formatter lays
+/// out independently: it decides how to break a call or a block from that
+/// construct's *own* line structure, so swapping a formatted argument into a
+/// half-formatted call can flip the decision for the whole call and produce
+/// text neither form contains. Whole statements have no such coupling — every
+/// one starts its own line at a fixed indent, and nothing above it decides how
+/// it breaks — which is exactly the property that lets a selection be
+/// formatted at all. They nest, so a statement inside a function body is a
+/// unit of its own and selecting one line of a long function still rewrites
+/// only that line's statement.
+///
+/// The walk descends only while the two nodes have the same children in the
+/// same order, so it cannot pair up constructs that are not each other. That
+/// is what rules out the formatter's structural rewrites: bracing a bare `if`
+/// body wraps it in a node the source has no counterpart for, and the walk
+/// stops at the `if` rather than pairing its body with the new block — the
+/// difference then belongs to the `if` as a whole, which is the only way to
+/// describe it.
+fn paired_statements(
+    source: &SyntaxNode,
+    formatted: &SyntaxNode,
+    pairs: &mut Vec<(TextSize, TextSize)>,
+) {
+    // A braced block is an expression in R, so the node kind is what marks a
+    // sequence of statements — not the position in the tree.
+    let sequence = matches!(
+        source.kind(),
+        SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
+    );
+    // A comment standing between statements is a unit of the same kind: it
+    // holds its own line and nothing around it decides how it is laid out, so
+    // selecting it need not drag in the statement above. A comment trailing a
+    // statement belongs to that statement's node instead and is never reached
+    // here.
+    let members = |node: &SyntaxNode| -> Vec<SyntaxElement> {
+        node.children_with_tokens()
+            .filter(|element| {
+                element.as_node().is_some() || (sequence && element.kind() == SyntaxKind::COMMENT)
+            })
+            .collect()
+    };
+    let source_children = members(source);
+    let formatted_children = members(formatted);
+    if source_children.len() != formatted_children.len() {
+        return;
+    }
+    let paired = source_children.iter().zip(&formatted_children);
+    if paired
+        .clone()
+        .any(|(left, right)| left.kind() != right.kind())
+    {
+        return;
+    }
+    for (source_child, formatted_child) in paired {
+        if sequence {
+            pairs.push((
+                source_child.text_range().start(),
+                formatted_child.text_range().start(),
+            ));
+        }
+        if let (Some(source_child), Some(formatted_child)) =
+            (source_child.as_node(), formatted_child.as_node())
+        {
+            paired_statements(source_child, formatted_child, pairs);
+        }
+    }
+}
+
+/// The index of the line `offset` starts the content of — `None` when anything
+/// but indentation precedes it on that line.
+///
+/// Only spaces and tabs count. A bare carriage return is a line break to the
+/// lexer but not to a text editor, so a line split on `\n` can hold one: it
+/// looks like whitespace before the statement and is in fact a break the
+/// formatter counts, and a span that swallowed it would silently join two
+/// lines the formatter had kept apart.
+fn line_starting_at(text: &str, line_offsets: &[TextSize], offset: TextSize) -> Option<usize> {
+    let line = line_offsets
+        .partition_point(|&line_start| line_start <= offset)
+        .checked_sub(1)?;
+    let start = usize::from(*line_offsets.get(line)?);
+    text.get(start..usize::from(offset))?
+        .bytes()
+        .all(|byte| byte == b' ' || byte == b'\t')
+        .then_some(line)
+}
+
+/// The byte offset each line starts at, plus a sentinel holding the end of the
+/// text, so that a span reaching the last line still has an offset to close at.
+fn line_offsets(lines: &[&str]) -> Vec<TextSize> {
+    let mut offsets = Vec::with_capacity(lines.len() + 1);
+    let mut offset = TextSize::new(0);
+    for line in lines {
+        offsets.push(offset);
+        offset += TextSize::of(*line);
+    }
+    offsets.push(offset);
+    offsets
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2128,6 +2428,168 @@ fn is_opener(kind: AnnotationTokenKind) -> bool {
 fn is_closer(kind: AnnotationTokenKind) -> bool {
     use AnnotationTokenKind::*;
     matches!(kind, CloseParen | CloseBracket | CloseBrace | CloseAngle)
+}
+
+/// The fuzz invariant battery for range formatting over one input, swept
+/// across a bounded, deterministic set of selections. The contract every
+/// selection must hold:
+///
+///  1. determinism, and refusal exactly when whole-file formatting refuses;
+///  2. geometry — edits are ordered, disjoint, whole lines, and in bounds;
+///  3. preservation — applying them keeps every token, so no code is lost;
+///  4. convergence — the applied document still formats to what the original
+///     formats to, which is the property that makes formatting a selection
+///     safe to do repeatedly and in any order;
+///  5. restriction — every edit is one the whole file's formatting would have
+///     made, so a selection can only ever do less, never something else;
+///  6. completeness — selecting the whole file reproduces whole-file
+///     formatting byte for byte;
+///  7. stability — the region the edits produced is already laid out, so
+///     formatting the same selection again is a no-op.
+pub fn check_range_format_invariants(input: &str) {
+    let config = Config::default();
+    let whole_file = format(input, config);
+    let length = TextSize::of(input);
+    let everything = format_range(input, config, TextRange::up_to(length));
+    for selection in probe_selections(input) {
+        let first = format_range(input, config, selection);
+        let again = format_range(input, config, selection);
+        assert_eq!(
+            first, again,
+            "non-deterministic range format for {selection:?} of {input:?}"
+        );
+        let edits = match (first, &whole_file) {
+            (Err(error), Err(expected)) => {
+                assert_eq!(
+                    &error, expected,
+                    "range format refused differently than whole-file formatting for {input:?}"
+                );
+                continue;
+            }
+            (Err(error), Ok(_)) => {
+                panic!("range format refused {selection:?} of a file that formats: {error}")
+            }
+            (Ok(edits), Err(error)) => {
+                panic!("range format produced {edits:?} for a file that refuses: {error}")
+            }
+            (Ok(edits), Ok(_)) => edits,
+        };
+        let formatted = whole_file.as_ref().expect("checked above");
+        let everything = everything.as_ref().expect("checked above");
+
+        let mut previous_end = TextSize::new(0);
+        let mut previous_non_empty = false;
+        for edit in &edits {
+            assert!(
+                edit.range.start() >= previous_end && edit.range.end() <= length,
+                "edit {edit:?} out of order or out of bounds in {input:?}"
+            );
+            // An insertion sharing an offset with the edit beside it has no
+            // defined application order, so it is as much a defect as an
+            // overlap. Two replacements may abut: their ranges still say which
+            // text belongs to which.
+            assert!(
+                edit.range.start() > previous_end
+                    || previous_end == TextSize::new(0)
+                    || (!edit.range.is_empty() && previous_non_empty),
+                "an insertion touches the edit beside it at {previous_end:?} in {input:?}"
+            );
+            assert!(
+                starts_line(input, edit.range.start()) && starts_line(input, edit.range.end()),
+                "edit {edit:?} does not cover whole lines in {input:?}"
+            );
+            assert!(
+                everything.contains(edit),
+                "edit {edit:?} is not one whole-file formatting would make in {input:?}"
+            );
+            previous_end = edit.range.end();
+            previous_non_empty = !edit.range.is_empty();
+        }
+
+        let result = apply_edits(input, &edits);
+        assert_eq!(
+            significant_tokens(input),
+            significant_tokens(&result),
+            "range formatting {selection:?} changed the code in {input:?} (result {result:?})"
+        );
+        assert_eq!(
+            format(&result, config).as_ref(),
+            Ok(formatted),
+            "range formatting {selection:?} changed what {input:?} formats to (result {result:?})"
+        );
+        if selection.start() == TextSize::new(0) && selection.end() >= length {
+            assert_eq!(
+                &result, formatted,
+                "selecting the whole file did not reproduce whole-file formatting for {input:?}"
+            );
+        }
+
+        let (Some(first_edit), Some(last_edit)) = (edits.first(), edits.last()) else {
+            continue;
+        };
+        let growth: i64 = edits
+            .iter()
+            .map(|edit| edit.new_text.len() as i64 - u32::from(edit.range.len()) as i64)
+            .sum();
+        let touched = TextRange::new(
+            first_edit.range.start(),
+            TextSize::new((u32::from(last_edit.range.end()) as i64 + growth) as u32),
+        );
+        // Edits that only delete leave no lines behind to re-check, and the
+        // empty range they collapse to would pick up the untouched line that
+        // moved into its place.
+        if touched.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            format_range(&result, config, touched),
+            Ok(Vec::new()),
+            "range formatting {selection:?} of {input:?} left {touched:?} of {result:?} unformatted"
+        );
+    }
+}
+
+/// Whether `offset` is the first byte of a line (or the end of the text).
+fn starts_line(text: &str, offset: TextSize) -> bool {
+    let offset = usize::from(offset);
+    offset == 0 || offset == text.len() || text.as_bytes().get(offset - 1) == Some(&b'\n')
+}
+
+/// A bounded, deterministic spread of selections over one input: the whole
+/// file, bare carets, whole lines, spans of several lines, part-line spans,
+/// and a range past the end. Line count is sampled rather than enumerated so
+/// the battery stays linear in the fuzzer's budget rather than quadratic in
+/// file size.
+fn probe_selections(text: &str) -> Vec<TextRange> {
+    let length = TextSize::of(text);
+    let mut selections = vec![
+        TextRange::up_to(length),
+        TextRange::empty(TextSize::new(0)),
+        TextRange::empty(length),
+        TextRange::new(length, length + TextSize::new(7)),
+    ];
+    let starts: Vec<TextSize> = std::iter::once(TextSize::new(0))
+        .chain(
+            text.match_indices('\n')
+                .map(|(at, _)| TextSize::new(at as u32 + 1)),
+        )
+        .collect();
+    let step = (starts.len() / 8).max(1);
+    for (index, &start) in starts.iter().enumerate().step_by(step).take(12) {
+        let end = starts.get(index + 1).copied().unwrap_or(length).min(length);
+        selections.push(TextRange::new(start, end));
+        selections.push(TextRange::empty(start));
+        // A caret in the middle of the line, and a span that starts and ends
+        // inside one — neither lands on a line boundary, and neither is
+        // required to land on a character boundary either.
+        let middle = start + TextSize::new(u32::from(end - start) / 2);
+        selections.push(TextRange::empty(middle));
+        selections.push(TextRange::new(middle, end));
+        if let Some(&next) = starts.get(index + 2) {
+            selections.push(TextRange::new(middle, next.min(length)));
+        }
+    }
+    selections
 }
 
 /// The fuzz invariant battery for one input: formatting never panics, is

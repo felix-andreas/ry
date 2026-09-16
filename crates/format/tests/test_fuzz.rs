@@ -7,7 +7,9 @@
 //!   2. idempotence — when `format` succeeds, formatting the output again
 //!      succeeds and reproduces it byte-for-byte;
 //!   3. determinism — the same input formats to the same result;
-//!   4. preservation — the token kinds survive, so lost code is caught.
+//!   4. preservation — the token kinds survive, so lost code is caught;
+//!   5. the range-formatting battery over a spread of selections, which is
+//!      where a partial application that changes the file's meaning shows up.
 //!
 //! Generators mirror the syntax-crate harness: valid-program seeds, byte-level
 //! seed mutations, token soup from an R-shaped alphabet, random bytes, every
@@ -20,6 +22,7 @@
 //! nightly/manual runs.
 
 use format::check_format_invariants as check_invariants;
+use format::check_range_format_invariants as check_range_invariants;
 use format::{Config, format};
 use std::path::PathBuf;
 
@@ -188,6 +191,7 @@ fn seeds_hold_invariants() {
             "seed unexpectedly refused: {seed:?}"
         );
         check_invariants(seed);
+        check_range_invariants(seed);
     }
 }
 
@@ -195,6 +199,7 @@ fn seeds_hold_invariants() {
 fn fuzz_regressions_hold_invariants() {
     for input in REGRESSIONS {
         check_invariants(input);
+        check_range_invariants(input);
     }
 }
 
@@ -256,6 +261,7 @@ fn fuzz_corpus_seeded() {
     };
     for source in &files {
         check_invariants(source);
+        check_range_invariants(source);
     }
     // Byte mutations over real files reach refusal/verbatim edges that clean
     // sources never hit.
@@ -285,6 +291,7 @@ fn fuzz_corpus_seeded() {
         }
         let text = String::from_utf8_lossy(&bytes).into_owned();
         check_invariants(&text);
+        check_range_invariants(&text);
     }
 }
 
@@ -306,6 +313,7 @@ fn run_random_bytes(budget: usize) {
         let bytes: Vec<u8> = (0..len).map(|_| (rng.next() & 0xFF) as u8).collect();
         let text = String::from_utf8_lossy(&bytes).into_owned();
         check_invariants(&text);
+        check_range_invariants(&text);
     }
 }
 
@@ -321,6 +329,7 @@ fn run_token_soup(budget: usize) {
             }
         }
         check_invariants(&text);
+        check_range_invariants(&text);
     }
 }
 
@@ -356,6 +365,7 @@ fn run_seed_mutations(budget: usize) {
         }
         let text = String::from_utf8_lossy(&text).into_owned();
         check_invariants(&text);
+        check_range_invariants(&text);
     }
 }
 

@@ -1,0 +1,161 @@
+#==== selection
+#---- caret_inside_a_statement
+x<-1
+y$0<-2
+z<-3
+#++++
+edit 2:1-3:1
+----
+x<-1
+«y <- 2»
+z<-3
+
+#---- caret_at_the_start_of_a_line
+x<-1
+$0y<-2
+z<-3
+#++++
+edit 2:1-3:1
+----
+x<-1
+«y <- 2»
+z<-3
+
+#---- caret_at_the_end_of_a_line
+x<-1
+y<-2$0
+z<-3
+#++++
+edit 2:1-3:1
+----
+x<-1
+«y <- 2»
+z<-3
+
+#---- caret_on_a_blank_line
+x<-1
+
+$0
+y<-2
+#++++
+no edits
+
+#---- caret_on_a_comment
+x<-1
+#  a note$0
+y<-2
+#++++
+no edits
+
+#---- part_of_one_line
+x<-1
+y$0<$0-2
+z<-3
+#++++
+edit 2:1-3:1
+----
+x<-1
+«y <- 2»
+z<-3
+
+#---- a_line_up_to_the_start_of_the_next
+x<-1
+$0y<-2
+$0z<-3
+#++++
+edit 2:1-3:1
+----
+x<-1
+«y <- 2»
+z<-3
+
+#---- several_lines
+$0x<-1
+y<-2
+z$0<-3
+#++++
+edit 1:1-2:1
+edit 2:1-3:1
+edit 3:1-4:1
+----
+«x <- 1»
+«y <- 2»
+«z <- 3»
+
+#---- the_whole_file_when_nothing_is_marked
+x<-1
+y<-2
+#++++
+edit 1:1-2:1
+edit 2:1-3:1
+----
+«x <- 1»
+«y <- 2»
+
+#---- a_selection_covering_the_whole_file
+$0x<-1
+y<-2
+$0
+#++++
+edit 1:1-2:1
+edit 2:1-3:1
+----
+«x <- 1»
+«y <- 2»
+
+#---- lines_that_are_already_laid_out
+x <- 1
+y$0 <- 2
+z<-3
+#++++
+no edits
+
+#---- a_caret_past_the_last_line
+x<-1
+y<-2
+$0
+#++++
+edit 2:1-3:1
+----
+x<-1
+«y <- 2»
+
+#---- from_inside_one_statement_into_another
+x<-1
+y<$0-2
+z<$0-3
+w<-4
+#++++
+edit 2:1-3:1
+edit 3:1-4:1
+----
+x<-1
+«y <- 2»
+«z <- 3»
+w<-4
+
+#---- trailing_newline_kept
+x<-1
+y$0<-2
+$0
+#++++
+edit 2:1-3:1
+----
+x<-1
+«y <- 2»
+
+#---- an_empty_file
+$0
+#++++
+no edits
+
+#---- a_file_of_blank_lines
+$0
+
+$0
+
+#++++
+edit 2:1-3:1
+----
+
+«»
