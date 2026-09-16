@@ -176,7 +176,32 @@ nominal distinctness, and no cascades outside the `@param` case. The gap is not 
 **diagnostics render the artifact unification left behind rather than the fact that failed**, and that
 the nominal story protects construction but nothing after it.
 
-## FIXED — a field write was lost across items in a package but not in a script
+## FIXED — goto-definition landed on the wrong token, and a stray quote blanked the rest of a file
+
+Opened by the IDE fuzz battery at a raised budget (`FUZZ_ITERS=1200 cargo test -p ide --test
+test_fuzz`): goto-definition from a cursor, followed by references from the definition it lands on,
+did not come back to the cursor. Three separate defects were under it, and the middle one is the
+serious one.
+
+1. **An unterminated string or backtick name ran to end of file.** R lets either span lines, so the
+   scan can only give up at EOF — and the token then swallowed every statement below it. One missing
+   quote in a large file took naming, diagnostics and every editor feature out from that line to the
+   end of the file. An unterminated token now ends at its line break (`Lexer::end_unterminated_at_line_break`);
+   input that closes never reaches the truncation. Pinned by naming fixtures, since the error
+   renderer clamps its caret to the first line either way and could not see the difference.
+2. **Goto-definition took the item's FIRST `NAME` node.** That reads `name <- value` correctly and
+   every other shape wrong: a right assignment declares its name last, so every jump to `total` in
+   `compute(1) -> total` landed inside `compute`. Valid R, wrong position, and it was reached by
+   hover, goto and the document outline alike. Naming already knows which token declares the item, so
+   `declared_name_range` asks it and keeps the syntax scan only for shapes naming binds nothing for.
+3. **A declaration was unreachable from its own first character.** Expressions are ranked
+   end-inclusively so a cursor just past a name still means that name; where two siblings abut
+   (`"s"broken <- …` in recovered source) that handed the cursor the expression it had just left, and
+   an unresolved neighbour then refused outright instead of letting the declaration under the same
+   cursor answer. The declaration scan is now the fallback for every binding kind, not just
+   parameters and loop variables.
+
+## FIXED — a field write was lost across items in a package but not in a script## FIXED — a field write was lost across items in a package but not in a script
 
 Identical code, two answers. A structural record written at top level and read in a later top-level
 statement:
@@ -539,6 +564,65 @@ qualification). Mechanical, but do it as its own pass so the diff stays readable
   wrong name — `cargo tree --workspace --exclude zed_roughly` prints `warning: excluded package(s)
   'zed_roughly' not found in workspace` and carries on, so the exclusion silently does nothing and the
   one warning scrolls past in a long build log.
+
+## Open — oracles, not inputs: what the batteries cannot see
+
+The two reviews below measure what the fuzzers *feed* the code. This section is about what they
+*ask* of it, and it was written after a crash class shipped past every battery: an inference variable
+escaping the item whose table minted it. The output stayed well formed — ranges in bounds, output
+deterministic, incremental equal to fresh — so all four batteries were green while **every** package
+in the pinned CRAN manifest leaked one and a quarter of them crashed `ry check`. An oracle that only
+asks "is the answer well formed" cannot see a wrong answer, which the testing section of `MEMORY.md`
+already says; these are the concrete follow-ons.
+
+### Assert internal invariants in the code, not only output properties in the harness
+
+A `debug_assert` at a seam turns every input in every suite — fixtures included — into a test for that
+invariant, at zero release cost. The export-edge one (a closed scheme carries no inference variable)
+landed with the fix. Worth adding next, each stated as the seam it guards:
+
+- every expression type an item records resolves in the table that produced it (the same defect from
+  the other end);
+- an item's declared-name range lies inside the item and spells the item's name — the fuzzer needed
+  1,200 iterations to stumble on a jump that landed on the wrong token, and this assertion catches it
+  on the first fixture that uses `->`;
+- HIR expression ranges and naming binding ranges lie inside their item's range;
+- occurrence sets returned by references/rename are all spelled alike (the IDE battery checks this
+  locally — promote it so every caller is covered).
+
+### Relational oracles find real bugs in valid code; add more of them
+
+The round trip (definition → references → back to the cursor) is the only relational oracle in the
+tree and it found a wrong jump on ordinary R. Each of these is one extra call and needs no expected
+output: rename edits ≡ references; hover at the definition target names the same symbol as hover at
+the cursor; completion at a name's first character offers that name; goto-definition is idempotent.
+
+### Wire the pinned CRAN corpus in as a test — and run each package as its own project
+
+`scripts/corpus-manifest.txt` pins 69 packages, `corpus/` is gitignored, and nothing fetches it (the
+review below records two arms silently contributing zero inputs). Twenty packages found five distinct
+crashes in ten minutes of wall clock. Two details decide whether it works:
+
+- each package is **its own project** (one `ry.toml`, its own `R/`), because the defects live on the
+  item-to-item interface — a per-file arm cannot see them, and one shared database over every file
+  distorts the diagnostics instead (`duplicate` explodes, as measured below);
+- typing and strict **on**, or most of the checker never runs.
+
+### Make a corpus finding reproducible before trying to minimize it
+
+The same package panicked on one run and not the next: item checks run across threads, and which
+items are visited first decides whether a dangling id lands out of range. A delta-debug pass over a
+non-deterministic reproducer wastes an hour and can conclude the opposite of the truth. The corpus
+arm should force a single thread, and a file-level-then-statement-level minimizer belongs in
+`scripts/` rather than being rewritten per crash.
+
+### Budget: keep the default cheap, and mutate for the shape that found these
+
+The IDE round trip needs ~1,200 iterations to surface and the default 300 never does. Raising the
+default is the wrong lever (that battery already costs 216 s): every failing input had the same shape
+— two tokens abutting with no separator, `"s"broken <- …` — which the seed-mutation arm produces by
+accident and a grammar generator produces almost never. Add "delete a separator" as an explicit
+mutation, and run the high budget nightly.
 
 ## Open — fuzzing input-generation review (measured)
 

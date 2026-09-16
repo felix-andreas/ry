@@ -335,6 +335,135 @@ pub fn type_size<'db>(db: &'db dyn Db, ty: Ty<'db>) -> u64 {
 /// code produces and well below the sizes a self-referential value reaches.
 pub const TYPE_SIZE_CEILING: u64 = 100_000;
 
+/// Rebuild `ty` with `map` applied to every type it directly contains — the one
+/// place that knows which types a composite is made of, and the mapping
+/// counterpart of [`Parameter::types`].
+///
+/// Every transformation that rewrites types (resolution, substitution,
+/// generalization, variable erasure) goes through here, so a member a
+/// transformation must not skip cannot be skipped by one walk and honored by
+/// another. A parameter's DEFAULT is exactly such a member: five hand-written
+/// walks each re-listed the composites, two of them forgot the default, and an
+/// inference variable riding inside one crossed the item boundary into a table
+/// that could not resolve it.
+///
+/// Leaves — and the variables and rigid binders a caller substitutes — come back
+/// unchanged, so a caller handles the kind it cares about and delegates the rest
+/// to this function.
+pub fn map_child_types<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+    map: &mut impl FnMut(Ty<'db>) -> Ty<'db>,
+) -> Ty<'db> {
+    match ty.kind(db).clone() {
+        TyKind::Any
+        | TyKind::Unknown
+        | TyKind::Null
+        | TyKind::Scalar(_)
+        | TyKind::Var(_)
+        | TyKind::Rigid(_) => ty,
+        TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(map(inner))),
+        TyKind::NamedVector(inner) => Ty::new(db, TyKind::NamedVector(map(inner))),
+        TyKind::List(inner) => Ty::new(db, TyKind::List(map(inner))),
+        TyKind::NamedList(inner) => Ty::new(db, TyKind::NamedList(map(inner))),
+        TyKind::Tuple(items) => Ty::new(
+            db,
+            TyKind::Tuple(items.iter().map(|&item| map(item)).collect()),
+        ),
+        TyKind::Record(fields) => Ty::new(
+            db,
+            TyKind::Record(
+                fields
+                    .iter()
+                    .map(|field| RecordField {
+                        ty: map(field.ty),
+                        ..field.clone()
+                    })
+                    .collect(),
+            ),
+        ),
+        TyKind::Function(function) => Ty::new(
+            db,
+            TyKind::Function(FunctionType {
+                positional: function.positional.iter().map(|&ty| map(ty)).collect(),
+                named: function
+                    .named
+                    .iter()
+                    .map(|parameter| Parameter {
+                        ty: map(parameter.ty),
+                        default: parameter.default.map(&mut *map),
+                        ..parameter.clone()
+                    })
+                    .collect(),
+                variadic: function.variadic.as_ref().map(|rest| RestParameter {
+                    element: map(rest.element),
+                    ..rest.clone()
+                }),
+                ret: map(function.ret),
+            }),
+        ),
+        // Members can collapse into one another once mapped, so the result
+        // re-normalizes instead of keeping a union of equal members.
+        TyKind::Union(members) => union_of(db, members.iter().map(|&member| map(member))),
+        TyKind::Named(name, arguments) => Ty::new(
+            db,
+            TyKind::Named(
+                name,
+                arguments.iter().map(|&argument| map(argument)).collect(),
+            ),
+        ),
+    }
+}
+
+/// Visit every type `ty` directly contains — the reading counterpart of
+/// [`map_child_types`], for walks that inspect a type without rebuilding it.
+pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl FnMut(Ty<'db>)) {
+    match ty.kind(db) {
+        TyKind::Any
+        | TyKind::Unknown
+        | TyKind::Null
+        | TyKind::Scalar(_)
+        | TyKind::Var(_)
+        | TyKind::Rigid(_) => {}
+        TyKind::Vector(inner)
+        | TyKind::NamedVector(inner)
+        | TyKind::List(inner)
+        | TyKind::NamedList(inner) => visit(*inner),
+        TyKind::Tuple(items) | TyKind::Union(items) => items.iter().copied().for_each(visit),
+        TyKind::Record(fields) => fields.iter().for_each(|field| visit(field.ty)),
+        TyKind::Function(function) => {
+            function.positional.iter().copied().for_each(&mut *visit);
+            function
+                .named
+                .iter()
+                .flat_map(|parameter| parameter.types())
+                .for_each(&mut *visit);
+            function
+                .variadic
+                .iter()
+                .for_each(|rest| visit(rest.element));
+            visit(function.ret);
+        }
+        TyKind::Named(_, arguments) => arguments.iter().copied().for_each(visit),
+    }
+}
+
+/// Whether an inference variable appears anywhere in `ty`. Variables are
+/// indices into ONE table, so a type that outlives the table that minted them —
+/// an exported scheme, a value cached across a table rollback — must carry
+/// none: read in a foreign table the index either dangles or, worse, names an
+/// unrelated variable.
+pub fn contains_inference_var<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    if matches!(ty.kind(db), TyKind::Var(_)) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || contains_inference_var(db, child);
+    });
+    found
+}
+
 pub fn substitute_rigid<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
@@ -370,96 +499,12 @@ fn substitute_rigid_uncached<'db>(
     substitution: &rustc_hash::FxHashMap<Name<'db>, Ty<'db>>,
     memo: &mut rustc_hash::FxHashMap<Ty<'db>, Ty<'db>>,
 ) -> Ty<'db> {
-    match ty.kind(db).clone() {
-        TyKind::Rigid(name) => substitution.get(&name).copied().unwrap_or(ty),
-        TyKind::Vector(inner) => Ty::new(
-            db,
-            TyKind::Vector(substitute_rigid_memo(db, inner, substitution, memo)),
-        ),
-        TyKind::NamedVector(inner) => Ty::new(
-            db,
-            TyKind::NamedVector(substitute_rigid_memo(db, inner, substitution, memo)),
-        ),
-        TyKind::List(inner) => Ty::new(
-            db,
-            TyKind::List(substitute_rigid_memo(db, inner, substitution, memo)),
-        ),
-        TyKind::NamedList(inner) => Ty::new(
-            db,
-            TyKind::NamedList(substitute_rigid_memo(db, inner, substitution, memo)),
-        ),
-        TyKind::Tuple(items) => Ty::new(
-            db,
-            TyKind::Tuple(
-                items
-                    .iter()
-                    .map(|&item| substitute_rigid_memo(db, item, substitution, memo))
-                    .collect(),
-            ),
-        ),
-        TyKind::Record(fields) => Ty::new(
-            db,
-            TyKind::Record(
-                fields
-                    .iter()
-                    .map(|field| {
-                        let mut field = field.clone();
-                        field.ty = substitute_rigid_memo(db, field.ty, substitution, memo);
-                        field
-                    })
-                    .collect(),
-            ),
-        ),
-        TyKind::Function(function) => Ty::new(
-            db,
-            TyKind::Function(FunctionType {
-                positional: function
-                    .positional
-                    .iter()
-                    .map(|&ty| substitute_rigid_memo(db, ty, substitution, memo))
-                    .collect(),
-                named: function
-                    .named
-                    .iter()
-                    .map(|parameter| {
-                        let mut parameter = parameter.clone();
-                        parameter.ty = substitute_rigid_memo(db, parameter.ty, substitution, memo);
-                        // The default is part of the parameter's type, so a
-                        // substitution that skipped it would leave the
-                        // instantiated signature holding the uninstantiated
-                        // binder.
-                        parameter.default = parameter
-                            .default
-                            .map(|ty| substitute_rigid_memo(db, ty, substitution, memo));
-                        parameter
-                    })
-                    .collect(),
-                variadic: function.variadic.as_ref().map(|rest| {
-                    let mut rest = rest.clone();
-                    rest.element = substitute_rigid_memo(db, rest.element, substitution, memo);
-                    rest
-                }),
-                ret: substitute_rigid_memo(db, function.ret, substitution, memo),
-            }),
-        ),
-        TyKind::Union(members) => union_of(
-            db,
-            members
-                .iter()
-                .map(|&member| substitute_rigid_memo(db, member, substitution, memo)),
-        ),
-        TyKind::Named(name, arguments) => Ty::new(
-            db,
-            TyKind::Named(
-                name,
-                arguments
-                    .iter()
-                    .map(|&argument| substitute_rigid_memo(db, argument, substitution, memo))
-                    .collect(),
-            ),
-        ),
-        _ => ty,
+    if let TyKind::Rigid(name) = ty.kind(db) {
+        return substitution.get(name).copied().unwrap_or(ty);
     }
+    map_child_types(db, ty, &mut |child| {
+        substitute_rigid_memo(db, child, substitution, memo)
+    })
 }
 
 /// Replace every inference variable in an (already-resolved) type with
@@ -467,70 +512,10 @@ fn substitute_rigid_uncached<'db>(
 /// variable id would dangle once the rollback reclaims (and later reuses) the
 /// id.
 pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
-    match ty.kind(db).clone() {
-        TyKind::Var(_) => unknown(db),
-        TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(erase_vars(db, inner))),
-        TyKind::NamedVector(inner) => Ty::new(db, TyKind::NamedVector(erase_vars(db, inner))),
-        TyKind::List(inner) => Ty::new(db, TyKind::List(erase_vars(db, inner))),
-        TyKind::NamedList(inner) => Ty::new(db, TyKind::NamedList(erase_vars(db, inner))),
-        TyKind::Tuple(items) => Ty::new(
-            db,
-            TyKind::Tuple(items.iter().map(|&item| erase_vars(db, item)).collect()),
-        ),
-        TyKind::Record(fields) => Ty::new(
-            db,
-            TyKind::Record(
-                fields
-                    .iter()
-                    .map(|field| {
-                        let mut field = field.clone();
-                        field.ty = erase_vars(db, field.ty);
-                        field
-                    })
-                    .collect(),
-            ),
-        ),
-        TyKind::Function(function) => Ty::new(
-            db,
-            TyKind::Function(FunctionType {
-                positional: function
-                    .positional
-                    .iter()
-                    .map(|&ty| erase_vars(db, ty))
-                    .collect(),
-                named: function
-                    .named
-                    .iter()
-                    .map(|parameter| {
-                        let mut parameter = parameter.clone();
-                        parameter.ty = erase_vars(db, parameter.ty);
-                        parameter.default = parameter.default.map(|ty| erase_vars(db, ty));
-                        parameter
-                    })
-                    .collect(),
-                variadic: function.variadic.as_ref().map(|rest| {
-                    let mut rest = rest.clone();
-                    rest.element = erase_vars(db, rest.element);
-                    rest
-                }),
-                ret: erase_vars(db, function.ret),
-            }),
-        ),
-        TyKind::Union(members) => {
-            union_of(db, members.iter().map(|&member| erase_vars(db, member)))
-        }
-        TyKind::Named(name, arguments) => Ty::new(
-            db,
-            TyKind::Named(
-                name,
-                arguments
-                    .iter()
-                    .map(|&argument| erase_vars(db, argument))
-                    .collect(),
-            ),
-        ),
-        _ => ty,
+    if matches!(ty.kind(db), TyKind::Var(_)) {
+        return unknown(db);
     }
+    map_child_types(db, ty, &mut |child| erase_vars(db, child))
 }
 
 #[cfg(test)]
@@ -575,6 +560,38 @@ mod size_tests {
 mod tests {
     use super::*;
     use crate::RootDatabase;
+
+    /// A parameter's default is a type like any other, and the walks that
+    /// rewrite or inspect types have to reach it: a variable left there
+    /// travelled out of the item whose table minted it and was read against a
+    /// table that never had it.
+    #[test]
+    fn a_parameter_default_is_part_of_the_type() {
+        let db = RootDatabase::default();
+        let var = Ty::new(&db, TyKind::Var(InferenceVar(7)));
+        let signature = Ty::new(
+            &db,
+            TyKind::Function(FunctionType {
+                positional: Vec::new(),
+                named: vec![Parameter {
+                    name: Name::new(&db, "x".to_owned()),
+                    ty: scalar(&db, Atomic::Integer),
+                    optional: true,
+                    default: Some(var),
+                }],
+                variadic: None,
+                ret: scalar(&db, Atomic::Integer),
+            }),
+        );
+
+        assert!(contains_inference_var(&db, signature));
+        let erased = erase_vars(&db, signature);
+        assert!(!contains_inference_var(&db, erased));
+        let TyKind::Function(function) = erased.kind(&db) else {
+            panic!("erasure keeps the shape")
+        };
+        assert_eq!(function.named[0].default, Some(unknown(&db)));
+    }
 
     #[test]
     fn interning_gives_id_equality() {

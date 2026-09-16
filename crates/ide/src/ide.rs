@@ -237,7 +237,7 @@ fn global_hover_definition(
         })
         .or(own_item)?;
     let node = item_node(db, declaring)?;
-    let range = definition_name_range(&node).unwrap_or_else(|| node.text_range());
+    let range = declared_name_range(db, declaring, &node).unwrap_or_else(|| node.text_range());
     Some(HoverDefinition::Global {
         target: NavigationTarget {
             file: *declaring.file(db),
@@ -362,7 +362,8 @@ pub fn definition(
         Target::Global(name) => {
             if let Some(winner) = package_definitions(db, files).get(&name) {
                 let node = item_node(db, *winner)?;
-                let range = definition_name_range(&node).unwrap_or_else(|| node.text_range());
+                let range =
+                    declared_name_range(db, *winner, &node).unwrap_or_else(|| node.text_range());
                 return Some(DefinitionTarget::Project(NavigationTarget {
                     file: *winner.file(db),
                     range,
@@ -1293,7 +1294,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                     });
                     continue;
                 }
-                let selection = definition_name_range(&node).unwrap_or(range);
+                let selection = declared_name_range(db, item, &node).unwrap_or(range);
                 // An assigned S4/R6 construction (the call is the assigned
                 // value, a direct child of the assignment) keeps the assigned
                 // name but takes the construct's kind, detail, and members.
@@ -2889,7 +2890,6 @@ fn target_at<'db>(
             if semantics::stubs::stub_declaration(db, name).is_some() {
                 return Some(Target::StubGlobal(name.clone()));
             }
-            return None;
         }
     }
 
@@ -2904,20 +2904,32 @@ fn target_at<'db>(
         });
     }
 
-    // Parameter names and for-loop variables are declarations without an
-    // expression; the cursor hits their binding site directly.
-    for (id, info) in &naming.bindings {
-        if matches!(info.kind, BindingKind::Parameter | BindingKind::ForVariable)
-            && info.range.start() <= position.relative
-            && position.relative <= info.range.end()
-        {
-            return Some(Target::Slot {
-                item: position.item,
-                binding: *id,
-            });
-        }
+    // The cursor sits on a declared name that the expression walk could not
+    // answer for: a parameter or for-loop variable, which is a declaration
+    // with no expression of its own, or a name whose neighbour won the
+    // end-inclusive ranking — where two siblings abut, the expression ENDING
+    // at the cursor is ranked ahead of the declaration STARTING there, and for
+    // an unresolved neighbour it has nothing to offer. Reaching a declaration
+    // from its own first character is what keeps goto-definition reciprocal
+    // with references: a jump lands exactly there.
+    //
+    // Smallest range first (then binding id) so an item whose recovery left
+    // two declarations overlapping still answers deterministically rather than
+    // by hash order.
+    let (binding, info) = naming
+        .bindings
+        .iter()
+        .filter(|(_, info)| {
+            info.range.start() <= position.relative && position.relative <= info.range.end()
+        })
+        .min_by_key(|(binding, info)| (info.range.len(), binding.0))?;
+    if info.kind == BindingKind::TopLevel {
+        return Some(Target::Global(info.name.clone()));
     }
-    None
+    Some(Target::Slot {
+        item: position.item,
+        binding: *binding,
+    })
 }
 
 /// Whether any item declares `name` as a top-level slot — named definitions
@@ -3158,10 +3170,36 @@ fn position_in_item(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<P
     touching
 }
 
-/// The name node range of a definition item (`name <- ...`), for goto
-/// targets that land on the name rather than the whole statement.
-fn definition_name_range(node: &syntax::SyntaxNode) -> Option<TextRange> {
-    node.descendants()
-        .find(|descendant| descendant.kind() == syntax::SyntaxKind::NAME)
-        .map(|name| name.text_range())
+/// The range of the name an item declares, for goto targets and outline
+/// selections that land on the name rather than on the whole statement.
+///
+/// Naming owns which token that is, and asking it is the whole point: a syntax
+/// scan for the item's first `NAME` node reads `name <- value` correctly and
+/// every other shape wrong. A right assignment declares its name LAST, so
+/// `compute(1) -> total` sent every jump to `total` into `compute` instead —
+/// valid R, and the wrong file position. Items naming binds nothing for (an
+/// S4 registration call) still fall back to the scan.
+fn declared_name_range(
+    db: &dyn Db,
+    item: Item<'_>,
+    node: &syntax::SyntaxNode,
+) -> Option<TextRange> {
+    let declared = item.name(db).as_deref();
+    let bound = item_naming(db, item).as_ref().and_then(|naming| {
+        naming
+            .bindings
+            .values()
+            .filter(|info| {
+                info.kind == BindingKind::TopLevel && Some(info.name.as_str()) == declared
+            })
+            .map(|info| info.range)
+            .min_by_key(|range| (range.start(), range.len()))
+    });
+    match bound {
+        Some(range) => Some(range + node.text_range().start()),
+        None => node
+            .descendants()
+            .find(|descendant| descendant.kind() == syntax::SyntaxKind::NAME)
+            .map(|name| name.text_range()),
+    }
 }

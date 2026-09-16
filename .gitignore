@@ -11,6 +11,11 @@ node_modules
 /target
 /release
 
+# Coverage profiles, written into the crate directory the instrumented
+# binary ran from.
+*.profraw
+*.profdata
+
 .local
 .rlib
 r-examples

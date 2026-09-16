@@ -552,6 +552,11 @@ pub fn check_item_with_annotation<'db>(
 /// erase to `Unknown` via [`erase_residual_vars`]. The synthetic binder
 /// names never display — the renderer canonicalizes rigid names to
 /// `T`/`U`/`V` by first occurrence.
+///
+/// This is the only edge a scheme crosses on its way out of the item, so it is
+/// where the table-scoped-variable invariant is asserted: an id that reaches a
+/// reader's table either dangles (an index past the end) or names an unrelated
+/// variable of the reader's own, and the second failure is silent.
 fn close_scheme<'db>(
     db: &'db dyn Db,
     table: &mut InferenceTable<'db>,
@@ -562,6 +567,10 @@ fn close_scheme<'db>(
         generalized: FxHashMap::default(),
     };
     let body = erase_residual_vars_at(db, table, scheme.body, 0, Some(&mut closer));
+    debug_assert!(
+        !crate::types::contains_inference_var(db, body),
+        "a closed scheme must carry no inference variable"
+    );
     TypeScheme {
         binders: closer.binders,
         body,
@@ -592,181 +601,39 @@ fn erase_residual_vars_at<'db>(
         return unknown(db);
     }
     let resolved = table.shallow_resolve(db, ty);
-    match resolved.kind(db).clone() {
-        TyKind::Var(var) => {
-            if let Some(closer) = closer.as_deref_mut()
-                && let Entry::Unbound { constraint, .. } = table.entry(var)
-                && *constraint != Constraint::Unconstrained
-            {
-                if let Some(&rigid) = closer.generalized.get(&var) {
-                    return rigid;
-                }
-                let constraint = *constraint;
-                let mut ordinal = closer.binders.len() + 1;
-                let name = loop {
-                    let candidate = Name::new(db, format!("R{ordinal}"));
-                    if !closer
-                        .binders
-                        .iter()
-                        .any(|(existing, _)| *existing == candidate)
-                    {
-                        break candidate;
-                    }
-                    ordinal += 1;
-                };
-                let rigid = Ty::new(db, TyKind::Rigid(name));
-                closer.binders.push((name, constraint));
-                closer.generalized.insert(var, rigid);
-                return rigid;
-            }
-            unknown(db)
-        }
-        TyKind::Vector(inner) => Ty::new(
-            db,
-            TyKind::Vector(erase_residual_vars_at(
-                db,
-                table,
-                inner,
-                depth + 1,
-                closer.as_deref_mut(),
-            )),
-        ),
-        TyKind::NamedVector(inner) => Ty::new(
-            db,
-            TyKind::NamedVector(erase_residual_vars_at(
-                db,
-                table,
-                inner,
-                depth + 1,
-                closer.as_deref_mut(),
-            )),
-        ),
-        TyKind::List(inner) => Ty::new(
-            db,
-            TyKind::List(erase_residual_vars_at(
-                db,
-                table,
-                inner,
-                depth + 1,
-                closer.as_deref_mut(),
-            )),
-        ),
-        TyKind::NamedList(inner) => Ty::new(
-            db,
-            TyKind::NamedList(erase_residual_vars_at(
-                db,
-                table,
-                inner,
-                depth + 1,
-                closer.as_deref_mut(),
-            )),
-        ),
-        TyKind::Tuple(items) => Ty::new(
-            db,
-            TyKind::Tuple(
-                items
-                    .iter()
-                    .map(|&item| {
-                        erase_residual_vars_at(db, table, item, depth + 1, closer.as_deref_mut())
-                    })
-                    .collect(),
-            ),
-        ),
-        TyKind::Record(fields) => Ty::new(
-            db,
-            TyKind::Record(
-                fields
-                    .iter()
-                    .map(|field| {
-                        let mut field = field.clone();
-                        field.ty = erase_residual_vars_at(
-                            db,
-                            table,
-                            field.ty,
-                            depth + 1,
-                            closer.as_deref_mut(),
-                        );
-                        field
-                    })
-                    .collect(),
-            ),
-        ),
-        TyKind::Function(function) => Ty::new(
-            db,
-            TyKind::Function(FunctionType {
-                positional: function
-                    .positional
-                    .iter()
-                    .map(|&ty| {
-                        erase_residual_vars_at(db, table, ty, depth + 1, closer.as_deref_mut())
-                    })
-                    .collect(),
-                named: function
-                    .named
-                    .iter()
-                    .map(|field| {
-                        let mut field = field.clone();
-                        field.ty = erase_residual_vars_at(
-                            db,
-                            table,
-                            field.ty,
-                            depth + 1,
-                            closer.as_deref_mut(),
-                        );
-                        field
-                    })
-                    .collect(),
-                variadic: function.variadic.as_ref().map(|rest| {
-                    let mut rest = rest.clone();
-                    rest.element = erase_residual_vars_at(
-                        db,
-                        table,
-                        rest.element,
-                        depth + 1,
-                        closer.as_deref_mut(),
-                    );
-                    rest
-                }),
-                ret: erase_residual_vars_at(
-                    db,
-                    table,
-                    function.ret,
-                    depth + 1,
-                    closer.as_deref_mut(),
-                ),
-            }),
-        ),
-        TyKind::Union(members) => union_of(
-            db,
-            members
-                .iter()
-                .map(|&member| {
-                    erase_residual_vars_at(db, table, member, depth + 1, closer.as_deref_mut())
-                })
-                .collect::<Vec<_>>(),
-        ),
-        TyKind::Named(name, arguments) => Ty::new(
-            db,
-            TyKind::Named(
-                name,
-                arguments
-                    .iter()
-                    .map(|&argument| {
-                        erase_residual_vars_at(
-                            db,
-                            table,
-                            argument,
-                            depth + 1,
-                            closer.as_deref_mut(),
-                        )
-                    })
-                    .collect(),
-            ),
-        ),
-        TyKind::Any | TyKind::Unknown | TyKind::Null | TyKind::Scalar(_) | TyKind::Rigid(_) => {
-            resolved
-        }
+    let TyKind::Var(var) = *resolved.kind(db) else {
+        return crate::types::map_child_types(db, resolved, &mut |child| {
+            erase_residual_vars_at(db, table, child, depth + 1, closer.as_deref_mut())
+        });
+    };
+    let Some(closer) = closer else {
+        return unknown(db);
+    };
+    let Entry::Unbound { constraint, .. } = *table.entry(var) else {
+        return unknown(db);
+    };
+    if constraint == Constraint::Unconstrained {
+        return unknown(db);
     }
+    if let Some(&rigid) = closer.generalized.get(&var) {
+        return rigid;
+    }
+    let mut ordinal = closer.binders.len() + 1;
+    let name = loop {
+        let candidate = Name::new(db, format!("R{ordinal}"));
+        if !closer
+            .binders
+            .iter()
+            .any(|(existing, _)| *existing == candidate)
+        {
+            break candidate;
+        }
+        ordinal += 1;
+    };
+    let rigid = Ty::new(db, TyKind::Rigid(name));
+    closer.binders.push((name, constraint));
+    closer.generalized.insert(var, rigid);
+    rigid
 }
 
 /// The slot environment: an undo-logged map from binding slots to types.
@@ -6049,106 +5916,33 @@ impl<'db> Checker<'db, '_> {
         binders: &mut Vec<(Name<'db>, Constraint)>,
         mapping: &mut FxHashMap<crate::types::InferenceVar, Name<'db>>,
     ) -> Ty<'db> {
-        match ty.kind(self.db).clone() {
-            TyKind::Var(var) => {
-                let representative = self.table.find(var);
-                if let Some(&name) = mapping.get(&representative) {
-                    return Ty::new(self.db, TyKind::Rigid(name));
-                }
-                let Entry::Unbound { level, constraint } = *self.table.entry(representative) else {
-                    return ty;
-                };
-                if level <= self.table.level {
-                    // Escaped below the binding level: stays monomorphic.
-                    return ty;
-                }
-                let letter = (b'T' + (binders.len() as u8 % 7)) as char;
-                let suffix = binders.len() / 7;
-                let text = if suffix == 0 {
-                    letter.to_string()
-                } else {
-                    format!("{letter}{suffix}")
-                };
-                let name = Name::new(self.db, text);
-                mapping.insert(representative, name);
-                binders.push((name, constraint));
-                Ty::new(self.db, TyKind::Rigid(name))
-            }
-            TyKind::Vector(inner) => {
-                let inner = self.abstract_vars(inner, binders, mapping);
-                Ty::new(self.db, TyKind::Vector(inner))
-            }
-            TyKind::NamedVector(inner) => {
-                let inner = self.abstract_vars(inner, binders, mapping);
-                Ty::new(self.db, TyKind::NamedVector(inner))
-            }
-            TyKind::List(inner) => {
-                let inner = self.abstract_vars(inner, binders, mapping);
-                Ty::new(self.db, TyKind::List(inner))
-            }
-            TyKind::NamedList(inner) => {
-                let inner = self.abstract_vars(inner, binders, mapping);
-                Ty::new(self.db, TyKind::NamedList(inner))
-            }
-            TyKind::Tuple(items) => {
-                let items = items
-                    .iter()
-                    .map(|&item| self.abstract_vars(item, binders, mapping))
-                    .collect();
-                Ty::new(self.db, TyKind::Tuple(items))
-            }
-            TyKind::Record(fields) => {
-                let fields = fields
-                    .iter()
-                    .map(|field| {
-                        let mut field = field.clone();
-                        field.ty = self.abstract_vars(field.ty, binders, mapping);
-                        field
-                    })
-                    .collect();
-                Ty::new(self.db, TyKind::Record(fields))
-            }
-            TyKind::Function(function) => {
-                let function = FunctionType {
-                    positional: function
-                        .positional
-                        .iter()
-                        .map(|&ty| self.abstract_vars(ty, binders, mapping))
-                        .collect(),
-                    named: function
-                        .named
-                        .iter()
-                        .map(|field| {
-                            let mut field = field.clone();
-                            field.ty = self.abstract_vars(field.ty, binders, mapping);
-                            field
-                        })
-                        .collect(),
-                    variadic: function.variadic.as_ref().map(|rest| {
-                        let mut rest = rest.clone();
-                        rest.element = self.abstract_vars(rest.element, binders, mapping);
-                        rest
-                    }),
-                    ret: self.abstract_vars(function.ret, binders, mapping),
-                };
-                Ty::new(self.db, TyKind::Function(function))
-            }
-            TyKind::Union(members) => {
-                let members: Vec<Ty<'db>> = members
-                    .iter()
-                    .map(|&member| self.abstract_vars(member, binders, mapping))
-                    .collect();
-                union_of(self.db, members)
-            }
-            TyKind::Named(name, arguments) => {
-                let arguments = arguments
-                    .iter()
-                    .map(|&argument| self.abstract_vars(argument, binders, mapping))
-                    .collect();
-                Ty::new(self.db, TyKind::Named(name, arguments))
-            }
-            _ => ty,
+        let TyKind::Var(var) = *ty.kind(self.db) else {
+            return crate::types::map_child_types(self.db, ty, &mut |child| {
+                self.abstract_vars(child, binders, mapping)
+            });
+        };
+        let representative = self.table.find(var);
+        if let Some(&name) = mapping.get(&representative) {
+            return Ty::new(self.db, TyKind::Rigid(name));
         }
+        let Entry::Unbound { level, constraint } = *self.table.entry(representative) else {
+            return ty;
+        };
+        if level <= self.table.level {
+            // Escaped below the binding level: stays monomorphic.
+            return ty;
+        }
+        let letter = (b'T' + (binders.len() as u8 % 7)) as char;
+        let suffix = binders.len() / 7;
+        let text = if suffix == 0 {
+            letter.to_string()
+        } else {
+            format!("{letter}{suffix}")
+        };
+        let name = Name::new(self.db, text);
+        mapping.insert(representative, name);
+        binders.push((name, constraint));
+        Ty::new(self.db, TyKind::Rigid(name))
     }
 
     /// Instantiate a scheme with fresh variables carrying its constraints.

@@ -99,6 +99,8 @@ The code says **whose grammar was broken**, not which stage noticed: your R is `
 
 **One mistake, one finding.** Recovery reports the first thing it cannot use and then stays quiet about the consequences: a `#:` region reports once (plus, at most, one unclosed opener, which is a structural fact about a construct rather than a per-token consequence), and an unterminated argument or parameter list ends at the next statement instead of adopting it. A function missing its body is not reported when its parameter list never closed — that is the same mistake said twice.
 
+**A mistake stays on its own line.** A string or backtick-quoted name may span lines in R, so one that never closes can only be discovered at the end of the file — but a token reaching that far would take every statement below it out of analysis, which is what a stray quote does while you are still typing it. An unterminated one ends at its line break instead: the quote is reported where it opens, and the rest of the file keeps its diagnostics, its definitions, and its completions.
+
 A statement that fails to parse as R suppresses every name-resolution and typing finding overlapping it — the checker draws no conclusions from source it could not read. A broken annotation suppresses nothing outside its own block; inside it, the block carries no typing payload, so the refusal is the only finding.
 
 ### Name resolution

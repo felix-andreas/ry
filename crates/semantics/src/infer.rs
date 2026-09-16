@@ -86,6 +86,11 @@ pub struct InferenceTable<'db> {
 /// does.
 pub static RESOLVE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// How deep resolution expands alias applications before leaving one as
+/// written. Well past any alias a reader would nest by hand, and short enough
+/// that an alias whose body mentions itself cannot expand forever.
+const ALIAS_EXPANSION_LIMIT: usize = 64;
+
 impl<'db> InferenceTable<'db> {
     pub fn fresh(&mut self, constraint: Constraint) -> InferenceVar {
         let var = InferenceVar(self.entries.len() as u32);
@@ -233,131 +238,38 @@ impl<'db> InferenceTable<'db> {
             return (hit, true);
         }
 
-        let (resolved, clean) = match ty.kind(db) {
-            TyKind::Any | TyKind::Unknown | TyKind::Null | TyKind::Scalar(_) | TyKind::Rigid(_) => {
-                (ty, true)
+        let mut clean = true;
+        let resolved = crate::types::map_child_types(db, ty, &mut |child| {
+            let (child, child_clean) = self.resolve_rec(db, child, visiting);
+            clean &= child_clean;
+            child
+        });
+        // An alias is a transparent shorthand: it expands here and never
+        // survives into unification or compatibility. A self-referential alias
+        // would re-enter through the SAME interned application, so the
+        // expansion is bounded by the visiting stack's length.
+        let alias = match resolved.kind(db) {
+            TyKind::Named(name, arguments) => self
+                .definitions
+                .and_then(|table| table.get(name))
+                .filter(|definition| definition.alias)
+                .map(|definition| (definition, arguments.clone())),
+            _ => None,
+        };
+        let (resolved, clean) = match alias {
+            Some((definition, arguments)) if visiting.len() < ALIAS_EXPANSION_LIMIT => {
+                let expanded = apply_definition(db, definition, &arguments);
+                // Guard alias self-reference with a sentinel slot on the same
+                // stack the variable cycle check uses.
+                visiting.push(InferenceVar(u32::MAX));
+                let (expanded, expanded_clean) = self.resolve_rec(db, expanded, visiting);
+                visiting.pop();
+                (expanded, clean && expanded_clean)
             }
-            TyKind::Var(_) => unreachable!("handled above"),
-            TyKind::Vector(element) => {
-                let (element, clean) = self.resolve_rec(db, *element, visiting);
-                (Ty::new(db, TyKind::Vector(element)), clean)
-            }
-            TyKind::NamedVector(element) => {
-                let (element, clean) = self.resolve_rec(db, *element, visiting);
-                (Ty::new(db, TyKind::NamedVector(element)), clean)
-            }
-            TyKind::List(element) => {
-                let (element, clean) = self.resolve_rec(db, *element, visiting);
-                (Ty::new(db, TyKind::List(element)), clean)
-            }
-            TyKind::NamedList(element) => {
-                let (element, clean) = self.resolve_rec(db, *element, visiting);
-                (Ty::new(db, TyKind::NamedList(element)), clean)
-            }
-            TyKind::Tuple(items) => {
-                let mut clean = true;
-                let items = items
-                    .iter()
-                    .map(|&item| {
-                        let (item, item_clean) = self.resolve_rec(db, item, visiting);
-                        clean &= item_clean;
-                        item
-                    })
-                    .collect();
-                (Ty::new(db, TyKind::Tuple(items)), clean)
-            }
-            TyKind::Record(fields) => {
-                let mut clean = true;
-                let fields = fields
-                    .iter()
-                    .map(|field| {
-                        let mut field = field.clone();
-                        let (ty, field_clean) = self.resolve_rec(db, field.ty, visiting);
-                        field.ty = ty;
-                        clean &= field_clean;
-                        field
-                    })
-                    .collect();
-                (Ty::new(db, TyKind::Record(fields)), clean)
-            }
-            TyKind::Function(function) => {
-                let mut clean = true;
-                let mut resolve = |ty: Ty<'db>, visiting: &mut Vec<InferenceVar>| {
-                    let (ty, ty_clean) = self.resolve_rec(db, ty, visiting);
-                    clean &= ty_clean;
-                    ty
-                };
-                let function = FunctionType {
-                    positional: function
-                        .positional
-                        .iter()
-                        .map(|&ty| resolve(ty, visiting))
-                        .collect(),
-                    named: function
-                        .named
-                        .iter()
-                        .map(|parameter| {
-                            let mut parameter = parameter.clone();
-                            parameter.ty = resolve(parameter.ty, visiting);
-                            parameter.default = parameter.default.map(|ty| resolve(ty, visiting));
-                            parameter
-                        })
-                        .collect(),
-                    variadic: function.variadic.as_ref().map(|rest| {
-                        let mut rest = rest.clone();
-                        rest.element = resolve(rest.element, visiting);
-                        rest
-                    }),
-                    ret: resolve(function.ret, visiting),
-                };
-                (Ty::new(db, TyKind::Function(function)), clean)
-            }
-            TyKind::Union(members) => {
-                // Members can collapse after resolution: re-normalize.
-                let mut clean = true;
-                let members: Vec<Ty<'db>> = members
-                    .iter()
-                    .map(|&member| {
-                        let (member, member_clean) = self.resolve_rec(db, member, visiting);
-                        clean &= member_clean;
-                        member
-                    })
-                    .collect();
-                (union_of(db, members), clean)
-            }
-            TyKind::Named(name, arguments) => {
-                let mut clean = true;
-                let arguments: Vec<Ty<'db>> = arguments
-                    .iter()
-                    .map(|&argument| {
-                        let (argument, argument_clean) = self.resolve_rec(db, argument, visiting);
-                        clean &= argument_clean;
-                        argument
-                    })
-                    .collect();
-                // An alias is a transparent shorthand: it expands here and
-                // never survives into unification or compatibility. A
-                // self-referential alias would re-enter through the SAME
-                // interned application; the expansion depth guard is the
-                // visiting stack's length bound.
-                if let Some(definition) = self.definitions.and_then(|table| table.get(name))
-                    && definition.alias
-                {
-                    if visiting.len() >= 64 {
-                        (Ty::new(db, TyKind::Named(*name, arguments)), false)
-                    } else {
-                        let expanded = apply_definition(db, definition, &arguments);
-                        // Guard alias self-reference with a sentinel slot on
-                        // the same stack the variable cycle check uses.
-                        visiting.push(InferenceVar(u32::MAX));
-                        let resolved = self.resolve_rec(db, expanded, visiting);
-                        visiting.pop();
-                        (resolved.0, clean && resolved.1)
-                    }
-                } else {
-                    (Ty::new(db, TyKind::Named(*name, arguments)), clean)
-                }
-            }
+            // Past the bound the application stays as written, which is not an
+            // answer other positions may reuse.
+            Some(_) => (resolved, false),
+            None => (resolved, clean),
         };
         if clean {
             self.resolve_cache.borrow_mut().1.insert(ty, resolved);
