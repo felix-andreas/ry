@@ -566,14 +566,12 @@ A compact function annotation uses a single function type:
 
 An optional parameter must be named, as `[name]: TYPE`. A bare optional positional form such as `fn(integer, [character])` is not supported.
 
-A function may declare a rest parameter to accept a variable number of arguments.
+A function may declare one rest parameter to accept a variable number of arguments. It is written `...: TYPE`, and `fn(...)` is shorthand for `...: Any`. Naming it, as `...items: TYPE`, is an annotation error, because rest arguments are matched by position.
 
-- `fn(...) -> RETURN_TYPE` accepts any number of arguments of any type. `...` is shorthand for `...: Any`
-- the rest parameter is anonymous. It is written `...: TYPE`, and naming it as `...items: TYPE` is an annotation error, because rest arguments are matched by position and never by that name
-- `fn(prefix: TYPE, ...: TYPE) -> RETURN_TYPE` shows that a rest parameter may follow fixed parameters
-- `fn(...: TYPE, [option]: TYPE) -> RETURN_TYPE` shows that named parameters may also follow the rest parameter. They are matched by name only, exactly like R formals declared after `...`
+- `fn(prefix: TYPE, ...: TYPE) -> RETURN_TYPE` puts it after fixed parameters
+- `fn(...: TYPE, [option]: TYPE) -> RETURN_TYPE` puts named parameters after it
 
-There may be at most one rest parameter. Its position is part of the signature, and it mirrors the position of `...` in the R formal list. Parameters written before it fill positionally, and parameters written after it fill by name only. See [Function calls](#function-calls).
+Its position is part of the signature and mirrors the position of `...` in the R formal list. See [Function calls](#function-calls) for how arguments then match.
 
 An annotation declares the types of a definition's parameters. It does not declare the parameter list. R matches a call's arguments against the formals in the `function(...)` header, so those formals are the call interface. That covers their names, their order, their defaults, and where `...` sits. An annotation cannot add, remove, or reorder them. Every parameter the annotation does not mention keeps its inferred type, so annotating one parameter of several is a supported partial form.
 
@@ -644,31 +642,25 @@ then_some <- function(condition, value) {
 
 ### Inferred function types
 
-An unannotated `function(...)` expression infers a function type directly from its definition.
+An unannotated `function(...)` expression infers its type from the definition.
 
-- every parameter appears as a named parameter, using its definition name, because R parameters are always matchable both by name and by position
-- a parameter with a default value is optional at call sites
-- a formal the body tests with `missing(name)` is also optional at call sites. This is how R writes an optional argument with no default, so `function(name, punct) if (missing(punct)) … else …punct…` may be called without `punct`
-- `missing(name)` on a defaultless formal of the current function also narrows the formal's supplied state along the branch edges, exactly like a type guard. Six rules apply:
-  - on the edge where `missing(name)` is true, reading `name` is an error, because R would fail the read at run time with "argument is missing, with no default". Writing it is legal, and it supplies the formal, as in `if (missing(punct)) punct <- "!"`
-  - on the edge where `missing(name)` is false, the formal is supplied and reads are ordinary
-  - a diverging true edge, such as `if (missing(x)) stop(...)`, leaves the rest of the body on the supplied edge. `!missing(name)` swaps the edges
-  - after the branches rejoin, the formal counts as unsupplied only when it is unsupplied on both edges, so only definite runtime failures are reported
-  - a formal with a default is never narrowed. Reading such a formal while unsupplied evaluates the default, which is legal
-  - `missing()` applies only to the immediate function's own formals, which matches R. An enclosing function's formal is not narrowed inside a nested function
-- a `...` formal becomes a rest parameter with element type `Any`, at the position it holds in the formal list. `function(x, ...) …` therefore infers as `fn(x: T, ...: Any) -> …`, and calls check against it by the [rest-parameter rules](#function-calls). Those rules absorb surplus positional arguments and unmatched keywords, and they match formals after the `...` by name only
-- the values reaching `...` are not tracked into the body. A body use of `...`, such as forwarding it to another call, types as `Unknown`
-- parameter types and return types are inferred. An unconstrained parameter generalizes at a binding boundary, like any other inferred type
-- a constraint that an inference variable still carries at an item's export edge survives as a scheme binder. `mixed_apply <- invoke(mirror)` therefore exports `<T: numeric> fn(x: T) -> T`, so cross-item calls keep checking it. An unconstrained residual variable erases to `Unknown`
-- default value expressions are typechecked. An error inside a default is reported, and a default for an annotated parameter must be compatible with the declared type
-- a `NULL` default is checked like any other default. `function(title = NULL)` is R's usual spelling for an optional argument, and it does not make the parameter optional to the body. When the caller omits the argument, `title` is `NULL` in the body, so a declared `character` is a promise the function does not keep. Declare the parameter `character | NULL` and narrow it with `if (is.null(title))`. `if (title == "draft")` is then an error rather than a run-time `argument is of length zero`. Marking the parameter `[title]` relaxes only the call. It says that callers may omit the argument, not that the body may receive nothing
-- an unannotated parameter's type comes from its uses, not from its default, so a non-`NULL` default does not pin the inferred parameter type. `function(x = 1) x` is `<T> fn([x]: T) -> T`, and passing a character to it is not a finding, because R runs it
-- a call that omits the argument takes the default's type, because that is the value R puts in the frame. With `f <- function(x = 1) x`, `f()` is a `double` and `f("a")` is a `character`. The two rules fit together. The parameter is polymorphic, and omitting the argument is the one call where the default chooses the instantiation rather than the caller
-- for the same reason, a default is checked against an instantiation of the declared parameter type rather than against the binder itself. `#: <T> fn([x]: T) -> T` over `function(x = 1) x` is therefore accepted. A concrete declared type is unaffected, so `fn(title: character)` still refuses a `NULL` default, and `<T: numeric>` still refuses a character one
+- every parameter appears as a named parameter under its definition name, because R matches parameters both by name and by position
+- a parameter with a default is optional at call sites, and so is one the body tests with [`missing()`](#missing-on-a-defaultless-formal)
+- a `...` formal becomes a rest parameter of element type `Any`, at the position it holds in the formal list, so `function(x, ...) …` infers as `fn(x: T, ...: Any) -> …`
+- the values reaching `...` are not tracked into the body, so forwarding `...` to another call types as `Unknown`
+- parameter and return types are inferred, and an unconstrained parameter generalizes when the function is bound to a name
+- a requirement the inference could not discharge survives into the exported type, so a parameter used numerically exports `<T: numeric>` and cross-file calls keep checking it
+
+Defaults are typechecked, and four rules govern how they interact with the parameter's type.
+
+- an error inside a default is reported, and a default for an annotated parameter must be compatible with the declared type
+- a `NULL` default is checked like any other. `function(title = NULL)` is R's usual spelling for an optional argument, and it does not make the parameter optional to the body: when the caller omits it, `title` is `NULL` there, so a declared `character` is a promise the function does not keep. Declare `character | NULL` and narrow it with `if (is.null(title))`. Marking the parameter `[title]` relaxes only the call
+- an unannotated parameter takes its type from its uses, not from its default, so `function(x = 1) x` is `<T> fn([x]: T) -> T` and passing a character is not a finding
+- a call that omits the argument takes the default's type, because that is the value R puts in the frame, so `f <- function(x = 1) x` makes `f()` a `double` and `f("a")` a `character`. A default is therefore checked against an instantiation of the declared type rather than against the binder, so `#: <T> fn([x]: T) -> T` over `function(x = 1) x` is accepted. A concrete declared type is unaffected, and `fn(title: character)` still refuses a `NULL` default
 
 Examples:
 
-- `function(x) x` infers as `<T> fn(x: T) -> T` at a binding boundary
+- `function(x) x` infers as `<T> fn(x: T) -> T`
 - `function(count, label = NULL) count` may be called as `f(1L)`, `f(count = 1L)`, or `f(1L, "x")`
 
 ### Named and positional parameters
@@ -1248,14 +1240,14 @@ Argument checking is compatibility-based, not exact-equality-based.
 - A whole-number `double` literal counts as `integer` at a parameter position, so `seq_len(10)` and `substr(x, 1, 3)` are as valid as their `10L`, `1L`, and `3L` spellings. This generalizes the rule the `:` operator already applies to its endpoints. A fractional literal such as `2.5` is still rejected at an `integer` parameter, and so is a `double`-typed variable that holds a whole number.
 - An argument whose type is `Unknown` is accepted at any parameter. The reason the value became `Unknown` was already diagnosed where it happened, and repeating it at every later use would add nothing.
 
-A rest parameter, written `...: TYPE`, changes how surplus arguments are handled. Its position in the signature mirrors the position of `...` in the R formal list. Argument matching follows R's rule for formals around the dots.
+A rest parameter follows R's rule for formals around the dots.
 
-- a rest parameter adds no required arguments, so a variadic function may be called with none. `paste()` is legal
-- a positional argument first fills the unfilled parameters declared before the rest parameter, in order. This is exactly how R fills formals before `...` positionally. `wrap("a", "b")` on `fn(x: character, ...: character)` gives `x = "a"` and sends `"b"` to the rest
-- once the pre-rest parameters are filled, the rest parameter absorbs any number of remaining positional arguments, each checked against its element type
-- a positional argument never fills a parameter declared after the rest parameter. Those are matched by name only, as in R. `sum(1, 2, na.rm = TRUE)` with `fn(...: integer[] | logical[], [na.rm]: logical)` therefore sends `1` and `2` to the rest, and `na.rm` by name
-- the rest parameter also absorbs a named argument that matches no declared parameter, and checks it against the element type. R collects unmatched keywords into `...`, which is how a wrapper passes an option through to the function it calls. `read.csv(file, colClasses = "character")` passes `colClasses` this way
-- a named argument that duplicates a declared parameter already given stays a named-parameter error, even with a rest parameter. R rejects a formal matched by multiple actual arguments. Without a rest parameter, any unmatched named argument is an error as before
+- it adds no required arguments, so a variadic function may be called with none, and `paste()` is legal
+- positional arguments fill the parameters declared before it first, so `wrap("a", "b")` on `fn(x: character, ...: character)` gives `x = "a"` and sends `"b"` to the rest
+- it then absorbs any number of remaining positional arguments, each checked against its element type
+- a parameter declared after it is matched by name only, so `sum(1, 2, na.rm = TRUE)` on `fn(...: integer[] | logical[], [na.rm]: logical)` sends `1` and `2` to the rest and `na.rm` by name
+- it also absorbs a named argument that matches no declared parameter, which is how a wrapper passes an option through, as in `read.csv(file, colClasses = "character")`
+- a named argument that duplicates a parameter already given is still an error, because R rejects a formal matched twice
 
 ### Overload sets
 
@@ -1363,6 +1355,19 @@ Ten rules and limits apply.
 - A condition combined with `&&` or `||` does not narrow.
 - `is.na(x)` is not a type guard. In this system, being `NA` is a value property rather than a type property.
 - Narrowing never touches an unresolved inference variable, so a guard does not pin an unannotated parameter.
+
+#### `missing()` on a defaultless formal
+
+A formal the body tests with `missing(name)` is optional at call sites, which is how R writes an optional argument with no default. `function(name, punct) if (missing(punct)) … else …punct…` may be called without `punct`.
+
+The test also narrows the formal's supplied state along the branch edges, like a type guard.
+
+- on the true edge, reading `name` is an error, because R fails that read with "argument is missing, with no default". Writing it is legal and supplies it, as in `if (missing(punct)) punct <- "!"`
+- on the false edge the formal is supplied, and reads are ordinary
+- a diverging true edge, such as `if (missing(x)) stop(...)`, leaves the rest of the body on the supplied edge, and `!missing(name)` swaps the edges
+- after the branches rejoin, the formal counts as unsupplied only when it is unsupplied on both edges, so only definite runtime failures are reported
+- a formal with a default is never narrowed, because reading it while unsupplied evaluates the default
+- `missing()` applies only to the immediate function's own formals, as in R, so an enclosing function's formal is not narrowed inside a nested function
 
 ### Blocks
 
