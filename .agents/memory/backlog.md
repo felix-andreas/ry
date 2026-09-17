@@ -1851,6 +1851,35 @@ Renderer gaps in the naming suite itself, none of them a product bug:
   without knowing about quoting, so a `b0 x local` binding appears that nothing writes and nothing
   resolves to. Harmless; a premint fix should re-bless the case that pins it.
 
+## Open — a quoted token opened inside a `#:` annotation crosses the line that ends it
+
+The formatter writes `#: ` markers into a string's contents, so the code it emits is not the code it
+was given. Reproducer:
+
+```r
+#: lc("ab
+}el"ist{
+#:   a: integer
+#: }
+x <- list(a = 1L)
+```
+
+`format` returns that file with the second line as `#: }el"ist{` — the marker is now *inside* the
+string literal. The token-preservation oracle catches it (`fuzz_seed_mutations` at
+`FUZZ_ITERS=120000`); the default budget does not reach it.
+
+Root cause: a `#:` region ends at the line break, but `Lexer::string` (and `raw_string`,
+`backtick_name`) only give up at end of file, because an R string may legally span lines. The
+annotation therefore holds a token that runs past its own end, and re-laying-out the block prefixes
+every line it covers.
+
+Fix shape, and why it is not a one-liner: the quoted scanners must stop at the line break **while
+`in_annotation`**, and the error that stop raises has to carry `SyntaxError.in_annotation = true`.
+Every lexer error is `false` today, and the formatter refuses the whole file on any error that is not
+flagged — so the narrow fix would turn a malformed annotation from "renders verbatim" into "the file
+will not format", which is the opposite of the documented policy. Decide the flag question first,
+then add the case to the golden error suite.
+
 ## Open — fuzzing oracle-strength review (measured, and it found two live bugs)
 
 The third of three independent fuzzing reviews, asking the complementary question to the other two:

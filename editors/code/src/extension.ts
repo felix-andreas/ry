@@ -41,10 +41,8 @@ export async function activate({ subscriptions, extension, }: ExtensionContext):
       if (
         change.affectsConfiguration("ry.path")
         || change.affectsConfiguration("ry.args")
-        || change.affectsConfiguration("ry.experimentalFeatures")
         || change.affectsConfiguration("roughly.path")
         || change.affectsConfiguration("roughly.args")
-        || change.affectsConfiguration("roughly.experimentalFeatures")
       ) {
         const choice = await window.showWarningMessage(
           "Configuration change requires restarting the language server",
@@ -133,12 +131,7 @@ function createClient(): LanguageClient {
         : "ry"
     )
 
-  const commandArgs = setting<string[]>("args") ?? ["server"]
-  const experimentalFeatures = setting<string[]>("experimentalFeatures")
-  const experimentalArgs = experimentalFeatures
-    ? ["--experimental-features", experimentalFeatures.join(" ")]
-    : []
-  const args = [...experimentalArgs, ...commandArgs]
+  const args = setting<string[]>("args") ?? ["server"]
 
   logger.info("using server command:", [command, ...args].join(" "))
 

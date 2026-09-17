@@ -63,7 +63,9 @@ actions, document/workspace symbols, annotation-type and S4 navigation.
 
 ## `format` crate (`src/format.rs`, single file)
 
-The preserving formatter over the syntax tree, plus its configuration types.
+The preserving formatter over the syntax tree, plus its configuration types and
+`format_range`, which turns a selection into the edits that lay out its lines
+the way formatting the whole file would.
 
 ## `ry` crate (`src/ry.rs` is the root)
 
