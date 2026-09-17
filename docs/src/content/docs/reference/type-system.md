@@ -429,55 +429,39 @@ Where a single representative type is needed, every nominal argument must match 
 
 ### Union types
 
-A union type `A | B | ...` describes a value that has one of the member types. Any number of members is allowed, and any type may be a member. `T | NULL` is the two-member special case, and it is the nullable form of `T`.
+A union type `A | B | ...` describes a value that has one of the member types. Any number of members is allowed, and any type may be a member. `T | NULL` is the nullable form of `T`.
 
-- union syntax is allowed anywhere a type can appear, which includes:
-  - a variable annotation
-  - a function parameter
-  - a function return
-  - a compact function type annotation
-  - a nested function type
-  - a list annotation and a map-like list annotation
-- a union describes which shapes a value can take. It does not merge or coerce its members
-- a type may be parenthesized for grouping. `(TYPE)` means exactly `TYPE` and adds no structure of its own. Grouping makes a union with a function-type member writable. In `fn() -> integer | NULL` the `->` extends over the whole union, so that type is a function returning `integer | NULL`. An optional callback is therefore written `(fn() -> integer) | NULL`, which is also the form such a union renders as. A `<T>` binder may not appear inside parentheses, because binders stay at the outermost level of an annotation
+A union may be written anywhere a type may: a variable annotation, a parameter, a return, a nested function type, and a list annotation. It describes which shapes a value can take, and does not merge or coerce its members.
 
-Examples:
+A type may be parenthesized for grouping, where `(TYPE)` means exactly `TYPE`. Grouping is what makes a union with a function-type member writable, because in `fn() -> integer | NULL` the `->` extends over the whole union. An optional callback is therefore written `(fn() -> integer) | NULL`, which is also how it renders. A `<T>` binder may not appear inside parentheses.
 
 - `integer | character`
-- `integer | character | NULL`
 - `character[] | NULL`
-- `integer[] | character[]`
 - `fn(count: integer | NULL) -> character | logical | NULL`
-- `(fn() -> integer) | NULL`, an optional callback, which is a function returning `integer`, or `NULL`
-
-A union whose members all collapse to one type is that type. `NULL | NULL` is accepted and means `NULL`, by the same singleton rule that every other duplicate member follows below.
+- `(fn() -> integer) | NULL`, a function returning `integer`, or `NULL`
 
 #### Union normalization
 
-Unions are kept in one normal form, so that equivalent spellings mean the same type and render as the same type.
+Unions are kept in one normal form, so equivalent spellings mean the same type and render the same way.
 
-- **Flat.** A union member that is itself a union flattens into the enclosing union. An alias expanding to `(A | B) | C` therefore normalizes to `A | B | C`.
-- **Deduplicated.** Repeated members collapse, keeping the first occurrence. `integer | character | integer` normalizes to `integer | character`.
-- **Order-insensitive.** Member order does not affect meaning, so `integer | NULL` and `NULL | integer` are the same type. Rendering preserves first-occurrence order, except that `NULL` always renders last.
-- **Singleton collapse.** A union whose members collapse to a single type is that type. `integer | integer` is `integer`, and a nullable of `NULL` itself normalizes to `NULL`.
-- **`Any` absorbs.** A union with an `Any` member is `Any`, because every value already satisfies `Any`.
-- **`Unknown` absorbs.** Otherwise, a union with an `Unknown` member is `Unknown`. Such a union claims no more than that the type is not statically known.
+- a member that is itself a union flattens, so `(A | B) | C` becomes `A | B | C`
+- repeated members collapse, keeping the first occurrence, so `integer | character | integer` becomes `integer | character`
+- member order does not affect meaning, and rendering preserves first-occurrence order except that `NULL` renders last
+- a union whose members collapse to one type is that type, so `integer | integer` is `integer` and `NULL | NULL` is `NULL`
+- a union with an `Any` member is `Any`, because every value already satisfies `Any`
+- otherwise a union with an `Unknown` member is `Unknown`
 
-Normalization also applies to the unions the checker builds itself, which are branch joins, alias expansions, and `NULL`-producing lookups. A rendered union is therefore always flat, always deduplicated, and always at least two members.
+The checker's own unions are normalized too, so a rendered union is always flat, deduplicated, and at least two members.
 
 ### Union compatibility
 
-Compatibility treats a union differently on the two sides.
+A value fits an expected union when it fits any member, with the usual coercions applied per member. So `integer` fits `integer | character | NULL`, and `NULL` fits any union containing `NULL`.
 
-- **Into a union, on the expected side.** A value fits an expected union when it fits any member.
-  - `T` is compatible with any union containing `T`, so `integer` is compatible with `integer | character | NULL`
-  - `NULL` is compatible with any union containing `NULL`
-  - the usual coercions apply per member, so a value coercible to some member fits the union
-- **Out of a union, on the actual side.** A union value must be accepted in every shape it can take, so a union is compatible with an expected type only when each of its members is.
-  - a union is compatible with any wider union, so `integer | NULL` is compatible with `integer | character | NULL`
-  - a union is not compatible with a plain member type. `integer | character` is not compatible with `integer`, and `T | NULL` is not compatible with plain `T`
-- member checks are attempted in member order, and a failed member attempt leaks no inference bindings into the next attempt
-- A flexible argument checked against an expected union binds to the whole union at that first use, exactly as unification would bind it. A flexible argument is an inference variable, which is an unannotated parameter or a local that is not yet pinned. Uses commit in program order, so a later use that requires a different type reports its error at that later site, against the already-committed union. When two union-typed contracts share only some members, such as `integer | character` at one call and `logical | character` at the next, the intersection is not computed. Annotate the value with the intended member type to satisfy both. First-use commitment keeps checking deterministic in program order, which is the order R evaluates in
+A union value must be accepted in every shape it can take, so it fits an expected type only when every member does. A union therefore fits any wider union, and `integer | NULL` fits `integer | character | NULL`. It does not fit a plain member type: `integer | character` does not fit `integer`, and `T | NULL` does not fit plain `T`.
+
+Members are tried in order, and a failed attempt leaks no bindings into the next.
+
+An unannotated value checked against an expected union binds to the whole union at its first use. Uses commit in program order, so a later use requiring a different type reports at that later site. When two union-typed contracts share only some members, such as `integer | character` at one call and `logical | character` at the next, the intersection is not computed. Annotate the value with the member type you intend.
 
 ## Function types
 
@@ -494,45 +478,18 @@ When function annotations use consecutive `#:` lines, those lines are one annota
 
 ### Expanded function annotations
 
-Expanded function annotations use these forms:
+The expanded form uses one directive per line: `@forall` to declare type parameters, `@param name {TYPE}` per parameter, `@param [name] {TYPE}` for an optional one, and `@return {TYPE}` or `@returns {TYPE}`. A binder constraint is written `@forall T: numeric`, with the same names and meaning as the compact `<T: numeric>` form.
 
-- `@forall T,U,...`
-- `@forall T`
-- `@forall T: numeric`. A binder constraint uses the same names and semantics as the compact `<T: numeric>` form. See [Type parameters, aliases, and nominal types](#type-parameters-aliases-and-nominal-types)
-- `@param name {TYPE}`
-- `@param [name] {TYPE}` for an optional parameter
-- `@return {TYPE}`
-- `@returns {TYPE}`
-
-Additional rules:
-
-- repeated `@forall` lines are allowed, and they accumulate in source order
-- duplicate type parameter names in the same annotation block are errors
-- every `@forall` directive must appear before any `@param`, `@return`, or `@returns` directive
-- the bracket syntax for an optional parameter follows JSDoc-style notation
-- when no `@return` or `@returns` annotation is provided, the return type is elided. On a checked annotation of a function definition, it is inferred from the function's body. See [Elided return types](#elided-return-types). In every position with no body to infer from, it means `NULL`
-- at most one `@return` or `@returns` directive may appear in the block
-- every `@param` directive must appear before `@return` or `@returns`
-
-Examples:
+- directives are ordered: every `@forall` before any `@param`, and every `@param` before `@return` or `@returns`
+- repeated `@forall` lines accumulate in source order, and a duplicate type parameter name is an error
+- at most one `@return` or `@returns` may appear
+- with no `@return` or `@returns`, the return type is [elided](#elided-return-types)
 
 ```r
 #: @param count {integer}
 #: @param [label] {character | NULL}
 #: @return {integer}
 double_count <- function(count, label = NULL) { count + count }
-```
-
-```r
-#: @param count {integer}
-log_count <- function(count) { }
-```
-
-```r
-#: @forall T
-#: @param value {T}
-#: @return {T}
-identity <- function(value) value
 ```
 
 ```r
@@ -543,15 +500,6 @@ identity <- function(value) value
 then_some <- function(condition, value) {
   if (condition) value
 }
-```
-
-```r
-#: @forall T
-#: @forall U
-#: @param left {T}
-#: @param right {U}
-#: @return {T}
-keep_left <- function(left, right) left
 ```
 
 ### Compact function annotations
