@@ -380,6 +380,13 @@ typo, and a run of zero cases would otherwise report a pass.
 The default crate test command while iterating is `cargo test -p semantics` (analysis behavior);
 `just gate` runs the whole battery plus clippy and a formatting check before a change lands.
 
+Every command that is meant to cover the project spells out `--workspace --exclude zed_ry`. The
+manifest sets `default-members = ["crates/ry"]` so that a bare `cargo run` starts the CLI, and the
+same setting makes a bare `cargo test`, `cargo clippy` or `cargo build` select that one package —
+which leaves every suite on this page except the CLI and LSP ones silently out of scope. `zed_ry` is
+the exclusion because it targets wasm. Run `just gate` rather than a bare `cargo test` before
+landing a change; the CI workflow is missing the selection today, which is tracked as open work.
+
 ## Blessing expectations
 
 Set `RY_BLESS=1` to rewrite the `#++++` expectation blocks in the source `.test` files in

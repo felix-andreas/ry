@@ -1851,6 +1851,44 @@ Renderer gaps in the naming suite itself, none of them a product bug:
   without knowing about quoting, so a `b0 x local` binding appears that nothing writes and nothing
   resolves to. Harmless; a premint fix should re-bless the case that pins it.
 
+## Open — CI gates only the CLI crate, so every fixture suite passes vacuously
+
+`.github/workflows/ci.yml` runs `cargo clippy`/`build`/`test` with no package selection, and the
+manifest sets `default-members = ["crates/ry"]` so that a bare `cargo run` starts the CLI — cargo
+honours it here too and selects that one package. Every fixture suite (syntax, semantics, format,
+ide), every property battery and every fuzz harness sits outside the gate: a green report in 36
+seconds, having run none of them. `just gate` already uses the right selection, and its comment
+assumes CI matches.
+
+The fix for the fast gate is mechanical — add `--workspace --exclude zed_ry` to the clippy, build,
+test and doctest steps. Verified locally: that selection is green, clippy-clean at `-D warnings`,
+and `cargo fmt --all --check` passes.
+
+```yaml
+      - name: clippy
+        run: cargo clippy --workspace --exclude zed_ry --all-targets --all-features -- -D warnings
+      - name: build
+        run: cargo build --workspace --exclude zed_ry --all-targets --all-features
+      - name: test
+        run: cargo test --workspace --exclude zed_ry --all-targets --all-features
+      - name: doctests
+        run: cargo test --workspace --exclude zed_ry --doc --all-features
+```
+
+The `ignored benches + fuzz` job has the same hole and needs two more things measured before its
+selection can widen:
+
+- **A corpus fetch.** `stats_new_stack`, `stats_legacy_stack`, `stats_new_stack_parallel`,
+  `stats_keystrokes` and `stats_witness` (`legacy/differential/tests/test_stats.rs`) assert
+  `!packages.is_empty(), "run scripts/fetch-corpus.rs first"` and panic on a runner without one.
+  Either the job fetches the corpus or those five skip with a notice instead of failing — and a
+  skip that nobody reads is how this hole started, so prefer the fetch.
+- **A bigger budget.** There are 22 ignored tests workspace-wide. `fuzz_soak` alone measured
+  ~21 minutes in release on a development machine, before the 100k/200k-line benchmarks; the job's
+  timeout is 45 minutes.
+
+Until both are settled its green means nothing, the same way the fast gate's did.
+
 ## Open — fuzzing oracle-strength review (measured, and it found two live bugs)
 
 The third of three independent fuzzing reviews, asking the complementary question to the other two:
