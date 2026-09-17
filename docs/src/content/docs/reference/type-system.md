@@ -688,50 +688,37 @@ The leading character must still be a letter or `_`, and the dot is interior onl
 
 ### Function type compatibility
 
-Parameter names are part of the call interface. R matches call arguments against the definition's formal names, so names participate in compatibility.
+A function value is compatible with an expected function type when its parameters accept every call the interface may make, and its return type satisfies the interface's.
 
-- a named parameter pairs by name. `fn(a: integer, b: character)` accepts a function defined `function(b, a)`, and each annotation type binds to the same-named formal regardless of order
-- an unnamed positional parameter type pairs with the remaining parameters left to right, so `fn(count: integer) -> NULL` and `fn(integer) -> NULL` are mutually compatible
+Parameter names are part of the interface, because R matches call arguments against the definition's formal names.
+
+- a named parameter pairs by name, so `fn(a: integer, b: character)` accepts a function defined `function(b, a)`
+- an unnamed parameter type pairs with the remaining parameters left to right, so `fn(count: integer) -> NULL` and `fn(integer) -> NULL` are mutually compatible
 - an annotation may not rename a parameter. `fn(count: integer) -> integer` over `function(n) n` is an error, because it would promise callers a name the runtime rejects
-- parameter counts must match
-- an expected-optional parameter promises callers that they may omit it, so the actual function must have a default for that parameter:
-  - `fn(count: integer, [label]: character) -> integer` does not accept `function(count, label) count`
-  - `fn(count: integer, label: character) -> integer` accepts `function(count, label = NULL) count`
 
-Function compatibility is contravariant in parameters and covariant in the return type. A function value is compatible with an expected function type under three conditions.
+Arity is a range rather than a fixed count. The function may declare more parameters than the interface passes, as long as the extras have defaults. It may not require more than the interface supplies, and it may not refuse an argument the interface may send. An expected-optional parameter promises callers they may omit it, so the actual formal must carry a default.
 
-- Each expected parameter type is compatible with the corresponding actual parameter type. This is the contravariant direction, and it means the actual function must accept every argument the expected interface may pass. Parameters pair by name where both sides name them, as R matches call arguments. Unnamed parameters take the remaining slots left to right.
-- A function may declare more parameters than the interface passes, as long as the extras have defaults. It may not require more than the interface supplies, and it may not refuse an argument the interface may send.
-- The actual return type is compatible with the expected return type. This is the covariant direction.
+Parameters are contravariant and the return type is covariant. Each expected parameter type must be compatible with the actual parameter type, so the function must accept every argument the interface may pass. The actual return type must be compatible with the expected one.
 
-Examples:
-
-- a function of type `fn(integer | NULL) -> integer` is accepted where `fn(integer) -> integer` is expected, because `integer` is compatible with `integer | NULL`
-- a function of type `fn(integer) -> integer` is rejected where `fn(integer | NULL) -> integer` is expected, because the expected interface may pass `NULL`, which the actual function does not accept
-- `fn(a: integer, [b]: integer) -> integer` is accepted where `fn(integer) -> integer` is expected, because `b` defaults and the one-argument call the interface makes is valid. This lets a standard-library reduction serve a callback interface. `lapply(list(mean, sd), function(g) g(1:3))` types as `list[double]`, even though `mean` and `sd` each declare optional formals the callback never passes
-- `fn(a: integer, b: integer) -> integer` is rejected there, because the interface never supplies `b`. `fn() -> integer` is rejected too, because it cannot receive the argument the interface sends
+- `fn(integer | NULL) -> integer` is accepted where `fn(integer) -> integer` is expected
+- `fn(integer) -> integer` is rejected where `fn(integer | NULL) -> integer` is expected, because the interface may pass `NULL`
+- `fn(a: integer, [b]: integer) -> integer` is accepted where `fn(integer) -> integer` is expected, because `b` defaults. This lets a standard-library function serve a callback interface, so `lapply(list(mean, sd), function(g) g(1:3))` types as `list[double]` although `mean` and `sd` declare optional formals the callback never passes
+- `fn(a: integer, b: integer) -> integer` is rejected there, because the interface never supplies `b`, and `fn() -> integer` is rejected because it cannot receive the argument the interface sends
+- `fn(count: integer, [label]: character) -> integer` does not accept `function(count, label) count`, because `label` has no default
 
 #### Callback forwarding at variadic call sites
 
-R's apply family invokes its callback as `FUN(element, ...)`, forwarding the caller's surplus arguments. A callback with more formals than the declared interface is therefore still correct when the call forwards the difference. At a call to a variadic function, a function-typed argument that fails the plain interface check is re-checked as that forwarded invocation.
+R's apply family invokes its callback as `FUN(element, ...)`, forwarding the caller's surplus arguments, so a callback with more formals than the interface declares is still correct when the call forwards the difference. At a call to a variadic function, a function-typed argument that fails the plain interface check is re-checked as that forwarded invocation.
 
-- forwarded named arguments consume the callback's same-named formals first, each checked against its formal's type. These are the arguments the rest parameter would absorb
-- the interface's parameter types then fill the callback's remaining formals in order, followed by the forwarded positional arguments. The interface's parameter types are the elements the callee will pass
-- a formal that the invocation leaves unfilled must have a default
-- the callback's return type must satisfy the interface's return type, in the covariant direction
+- forwarded named arguments consume the callback's same-named formals first, each checked against its formal's type
+- the interface's own parameter types then fill the remaining formals in order, followed by the forwarded positional arguments
+- a formal the invocation leaves unfilled must have a default
+- the callback's return type must satisfy the interface's return type
 - the re-check binds nothing on failure, and the reported error is the plain interface mismatch
 
-There are three consequences. `lapply(words, gsub, pattern = "a", replacement = "o")` checks `gsub(word, pattern = "a", replacement = "o")` and types as `list[character]`. `lapply(words, nchar)` accepts the optional display formals of `nchar`. A forwarded argument of the wrong type fails the probe, and the call errors.
+`lapply(words, gsub, pattern = "a", replacement = "o")` therefore checks `gsub(word, pattern = "a", replacement = "o")` and types as `list[character]`, and `lapply(words, nchar)` accepts the optional formals of `nchar`. A forwarded argument of the wrong type fails the probe and the call errors.
 
-Variadic compatibility is conservative.
-
-- a variadic function type is compatible only with another variadic function type. Their rest element types are contravariant, like ordinary parameters, and the fixed prefixes must match by the rules above
-- the rest parameters must sit at the same position. The number of parameters declared before `...` must agree on both sides, because that position decides which parameters callers may fill positionally
-- a variadic function type and a fixed-arity function type are never compatible, in either direction
-
-This over-rejects some safe pairings, such as a fixed function that happens to accept the same arguments. It never admits an unsound one.
-
-Inference gives a `...` formal a rest parameter at its formal position. See [Inferred function types](#inferred-function-types). An annotation with a rest parameter therefore checks against a `function(…, ..., …)` definition like any other function annotation.
+Variadic compatibility is conservative. A variadic function type is compatible only with another variadic function type, and never with a fixed-arity one in either direction. Their rest element types are contravariant like ordinary parameters, and the number of parameters declared before `...` must agree on both sides, because that position decides which parameters callers may fill positionally. This over-rejects some safe pairings, and never admits an unsound one.
 
 #### Reporting a function that does not fit
 
