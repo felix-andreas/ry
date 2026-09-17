@@ -36,4 +36,4 @@ and a static type checker — the first for R.
 
 Binaries are on [GitHub Releases](https://github.com/felix-andreas/ry/releases), and the VS Code
 extension is on the
-[Marketplace](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly).
+[Marketplace](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry).

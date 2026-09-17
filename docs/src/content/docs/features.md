@@ -1,6 +1,6 @@
 ---
 title: Features
-description: What ry gives you before you configure anything — and the one flag that changes the rest
+description: What ry gives you with no configuration, and the one setting that turns on type errors
 ---
 
 Everything below works with no configuration and no annotations. The last section needs one line of

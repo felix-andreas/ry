@@ -16,10 +16,10 @@ It requires no changes to your code, and the same binary runs in your editor and
 
 ## Install
 
-Roughly can be used either as a standalone command-line tool or as an extension in supported editors like VS Code:
+Install ry as a command-line tool, as an editor extension, or both:
 
 - **CLI:** Download a [prebuilt binary](https://github.com/felix-andreas/ry/releases)
-- **VS Code Extension:** Install from [marketplace](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly)
+- **VS Code Extension:** Install from [marketplace](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
 - **Zed Extension**: Install manually [from here](https://github.com/felix-andreas/ry/tree/main/editors/zed)
 
 For detailed instructions or other installation methods (e.g. for RStudio or building from source) see the [installation page](/installation).

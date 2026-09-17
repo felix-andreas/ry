@@ -18,12 +18,12 @@ just opened. ry answers from the source alone, so the answers exist in a pull re
 in a file you have never run:
 
 - a typo in a variable name
+- a name you deleted in another file
 - an argument in the wrong position, or a call missing a required one
 - a value that is sometimes `NULL`, used as though it never is
-- a name you deleted in another file
 
-All of these come from **one** understanding: formatting, analysis, editor features and type
-checking are views onto the same knowledge.
+The first two are reported out of the box. The last two need the type checker, which is one line in
+`ry.toml`. Formatting, analysis, editor features and type checking all read your code the same way.
 
 ## Speed on large codebases
 
@@ -68,7 +68,7 @@ means a check was skipped rather than a wrong answer produced.
 
 ## Project status
 
-The project has alpha level quality.
+ry is beta software.
 
 **The interfaces are stable.** The diagnostics, the `ry.toml` keys, the diagnostic codes, and the
 JSON output are covered by tests that fail when they change, so CI built on them will not break
@@ -78,9 +78,9 @@ silently.
 not, so pin a version if you gate a build on a clean run.
 
 **Where it runs.** `ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw`
-documents. The editor integration does not cover literate documents yet — you get them in `check`
-and in CI, but not as you type. The formatter skips them, since most of an `.Rmd` is prose the
-formatter should not rewrite.
+documents. The editor integration does not handle literate documents yet. Do not point the language
+server at one, because it reads the whole file as R and reports the prose. The formatter skips them,
+since most of an `.Rmd` is prose the formatter should not rewrite.
 
 **What it does not cover yet.** The largest gaps are data frames, S4, and R6 — see
 [limitations](/type-checking/limitations) for the full account before deciding how far to trust a
