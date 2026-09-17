@@ -144,6 +144,24 @@ edit 2:1-3:1
 x<-1
 «y <- 2»
 
+#---- a_file_already_laid_out_selected_whole
+x <- 1
+
+y <- 2
+#++++
+no edits
+
+#---- a_statement_after_a_blank_line_the_formatter_keeps
+x<-1
+
+y$0<-2
+#++++
+edit 3:1-4:1
+----
+x<-1
+
+«y <- 2»
+
 #---- an_empty_file
 $0
 #++++

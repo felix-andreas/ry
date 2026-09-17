@@ -368,31 +368,25 @@ fn paired_statements(
         source.kind(),
         SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
     );
-    // A comment standing between statements is a unit of the same kind: it
-    // holds its own line and nothing around it decides how it is laid out, so
-    // selecting it need not drag in the statement above. A comment trailing a
-    // statement belongs to that statement's node instead and is never reached
-    // here.
-    let members = |node: &SyntaxNode| -> Vec<SyntaxElement> {
-        node.children_with_tokens()
-            .filter(|element| {
-                element.as_node().is_some() || (sequence && element.kind() == SyntaxKind::COMMENT)
-            })
-            .collect()
+    // Whether the two hold the same children in the same order. Both lists are
+    // stepped together so that one running out while the other has more counts
+    // as a difference — pairing up what is left would pair constructs that are
+    // not each other.
+    let mut source_children = members(source, sequence);
+    let mut formatted_children = members(formatted, sequence);
+    let same_shape = loop {
+        match (source_children.next(), formatted_children.next()) {
+            (None, None) => break true,
+            (Some(left), Some(right)) if left.kind() == right.kind() => {}
+            _ => break false,
+        }
     };
-    let source_children = members(source);
-    let formatted_children = members(formatted);
-    if source_children.len() != formatted_children.len() {
+    if !same_shape {
         return;
     }
-    let paired = source_children.iter().zip(&formatted_children);
-    if paired
-        .clone()
-        .any(|(left, right)| left.kind() != right.kind())
+    for (source_child, formatted_child) in
+        members(source, sequence).zip(members(formatted, sequence))
     {
-        return;
-    }
-    for (source_child, formatted_child) in paired {
         if sequence {
             pairs.push((
                 source_child.text_range().start(),
@@ -405,6 +399,19 @@ fn paired_statements(
             paired_statements(source_child, formatted_child, pairs);
         }
     }
+}
+
+/// The children [`paired_statements`] pairs up: every child node, and — in a
+/// statement sequence — every comment standing on its own between statements.
+///
+/// Such a comment is a unit like a statement: it holds its own line and nothing
+/// around it decides how it is laid out, so selecting it need not drag in the
+/// statement above. A comment *trailing* a statement belongs to that
+/// statement's node instead and is never one of these.
+fn members(node: &SyntaxNode, sequence: bool) -> impl Iterator<Item = SyntaxElement> {
+    node.children_with_tokens().filter(move |element| {
+        element.as_node().is_some() || (sequence && element.kind() == SyntaxKind::COMMENT)
+    })
 }
 
 /// A text split into lines, each keeping its terminator, with the byte offset

@@ -863,7 +863,12 @@ impl Worker {
     /// layout to offer for a file whose structure is unknown, and a protocol
     /// error would put a message in the user's face for a file they are in the
     /// middle of typing.
-    fn format_edits(&self, text: &str, selection: TextRange) -> Option<Vec<lsp_types::TextEdit>> {
+    fn format_edits(
+        &self,
+        index: &LineIndex,
+        text: &str,
+        selection: TextRange,
+    ) -> Option<Vec<lsp_types::TextEdit>> {
         let edits = match format::format_range(text, self.config.format, selection) {
             Ok(edits) => edits,
             Err(error) => {
@@ -871,14 +876,13 @@ impl Worker {
                 return None;
             }
         };
-        let index = LineIndex::new(text);
         Some(
             edits
                 .into_iter()
                 .map(|edit| lsp_types::TextEdit {
                     range: lsp_types::Range {
-                        start: self.to_position_with(&index, text, edit.range.start()),
-                        end: self.to_position_with(&index, text, edit.range.end()),
+                        start: self.to_position_with(index, text, edit.range.start()),
+                        end: self.to_position_with(index, text, edit.range.end()),
                     },
                     new_text: edit.new_text,
                 })
@@ -2193,7 +2197,9 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let text = worker.text(file);
-            Ok(worker.format_edits(&text, TextRange::up_to(TextSize::of(text.as_str()))))
+            let index = LineIndex::new(&text);
+            let whole_file = TextRange::up_to(TextSize::of(text.as_str()));
+            Ok(worker.format_edits(&index, &text, whole_file))
         })
     }
 
@@ -2212,7 +2218,7 @@ impl LanguageServer for ServerState {
             let first = worker.to_offset_with(&index, &text, params.range.start);
             let second = worker.to_offset_with(&index, &text, params.range.end);
             let selection = TextRange::new(first.min(second), first.max(second));
-            Ok(worker.format_edits(&text, selection))
+            Ok(worker.format_edits(&index, &text, selection))
         })
     }
 
