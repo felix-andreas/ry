@@ -1,0 +1,137 @@
+#==== edges
+#---- a_file_that_does_not_parse
+x <- ($0
+y<-2
+#++++
+ERROR: Syntax error: unclosed `(`; expected a matching `)` at line 1, column 6
+
+#---- a_file_whose_annotation_does_not_parse
+#: @type Person {list[$0
+p<-list(1,2)
+q<-2
+#++++
+no edits
+
+#---- only_unchanged_lines_between_changed_ones
+a<-1
+b <- 2
+$0c <- 3
+d <- 4$0
+e<-5
+#++++
+no edits
+
+#---- blank_lines_that_collapse
+a<-1
+
+
+
+b$0<-2
+#++++
+edit 5:1-6:1
+----
+a<-1
+
+
+
+«b <- 2»
+
+#---- blank_lines_above_the_selection
+a<-1
+
+
+
+$0b<-2
+#++++
+edit 5:1-6:1
+----
+a<-1
+
+
+
+«b <- 2»
+
+#---- a_trailing_semicolon
+before<-1
+x<-1;$0
+after<-1
+#++++
+edit 2:1-3:1
+----
+before<-1
+«x <- 1»
+after<-1
+
+#---- non_ascii_text_on_the_selected_line
+label<-"mesure en °C"
+unit$0<-"µm"
+#++++
+edit 2:1-3:1
+----
+label<-"mesure en °C"
+«unit <- "µm"»
+
+#---- text_outside_the_basic_plane
+emoji<-"🙂"
+other$0<-"🎉"
+#++++
+edit 2:1-3:1
+----
+emoji<-"🙂"
+«other <- "🎉"»
+
+#---- a_string_spanning_lines
+before<-1
+text<-"first
+second"
+after$0<-1
+#++++
+edit 4:1-5:1
+----
+before<-1
+text<-"first
+second"
+«after <- 1»
+
+#---- the_selection_inside_a_string_spanning_lines
+before<-1
+text  <-  "first
+sec$0ond"
+after<-1
+#++++
+no edits
+
+#---- tab_indentation
+f<-function(){
+	a<-1
+	b$0<-2
+}
+#++++
+edit 3:1-4:1
+----
+f<-function(){
+	a<-1
+«  b <- 2»
+}
+
+#---- a_deeply_nested_chain
+before<-1
+x<-a$b$c$d[[1]]$e (  2 )$0
+after<-1
+#++++
+edit 2:1-3:1
+----
+before<-1
+«x <- a$b$c$d[[1]]$e(2)»
+after<-1
+
+#---- one_statement_per_line_all_changed
+a<-1
+b$0<-2
+c<-3
+#++++
+edit 2:1-3:1
+----
+a<-1
+«b <- 2»
+c<-3

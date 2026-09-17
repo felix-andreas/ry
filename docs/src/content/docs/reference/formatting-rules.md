@@ -21,6 +21,25 @@ ry fmt --diff    # Show a diff of formatting changes without applying them
 (for example a file that cannot be parsed) exit 2 — see the full
 [exit-code table](/reference/cli#exit-codes).
 
+### Formatting a selection
+
+In an editor, "Format Document" lays out the whole file and "Format Selection" lays out only what
+you selected. The selected lines come out exactly as formatting the whole file would have left
+them, and every other line of the file stays byte for byte as it was — so you can tidy the function
+you are working on without a diff that touches the rest of the file.
+
+Three things follow from that:
+
+* **The selection widens to whole lines.** Selecting half of a line selects the line; putting the
+  cursor on a line with nothing selected selects that line.
+* **A statement is laid out as a unit.** The formatter decides how to break a call from that call's
+  own line structure, so a line just outside your selection can change when it belongs to a
+  statement your selection reaches into. Statements nest: selecting one line inside a long function
+  rewrites that line's statement, not the function.
+* **What formatting leaves alone, this leaves alone too.** A `# fmt: off` region or a
+  `# fmt: skip` expression inside the selection is untouched, and a file that does not parse
+  produces no edits at all — the same refusal `ry fmt` makes.
+
 ## Philosophy
 
 The formatter preserves existing line breaks and does not split expressions that are written on one line. Four principles follow from that:

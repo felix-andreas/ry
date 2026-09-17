@@ -65,6 +65,14 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
   each case's source formats to the expected block, and the runner re-formats the output to
   assert idempotence on every case; a case whose expectation is a refusal renders the
   structured `FormatError`
+- `crates/format/tests/format-range` — the range-formatting golden suite: the case source
+  carries the selection as `$0` markers (two for a selection, one for a bare caret, none to
+  select the whole file) and the expectation lists each edit's source range as `line:column`
+  then shows the document the edits produce, with every replacement between `«` and `»`. The
+  runner gives a case source the trailing newline the fixture format strips — a file without
+  one makes the formatter rewrite its last line, and every expectation here would carry that
+  instead of the behavior it is about, so files that genuinely lack one belong in the property
+  tests, which can spell the text out exactly
 - `crates/ide/tests/ide` — IDE feature fixtures: the case source carries one `$0` cursor
   marker (stripped before analysis) and the expectation renders each feature's result at
   that position (hover line with its absolute range, definition target range, reference
@@ -261,6 +269,23 @@ for judging corpus quality needs the llvm-tools component:
 Deep runs are manual/scheduled work; the bounded in-tree batteries remain the default-suite
 gate.
 
+### The range-formatting property battery
+
+`format::check_range_format_invariants` sweeps a bounded, deterministic spread of selections
+over one input — the whole file, bare carets, whole lines, several lines, part-line spans, and
+a range past the end — and is run from `crates/format/tests/test_format_range.rs` over every
+fixture case source in the repository and the mined legacy corpus, and from every generator arm
+of `test_fuzz.rs`. Per selection it asserts: determinism, and refusal exactly when whole-file
+formatting refuses; edits ordered, disjoint, whole lines and in bounds; that applying them keeps
+every token; that the applied document still formats to what the original formats to; that every
+edit is one whole-file formatting would have made; that selecting the whole file reproduces
+whole-file formatting byte for byte; and that the region the edits produced is already laid out,
+so a second pass over it is a no-op.
+
+The last two are the load-bearing ones and are worth keeping that way: they are what caught a
+span cut where two lines merely looked alike (an annotation block lost its closing `#: }`) and a
+span that flipped a call's hug decision by splicing one formatted argument into it.
+
 ### The lint fixture suites
 
 `crates/semantics/tests/lints/` runs `lints::lint_file` under the default configuration and
@@ -289,6 +314,13 @@ diagnostic refresh on save and config change, the config matrix (live reload, an
 configs, failure keeps the previous config, the config-file diagnostic), every feature
 endpoint including UTF-16/UTF-8 range correctness with BMP and non-BMP content and
 out-of-bounds safety, semantic tokens for `#:` bodies, and `.Rtypes`/NAMESPACE buffer serving.
+Formatting is covered on both requests, because they are one code path over different ranges:
+whole-document formatting replacing only the lines that change and making no edits at all on an
+already formatted file, and range formatting over a statement, a bare caret, a whole-line
+selection that stops at the next line's first column, a range sent end first, a statement nested
+inside a function, a `# fmt: off` region inside the selection, lines already laid out, a file
+that does not parse, a range past the end of the document, UTF-16 columns over non-BMP text, and
+a CRLF document.
 
 The cancelled-pull test is deterministic through a fault-injection seam: with the
 `RY_TEST_DELAY_PULL_MS` environment variable set, the server announces each diagnostics pull
@@ -347,6 +379,13 @@ typo, and a run of zero cases would otherwise report a pass.
 
 The default crate test command while iterating is `cargo test -p semantics` (analysis behavior);
 `just gate` runs the whole battery plus clippy and a formatting check before a change lands.
+
+Every command that is meant to cover the project spells out `--workspace --exclude zed_ry`. The
+manifest sets `default-members = ["crates/ry"]` so that a bare `cargo run` starts the CLI, and the
+same setting makes a bare `cargo test`, `cargo clippy` or `cargo build` select that one package —
+which leaves every suite on this page except the CLI and LSP ones silently out of scope. `zed_ry` is
+the exclusion because it targets wasm. Run `just gate` rather than a bare `cargo test` before
+landing a change; the CI workflow is missing the selection today, which is tracked as open work.
 
 ## Blessing expectations
 
