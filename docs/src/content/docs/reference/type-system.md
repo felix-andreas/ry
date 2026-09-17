@@ -161,14 +161,9 @@ Annotations produce most array-like and map-like list types. Coercing a structur
 
 #### List coercions
 
-- a tuple-like list coerces to an array-like `list[T]` when each tuple element is compatible with `T`
-- a record-like list coerces to an array-like `list[T]` when each field value is compatible with `T`
-- a map-like list coerces to an array-like `list[T]` when each field value is compatible with `T`
-- a record-like list coerces to a map-like `list[named: T]` when each field value is compatible with `T`
-- a map-like list coerces to a map-like `list[named: T]` when each field value is compatible with `T`
-- reverse coercions are not allowed:
-  - an array-like `list[T]` value does not coerce back into a tuple-like, record-like, or map-like value
-  - a map-like `list[named: T]` value does not coerce back into a fixed-shape record-like value
+- any list coerces to an array-like `list[T]` when every element is compatible with `T`
+- a record-like or map-like list coerces to a map-like `list[named: T]` when every value is compatible with `T`
+- reverse coercions are not allowed. An array-like `list[T]` does not coerce back into a tuple-like, record-like, or map-like value, and a map-like `list[named: T]` does not coerce back into a record-like one
 
 #### Tuple-like lists
 
@@ -826,7 +821,7 @@ Examples:
 - a vector is a type error, because a condition whose length is not one is an error in R too
 - a condition whose type is still undetermined binds to `logical`. That is the useful default for an unannotated predicate, so `function(flag) if (flag) 1L` infers `flag: logical`
 
-`!` coerces its operand the same way. `!0` is `TRUE` and `!5` is `FALSE`. See [Unary `!`](#unary-) for the result shape.
+`!` coerces its operand the same way. `!0` is `TRUE` and `!5` is `FALSE`. See [Unary `!`](#unary) for the result shape.
 
 ### Indexing
 
@@ -923,18 +918,19 @@ They are also defined for a class that declares an operator method. See [operato
 
 A map-like vector may participate through its compatibility with an array-like vector, and arithmetic does not preserve map-likeness.
 
-An operand whose shape is still unknown, such as an unannotated parameter, counts as scalar-like, here and in the comparison rules. A scalar coerces into every vector position, so the claim can never produce a false error later. The cost is that vector-in and vector-out shape is not tracked through such a function. A generic vector written `T[]` is the exception, and its operator results are genuinely vector-shaped.
+An operand whose shape is still unknown, such as an unannotated parameter, counts as scalar-like, here and in the comparison rules, by the same scalar claim that [`[` on vectors](#-on-vectors) makes. The cost is that vector-in and vector-out shape is not tracked through such a function. A generic vector written `T[]` is the exception, and its operator results are genuinely vector-shaped.
 
-#### Binary `+`, `-`, and `*`
+#### Result shapes
 
-Binary `+`, `-`, and `*` use these rules:
+Every arithmetic operator uses the same shape rule: the result is scalar-like when both operands are scalar-like, and array-like otherwise. Arithmetic does not preserve map-likeness, so a map-like operand gives an array-like result. Unary `-` keeps a scalar-like or array-like operand's shape.
 
-- atomic result:
-  - `integer op integer` returns `integer`
-  - when either operand is `double`, the result is `double`
-- shape result:
-  - when both operands are scalar-like, the result is scalar-like
-  - otherwise, the result is array-like
+Only the atomic result differs per operator.
+
+| operator | atomic result |
+| --- | --- |
+| `+`, `-`, `*`, `%%`, `%/%` | `integer` when both operands are `integer`, otherwise `double` |
+| `/`, `**`, `^` | always `double`. `**` is R's parser alias for `^` |
+| unary `-` | the operand's own atomic type |
 
 Examples:
 
@@ -942,56 +938,11 @@ Examples:
 - `integer - double` returns `double`
 - `double * integer[]` returns `double[]`
 - `integer[named] + integer` returns `integer[]`
-
-#### Binary `/`, `**`, and `^`
-
-Binary `/`, `**`, and `^` use these rules:
-
-- `^` and `**` are the same operator, because `**` is R's parser alias for `^`
-- atomic result:
-  - always `double`
-- shape result:
-  - when both operands are scalar-like, the result is scalar-like
-  - otherwise, the result is array-like
-
-Examples:
-
 - `integer / integer` returns `double`
-- `double ** integer` returns `double`
 - `2L ^ 3L` returns `double`
-- `integer[] / integer` returns `double[]`
-
-#### Binary `%%` and `%/%`
-
-Modulo `%%` and integer division `%/%` follow the same rules as binary `+`, `-`, and `*`:
-
-- atomic result:
-  - `integer op integer` returns `integer`
-  - when either operand is `double`, the result is `double`
-- shape result:
-  - when both operands are scalar-like, the result is scalar-like
-  - otherwise, the result is array-like
-
-Every other `%op%` special operator is an unsupported construct.
-
-#### Unary `-`
-
-Unary `-` accepts `integer` and `double`.
-
-Its result rules are:
-
-- atomic result:
-  - `-integer` returns `integer`
-  - `-double` returns `double`
-- shape result:
-  - a scalar-like operand and an array-like operand keep their shape
-  - a map-like vector may participate through its compatibility with an array-like vector, and the result is array-like
-
-Examples:
-
-- `-1L` returns `integer`
-- `-c(1L, 2L)` returns `integer[]`
 - `-c(foo = 1L, bar = 2L)` returns `integer[]`
+
+Every `%op%` operator other than `%%` and `%/%` is covered by [operator methods on a class](#operator-methods-on-a-class).
 
 ### Operator methods on a class
 
@@ -1560,7 +1511,7 @@ These are the recognized masks.
 
 - A single `[` bracket whose subject types as the `data.table` nominal masks all of its index arguments, whatever they look like. With the subject's class known, `DT[speed > 20]` and `DT[, x]` are column references even though they carry no syntactic marker.
 - A `[` call carrying an unambiguous data.table signature masks all of that bracket's index arguments, even when the subject's type is unknown. Such a signature is a `by =` or `keyby =` argument, a `:=` column assignment, a `.()` list call, or one of the `.SD`, `.N`, `.I`, `.BY`, `.GRP`, and `.EACHI` specials.
-- The base masking family masks every argument other than the data. That family is `with()`, `within()`, `subset()`, and `transform()`. A locally defined function of the same name masks nothing. Which argument is the data follows R's own matcher. A named argument claims its formal first, which is `data` for the `with` pair and `x` for `subset` and `transform`. The remaining positional arguments fill what is left, so `with(data = frame, speed > 20)` and `with(speed > 20, data = frame)` both mask the condition. The `base::` spelling of any of the four masks exactly as the bare one does. Another package's same-named export is its own function, and it masks nothing.
+- The base masking family masks every argument other than the data. That family is `with()`, `within()`, `subset()`, and `transform()`. Which argument is the data follows R's own matcher. A named argument claims its formal first, which is `data` for the `with` pair and `x` for `subset` and `transform`. The remaining positional arguments fill what is left, so `with(data = frame, speed > 20)` and `with(speed > 20, data = frame)` both mask the condition. The `base::` spelling of any of the four masks exactly as the bare one does. Another package's same-named export is its own function, and it masks nothing.
 
 A name inside a mask that does resolve, such as a local variable used in `j` or a function like `sum`, keeps its ordinary resolution and typing. data.table itself falls back to the lexical scope for names that are not columns. Base-R indexing such as `m[i, j]` carries no data.table marker, so it keeps full lexical checking. A nested function body written inside a masked argument is masked too, because a closure created in `j` is created inside the data's frame.
 
@@ -1604,7 +1555,7 @@ filter : @masked fn(.data: Any, ...: Any) -> Any
 mutate : @masked fn(.data: Any, ...: Any) -> Any
 ```
 
-A call to a `@masked` name evaluates the arguments that the `...` rest parameter absorbs inside the data's frame, and a bare name there is a column reference. This applies to the bare name and to `pkg::name` alike. An argument matching a formal declared before the `...`, such as `.data` above, resolves normally, by position or by name. A declaration whose only parameter is `...`, such as `join_by : @masked fn(...: Any) -> Any`, masks every argument. A locally defined function of the same name masks nothing. `@masked` on a non-variadic declaration is a stub error.
+A call to a `@masked` name evaluates the arguments that the `...` rest parameter absorbs inside the data's frame, and a bare name there is a column reference. This applies to the bare name and to `pkg::name` alike. An argument matching a formal declared before the `...`, such as `.data` above, resolves normally, by position or by name. A declaration whose only parameter is `...`, such as `join_by : @masked fn(...: Any) -> Any`, masks every argument. In every case here, a locally defined function of the same name masks nothing. `@masked` on a non-variadic declaration is a stub error.
 
 ## Object systems (S3, S4, R6)
 
