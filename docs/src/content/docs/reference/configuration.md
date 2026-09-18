@@ -9,8 +9,6 @@ Everything you can change about ry's behavior lives in one file, `ry.toml`. Edit
 
 `ry.toml` is the configuration file. There is no home-directory config, no environment variable naming one, and no merging. The nearest file replaces the built-in defaults wholesale.
 
-`roughly.toml` is also read, under the project's former name. Both names are looked for in one directory before the search moves to its parent, and `ry.toml` wins when a directory holds both.
-
 | Where ry runs | Search starts at |
 | --- | --- |
 | `ry check R/utils.R` | the file's own directory |
