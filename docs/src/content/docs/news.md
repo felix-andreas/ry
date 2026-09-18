@@ -11,8 +11,7 @@ Version 0.3.0 replaces the previous implementation end to end: a new parser, a n
 and a static type checker — the first for R.
 
 - **Renamed from Roughly to ry.** The binary is `ry`, the config file is `ry.toml`, and suppression
-  comments are `# ry: allow(...)`. Nothing needs changing to upgrade: the old names are still
-  honoured. The crate is published as `ry-lang`.
+  comments are `# ry: allow(...)`. The crate is published as `ry-lang`.
 - **A static type checker for R** — novel and experimental. Hindley–Milner inference with numeric
   constraints and generics, driven by [`#:` annotation comments](/type-checking/tutorial). Type
   errors are opt-in via `[check] typing`; hover, completion, signature help, and inlay hints use the
