@@ -527,7 +527,7 @@ fn check_reports_no_matching_overload() {
     assert_eq!(exit_code(&output), 1, "stderr: {rendered}");
     assert!(
         rendered.contains(
-            "no overload of `pick` matches these arguments — I tried all 2 declared signatures"
+            "no overload of `pick` matches these arguments. I tried all 2 declared signatures"
         ),
         "expected the no-overload finding, got: {rendered}"
     );
