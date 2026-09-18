@@ -172,5 +172,5 @@ Enabling `strict` also raises every `unresolved` finding in the file from warnin
 
 | Code | Severity | On by default | Triggered by |
 | --- | --- | --- | --- |
-| `stub` | error | yes | A declaration in a project's `stubs/*.Rtypes` file that would otherwise be dropped in silence: a line that is not a `name : TYPE` declaration, an invalid name, a missing or invalid type, an unknown type name, or `@masked` on a non-variadic function type. The range covers the whole line |
+| `stub` | error | yes | A declaration in a project's `stubs/*.Rtypes` file that would otherwise be dropped in silence: a line that is not a `name : TYPE` declaration, an invalid declaration name, an invalid name after `@type`, a missing or invalid type, an unknown type name, or `@masked` on a non-variadic function type. The range covers the whole line |
 | `config` | error | yes | A malformed `ry.toml` — a TOML parse failure, or the wrong type of value on a known key. `check` prints it on stderr under this code and exits 2. The language server publishes it as a finding on the config file instead. |

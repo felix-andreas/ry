@@ -298,7 +298,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             };
             if let Some(rest) = content.strip_prefix("@type") {
                 let name = rest.trim();
-                if !name.is_empty() {
+                if is_nominal_name(name) {
                     library.nominals.insert(name.to_owned());
                     namespace_exports.insert(name.to_owned());
                     if let Some(range) = name_range(name) {
@@ -432,7 +432,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         let content = strip_comment(raw_line).trim();
         if let Some(rest) = content.strip_prefix("@type") {
             let name = rest.trim();
-            if !name.is_empty() {
+            if is_nominal_name(name) {
                 known_nominals.insert(name.to_owned());
             }
         }
@@ -445,10 +445,16 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             continue;
         }
         if let Some(rest) = content.strip_prefix("@type") {
-            if rest.trim().is_empty() {
+            let name = rest.trim();
+            if name.is_empty() {
                 problems.push(StubProblem {
                     line,
                     message: "expected a type name after `@type`.".to_owned(),
+                });
+            } else if !is_nominal_name(name) {
+                problems.push(StubProblem {
+                    line,
+                    message: format!("`{name}` is not a valid type name."),
                 });
             }
             continue;
@@ -621,16 +627,7 @@ fn top_level_colon(content: &str) -> Option<usize> {
 /// method (`+.Date`) — the spelling R itself uses to give a class arithmetic
 /// or comparison, and the only way a stub can say a nominal supports `+`.
 fn is_stub_name(name: &str) -> bool {
-    let identifier = |name: &str| {
-        let mut characters = name.chars();
-        characters
-            .next()
-            .is_some_and(|first| !first.is_ascii_digit())
-            && name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
-    };
-    if identifier(name) {
+    if is_nominal_name(name) {
         return true;
     }
     if let Some(body) = name
@@ -642,7 +639,18 @@ fn is_stub_name(name: &str) -> bool {
     OPERATOR_METHOD_PREFIXES
         .iter()
         .filter_map(|operator| name.strip_prefix(operator))
-        .any(|suffix| suffix.strip_prefix('.').is_some_and(identifier))
+        .any(|suffix| suffix.strip_prefix('.').is_some_and(is_nominal_name))
+}
+
+/// A nominal's name is a plain R identifier. The operator spellings a method
+/// declaration may carry are names for values, never for types.
+fn is_nominal_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|first| !first.is_ascii_digit())
+        && name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
 }
 
 /// The operator spellings an S3 method name may carry, longest first so
@@ -679,6 +687,24 @@ mod tests {
             "sum keeps its ordered overload candidates"
         );
         assert_eq!(library.schemes["length"].len(), 1);
+    }
+
+    #[test]
+    fn a_type_name_must_be_an_identifier() {
+        let db = RootDatabase::default();
+        install_shipped_stubs(&db);
+        let problems = stub_source_problems(
+            &db,
+            "@type structural { a: integer }\nmk : fn() -> structural\n",
+        );
+        assert_eq!(problems[0].line, 0);
+        assert_eq!(
+            problems[0].message,
+            "`structural { a: integer }` is not a valid type name."
+        );
+        // The nominal is refused, so the use below reports too, and an author
+        // who reads only the second error is not sent to a correct line.
+        assert_eq!(problems[1].line, 1);
     }
 
     /// Whether a name is an S3 operator method (`+.Date`) or an operator group
