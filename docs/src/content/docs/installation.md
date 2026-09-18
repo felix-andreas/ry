@@ -28,7 +28,7 @@ Every extension setting is listed under
 
 Not in Zed's extension registry yet. Until it is, install it from the repository as a dev extension:
 
-1. Install a [Rust toolchain](https://rustup.rs) — Zed compiles dev extensions to WebAssembly itself.
+1. Install a [Rust toolchain](https://rustup.rs). Zed compiles dev extensions to WebAssembly itself.
 2. Clone the repository.
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 
@@ -83,4 +83,4 @@ in [CI](/guides/continuous-integration).
 ry --version
 ```
 
-Then run it on a project — [getting started](/getting-started) shows what a first run looks like.
+Then run it on a project. [Getting started](/getting-started) shows what a first run looks like.

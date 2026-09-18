@@ -3,16 +3,16 @@ title: Getting started
 description: What ry is, what it finds on your first run, and where to install it
 ---
 
-ry is a toolchain for R, written in Rust. It is four tools in one binary:
+ry is a toolchain for R, written in Rust. You install one thing and get five jobs done:
 
-1. **A language server** — hover, completion, go-to-definition, references, rename, and inlay hints,
-   in any editor that supports LSP.
-2. **A formatter** — a single consistent style; no configuration beyond indent width and line
-   endings.
-3. **An R console** — a REPL with project-aware completion.
-4. **A type checker** — optional; its inferred types also power the editor features.
+1. **A language server.** Hover, completion, go-to-definition, references, rename, and inlay hints,
+   in any editor that speaks LSP.
+2. **A linter.** Typos, unresolved names, and dead assignments, with no configuration.
+3. **A formatter.** One consistent style. The only settings are indent width and line endings.
+4. **An R console.** A REPL with project-aware completion.
+5. **A type checker.** Optional, and its inferred types also power the editor features.
 
-It requires no changes to your code, and the same binary runs in your editor and in CI.
+Your code needs no changes, and you run the same thing in your editor and in CI.
 
 ## Install
 
@@ -58,7 +58,7 @@ execution reaches that line.
 
 ## Now turn on the type checker
 
-Fix the typo and make a different mistake — one no linter can catch, because catching it requires
+Fix the typo and make a different mistake, one no linter can catch, because catching it requires
 knowing what a value *is*:
 
 ```toml
@@ -87,6 +87,6 @@ not you turn the errors on.
 
 ## Next
 
-- [Features](/features) — everything you get before configuring anything
-- [Tutorial](/type-checking/tutorial) — the type checker on real code
-- [Why ry](/why-ry) — why this exists, and how far along it is
+- [Features](/features) lists everything you get before configuring anything
+- [Tutorial](/type-checking/tutorial) puts the type checker on real code
+- [Why ry](/why-ry) explains why this exists, and how far along it is

@@ -1,13 +1,13 @@
 ---
 title: Why ry
-description: Why R needs one fast toolchain with a type checker at its core — and how far along this one is
+description: Why R needs one fast toolchain with a type checker at its core, and how far along this one is
 ---
 
 R has good tools, but they are separate tools. Linting, formatting, style, analysis and running the
 code are five programs that each parse your source and each build their own partial picture of it.
 None of them shares what it learned with the others, so each one starts over.
 
-## Static, not a live session
+## Answers without running your code
 
 R's language servers know what your values are because they ask a live R session. That is what makes
 completion on a fitted model work in RStudio.
@@ -31,9 +31,8 @@ Latency matters most on large R projects, where a check slow enough to interrupt
 being run at all.
 
 ry is written in Rust, and analysis is incremental: an edit re-checks only what that edit could
-have affected, not the project. It is tested against roughly 970,000 lines of real R — 69 CRAN
-packages plus R's own base library — and the check that an edit does not trigger more work than it
-should runs on every change.
+have affected, not the project. It is tested against roughly 970,000 lines of real R, which is 69 CRAN
+packages plus R's own base library.
 
 `check` and `fmt` never load R and never execute your code, which is what makes them safe in CI and
 fast in an editor. The one exception is the [R console](/guides/r-console), which runs R by
@@ -59,20 +58,19 @@ already an error. This is why most R needs no annotations at all. The ones you d
 `#:` comments, so the file stays ordinary R that every other tool reads, and type checking is
 opt-in, so you can adopt it one file at a time.
 
-The inference is Hindley–Milner, which is sound and close to linear on real code. That choice
-excludes two features R programmers might expect — class hierarchies and overloading in your own
-functions — because a type system that admits them can spend an unbounded amount of time on a
-single expression, which an editor cannot afford. R is dynamic enough that some constructs cannot be
-described statically at all; those become `Unknown`, which is compatible with everything, so a gap
-means a check was skipped rather than a wrong answer produced.
+Two things R programmers expect are missing. You cannot define a class hierarchy, and you cannot
+give one of your own functions several signatures. Both would make a single expression slow enough
+to check that an editor could not keep up.
+
+Some R constructs cannot be described statically at all. Those become `Unknown`, which is compatible
+with everything, so a gap means a check was skipped rather than a wrong answer produced.
 
 ## Project status
 
 ry is beta software.
 
-**The interfaces are stable.** The diagnostics, the `ry.toml` keys, the diagnostic codes, and the
-JSON output are covered by tests that fail when they change, so CI built on them will not break
-silently.
+**The interfaces are stable.** The diagnostic wording, the diagnostic codes, the `ry.toml` keys,
+and the JSON output will not change under you, so CI built on them keeps working.
 
 **The type system is still gaining capability.** A new release may report findings an older one did
 not, so pin a version if you gate a build on a clean run.
@@ -82,11 +80,11 @@ documents. The editor integration does not handle literate documents yet. Do not
 server at one, because it reads the whole file as R and reports the prose. The formatter skips them,
 since most of an `.Rmd` is prose the formatter should not rewrite.
 
-**What it does not cover yet.** The largest gaps are data frames, S4, and R6 — see
+**What it does not cover yet.** The largest gaps are data frames, S4, and R6. See
 [limitations](/type-checking/limitations) for the full account before deciding how far to trust a
 clean run.
 
 ## Next
 
-- [Features](/features) — what you get, before you turn anything on
-- [Tutorial](/type-checking/tutorial) — the type checker on real code
+- [Features](/features) lists what you get before you turn anything on
+- [Tutorial](/type-checking/tutorial) puts the type checker on real code
