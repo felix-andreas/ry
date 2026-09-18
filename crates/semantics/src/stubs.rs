@@ -505,7 +505,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             problems.push(StubProblem {
                 line,
                 message: format!(
-                    "`@masked` on `{name}` requires a variadic function type — the mask covers \
+                    "`@masked` on `{name}` requires a variadic function type. The mask covers \
                      the arguments the `...` rest parameter absorbs."
                 ),
             });

@@ -1557,7 +1557,7 @@ impl Worker {
         let _ = client.show_message(lsp_types::ShowMessageParams {
             typ: lsp_types::MessageType::WARNING,
             message: format!(
-                "{file} sets {keys}, which this version of ry does not know — \
+                "{file} sets {keys}, which this version of ry does not know, so it is \
                  ignoring {}. Check the spelling, or update ry.",
                 if self.config.unknown_keys.len() == 1 {
                     "it"

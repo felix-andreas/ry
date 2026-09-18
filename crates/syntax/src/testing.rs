@@ -220,7 +220,7 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     if let Some(filter) = &filter {
         assert!(
             matched > 0 || sibling_suite_holds(suite_dir, filter),
-            "FIXTURE_FILTER=`{filter}` names no fixture case in any suite — check the id.\n\
+            "FIXTURE_FILTER=`{filter}` names no fixture case in any suite. Check the id.\n\
              A filter that matches nothing would otherwise run zero cases and report a pass."
         );
     }

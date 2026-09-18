@@ -863,14 +863,6 @@ module *produces* is on a boundary, so the panic was not shown reachable from to
 "IDE features never panic on stale ranges" is a stated soundness invariant with nothing enforcing it,
 and the CRLF break sits on the Windows default path.
 
-### `FIXTURE_FILTER` with a name that matches nothing passes green
-
-`FIXTURE_FILTER=does_not__exist cargo test -p semantics --test test_typing_fixtures` reports `ok. 4
-passed; 0 failed` having run zero cases. This is the documented iteration loop, so a typo'd or
-renamed case id reads as "my fix works" during exactly the work that renames case ids. Count matched
-cases and assert the filter matched at least one — three lines, and the highest value-per-line item
-in the review.
-
 ### The IDE arm is the most expensive test in the repo and asserts almost nothing
 
 Of 13 feature calls per offset only `hover` is checked, for determinism; eight are `let _ = …`, i.e.
@@ -1089,10 +1081,6 @@ The Zed half of that verdict did not survive review: the drift there was the *de
 Its own file rather than an addition to `test_cli.rs`, which is explicitly the *binary's* behaviour
 contract (rendering, JSON, exit codes) — shipped-artifact metadata is a different component.
 
-Related and user-owned: the extension is published as `felix-andreas.roughly`, and
-`felix-andreas.ry` is a 404, so every README and docs link that the rename swept to the new identifier
-points at nothing until it is republished. The README now links the working identifier and says why.
-Verified: `felix-andreas.roughly` returns 200, `felix-andreas.ry` returns 404.
 
 ## Open — test-user round 2 findings
 

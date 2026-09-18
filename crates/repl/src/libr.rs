@@ -281,8 +281,8 @@ fn symbol<T: Copy>(
         .map(|symbol| *symbol)
         .map_err(|_| {
             ReplError(format!(
-                "the R shared library at {} does not export `{name}` — \
-                 is this a complete R >= 4.2 installation?",
+                "the R shared library at {} does not export `{name}`. \
+                 Is this a complete R >= 4.2 installation?",
                 library_path.display(),
             ))
         })
@@ -485,7 +485,7 @@ fn discover_r_home() -> Result<PathBuf, ReplError> {
     let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if home.is_empty() {
         return Err(ReplError(
-            "`R RHOME` printed nothing — set R_HOME to an R installation".to_owned(),
+            "`R RHOME` printed nothing. Set R_HOME to an R installation".to_owned(),
         ));
     }
     let path = PathBuf::from(&home);
@@ -550,8 +550,8 @@ fn shared_library_path(r_home: &Path) -> Result<PathBuf, ReplError> {
         }
     }
     Err(ReplError(format!(
-        "no R shared library under {} — the REPL needs an R compiled with \
-         `--enable-R-shlib` (all CRAN binary distributions are)",
+        "no R shared library under {}. The REPL needs an R compiled with \
+         `--enable-R-shlib`, which every CRAN binary distribution is",
         library_directory.display()
     )))
 }
@@ -567,7 +567,7 @@ fn shared_library_path(r_home: &Path) -> Result<PathBuf, ReplError> {
         }
     }
     Err(ReplError(format!(
-        "no R.dll under {}\\bin — is this a complete R installation?",
+        "no R.dll under {}\\bin. Is this a complete R installation?",
         r_home.display()
     )))
 }

@@ -249,7 +249,7 @@ the next line. Running them together reports:
 ```text
 annotation
 
-  x `@type` and `@alias` declarations need their own `#:` block — separate them from other annotations with a blank line.
+  x `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.
    --[R/a.R:1:1]
  1 | --> #: @type Row {list{id: integer}}
  2 | `-> #: fn(x: integer) -> integer

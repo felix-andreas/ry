@@ -18,7 +18,7 @@ What ry replaces is the *line editor* in front of R. That is where the two diffe
 ```
 $ ry repl
 ... R's own startup banner ...
-ry R console — R at /usr/lib/R (q() or Ctrl-D quits)
+ry R console, R at /usr/lib/R. Type q() or Ctrl-D to quit.
 > account <- list(holder = "ada", balance = 120.5)
 > account$
 balance  double

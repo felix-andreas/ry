@@ -126,7 +126,7 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
         if continues {
             return Err(FormatError {
                 message:
-                    "a `#:` annotation cannot interrupt an expression — move it to its own line"
+                    "a `#:` annotation cannot interrupt an expression. Move it to its own line"
                         .to_owned(),
                 line,
                 column: offset - line_starts[line],

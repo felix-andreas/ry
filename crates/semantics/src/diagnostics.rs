@@ -164,7 +164,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
                 // rather than only the rule: every documented function in a
                 // package has roxygen above it, and the order is the one thing
                 // a reader cannot guess.
-                "A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block."
+                "A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block."
             }
         };
         diagnostics.push(Diagnostic {
@@ -297,7 +297,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     })
             });
             let hint = if dangling_operator {
-                " — the operator at the end of this line pulled the next line in as its right-hand side"
+                ". The operator at the end of this line pulled the next line in as its right-hand side"
             } else {
                 ""
             };
@@ -608,7 +608,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 severity: Severity::Error,
                 code: "type-mismatch",
                 message: format!(
-                    "the element of a `[]` vector type must be an atomic type, found `{rendered}` — for a list of these, write `list[{rendered}]`"
+                    "the element of a `[]` vector type must be an atomic type, found `{rendered}`. For a list of these, write `list[{rendered}]`"
                 ),
                 related: Vec::new(),
             });
@@ -632,9 +632,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                     range: *range,
                     severity: Severity::Error,
                     code: "annotation",
-                    message: format!(
-                        "`{name}` is not a generic type — it takes no type arguments."
-                    ),
+                    message: format!("`{name}` is not a generic type. It takes no type arguments."),
                     related: Vec::new(),
                 });
             } else if arity != *count {
@@ -1015,7 +1013,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
                 severity: Severity::Error,
                 code: "annotation",
                 message: format!(
-                    "the type name `{name}` is declared more than once — `@type` and `@alias` declarations share one project-global namespace."
+                    "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one project-global namespace."
                 ),
                 related: vec![RelatedLocation {
                     file: neighbour_file,
@@ -1053,7 +1051,7 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
             severity: Severity::Error,
             code: "annotation",
             message: format!(
-                "the type name `{name}` is declared more than once — `@type` and `@alias` declarations share one namespace, which for a script is this file."
+                "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file."
             ),
             related: vec![RelatedLocation {
                 file,
@@ -1626,7 +1624,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 severity: Severity::Error,
                 code: "strict",
                 message: format!(
-                    "strict mode: nothing this project can see defines `{}` — it is silent only because an attached package's exports are unknown. Declare the package with a `.Rtypes` stub to check it",
+                    "strict mode: nothing this project can see defines `{}`. It is silent only because an attached package's exports are unknown. Declare the package with a `.Rtypes` stub to check it",
                     display_name(name)
                 ),
                 related: Vec::new(),
@@ -1674,10 +1672,10 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         "strict mode: could not determine the type of `{name}`; it has no known type"
                     ),
                     StrictOriginKind::LoopWidened(name) => format!(
-                        "strict mode: could not determine the type of `{name}`; its type does not stabilize across loop iterations — add a type annotation"
+                        "strict mode: could not determine the type of `{name}`. Its type does not stabilize across loop iterations. Add a type annotation"
                     ),
                     StrictOriginKind::RecursiveUnknown(name) => format!(
-                        "strict mode: could not determine the full type of `{name}`; it is defined recursively — add a type annotation"
+                        "strict mode: could not determine the full type of `{name}`. It is defined recursively. Add a type annotation"
                     ),
                 }
             };
@@ -1730,14 +1728,14 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         ),
         TypeErrorKind::NotAFunction { found } => {
             format!(
-                "this has type `{}`, which is not a function — it cannot be called",
+                "this has type `{}`, which is not a function, so it cannot be called",
                 renderer.render(db, *found)
             )
         }
         TypeErrorKind::ArityMismatch { expected, found } => {
             if found < expected {
                 format!(
-                    "this call supplies {found} {}, but the function requires {expected} — a required argument is missing",
+                    "this call supplies {found} {}, but the function requires {expected}, so a required argument is missing",
                     plural(*found, "argument", "arguments"),
                 )
             } else {
@@ -1755,7 +1753,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         } => {
             if *duplicate {
                 return format!(
-                    "this call gives `{argument}` more than once — R matches each named parameter at most once"
+                    "this call gives `{argument}` more than once. R matches each named parameter at most once"
                 );
             }
             if let Some(nearest) = suggestion {
@@ -1764,34 +1762,34 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 );
             }
             if expected_parameters.is_empty() {
-                format!("this function has no parameter `{argument}` — it has no named parameters")
+                format!("this function has no parameter `{argument}`. It has no named parameters")
             } else {
                 format!(
-                    "this function has no parameter `{argument}` — its named {} {}",
+                    "this function has no parameter `{argument}`. Its named {} {}",
                     plural(expected_parameters.len(), "parameter is", "parameters are"),
                     render_names(expected_parameters),
                 )
             }
         }
         TypeErrorKind::MaybeNullCallee { found } => format!(
-            "this may be `NULL` here, so calling it is not safe — its type is `{}`. Guard it with `is.null()`, or give the `switch` a default branch",
+            "this may be `NULL` here, so calling it is not safe. Its type is `{}`. Guard it with `is.null()`, or give the `switch` a default branch",
             renderer.render(db, *found)
         ),
         TypeErrorKind::KnownTypeUnderIfUnknown { found } => format!(
-            "`@if-unknown` applies only where the type is unknown, and this is already `{}` — drop the annotation, or use `#:` to check the type or `@trust` to override it",
+            "`@if-unknown` applies only where the type is unknown, and this is already `{}`. Drop the annotation, or use `#:` to check the type or `@trust` to override it",
             renderer.render(db, *found)
         ),
         TypeErrorKind::AnnotationRequiredButDefaulted { name } => format!(
-            "this annotation declares `{name}` as required, but the function gives it a default — write `[{name}]` to declare it optional, or drop the default"
+            "this annotation declares `{name}` as required, but the function gives it a default. Write `[{name}]` to declare it optional, or drop the default"
         ),
         TypeErrorKind::AnnotationParameterMismatch { name } => format!(
-            "this annotation names a parameter `{name}`, but the function does not define one — annotation parameter names must match the function's parameter names"
+            "this annotation names a parameter `{name}`, but the function does not define one. An annotation parameter name must match the function's parameter name"
         ),
         TypeErrorKind::NullDefaultNotAdmitted { name, declared } => {
             let mut renderer = TypeRenderer::default();
             let declared = renderer.render(db, *declared);
             format!(
-                "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `{declared} | NULL` and narrow with `is.null()`"
+                "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{declared} | NULL` and narrow with `is.null()`"
             )
         }
         TypeErrorKind::AliasCycle { name } => {
@@ -1820,7 +1818,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             ),
             RecordMismatch::Missing { path, near } => match near {
                 Some(near) => format!(
-                    "expected a field `{}` here, and this list has `{near}` instead — check the spelling",
+                    "expected a field `{}` here, and this list has `{near}` instead. Check the spelling",
                     path.join(".")
                 ),
                 None => format!(
@@ -1884,21 +1882,21 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             format!("expected a list, found `{}`", renderer.render(db, *found))
         }
         TypeErrorKind::NotIterable { found } => format!(
-            "this `for` sequence is `{}`, which cannot be iterated — expected a vector or list.",
+            "this `for` sequence is `{}`, which cannot be iterated. Expected a vector or list.",
             renderer.render(db, *found)
         ),
         TypeErrorKind::UnsupportedSubset { found } => {
             format!("`[` is not supported on `{}`", renderer.render(db, *found))
         }
         TypeErrorKind::BadVectorIndex { index } => format!(
-            "a vector cannot be indexed by `{}` — expected a numeric, logical, or character index",
+            "a vector cannot be indexed by `{}`. Expected a numeric, logical, or character index",
             renderer.render(db, *index)
         ),
         TypeErrorKind::UnsupportedIndexShape { index_count } => match index_count {
             0 => "indexing with an empty index (`x[]`) is not supported yet".to_owned(),
             1 => "indexing with a named index argument is not supported yet".to_owned(),
             count => format!(
-                "indexing with {count} indexes is not supported yet — ry does not model matrix and data.frame subsetting"
+                "indexing with {count} indexes is not supported yet. ry does not model matrix and data.frame subsetting"
             ),
         },
         TypeErrorKind::PositionDoesNotExist {
@@ -1923,7 +1921,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             )
         }
         TypeErrorKind::DollarOnAtomicVector { found } => format!(
-            "R's `$` operator is invalid on atomic vectors; this value is `{}` — extract an element with `[[` instead.",
+            "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
             renderer.render(db, *found)
         ),
         TypeErrorKind::InvalidOperand { expected, found } => {
@@ -1957,7 +1955,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             first,
         } => {
             let mut message = format!(
-                "no overload of `{name}` matches these arguments — I tried all {candidates} declared signatures"
+                "no overload of `{name}` matches these arguments. I tried all {candidates} declared signatures"
             );
             if let Some(first) = first {
                 message.push_str(&format!(

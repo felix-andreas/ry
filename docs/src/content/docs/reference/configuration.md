@@ -18,7 +18,7 @@ Everything you can change about ry's behavior lives in one file, `ry.toml`. Edit
 | Rule | Behavior |
 | --- | --- |
 | Search | walk up from the starting directory; the first `ry.toml` wins. None found: built-in defaults. |
-| Merging | none — one file supplies every key. |
+| Merging | None. One file supplies every key. |
 | Reload | the language server watches `ry.toml` and re-discovers on every change, so deleting it falls back to an ancestor or to the defaults. |
 | Several CLI targets | discovery runs once per argument, so two arguments can resolve two different files. |
 | `..` in a path | cancelled textually before the search, so `project/ry.toml` does **not** govern `project/../outside.R`. |
@@ -39,7 +39,7 @@ $ ry fmt --diff project/../outside.R
 
 ### Project root
 
-The project root is a separate decision: it sets the analysis scope — which files see each other's definitions — not which config is loaded.
+The project root is a separate decision: it sets the analysis scope, meaning which files see each other's definitions, rather than which configuration is loaded.
 
 | Situation | Root |
 | --- | --- |
@@ -57,16 +57,16 @@ The project root is a separate decision: it sets the analysis scope — which fi
 
 ## `[lint]`
 
-Every key except `naming-style` takes a level: `"off"`, `"warn"`, `"error"`, or `"default"` — which means the built-in severity, exactly as if you omitted the key.
+Every key except `naming-style` takes a level: `"off"`, `"warn"`, `"error"`, or `"default"`. The last one means the built-in severity, exactly as if you omitted the key.
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `naming-style` | `"snake_case"`, `"camelCase"` | unset — check off | Reports `naming-style` for variables and function parameters that do not match. `SCREAMING_SNAKE_CASE` always conforms. Always a warning; the value is a style, not a level. |
+| `naming-style` | `"snake_case"`, `"camelCase"` | unset, so the check is off | Reports `naming-style` for variables and function parameters that do not match. `SCREAMING_SNAKE_CASE` always conforms. Always a warning; the value is a style, not a level. |
 | `assignment-operator` | level | `"warn"` | `=` used for assignment. |
 | `boolean-shorthand` | level | `"warn"` | `T` or `F` written instead of `TRUE` or `FALSE`. |
 | `trailing-comma` | level | `"error"` | A comma after the last argument of a call. |
 | `unused-parameter` | level | `"off"` | Function formals never read. S3 methods and your project's own generics are exempt. |
-| `unused-import` | level | `"off"` | An `importFrom(pkg, name)` in `NAMESPACE` whose name appears nowhere in your sources. Whole-namespace `import(pkg)` is never checked, and this finding is raised by `ry check` only — not in the editor. |
+| `unused-import` | level | `"off"` | An `importFrom(pkg, name)` in `NAMESPACE` whose name appears nowhere in your sources. Whole-namespace `import(pkg)` is never checked, and `ry check` raises this finding, while the editor does not. |
 | `shadows-builtin` | level | `"off"` | A top-level binding with the same name as a `base` export. |
 | `shadows-namespace` | level | `"off"` | A top-level binding with the same name as an export of another namespace, such as `stats::filter`. |
 
@@ -74,17 +74,17 @@ For a single exception, prefer a [suppression comment](/reference/diagnostic-cod
 
 ## `[check]`
 
-Type inference always runs — hover, inlay hints, and signature help work regardless of these keys. `[check]` only decides which findings are reported.
+Type inference always runs, so hover, inlay hints, and signature help work whatever these keys say. `[check]` only decides which findings are reported.
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `unused` | boolean | `true` | Report `unused` — bindings whose value is never read. |
+| `unused` | boolean | `true` | Report `unused`, which is a binding whose value is never read. |
 | `typing` | boolean | `false` | Report `type-mismatch`. See the [tutorial](/type-checking/tutorial). |
-| `maybe-undefined` | boolean | `false` | Report `maybe-undefined` — a read some path reaches with no prior write. Off by default because correlated guards read as independent branches; see [diagnostic codes](/reference/diagnostic-codes). |
+| `maybe-undefined` | boolean | `false` | Report `maybe-undefined`, which is a read some path reaches with no prior write. Off by default because correlated guards read as independent branches; see [diagnostic codes](/reference/diagnostic-codes). |
 | `strict` | boolean | `false` | Report each site with a genuinely undetermined type, **and** raise every `unresolved` finding from warning to error. See [strict mode](/reference/type-system#strict-mode). |
 | `exclude` | array of strings | `[]` | Gitignore-style patterns the directory walk of `ry check` skips. |
 
-A `# typing: off`, `# typing: on`, or `# typing: strict` line at the top of a file replaces both `typing` and `strict` for that file — see [the per-file directive](/reference/type-system#per-file-directive).
+A `# typing: off`, `# typing: on`, or `# typing: strict` line at the top of a file replaces both `typing` and `strict` for that file. See [the per-file directive](/reference/type-system#per-file-directive).
 
 Four rules govern `exclude`:
 
@@ -133,9 +133,9 @@ typing = true
 [format]
 indent = 4
 $ ry check .
-  ! ignoring config key `strict` — it belongs under `[check]`, and nothing outside a table sets it
-  ! ignoring unknown config key `check.stric` — check the spelling, or update ry
-  ! ignoring unknown config key `format.indent` — check the spelling, or update ry
+  ! ignoring config key `strict`. It belongs under `[check]`, and nothing outside a table sets it
+  ! ignoring unknown config key `check.stric`. Check the spelling, or update ry
+  ! ignoring unknown config key `format.indent`. Check the spelling, or update ry
 1 file checked, no problems
 ```
 
@@ -161,7 +161,7 @@ Where that lands depends on how ry runs:
 
 | | Behavior |
 | --- | --- |
-| CLI | The message goes to stderr and the command exits 2 — see the [exit codes](/reference/cli#exit-codes). |
+| CLI | The message goes to stderr and the command exits 2. See the [exit codes](/reference/cli#exit-codes). |
 | The language server | Never crashes. At startup it falls back to the defaults; on a live edit it keeps the previous configuration. Either way it shows the message and publishes a `config` finding on `ry.toml` at the offending line, cleared once the file loads again. |
 
 ## Legacy keys
@@ -182,7 +182,7 @@ These say where the binary is and how to launch it; none of them changes analysi
 | --- | --- | --- |
 | `ry.path` | `null` | Location of the `ry` executable. |
 | `ry.args` | `null`, meaning `["server"]` | Arguments passed to the executable. |
-| `ry.experimentalFeatures` | `null` | Feature names forwarded as `--experimental-features`. Currently only `range_formatting` — format the selected range instead of the whole file. |
+| `ry.experimentalFeatures` | `null` | Feature names forwarded as `--experimental-features`. The only one today is `range_formatting`, which formats the selected range instead of the whole file. |
 
 Changing any of the three prompts you to restart the server; it takes effect only then. The extension finds the binary in this order: the `SERVER_PATH` environment variable, `ry.path`, its own bundled copy, then `ry` on your `PATH`.
 

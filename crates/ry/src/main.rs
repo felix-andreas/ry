@@ -133,7 +133,7 @@ struct Cli {
 fn experimental_features_help() -> String {
     let features = ry::config::ExperimentalFeatures::KNOWN
         .iter()
-        .map(|feature| format!("            {} — {}", feature.name, feature.description))
+        .map(|feature| format!("            {}: {}", feature.name, feature.description))
         .collect::<Vec<_>>()
         .join("\n");
     format!(

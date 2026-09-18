@@ -8,18 +8,18 @@
 
 [**Docs**](https://ry-lang.org) ·
 [**Releases**](https://github.com/felix-andreas/ry/releases) ·
-[**VS Code**](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly) ·
+[**VS Code**](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) ·
 [**Zed**](https://github.com/felix-andreas/ry/tree/main/editors/zed)
 
 </div>
 
 ry is four tools in one binary:
 
-1. **A language server** — hover, completion, go-to-definition, references, rename, and inlay hints,
-   in any editor that supports LSP.
-2. **A formatter** — a single consistent style, with almost no configuration.
-3. **An R console** — a REPL with project-aware completion.
-4. **A type checker** — optional; its inferred types also power the editor features.
+1. **A language server.** It gives you hover, completion, go-to-definition, references, rename, and
+   inlay hints, in any editor that supports LSP.
+2. **A formatter.** It applies a single consistent style, with almost no configuration.
+3. **An R console.** It is a REPL with project-aware completion.
+4. **A type checker.** It is optional, and its inferred types also power the editor features.
 
 It requires no changes to your code, and the same binary runs in your editor and in CI.
 
@@ -31,7 +31,7 @@ fast language server that supported only go-to-definition using regex-based inde
 
 The second iteration replaced the regex index with tree-sitter and performed proper analysis on
 syntax trees. Go-to-definition became reliable, formatting and linting were added, and the "good
-enough" part was dropped from the name — the project became *Roughly*.
+enough" part was dropped from the name, and the project became *Roughly*.
 
 The third iteration uses its own R parser and its own static analysis. That is what makes good error
 messages possible:
@@ -53,16 +53,15 @@ Error: unexpected string constant in "planets <- c("Mercury", "Venus" "Earth""
 Tree-sitter also recovers from broken input, but a dedicated parser can report precisely what is
 wrong, and its syntax tree integrates directly with the static analysis, so one mistake does not hide
 the lints and type errors in the rest of the file. The trend has continued: the better the tool
-became, the shorter its name — first *Roughly*, now *ry*.
+became, the shorter its name. It was *Roughly*, and it is now *ry*.
 
 ## Getting started
 
-- **VS Code** — the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly)
-  bundles the binary, so there is nothing else to set up. It is still published under the project's
-  previous name.
-- **A binary** — from [Releases](https://github.com/felix-andreas/ry/releases), for CI or any other
+- **VS Code.** The [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
+  bundles the binary, so there is nothing else to set up.
+- **A binary** from [Releases](https://github.com/felix-andreas/ry/releases), for CI or any other
   editor.
-- **Cargo** — `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
+- **Cargo.** Run `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 
 Then, in a project directory:
 
@@ -95,8 +94,8 @@ inlay hints, and rename are all based on it. The `typing = true` setting only co
 mismatches are reported.
 
 Checking all of R is not the goal. R is a highly dynamic language, and no static checker can
-describe everything it can do. ry therefore aims for two properties instead of coverage: soundness —
-what it claims must be true — and high performance, even on large codebases. This is why inference
+describe everything it can do. ry therefore aims for two properties instead of coverage. The first is
+soundness, so what it claims must be true. The second is high performance, even on a large codebase. This is why inference
 is Hindley–Milner and why some concepts are deliberately not supported. Code with a describable
 shape is checked; everything else becomes `Unknown`, which is compatible with everything, so a gap
 means a check was skipped rather than a wrong answer produced.

@@ -497,7 +497,7 @@ fn is_ident_continue(c: char) -> bool {
 /// between backticks shows the reader an empty pair and a caret over nothing.
 fn unexpected_character_message(character: char) -> String {
     let ascii = |what: &str, instead: char| {
-        format!("`{character}` is {what}, not R syntax — use `{instead}` instead")
+        format!("`{character}` is {what}, not R syntax. Use `{instead}` instead")
     };
     match character {
         '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{00ab}' | '\u{00bb}' => {
@@ -519,7 +519,7 @@ fn unexpected_character_message(character: char) -> String {
         }
         '\u{3000}' => invisible("an ideographic space"),
         '\u{200b}' | '\u{feff}' => {
-            "there is an invisible character here (a zero-width space) — delete it".to_owned()
+            "there is an invisible character here, a zero-width space. Delete it".to_owned()
         }
         _ => format!("unexpected character `{character}`"),
     }
@@ -528,5 +528,5 @@ fn unexpected_character_message(character: char) -> String {
 /// Whitespace that is not whitespace to R. Quoting it would show the reader a
 /// blank between backticks.
 fn invisible(what: &str) -> String {
-    format!("this is {what}, not an ordinary space — R needs a plain space here")
+    format!("this is {what}, not an ordinary space. R needs a plain space here")
 }
