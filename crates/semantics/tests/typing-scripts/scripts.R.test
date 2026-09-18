@@ -66,7 +66,7 @@ f: <T> fn(p: T) -> T
 g: fn(p: Unknown) -> Unknown
 h: Unknown
 26..27 warning[unused] `h` is assigned but never used.
-42..43 error[type-mismatch] this call supplies 0 arguments, but the function requires 1 — a required argument is missing
+42..43 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
 
 #---- unused_marks_the_name_not_the_multiline_value
 helper <- function(count) {
@@ -101,7 +101,7 @@ print(label)
 #++++
 total: character
 466..471 warning[unused] `total` is assigned but never used.
-475..484 error[syntax-error] this is a value, not a name, so nothing can be assigned to it — the operator at the end of this line pulled the next line in as its right-hand side
+475..484 error[syntax-error] this is a value, not a name, so nothing can be assigned to it. The operator at the end of this line pulled the next line in as its right-hand side
 501..506 warning[unresolved] I could not resolve `label` in this package, its imports, or builtins. Did you mean `labels`?
 
 #---- a_computed_assignment_target_is_reported_without_the_hint
@@ -217,7 +217,7 @@ print(g(1L))
 g: Unknown
 h: Unknown
 g: <T> fn(x: T) -> T
-16..17 error[type-mismatch] this call supplies 0 arguments, but the function requires 1 — a required argument is missing
+16..17 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
 
 #---- an_immediate_read_picks_the_nearest_earlier_binding_of_several
 # Not the first and not the last: with several bindings of one name, a read at
@@ -534,8 +534,8 @@ maybe: fn() -> character | NULL
 use_it <- function(t) t
 #++++
 use_it: fn(t: Thing) -> character
-234..255 error[annotation] the type name `Thing` is declared more than once — `@type` and `@alias` declarations share one namespace, which for a script is this file.
-260..284 error[annotation] the type name `Thing` is declared more than once — `@type` and `@alias` declarations share one namespace, which for a script is this file.
+234..255 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
+260..284 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
 315..321 warning[unused] `use_it` is assigned but never used.
 
 #---- a_type_and_an_alias_of_one_name_conflict_too
@@ -546,8 +546,8 @@ use_it: fn(t: Thing) -> character
 keep <- 1.0
 #++++
 keep: double
-3..23 error[annotation] the type name `Thing` is declared more than once — `@type` and `@alias` declarations share one namespace, which for a script is this file.
-28..52 error[annotation] the type name `Thing` is declared more than once — `@type` and `@alias` declarations share one namespace, which for a script is this file.
+3..23 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
+28..52 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
 54..58 warning[unused] `keep` is assigned but never used.
 
 #---- distinct_names_in_one_script_are_fine
@@ -588,7 +588,7 @@ quoted: Any
 direct: Unknown
 267..273 warning[unused] `quoted` is assigned but never used.
 301..307 warning[unused] `direct` is assigned but never used.
-311..320 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+311..320 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
 
 #---- a_quoted_read_still_keeps_a_write_alive
 # `eval` may run the quotation later, so a name it mentions is read — dropping

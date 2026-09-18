@@ -243,7 +243,7 @@ wrong_shape: Unknown
 wrong_return: Unknown
 wrong_nominal: Unknown
 wrong_optional: Unknown
-1672..1681 error[type-mismatch] this call supplies 3 arguments, but the function requires 4 — a required argument is missing
+1672..1681 error[type-mismatch] this call supplies 3 arguments, but the function requires 4, so a required argument is missing
 1837..1860 error[type-mismatch] expected `fn(LocalInput) -> Result`, found `fn(a: T, b: U) -> Result`
 1992..2009 error[type-mismatch] this function must return `Result`, but it returns `Item`
 2142..2164 error[type-mismatch] expected `LocalInput`, found `RemoteInput`

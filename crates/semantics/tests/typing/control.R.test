@@ -280,7 +280,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated — expected a vector or list.
+51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated. Expected a vector or list.
 
 #---- repeat_applies_exit_state
 f <- function() {
