@@ -197,7 +197,7 @@ The recorded decision must state four things: the previous source of truth, what
 - Add or extend a fixture suite for a new phase or module before you rely on ad hoc unit tests.
 - Use the lightest fixture change that captures the failing shape.
 - Read the testing page at `docs/src/content/docs/contributing/testing.md` before you change the fixture harness or add a new fixture suite.
-- Run a focused fixture case with `FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures`. The other fixture targets are `test_naming_fixtures`, `test_lowering_fixtures`, and `test_lint_fixtures` in `semantics`, plus `test_syntax_fixtures` in `syntax`, `test_ide_fixtures` in `ide`, and `test_format_fixtures` in `format`.
+- Run a focused fixture case with `FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures`. The other fixture targets are `test_naming_fixtures`, `test_lowering_fixtures`, and `test_lint_fixtures` in `semantics`, plus `test_syntax_fixtures` and `test_error_messages` in `syntax`, `test_ide_fixtures` in `ide`, and `test_format_fixtures` in `format`.
 - Prefer running focused crate tests while you iterate. `cargo test -p semantics` is the default crate test command.
 - Keep a fixture's `group__case` name stable, because that name is the test identity. Reject a duplicate name across the suite instead of letting one case silently shadow another.
 - Treat fixtures as the desired semantics contract, not as a regression suite that preserves known-wrong behavior. Review an expectation change deliberately. Update an expectation only when the wording or the behavior improves on purpose. Never commit an intentionally wrong outcome only to keep the suite green.
