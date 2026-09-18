@@ -230,7 +230,7 @@ Examples:
 - `Unknown` means the checker could not infer a more specific type
 - `Unknown` may arise from an unsupported construct, an unresolved name, a partially supported construct, or insufficient type information
 - `Unknown` is compatible with every type, in both directions, like `Any`. A gap in the checker's knowledge therefore means a check is skipped rather than wrong, and a value it could not type flows into a `double` parameter without complaint
-- `Unknown` differs from `Any` in intent, not in compatibility. `Any` is a declared instruction not to check the value. `Unknown` records that the checker could not tell. The one place that intent changes behaviour is [`@if-unknown`](#unknown-only-coercions), which supplies a type where one is missing. It applies to an `Unknown` and is refused on an `Any`, because `Any` already says not to check the value
+- `Unknown` differs from `Any` in intent, not in compatibility. `Any` is a declared instruction not to check the value. `Unknown` records that the checker could not tell. The one place that intent changes behavior is [`@if-unknown`](#unknown-only-coercions), which supplies a type where one is missing. It applies to an `Unknown` and is refused on an `Any`, because `Any` already says not to check the value
 - [Strict mode](#strict-mode) reports the sites where a type could not be determined, not every type that happens to be `Unknown`. A declaration whose return type is `Unknown` produces no finding at its call sites, and an `Unknown` nested inside a larger type is not reported either
 - `Unknown` is not an explicit opt-out
 

@@ -174,7 +174,7 @@ Where that lands depends on how ry runs:
 
 ## Editor settings
 
-These say where the binary is and how to launch it; none of them changes analysis. The language server ignores LSP workspace configuration outright, so every behavioural key must live in `ry.toml`.
+These say where the binary is and how to launch it; none of them changes analysis. The language server ignores LSP workspace configuration outright, so every behavioral key must live in `ry.toml`.
 
 ### VS Code
 
