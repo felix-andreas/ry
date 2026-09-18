@@ -1,93 +1,118 @@
 ---
 title: Structure
-description: The file structure of the syntax, semantics, ide, format, ry, and repl crates
+description: What each source file holds in the syntax, semantics, ide, format, ry, and repl crates
 ---
 
-This document is the authoritative file structure for ry's code. The
-crate graph and phase boundaries live in [Architecture](/contributing/architecture); this
-page records the file split and the role of each file. The `*-legacy` crates
-keep their own (frozen) layout and are not documented here.
+This page records what each source file holds. The crate graph and the phase
+boundaries live in [Architecture](/contributing/architecture). The frozen
+`*-legacy` crates keep their own layout, and this page does not cover them.
 
-## `syntax` crate (`src/syntax.rs` is the root)
+## `syntax`
 
-- `lexer.rs` — the hand lexer, including `#:` annotation regions as
-  structured trivia
-- `parser.rs` — the recursive-descent/Pratt parser onto rowan green trees,
-  including the annotation type grammar and statement-anchored recovery
-- `kind.rs` — `SyntaxKind`: every token and node kind, with display names
-- `ast.rs` — typed AST views (`Option`-returning accessors over the raw tree)
-- `literate.rs` — `.Rmd`/`.qmd`/`.Rnw` documents as the R program their chunks
-  contain, converted length-preservingly (every non-R character becomes a
-  space) so offsets need no translation
-- `reparse.rs` — statement-splice incremental reparse (an optimization; parse
-  correctness never depends on it)
-- `testing.rs` — the fixture harness (`.test` format, `RY_BLESS`,
-  `FIXTURE_FILTER`, duplicate-id rejection) shared by every fixture suite
+The crate root is `src/syntax.rs`.
 
-## `semantics` crate (`src/semantics.rs` is the root)
+- `lexer.rs` is the hand-written lexer. It lexes an `#:` annotation region as
+  structured trivia.
+- `parser.rs` is the parser. It is recursive descent with Pratt expression
+  parsing, and it builds rowan green trees. It also parses the annotation type
+  grammar. Recovery is anchored at statement boundaries.
+- `kind.rs` defines `SyntaxKind`. That enum names every token kind and node
+  kind, and it carries the display name for each one.
+- `ast.rs` holds the typed views over the raw tree. Every accessor returns an
+  `Option`.
+- `literate.rs` reads an `.Rmd`, `.qmd`, or `.Rnw` document as the R program
+  its chunks contain. The conversion preserves length by replacing every
+  non-R character with a space, so byte offsets need no translation.
+- `reparse.rs` reparses incrementally by splicing one statement. It is an
+  optimization. Parse correctness never depends on it.
+- `testing.rs` is the fixture harness that every fixture suite shares. It
+  defines the `.test` file format, the `RY_BLESS` and `FIXTURE_FILTER`
+  variables, and the rejection of duplicate case ids.
 
-- `semantics.rs` — the salsa database, two of its four inputs (`SourceFile`
-  and `ProjectFiles`; `PackageMetadata` and `StubSources` live with their own
-  modules), the item tree with insertion-stable identities,
-  per-item syntax anchoring, the package interface (`global_scheme` fixpoint),
-  and item-span queries
-- `hir.rs` — per-item HIR: expressions with item-relative ranges, lowering
-  from the syntax tree
-- `naming.rs` — the mutable-slot variable model: scopes, reaching-write flow,
-  captures, data-masked evaluation recognition, unused outputs
-- `types.rs` — interned types (`Ty`/`TyKind`), schemes, constraints, union
-  normalization
-- `infer.rs` — the inference table: union-find entries, unification, the
-  directional compatibility relation, memoized deep resolution
-- `check.rs` — the inference walk per item: environment undo-log, calls and
-  overload probing, control flow, annotations enforcement, strict origins
-- `annotations.rs` — lowering `#:` annotation nodes onto interned types;
-  block-form rules
-- `stubs.rs` — the `.Rtypes` corpus: parsing, the assembled library
-  (schemes, nominals, masked verbs, namespace exports), and loader-problem
-  reporting
-- `metadata.rs` — the `PackageMetadata` input: NAMESPACE and DESCRIPTION
-  parsing, import and dependency resolution
-- `lints.rs` — the style lints and their configuration types
-- `testing.rs` — the semantic pipeline's invariant battery, shared by the
-  fuzz harness and the coverage-guided targets
-- `diagnostics.rs` — the diagnostics edge (parse-stage and full per-file
-  sets, strict rendering) and the one user-facing `TypeRenderer`
+## `semantics`
 
-## `ide` crate (`src/ide.rs`, single file)
+The crate root is `src/semantics.rs`.
 
-All eight feature families in one module over `semantics` queries: hover, the
-shared occurrence engine behind definition/references/rename, inlay hints,
-signature help, completion (with the shared smart-case matcher), code
-actions, document/workspace symbols, annotation-type and S4 navigation.
+- `semantics.rs` defines the salsa database. It holds two of the four database
+  inputs, `SourceFile` and `ProjectFiles`. The other two, `PackageMetadata`
+  and `StubSources`, live with their own modules. It also holds the item tree
+  with its insertion-stable identities, the anchoring of an item to its
+  syntax, the package interface through the `global_scheme` fixpoint, and the
+  item-span queries.
+- `hir.rs` lowers the syntax tree to the per-item HIR. An expression range in
+  the HIR is relative to its item.
+- `naming.rs` is the variable model. A variable is a mutable slot. The module
+  resolves scopes, reaching-write flow, and captures. It also recognizes
+  data-masked evaluation and reports unused outputs.
+- `types.rs` defines the interned types `Ty` and `TyKind`, along with schemes,
+  constraints, and union normalization.
+- `infer.rs` is the inference table. It holds the union-find entries,
+  unification, the directional compatibility relation, and memoized deep
+  resolution.
+- `check.rs` runs the inference walk for one item. It covers the environment
+  undo log, calls and overload probing, control flow, annotation enforcement,
+  and strict origins.
+- `annotations.rs` lowers an `#:` annotation node onto an interned type. It
+  also holds the rules for the block form.
+- `stubs.rs` owns the `.Rtypes` corpus. It parses the corpus, assembles the
+  library of schemes, nominals, masked verbs, and namespace exports, and
+  reports loader problems.
+- `metadata.rs` provides the `PackageMetadata` input. It parses NAMESPACE and
+  DESCRIPTION, then resolves imports and dependencies.
+- `lints.rs` holds the style lints and their configuration types.
+- `testing.rs` is the invariant battery for the semantic pipeline. The fuzz
+  harness and the coverage-guided targets share it.
+- `diagnostics.rs` is the diagnostics edge. It produces the parse-stage set
+  and the full per-file set, renders strict output, and holds the one
+  user-facing `TypeRenderer`.
 
-## `format` crate (`src/format.rs`, single file)
+## `ide`
 
-The preserving formatter over the syntax tree, plus its configuration types.
+The crate is one file, `src/ide.rs`. Every editor feature is a read of
+`semantics` queries. The features are hover, goto-definition, references,
+rename, inlay hints, signature help, completion, code actions, document and
+workspace symbols, and navigation to annotation types and S4 definitions.
+Definition, references, and rename share one occurrence engine. Completion
+uses the shared smart-case matcher.
 
-## `ry` crate (`src/ry.rs` is the root)
+## `format`
 
-- `main.rs` — the CLI surface and exit-code contract (0 clean, 1 findings,
-  2 usage/configuration/IO errors)
-- `cli.rs` — `check` (project assembly, rendering, NAMESPACE and stub-
-  override reports) and `fmt` implementations
-- `server.rs` — the LSP server: frontend/worker threading, document sync,
-  push/pull diagnostics, all feature endpoints, semantic tokens, stub and
-  NAMESPACE buffers
-- `config.rs` — `ry.toml` discovery and parsing
-- `diagnostics.rs` — the shared diagnostics assembly (config gating, strict
-  escalation, suppression comments) used by both the server and the CLI
-- `namespace.rs` — NAMESPACE import parsing and validation
-- `position.rs` — the line index: byte offsets ↔ line/column in bytes,
-  characters (what the CLI reports), or UTF-16 code units (the LSP default)
-- `stats.rs` — the performance diagnosis behind `ry debug analysis-stats`
-- `repl_completer.rs` — completion for the interactive console
+The crate is one file, `src/format.rs`. It holds the preserving formatter
+over the syntax tree and the formatter's configuration types.
 
-## `repl` crate (`src/repl.rs` is the root)
+## `ry`
 
-Backs `ry repl` and `ry run` by locating and loading the system R at
-runtime, so the rest of the workspace builds and analyzes R with no R present.
+The library root is `src/ry.rs`. The binary root is `src/main.rs`.
 
-- `repl.rs` — the session: evaluation, the read-eval-print loop, exit codes
-- `libr.rs` — the runtime binding to R's shared library (no build-time link)
-- `console.rs` — the terminal front end
+- `main.rs` defines the CLI surface and the exit-code contract. An exit code
+  of 0 means no findings, 1 means findings, and 2 means a usage,
+  configuration, or IO error.
+- `cli.rs` implements `check`, `fmt`, and `ry debug ast`. The `check`
+  implementation assembles the project, renders the output, and reports
+  NAMESPACE problems and stub overrides.
+- `server.rs` is the LSP server. It holds the frontend and worker threading,
+  document sync, push and pull diagnostics, every feature endpoint, semantic
+  tokens, and the stub and NAMESPACE buffers.
+- `config.rs` discovers and parses `ry.toml`.
+- `diagnostics.rs` assembles diagnostics for both the server and the CLI. It
+  applies configuration gating, strict escalation, and suppression comments.
+- `namespace.rs` parses and validates NAMESPACE imports.
+- `position.rs` is the line index. It converts between a byte offset and a
+  line and column. The column is measured in bytes, in characters, or in
+  UTF-16 code units. The CLI reports characters. The LSP default is UTF-16
+  code units.
+- `stats.rs` implements the performance diagnosis behind
+  `ry debug analysis-stats`.
+- `repl_completer.rs` provides completion for the interactive console.
+
+## `repl`
+
+The crate root is `src/repl.rs`. This crate backs `ry repl` and `ry run`. It
+locates and loads the system R at runtime, so the rest of the workspace
+builds and analyzes R on a machine with no R installed.
+
+- `repl.rs` is the session. It holds evaluation, the read-eval-print loop,
+  and the exit codes.
+- `libr.rs` binds to R's shared library at runtime. There is no build-time
+  link.
+- `console.rs` is the terminal front end.
