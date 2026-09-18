@@ -1,6 +1,6 @@
 ---
 title: Features
-description: What ry gives you before you configure anything — and the one flag that changes the rest
+description: What ry gives you with no configuration, and the one setting that turns on type errors
 ---
 
 Everything below works with no configuration and no annotations. The last section needs one line of
@@ -57,31 +57,9 @@ syntax-error
  4 |   width = 800
 ```
 
-The same comparison with a parenthesis left open:
-
-```r
-if (x > 1 {
-  y
-}
-```
-
-```text
-Error: unexpected '{' in "if (x > 1 {"
-```
-
-```text
-syntax-error
-
-  x unclosed `(` in the `if` condition; expected a matching `)`
-   --[a.R:1:4]
- 1 | if (x > 1 {
-   |    ^
- 2 |   y
-```
-
 R's parser stops at the first error, because its job is to run your code. A parser written for
-tooling carries on, keeps the rest of the file analyzable, and can say which construct was left
-open.
+tooling carries on, keeps the rest of the file analyzable, and names the construct that is missing
+rather than the token it stopped on.
 
 ## Formatting
 
@@ -127,17 +105,13 @@ all. Renaming one of them must leave the others alone, across every file in the 
 
 ## The type checker
 
-Everything above comes from one model of your project: which names exist, which binding each
-occurrence refers to, and where each is visible. That model is what separates these features from
-text search, and building it is most of the work.
-
-The type checker goes one step further. It knows not only which binding a name refers to, but what
-kind of value that binding holds. Completion therefore knows what is inside a value, not just which
-names exist:
+The features above know which binding each name refers to. The type checker also knows what kind of
+value that binding holds, so completion can offer what is inside a value rather than just the names
+in scope:
 
 ```r
 account <- list(holder = "ada", balance = 120.5)
-account$        # balance, holder — with their types
+account$        # balance, holder, with their types
 ```
 
 Nothing declared those fields. Hovering a function you never annotated gives you its full type:
@@ -188,8 +162,8 @@ That took one line of configuration, no annotations, and no change to the code.
 
 Type checking a whole project is affordable because analysis is incremental: an edit re-checks only
 what that edit could have affected, not the project. ry is tested against roughly 970,000 lines of
-real R — 69 CRAN packages plus R's base library.
+real R, which is 69 CRAN packages plus R's base library.
 
-- [Tutorial](/type-checking/tutorial) — put it on real code
-- [Concepts](/type-checking/concepts) — how it works out what it knows
-- [Adopting an existing codebase](/guides/adopting) — turning it on a piece at a time
+- [Tutorial](/type-checking/tutorial) puts it on real code
+- [Concepts](/type-checking/concepts) explains how it works out what it knows
+- [Adopting an existing codebase](/guides/adopting) turns it on a piece at a time

@@ -1,6 +1,6 @@
 ---
 title: Concepts
-description: How ry's type system works — the vocabulary you need to read what it tells you
+description: The vocabulary you need to read what ry's type checker tells you
 ---
 
 ## Inference
@@ -17,8 +17,8 @@ scale <- function(x, factor) {
 `*` is arithmetic, so `x` and `factor` are numbers. That is inferred, not declared, and it is enough
 to reject `scale("a", 2)`.
 
-You annotate where you want to state something the code does not already state — a boundary, a
-domain type, a promise you want held to.
+Annotate where you want to state something the code does not already state. That means a boundary,
+a domain type, or a rule you want enforced.
 
 ## Scalars and vectors
 
@@ -51,9 +51,8 @@ So an `integer` is accepted where a `double` is wanted. `character` and `raw` ar
 **not** on the ladder: R coerces a number to a string, but doing so silently is more often a mistake
 than an intention, so ry requires you to write the conversion.
 
-Widening happens only when checking whether a value *fits* somewhere. It never happens when the
-checker is working out what two things have in common — that is a different question, and answering
-it by widening would discard information.
+Widening happens only when checking whether a value fits somewhere. It does not happen when the
+checker works out what two types have in common, because widening there would discard information.
 
 ## Lists
 
@@ -105,8 +104,8 @@ A function type is written in the order you would say it:
 fn(x: integer, y: character) -> logical
 ```
 
-Optional parameters — those with defaults — are marked, and parameter **names** are part of the
-type, because R calls functions by name as often as by position.
+A parameter with a default is marked optional. Parameter **names** are part of the type, because R
+calls functions by name as often as by position.
 
 ## Unions and `NULL`
 
@@ -121,8 +120,8 @@ type after the `if` is the union of both. That is what the type checker reports 
 [Features](/features) example.
 
 `NULL` is its own type, and this is where unions matter most. A function that may return nothing has
-type `character | NULL`, and using that result as a `character` without checking is an error — the
-missing `if (is.null(x))` that would have failed at runtime.
+type `character | NULL`. Using that result as a `character` without checking is an error, and it is
+the missing `if (is.null(x))` that would have failed at runtime.
 
 ## `Any` and `Unknown`
 
@@ -135,8 +134,8 @@ arise differs, and the reason is what you need to know:
 | `Any` | **You declared that it does not matter.** A deliberate opt-out you wrote |
 
 Because `Unknown` is compatible with everything, one construct the checker cannot model does not
-cascade into a screen of errors; it produces no findings at all. That is what keeps the tool usable
-on real R. It also means a clean run does not by itself tell you how much was checked.
+cascade into a screen of errors, and produces no findings at all. It also means a clean run does not
+by itself tell you how much was checked.
 
 [Strict mode](#typing-modes) addresses that: it reports every place a value became `Unknown`, so the
 gaps are visible instead of looking like approval.
@@ -161,7 +160,7 @@ new_person <- function(name, age) {
 greet <- function(p) paste0("hi ", p$name)
 ```
 
-A `Person` is an ordinary named list at runtime — no class system, no dispatch, no dependency. To
+A `Person` is an ordinary named list at runtime, with no class system, no dispatch, and no dependency. To
 the checker it is a **distinct type**, so `greet` accepts a `Person` and nothing else:
 
 ```r
@@ -190,9 +189,9 @@ ada <- list(name = "Ada", age = 36L)
 nominal type. Put it inside a constructor, as `new_person` does, and every `Person` in your program
 came from there.
 
-This is **nominal** typing, as opposed to **structural**. Structural typing asks "does it have the
-right shape?"; nominal typing asks "is it the thing?". S4 and R6 answer that question at run time
-and tell the checker nothing. `@type` answers it at analysis time and adds nothing at run time.
+This is **nominal** typing, as opposed to **structural**. Structural typing asks whether a value has
+the right shape. Nominal typing asks whether it is the thing itself. S4 and R6 answer that question
+at run time and tell the checker nothing. `@type` answers it at analysis time and adds nothing at run time.
 
 ### Two names for the same shape
 
@@ -281,7 +280,7 @@ After the guard, `name` is no longer `NULL` and `paste0` accepts it.
 Narrowing is deliberately limited. It happens on the condition of an `if`, and only for a guard
 applied directly to a plain variable. `if (is.null(x))` narrows `x`; `if (is.null(obj$field))` does
 not, and neither does a guard behind an `&&`. If a narrowing you expected did not happen, this is
-almost always why — lift the value into a local variable first.
+almost always why. Lift the value into a local variable first.
 
 ## Generics
 
@@ -292,7 +291,7 @@ constrains is generic automatically:
 identity2 <- function(x) x
 ```
 
-is `<T> fn(x: T) -> T` — it returns exactly what it was given, whatever that was. Add one arithmetic
+is `<T> fn(x: T) -> T`, meaning it returns exactly what it was given, whatever that was. Add one arithmetic
 operation and the checker narrows the type on its own:
 
 ```r
@@ -315,7 +314,7 @@ There are three, and they are per file as well as per project:
 | Mode | Reports |
 | --- | --- |
 | `off` | No type findings. Everything else still runs |
-| `on` | Contradictions — places where the types genuinely disagree |
+| `on` | Contradictions, meaning places where the types genuinely disagree |
 | `strict` | Contradictions, plus every place a value became `Unknown` |
 
 Set the project default in [`ry.toml`](/reference/configuration), and override it in any single file
@@ -329,7 +328,7 @@ The file always wins, which is what lets you adopt this one module at a time.
 
 ## Next
 
-- [Tutorial](/type-checking/tutorial) — the same ideas, applied to real code
-- [Domain modeling](/type-checking/domain-modeling) — nominal types instead of S4, R6, or S7
-- [Limitations](/type-checking/limitations) — where the checker cannot help yet
-- [Type system reference](/reference/type-system) — the exact contract
+- [Tutorial](/type-checking/tutorial) applies the same ideas to real code
+- [Domain modeling](/type-checking/domain-modeling) covers nominal types instead of S4, R6, or S7
+- [Limitations](/type-checking/limitations) covers what the checker cannot do
+- [Type system reference](/reference/type-system) has the exact contract

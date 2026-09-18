@@ -14,19 +14,19 @@ const capabilities = [
     {
         title: "Language server",
         accent: "cyan",
-        blurb: "Completion, hover, go-to-definition, references, rename, and inlay hints — live in your editor.",
+        blurb: "Completion, hover, go-to-definition, find references, rename and inline type hints, in your editor.",
         link: { label: "Language server", href: "/features" },
     },
     {
         title: "Code analyzer",
         accent: "violet",
-        blurb: "Lint diagnostics on by default — plus the first static type checker for R, opt-in.",
+        blurb: "Lints run with no setup. Turn on type checking and get the first static type checker for R.",
         link: { label: "Type checker", href: "/type-checking/tutorial" },
     },
     {
         title: "Formatter",
         accent: "emerald",
-        blurb: "ry fmt rewrites your whole project to one consistent style, with a --diff mode for CI.",
+        blurb: "Format the whole project in one command. --check reports what would change without touching a file.",
         link: { label: "Formatter", href: "/reference/formatting-rules" },
     },
 ];
@@ -51,7 +51,7 @@ const lspFeatures = [
     {
         key: "definition",
         label: "Go to definition",
-        note: "Jump to the binding — in this file, another file, or a stdlib stub.",
+        note: "Jump to the binding, in this file, another file, or a stdlib stub.",
         method: "textDocument/definition",
     },
     {
@@ -92,8 +92,8 @@ const analysisTabs = [
         file: "R/pricing.R",
         config: "ry.toml · [check] typing = true",
         note:
-            "<code>fee_rate</code> wants the region, not the amount. Annotations live in <code>#:</code> " +
-            "comments — ordinary comments to R and to every other tool you run.",
+            "<code>fee_rate</code> takes the region, not the amount. Annotations live in <code>#:</code> " +
+            "comments, which R and every other tool read as ordinary comments.",
     },
     {
         key: "inference",
@@ -102,8 +102,8 @@ const analysisTabs = [
         file: "R/booking.R",
         config: "ry.toml · [check] typing = true",
         note:
-            "Not one annotation in this file. Inference recovers the signatures — the grey text is what " +
-            "your editor shows — and the <code>numeric</code> bound alone rejects the string.",
+            "This file carries no annotation. Inference recovers the signatures, shown here in grey as " +
+            "your editor shows them, and the <code>numeric</code> bound alone rejects the string.",
     },
 ];
 
@@ -120,14 +120,14 @@ const formatterTabs = [
         label: "Braces & loops",
         file: "regions.R",
         meta: "loop and if bodies",
-        note: "Braces go in wherever leaving them out could change what runs.",
+        note: "Braces are added where leaving them out could change what runs.",
     },
     {
         key: "indent",
         label: "Indentation",
         file: "options.R",
         meta: "multi-line call arguments",
-        note: "Every argument snaps to one indent step. Your line breaks are kept.",
+        note: "Every argument takes one indent step. Your line breaks are kept.",
     },
     {
         key: "annotations",
@@ -135,8 +135,8 @@ const formatterTabs = [
         file: "pricing.R",
         meta: "#: type annotations",
         note:
-            "Annotations are re-rendered with the type checker's own grammar. Anything it cannot parse is " +
-            "left byte-for-byte alone.",
+            "An annotation is re-rendered with the type checker's own grammar. One it cannot parse is " +
+            "left byte for byte alone.",
     },
 ];
 
@@ -312,11 +312,11 @@ const year = new Date().getFullYear();
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>
-            ry — the first type checker for R, and the tooling to match
+            ry: editor support, error checking and formatting for R
         </title>
         <meta
             name="description"
-            content="ry is a fast Rust toolchain for R: the first static type checker, a full language server, and a project formatter in one tool. Catch type errors before you run — without changing your existing code."
+            content="ry gives R completion and go-to-definition in your editor, catches mistakes before you run a script, and formats a whole project in one command. It includes the first static type checker for R. Type annotations are ordinary comments, so your code still runs anywhere."
         />
         <link rel="icon" href="/favicon.svg" />
         <script is:inline>
@@ -374,12 +374,14 @@ const year = new Date().getFullYear();
                     <div class="hero-vignette" aria-hidden="true"></div>
                     <div class="hero-copy">
                         <h1 class="hero-heading">
-                            Modern developer tooling for R.
+                            Editor support, error checking and formatting for R.
                         </h1>
                         <p class="subhead">
-                            Type checker, language server, and formatter in one
-                            binary. Catch errors before you run the code —
-                            without changing the R you already write.
+                            Get completion and go-to-definition in your
+                            editor, catch mistakes before you run a script, and
+                            format a whole project in one command. ry reads the
+                            R you already write. Type annotations are ordinary
+                            comments, so your code still runs anywhere.
                         </p>
                         <div class="cta-cluster">
                             <a class="cta cta-lg" href="/getting-started"
@@ -387,7 +389,7 @@ const year = new Date().getFullYear();
                             >
                             <a
                                 class="btn-vscode"
-                                href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly"
+                                href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry"
                                 target="_blank"
                                 rel="noopener"
                             >
@@ -469,15 +471,14 @@ const year = new Date().getFullYear();
             <!-- ---------- capabilities triad ---------- -->
             <section id="capabilities" class="band dotted">
                 <div class="col">
-                    <p class="eyebrow">three tools, one binary</p>
-                    <h2>Three tools, one binary.</h2>
+                    <p class="eyebrow">what ry does</p>
+                    <h2>One tool replaces three.</h2>
                     <p class="lede">
-                        Built for R users who have outgrown RStudio: editor
-                        smarts, problem-catching analysis, and one consistent
-                        style from a single binary. R has world-class statistics
-                        — ry brings the IDE-grade tooling other ecosystems
-                        already take for granted, fast enough to scale past 300k
-                        lines.
+                        ry is the language server your editor talks to, the
+                        checker you run before you commit, and the formatter you
+                        run on the whole project. All three read your code the
+                        same way, so your editor and your CI never disagree, and
+                        there is no second tool to configure or keep in sync.
                     </p>
                 </div>
                 <div class="col show-col">
@@ -577,13 +578,15 @@ const year = new Date().getFullYear();
                             <span class="eyebrow-mark" aria-hidden="true"
                             ></span>write
                         </p>
-                        <h2>Your editor, fluent in R.</h2>
+                        <h2>One server drives every editor feature.</h2>
                         <p class="lede">
-                            One server behind every editor feature — complete a
-                            record's fields, hover a name for its inferred
-                            signature, jump to where it is bound, rename it
-                            everywhere at once. Extensions for VS Code and Zed,
-                            plain LSP for the rest.
+                            Complete a list's fields by name, hover any value
+                            to see its type, jump to where a function is
+                            defined, and rename it everywhere in one step. ry
+                            works this out from your code, so you get it on
+                            files you never annotated. Install the VS Code
+                            extension from the Marketplace, or point any
+                            LSP-capable editor at <code>ry server</code>.
                         </p>
                     </header>
 
@@ -726,12 +729,14 @@ const year = new Date().getFullYear();
                             <span class="eyebrow-mark" aria-hidden="true"
                             ></span>check
                         </p>
-                        <h2>Catch it before you run it.</h2>
+                        <h2>ry finds the error before you run the code.</h2>
                         <p class="lede">
-                            <code>ry check</code> lints out of the box. Switch the
-                            type checker on and it reads your code the way a compiler
-                            would — and since inference runs whether or not you annotate
-                            anything, it catches the mistake either way.
+                            Find the typo and the wrong argument before the
+                            script runs for twenty minutes and fails at the end.
+                            <code>ry check</code> lints with no setup at all.
+                            Turn on <code>[check] typing = true</code> and it
+                            checks types too, on files you have not annotated,
+                            because it infers them.
                         </p>
                     </header>
 
@@ -827,14 +832,15 @@ const year = new Date().getFullYear();
                     <header class="band-head">
                         <p class="eyebrow">
                             <span class="eyebrow-mark" aria-hidden="true"
-                            ></span>ship
+                            ></span>format
                         </p>
-                        <h2>One consistent style, in place.</h2>
+                        <h2>The formatter keeps the layout you chose.</h2>
                         <p class="lede">
-                            <code>ry fmt</code> is deliberately non-invasive. It fixes
-                            spacing, braces and indentation, and it never splits a
-                            line you chose to keep on one line. Run it across the
-                            project, or use <code>--diff</code> in CI.
+                            <code>ry fmt</code> fixes spacing, braces and
+                            indentation across the project. It keeps the line
+                            breaks you chose and never splits a line you wanted
+                            on one line, so the diff stays small. Add
+                            <code>--check</code> to CI.
                         </p>
                     </header>
 
@@ -933,12 +939,14 @@ const year = new Date().getFullYear();
                 <canvas id="closer-canvas" aria-hidden="true"></canvas>
                 <div class="closer-scrim" aria-hidden="true"></div>
                 <div class="col closer-col">
-                    <p class="eyebrow">adopt</p>
-                    <h2>Drop it onto your R project.</h2>
+                    <p class="eyebrow">install</p>
+                    <h2>Point ry at a project you already have.</h2>
                     <p class="lede">
-                        Nothing about your existing R has to change. Install the
-                        VS Code extension in one click — no toolchain required —
-                        or grab the CLI and point ry at your project.
+                        Nothing in your project has to change first. The VS
+                        Code extension brings its own ry, so there is no
+                        toolchain to install. On the command line it is one
+                        <code>cargo install</code>, then point ry at the
+                        project you already have.
                     </p>
                     <div class="steps">
                         <div class="step">
@@ -956,15 +964,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         </div>
                     </div>
                     <p class="band-note">
-                        Grab the <a
+                        Settings, lint selection and the typing switch are in
+                        the <a
                             class="inline-link"
-                            href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly"
-                            target="_blank"
-                            rel="noopener">VS Code extension</a
-                        >
-                        from the Marketplace, then tune behavior in <a
-                            class="inline-link"
-                            href="/reference/configuration">configuration</a
+                            href="/reference/configuration">configuration
+                            reference</a
                         >.
                     </p>
                     <div class="cta-cluster">
@@ -973,7 +977,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         >
                         <a
                             class="btn-vscode"
-                            href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly"
+                            href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry"
                             target="_blank"
                             rel="noopener"
                         >

@@ -7,6 +7,10 @@ This tutorial covers the type checker: writing an annotation, what inference giv
 unions and `NULL`, declaring your own domain types, generics, and strict mode. It assumes you can
 already run `ry check` on a project.
 
+Every transcript below comes from a package, with a `DESCRIPTION` file and the code under `R/`. In a
+loose script a top-level function is not package-visible, so `ry` also reports it as unused. That
+warning is not part of the lesson.
+
 :::note
 Type errors are opt-in. Add this to `ry.toml`, or put `# typing: on` at the top of a file:
 
@@ -29,7 +33,7 @@ apply_discount <- function(price, rate) {
 
 That first line is the annotation. It reads left to right: `fn(` the parameters and their types `)`,
 then `->` and the return type. It lives in a `#:` comment, so R and every other R tool see a comment
-and carry on — annotated code is still ordinary R.
+and carry on. Annotated code is still ordinary R.
 
 Now call it wrongly:
 
@@ -47,11 +51,10 @@ type-mismatch
    |                     ^^^^^
 ```
 
-Found without running anything, and pointing at the argument rather than at the line that would have
-failed.
+ry found that without running the code, and the caret is on the argument rather than on the line
+that would have failed.
 
-The annotation is a promise the checker holds you to in both directions. Claim the wrong return type
-and it reports that too, pointing at the body:
+The annotation is checked in both directions. Claim the wrong return type and the body is reported:
 
 ```r
 #: fn(price: double, rate: double) -> character
@@ -93,28 +96,26 @@ type-mismatch
    |                     ^^^^^
 ```
 
-The same error. `*` is arithmetic, so `price` and `rate` are numbers — the checker worked that out
-from the body. This is **inference**, and it is why most R needs no annotations at all.
+The same error. `*` is arithmetic, so `price` and `rate` are numbers, and the checker worked that
+out from the body. This is **inference**, and it is why most R needs no annotations at all.
 
-Which kind of inference decides how far you can trust it. ry uses **Hindley–Milner** inference, the
-algorithm behind ML, Haskell and Elm. Two properties matter here:
+Two properties of it are worth knowing.
 
-- It computes a **principal type** — the single most general type consistent with how a value is
-  used. Not a guess, not a heuristic. Run it twice and you get the same answer; run it on a
-  colleague's machine and they get yours. (Calls into the standard library are the one place a
-  *choice* is made, because a handful of R's builtins are declared with several signatures; the
-  [rules for that](/reference/type-system#overload-sets) are fixed and deterministic too.)
-- It does not silently accept a contradiction. Within the part of your program it can model, if the
-  types cannot line up, it reports that.
+- The type ry gives a value is the most general one consistent with how the value is used. It does
+  not depend on the order you read the file in or on the machine you run it on, so you and a
+  colleague get the same answer. Calls into the standard library are the one place a choice is
+  made, because a few of R's builtins are declared with several signatures, and the
+  [rules for that](/reference/type-system#overload-sets) are fixed too.
+- ry does not accept a contradiction silently. Where the types cannot line up, it reports that.
 
-The second clause carries the limit. R has constructs no type system can follow — `UseMethod`
-dispatch, data-frame columns, S4. There the checker yields `Unknown` rather than guessing, and
-`Unknown` is compatible with everything, so one gap produces no consequential errors.
+The second one carries the limit. R has constructs no type system can follow, including `UseMethod`
+dispatch, data-frame columns, and S4. There ry yields `Unknown` rather than guessing, and `Unknown`
+is compatible with everything, so one gap does not produce a run of follow-on errors.
 [Strict mode](#7-strict-mode) is how you find those gaps.
 
 ## 3. When to annotate
 
-Inference handles the interior. Annotate at the edges:
+Inference covers the code inside a function. Annotate where the code meets something else:
 
 - **Exported functions**, and anything else another file or another person calls. The annotation is
   documentation the checker enforces, and it stops a change to the body quietly changing the
@@ -203,7 +204,7 @@ An unannotated function that constrains nothing is already generic:
 identity2 <- function(x) x
 ```
 
-Hover it and you get `<T> fn(x: T) -> T` — for any type `T`, takes one and returns the same one. Add
+Hover it and you get `<T> fn(x: T) -> T`, meaning it takes a value of any type `T` and returns the same type. Add
 arithmetic and the type narrows on its own to `<T: numeric> fn(x: T) -> T`. Neither has to be asked
 for, and neither has to be maintained.
 
@@ -260,7 +261,7 @@ findings already in it.
 
 ## Where to go next
 
-- [Concepts](/type-checking/concepts) — the full vocabulary: vectors, records, `Any` vs `Unknown`
-- [Domain modeling](/type-checking/domain-modeling) — nominal types instead of S4, R6, or S7
-- [Limitations](/type-checking/limitations) — where the checker cannot help yet
-- [Type system reference](/reference/type-system) — the precise rules
+- [Concepts](/type-checking/concepts) covers the full vocabulary: vectors, records, and `Any` against `Unknown`
+- [Domain modeling](/type-checking/domain-modeling) covers nominal types instead of S4, R6, or S7
+- [Limitations](/type-checking/limitations) covers what the checker cannot do
+- [Type system reference](/reference/type-system) has the precise rules

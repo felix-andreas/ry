@@ -8,7 +8,7 @@ The common paths are on the install section of
 
 ## VS Code
 
-The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly)
+The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
 bundles the binary for **Linux x86_64, macOS aarch64, and Windows x86_64**.
 
 On any other architecture the extension installs but has no binary to run. Install the CLI
@@ -28,7 +28,7 @@ Every extension setting is listed under
 
 Not in Zed's extension registry yet. Until it is, install it from the repository as a dev extension:
 
-1. Install a [Rust toolchain](https://rustup.rs) — Zed compiles dev extensions to WebAssembly itself.
+1. Install a [Rust toolchain](https://rustup.rs). Zed compiles dev extensions to WebAssembly itself.
 2. Clone the repository.
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 
@@ -49,12 +49,12 @@ and each archive holds a single `ry` binary:
 | Windows x86_64 | `ry-x86_64-pc-windows-gnu.zip` |
 
 ```bash
-curl -sSL https://github.com/felix-andreas/ry/releases/download/0.3.0-alpha/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -sSL https://github.com/felix-andreas/ry/releases/download/0.3.1-beta/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv ry /usr/local/bin/
 ```
 
-Name the tag explicitly. Every release so far is marked a pre-release, so `releases/latest/`
-resolves to an older stable tag rather than the newest build.
+Name the tag explicitly. Every release since `0.1.1` is marked a pre-release, so `releases/latest/`
+still resolves to `0.1.1` rather than to the newest build.
 
 **From source**, if you have a [Rust toolchain](https://www.rust-lang.org/tools/install):
 
@@ -62,20 +62,15 @@ resolves to an older stable tag rather than the newest build.
 cargo install --git https://github.com/felix-andreas/ry ry-lang
 ```
 
-The package is `ry-lang` because the name `ry` was already taken on crates.io; the binary it
-installs is `ry`.
-
-This is also the route for architectures without a prebuilt binary.
-
-**Planned:** a one-line installer, so neither a manual download nor a Rust toolchain is needed. It
-is not scheduled.
+The crate is `ry-lang`. The command it installs is `ry`. This is also the route for an architecture
+with no prebuilt binary.
 
 ## RStudio
 
 RStudio has no language-server integration, but it can use ry as its external formatter:
 
-1. **Tools → Global Options → Code → Formatting → Format with an External Tool**, and set the reformat
-   command to `path/to/ry fmt`.
+1. **Tools → Global Options → Code → Formatting**, set **Code formatter** to **External**, then set
+   **Reformat command** to `path/to/ry fmt`. RStudio appends the file name to that command.
 2. For format-on-save, **Tools → Global Options → Code → Saving** and tick **Reformat documents on
    save**.
 
@@ -88,4 +83,4 @@ in [CI](/guides/continuous-integration).
 ry --version
 ```
 
-Then run it on a project — [getting started](/getting-started) shows what a first run looks like.
+Then run it on a project. [Getting started](/getting-started) shows what a first run looks like.
