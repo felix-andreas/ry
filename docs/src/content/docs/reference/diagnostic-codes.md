@@ -141,10 +141,11 @@ A statement that fails to parse as R suppresses every name-resolution and typing
 | `type-mismatch` | error | no | A constraint violated: `numeric`, `atomic`, or a scalar numeric |
 | `type-mismatch` | error | no | An alias cycle, or an infinite type (the occurs check) |
 | `type-mismatch` | error | no | Annotation rules: `@if-unknown` where the type is already known, an annotated parameter that also has a default, annotation parameters that do not match the function's formals, or a `[]`/`[named]` element type that is not atomic |
-| `strict` | error | no | An expression whose type is undetermined — "this expression has an undetermined type (`Unknown`)" |
-| `strict` | error | no | A reference with no known type — "could not determine the type of `x`" |
+| `strict` | error | no | An expression whose type is undetermined |
+| `strict` | error | no | A reference with no known type |
 | `strict` | error | no | A binding whose type does not stabilize across loop iterations |
 | `strict` | error | no | A binding defined recursively |
+| `strict` | error | no | A name that resolves only because an attached package's export set is unknown. Declare the package with a `.Rtypes` stub to check it |
 
 Enabling `strict` also raises every `unresolved` finding in the file from warning to error. The count does not change; the severity does, which matters if `--min-severity error` gates your build.
 
@@ -168,4 +169,4 @@ Enabling `strict` also raises every `unresolved` finding in the file from warnin
 | Code | Severity | On by default | Triggered by |
 | --- | --- | --- | --- |
 | `stub` | error | yes | A declaration in a project's `stubs/*.Rtypes` file that would otherwise be dropped in silence: a line that is not a `name : TYPE` declaration, an invalid name, a missing or invalid type, an unknown type name, or `@masked` on a non-variadic function type. The range covers the whole line |
-| `config` | error | yes | A malformed `ry.toml` — a TOML parse failure, or the wrong type of value on a known key. Reported on the config file by the language server only; `check` reports config failures as a usage error with exit code 2. An *unknown key* is not this finding: it is a `check` warning on stderr and never blocks loading |
+| `config` | error | yes | A malformed `ry.toml` — a TOML parse failure, or the wrong type of value on a known key. `check` prints it on stderr under this code and exits 2. The language server publishes it as a finding on the config file instead. |

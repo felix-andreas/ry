@@ -26,7 +26,7 @@ Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
-| `-V`, `--version` | — | — | Prints `ry 0.3.0-alpha` and exits 0 |
+| `-V`, `--version` | — | — | Prints the version and exits 0 |
 | `-h`, `--help` | — | — | Prints help and exits 0. Available on every command |
 | `--stdio` | — | — | Accepted and ignored. It exists so VS Code's default launch arguments do not error |
 | `--experimental-features` | `FEATURES` | none | Space-separated feature names, or `all`. Only `range_formatting` exists today, and only the language server reads it — the flag does nothing for `check`, `fmt`, `repl`, or `run`. An unknown name prints a warning on stderr and is ignored, not a usage error |
@@ -97,11 +97,11 @@ unresolved
  3 | result <- undefined_thing(3)
    |           ^^^^^^^^^^^^^^^
 
-3 problems in 2 files
+3 problems in 1 file
 ```
 
-Colour and rules follow the destination: a terminal gets unicode and colour (`NO_COLOR` turns the
-colour off), a pipe or a file gets the plain ASCII shown above.
+In a terminal the output uses unicode box drawing and colour. `NO_COLOR` turns the colour off. A
+pipe or a file gets the plain ASCII shown above.
 
 ## fmt
 

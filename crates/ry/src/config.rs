@@ -321,9 +321,12 @@ pub fn suggested_table(unknown_key: &str) -> Option<&'static str> {
 }
 
 /// Which keys each config table accepts. Serde offers no way to enumerate a
-/// struct's field names at run time, so this list is written out; the
-/// `table_keys_match_the_config_structs` test pins every entry to the real
-/// struct so the two cannot drift apart.
+/// struct's field names at run time, so this list is written out. It
+/// duplicates the config structs, and only one direction of the duplication is
+/// tested: `table_keys_match_the_config_structs` catches a key listed here
+/// that the struct does not have. A field ADDED to a struct and not added here
+/// is not caught, and silently costs that key its "belongs under `[check]`"
+/// hint.
 const TABLE_KEYS: [(&str, &[&str]); 3] = [
     ("format", &["indent-width", "line-ending"]),
     (
@@ -340,7 +343,10 @@ const TABLE_KEYS: [(&str, &[&str]); 3] = [
             "shadows-namespace",
         ],
     ),
-    ("check", &["unused", "typing", "strict", "exclude"]),
+    (
+        "check",
+        &["unused", "maybe-undefined", "typing", "strict", "exclude"],
+    ),
 ];
 
 /// Resolves `.` and `..` components lexically (without touching the
@@ -545,6 +551,20 @@ mod tests {
         // a key already inside a table.
         assert_eq!(suggested_table("typng"), None);
         assert_eq!(suggested_table("check.typing"), None);
+    }
+
+    #[test]
+    fn every_check_field_has_a_placement_hint() {
+        // Guards the direction `table_keys_match_the_config_structs` cannot
+        // see: a field added to `CheckConfig` but not to TABLE_KEYS. Written
+        // out because serde cannot enumerate the struct's fields.
+        for key in ["unused", "maybe-undefined", "typing", "strict", "exclude"] {
+            assert_eq!(
+                suggested_table(key),
+                Some("check"),
+                "`{key}` is a `[check]` field with no placement hint"
+            );
+        }
     }
 
     #[test]

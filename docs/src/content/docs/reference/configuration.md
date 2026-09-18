@@ -7,7 +7,9 @@ Everything you can change about ry's behavior lives in one file, `ry.toml`. Edit
 
 ## Project discovery
 
-`ry.toml` is the only configuration file. There is no home-directory config, no environment variable naming one, and no merging — the nearest file replaces the built-in defaults wholesale.
+`ry.toml` is the configuration file. There is no home-directory config, no environment variable naming one, and no merging. The nearest file replaces the built-in defaults wholesale.
+
+`roughly.toml` is also read, under the project's former name. Both names are looked for in one directory before the search moves to its parent, and `ry.toml` wins when a directory holds both.
 
 | Where ry runs | Search starts at |
 | --- | --- |
@@ -98,10 +100,12 @@ $ cat ry.toml
 [check]
 exclude = ["scripts/"]
 $ ry check .
-warning[unused]: `v` is assigned but never used.
- --> R/a.R:1:19
-1 | f <- function() { v <- 1; 2 }
-                      ^
+unused
+
+  ! `v` is assigned but never used.
+   --[R/a.R:1:19]
+ 1 | f <- function() { v <- 1; 2 }
+   |                   ^
 
 1 problem in 1 file
 ```
@@ -137,7 +141,7 @@ $ ry check .
 1 file checked, no problems
 ```
 
-A hard error shows the offending line, so you do not have to count columns:
+A hard error shows the offending line:
 
 ```console
 $ cat ry.toml
