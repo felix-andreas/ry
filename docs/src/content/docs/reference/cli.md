@@ -29,7 +29,9 @@ Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 | `-V`, `--version` | — | — | Prints the version and exits 0 |
 | `-h`, `--help` | — | — | Prints help and exits 0. Available on every command |
 | `--stdio` | — | — | Accepted and ignored. It exists so VS Code's default launch arguments do not error |
-| `--experimental-features` | `FEATURES` | none | Space-separated feature names, or `all`. Only `range_formatting` exists today, and only the language server reads it — the flag does nothing for `check`, `fmt`, `repl`, or `run`. An unknown name prints a warning on stderr and is ignored, not a usage error |
+| `--experimental-features` | `FEATURES` | none | Space-separated feature names, or `all` |
+
+Only `range_formatting` exists today, and only the language server reads it, so the flag does nothing for `check`, `fmt`, `repl`, or `run`. An unknown name prints a warning on stderr and is ignored rather than treated as a usage error.
 
 ## check
 

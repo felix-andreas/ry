@@ -16,7 +16,7 @@ fn documentation_examples() {
 
     let code_blocks = Regex::new(r"(?m)```r\n([\s\S]*?)```").expect("valid regex");
     const BEFORE: &str = "R CODE IN THIS FILE IS FORMATTED AND SAVED TO docs/src/content/docs/reference/formatting-rules.md";
-    const AFTER: &str = "THIS FILE IS GENERATED AUTOMATICALLY.\
+    const AFTER: &str = "THIS FILE IS GENERATED AUTOMATICALLY. \
 MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD";
 
     let formatted = code_blocks

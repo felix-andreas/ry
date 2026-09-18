@@ -93,13 +93,17 @@ To go the other way: `[check] unused = false`, and any `[lint]` code set to `"of
 | Code | Severity | On by default | Triggered by |
 | --- | --- | --- | --- |
 | `syntax-error` | error | yes | Anything the R parser rejects. The message varies with the failure ("unclosed `(`; expected `)` to close the parameter list"); the code does not |
-| `syntax-error` | error | yes | An assignment target R refuses — a computed value or a number where a name belongs (`1 + a <- 2`). R parses these and fails at run time, so the mistake is real but the parse looks clean; the commonest cause is a line ending in an operator that pulls the next line in as its right-hand side, which the message names when that is what happened. A `!`-headed target is deliberately exempt: `!` binds tighter than `<-`, so `expr(!!name <- value)` — building an assignment rather than performing one — has that same shape |
+| `syntax-error` | error | yes | An assignment target R refuses: a computed value or a number where a name belongs, as in `1 + a <- 2` |
 
-The code says **whose grammar was broken**, not which stage noticed: your R is `syntax-error`, your `#:` comment is `annotation`. So a type expression that does not parse, and a form the annotation grammar refuses deliberately such as a nested `<T>` binder, both report as `annotation` alongside the malformed-block findings below.
+R parses an assignment to a non-name and fails at run time, so the mistake is real although the parse looks clean. The commonest cause is a line ending in an operator, which pulls the next line in as its right-hand side, and the message says so when that is what happened.
 
-**One mistake, one finding.** Recovery reports the first thing it cannot use and then stays quiet about the consequences: a `#:` region reports once (plus, at most, one unclosed opener, which is a structural fact about a construct rather than a per-token consequence), and an unterminated argument or parameter list ends at the next statement instead of adopting it. A function missing its body is not reported when its parameter list never closed — that is the same mistake said twice.
+A `!`-headed target is exempt. `!` binds tighter than `<-`, so `expr(!!name <- value)` builds an assignment rather than performing one and has the same shape.
 
-A statement that fails to parse as R suppresses every name-resolution and typing finding overlapping it — the checker draws no conclusions from source it could not read. A broken annotation suppresses nothing outside its own block; inside it, the block carries no typing payload, so the refusal is the only finding.
+A finding names the grammar the source broke, not the stage that found it. Broken R reports as `syntax-error`, and a broken `#:` comment reports as `annotation`. A type expression that does not parse and a form the annotation grammar refuses, such as a nested `<T>` binder, both report as `annotation`.
+
+One mistake produces one finding. A `#:` region reports once, plus at most one unclosed opener. An unterminated argument or parameter list ends at the next statement rather than adopting it.
+
+A statement that fails to parse as R suppresses every name-resolution and typing finding that overlaps it. A broken annotation suppresses nothing outside its own block, and inside it the refusal is the only finding.
 
 ### Name resolution
 
