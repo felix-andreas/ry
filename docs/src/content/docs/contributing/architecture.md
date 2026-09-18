@@ -34,7 +34,7 @@ compiler-checked analog of "make illegal states unrepresentable":
   (`check`, `fmt`, `server`, `debug`). Owns configuration, position-encoding
   conversion, diagnostics assembly and publication, and suppression comments.
 
-The `*-legacy` crates (`ry-legacy`, `analysis-legacy`, `engine-legacy`)
+The `*-legacy` crates (`roughly-legacy`, `analysis-legacy`, `engine-legacy`)
 are the previous stack, frozen in-tree as the baseline the performance
 benchmarks measure against; no code is shared between the two stacks by
 design.

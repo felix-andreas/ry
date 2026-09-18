@@ -24,7 +24,7 @@ ry is a Rust workspace. The shipping language tool is six crates:
   the system R by locating and loading it at runtime.
 
 The workspace also contains the **frozen legacy stack** (`legacy/analysis-legacy`,
-`legacy/engine-legacy`, `legacy/ry-legacy`, plus its `legacy/fixtures` harness): the previous
+`legacy/engine-legacy`, `legacy/roughly-legacy`, plus its `legacy/fixtures` harness): the previous
 implementation, kept in-tree only as the benchmark baseline for `legacy/differential`. The parity
 program that once ran every fixture through both stacks is complete and retired. Do not extend the
 legacy stack, and never share or abstract code between the two stacks — data files may be

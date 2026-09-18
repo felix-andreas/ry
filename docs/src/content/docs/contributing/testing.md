@@ -373,9 +373,9 @@ expectation only when the behavior or wording intentionally improved.
 ## The frozen legacy stack's harnesses
 
 The previous implementation stays in-tree (`legacy/analysis-legacy`, `legacy/engine-legacy`,
-`legacy/ry-legacy`, with its own `legacy/fixtures` harness) as the cross-implementation oracle
+`legacy/roughly-legacy`, with its own `legacy/fixtures` harness) as the cross-implementation oracle
 the differential compares against, and as the benchmark baseline. Its suites still run —
-`cargo test -p analysis-legacy` / `-p engine-legacy` / `-p ry-legacy`, and the workspace-wide
+`cargo test -p analysis-legacy` / `-p engine-legacy` / `-p roughly-legacy`, and the workspace-wide
 battery covers them — but the stack is frozen: do not extend its fixtures or harnesses, and never
 share code between the two stacks. Its `fixtures` crate parses the same `Simple` shape plus a
 `MultiFile` shape (explicit file paths and grouped workspace edits) that its engine-era suites use.

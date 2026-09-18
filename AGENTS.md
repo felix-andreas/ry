@@ -13,7 +13,7 @@ The workspace has two crate directories.
   - `ide` provides editor features as pure reads.
   - `ry` is the LSP server and the CLI.
   - `repl` is the R console behind `ry repl` and `ry run`. It loads R at runtime, so the rest of the workspace needs no R.
-- `legacy/` holds the frozen previous implementation. It contains `analysis-legacy`, `engine-legacy`, `ry-legacy`, and the `fixtures` harness. It also contains `differential`, which is now only the cross-stack benchmark harness. The identity-parity program is complete, and the user retired it. The new stack's fixtures are the contract, so no change needs the oracle to agree. Everything sits in one directory because every dependency edge points at the oracle. Deleting the legacy stack is then a single directory removal. The performance witnesses that apply to the new stack alone move out first.
+- `legacy/` holds the frozen previous implementation. It contains `analysis-legacy`, `engine-legacy`, `roughly-legacy`, and the `fixtures` harness. It also contains `differential`, which is now only the cross-stack benchmark harness. The identity-parity program is complete, and the user retired it. The new stack's fixtures are the contract, so no change needs the oracle to agree. Everything sits in one directory because every dependency edge points at the oracle. Deleting the legacy stack is then a single directory removal. The performance witnesses that apply to the new stack alone move out first.
 
 AI agents drive development on this project, and humans steer it lightly. Agents keep two written homes current. The docs site in `docs/` holds the authoritative specs for users and contributors. Those specs are contracts, so keeping them accurate is mandatory. The agent knowledge base in `.agents/memory/MEMORY.md` holds engineering state, priorities, debt, and non-obvious design rationale, so that no agent has to rediscover them. Update both in the same session as the work that changes them.
 
@@ -197,8 +197,8 @@ The recorded decision must state four things: the previous source of truth, what
 - Add or extend a fixture suite for a new phase or module before you rely on ad hoc unit tests.
 - Use the lightest fixture change that captures the failing shape.
 - Read the testing page at `docs/src/content/docs/contributing/testing.md` before you change the fixture harness or add a new fixture suite.
-- Run a focused fixture case with `FIXTURE_FILTER=group__case cargo test -p analysis --test test_fixtures <suite> -- --nocapture`.
-- Prefer running focused crate tests while you iterate. `cargo test -p analysis` is the default crate test command.
+- Run a focused fixture case with `FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures`. The other fixture targets are `test_naming_fixtures`, `test_lowering_fixtures`, and `test_lint_fixtures` in `semantics`, plus `test_syntax_fixtures` in `syntax`, `test_ide_fixtures` in `ide`, and `test_format_fixtures` in `format`.
+- Prefer running focused crate tests while you iterate. `cargo test -p semantics` is the default crate test command.
 - Keep a fixture's `group__case` name stable, because that name is the test identity. Reject a duplicate name across the suite instead of letting one case silently shadow another.
 - Treat fixtures as the desired semantics contract, not as a regression suite that preserves known-wrong behavior. Review an expectation change deliberately. Update an expectation only when the wording or the behavior improves on purpose. Never commit an intentionally wrong outcome only to keep the suite green.
 - Some fixture cases are unreasonable, or are no longer worth preserving. Clean up such a case instead of treating it as authoritative by default.
