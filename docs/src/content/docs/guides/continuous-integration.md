@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install ry
         env:
-          RY_VERSION: 0.3.0-alpha
+          RY_VERSION: 0.3.1-beta
         run: |
           curl -sSL "https://github.com/felix-andreas/ry/releases/download/${RY_VERSION}/ry-x86_64-unknown-linux-gnu.tar.gz" \
             | tar xz
@@ -33,13 +33,13 @@ jobs:
 
 Both commands exit `1` on findings, which is what fails the job. Neither needs R installed.
 
-**Pin the version.** Every release so far is marked a pre-release, so
-`releases/latest/download/…` resolves to an old stable tag rather than the newest build. The type
+**Pin the version.** Every release since `0.1.1` is marked a pre-release, so
+`releases/latest/download/…` resolves back to `0.1.1` rather than to the newest build. The type
 system is also still gaining capability, so a newer version can report findings an older one did
 not. Name the tag explicitly, as above. See [project status](/why-ry#project-status).
 
-Asset names follow the Rust target triple — `ry-aarch64-apple-darwin.tar.gz`,
-`ry-x86_64-pc-windows-gnu.zip` — and each archive contains the single `ry` binary.
+Asset names follow the Rust target triple, as in `ry-aarch64-apple-darwin.tar.gz` and
+`ry-x86_64-pc-windows-gnu.zip`. Each archive contains the single `ry` binary.
 
 ## Deciding what should fail the build
 
@@ -64,8 +64,8 @@ the exit code. A run whose only findings are warnings prints `1 file checked, no
 | Formatting enforced | `ry fmt --check` |
 | To see the diff CI would apply | `ry fmt --diff` |
 
-Exit code `2` is not "worse than 1" — it is a *different* failure. It means the run could not be
-completed: an unparseable `ry.toml`, a path that does not exist, an unreadable file. A job that
+Exit code `2` means the run could not be completed: an unparseable `ry.toml`, a path that does not
+exist, or an unreadable file. It is a different failure from `1`, not a worse one. A job that
 treats any non-zero status as "findings" will report a broken config as a code problem. The full
 table is in the [CLI reference](/reference/cli#exit-codes).
 
@@ -75,17 +75,16 @@ table is in the [CLI reference](/reference/cli#exit-codes).
 ry check --output json
 ```
 
-writes JSON Lines to stdout — one object per finding, nothing else on the stream, and no summary
-line. In JSON mode stderr stays empty, so you can pipe stdout straight into a tool without filtering
-anything out.
+writes JSON Lines to stdout: one object per finding, nothing else on the stream, and no summary
+line. In JSON mode no diagnostic is rendered to stderr. Configuration warnings and the exit-2 failures
+below still go there, so stderr is not always empty.
 
 ```json
 {"code":"type-mismatch","column":21,"endColumn":27,"endLine":4,"line":4,"message":"expected `integer`, found `character`","path":"/home/you/demo/main.R","related":[],"severity":"error"}
 ```
 
 Every field is documented in the [CLI reference](/reference/cli#json-output), and the field names
-are a contract — they are covered by tests that fail when they change, so a script built on them
-will not break silently.
+are a contract.
 
 Counting errors for a summary line, without jq:
 
