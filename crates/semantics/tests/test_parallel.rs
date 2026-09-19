@@ -1,7 +1,7 @@
 //! Parallel-read stress tests: salsa storage-handle clones let several
 //! threads force the same queries concurrently. The dangerous shape is the
-//! package-interface fixpoint — concurrent threads entering the same
-//! `global_scheme` cycle from different heads — which historically hung
+//! package-interface fixpoint, where concurrent threads enter the same
+//! `global_scheme` cycle from different heads. That shape historically hung
 //! parallel salsa fixpoints upstream. These tests gate any multi-core use of
 //! the database: no deadlock (bounded wall time), no panic, and answers
 //! byte-equal to the single-threaded ones.
@@ -108,7 +108,7 @@ fn concurrent_cycle_queries_agree_with_the_baseline() {
     });
     assert!(
         started.elapsed() < std::time::Duration::from_secs(60),
-        "parallel fixpoint took implausibly long — treat as a hang"
+        "parallel fixpoint took implausibly long, so treat it as a hang"
     );
 
     let mut single = all_diagnostics(&db, &files);
@@ -172,8 +172,8 @@ fn parallel_cold_prime_matches_sequential() {
 /// Cyclic-group answers must not depend on which member is queried first:
 /// forward forcing, reverse forcing, and per-item phase pre-forcing must all
 /// render identical diagnostics. (The canonical per-group fixpoint guarantees
-/// this; before it, the salsa cycle head — the first query to arrive —
-/// decided where the round cap pinned.)
+/// this. Before it, the salsa cycle head decided where the round cap pinned,
+/// and the head is whichever query arrives first.)
 #[test]
 fn cyclic_group_answers_are_forcing_order_independent() {
     let cases: Vec<Vec<String>> = vec![

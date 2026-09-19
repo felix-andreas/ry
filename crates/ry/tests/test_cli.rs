@@ -44,7 +44,8 @@ const SYNTAX_ERROR_SOURCE: &str = "print(1)\ny <- (\n";
 
 /// How the graphical reporter heads one finding: its diagnostic code, a blank
 /// line, then the message behind a severity marker. Stderr is a pipe under
-/// test, so the ASCII theme is in force — `x` for an error, `!` for a warning.
+/// test, so the ASCII theme is in force. It writes `x` for an error and `!` for
+/// a warning.
 fn heading(code: &str, marker: char, message: &str) -> String {
     format!("{code}\n\n  {marker} {message}")
 }
@@ -79,7 +80,7 @@ fn check_renders_one_based_positions() {
 
 // A snippet is a window on the source, not a box: the gutter runs unbroken
 // down every row, the range is underlined with carets, and no rule closes the
-// snippet off — a run of findings would otherwise carry one per finding.
+// snippet off. A run of findings would otherwise carry one rule per finding.
 #[test]
 fn check_draws_the_snippet_as_a_window() {
     let directory = project(&[("bad.R", SYNTAX_ERROR_SOURCE)]);
@@ -588,7 +589,7 @@ fn check_collate_order_decides_the_package_winner() {
     // Both files bind `value`; the reader errors only when the character
     // binding wins. Path order makes `b.R` the later writer; the Collate
     // order reverses that, so the integer binding wins and the reader is
-    // clean. Duplicate-binding warnings fire either way — the error
+    // clean. A duplicate-binding warning fires either way, and the error
     // severity floor keeps the assertion on the type finding alone.
     let base: &[(&str, &str)] = &[
         ("R/a.R", "value <- 1L\n"),
@@ -656,8 +657,8 @@ fn check_without_r_files_reports_nothing_and_exits_clean() {
 fn testthat_files_share_one_namespace_with_their_helpers() {
     // testthat sources everything in `tests/testthat/` into one environment,
     // `helper-*.R` first. Analysing them separately reported the helper as
-    // unused *and* every use of it as unresolved — two findings per helper on a
-    // correct package.
+    // unused *and* every use of it as unresolved. That is two findings per
+    // helper on a correct package.
     let directory = project(&[
         (
             "DESCRIPTION",
@@ -708,8 +709,8 @@ fn the_analysis_instrument_measures_the_same_program_as_check() {
     // `analysis-stats` exists to say where `check` spends its time, so it has to
     // analyse what `check` analyses. It classified documents by `R/` alone while
     // `check` also counts `tests/testthat/`, and on this project that made the
-    // instrument report three findings where the product reported none — the
-    // helper as unused, and each use of it as unresolved.
+    // instrument report three findings where the product reported none. Those
+    // were the helper as unused, and each use of it as unresolved.
     let directory = project(&[
         (
             "DESCRIPTION",
@@ -826,8 +827,8 @@ fn check_reports_an_export_the_package_does_not_define() {
 }
 
 // A column is what a person counts and an editor shows, so non-ASCII text
-// earlier on the line must not shift it — and the caret has to sit beneath the
-// glyph, which means padding by terminal cells, not by characters.
+// earlier on the line must not shift it. The caret also has to sit beneath the
+// glyph, which means padding by terminal cells rather than by characters.
 #[test]
 fn check_reports_character_columns_and_aligns_the_caret() {
     let directory = project(&[(
@@ -1195,7 +1196,7 @@ fn typing_off_directive_silences_one_file() {
 
 // `# typing: on` opts a single file into type checking when the
 // configuration has it off, and `# typing: strict` additionally escalates
-// unresolved references — both without touching the rest of the workspace.
+// unresolved references. Neither touches the rest of the workspace.
 #[test]
 fn typing_on_and_strict_directives_opt_single_files_in() {
     let directory = project(&[
@@ -1220,10 +1221,10 @@ fn typing_on_and_strict_directives_opt_single_files_in() {
 }
 
 // An attached package whose export set cannot be known silences every name
-// nothing defines. That is deliberate — without it a `library()` the corpus has
-// no stubs for turns every one of its exports into a false `unresolved` — but it
-// switched a whole class of checking off project-wide while the run still read
-// as "I understood everything". Strict mode reports those reads, because a
+// nothing defines. That is deliberate, because without it a `library()` the
+// corpus has no stubs for turns every one of its exports into a false
+// `unresolved`. It still switched a whole class of checking off project-wide
+// while the run read as "I understood everything". Strict mode reports those reads, because a
 // tolerated read IS undetermined, and names the remedy the docs give.
 //
 // This cannot be a fixture: the tolerance keys on `PackageMetadata`, a salsa
@@ -1295,8 +1296,8 @@ fn unknown_typing_directive_value_is_reported() {
 
 // data.table's non-standard evaluation: bare column references inside a
 // bracket carrying the data.table signature and inside the base
-// `with`/`subset` family resolve as data-masked columns — no
-// unresolved-name warnings — while base indexing keeps them.
+// `with` and `subset` family resolve as data-masked columns, so they raise no
+// unresolved-name warning. Base indexing keeps those warnings.
 #[test]
 fn data_masked_column_references_do_not_warn() {
     let directory = project(&[
@@ -1322,10 +1323,10 @@ fn data_masked_column_references_do_not_warn() {
     }
 }
 
-// `utils::globalVariables(c(...))` — the ecosystem-standard escape hatch —
-// declares names as dynamically bound for the whole package:
-// could-not-resolve is suppressed for them everywhere, while undeclared
-// names keep warning.
+// `utils::globalVariables(c(...))` is the ecosystem-standard escape hatch. It
+// declares names as dynamically bound for the whole package, so
+// could-not-resolve is suppressed for them everywhere. An undeclared name keeps
+// warning.
 #[test]
 fn global_variables_declarations_suppress_unresolved_warnings() {
     let directory = project(&[
@@ -1353,8 +1354,8 @@ fn global_variables_declarations_suppress_unresolved_warnings() {
 
 // A project stub can declare a dplyr-style verb `@masked`: the arguments its
 // `...` rest parameter absorbs evaluate in the data's frame, so bare column
-// references there stop warning — for the bare and the `pkg::name` call
-// forms alike — while a locally shadowed name masks nothing.
+// references there stop warning, for the bare call form and the `pkg::name`
+// form alike. A locally shadowed name masks nothing.
 #[test]
 fn masked_stub_verbs_mask_rest_absorbed_arguments() {
     let directory = project(&[
@@ -1383,8 +1384,8 @@ fn masked_stub_verbs_mask_rest_absorbed_arguments() {
 #[test]
 fn a_type_name_two_scripts_both_declare_is_not_a_duplicate() {
     // A duplicate is judged against the namespace the declaration lives in. A
-    // script's type declarations reach only its own file — a name declared in
-    // one script is invisible to the next — so two scripts may each declare
+    // script's type declarations reach only its own file, and a name declared
+    // in one script is invisible to the next, so two scripts may each declare
     // `Thing`. Only a repeat inside one file conflicts, which the fixture
     // suites cover; this guards the cross-file half, which they cannot express
     // because a fixture case is one file.

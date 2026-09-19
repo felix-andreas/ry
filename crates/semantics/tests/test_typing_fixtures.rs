@@ -30,8 +30,8 @@ fn render_as(source: &str, kind: DocumentKind) -> String {
 /// Package-metadata cases: leading `#namespace ` lines form the NAMESPACE
 /// source and `#description ` lines the DESCRIPTION source (both stay in the
 /// analyzed text as ordinary comments, so ranges are honest). The suite is
-/// new-stack only — the oracle has no package-metadata concept — so it is
-/// deliberately absent from the differential fixture arm.
+/// only on the new stack, because the oracle has no package-metadata concept,
+/// so it is deliberately absent from the differential fixture arm.
 fn render_with_metadata(source: &str) -> String {
     let mut db = RootDatabase::default();
     semantics::stubs::install_shipped_stubs(&db);

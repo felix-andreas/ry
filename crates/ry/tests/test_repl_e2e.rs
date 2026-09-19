@@ -1,7 +1,8 @@
 //! End-to-end tests for `ry repl`, driving the real binary through a
 //! pseudo-terminal: type input, watch R evaluate. They need a local R
-//! installation, so they SKIP (loudly, but green) where none exists — CI has
-//! no R, and by decision these run locally before REPL-touching changes:
+//! installation, so they skip loudly, but green, where none exists. CI has no
+//! R, and by decision these run locally before a change that touches the
+//! console:
 //!
 //! ```sh
 //! cargo test -p ry-lang --test test_repl_e2e -- --nocapture
@@ -30,8 +31,8 @@ fn r_available() -> bool {
 }
 
 /// One interactive session at a time: concurrent full R sessions on a
-/// loaded machine make the pty timing flaky, while serial runs are stable —
-/// the lock rides in the session so its scope is exactly the session's.
+/// loaded machine make the pty timing flaky, while serial runs are stable. The
+/// lock rides in the session, so its scope is exactly the session's.
 static SESSION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct ReplSession {
@@ -65,7 +66,7 @@ impl ReplSession {
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
         let writer = pair.master.take_writer().expect("pty writer");
         // The pty read is blocking with no timeout, so it lives on its own
-        // thread; `expect` then waits on the channel with a deadline — a
+        // thread. `expect` then waits on the channel with a deadline, so a
         // session that goes silent fails loudly instead of hanging the test.
         let (sender, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
@@ -123,9 +124,10 @@ impl ReplSession {
             .push_str(&strip_ansi(&String::from_utf8_lossy(&chunk)));
     }
 
-    /// Keeps servicing the session for a fixed duration — used where a test
-    /// must let evaluation *start* (a bare sleep would leave the editor's
-    /// terminal handshake unanswered, so the input would still be queued).
+    /// Keeps servicing the session for a fixed duration. A test uses this
+    /// where it must let evaluation *start*. A bare sleep would leave the
+    /// editor's terminal handshake unanswered, so the input would still be
+    /// queued.
     fn settle(&mut self, duration: Duration) {
         let deadline = Instant::now() + duration;
         while Instant::now() < deadline {
@@ -253,10 +255,10 @@ fn tab_completes_with_analysis_signatures() {
     session.expect("ry R console");
     session.send("seq_l\t");
     // The completion menu renders the analysis-backed signature next to the
-    // candidate — the stub corpus reaching the console. (Session-binding
-    // completion is pinned by the completer's own unit tests; driving the
-    // menu through several interactions over a pty is too stateful to
-    // assert reliably.)
+    // candidate, which is the stub corpus reaching the console. The
+    // completer's own unit tests pin session-binding completion, because
+    // driving the menu through several interactions over a pty is too stateful
+    // to assert reliably.
     session.expect("seq_len");
     session.expect("fn(length.out: Any) -> integer[]");
     // Enter accepts the highlighted candidate and closes the menu; Ctrl-C
@@ -296,8 +298,8 @@ fn the_terminal_width_reaches_r() {
         return;
     }
     // R's own default is 80 columns whatever the terminal is, and it exports
-    // no setter — so without the console feeding `options(width = …)` in,
-    // every wide table wraps on a terminal that had room for it.
+    // no setter. Without the console feeding `options(width = …)` in, every
+    // wide table wraps on a terminal that had room for it.
     let mut session = ReplSession::start();
     session.expect("ry R console");
     session.send("cat(\"WIDTH:\", getOption(\"width\"), \"\\n\")\r");
