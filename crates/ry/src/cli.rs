@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use syntax::TextRange;
 
-/// A run summary — what was checked, what was formatted. Not a finding, so it
-/// is a plain line rather than a report.
+/// A run summary, saying what was checked and what was formatted. It is not a
+/// finding, so it is a plain line rather than a report.
 pub fn info(message: &str) {
     eprintln!("{}", style(message).bold());
 }
@@ -40,8 +40,9 @@ pub fn error(message: &str) {
     });
 }
 
-/// An error over an underlying failure — an I/O or parse error — which renders
-/// as the report's cause rather than as a bare line after it.
+/// An error over an underlying failure, such as an IO error or a parse error.
+/// The failure renders as the report's cause rather than as a bare line after
+/// it.
 pub fn error_because(message: &str, cause: &(dyn std::error::Error + 'static)) {
     report(&Report {
         message,
@@ -91,8 +92,8 @@ pub fn check(
     // One project per root, however the user spelled the paths. A name
     // declared in a sibling file must resolve the same way for `check .`,
     // `check R/` and `check R/a.R R/b.R`, so analysis always covers the whole
-    // root and only *reporting* is scoped to the paths that were named —
-    // otherwise the verdict depends on the command line, and
+    // root, and only *reporting* is scoped to the paths that were named.
+    // Otherwise the verdict depends on the command line, and
     // `check $(git diff --name-only)` cannot be trusted as a gate.
     let mut groups: Vec<(PathBuf, config::Config, Vec<PathBuf>)> = Vec::new();
     for file in files {
@@ -243,10 +244,11 @@ pub fn check(
             checked.push((path, source));
         }
 
-        // Feed the project in the server's order — package files first, in
-        // DESCRIPTION `Collate` order when declared (unlisted files after the
-        // listed ones), then ascending by root-relative path — so the
-        // last-writer-wins symbol index selects the same winners.
+        // Feed the project in the server's order, so the last-writer-wins
+        // symbol index selects the same winners. Package files come first, in
+        // the DESCRIPTION `Collate` order when it is declared, with unlisted
+        // files after the listed ones. The rest follow, ascending by
+        // root-relative path.
         // Diagnostics still print in discovery order below.
         let mut ordered: Vec<usize> = (0..checked.len()).collect();
         ordered.sort_by_key(|index| {
@@ -478,9 +480,9 @@ pub fn check(
     })
 }
 
-/// `check`'s closing line. An empty tree is not a usage error — a monorepo
-/// stage with no R in it yet must not fail a pipeline — so it reports what it
-/// found (nothing) and exits clean.
+/// `check`'s closing line. An empty tree is not a usage error, because a
+/// monorepo stage with no R in it yet must not fail a pipeline. It reports
+/// that it found nothing and exits clean.
 fn report_check_summary(n_files: usize, n_diagnostics: usize) {
     let files = if n_files == 1 { "file" } else { "files" };
     if n_diagnostics == 0 {
@@ -495,9 +497,10 @@ fn report_check_summary(n_files: usize, n_diagnostics: usize) {
     println!("{n_diagnostics} {problems} in {n_files} {files}");
 }
 
-/// The R program a file contributes to analysis: its own text, or — for a
-/// literate document — the R its chunks contain, with prose blanked so every
-/// reported range still points at the original file.
+/// The R program a file contributes to analysis. For an ordinary file that is
+/// its own text. For a literate document it is the R its chunks contain, with
+/// the prose blanked, so every reported range still points at the original
+/// file.
 pub(crate) fn analysable_source(path: &Path, text: String) -> String {
     let literate = path
         .extension()
@@ -530,7 +533,7 @@ pub(crate) fn warn_unknown_config_keys(config: &config::Config) {
 /// The `[check] exclude` matcher: gitignore-style patterns anchored at the
 /// config file's directory (the walk target's directory when no config file
 /// exists). The anchor is canonicalized so matching agrees with the
-/// canonicalized walk paths — on Windows canonical paths carry the `\\?\`
+/// canonicalized walk paths. A canonical path on Windows carries the `\\?\`
 /// prefix, and a non-canonical anchor would silently never match.
 pub(crate) fn exclude_matcher(
     config: &config::Config,
@@ -566,28 +569,29 @@ pub(crate) fn exclude_matcher(
 }
 
 /// Walks `target` for R sources. Excluded directories are pruned without
-/// descending; a `target` that is itself a file bypasses exclusion — a file
-/// named explicitly is always checked.
+/// descending. A `target` that is itself a file bypasses exclusion, because a
+/// file named explicitly is always checked.
 /// Directories that hold vendored dependency infrastructure rather than
 /// project code. `renv/activate.R` alone is a thousand generated lines every
 /// `renv`-using project would otherwise see reported. A path named explicitly
-/// on the command line still wins — this only scopes the directory walk.
+/// on the command line still wins, because this only scopes the directory
+/// walk.
 const VENDORED_DIRECTORIES: [&str; 5] = ["renv", "packrat", "revdep", ".Rproj.user", ".Rcheck"];
 
 /// Whether a file shares one namespace with its siblings rather than being
 /// analysed alone. Two directories do: `R/`, whose files are all sourced into
 /// the package environment, and `tests/testthat/`, whose files testthat sources
-/// into one environment as well — `helper-*.R` first, then the test files, which
-/// is the documented way to share a fixture. Analysing those separately reported
+/// into one environment as well. testthat sources `helper-*.R` first, then the
+/// test files, which is the documented way to share a fixture. Analysing those separately reported
 /// every helper as unused *and* every use of one as unresolved, two findings per
 /// helper on a package that is perfectly correct.
 ///
 /// **Every surface that assigns a [`DocumentKind`] must call this**, or it
 /// analyses a different program than the others. Three copies of the rule
 /// existed and one of them counted `R/` alone, which is why `analysis-stats`
-/// reported three findings on a testthat package where `check` reported none —
-/// an instrument disagreeing with the product it exists to measure. Note that
-/// this is not the *ordering* key: package files sort ahead of scripts by
+/// reported three findings on a testthat package where `check` reported none.
+/// An instrument must not disagree with the product it exists to measure. This
+/// is not the *ordering* key. A package file sorts ahead of a script by
 /// `R/`-membership alone, so a testthat file shares the namespace while still
 /// sorting after every `R/` file.
 pub(crate) fn shares_a_namespace(path: &Path, root: &Path) -> bool {
@@ -697,9 +701,9 @@ pub(crate) fn discover_project_stubs(
 }
 
 /// One companion location of a diagnostic, resolved to the file it lives in.
-/// A related range routinely sits in another document — the sibling binding an
-/// overwrite warning points at — so each note carries its own text to render
-/// from.
+/// A related range routinely sits in another document, such as the sibling
+/// binding an overwrite warning points at, so each note carries its own text to
+/// render from.
 struct RelatedNote<'a> {
     path: &'a Path,
     source: &'a str,
@@ -719,14 +723,16 @@ fn render_human_diagnostic(
 ) {
     // A companion location lives in another file, whose line table this run has
     // not built. There are only ever a handful per finding, so building one here
-    // costs a walk each — against one walk per finding, which is the point.
+    // costs a walk each. That is set against one walk per finding, which is
+    // the point.
     let related_lines: Vec<LineStarts> = related
         .iter()
         .map(|note| LineStarts::new(note.source))
         .collect();
     report(&Report {
-        // The code heads the report — it is what a suppression comment must
-        // spell (`# ry: allow(unused)`), so the human output teaches it.
+        // The code heads the report, because it is what a suppression comment
+        // must spell, as `# ry: allow(unused)` does. The human output
+        // therefore teaches it.
         code: Some(diagnostic.code),
         severity: match diagnostic.severity {
             Severity::Warning => ReportSeverity::Warning,
@@ -769,9 +775,10 @@ fn primary_label(source: &str, range: TextRange) -> LabeledSpan {
 
     let start = usize::from(range.start());
     let mut end = usize::from(range.end()).min(source.len());
-    // An empty range — a parser error at a position rather than over a token —
-    // has nothing to underline, so it takes the character it points at. At end
-    // of file there is none, and the header position alone has to carry it.
+    // An empty range has nothing to underline, so it takes the character it
+    // points at. A parser error at a position rather than over a token
+    // produces one. At end of file there is no such character, and the header
+    // position alone has to carry it.
     if end == start {
         end = source
             .get(start..)
@@ -925,7 +932,7 @@ impl miette::Diagnostic for Report<'_> {
 
 /// Draws one report on stderr. The look follows the destination: colour and
 /// unicode rules on an attended terminal, monochrome unicode when colour is
-/// refused, plain ASCII into a pipe or a file — a CI log and a captured
+/// refused, and plain ASCII into a pipe or a file. A CI log and a captured
 /// expectation both want the ASCII.
 pub fn report(diagnostic: &dyn miette::Diagnostic) {
     let reporter = &*REPORTER;
@@ -970,8 +977,8 @@ static REPORTER: LazyLock<Reporter> = LazyLock::new(|| {
     // rather than a corner that promises a frame nothing closes.
     theme.characters.vbar_break = theme.characters.vbar;
     theme.characters.ltop = theme.characters.hbar;
-    // Carets, not a rule, under the reported range — the underline is the one
-    // part of the drawing a reader is meant to look at.
+    // Carets go under the reported range rather than a rule. The underline is
+    // the one part of the drawing a reader is meant to look at.
     theme.characters.underline = '^';
 
     let closing_rule = format!(
@@ -997,8 +1004,9 @@ static REPORTER: LazyLock<Reporter> = LazyLock::new(|| {
 /// Whether `line` is the rule miette closes every snippet with. It is drawn
 /// from the same two characters as the cause-chain arrows, so it cannot be
 /// themed away, and a run of findings reads better without one under each.
-/// Only a line that is nothing *but* the rule counts — a nested report indents
-/// its own (in the parent's colour), and R source may spell anything at all.
+/// Only a line that is nothing *but* the rule counts. A nested report indents
+/// its own rule, in the parent's colour, and R source may spell anything at
+/// all.
 fn closes_a_snippet(line: &str, closing_rule: &str) -> bool {
     line.trim_end()
         .strip_suffix(closing_rule)
@@ -1007,8 +1015,8 @@ fn closes_a_snippet(line: &str, closing_rule: &str) -> bool {
 
 /// How many horizontal bars miette's snippet-closing rule carries. Read off
 /// miette 7.6's `GraphicalReportHandler`, which hardcodes the width rather than
-/// exposing it on the theme — so an upgrade can move it. Nothing breaks
-/// silently if it does: the rule then stops matching and reappears under every
+/// exposing it on the theme, so an upgrade can move it. Nothing breaks
+/// silently if it does. The rule then stops matching and reappears under every
 /// snippet, which `check_draws_the_snippet_as_a_window` fails on.
 const CLOSING_RULE_WIDTH: usize = 4;
 
@@ -1017,9 +1025,9 @@ const CLOSING_RULE_WIDTH: usize = 4;
 ///
 /// It exists to bound snippet drawing. miette finds a span's lines by walking
 /// the source from byte zero, so a run reporting many findings against one file
-/// re-walks that file once per finding — on a file with 8,000 findings that was
-/// 6.7 s of a 7.3 s run, 98% of the reporter. Built once per file, this turns
-/// the walk into a binary search plus a bounded window.
+/// re-walks that file once per finding. On a file with 8,000 findings that was
+/// 6.7 s of a 7.3 s run, which is 98% of the reporter. Built once per file,
+/// this turns the walk into a binary search plus a bounded window.
 #[derive(Debug)]
 struct LineStarts {
     starts: Vec<u32>,
@@ -1088,7 +1096,7 @@ impl<'a> NamedText<'a> {
 
     /// The zero-based column of a byte offset, counted in characters. A
     /// column is what a person counts and an editor shows, so non-ASCII text
-    /// earlier on the line must not shift it — and it has to agree with the
+    /// earlier on the line must not shift it. It also has to agree with the
     /// column the JSON records carry for the very same finding.
     fn character_column(&self, offset: usize) -> usize {
         let Some(before) = self.text.get(..offset) else {
@@ -1104,8 +1112,8 @@ impl SourceCode for NamedText<'_> {
     /// file. The window is the span's lines plus a margin wider than the context
     /// asked for, so the walk inside sees everything it would have seen and
     /// stops where it would have stopped; the result is then translated back
-    /// into whole-file coordinates. Delegating keeps one implementation of what
-    /// a snippet contains — reimplementing it is how a drawing drifts while
+    /// into whole-file coordinates. Delegating keeps one implementation of
+    /// what a snippet contains. Reimplementing it is how a drawing drifts while
     /// still looking plausible.
     fn read_span<'a>(
         &'a self,
@@ -1155,9 +1163,10 @@ impl SourceCode for NamedText<'_> {
 /// what makes the answer independent of how the command names its paths.
 ///
 /// Nearest wins whichever marker it is, so a `ry.toml` at a repository
-/// root does not swallow a package in a subdirectory — that package's own
+/// root does not swallow a package in a subdirectory. That package's own
 /// `DESCRIPTION` is closer, and its `R/` must still be package source. The
-/// ancestor config still *configures* it; only the root is decided here.
+/// ancestor config still *configures* it, and only the root is decided
+/// here.
 fn project_root_for_target(target: &Path) -> PathBuf {
     let mut current = if target.is_dir() {
         Some(target)
@@ -1212,7 +1221,7 @@ pub fn fmt(
             warn_unknown_config_keys(&config);
             // `[check] exclude` scopes analysis, not formatting: fmt walks
             // everything, matching the key's name and the formatter's speed.
-            // Literate documents are analysed but never formatted — the
+            // A literate document is analysed but never formatted. The
             // formatter rewrites whole-file layout, and most of an `.Rmd` is
             // prose it has no business touching.
             let paths: Vec<PathBuf> = collect_r_files(file, None)?
@@ -1292,7 +1301,7 @@ pub fn fmt(
         ("reformatted", "left unchanged")
     };
     // A file that could not be read or parsed is neither reformatted nor
-    // "already formatted" — counting it as the latter told the reader their
+    // "already formatted". Counting it as the latter told the reader their
     // whole tree was clean when part of it was never looked at.
     let n_unchanged = n_files - n_unformatted - n_errors;
     let failed = if n_errors == 0 {
@@ -1453,11 +1462,11 @@ mod tests {
     use super::*;
 
     /// The windowed `read_span` must answer exactly what miette's own
-    /// whole-file walk answers — same bytes, same span, same line, same line
-    /// count — or the drawing drifts while still looking plausible. Swept over
-    /// every line ending R files carry, spans that start mid-line, span a break,
-    /// sit at the very start or the very end, and a file with no trailing
-    /// newline.
+    /// whole-file walk answers, with the same bytes, span, line, and line
+    /// count, or the drawing drifts while still looking plausible. The sweep
+    /// covers every line ending an R file carries, a span that starts mid-line,
+    /// a span that crosses a break, a span at the very start and at the very
+    /// end, and a file with no trailing newline.
     #[test]
     fn the_windowed_snippet_matches_miettes_own() {
         let bodies = [
