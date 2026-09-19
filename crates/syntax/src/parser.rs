@@ -498,6 +498,12 @@ impl Parser<'_> {
                             self.error_here("expected `]` after the optional parameter name");
                         }
                     }
+                    // JSDoc writes the type first. This directive writes the
+                    // name first, so say which form to use instead of only
+                    // reporting the missing name.
+                    Some(SyntaxKind::L_BRACE) if self.pos < end => self.error_here(
+                        "expected a parameter name after `@param`. The name comes before the type, as `@param name {TYPE}`",
+                    ),
                     _ => self.error_here("expected a parameter name after `@param`"),
                 }
                 self.ann_trivia(end);

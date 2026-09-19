@@ -1544,8 +1544,8 @@ impl Worker {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        // Name the file that was actually loaded: a project may still be on
-        // the pre-rename `ry.toml`.
+        // Name the file that was actually loaded. A project may still be on
+        // `roughly.toml`, the name the configuration file used to have.
         let file = self
             .config
             .source_directory

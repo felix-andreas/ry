@@ -1,395 +1,499 @@
-# Decision record: incremental architecture & recheck-trigger model
+# Decision record: the analysis core is a memoized query framework
+
+The analysis core uses a memoized query framework with automatic,
+dependency-tracked invalidation. The substrate is salsa, and `crates/semantics`
+is the database.
+
+The alternative was to hand-roll incrementality per structure, with a
+reverse-dependency index, an incremental package naming pass, an incremental
+type index, and debug-only drift assertions that compared each incremental
+result against a full rebuild. That model shipped first and was then replaced.
+
+Four reasons decided it, and they still apply to anything proposed in this area.
 
-**Status:** Part A (recheck trigger) — decided. Part B (hand-roll vs. memoized-query framework) — **DIRECTOR-DRIVEN: direction is to pursue the memoized-query framework, validated by a de-risking spike before any production migration** (the user directed, verbatim, that driving this fork forward is the Director's responsibility — it is NOT deferred to the user). Part C (value-interface-table slice) — **paused; subsumed by the framework if the spike confirms.**
+- Hand-rolling the invalidation core is empirically error-prone, independent of
+  how simple R's dependency graph is. The hand-rolled model produced several
+  silent-stale bugs, where analysis served an answer computed from text the user
+  had already changed.
+- The safety net was structurally incomplete. The drift assertions ran under
+  `cfg(debug_assertions)` only, so release-path correctness was unverified. They
+  were also blind to a shared-rule bug, because the incremental path and the
+  oracle shared the membership predicate, so a wrong rule was invisible to both.
+- The real dividing line is automatic dependency-tracked invalidation against
+  hand-maintained mirrored invalidation. In a framework the tracked path is the
+  default, and an untracked read is the exception. Hand-rolling inverts that, so
+  every new read is a chance to reintroduce staleness.
+- A framework delivers cancellation, parallelism, and eviction structurally. The
+  live-as-you-type model below needs all three, and hand-rolling provides none
+  of them without large additional machinery.
+
+Only salsa's core is wanted, which is memoized queries with automatic
+invalidation. Its heavier machinery, for macro expansion, a trait and coherence
+solver, and a multi-crate graph, is aimed at a deep, dynamic dependency graph.
+R's graph is shallow and static, so that machinery stays unused.
+
+`docs/src/content/docs/contributing/architecture.md` is the contract for what
+the core does today. Read it before touching the analysis core or the server's
+scheduling.
+
+# Decision record: diagnostics are live as you type, not on save
+
+Diagnostics publish while the user types rather than only on save.
+
+rust-analyzer runs two diagnostic streams. It publishes its own type and name
+diagnostics live as you type, debounced and cancellable, and it runs
+`cargo check` on save for the authoritative full error set. ry has no second
+stream, because it is the only static type checker for R. Publishing on save
+alone would therefore give a user zero type feedback while typing, which is
+strictly worse than what rust-analyzer does.
+
+The interactive queries, which are hover, completion, goto, and signature help,
+answer on demand rather than on a schedule.
+
+The architecture page records how the server implements this today, through a
+fast first wave and a settled wave at idle time.
+
+
+# Decision record: the standard library ships as declaration-only stub files
+
+Standard-library type information ships as dedicated declaration-only files with
+the extension `.Rtypes`, rather than as ordinary R files.
+
+The retired approach shipped stubs as R files carrying a placeholder body, such
+as `length <- function(x) 0L`, and harvested the `#:` annotation while ignoring
+the body. That let a stub carry a meaningless, unreachable function body, and it
+required a full parse and lowering just to reach the annotation. In a
+declaration-only file a body is unrepresentable, so a stub cannot drift into
+carrying one, and the loader parses only declarations.
+
+The extension avoids colliding with R's own family, which is `.Rd` for
+documentation, plus `.Rmd`, `.Rda`, and `.RData`. `.Rstub` was considered and
+rejected.
+
+An ad-hoc overload uses an ordered overload set. A genuinely parametric
+higher-order function, such as `lapply`, `Map`, `Reduce`, or `identity`, gets a
+real generic type through the existing `<T> fn(...)` polymorphism, and is never
+widened to `Any`.
+
+Highlighting a stub file goes through LSP semantic tokens. One server
+implementation then colours both an inline `#:` annotation and a stub file, in
+every LSP client, reusing spans the server already computes.
+
+`docs/src/content/docs/contributing/authoring-stubs.md` is the contract for the
+format, the overload rules, and the export manifests.
+
+# Decision record: the beta semantics
+
+This record holds the core type-system decisions. `backlog.md` holds the prioritized work that
+follows from them. The semantics contract is `reference/type-system.md`, and it is updated before
+the behavior it describes ships.
+
+## The R variable model is mutable slots with union joins
+
+R assignment mutates the current function-scope environment. A branch or loop assignment is
+therefore visible after the construct. A model that creates a fresh binding per `<-`, which is
+let-shadowing, does not describe R, so it is not used. The model is this.
+
+- A function scope holds mutable variable slots. Each `<-`, `=` and `->` writes the slot. Each
+  `<<-` and `->>` walks the lexical chain to the nearest enclosing slot.
+- A read sees the union of the reaching definitions at that point. A conditional write joins with
+  the prior type. A loop-body write joins across iterations.
+- Unused detection falls out of the model. A write that no read reaches is unused, so the report
+  names an assignment rather than a binding.
 
-## RESOLUTION (2026-06-28) — how Part B is being driven
+Flow-sensitive narrowing is a later layer on the same model. It is not part of this decision.
 
-The Director owns this decision (per the user's explicit directive). Resolved direction, quality-first: **pursue the memoized-query / automatic-invalidation framework**, because the hand-rolled safety net is provably incomplete (debug-only — now also release-gated — AND blind to shared-rule bugs) and the silent-stale bug class keeps recurring; a framework makes that class structurally impossible, and the project's own roadmap (stub framework + namespace edges) trips the adopt-a-framework tripwire regardless.
+The let-shadowing model was unsound. `x <- 1L; if (f) x <- "two"; x + 1L` typechecked clean and
+crashes at run time. It also reported the conditional update and the loop accumulator as unused,
+and both are idiomatic R. No fix inside the lint alone was possible.
 
-This is driven **with evidence, not blind**, via a **de-risking SPIKE** (investigation, no production change — within CTO autonomy):
-1. Build a shadow prototype of the query engine (in-house red-green, or salsa) over one phase-chain: `parse(file)` → `lower(file)` → `local_naming(file)`.
-2. Run it alongside the current pipeline and cross-check its outputs against the existing drift oracles on the seeded soak.
-3. Measure overhead (memory + per-edit time) vs. the hand-rolled path.
-4. Report a **go/no-go** with evidence: is the query model clean for R, what is the overhead, does the cross-check stay green.
+## A multi-member union is for joins and annotations, never for a unification variable
 
-On **go**, proceed to a phased migration (keep tree-sitter parsing + the M2 HM type core; migrate phase-by-phase; run the existing drift oracles as the live cross-check during migration; retire them only once the query path is the source of truth). The full production migration is the point at which any remaining user-gate applies; the spike itself is investigation. On **no-go**, the spike's evidence justifies staying hand-rolled-within-limits and this record is updated with the finding.
+A general union `A | B | C` comes from a join or from an annotation. It normalizes flat,
+deduplicated and order-insensitive, and `T | NULL` is a special case of it.
 
-## REWRITE EXECUTION (user-directed, 2026-06-28)
-
-The spike returned GO. The user directed the rewrite be done as a **separate crate**, experimentally, and that the Director lead it (trusting the CTO + experts), verifying highest-possible quality at the end. Terms:
-
-- **Separate crate.** Build the new memoized-query engine in its own crate (promote the shelved spike `643d85a`), NOT behind a feature flag in `analysis`. The production `analysis` crate stays untouched and green throughout.
-- **Duplication is allowed and committed.** For experimentation, do not prematurely share code between the new crate and `analysis`; commit the experiment freely.
-- **Substrate is the CTO/architect's call** (salsa crate vs. the in-house red-green engine from the spike), justified in the design.
-- **Pipeline as memoized queries:** parse → lower → local_naming → package_naming → typecheck, with automatic dependency-tracked invalidation (no hand-maintained reverse-dep index / dirty-set / string fingerprints — they dissolve into recorded query dependencies).
-- **Validation = differential cross-check against the old engine** (new-engine output == `analysis` output over a ported fixture subset). This **subsumes the F1 differential fuzzer** — F1's invariant becomes the rewrite's new-vs-old test. Keep tree-sitter + the M2 type core (they become query bodies, not rewrites).
-- **Quality bar (Director + Expert verify before any cutover):** the silent-stale bug class is structurally impossible (no mirrored state ⇒ no drift oracle needed); cancellation + parallelism available; per-edit cost is O(blast-radius) and competitive; the code is cleaner than the hand-rolled model. Production cutover is a separate, later decision made on this evidence.
-
-**Recorded:** 2026-06-28, after two independent expert reviews commissioned with *effort explicitly excluded and engineering quality as the sole criterion* — the persistent RA/LSP expert (full M1–M4 context) and a fresh outside reviewer (no stake in prior work). They agreed on Parts A and C and **split on Part B**; that split is itself the key signal.
-
-### Execution status (R0–R3, 2026-06-28/29) — `engine` crate, `analysis` untouched
-
-- **R0** — `engine` crate stands up the in-house red-green substrate (CTO's call over salsa; justified in `crates/engine/DESIGN.md`). Generic core: revision clock, type-erased slots, runtime dependency recording, red-green validation + early cutoff, accidental-cycle guard, `remove_input` tombstones. Expert-ratified after the design gaps were closed (per-symbol granularity, deletion, R2-vs-full-rebuild, concurrency).
-- **R1** — the real pipeline wired as queries reusing `analysis` pub fns (no rewrite): parse → lower → local_naming → the per-symbol interface (`ExportedNames` names-only cutoff → `PackageSymbolIndex` → `DefiningItem` firewall → `GlobalScheme`) → typecheck → diagnostics. The recorded per-symbol dependency set **is** the M3 reverse-dep index, reconstructed automatically (granularity demonstrated by exec-counter tests). Re-export cycles (R1b) and the **general** value-reference interface cycle resolve via a Tarjan-SCC bounded fixed-point porting the production round-cap + `Unknown`-pinning.
-- **R2 — DIFFERENTIAL PARITY (the correctness gate).** `new == analysis`'s **full from-scratch `run_full`** (never its incremental path; production drift oracles self-check the oracle), byte-exact on rendered `(start,end,code,severity,message)`, asserted after **every** edit over 10 curated scenarios + a randomized cyclic/adversarial stream (8 seeds × 300 steps: edit→query→edit, add→delete→re-add, package↔script flips, renames, re-export+value cycles, **malformed input**, **`unused:true`**). Covers local-naming + package-naming + type + strict. Expert adversarially verified the machinery is genuinely honest (exclusions applied symmetrically by code, never masking within a compared class) and found two hidden divergences, now CLOSED: **GAP #3** (malformed-input lowering — the engine's `Lower` now short-circuits to an empty `Module` on `root.has_error()`, matching production) and **GAP #4** (unused-local warnings now emitted, gated by `unused`). Tombstone resurrection hardened (`fetch_optional` → empty, not panic).
-- **R3 — blast-radius + cancellation.** Recompute is **blast-radius-bounded** (exec-counter-proven: a body edit re-infers exactly the edited file + its referrers, **zero** O(package) folds) — substantiating O(blast-radius) *recompute* (parity alone proves no under-invalidation; this proves no over-recompute). Per-edit ~10–13× faster than the old engine at 9k/94k/281k LoC. **Honest caveat:** wall time is *not* flat in N — the residual O(N) is the red-green validation walk (one hash-lookup + cutoff-bump per file, no inference; salsa pays it too); driving it sub-linear is a deferred durability slice. Cooperative cancellation built (revision/token-checked, latest-edit-wins, additive).
-
-### Honest cutover-blocker list (replaces the earlier "2 exclusions" framing)
-
-Before any production cutover (a separate, later, user-gated decision), these must land — the parity gate is genuine for everything the engine *models*, but the engine does not yet model:
-
-1. **Lowering / syntax-error diagnostics** — **CLOSED (2026-06-29, `d315feb`).** `lower_with_diagnostics` is now `pub`; the engine's `LoweringDiagnostics(f)` query calls it (the same function production lowers through), so both branches — `collect_syntax_errors` on a malformed tree and the lowering-pass diagnostics on a well-formed one — are reproduced and compared. (`AnnotationError` stays dead but is compared, not excluded.)
-2. **Lint diagnostics** — **CLOSED (2026-06-29, `d315feb`).** `Lint(f)` query calls the same `analysis::lint::analyze` with the `[lint]` config (folded into the `Config` input). The differential now compares all six classes with **zero exclusions**.
-3. **IDE feature queries** *(added by Director verification 2026-06-29 — omitted from the CTO's original list; the single largest unmodeled surface).* The engine models only the **diagnostic** pipeline (parse→lower→naming→typecheck→diagnostics). The interactive query layer production's `analysis` serves — **hover, completion, goto-definition, references, rename, inlay hints, signature help** — is not modeled at all (the engine's query keys are all diagnostic-pipeline). A clean cutover that retires the old incremental path must port these to the engine (a large slice — they re-expose the engine's naming/type facts as IDE queries) **or** accept a hybrid (diagnostics on the new engine, IDE queries staying on the old `analysis` path, two engines coexisting). This dominates the cutover cost and is the main input to the cutover-scope decision. **(Cutover Phase 2 — the 7 interactive features are ported to engine-backed queries and proven at full per-position parity incl. cross-file, with the Class-1 granularity exec-counter proof; symbols ports with the Phase 3 server wiring. See the Phase 2 status below.)**
-4. **LSP/CLI integration** — the engine is not wired into the shipped binary; that integration (and running it off-thread with the cancellation token) is its own slice. **(Cutover Phase 3.)**
-5. **Sub-linear validation walk** — the residual O(N) per-edit (perf, not correctness): a durability / changed-input-tracking or sharded-def-map slice. **(Out of cutover scope; perf-only, deferred.)**
-
-## CUTOVER EXECUTION (user-directed, 2026-06-29)
-
-The user **DECIDED on a full production cutover**, quality-first, risk explicitly acceptable: **git + the differential harness are the safety net — no shadow-mode / soak / gated-staging ceremony; move fast, fix forward.** End-state = **ONE incremental model (the engine)** + the computational cores (M2 HM type checker, naming, IDE logic) reused as query bodies; the hand-rolled `analysis` incremental layer (M3 reverse-dep index, M4 incremental naming/type-index, dirty-set, fingerprints, winner-diff, **all drift oracles + the seeded soak**) is the **deletion target**. "analysis untouched" is **lifted** — refactor `analysis` freely, preferring to expose its real functions as query bodies over duplication.
-
-Six done-bar gates: (a) full diagnostic parity, zero exclusions; (b) IDE parity per feature incl. cross-file; (c) all hand-rolled indexes + drift oracles + soak deleted, no surviving mirror; (d) LSP/CLI off-thread on the engine + cancellable + UTF-16 + coherence-panic preserved; (e) memory bounded at 281k (or LRU); (f) net deletion > addition.
-
-**GATE (e) — GATED + ACCEPTED (measured `crates/engine/tests/test_memory.rs`, release, `--test-threads=1`, counting global allocator = live heap bytes):** engine vs. from-scratch `analysis`, ITEMS_PER_FILE=5 / CHAIN_LEN=8 synthetic package:
-
-| LoC | files | engine live heap | analysis live heap | old/new |
-|---|---|---|---|---|
-| 8.8k | 937 | 29.9 MB | 15.0 MB | 0.50x |
-| 88k | 9375 | 286.2 MB | 146.2 MB | 0.51x |
-| 264k | 28125 | 908.3 MB | 436.8 MB | 0.48x |
-
-**Verdict — within budget, accepted; no LRU needed now.** The engine is **linear** in LoC (~3.4 KB/LoC, stable across all three scales — no superlinear blowup) at a **constant ~2x** the from-scratch baseline. The 2x is the deliberate, bounded space-for-time cost of full memoization (every derived fact cached so an edit recomputes only its blast radius); the constant factor across 30x scale change confirms it is overhead, not a leak. At the 300k-LoC target this projects to ~1.0 GB live heap, comfortably within a modern dev machine's budget and in line with mature incremental servers (rust-analyzer routinely holds multiple GB on large workspaces). **Future lever if ever needed:** LRU/arena eviction of cold memos (the substrate already supports red-green recompute, so dropping a cold memo is sound) could roughly halve it — recorded as a non-blocking optimization, not a gate failure.
-
-Two load-bearing constraints (from the RA/LSP Expert): **(1) sequencing** — per IDE surface, build the engine query → stand up its IDE differential (engine == old `analysis` IDE output, cross-file included) → green → only THEN delete the old IDE impl; keep `analysis::run_full` frozen as the diagnostic oracle until cutover is proven. **(2) granularity** — Class-1 per-keystroke features (hover/local-goto/completion/inlay/signature) must be O(1)-on-cached-`Typecheck(f)` + sub-linear span lookup (exec-counter-proven: a point query on an unchanged file ⇒ zero `Typecheck` re-runs); Class-2 cross-file (references/rename/workspace-symbols/cross-file-goto) may be O(project)-with-text-prefilter but must not resurrect an occurrence mirror or bleed a coarse dep into Class-1.
-
-**Plan (5 phases, green per slice):** 1 — complete diagnostics (done-bar a); 2 — IDE: refactor `ide.rs` generic over an `IdeDatabase` fact-provider trait (`Analysis` = frozen oracle, `EngineIde` = engine-backed), port the 8 features reusing the identical orchestration, stand up the IDE differential + exec-counter granularity + direct fact-parity (done-bar b); 3 — wire LSP/CLI to the engine off-thread + cancellation + UTF-16 + coherence-panic (done-bar d); 4 — delete the hand-rolled incremental machinery + drift oracles + soak, rewrite `run_full` as a clean from-scratch oracle (done-bar c, f); 5 — memory bench (done-bar e).
-
-**Status (2026-06-29):**
-- **Phase 1 — DONE (`d315feb`).** Lowering + lint queries; differential compares all six classes with zero exclusions; engine 44 / analysis 86 / roughly 72 green.
-- **Phase 5 memory bench — DONE (`09a47cc`).** Engine vs `analysis` resident (fully-warmed all-files worst case): ~1.35–1.4× old, **linear** (ratio 0.71–0.76 stable from 9k→264k LoC), 802 MB vs 566 MB at 264k. Bounded, not catastrophic ⇒ **no LRU needed** (`slot_count()` remains the hook). Production is demand-driven, so real residency is far below this worst case.
-- **Phase 2 IDE — 7 interactive features DONE + proven (`98d785c`, `79f5cb2`, `9f73179`, `c11ba16`); symbols deferred to Phase 3.** `analysis::ide` is now generic over `pub trait IdeDatabase` (10 fact methods); the 7 features (hover/inlay/signature/definition/references/rename/completion) live in `analysis::ide::generic::*` over `&dyn IdeDatabase`, with `Analysis` (frozen oracle) and `engine::ide_view::EngineIde` (engine-backed, prime-then-borrow over a per-call `Caches` + `PathTable` bijection) both implementing the trait so the identical orchestration runs on both. **Done-bar (b) evidence:** `test_ide_differential` (8) sweeps **every cursor position** over single-file/cross-file/S4/script workspaces, cold (6) + incremental edit-streams (2: add/delete/tombstone-readd/reclassify + interface edits), asserting `EngineIde` == a fresh-`Analysis` oracle for all 7 features; `test_ide_granularity` (3) is the exec-counter Class-1 proof (repeated point query ⇒ 0 `Typecheck` reruns; unrelated edit ⇒ 0 for the queried file; own-body edit ⇒ exactly 1). The sweep forced a real fix: the engine's authoritative `Typecheck` now records per-expression types (`expression_types_by_id`) + strict origins (off for the discarded `GlobalScheme`/SCC checks); diagnostic differential stays green (20). **Symbols (document + workspace)** is purely structural (`roughly::symbols` over `index::index(tree, rope)`, no `IdeDatabase`, no analysis phase); its differential **landed** (`f7ceef0`, `crates/roughly/tests/test_symbols_differential.rs`): engine-served symbol output == the `analysis` oracle for document + ranked workspace symbols. `engine` is now a `roughly` dependency. **Done-bar (b) is fully closed for all 8 IDE features.**
-
-### Phase 3 / 4 execution plan (NEXT — server + CLI rewire, then deletion)
-
-Foundation laid: `roughly` depends on `engine`; `EngineIde`/`PathTable` serve IDE; the symbols adapter (`engine_package_items` in the symbols differential) serves symbols; the diagnostic render path is the differential's `engine_diagnostics` (fetch `Diagnostics(f)` + `FallbackRange`, render `type_errors` via `with_interner`+`Diagnostic::from_inference_error`, gate `unused`/`typing`/`strict` by `Config`). The shipped binary still runs entirely on `Analysis`; the cutover has NOT touched `server.rs`/`cli.rs` yet.
-
-**Phase 3 progress (committed, `test_lsp` green = 44 throughout):** `f6ebf91` **3a** — engine fed in lockstep in `ServerState` (`Engine`+`PathTable`+path→FileId allocator, `sync_engine_from_analysis` mirrors text after every mutation, `ProjectFiles` ordered package-first by `package_path_key`), reads still on `analysis`. `a0c6ea0` **3b** — diagnostics served by the engine (`convert_document_diagnostics` renders `FileDiagnostics`). `4667584` **3c** — the 7 IDE handlers call `EngineIde`. `4c4f246` **3d** — symbols served by engine `Parse` trees (`package_items_map` is now `&self`, selects package `FileId`s from the path table). `1f72dba` **3e-1** — dropped the now-dead `run_fast`/`run_full` passes (analysis outputs unread); `did_save` republishes all OPEN documents from the engine. **State now: the engine serves ALL user-facing reads (diagnostics + IDE + symbols) in the shipped binary, no per-keystroke analysis pass; `analysis_state` remains only as the document rope/tree buffer (`add_document_from_source`/`edit_document`/`document`) + position-conversion source.**
-
-**Phase 3 — COMPLETE (gate d).** 3e-2 (server is engine-only; staged `61be4e3`→`3e1dff3`) and 3f (off-thread + cancellation; `7f49432`→`0f902da`) landed; the concurrency review returned GO and its note-2 hardening (fail-loud on any panic escaping a worker job) landed `8b244b7`. **The shipped LSP server runs entirely on the engine, off the main thread, with latest-edit-wins cancellation, UTF-16 intact, and the coherence-`panic!` discipline preserved.** The original remaining-work designs are kept below for reference.
-
-**Phase 3 remaining (reference — now done):**
-- **3e-2 — remove `analysis_state` (text-ownership transfer).** Replace it with `documents: HashMap<PathBuf, Document>` (open-doc edit buffers, reusing `analysis::Document::{parse, apply_changes}`) + a `tree_sitter::Parser`. `document()`/`opened_document()` → `documents.get(path)`; `to_internal_*` (request doc, always open) → `documents[path].rope()`; `to_lsp_*` (may target a CLOSED cross-file file) → the engine `Parse` rope (uniform, so closed-file UTF-16 ranges stay correct — do NOT regress to raw line/char). Write path feeds the engine directly: `did_open` parses a `Document` + `set_input(SourceText/DocumentKind)` + `rebuild_project_files`; `did_change` converts each LSP range against the evolving `documents[path].rope()` (NOT the engine `Parse` rope, which is stale until `set_input`), `apply_changes` one at a time, then `set_input(SourceText = documents[path].rope().to_string())`; `did_close` drops the buffer, and for a package file on disk `set_input(SourceText from disk)` else `remove_input`+`rebuild_project_files`; the `initialize` scan + `did_change_watched_files` read disk text directly (`std::fs::read_to_string`) and `set_input`. `rebuild_project_files` orders package files ascending by `package_path_key` (base-relative, `\`→`/`) then scripts — last-writer-wins then equals production's `max_by_key(package_path_key)` winner. Drop `sync_engine_from_analysis`, the `analysis_state` field, and the `Analysis` import. This is one atomic increment (the server will not compile mid-migration); land it whole + `test_lsp` green.
-- **3f — DONE (`7f49432` `with_cancellation`, `c7c7d17` worker, `7b749c6` cancellable reads, `0f902da` real-read cancellation test, `8b244b7` fail-loud hardening). Concurrency review: GO** (one dedicated `!Send`/`!Sync` worker thread; serial job loop is the concurrency bound, so `ConcurrencyLayer` was dropped; `cancellable` reads return the type's empty default on `Cancelled`; edit path uses plain uncancellable `fetch` so push diagnostics always complete; coherence panics → `process::exit(1)`). The original design:** The engine is `!Send`/`!Sync` (`Rc`/`RefCell`), so it cannot move per-request or be shared: it lives on ONE dedicated `std::thread` worker (`EngineWorker`) that owns ALL analysis state (engine, `paths`, `file_ids`, `next_file_id`, `documents`, `parser`) plus `config`, `position_encoding`, a `ClientSocket` clone (to publish diagnostics), capabilities, `workspace_root`. The async-lsp `ServerState` becomes a thin frontend holding `sender: mpsc::Sender<Job>` + `cancel: Arc<AtomicBool>` + `client` (for error messages). `Job` is an enum with one variant per LSP op: lifecycle notifications (DidOpen/Change/Close/Save/WatchedFiles/Initialize/Initialized/ConfigChange) and requests (Hover/Completion/Definition/Inlay/Signature/References/Rename/DocumentSymbol/WorkspaceSymbol/Diagnostic, each carrying its params + a `tokio::sync::oneshot::Sender<Result<…>>`). The worker loops `while let Ok(job) = rx.recv()` and dispatches to the migrated handler bodies (the current ServerState methods move to `EngineWorker` near-verbatim; position conversion + LSP response building stay with them since they need the engine ropes/buffers). Request frontends serialize params → `send(Job)` → `box_future(async { reply_rx.await })` (non-blocking await). **Cancellation (latest-edit-wins, DESIGN §6):** every edit notification frontend does `cancel.store(true)` BEFORE sending its job; the worker, at the START of each READ job, does `cancel.store(false)` then runs the engine fetch via `fetch_cancellable(cancel.clone())`. An edit arriving mid-read flips the token → the read's `fetch_cancellable` unwinds the `Cancelled` sentinel → the worker catches it at the job boundary and replies empty → then processes the queued edit; the next read resets+runs. Serial worker ⇒ no overlap. **Coherence-panic:** the worker's lifecycle handlers keep their `panic!`/`expect`; install a startup panic hook that ignores the `Cancelled` payload but `process::abort()`s on any OTHER worker-thread panic, preserving "a sync failure is unrecoverable process death". **UTF-16** position handling is unchanged (stays in the worker). **Test:** prove latest-edit-wins (the engine's `test_cancellation.rs` already proves `fetch_cancellable` abandons from another thread; the server-level test asserts the worker flips the token on edits and serves correct post-edit results). This is a large, high-consequence concurrency rewrite of the shipped binary — implement carefully, `test_lsp` green throughout.
-  - **CONCURRENCY REVIEW — corrected design (ADJUST verdict; core architecture validated, 4 fixes):**
-    1. **Single shared `Arc<AtomicBool>` is correct** — serial worker ⇒ exactly one read in flight ⇒ one bool suffices (no per-read token / revision counter needed). All cancellation interleavings are benign: a read queued before a not-yet-applied edit resets the token + completes against a consistent pre-edit snapshot (correct-for-its-version; client reconciles by version) — edits do NOT reset the token, the next read's reset covers any stale `true`.
-    2. **Use `Relaxed` (not SeqCst)** for both store + load — single atomic location, no companion memory gated by it (engine state is worker-only; the reply rides the oneshot's own ordering). The engine already loads `Relaxed`. CORRECT RATIONALE: cancellation visibility comes from single-location atomic coherence, NOT the mpsc send/recv happens-before (that edge only orders the edit *dequeue*, which is after the in-flight read already finished).
-    3. **DEADLOCK FIX (required):** async-lsp's `ConcurrencyLayer::poll_ready` returns `Pending` once `max_concurrency` request futures are in flight, and MainLoop's inner dispatch loop awaits that gate WITHOUT polling `self.tasks` — so replied-but-pending read futures freeze, never drop their semaphore guard ⇒ total stall under a burst of pending reads. Set `max_concurrency` effectively unbounded OR drop `ConcurrencyLayer` (the serial worker IS the bound; dropping loses only `$/cancelRequest` early-abort, which the token supersedes).
-    4. **Coherence-panic → death (required, two SEPARATE mechanisms):** `CatchUnwindLayer` wraps only the FRONTEND request service, never the worker thread, so a non-`Cancelled` worker panic would leave a zombie server (errors every request, drops every edit). (a) Startup panic hook = PRINT only: suppress the `Cancelled` payload, else call the default hook; do NOT abort in the hook (it runs for every routine per-keystroke `Cancelled` unwind too). (b) Worker loop = `catch_unwind(AssertUnwindSafe(handle))` per job; non-`Cancelled` payload → `std::process::exit(1)` after the hook printed (the ONLY path to coherence-death on the worker thread). Frontend maps `send` failure + oneshot `RecvError` → `ResponseError`, never `unwrap`.
-    - **Channel primitives:** unbounded `std::sync::mpsc` IN (never bounded — a full bounded channel blocks `send` on the runtime thread), tokio `oneshot` BACK, worker blocking `recv()`. `publish_diagnostics` is a non-blocking `unbounded_send` — sound from the worker off-runtime. Async client-requests (register_capability on `initialized`, workspace_diagnostic_refresh on `did_save`) MUST use a captured `tokio::runtime::Handle::spawn` (bare `tokio::spawn` panics off-runtime); fire-and-forget, nothing needs `&mut self` after the await.
-    - **Construction gate:** the `!Send` `EngineWorker` MUST be built INSIDE the `std::thread::spawn` closure (the closure is `Send`-bounded; the engine is `!Send`). The closure captures only `Send` things (rx, cancel, ClientSocket, config, runtime Handle). ALL state-dependent logic incl. early-return validations (`opened_document().is_none()` etc.) moves to the worker; the frontend is stateless except sender/cancel/client.
-    - **Edits stay non-cancellable** (run to completion via plain `fetch`): `did_change` publishes only the edited file, so abandoning it on a newer different-file edit would leave that file's diagnostics stale.
-
-**Phase 3 (gate d) — original per-handler mapping (for reference):**
-- **State.** Replace `ServerState.analysis_state: Analysis` with `engine: Engine<RoughlyQueries>` + `paths: PathTable` + a `FileId` allocator (`HashMap<PathBuf, FileId>` + `next_file_id`) + the workspace file SET feeding `ProjectFiles`. **Single source of document text = the engine's `SourceText` input;** the current rope/tree for a file is `engine.fetch::<ParsedDocument>(Parse(f)).0` (rope for UTF-16 conversion, tree for symbols) — do NOT keep a second persistent server-side rope. On `did_change`: convert the change range against the current `Parse` rope, clone it, apply the incremental edits, `set_input(SourceText(f), new_text)` (whole-file reparse per edit — the engine has no incremental tree-sitter reparse; the memory bench shows this is fine).
-- **Lifecycle → inputs** (every site that today mutates `analysis_state`): `initialize` scan (`index::source_file_paths`) → per file allocate `FileId`, `set_input(SourceText from disk, DocumentKind::Package)`, add to `ProjectFiles`; `did_open` → `set_input(SourceText=text, DocumentKind` by `is_package_path)`, add to `ProjectFiles`, track open; `did_change` → above; `did_close` → package-on-disk: `set_input(SourceText from disk)`, else `remove_input(SourceText)+DocumentKind` + drop from `ProjectFiles`/`PathTable`; `did_save` → republish (inputs already fresh); `did_change_watched_files` → external R add/change/delete = set/remove inputs + `ProjectFiles`; config file → `set_input(Config, …)` (fold `[lint]`+`[check]` into the engine `Config`). `set_input` is infallible, so the **coherence-`panic!` discipline (gate d)** moves to: a `did_change` for a non-open doc, a missing `FileId`, and disk-read failures on scan/close — keep these as `panic!`/`expect`, never continue on stale state.
-- **Reads.** Diagnostics → port `engine_diagnostics`; IDE → `EngineIde`; symbols → `engine_package_items`. UTF-16 stays exactly: `position.rs` converts against the engine `Parse` rope.
-- **Off-thread + cancellation (gate d, the NEW infra — LAST sub-slice, separable).** The engine is `!Sync` (`Rc`/`RefCell`), so "off-thread" = the engine lives on ONE dedicated worker thread; the main async-lsp thread sends edits/requests over a channel and awaits replies. Install an `Arc<AtomicBool>` cancellation token flipped on each new edit (latest-edit-wins), passed to `fetch_cancellable`; install the startup panic-hook that swallows the `Cancelled` payload (DESIGN §6). This delivers Part A's debounced live-as-you-type tiers.
-
-**Phase 4 — DONE (`2ceffa5`, gates c + f).** Deleted the M3 reverse-dep index, M4/M4.3 candidate + materialized indexes, dirty-set, fingerprints, winner-diff baselines, all five `assert_*_consistent` drift oracles, the `verify-incremental` feature, the `test_incremental.rs` soak, the recompute-scope fixture machinery (`RecomputeReason`/`render_recompute_scope`/`recompute_scope.R.test`), `run_fast`, and the interface/typecheck fingerprint cache fields. `resolve_package`/`typecheck` are now clean from-scratch passes (`resolve_package` calls `rebuild_package_naming` — the former drift oracle, now production — plus a fresh `build_type_index`; `typecheck` runs the interface fixed-point over ALL package docs each round, oscillation guard intact, then re-checks every doc). `run_full` + `analysis::ide` stay reachable as the differential's permanent regression net. **Net −2463 lines** (109 added, 2572 deleted); grep confirms zero surviving mirror/oracle; the engine differential stays green (proves `run_full` correct); 192 tests pass, `cargo check --all-targets` clean. **CLI decision (deliberate):** `cli.rs` keeps `run_full` — a one-shot batch check needs no incrementality and `run_full` is now exactly a clean from-scratch pass, so it is the correct CLI path; no engine wiring for the CLI.
-
-## CUTOVER COMPLETE — all six done-bar gates met (awaiting Expert final verification)
-
-- **(a) full diagnostic parity, zero exclusions** — `test_differential` (engine == `analysis::run_full`, byte-exact over curated + randomized adversarial streams), incl. the strict-origin non-empty case.
-- **(b) IDE parity per feature incl. cross-file** — all 8 features (hover/inlay/signature/completion/definition/references/rename + symbols) proven via `test_ide_differential` (every-position sweep, cold + incremental + randomized) and `test_symbols_differential`; Class-1 granularity exec-counter-proven for every per-keystroke feature (`test_ide_granularity`). Expert-accepted.
-- **(c) no surviving mirror/oracle** — Phase 4 deleted the M3/M4 machinery + all five drift oracles + `verify-incremental` + `test_incremental.rs` soak + `run_fast`; grep confirms zero surviving `reverse_dependenc*`/`dirty_documents`/`maintain_package_naming`/`patch_*`/`assert_*_consistent`.
-- **(d) LSP/CLI off-thread on the engine + cancellable + UTF-16 + coherence-panic** — the server runs entirely on the engine on a dedicated worker thread with latest-edit-wins cancellation (`test_cancellation`/`test_read_cancellation` + functional `test_lsp`); concurrency-review GO + note-2 hardening. CLI on the clean `run_full` one-shot pass (deliberate).
-- **(e) memory bounded** — engine ~1.35–1.4× `analysis` resident, linear to 264k LoC (`test_memory`, `09a47cc`).
-- **(f) net deletion > addition** — net **−902 lines** since the cutover baseline `d2cedc9` (4569 ins / 5471 del); Phase 4 alone −2463.
-
-Status: **green** — engine + analysis + roughly tests pass, `cargo check --all-targets` clean. The hand-rolled incremental model is gone; the engine is the single incremental analysis backend behind the shipped LSP server + the differential `run_full` oracle as the permanent regression net.
-
-Original Phase 4 plan (for reference): from `analysis` remove the M3 reverse-dependency index, M4 incremental package naming + type index, dirty-set, dependency/type fingerprints, winner-diff, ALL `assert_*_consistent` drift oracles + the `verify-incremental` feature, the seeded soak (`test_incremental.rs`), `run_fast`, and the incremental `edit_document`/`add_document_*`/`delete_document` maintenance. **Keep** the computational cores (HM type checker, naming, lowering, `ide::generic`) — they are the engine's query bodies. Rewrite `run_full` as a clean from-scratch oracle (build fresh, lower/resolve/typecheck, NO mirrors) retained ONLY as the differential oracle. This is where gate (f) net-deletion is realized (the bespoke mirrors + oracles dwarf the engine query bodies, which reuse the cores). `cli.rs` batch check → build an engine over all files + fetch `Diagnostics`; formatting stays out of scope.
-
-**Phase 4 prerequisite findings (verified during 3e):**
-- **Phase 4 is UNBLOCKED and not gated on 3e-2.** Post-3e-1 the server calls no `run_fast`/`run_full`, so the incremental machinery is dead and deletable now. `Analysis::{add_document, edit_document}` call `invalidate_document` + `bump_package_version` (incremental hooks) — Phase 4 deletes `invalidate_document` and the indexes, so it must **strip those two calls** from `add_document`/`edit_document`, leaving them pure doc-store (parse/insert + rope/tree edit + version). The differential oracle (`build_oracle`) and a server still holding `analysis`-as-doc-store both keep working through that simplification, so Phase 4 can land **before or after** 3e-2/3f. Given Phase 4 is the highest-value (gates c+f) and lowest-risk remaining work (deleting dead code, validated by the surviving engine↔`run_full` differential), it is a reasonable next slice on its own.
-- **`run_full` after Phase 4** = `lint` + (if typing||strict) a from-scratch `typecheck` over the freshly-parsed doc store, no incremental maintenance — kept solely as the differential oracle (with `analysis::ide`). Deletion targets confirmed: `reverse_dependencies`, the M4 candidate/materialized type+value indexes, `dirty_documents`, dependency/type fingerprints, winner-diff baselines (`last_typecheck_global_bindings` etc.), the five `assert_*_consistent` oracles + their call-site blocks, the `verify-incremental` feature (+ the `roughly` passthrough), `tests/test_incremental.rs` (soak), and `run_fast`.
-
-**3e-2 doc-set subtlety (for when it lands):** the engine's file set = OPEN docs (server-owned `Document` buffers) ∪ CLOSED package docs (text read from disk on scan/close/watched). `documents: HashMap` holds only OPEN buffers; closed package files live only as engine `SourceText` inputs (set from disk, re-set only when they change on disk). `did_change` MUST resolve each change range against the evolving open buffer (`documents[path].rope()` updated per change by `apply_changes`), never the engine `Parse` rope (synced once after the batch, so stale for the 2nd+ change in a batch).
-
-**Pre-final-sign-off breadth residuals (Expert-flagged after accepting gate (b)) — ALL CLOSED (`a9013f1`, `d66d202`, `5a0187b`), landed before Phase 4 retires the oracle:**
-1. **DONE (`a9013f1`)** — Extend the Class-1 granularity exec-counter proof to ALL per-keystroke features — completion, inlay hints, signature help, local goto — not just hover. Completion especially fetches a different set (`PackageSymbolIndex` on top of `Typecheck`), so prove a point query on an unchanged file ⇒ 0 `Typecheck` reruns for each (`test_ide_granularity`).
-2. **DONE (`d66d202`)** — randomized IDE differential stream (`randomized_ide_differential_stream`, 3 seeds × 25 steps, full per-position sweep after each add/edit/delete/reclassify).
-3. **DONE (`5a0187b`)** — strict-origin non-empty case (`strict_origin_non_empty_matches_production`: `x <- 1L %then% 2L` forces an O1 `Unsupported`→`Unknown` origin; non-vacuity asserted, parity through the harness, cleared with `@trust Any`).
-
-## Why this exists
-
-M1–M4 built hand-rolled incremental analysis — reverse-dependency index, incremental package naming, incremental type index — each guarded by debug "drift assertions" (incremental result == full rebuild) plus a seeded soak. Along the way we caught **4+ silent-staleness bugs** (winner-diff baseline staleness from intervening IDE queries; script-vs-package drift; the fixed-point round-cap leaving deep chains stale; the bare-block predicate gap). Before building the next slice (incremental value-interface-table), we stopped to decide the foundation.
-
----
-
-## Part A — Recheck trigger model (DECIDED)
-
-Both experts corrected the common "rust-analyzer checks on save" belief:
-- rust-analyzer runs **two** diagnostic streams: (1) its own native type/name diagnostics **live as you type** (debounced, cancellable on the salsa snapshot), and (2) `cargo check` **flycheck on save** for authoritative full errors. Save-only applies to stream (2) *because there is a slower authoritative backstop to defer to.*
-- **Roughly has no stream (2). It *is* the only R type checker** (no prior static checker for R exists). So save-only would give the user **zero type feedback while typing** — strictly worse than rust-analyzer.
-
-**Decision — tiered, debounced, live-as-you-type, with save as a force-full pass:**
-- **Per-keystroke, debounced ~150–250 ms:** syntax + lint + lower + file-local naming + the **edited file's own** type errors. Budget: p95 ≤ 100 ms (feels live).
-- **Cross-file / package diagnostics:** debounced ~300–500 ms after typing settles, **bounded to blast radius**, cancellable (latest edit wins).
-- **On save:** force a full authoritative pass (natural commit point + safety net).
-- **Interactive queries** (hover / completion / goto / signature help): on demand, < 50–100 ms.
-
-This is a forward design target; the current server does not yet implement the debounce/cancel tiers (that is part of the deferred M5 "off-thread responsiveness" work).
-
----
-
-## Part B — Hand-roll vs. memoized-query framework (OPEN — user's call)
-
-The fork: continue hand-rolling per-structure incrementality (guarded by drift assertions), **or** adopt a memoized-query / automatic-invalidation substrate (salsa, or a minimal in-house red-green engine) so invalidation is correct-by-construction.
-
-**Both experts agree on two things:** salsa's *heavy* machinery (macro expansion, trait/coherence solver, multi-crate graph, durability tiers) is genuinely **unneeded** for R — the real question is only its **core**: memoized queries with automatic dependency-tracked invalidation. And: the drift-assertion safety net has a real hole (below) that should be closed regardless.
-
-**Fresh reviewer → (c) keep hand-rolling, within strict limits + a salsa "tripwire".**
-- R's dependency graph is shallow and static (source → lower → naming → interface → check; one-hop reverse-dep + one bounded fixed-point for re-exports). salsa's machinery tames *deep, dynamic* graphs — importing it for a shallow static one is machinery for its own sake.
-- salsa relocates rather than eliminates the discipline (you must route every read through a tracked query; an off-query read reintroduces the same staleness).
-- Migrating already-correct, drift-asserted, soak-covered code is a fresh net-negative bug surface; salsa's own API has churned hard.
-- Adopt a framework **only when a tripwire fires** (see below).
-
-**RA/LSP expert → (b) adopt a memoized-query framework** (and it *changed its recommendation toward this* once told to weigh quality over effort).
-- The 4+ silent-stale bugs are empirical evidence that hand-rolling the invalidation **core** is error-prone *independent of R's simplicity*.
-- The safety net is **structurally incomplete**: the drift assertions are **debug-only**, and they are **blind to shared-rule bugs** (incremental and oracle share the membership predicate, so a wrong *rule* is invisible — mitigated only by fixtures). It cannot catch the full bug class even in principle.
-- "R is simpler" justifies not needing salsa's macro/trait machinery, but **not** its core — which is exactly what keeps getting hand-rolled wrong. R's regularity makes the **migration easy**, not the framework unnecessary.
-- The real dividing line is **automatic dependency-tracked invalidation vs. hand-maintained mirrored invalidation.** In a framework the *tracked* path is the natural default; hand-rolled makes the *untracked* path the default (read `global_bindings` directly) and tracking the bespoke addition you can forget — which is how every one of these bugs happened.
-- A framework also delivers **cancellation, parallelism, and LRU eviction** structurally — all of which the Part A live-debounced model and the 300k responsiveness goal need, and none of which hand-rolling provides without large bespoke effort that reproduces the same bug class.
-
-**Tripwires that flip the decision to a framework** (per the fresh reviewer; the expert argues these are imminent enough to adopt now):
-1. **Cross-file / whole-program type inference** (the architecture page's one-hop premise explicitly says this voids one-hop and forces a worklist).
-2. **R namespace dependency edges** — `::`/`:::`, `library()`/`requireNamespace()` load-order, imported-package symbols. **Note: the planned stub framework introduces exactly this**, so it likely crosses this tripwire on its own.
-3. **Dynamic dispatch resolution across files** (S4/R6 method dispatch creating data-dependent edges).
-
-**Tie-breaker under the stated criteria (quality-first, effort irrelevant):** tilts toward the framework — "migration is risky/work" is the conservative view's main weight, and effort is excluded; and the project's own roadmap (stub framework + namespace resolution) likely trips the conservative reviewer's *own* tripwire. The recommended shape is a **de-risked incremental migration**: keep tree-sitter parsing (superior — lossless, free incremental reparse) and the now-sound M2 HM type core (they become the bodies of `parse`/`infer` queries, not rewrites); migrate phase-by-phase; **run the existing drift oracles as a live cross-check *during* migration**, retiring them only once the query path is proven; do a query-grain spike (per-file vs per-binding) first.
-
-**Deferred migration query graph (for when chosen):** `parse(file)` → `lower(file)` → `local_naming(file)` → `package_naming` → `interface(file)` → `check(file)` → `diagnostics(file)`; inputs = per-file text + config. The reverse-dep index dissolves into salsa's recorded dependencies; the interface fixed-point maps to a cyclic query with `Unknown` recovery (the existing oscillation-pinning maps directly); string fingerprints are replaced by salsa early-cutoff.
-
-**This decision is the user's** (AGENTS.md gates large incremental-analysis direction changes on user sign-off). Recorded here so the decision is made on the full analysis, not rediscovered.
-
----
-
-## Part C — The value-interface-table slice (PAUSED)
-
-`build_package_interface_table` is O(all package globals) with deep scheme clones, **rebuilt 2–3× per recheck regardless of edit blast radius** (~62 ms of the ~77 ms single-file recheck at ~60k synthetic globals; the winner-diff is a same-class ~8 ms cost). It is the **last O(package) flat-recheck cost** — recheck still scales with package size, not edit size.
-
-Both experts: **not urgent** at real R package sizes (hundreds–low-thousands of exports, not 60k) under the Part A debounced model — the cost hides inside the debounce window. **Necessary at the 300k target**, where O(globals) dominates flat recheck. **But it should not be built as the next hand-rolled slice:** if Part B chooses a framework, the table becomes a memoized query and is *subsumed* — hand-rolling it first would be wasted and add a sixth bespoke mirror+oracle. If Part B stays hand-rolled, do it as an **in-place patch of the existing table** (patch only `changed_globals`/winner-flips, which M3/M4 already compute) — **no new mirrored index, no sixth oracle**. If it can't be done without a new mirror, that is the signal it isn't worth doing yet.
-
----
-
-## No-regret action (correct regardless of Part B) — DO NOW
-
-The drift assertions are `#[cfg(debug_assertions)]` and the soak runs in debug, so **release-path incremental correctness is unverified except indirectly.** Both experts call this the cheapest, highest-value hardening available. Action: make the drift-oracle + seeded-soak a hard CI gate that also exercises the **release** routing, and broaden the soak's adversarial interleavings (edit→IDE-query→edit, add→delete→re-add, package↔script transitions). This holds whether we keep hand-rolling or migrate (during a migration it becomes the cross-check).
-
-## Open risk to carry
-
-The **one-hop premise** ("a single reverse-dep hop suffices only because inference never flows across files") is the load-bearing assumption of the entire hand-rolled model. It is stated in prose and enforced by nothing at compile time — a future contributor adding a small cross-file inference shortcut silently voids it. Either encode it as a loud invariant at the inference boundary, or treat its violation as an automatic Part-B = framework trigger.
-
-# Decision record: standard-library stub format
-
-## DECIDED — dedicated declaration-only stub files
-
-Stdlib type information ships as **dedicated declaration-only stub files**, not ordinary R files (the current `crates/analysis/src/stdlib_base.R` placeholder-body approach — `length <- function(x) 0L` harvested by ignoring the body — is retired). The accepted shape is the Expert's design: a flat list of `name : <type-expr>` declarations that **reuse the existing type-expression parser** (so the only new grammar is a thin declaration-line layer, not a second type system); a function body is unrepresentable, so "declaration-only" is enforced structurally the way `.d.ts`/`.pyi` do. Override precedence (project stub wins over shipped stdlib, selected by detected R version) reuses the existing `stdlib.rs` `load_with_overrides` fold; the assembled stub library stays a **set-once input kept out of the incremental dependency graph** (engine invariant — do not route stub files through `did_change`).
-
-**File extension:** a dedicated one, name to be chosen by the CTO + Expert design pass — **not** `.Rstub` (that specific name was vetoed). Candidates: `.Rtypes` / `.Ri` / `.Rtypes` / `.Rdecl`; avoid collisions with `.Rd` (R documentation), `.Rmd`, `.Rda`/`.RData`.
-
-**Overloads:** v1 uses `Any` for ad-hoc overloads only. Genuinely parametric higher-order functions (`lapply`, `Map`, `Reduce`, `identity`, …) must get **real generic types** via the existing `<T> fn(...)` polymorphism — they are NOT widened to `Any`. Only functions whose return type varies by argument type (`abs`, `rep`, `seq`) fall back to `Any`/`Incomplete` for now. The permanent solution — **traits in the type system vs. overload sets** — is deferred to a later decision. The declaration grammar must permit repeated declarations of one name now, so adopting either later needs no corpus rewrite.
-
-**Syntax highlighting:** LSP semantic tokens first (one server implementation colours both inline `#:` annotations and the stub files, in every LSP client, reusing spans the server already computes); a tree-sitter/TextMate grammar for offline/static highlighting is a later nice-to-have that reuses the declaration grammar.
-
-**Open questions routed to the CTO design pass:** (1) does `type_syntax` already expose a parse-a-bare-type entry point, or must one be extracted (effort driver); (2) per-namespace vs per-item stub file granularity, and whether editing a project stub live triggers a coarse (non-incremental) re-seed vs a restart; (3) `pkg::name` needs a real `NamespaceGet` HIR node (currently `Unsupported`) for re-exports — confirm deferral to the CRAN tier. The full Expert proposal (ecosystem precedent from `.pyi`/`.d.ts`, worked format examples, the precedence stack) should be folded into `docs/.../stdlib-stubs.md` when the format is built.
-
-# Decision record: beta semantics & quality program
-
-**Status: DECIDED (user-ratified).** Direction chosen after a full adversarial audit of the type checker core, LSP surface, formatter, config, stub corpus, and engine, with findings verified empirically. The prioritized execution list is `backlog.md`; the user chose **semantics-first sequencing** and delegated the flow-model and strict-mode calls ("do what is necessary to achieve best quality"; "we want a sound type checker; it is okay to not support every R construct"). The contract page (`reference/type-system.md`) is updated contract-first per Phase-1 item as it is implemented.
-
-## R variable model — mutable slots with union joins
-
-The fresh-binding-per-`<-` (let-shadowing) model is retired: it is not R. R assignment mutates the current function-scope environment, so a branch or loop assignment must be visible after the construct. Decided model:
-
-- A function scope holds **mutable variable slots**; each `<-`/`=`/`->` writes the slot, `<<-`/`->>` walks the lexical chain to the nearest enclosing slot.
-- A read sees the **union of reaching definitions** at that point (a conditional write joins with the prior type; a loop-body write joins across iterations).
-- Unused detection falls out: a **write** that no read reaches is unused (report assignments, not bindings).
-- Flow-sensitive *narrowing* (`if (is.null(x))`) is a later layer on the same model, not part of this decision.
-
-Rationale: the old model was verified unsound (`x <- 1L; if (f) x <- "two"; x + 1L` typechecked clean and crashes at runtime) and produced unused-lint false positives on the two most idiomatic R patterns (conditional update, loop accumulator). No lint-local fix existed.
-
-## Multi-member unions — join/annotation-only, never in unification variables
-
-General unions `A | B | C` (normalized: flat, deduped, order-insensitive; `T | NULL` becomes the special case) are adopted for joins and annotations. **The HM-speed guardrail:** a union imposes no union *constraints* on inference variables (plain substitution-binding of a variable **to** a union value is permitted, like any other type) — unification stays syntactic (a union unifies only with a structurally equal union); all member-wise directional logic lives in `check_compatibility`. This keeps inference decidable and fast and matches the existing unification-is-the-invariant-floor split. Tags/discriminated-union `match` (post-beta) builds on these unions.
+A union imposes no union constraint on an inference variable. That is what keeps inference fast.
+Binding a variable to a union value by plain substitution is allowed, like any other type.
+Unification stays syntactic, so a union unifies only with a structurally equal union. All
+member-wise directional logic lives in `check_compatibility`. Inference therefore stays decidable
+and fast, and the split follows the existing rule that unification is the invariant floor.
 
 ## A type error inside a test assertion stays reported
 
-`expect_error(f("bad type"))` is how an author tests that a function refuses bad input, and the
-call inside it really is type-incorrect, so the finding is *true*. The question was whether an
+`expect_error(f("bad type"))` is how an author tests that a function refuses bad input. The call
+inside it really is type-incorrect, so the finding is true. The open question was whether an
 expectation that asserts a condition should suppress type findings in its payload.
 
-**It should not.** Blanket-suppressing inside `expect_error` and its siblings would also silence a
-genuine mistake in the test — a misspelled callee, the wrong argument passed by accident — and test
+It should not. Suppressing everything inside `expect_error` and its siblings would also silence a
+genuine mistake in the test, such as a misspelled callee or an argument passed by accident. Test
 code deserves the same checking as everything else. It would also be a special case for one
-function family with an open-ended tail (`expect_warning`, `expect_condition`, `expect_snapshot(error =
-TRUE)`, `tryCatch`, `try`), which is the kind of accretion the design bar refuses.
+function family with an open-ended tail: `expect_warning`, `expect_condition`,
+`expect_snapshot(error = TRUE)`, `tryCatch` and `try`.
 
-The answer is the general mechanism that already exists: `# roughly: allow(type-mismatch)` on the
-assertion. It is explicit, it is local, and it says what it means. Documented on the diagnostics
-page under "testing that something is rejected".
+The answer is the general mechanism that already exists, which is `# ry: allow(type-mismatch)` on
+the assertion. It is explicit, it is local, and it says what it means. The diagnostics page
+documents it under "testing that something is rejected".
 
-Worth revisiting only for the stronger form TypeScript's `@ts-expect-error` has: a suppression that
-*itself* reports when the expected finding does not appear, turning "ignore this" into "assert a
-finding here". That is a feature, not a special case, and it would apply to every code.
+One stronger form is worth revisiting. TypeScript's `@ts-expect-error` reports when the expected
+finding does not appear, which turns "ignore this" into "assert a finding here". That is a feature
+rather than a special case, and it would apply to every code.
 
-## The type system is Hindley-Milner, and stays fast to check (user directive)
+## The type system is Hindley-Milner, and stays fast to check
 
-**Only admit features that are fast to check — which means HM.** The bar for any proposed addition to the type system is: does it keep inference to unification over the existing constraint mechanism, decidable and linear-ish, with no search and no global solving? If not, it does not go in, however useful it looks. Soundness and speed are not traded for expressiveness.
+This is a user directive. Admit only a feature that is fast to check, which means Hindley-Milner.
+Ask one question of any proposed addition. Does it keep inference to unification over the existing
+constraint mechanism, decidable and close to linear, with no search and no global solving? If it
+does not, it does not go in, however useful it looks. Expressiveness never buys soundness or speed.
 
-What this rules out, so nobody re-derives it: **type classes / traits** (declined, not deferred — see the tripwire note in `contributing/design/open-questions.md`), **general subtyping** (subtype inference is a different, slower algorithm than unification; a declared *coercion* at a named boundary is HM and is the shape any variance work must take), and any construct requiring backtracking search over a program-wide constraint set.
+Three things are ruled out.
 
-**The sanctioned exception is declaration files.** A `.Rtypes` stub may do things a user's own annotated code may not — today that means ad-hoc overloading. The exception is bounded on purpose: the cost of a non-principal feature is proportional to how much code it applies to, and a stub surface is a fixed, curated corpus the project itself maintains, not user code. It is also where the need is real: R's base library was never designed with types, so no principal scheme describes `min` or `abs`, and a gradual checker that cannot describe the standard library is not usable at all. A user's `#:` annotation stays pure HM, which is what keeps the *user-facing* promise ("your code, checked, fast") honest.
+- Type classes and traits are declined rather than deferred.
+  `contributing/design/open-questions.md` records the reasoning.
+- General subtyping is out, because subtype inference is a different and slower algorithm than
+  unification. A declared coercion at a named boundary is Hindley-Milner, and that is the shape any
+  variance work must take.
+- Any construct that requires backtracking search over a program-wide constraint set is out.
 
-## Overload sets — bounded ordered probes
+A declaration file is the one sanctioned exception. A `.Rtypes` stub may do something a user's own
+annotated code may not, and today that is ad-hoc overloading. The exception is bounded on purpose.
+The cost of a non-principal feature is proportional to how much code it applies to, and the stub
+surface is a fixed corpus the project maintains. The need there is real. R's base library was never
+designed with types, so no principal scheme describes `min` or `abs`, and a gradual checker that
+cannot describe the standard library is not usable. A user's `#:` annotation stays pure
+Hindley-Milner, which is what keeps the user-facing promise honest.
 
-Functions whose result type depends on the argument type get **ordered overload sets** (stub surface first; repeating a name within one `.Rtypes` source appends a candidate; a later source replaces a name's whole set). Call sites try schemes in declaration order using the existing probe-then-rollback machinery; first compatible match wins. Principal-type purity is knowingly relaxed *at overload sites only* (declaration order is semantic — the TS/mypy model).
+## An overload set is a bounded, ordered probe
 
-**Scope is the point, and it is enforced, not conventional:** only a plain or namespace-qualified name whose declarations come from a `.Rtypes` source can be overloaded (`GlobalEnv::overloads` reads the stub library and returns `None` the moment a script or package binding shadows the name). A project's own R code cannot declare an overload set, and should not gain the ability — see the HM record above. Project override stubs *can*, because a `.Rtypes` file is a declaration file for foreign code either way.
+A function whose result type depends on the argument type gets an ordered overload set, on the stub
+surface first. Repeating a name within one `.Rtypes` source appends a candidate. A later source
+replaces a name's whole set. A call site tries the schemes in declaration order using the existing
+probe-then-rollback machinery, and the first compatible match wins. Principal-type purity is
+relaxed at overload sites only, because declaration order carries meaning there. This is the
+TypeScript and mypy model.
 
-**Overloads are the escape hatch, not the mechanism, and the corpus is the pressure gauge.** Of the 35 sets the corpus declares, about a dozen are atomic-family promotion (`abs`, `min`, `sum`, the `cum*` family — a numeric constraint in disguise), about a dozen are shape dispatch (`head`, `rev`, `Filter`, `lapply` — a stand-in for shape-mirroring returns, which also explains why `abs` needs one candidate per shape *and* per family), nine are S3 operator method tables (`+.Date`, `Arith.difftime` — dispatch, which needs a multi-entry table under any design and would survive untouched), and two are genuinely two-form functions. So two thirds are workarounds for two absent features, both of which are HM-compatible and both in `backlog.md`. Watch that ratio: a rising count of promotion/shape sets is the signal to build those two features, never to design traits.
+The scope is enforced rather than conventional. Only a plain or namespace-qualified name whose
+declarations come from a `.Rtypes` source can be overloaded. `GlobalEnv::overloads` reads the stub
+library and returns `None` as soon as a script or package binding shadows the name. A project's own
+R code cannot declare an overload set, and should not gain the ability, for the Hindley-Milner
+reason above. A project override stub can, because a `.Rtypes` file is a declaration file for
+foreign code either way.
 
-Three call-site rules keep selection sound (implemented in `try_overloaded_call`):
+Overloads are the escape hatch, not the mechanism, and the corpus is the pressure gauge. Of the 35
+sets the corpus declares:
 
-- **Arguments are inferred once, before any probe.** Expression inference writes environment/recorded-type state the probe snapshot does not reverse, so probes run only instantiation + argument *matching* (the signature-matching half of function-call inference is split out as `match_arguments` for exactly this reason).
-- **A fit is a fact or a guess.** The caller's open inference variables are recorded before probing (`collect_unbound_vars`); a candidate that fits while leaving every one of them untouched — same representative, same entry, so binding, redirecting and constraint-tightening all count as touching — was chosen by the concrete arguments, and it beats a candidate that fits only by narrowing them (which would over-commit a `function(x) sum(x)` wrapper). Facts beat guesses, and **among fits of the same kind declaration order decides — the first wins**, which keeps one reading of order everywhere (first-match at call sites, most-specific-first in the corpus, and the last declaration for a value use of the name). A lone fit is never a guess — it is the only signature that accepts the call. Probing rolls back, so the winner is re-probed to commit; matching is a pure function of the table, which is back in its pre-probe state, so the fit repeats.
-  - **A last-fitting-wins tiebreak was tried and removed:** its purpose was to keep `function(x) sum(x)` from committing to a narrow candidate, and the fact rule already does that — a general fallback taking `Any` accepts *without binding*, so it is a fact and outranks every guess above it. Last-wins additionally forced any set whose candidates differ only in a *sequence* shape (`lapply`, named list in → named list out; a lambda callback makes every candidate a guess) to be declared most-general-first, which contradicts both the corpus convention and the value-use rule, which resolves a non-call use of the name to the LAST declaration and would then hand out the narrower contract.
-- **Strict-then-courtesy rounds.** The whole-number-literal-as-integer courtesy is disabled in the first selection round (`sum(1, 2)` must pick the double candidate — R computes a double) and re-enabled in a second round only when nothing matched strictly (a name whose only fitting candidate wants `integer` still accepts `foo(1)`). Exact matches outrank conversions.
+- About a dozen are atomic-family promotion: `abs`, `min`, `sum` and the `cum*` family. Each is a
+  numeric constraint in disguise.
+- About a dozen are shape dispatch: `head`, `rev`, `Filter` and `lapply`. Each stands in for a
+  shape-mirroring return. This also explains why `abs` needs one candidate per shape and per
+  family.
+- Nine are S3 operator method tables, such as `+.Date` and `Arith.difftime`. Those are dispatch.
+  They need a multi-entry table under any design and would survive untouched.
+- Two are genuinely two-form functions.
 
-**All-fail wording: name the set only when the candidates disagree about what is wrong.** `NoMatchingOverload` ("no overload of `f` matches — I tried all N declared signatures", plus the first candidate's failure as a hint) is right when the call could have meant any of several shapes and each rejects it elsewhere or differently — `pick("word")` against `fn(integer)` and `fn(double)` is refused at the same argument by both, and neither reason is *the* answer. Two failure shapes have a single answer, and the wrapper buries it along with the argument's own range (it blames the whole call): every candidate failing for the *identical* reason, and one candidate getting strictly further into the call than any other — measured as the index of the first argument each blames, with a whole-call verdict (arity, unknown name) counting as no progress. The deeper candidate is the signature the caller meant: a two-parameter callback handed to `lapply` is refused at the callback by the candidate that accepted the sequence and at the sequence by the candidate that wanted a named list, so the callback is the finding.
+Two thirds are therefore workarounds for two absent features. Both features are
+Hindley-Milner-compatible and both are in `backlog.md`. Watch that ratio. A rising count of
+promotion sets or shape sets is the signal to build those two features, never to design traits.
 
-## R's object systems — the boundary is dispatch, not Hindley-Milner
+Three call-site rules keep selection sound. `try_overloaded_call` implements them.
 
-A recurring claim is that S3/S4/R6 support is fundamentally at odds with a Hindley-Milner core, and
-that supporting it therefore costs soundness or speed. **That is the wrong diagnosis, and it is
-recorded here so it is not re-derived.** The declarative core of all three systems maps onto
-machinery the checker already has and already relies on: nominal types with a checked representation
-(`@type` + `@new`), record field projection on a nominal, and declaration-ordered overload sets.
-The existence proof is that **S3 dispatch already runs inside the inference core**: an operator on a
-nominal is dispatched through `+.Class` / `Arith.Class` / `Ops.Class`, statically, soundly, today.
-S4 inverts the claim hardest — `setClass` is a record declaration with slot types written literally
-in source, `new(...)` a named-argument constructor call, `x@slot` a field projection,
-`setMethod(signature = ...)` an overload candidate — so it is *more* statically declared than the
-`#:` annotations the checker already consumes. Hand-writing the equivalent (`@type` + a wrapper
-constructor carrying `@new`) yields full checking of slot types and constructor arity with no strain
-on inference at all; the gap is a lowering pass, not type theory.
+- **Arguments are inferred once, before any probe.** Expression inference writes environment and
+  recorded-type state that the probe snapshot does not reverse. A probe therefore runs
+  instantiation and argument matching only. The signature-matching half of function-call inference
+  is split out as `match_arguments` for this reason.
+- **A fit is either a fact or a guess.** The caller's open inference variables are recorded before
+  probing, by `collect_unbound_vars`. A candidate that fits while leaving every one of them
+  untouched was chosen by the concrete arguments, so it is a fact. Untouched means the same
+  representative and the same entry, so binding, redirecting and tightening a constraint all count
+  as touching. A fact beats a candidate that fits only by narrowing those variables, which would
+  over-commit a wrapper such as `function(x) sum(x)`. Among fits of the same kind, declaration
+  order decides and the first wins. That keeps one reading of order everywhere: first match at a
+  call site, most specific first in the corpus, and the last declaration for a value use of the
+  name. A lone fit is never a guess, because it is the only signature that accepts the call.
+  Probing rolls back, so the winner is re-probed to commit. Matching is a pure function of the
+  table, and the table is back in its pre-probe state, so the fit repeats.
+- **Selection runs a strict round, then a courtesy round.** The courtesy that reads a whole-number
+  literal as an integer is off in the first round, so `sum(1, 2)` picks the double candidate, which
+  is what R computes. It is on in a second round that runs only when nothing matched strictly, so a
+  name whose only fitting candidate wants `integer` still accepts `foo(1)`. An exact match outranks
+  a conversion.
 
-**Three things genuinely do keep dispatch out, and they are the real reasons:**
+A last-fitting-wins tiebreak was tried and removed. Its purpose was to stop `function(x) sum(x)`
+from committing to a narrow candidate, and the fact rule already does that. A general fallback
+taking `Any` accepts without binding, so it is a fact and outranks every guess above it. Last-wins
+also forced any set whose candidates differ only in a sequence shape to be declared
+most-general-first. `lapply` is such a set, where a named list in gives a named list out, and a
+lambda callback makes every candidate a guess. That order contradicts both the corpus convention
+and the value-use rule, which resolves a non-call use of the name to the last declaration and would
+then hand out the narrower contract.
 
-- **Dispatch needs a class known at the call site.** Inside an unannotated `function(x) speak(x)` the
-  argument is an open inference variable, so there is nothing to dispatch on and the only sound
+When every candidate fails, name the set only when the candidates disagree about what is wrong.
+`NoMatchingOverload` says that no overload of `f` matches, gives the number of declared signatures
+tried, and adds the first candidate's failure as a hint. That is right when the call could have
+meant several shapes and each one rejects it elsewhere or for a different reason. `pick("word")`
+against `fn(integer)` and `fn(double)` is refused at the same argument by both, and neither reason
+is the answer.
+
+Two failure shapes have a single answer, and the wrapper buries it along with the argument's own
+range, because the wrapper blames the whole call. The first shape is every candidate failing for
+the identical reason. The second is one candidate getting strictly further into the call than any
+other, measured as the index of the first argument each one blames, where a whole-call verdict such
+as an arity error or an unknown name counts as no progress. The deeper candidate is the signature
+the caller meant. A two-parameter callback handed to `lapply` is refused at the callback by the
+candidate that accepted the sequence, and at the sequence by the candidate that wanted a named
+list, so the callback is the finding.
+
+## The boundary for R's object systems is dispatch, not Hindley-Milner
+
+A recurring claim is that S3, S4 and R6 support is fundamentally at odds with a Hindley-Milner
+core, and that supporting it therefore costs soundness or speed. That is the wrong diagnosis, and
+it is recorded here so nobody re-derives it.
+
+The declarative core of all three systems maps onto machinery the checker already has and relies
+on: a nominal type with a checked representation, written `@type` plus `@new`, record field
+projection on a nominal, and declaration-ordered overload sets. The existence proof is that S3
+dispatch already runs inside the inference core. An operator on a nominal is dispatched statically
+and soundly today, through `+.Class`, `Arith.Class` or `Ops.Class`. S4 inverts the claim hardest.
+`setClass` is a record declaration with slot types written literally in source, `new(...)` is a
+named-argument constructor call, `x@slot` is a field projection, and `setMethod(signature = ...)`
+is an overload candidate. S4 is therefore more statically declared than the `#:` annotations the
+checker already consumes. Hand-writing the equivalent, which is `@type` plus a wrapper constructor
+carrying `@new`, already checks slot types and constructor arity with no strain on inference. The
+gap is a lowering pass, not type theory.
+
+Three things genuinely do keep dispatch out, and they are the real reasons.
+
+- **Dispatch needs a class known at the call site.** Inside an unannotated `function(x) speak(x)`
+  the argument is an open inference variable, so there is nothing to dispatch on and the only sound
   answer is `Unknown`. R code is most dynamic exactly where dispatch matters most, so generic
-  dispatch structurally underdelivers where it would be used. (Same shape as overload selection with
-  a flexible argument: never guess, fall back.)
-- **Inheritance is subtyping, and there is none.** `TyKind::Named` matches by exact name (type
-  arguments aside); no hierarchy exists anywhere in the compatibility relation. S4's `contains=` and
-  R6's `inherit=` require one, and nominal subtyping is a new axis in `compatible` and in the
-  union/join rules — the one place where a soundness regression is a real risk rather than a worry.
+  dispatch structurally underdelivers where it would be used. This is the same shape as overload
+  selection with a flexible argument: never guess, fall back.
+- **Inheritance is subtyping, and there is none.** `TyKind::Named` matches by exact name, type
+  arguments aside. No hierarchy exists anywhere in the compatibility relation. S4's `contains=` and
+  R6's `inherit=` require one. Nominal subtyping is a new axis in `compatible` and in the union and
+  join rules, and it is the one place where a soundness regression is a real risk.
 - **A generic's method set is global mutable state, which fights the interface firewall.** Any file
-  may add `print.foo`. If "the methods of generic G" is an input to every call of G, one new method
-  invalidates every call site in the workspace. Incremental support needs a separately memoized
-  method-set query per generic, so that adding a method invalidates only calls to that generic and
-  editing a method body invalidates nothing. Getting this wrong turns a single edit into a full
-  revalidate at 300k LoC.
+  may add `print.foo`. If the method set of a generic is an input to every call of that generic,
+  one new method invalidates every call site in the workspace. Incremental support needs a
+  separately memoized method-set query per generic, so that adding a method invalidates only calls
+  to that generic and editing a method body invalidates nothing. Getting this wrong turns a single
+  edit into a full revalidation at 300,000 lines of code.
 
-**Therefore one decision splits into three, decided separately:**
+One decision therefore splits into three, decided separately.
 
-1. **False positives are defects, not deferred features.** `setGeneric("f", ...)` not defining `f`
-   (so every call to a project's own S4 generic reports `unresolved`) and the absent R6 stub
-   (`R6::R6Class` reporting an unknown namespace) are bugs. They cost nothing in soundness or speed
-   and are fixed independently of any object-system ambition.
-2. **Declarations may become nominals; this is the cheap win.** Recognizing `setClass` and
+1. **A false positive is a defect, not a deferred feature.** `setGeneric("f", ...)` not defining
+   `f`, so that every call to a project's own S4 generic reports `unresolved`, is a bug. So is the
+   absent R6 stub, which makes `R6::R6Class` report an unknown namespace. Neither costs anything in
+   soundness or speed, and both are fixed independently of any object-system ambition.
+2. **A declaration may become a nominal, and this is the cheap win.** Recognizing `setClass` and
    `R6Class(public = list(...))` as class declarations that produce a nominal with typed slots or
-   fields catches the mistakes users actually make (slot and field typos, constructor arity) with no
-   subtyping, no new global state, and per-file firewalling like any other item.
-3. **Dispatch and inheritance stay unmodelled** on the three grounds above, and an unmodelled
-   construct stays `Unknown` — a coverage limit reported by strict mode, never a guess. Revisit only
-   with a memoized per-generic method-set query and a decided nominal-subtyping design.
+   fields catches the mistakes users actually make, which are slot and field typos and constructor
+   arity. It needs no subtyping, no new global state, and it firewalls per file like any other
+   item.
+3. **Dispatch and inheritance stay unmodelled**, on the three grounds above. An unmodelled
+   construct stays `Unknown`, which strict mode reports as a coverage limit rather than a guess.
+   Revisit only with a memoized per-generic method-set query and a decided nominal-subtyping
+   design.
 
-## `T[]` — atomic-element constraint, not traits
+## `T[]` carries an atomic-element constraint, not a trait
 
-The core vector generalizes to carry an element *type* (so it can hold a variable), with a new **atomic-element constraint** kind on inference variables — the same mechanism as the existing numeric constraint (`<T: numeric>`), rendered `<T: atomic>`. This resolves the former open question (typing-design §1) in favor of option (a): the constraint mechanism is already built, proven, and fast; a trait system is not justified by this need alone.
+The core vector generalizes to carry an element type, so it can hold a variable. That needs a new
+atomic-element constraint kind on an inference variable. It is the same mechanism as the existing
+numeric constraint `<T: numeric>`, and it renders as `<T: atomic>`. A trait system is not justified
+by this need alone, because the constraint mechanism is already built, proven and fast.
 
-Implementation notes: valid vector elements are `Scalar(_)`, a constrained `Variable(_)`, and `Any`/`Unknown` (statically untracked element). `Constraint` became a proper lattice merged via `join` (not `Ord`): numeric ∧ atomic-element = `ScalarNumeric` (a scalar `integer`/`double`, rendered `<T: scalar numeric>`), which defaults to `double` at binding boundaries like plain numeric. Annotation lowering records the atomic-element bound directly on the element variable's entry rather than through `constrain_type`, because the element may be a rigid `<T>` binder — the annotation itself makes the promise there, while a function body must not add bounds the annotation never declared.
+A valid vector element is a `Scalar(_)`, a constrained `Variable(_)`, or `Any` or `Unknown` for an
+element the checker does not track. `Constraint` is a lattice merged by `join` rather than by
+`Ord`. Numeric meets atomic-element as `ScalarNumeric`, which is a scalar `integer` or `double`,
+renders as `<T: scalar numeric>`, and defaults to `double` at a binding boundary like plain
+numeric. Annotation lowering records the atomic-element bound directly on the element variable's
+entry instead of going through `constrain_type`, because the element may be a rigid `<T>` binder.
+The annotation itself makes the promise there, while a function body must not add a bound the
+annotation never declared.
 
 ## Coercion policy at parameter positions
 
-Three verified false-positive factories are fixed at the compatibility level: whole-number `double` literals are accepted at `integer` parameters (generalizing the rule `:` already had); `integer` widens to `double` at parameter positions; vectorized stdlib stubs declare `T[]` parameters so scalars coerce up (instead of scalar parameters falsely rejecting vectors). Rationale: with the old policy, the *more precise* a stub was, the more false positives it produced (`seq_len(10)`, `toupper(c("a","b"))`, `round(x, 2)` all errored) — which pressure-cooked the corpus toward `Any`.
+Three verified false-positive factories are fixed at the compatibility level.
+
+- A whole-number `double` literal is accepted at an `integer` parameter. This generalizes the rule
+  `:` already had.
+- `integer` widens to `double` at a parameter position.
+- A vectorized stdlib stub declares `T[]` parameters, so a scalar coerces up. A scalar parameter
+  would otherwise reject a vector.
+
+The old policy punished precision. The more precise a stub was, the more false positives it
+produced. `seq_len(10)`, `toupper(c("a","b"))` and `round(x, 2)` all errored, which pressured the
+corpus toward `Any`.
 
 ## Signature matching is name-aware
 
-Annotation-vs-definition parameter matching by flat position (spec'd and implemented) was an accepts-then-crashes soundness hole: R call sites match by **name**, so a positional zip routes values to wrongly-typed formals. Both the contract and the implementation switch to name-aware matching where names exist.
+An R call site matches arguments by name. Matching an annotation against a definition by flat
+position therefore routes a value to a wrongly-typed formal, which accepts code that crashes at run
+time. Both the contract and the implementation match by name where names exist.
 
 ## Strict mode
 
-Strict = **Unknown origins are errors AND unresolved-name references are errors** (they stop being plain naming warnings under strict); a recursion-induced `Unknown` return is an origin. Explicit `Any` remains the sanctioned escape hatch — "allowed unknown" is expressed by annotating, never silently. **Per-file toggle:** a top-of-file `#: @strict` / `#: @strict off` directive overrides the config default in both pipelines (the gates are already per-file; derive the directive from the parse so incrementality holds). Sound-by-refusal is acceptable policy: an unsupported construct may be refused loudly; it must never be silently mistyped.
+Under strict mode an `Unknown` origin is an error, and an unresolved-name reference is an error
+rather than a plain naming warning. A recursion-induced `Unknown` return is an origin. Explicit
+`Any` remains the sanctioned escape hatch, so an allowed unknown is expressed by annotating it and
+never silently.
 
-## A reported column counts characters; caret art counts terminal cells
+A `#: @strict` or `#: @strict off` directive at the top of a file overrides the configured default
+in both pipelines. The gates are already per file, and the directive is derived from the parse so
+incrementality holds.
 
-The CLI reported byte columns, in the rendered header and in `--output json` alike, and padded the caret by the same byte count. On any line carrying non-ASCII text before the finding — which R source does as soon as a string holds a name, a unit, or an em dash — the number disagreed with every editor and the caret sat visibly to the right of the code it accused, sometimes past the end of the line. Byte columns served nobody: a consumer would have to re-read the file as bytes to use one, and no editor or reviewer counts that way.
+Refusing an unsupported construct loudly is acceptable policy. Mistyping one silently is not.
 
-Two units, because the two jobs are different. **A column is characters** (`LineIndex::line_column_chars` for the JSON `column`/`endColumn` fields and the server's human-readable `file:line:column` strings; the CLI's snippet source re-counts miette's byte column the same way for the report header) — the number a person can act on. **Underline art is terminal cells**, because a CJK character or an emoji occupies two of them and a character count would under-pad; the graphical reporter measures them, so the two units never have to be reconciled by hand again. The JSON field documentation changed with it (a stated contract, so the change is deliberate and recorded here). The LSP protocol path is untouched: it converts to the negotiated encoding — UTF-16 by default — at the protocol edge, which is what LSP specifies and what byte columns were never meant to serve.
+## A reported column counts characters, and caret art counts terminal cells
 
-## The CLI reports through miette, not a hand-rolled renderer
+The CLI reported byte columns in the rendered header and in `--output json` alike, and padded the
+caret by the same byte count. R source carries non-ASCII text as soon as a string holds a name or a
+unit. On such a line the number disagreed with every editor, and the caret sat to the right of the
+code it accused, sometimes past the end of the line. A byte column served nobody, because a
+consumer would have to re-read the file as bytes to use one, and no editor counts that way.
 
-**Previously** every user-facing message the CLI printed was assembled by hand. `render_human_diagnostic` computed a gutter width, sliced the finding's first line out of a `LineIndex`, padded a caret row by terminal cells, truncated multi-line ranges with a dim note of its own wording, and printed related locations as one-line `= note: … --> path:line:col` trailers. Beside it, a second path styled `error: ` / `warning: ` prefixes with `console` and printed an underlying I/O failure with a bare `eprintln!` on the next line, and `ConfigParseError` built its own `in <path> for <key> at line L, column C` sentence. Three renderers, three notions of where a message points, and every improvement (a related location deserving its own snippet, a config error deserving its own line of source) meant more hand-rolled layout.
+The two jobs need two units.
 
-**Target shape:** one report type in the CLI, drawn by `miette`'s `GraphicalReportHandler`. A report is a severity, an optional diagnostic code, a message, an optional cause, an optional snippet (named source + labelled range), and nested related reports — enough for a finding, a companion note, and a bare failure alike, so the same reporter draws all of them. Errors that know their own source implement `miette::Diagnostic` themselves (`ConfigError` carries the config text and the toml span), and the CLI hands them to the same entry point. The look follows the destination: colour and unicode on an attended terminal, monochrome unicode when colour is refused, plain ASCII into a pipe or a file.
+- **A column counts characters.** `LineIndex::line_column_chars` produces the JSON `column` and
+  `endColumn` fields and the server's `file:line:column` strings. The CLI's snippet source
+  re-counts miette's byte column the same way for the report header. This is the number a person
+  can act on. The JSON field documentation changed with it, and that is a stated contract, so the
+  change is recorded here.
+- **Underline art counts terminal cells.** A CJK character or an emoji occupies two cells, so a
+  character count would under-pad. The graphical reporter measures cells, so the two units never
+  have to be reconciled by hand.
 
-**Impact.** *Correctness:* the underline is the library's, so multi-byte and wide glyphs are handled in one audited place; related locations are drawn from their own file instead of being reduced to a coordinate; a configuration failure is shown rather than described. *Simplicity:* the caret/gutter/width arithmetic is gone, and `RelatedNote` resolution moved out of the parallel worker into the sequential render step, so the workers now return plain diagnostics. *Performance:* the reporter is built once (`LazyLock`) instead of re-derived per finding, and the snippet source is borrowed — a custom `SourceCode` impl rather than `NamedSource`, which owns its text and would copy the whole file into every finding reported against it. *Incremental analysis:* untouched; this is presentation, and the JSON Lines contract is unchanged.
+The LSP path is untouched. It converts to the negotiated encoding, UTF-16 by default, at the
+protocol edge. That is what LSP specifies, and it is not what a byte column was ever meant to
+serve.
 
-**Two things miette does not do for us.** It counts the header column in **bytes**, so the borrowed-source `read_span` re-counts it in characters — otherwise the human header and the JSON record would disagree about the same finding. And it draws every line a range covers, so a range spanning more than three lines is clamped to its first line with the reach stated in the label; a finding on a long item must not print the item.
+## The CLI reports through miette
 
-**The theme is ours, not the stock one.** A snippet is a window on the source, not a box: the gutter runs unbroken down every row (`vbar_break = vbar`, in place of the stock dotted `·` row), the header opens with a plain rule rather than a corner (`ltop = hbar`), the range is underlined with carets (`underline = '^'`), and the closing rule under each snippet is dropped — one line saved per finding, and a run of findings prints dozens. The closer is the one part that is not themeable: miette hardcodes it from `lbot`+`hbar`, both of which the cause-chain arrows and multi-line span brackets also draw, so it is filtered out of the rendered string instead, matching only a line that is *nothing but* the rule (a nested report indents its own, in the parent's colour).
+Every user-facing message the CLI printed used to be assembled by hand. `render_human_diagnostic`
+computed a gutter width, sliced the finding's first line out of a `LineIndex`, padded a caret row
+by terminal cells, truncated a multi-line range with a dim note of its own wording, and printed a
+related location as a one-line `= note: ... --> path:line:col` trailer. A second path styled the
+`error: ` and `warning: ` prefixes with `console` and printed an underlying I/O failure with a bare
+`eprintln!` on the next line. `ConfigParseError` built its own `in <path> for <key> at line L,
+column C` sentence. That is three renderers and three notions of where a message points. Every
+improvement meant more hand-rolled layout.
 
-**The README's hero image is generated, and its renderer had to learn the palette.** `scripts/render-diagnostic-svg.rs` runs `ry check` under a pty and turns the ANSI it emits into an SVG, because GitHub strips escapes from code blocks but honours a `<style>` block inside an embedded SVG. Its SGR parser matched whole escape bodies, which handled the previous renderer's single-parameter codes and silently dropped every compound one the graphical reporter emits (`36;1;4` for the underlined locus, `35;1` for the caret) — the failure is a *monochrome image that still looks plausible*, so the render is worth an eye after any change to the palette, not just a re-run. Parameters are applied one at a time now, with cyan/magenta/green/yellow and underline added. The snippet-closing-rule width is read off miette 7.6, which hardcodes it; `check_draws_the_snippet_as_a_window` fails if an upgrade moves it, verified by changing the constant.
+The shape now is one report type in the CLI, drawn by miette's `GraphicalReportHandler`. A report
+holds a severity, an optional diagnostic code, a message, an optional cause, an optional snippet
+made of a named source and a labelled range, and nested related reports. That is enough for a
+finding, a companion note and a bare failure alike, so one reporter draws all of them. An error
+that knows its own source implements `miette::Diagnostic` itself. `ConfigError` carries the config
+text and the toml span, and the CLI hands it to the same entry point. The look follows the
+destination: colour and unicode on an attended terminal, monochrome unicode when colour is refused,
+and plain ASCII into a pipe or a file.
 
-## Annotation formatter — parse, then pretty-print
+The effect on each axis:
 
-The per-line re-indent walk (no bracket matching, lines never split) is replaced: join the `#:` block, parse it with the real `type_syntax` parser, pretty-print with **per-bracket hug bits** (an opener followed by content on its own line stays hugged; its closer mirrors it), honoring `indent_width`; on parse failure the block is left verbatim (which also ends prose corruption, and removes the drifted duplicate tokenizer). Both the fully expanded and the hugged style are stable fixed points; mixed shapes normalize.
+- Correctness. The underline is the library's, so a multi-byte or wide glyph is handled in one
+  audited place. A related location is drawn from its own file instead of being reduced to a
+  coordinate. A configuration failure is shown rather than described.
+- Simplicity. The caret, gutter and width arithmetic is gone. `RelatedNote` resolution moved out of
+  the parallel worker into the sequential render step, so a worker returns a plain diagnostic.
+- Performance. The reporter is built once in a `LazyLock` instead of being re-derived per finding.
+  The snippet source is borrowed through a custom `SourceCode` implementation rather than a
+  `NamedSource`, which owns its text and would copy the whole file into every finding reported
+  against it.
+- Incremental analysis. Untouched. This is presentation, and the JSON Lines contract is unchanged.
+
+Two things miette does not do here. It counts the header column in bytes, so the borrowed source's
+`read_span` re-counts it in characters. Otherwise the human header and the JSON record would
+disagree about the same finding. It also draws every line a range covers, so a range spanning more
+than three lines is clamped to its first line with the reach stated in the label. A finding on a
+long item must not print the item.
+
+The theme is the project's own, not the stock one. A snippet is a window on the source, not a box.
+The gutter runs unbroken down every row, with `vbar_break = vbar` in place of the stock dotted row.
+The header opens with a plain rule rather than a corner, with `ltop = hbar`. The range is
+underlined with carets, with `underline = '^'`. The closing rule under each snippet is dropped,
+which saves one line per finding, and a run of findings prints dozens. The closer is the one part
+that is not themeable. miette builds it from `lbot` and `hbar`, and the cause-chain arrows and the
+multi-line span brackets draw from those too, so it is filtered out of the rendered string instead.
+The filter matches only a line that is nothing but the rule, because a nested report indents its
+own in the parent's colour.
+
+The README's hero image is generated, and its renderer had to learn the palette.
+`scripts/render-diagnostic-svg.rs` runs `ry check` under a pty and turns the ANSI it emits into an
+SVG, because GitHub strips escapes from a code block but honours a `<style>` block inside an
+embedded SVG. Its SGR parser matched whole escape bodies. That handled the previous renderer's
+single-parameter codes and silently dropped every compound one the graphical reporter emits, such
+as `36;1;4` for the underlined locus and `35;1` for the caret. The failure mode is a monochrome
+image that still looks plausible, so the render is worth an eye after any change to the palette.
+Parameters are applied one at a time now, and cyan, magenta, green, yellow and underline were
+added. The snippet-closing-rule width is read off miette 7.6, which hardcodes it.
+`check_draws_the_snippet_as_a_window` fails if an upgrade moves it, which was verified by changing
+the constant.
+
+## The annotation formatter parses, then pretty-prints
+
+The formatter used to re-indent a `#:` block line by line, with no bracket matching, and it never
+split a line. It now joins the block, parses it with the real annotation type parser, and
+pretty-prints the result with per-bracket hug bits, honoring `indent_width`. An opener followed by
+content on its own line stays hugged, and its closer mirrors it. On a parse failure the block is
+left verbatim, which also ends prose corruption and removed the drifted duplicate tokenizer. Both
+the fully expanded style and the hugged style are stable fixed points, and a mixed shape
+normalizes.
 
 ## Config subsystem
 
-Workspace root comes from `InitializeParams` (never process CWD); discovery = nearest `roughly.toml` ancestor of the target, identical in LSP and CLI; unknown keys are **errors with toml spans**, surfaced as diagnostics on `roughly.toml` plus a window message — never a startup panic; config reload triggers a diagnostics refresh; one config struct chain end-to-end (the four parallel representations collapse).
+The workspace root comes from `InitializeParams` and never from the process working directory.
+Discovery finds the nearest configuration file in an ancestor directory, identically in the LSP and
+in the CLI. An unknown key is an error with a toml span, surfaced as a diagnostic on the
+configuration file plus a window message, and never as a startup panic. A config reload triggers a
+diagnostics refresh. One config struct chain runs end to end, replacing four parallel
+representations.
 
 ## Guard narrowing
 
-Flow-sensitive narrowing is implemented as **branch-edge entry refinement on the slot model**, not
-a separate flow analysis: a recognized guard condition (`is.null(x)`, the `is.*` family, negation)
-computes refined types for the guarded slot's two edges, and each refinement is an ordinary
-undo-logged environment write inside the branch region — branch writes replace it, the region
-rollback reverts it, and the branch join sees final values with no new machinery. Early-exit
-persistence falls out of divergence-aware joins: a branch that never falls through (`return`,
-`stop`, `break`, `next`, blocks ending in them) contributes neither value nor state, so the
-surviving edge's refinement (and only it) applies after the `if`.
+Flow-sensitive narrowing is branch-edge entry refinement on the slot model, not a separate flow
+analysis. A recognized guard condition computes refined types for the guarded slot's two edges. A
+recognized condition is `is.null(x)`, a member of the `is.*` family, or a negation of one. Each
+refinement is an ordinary undo-logged environment write inside the branch region. A branch write
+replaces it, the region rollback reverts it, and the branch join sees final values, so no new
+machinery is needed.
 
-Deliberate limits, for soundness and zero false positives:
-- **Union member filtering only.** Family guards do not invent a shape for `Any`/`Unknown` — a
-  refined `character | character[]` would false-positive against scalar-claim stub signatures.
-  The one non-union refinement is `is.null`'s true edge on `Any`/`Unknown` → `NULL`.
-- **Statically undecidable members stay on both edges** (inference variables, flexible-element
-  vectors, opaque nominals — `is.list(data.frame)` is true at runtime).
-- **Local slots only** (parameters, function/script locals). Package globals keep winner
-  semantics; guarded *expressions* (`is.null(x$field)`) are not tracked.
-- **No `&&`/`||` decomposition** and no in-condition narrowing (the right conjunct of
-  `!is.null(x) && x > 0` does not yet see the refinement) — recorded follow-ups.
-- The guarded key is resolved exactly as a read resolves (local slot under a naming context; the
-  flat global entry in context-less fixture states), so fixtures and production share one path.
+Early-exit persistence falls out of divergence-aware joins. A branch that never falls through
+contributes neither a value nor state, so the surviving edge's refinement applies after the `if`,
+and only that edge's. A branch never falls through when it ends in `return`, `stop`, `break` or
+`next`, or in a block ending in one of them.
 
-## Expanded annotation syntax: `@param name {TYPE}`
+The limits below are deliberate, for soundness and for zero false positives.
 
-**DECIDED (user-proposed, ratified).** The expanded parameter directive is `@param name {TYPE}` / `@param [name] {TYPE}` — name first, braced type second — replacing the JSDoc-ordered `@param name {TYPE}`. Rationale: (1) the wrapping payload (the type) becomes the trailing element, so multi-line types continue cleanly under the directive instead of leaving the name dangling after the closing braces; (2) one shape across all directives (`@type Name {TYPE}`, `@alias Name<T> {TYPE}`, `@param name {TYPE}`); (3) the grammar becomes unambiguous — the name is a single identifier token right after the directive, which retires the swallow-the-tail-as-name ambiguity and leaves room for an optional trailing description as a first-class extension. The old order is rejected with a targeted error naming the new form, not a generic parse failure. `@return {TYPE}` / `@forall` are unchanged.
+- **Only union members are filtered.** A family guard does not invent a shape for `Any` or
+  `Unknown`, because a refined `character | character[]` would false-positive against a stub
+  signature that claims a scalar. The one non-union refinement is the true edge of `is.null` on
+  `Any` or `Unknown`, which becomes `NULL`.
+- **A statically undecidable member stays on both edges.** That covers an inference variable, a
+  flexible-element vector and an opaque nominal. `is.list(data.frame)` is true at run time.
+- **Only a local slot narrows.** That is a parameter, a function local or a script local. A package
+  global keeps winner semantics, and a guarded expression such as `is.null(x$field)` is not
+  tracked.
+- **`&&` and `||` are not decomposed**, and narrowing does not apply inside the condition. The
+  right conjunct of `!is.null(x) && x > 0` does not yet see the refinement. Both are recorded
+  follow-ups.
+- The guarded key resolves exactly as a read resolves. That is the local slot under a naming
+  context, or the flat global entry in a context-less fixture state, so a fixture and production
+  share one path.
+
+## The expanded parameter directive is `@param name {TYPE}`
+
+The expanded parameter directive writes the name first and the braced type second, as
+`@param name {TYPE}` or `@param [name] {TYPE}`. JSDoc writes the type first, as
+`@param {TYPE} name`, and that order is rejected. There are three reasons.
+
+- The wrapping payload is the type, so putting it last lets a multi-line type continue cleanly
+  under the directive instead of leaving the name dangling after the closing brace.
+- It gives one shape across all directives: `@type Name {TYPE}`, `@alias Name<T> {TYPE}` and
+  `@param name {TYPE}`.
+- The grammar becomes unambiguous. The name is a single identifier token right after the directive.
+  That retires the ambiguity of swallowing the tail as a name, and it leaves room for an optional
+  trailing description later.
+
+The JSDoc order is rejected with an error that names the new form rather than with a generic parse
+failure. `@return {TYPE}` and `@forall` are unchanged.
 
 # Decision record: error-tolerant lowering (syntax errors do not erase a file)
 

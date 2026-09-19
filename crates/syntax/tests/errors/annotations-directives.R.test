@@ -26,6 +26,15 @@ error: expected a parameter name after `@param`
   | #: @param
   |         ^
 
+#---- param_jsdoc_order
+#: @param {double} x
+f <- function(x) x
+#++++
+error: expected a parameter name after `@param`. The name comes before the type, as `@param name {TYPE}`
+ --> 1:11
+  | #: @param {double} x
+  |           ^
+
 #---- param_missing_type
 #: @param x
 f <- function(x) x
