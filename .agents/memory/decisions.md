@@ -1218,86 +1218,183 @@ abstracted between the two stacks, which is a user directive. The duplication is
 introducing an abstraction to share code with legacy is a mistake even where the duplication is
 verbatim.
 
-# Decision record: cross-stack differential parity — range containment and the oracle-divergence allowlist
+# Decision record: every pipeline stage is fuzzed from its first commit
 
-**Context.** The Phase 2 gate holds the rewrite's semantic diagnostic classes (`type`, `unresolved`, `unused`) byte-exact against the legacy oracle. The first cross-stack differential run surfaced two structural tensions: (a) the rewrite frequently blames a *tighter* range than legacy for the same finding (the value expression instead of the whole assignment, the callee instead of the whole call) — which is the repo's stated diagnostics goal, not a defect; (b) legacy emits findings that are simply wrong (forward-captured bindings flagged unresolved and unused) where the rewrite's naming pass is correct.
+This is a user directive. The testing doctrine made fuzzing mandatory for the `syntax` crate from
+day one. It applies to every other pipeline stage too. Fuzzing is never bolted on later, for any
+layer.
 
-**Decision.**
-- **Range containment counts as parity.** Two findings match when class and message are byte-identical and the new range equals or lies inside the legacy range. Ranges strictly tighter than the oracle's are an intended improvement and never a divergence; a *wider* or shifted range still fails. Message text and finding **count** remain byte-exact.
-- **Oracle defects go on a committed allowlist, per case, with the reason.** The harness (`legacy/differential/tests/test_differential.rs`) fails on any unexplained divergence and also fails when an allowlisted case starts matching (stale entries must be removed). Current entries: the three forward-capture scoping cases where legacy reports false unresolved/unused findings.
-- **Diagnostic wording is adopted from legacy verbatim during the rewrite** for the compared classes (call-matcher arity and named-argument errors, annotation-parameter mismatch, the `@new` representation phrasing, the `#:` block-form refusals). Wording improvements are deliberately deferred to after cutover so parity stays byte-exact while the oracle exists; range precision is the one axis allowed to improve now (covered by containment).
+Every stage gets fuzz and property coverage the day it exists, alongside its fixtures. That covers
+lowering, naming, inference, diagnostics, the incremental layer, the formatter and the IDE
+features. The formatter is fuzzed for idempotence and losslessness. An IDE feature is fuzzed for
+never panicking at any cursor position.
 
-**Consequences.** The differential is a hard gate from its first commit (`0` unexplained divergences), not a triage report. The `@new` value check reports the applied representation as the expected type (the value is checked against the representation; naming the nominal would restate the `@new` line). Invalid `#:` blocks (mixed compact/expanded/definition forms) carry no typing payload — the refusal is the block's only contribution, matching legacy's drop-the-block behavior, and the three legacy refusal wordings are reproduced exactly.
+The semantics harness at `crates/semantics/tests/test_fuzz.rs` is the template. It asserts four
+things over a generator biased toward semantically live shapes, plus a token-soup robustness arm.
 
-# Decision record: fuzzing is pipeline-wide, from each stage's first commit (user directive)
+- Nothing panics across the full pipeline, which includes fixpoints converging.
+- Results are deterministic across fresh databases.
+- Diagnostic ranges have valid geometry.
+- Incremental equivalence holds, so editing through the setter gives the same result as a fresh
+  build. That is the red-green invariant.
 
-**Context.** The testing doctrine in the greenfield-rewrite record made fuzzing mandatory for the `syntax` crate from day one. The user extended this: fuzzing must cover the OTHER pipeline stages too — it is never an afterthought bolted on later, for any layer.
+`FUZZ_ITERS` scales the budgets. A bounded pass runs in the default test suite, so CI fuzzes on
+every change, and the `fuzz_deep` variants carry the long runs.
 
-**Decision.** Every pipeline stage gets fuzz + property coverage the day it exists, alongside its fixtures: lowering, naming, inference, diagnostics, the salsa incremental layer, and later the formatter and IDE features (formatter: idempotence + losslessness under fuzz; IDE: never-panic per cursor position). The semantics harness (`crates/semantics/tests/test_fuzz.rs`) is the template: never-panic across the full pipeline (salsa fixpoints must converge), determinism across fresh databases, diagnostic-range geometry, and incremental-equivalence (edit through the setter == fresh build — the red-green invariant), over a generator biased toward semantically live shapes plus a token-soup robustness arm. `FUZZ_ITERS` scales budgets; a bounded pass runs in the default test suite so CI fuzzes on every change, and `fuzz_deep` variants carry the long runs.
+The first semantics fuzz runs found two real crashes within seconds. One was a non-converging
+cycle, where a growing self-referential type rode the iteration cap into a panic. The other was
+inference variables leaking through exported schemes into foreign tables. Both are of the class
+that only surfaces in the large, which is exactly what per-stage fuzzing exists to catch early.
 
-**Validation.** The first semantics fuzz runs found two real crashes within seconds — a non-converging salsa cycle (a growing self-referential type riding the iteration cap into a panic; the legacy oracle crashes on the same input) and inference variables leaking through exported schemes into foreign tables — both of the class that only surfaces "in the large", exactly what per-stage fuzzing exists to catch early.
+# Decision record: diagnostic wording follows the project's own bar
 
-# Decision record: wording is free to improve — the oracle pins findings, not prose (user directive)
+This is a user directive. A message does not have to copy any other implementation, and improving
+one is welcome.
 
-**Context.** The differential-parity record adopted legacy diagnostic wording verbatim so the semantic classes could be compared byte-exact, deferring improvements to after cutover. The user lifted that constraint: messages need not copy the oracle — improving them is welcome.
+Wording follows the diagnostics bar in `AGENTS.md`, which is the Rust and Elm standard. The golden
+fixture suites are the wording contract, and they render the stack's own messages.
 
-**Decision.** The cross-stack differential matches findings on **class + range containment only** (a legacy finding pairs with a distinct new finding of the same class whose range is equal or inside legacy's; counts must pair fully). Message text is not compared; pairs whose messages differ are collected into an informational "wording differences" section of each report, so deliberate improvements stay visible and accidental regressions are still noticeable. The oracle therefore pins **which findings exist and where** — existence, class, position, and count — which is the semantically load-bearing part. Wording already adopted from legacy stays (no churn for its own sake); future wording follows the repo's Rust/Elm diagnostics bar instead of the oracle, and the golden fixture suites are the wording contract.
+# Decision record: deep resolve is memoized per binding epoch and cuts a cycle to `Unknown`
 
-**Consequences.** Divergences that were pure prose differences reclassify as matches; remaining corpus divergences are genuinely semantic (missing/extra findings or misplaced ranges). The fixture suites — which render the new stack's own messages — remain the authority on wording quality.
+`InferenceTable::resolve`, the deep resolver in `crates/semantics/src/infer.rs`, walked the interned
+type structure recursively with only a depth-64 cap as protection. Interned types form a directed
+acyclic graph, so a shared subtree appears once in memory but was re-resolved once per occurrence.
+A self-referential binding, meaning a variable whose binding transitively contains itself or a
+self-referential alias, expanded as a tree up to the cap. On the real-file corpus of about 507k
+lines this measured 397 million inner resolve steps, and resolve alone cost more wall time than the
+legacy stack's entire pipeline. The depth cap also truncated meaning. Past depth 64 a type silently
+stayed unexpanded, which is a position-dependent semantics that no cache can be layered onto.
 
-# Decision record: deep-resolve is memoized per binding epoch with cycle-cut-to-Unknown (replacing depth truncation)
+Deep resolve is now a memoized walk over the interned graph with explicit cycle detection.
 
-**Context.** `InferenceTable::resolve` (the deep resolver in `crates/semantics/src/infer.rs`) walked the interned type structure recursively with only a depth-64 cap as protection. Interned types form a DAG — shared subtrees appear once in memory but were re-resolved once per occurrence, and a self-referential binding (a variable whose binding transitively contains itself, or a self-referential alias) expanded as a tree up to the cap. On the real-file corpus (~507K lines) this was measured at 397 million inner resolve steps — resolve alone cost more wall time than the legacy stack's entire pipeline — and the depth cap also *truncated meaning*: past depth 64 a type silently stayed unexpanded, a position-dependent semantics no cache could be layered onto.
+- **A cycle cuts to `Unknown`.** The walk carries a `visiting` stack of the variables under
+  expansion. Re-encountering one means an infinite type, and it resolves to `Unknown`. That matches
+  the pin-to-`Unknown` doctrine used everywhere self-reference grows, including the fixpoint cap and
+  loop widening. Alias expansion keeps a depth guard as a pure resource backstop, not as a
+  semantics.
+- **Only a clean subtree is memoized.** A result caches in `resolve_cache` keyed by the interned
+  type, but only when no cycle was cut beneath it. A node containing a variable currently being
+  expanded resolves differently at top level.
+- **An epoch invalidates the cache.** Every binding mutation and rollback bumps an epoch counter,
+  and the cache self-clears on an epoch mismatch. No entry can serve a stale binding. The common
+  case, which is many resolves between mutations such as rendering a whole item's diagnostics, hits
+  warm.
 
-**Decision.** Deep-resolve is a memoized walk over the interned DAG with explicit cycle detection:
+Correctness: silent depth truncation is replaced by the established cycle semantics, so an infinite
+type resolves to `Unknown` at the point of self-reference instead of expanding arbitrarily deep.
+The fixture and fuzz suites confirm this is observation-equivalent everywhere covered. Performance:
+corpus inner resolve steps went from 397 million to 4.2 million, which is linear in corpus size.
+Resolve wall time went from 30.8 s to 0.3 s, and a whole corpus pass from 53.2 s to 12.7 s.
+`RESOLVE_CALLS` stays as a standing instrument, because a near-linear step count is now an
+invariant the performance harness can watch.
 
-- **Cycle cut:** the walk carries a `visiting` stack of variables under expansion; re-encountering one is an infinite type and resolves to `Unknown`, matching the pin-to-Unknown doctrine used everywhere self-reference grows (salsa fixpoint cap, loop widening). Alias expansion keeps a depth guard as a pure resource backstop, not a semantics.
-- **Per-node memo, clean-flag discipline:** results cache in `resolve_cache` keyed by the interned type, but only CLEAN subtrees — those with no cycle cut beneath — are stored, because a node containing a variable currently being expanded resolves differently at top level.
-- **Epoch invalidation:** every binding mutation and rollback bumps an epoch counter; the cache self-clears on epoch mismatch. No entry can ever serve a stale binding, and the common case (many resolves between mutations, e.g. rendering a whole item's diagnostics) hits warm.
+# Decision record: the server threads one worker, and publishes diagnostics in two waves
 
-**Impact.** Corpus inner resolve steps 397M → 4.2M (linear in corpus size); resolve wall 30.8s → 0.3s; whole new-stack corpus pass 53.2s → 12.7s, beating the legacy stack's 13.9s. Semantically the change replaces silent depth truncation with the established cycle semantics — infinite types resolve to `Unknown` at the point of self-reference instead of arbitrarily deep expansion — which the fixture, fuzz, and both differential suites confirm is observation-equivalent everywhere covered. `RESOLVE_CALLS` stays as a standing instrument: near-linear step counts are now an invariant the perf harness can watch.
+The server runs one async-lsp frontend thread and one worker thread that owns the database.
 
-# Decision record: Phase 3 cutover — the new stack is the product
+**Cancellation rides the database's own token.** `notify_edit` cancels before it enqueues. A flip
+is consumed by whichever in-flight query it kills, and every subsequent job starts on a fresh
+storage-handle clone, so the latest edit wins. This was chosen over a hand-rolled cooperative flag
+because the database checks its token at every operation, which means no query body needs
+instrumenting.
 
-**Context.** The greenfield-rewrite plan's Phase 3: a new `crates/roughly` takes the product surface (LSP server + CLI) on the syntax/semantics/ide/format stack, with the legacy crates staying in-tree as oracle and benchmark.
+**The publish waves gate on a real query split.** `parse_stage_diagnostics` covers the syntax and
+annotation classes and exists as its own query precisely so the first wave never computes naming or
+type checking. Filtering the full set afterwards would pay the whole cost and only hide it.
+`file_diagnostics` builds on the same query, which keeps the first wave a faithful subset by
+construction.
 
-**Decision (executed).**
-- The new `crates/roughly` owns the `roughly` lib and bin names; the legacy targets renamed to `roughly_legacy`/`roughly-legacy` in the same change that created the new bin (two same-named targets never coexist). Workspace `default-members` now points at the new crate, so the bare cargo commands and the active CI gate the new product.
-- **Server threading and cancellation:** one async-lsp frontend thread and one worker thread owning the salsa database. Latest-edit-wins rides salsa's cancellation token: `notify_edit` cancels before enqueueing; a flip is consumed by whichever in-flight query it kills, and every subsequent job starts on a fresh storage-handle clone. Chosen over a hand-rolled cooperative flag because salsa checks its token at every operation — no instrumentation of query bodies needed.
-- **The publish waves gate on a real query split.** `parse_stage_diagnostics` (syntax/annotation classes) exists as its own salsa query precisely so the first wave never computes naming or type checking; filtering the full set post-hoc would pay the whole cost and only hide it. `file_diagnostics` builds on the same query, keeping the first wave a faithful subset by construction.
-- **The host assembly is shared** (`crates/roughly/src/diagnostics.rs`): config gating, per-file typing modes, strict escalation, lints, and suppression comments run identically for the server's publish path and `roughly check`, so the two surfaces cannot drift.
-- Lints were ported to `semantics::lints` (the `missing-comma` lint retired: the hand parser rejects `f(1 2)` as R does — the lint compensated for tree-sitter over-acceptance; its config key stays accepted, inert). `globalVariables` suppression and stub-loader problem reporting (`stub_source_problems`, incl. `@masked` variadic validation and unknown-nominal checks) were built during the port after the contract suites exposed them as gaps.
-- **Deliberately not ported:** the legacy CLI's `debug analysis-stats`/`debug index` (the measurement instrument on the new stack is `test_stats`), and per-diagnostic related locations (duplicate top-level binding notes) — the new `Diagnostic` has no related-location model yet; recorded as open work, not silently dropped.
+**The host assembly is shared**, in `crates/ry/src/diagnostics.rs`. Config gating, per-file typing
+modes, strict escalation, lints and suppression comments run identically for the server's publish
+path and for `ry check`, so the two surfaces cannot drift.
 
-**Validation.** The CLI contract suite (27 tests) and the LSP behavioral suite (59 tests, driving the real binary over stdio) pin the surface; the full workspace, both release differentials, clippy, and fmt stay green; `stats_witness` asserts the perf/memory budgets as CI-checkable thresholds.
+Two smaller decisions sit alongside. The `missing-comma` lint is retired, because the hand parser
+rejects `f(1 2)` as R does and the lint only compensated for tree-sitter over-accepting it. Its
+config key stays accepted and inert. Per-diagnostic related locations, such as the note on a
+duplicate top-level binding, are not implemented, because `Diagnostic` has no related-location
+model yet. That is recorded as open work rather than silently dropped.
 
-# Decision record: canonical per-group interface fixpoint — cyclic schemes are forcing-order-independent
+The CLI contract suite and the LSP behavioral suite pin the surface. The LSP suite drives the real
+binary over stdio. `stats_witness` asserts the performance and memory budgets as CI-checkable
+thresholds.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by a corpus-scale finding from the multi-core instrument: 64852 findings when per-file phases were pre-forced versus 64835 when file diagnostics were forced directly — both counts stable across runs and thread counts (one worker equals four exactly), so the delta was never a parallelism race but query-order semantics.
+# Decision record: the interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order
 
-Previous shape / structural weakness: cyclic package-interface groups resolved through salsa's dynamic cycle recovery alone (`item_check_recover` / `global_scheme_recover`): whichever member was queried first became the cycle head, the fixpoint iterated from that head, and a group still changing at the round cap pinned *from that head's perspective* — so which items lost their types to `Unknown` depended on which query happened to arrive first. Every individual forcing order was deterministic, but hover-then-check, check-then-hover, and differently-ordered cold passes could disagree with each other. The legacy stack's whole-package rounds were entry-order-independent; the rewrite's per-item cycle heads were not.
+A corpus-scale finding from the multi-core instrument drove this. Pre-forcing the per-file phases
+gave 64852 findings, and forcing file diagnostics directly gave 64835. Both counts were stable
+across runs and thread counts, and one worker equalled four exactly, so the difference was never a
+parallelism race. It was query-order semantics.
 
-Chosen shape (in `crates/semantics/src/semantics.rs`):
-- `interface_sccs(files)` — the static interface-reference graph: an edge from each named package definition item to the winner of every global name its body reads (`non_locals` plus validated `namespace_reads`), condensed by one iterative Tarjan pass in canonical order (project file order, item order within a file). Only *cyclic* groups (more than one member, or a self-edge) are recorded.
-- `scc_schemes(files, group)` — the canonical fixpoint of one group: every member starts at the tolerant `Unknown` scheme; each round re-checks every member against the *previous* round's table (Jacobi — one propagation hop per round, so within-round order cannot matter either); convergence is scheme-table equality; a group still changing at the round cap (16, shared with the salsa backstop) pins **all** members to `Unknown` — the only entry-order-free pin. Member checks run `check_item_with_annotation` directly against an overlay environment (`SccGlobals`: round table first, ordinary global resolution otherwise; stub overloads suppressed for member names) — never through `item_check` — so no salsa cycle forms.
-- `item_check` **adopts** the canonical scheme as a member's exported scheme (single source of truth: export, hover, and every downstream reader see the fixpoint value, not the one-hop-ahead re-derivation the item's own check just computed), and `global_scheme` reads `item_check` only. The salsa cycle recovery stays as a backstop for reference edges the static graph cannot see.
+A cyclic package-interface group used to resolve through dynamic cycle recovery alone, in
+`item_check_recover` and `global_scheme_recover`. Whichever member was queried first became the
+cycle head, the fixpoint iterated from that head, and a group still changing at the round cap
+pinned from that head's perspective. Which items lost their types to `Unknown` therefore depended
+on which query happened to arrive first. Every individual forcing order was deterministic, but
+hover-then-check, check-then-hover and differently ordered cold passes could disagree with each
+other. The legacy stack's whole-package rounds were entry-order-independent. Per-item cycle heads
+were not.
 
-Impact: correctness — forward, reverse, and phase-pre-forced forcing render identical diagnostics (regression test `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`; the corpus instruments now agree at 64835 findings for both forcing shapes), and the growing-self-reference pin stays `Unknown`; simplicity — the fixpoint is an ordinary tracked query over an explicit graph instead of emergent salsa cycle-head dynamics; performance — the sequential corpus pass *improved* 12.7s → 10.1s (canonical rounds replace salsa's per-head cycle re-iteration), while keystrokes in a 53K-line package pay ~3ms more per edit (~8%; the once-per-revision validation walk of `interface_sccs`, whose dependency surface is every item's naming — narrowing that surface to a per-item read-name projection is the known lever if it ever matters); incremental analysis — the graph derives from naming only, so edits that leave every member's read-set unchanged backdate `interface_sccs` and the group fixpoint re-runs only when a member's check output changes.
+The shape now lives in `crates/semantics/src/semantics.rs` and has three parts.
 
-# Decision record: no third constraint kind — two-flexible comparisons stay unconstrained
+- `interface_sccs(files)` builds the static interface-reference graph. It draws an edge from each
+  named package definition item to the winner of every global name its body reads, which is
+  `non_locals` plus validated `namespace_reads`. One iterative Tarjan pass condenses it in
+  canonical order, which is project file order and then item order within a file. Only a cyclic
+  group is recorded, meaning one with more than one member or with a self-edge.
+- `scc_schemes(files, group)` is the canonical fixpoint of one group. Every member starts at the
+  tolerant `Unknown` scheme. Each round re-checks every member against the previous round's table,
+  which is Jacobi iteration, so one propagation hop happens per round and within-round order cannot
+  matter either. Convergence is scheme-table equality. A group still changing at the round cap,
+  which is 16 and shared with the backstop, pins all members to `Unknown`. That is the only
+  entry-order-free pin. A member check runs `check_item_with_annotation` directly against an
+  overlay environment called `SccGlobals`, which reads the round table first and falls back to
+  ordinary global resolution, and which suppresses stub overloads for member names. It never runs
+  through `item_check`, so no cycle forms.
+- `item_check` adopts the canonical scheme as a member's exported scheme, which keeps a single
+  source of truth. Export, hover and every downstream reader see the fixpoint value rather than the
+  one-hop-ahead re-derivation the item's own check just computed. `global_scheme` reads `item_check`
+  only. The dynamic cycle recovery stays as a backstop for reference edges the static graph cannot
+  see.
 
-**Status:** decided and ratified (agent-owned decision under the delegated ownership mandate). This resolves the recorded design fork on two-flexible-operand comparisons without tripping the traits tripwire.
+Correctness: forward, reverse and phase-pre-forced forcing now render identical diagnostics. The
+regression test is `cyclic_group_answers_are_forcing_order_independent` in
+`crates/semantics/tests/test_parallel.rs`, and the corpus instruments agree at 64835 findings for
+both forcing shapes. The growing-self-reference pin stays `Unknown`. Simplicity: the fixpoint is an
+ordinary tracked query over an explicit graph, instead of emergent cycle-head dynamics.
+Performance: the sequential corpus pass improved from 12.7 s to 10.1 s, because canonical rounds
+replace per-head cycle re-iteration. A keystroke in a 53k-line package costs about 3 ms more, which
+is about 8%. That is the once-per-revision validation walk of `interface_sccs`, whose dependency
+surface is every item's naming. Narrowing that surface to a per-item read-name projection is the
+known lever if it ever matters. Incremental analysis: the graph derives from naming only, so an
+edit that leaves every member's read set unchanged backdates `interface_sccs`, and the group
+fixpoint re-runs only when a member's check output changes.
 
-Question: `function(a, b) a < b` — should comparing two flexible operands constrain them (to each other, or to a new "comparable" constraint kind covering numeric/`character`/`logical`)?
+# Decision record: there is no third constraint kind, so two flexible comparison operands stay unconstrained
 
-Decision: **no.** Two flexible comparison operands stay fully unconstrained — the function infers as `<T, U> fn(a: T, b: U) -> logical` and cross-family calls are accepted. A flexible operand is still constrained to numeric when its partner is concretely numeric (existing rule), and two concretely-known families must still match.
+The question was whether comparing two flexible operands in `function(a, b) a < b` should constrain
+them, either to each other or to a new comparable constraint kind covering numeric, `character` and
+`logical`.
 
-Rationale:
-- R's runtime comparison coerces across atomic families (`1 < "2"` is legal, character-compares `"1" < "2"`), so any constraint tying flexible operands to a family or to each other rejects legal programs the checker cannot prove wrong.
-- A "comparable" constraint would be the third independent constraint kind — the recorded traits tripwire. Comparisons alone do not justify designing traits: the constraint would be nearly vacuous (every atomic family is comparable), buying almost no precision for real machinery cost.
-- The same-family error on two *concrete* operands stays: that case is decidable and catches real bugs (`x < "10"`).
+It should not. Two flexible comparison operands stay fully unconstrained. The function infers as
+`<T, U> fn(a: T, b: U) -> logical`, and a cross-family call is accepted. A flexible operand is
+still constrained to numeric when its partner is concretely numeric, which is the existing rule,
+and two concretely known families must still match.
 
-Impact: correctness — ratifies existing behavior (fixture `two_flexible_comparison_stays_unconstrained`; both differentials green, so the oracle agrees); simplicity — no new machinery, the traits tripwire stays armed; the typing reference now states the flexible-operand comparison rules explicitly.
+Three reasons.
+
+- R's runtime comparison coerces across atomic families. `1 < "2"` is legal and compares
+  `"1" < "2"` as characters. Any constraint tying flexible operands to a family, or to each other,
+  therefore rejects a legal program the checker cannot prove wrong.
+- A comparable constraint would be the third independent constraint kind, which is the recorded
+  traits tripwire. Comparisons alone do not justify designing traits. The constraint would be
+  nearly vacuous, because every atomic family is comparable, so it would buy almost no precision
+  for real machinery cost.
+- The same-family error on two concrete operands stays. That case is decidable and catches a real
+  bug, such as `x < "10"`.
+
+Correctness: this ratifies existing behavior, pinned by the fixture
+`two_flexible_comparison_stays_unconstrained`. Simplicity: no new machinery, and the traits
+tripwire stays armed. The typing reference states the flexible-operand comparison rules explicitly.
 
 # Decision record: union compatibility commits a flexible argument at first use, in program order
 
