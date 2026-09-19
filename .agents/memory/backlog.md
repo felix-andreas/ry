@@ -1010,89 +1010,72 @@ produce good messages. One tester confirmed the `expect_error` decision was righ
 "testing that something is rejected" subsection worked first try. Performance was never a complaint:
 0.15 s on 919 lines and 31.5k lines across 120 files in 2.2 s, both on debug builds.
 
-## Open — documentation review findings
+## Open: what the documentation reviews left
 
-Four independent reviews read the docs cold (a first-hour newcomer, an information architect, an
-accuracy auditor executing every claim against the binary, and a positioning analyst who also
-measured the competition). The accuracy fixes landed; what remains is below.
+Four independent reviews read the docs cold: a first-hour newcomer, an information architect, an
+accuracy auditor who executed every claim against the binary, and a positioning analyst who also
+measured the competition. The four `docs-review-*.md` files from that round hold the full reports
+and their paste-ready rewrites.
 
-**Bugs the reviews found, each with a repro:**
+Most of what they found is fixed. The structural rewrite landed, so the type-checking guide is a
+tutorial of eight numbered steps from a zero-config first run to strict mode, each with a runnable
+example whose output came from the binary, ending where the reference begins. The stubs page is no
+longer an internal RFC. The diagnostics reference covers all fourteen codes in tables built by
+running the tool, and a CI workflow page and a limitations page landed with it. `why-ry.md` answers
+why a type checker for R, and `guides/adopting.md` is the adoption how-to. Re-verified against the
+tree: the rest-parameter spelling, the stale symbol names, the internal gate vocabulary, the bless
+environment variable, the `stub` diagnostic code, the `SCREAMING_SNAKE_CASE` exemption and the
+duplicate-`@type` error in a script are all correct now.
 
-- **Numeric conditions FIXED** (`if (length(x))`, `while (n)`, `!length(x)` — R coerces them, zero
-  false and anything else true; `character`/`complex`/`raw`/vector conditions stay errors). One
-  residual: a condition whose type is still *undetermined* is bound to `logical`, so
-  `function(n) while (n) ...` infers `n: logical` and rejects a numeric caller. Fixing that
-  properly needs a "coercible to a condition" constraint — a fourth constraint kind, which is the
-  documented tripwire for designing traits rather than accreting (see `contributing/design/open-questions.md`).
-- **Named-before-positional matching FIXED.** `match_arguments` walked the argument list once, in
-  source order, so a positional argument could take a formal that a *later* named argument was
-  going to claim (`vapply(xs, character(1), FUN = f)` reported a bogus "FUN given twice").
-  Matching is now two passes in `argument_targets` — names claim their formals, then positionals
-  fill what is left — computed once and shared by the checking loop and the rest-parameter
-  forwarding scan, which previously duplicated the accounting and so duplicated the bug.
-- **The accumulator idiom FIXED, on the design the report proposed.** `$` on a union subject no
-  longer demands the field on every member: a field some shapes carry and others do not reads as
-  `T | NULL`, because that is what R answers for a name a list lacks. A field **no** shape carries
-  stays an error — the typo check is the whole value — and a structural refusal (`$` on an atomic
-  vector) is still hard from any member. The "did you mean" is drawn from every field the union can
-  carry, so the suggestion survives a member with no fields at all.
-- **Literate-document prose blanking FIXED, and it hid a worse bug.** A non-breaking space is
-  whitespace to Rust's `char::is_whitespace` and an unexpected character to R's lexer, so prose
-  containing one reported a syntax error against a blank line. The same code blanked per
-  *character* rather than per *byte*, so any non-ASCII prose shifted every byte offset after it —
-  every downstream range is a byte offset, so diagnostics in later chunks were silently
-  misplaced. Both are fixed by blanking each character to its own `len_utf8()` in spaces; the unit
-  test that was supposed to catch this asserted char count instead of byte length.
-- **Self-checking ggplot2 reports 1132 findings and takes 2.4s** — the one package a stub ships
-  for. The proposed cause (the shipped stub colliding with the package's own definitions) does
-  **not** reproduce minimally: a package named `ggplot2` that defines `geom_point` and calls it
-  checks clean, so project-wins-over-corpus works. The real cause is unidentified and needs the
-  actual source (fetch the corpus); the likely candidates are ggplot2's own ggproto/R6 layer and
-  its NSE, both known gaps, in which case the number is honest rather than a bug.
-- **Duplicate type names go unreported in script files.** `reference.md` says the duplicate-`@type`
-  error fires "regardless of file"; it fires in package files only. The value-name analogue is
-  deliberately exempt for scripts, type names are not.
+### The comparison page does not exist
 
-**Documentation that is still wrong (verified, not yet fixed):** `reference.md` documents a
-rest-parameter spelling (`...items`) that never parses, and cites `contributing/design/open-questions.md`
-— a published contract pointing at an unpublished file; `stdlib-stubs.md` names six symbols
-(`BuiltinKind`, `parse_surface_type`, …) that exist only in the frozen legacy tree, and puts `...`
-last in `paste` when the real declaration has it first (the position is load-bearing);
-`architecture.md` still uses internal gate vocabulary; `development.md`'s re-bless command omits
-`ROUGHLY_BLESS=1`; the `stub` diagnostic code and the SCREAMING_SNAKE naming exemption are emitted
-but documented nowhere; five smaller `language-server.mdx` items (a `bun run package` with no root
-`package.json`, three wrong VS Code palette titles, 4-of-5 code actions, `PAREN_EXPR` folding
-omitted, a `--verbose` example whose own help says it is ignored).
+An earlier entry recorded it as done, naming `comparison.md`. No such file has ever been committed,
+and nothing in the docs mentions Air, Jarl or lintr.
 
-**The structural problem.** The site was organised around Roughly's subsystems rather than around
-anything a reader wants to *do*. Largely addressed: `typing/guide.md` is now a **tutorial** — eight
-numbered steps from a zero-config first run to strict mode, each with a runnable example and output
-captured from the binary, ending where the reference begins — and `stdlib-stubs.md` is no longer an
-internal RFC. Also landed: the diagnostics reference (all fourteen codes, tables built by running
-the tool), a CI workflow, and `limitations.md`.
+It is worth writing, and the earlier entry describes the right shape: a capability table plus a
+section on where you should use something else, handing formatting to Air and rule breadth to Jarl
+and lintr outright, and stating the alpha and one-maintainer position. Verify every claim about
+another project from that project's own documentation, and use no benchmark number that was not
+measured here, because a second-hand number about a competitor is the fastest way to lose the
+argument.
 
-**Comparison page DONE** (`comparison.md`): a capability table plus a "where you should use
-something else" section that hands formatting to Air and rule breadth to Jarl and lintr outright,
-and states the alpha/one-maintainer position. Every claim about another project was verified from
-that project's own documentation, and no benchmark number appears that was not measured here —
-second-hand numbers about competitors are the fastest way to lose the argument.
+Two measured facts the docs never state and should: 854 files and 166k lines in 3.6 s, and lintr at
+38.2 s against 0.47 s on dplyr.
 
-**Still missing:** a **"why a type checker for R"** explanation page (where the intrigue lives) and
-a dedicated **adoption how-to** (the ladder is on the limitations page but deserves its own).
+### The headline leads with the two things ry loses at
 
-**Positioning (partly addressed — the comparison page landed and the primacy claim is now
-defensible: "the only one that infers types" rather than "the first one", since two unmaintained
-annotation-only attempts exist and a hostile reader finds them in one search).** The headline leads
-with the formatter and linter — the two things Roughly loses at
-today (Posit's Air is bundled in Positron; Jarl ships 71 rules with `--fix` and an LSP, 140× faster
-than lintr) — and buries the one thing nobody else has. Measured facts the docs never state: 854
-files / 166k lines in 3.6s, and lintr 38.2s vs 0.47s on dplyr. Research confirms **no one has ever
-shipped a static type checker for R**: Vitek's group proved it viable (~80% of CRAN functions
-monomorphic or nearly, 1.98% contract-failure rate) then pivoted to a JIT IR, the one Damas-Milner
-attempt (`RTypeInference`) went dormant in 2021, and Posit's `ark` README states it plans
-"sophisticated static analysis of R code" citing rust-analyzer while Positron ships a Rust type
-checker for *Python*. Full reports and their paste-ready rewrites are the four
-`docs-review-*.md` files produced by that round.
+The landing page says "Editor support, error checking and formatting for R", which leads with the
+formatter and the linter. Posit's Air is bundled in Positron, and Jarl ships 71 rules with `--fix`
+and an LSP at 140 times lintr's speed. The one thing nobody else has is buried.
+
+Research confirms that nobody has ever shipped a static type checker for R. Vitek's group proved it
+viable, finding about 80% of CRAN functions monomorphic or nearly so with a 1.98% contract-failure
+rate, then pivoted to a JIT intermediate representation. The one Damas-Milner attempt,
+`RTypeInference`, went dormant in 2021. Posit's `ark` README states that it plans "sophisticated
+static analysis of R code" and cites rust-analyzer, while Positron ships a Rust type checker for
+Python.
+
+The primacy claim is already defensible in its current form, which is that ry is the only one that
+infers types rather than the first one, because two unmaintained annotation-only attempts exist and
+a hostile reader finds them in one search.
+
+### Self-checking ggplot2 reports 1132 findings and takes 2.4 s
+
+That is the one package a stub ships for. The proposed cause, the shipped stub colliding with the
+package's own definitions, does not reproduce minimally: a package named `ggplot2` that defines
+`geom_point` and calls it checks clean, so project-wins-over-corpus works.
+
+The real cause is unidentified and needs the actual source, so fetch the corpus. The likely
+candidates are ggplot2's own ggproto and R6 layer and its non-standard evaluation, both known gaps,
+in which case the number is honest rather than a bug.
+
+### One residual from the numeric-condition fix
+
+A condition whose type is still undetermined is bound to `logical`, so `function(n) while (n) ...`
+infers `n: logical` and rejects a numeric caller. Fixing that properly needs a "coercible to a
+condition" constraint, which is a fourth constraint kind and therefore the documented tripwire for
+designing traits rather than accreting them. `contributing/design/open-questions.md` holds the
+reasoning.
 
 ## Open — adoption review findings (unfixed items, each with a minimal repro)
 
@@ -1802,6 +1785,52 @@ The end-to-end guard rests on the corpus suites.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **A numeric condition is accepted**, because R coerces one, where zero is false and anything else
+  is true. That covers `if (length(x))`, `while (n)` and `!length(x)`. A `character`, `complex`,
+  `raw` or vector condition stays an error.
+
+- **Named arguments claim their formals before positionals fill what is left.** `match_arguments`
+  walked the argument list once in source order, so a positional argument could take a formal that a
+  later named argument was going to claim, and `vapply(xs, character(1), FUN = f)` reported a bogus
+  "FUN given twice". `argument_targets` now computes the two passes once and shares them with the
+  checking loop and the rest-parameter forwarding scan, which previously duplicated the accounting
+  and therefore duplicated the bug.
+
+- **`$` on a union subject no longer demands the field on every member.** A field some shapes carry
+  and others do not reads as `T | NULL`, because that is what R answers for a name a list lacks. A
+  field no shape carries stays an error, because the typo check is the whole value, and a structural
+  refusal such as `$` on an atomic vector is still hard from any member. The did-you-mean is drawn
+  from every field the union can carry, so the suggestion survives a member with no fields at all.
+
+- **Literate prose is blanked per byte, not per character.** A non-breaking space is whitespace to
+  Rust's `char::is_whitespace` and an unexpected character to R's lexer, so prose containing one
+  reported a syntax error against a blank line. The same code blanked per character, so any
+  non-ASCII prose shifted every byte offset after it, and every downstream range is a byte offset,
+  so diagnostics in later chunks were silently misplaced. Each character now blanks to its own
+  `len_utf8()` in spaces. The unit test that should have caught it asserted char count instead of
+  byte length.
+
+- **A duplicate type name reports in a script too.** The reference said the duplicate-`@type` error
+  fires regardless of file, and it fired in package files only. The value-name analogue stays
+  deliberately exempt for scripts. Type names are not.
+
+- **A list of functions works, and the cause was not the union.** `function_compatible` demanded an
+  exact parameter count, so `mean`, which has one required and two optional parameters, could not
+  serve a one-argument callback interface, and the union of two such functions failed member-wise.
+  Arity is a range now: a function serves an interface when it accepts every call shape the
+  interface promises. Extra optional parameters are therefore fine, while requiring too many, or
+  refusing an argument the interface sends, still fail. `lapply(list(mean, sd), function(g) g(1:3))`
+  is `list[double]`. `lapply` also keeps its input's names, through `list[named: T]` declared as its
+  narrower first candidate, which is what forced the overload tiebreak to become plain first-match.
+
+- **An S3 method declared in R is not reported `unused`.** The unused walk shares the method-name
+  knowledge with the lints, and a project's own generics count rather than only the corpus's.
+  Dispatch is still not a read, so the exemption is by name shape, meaning `generic.class` for a
+  generic that exists, which is the same signal R itself uses to find the method.
+
+- **`%*%`, `%o%` and `%x%` return the `matrix` nominal**, and the class has its arithmetic and
+  comparison methods, so a matrix expression types and composes.
 
 - **A `library()` of an unstubbed package no longer disables bare-name resolution project-wide.**
   Four independent testers reported this, and the most damning version was
