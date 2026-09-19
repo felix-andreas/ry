@@ -308,261 +308,277 @@ house style. A type is imported directly, and a function gets at least one modul
 unless ambiguity forces qualification. The change is mechanical, so do it as its own pass to keep
 the diff readable.
 
-## Open — fuzzing input-generation review (measured)
+## Open: what the fuzzers actually feed the code
 
-An independent review of what the fuzzers actually feed the code, with every number produced by a
-probe that reimplements each generator arm byte-for-byte (same RNG constants, seeds and budgets) and
-real `-C instrument-coverage` region counts. **11,735 generated inputs per default battery run**;
-98.7% of the wall clock goes to the two batteries with the worst input quality.
+An independent review measured the generators rather than reading them. Every number came from a
+probe that reimplements each generator arm byte for byte, with the same RNG constants, seeds and
+budgets, and from real `-C instrument-coverage` region counts. A default battery run generates
+11,735 inputs, and 98.7% of the wall clock goes to the two batteries with the worst input quality.
 
 ### The format battery's 4,500 generated inputs add 8 regions of 2,951
 
-Leave-one-out region coverage of `format.rs` (whole battery 2,771/2,951): dropping `fuzz_random_bytes`
-loses **0**, dropping `fuzz_seed_mutations` loses **0**, dropping token soup loses 4. Dropping all three
-as a block: 2,771 → 2,763. `fixture_sources_hold_invariants` alone covers 2,762 and contributes **410
-unique regions**. The earlier "14 in 1500" figure for the random-byte arm reaching the formatter body is
-confirmed and is worse than it reads: 11 of the 14 are empty or whitespace, so it formats a program with
-at least one token **3 times in 1500**, and never one with ten tokens. Delete the random-byte arm, cut
-soup to ~200 (it is the cheapest source of parser-error shapes — 33 of 35), and seed mutations from the
-fixture corpus instead of the 35 hand seeds.
+Leave-one-out region coverage of `format.rs`, where the whole battery reaches 2,771 of 2,951:
+dropping `fuzz_random_bytes` loses none, dropping `fuzz_seed_mutations` loses none, and dropping
+token soup loses 4. Dropping all three as a block takes 2,771 to 2,763. `fixture_sources_hold_invariants`
+alone covers 2,762 and contributes 410 unique regions.
+
+The earlier figure of 14 in 1500 for the random-byte arm reaching the formatter body is confirmed,
+and it is worse than it reads. Eleven of the 14 are empty or whitespace, so the arm formats a
+program with at least one token three times in 1500, and never one with ten tokens.
+
+Delete the random-byte arm. Cut token soup to about 200, because it is the cheapest source of
+parser-error shapes at 33 of 35. Seed the mutations from the fixture corpus instead of from the 35
+hand-written seeds.
 
 ### The generators cannot express most of the type system
 
-Diagnostics normalized to message *shapes*: all three semantics fuzz arms reach **60 shapes (33 of them
-parser errors, 9 distinct `type-mismatch`, 0 lint)** against the legacy corpus's 110 and the typing
-fixtures' 80. In 250 generated programs the annotation grammar produces `TYPE_REF`/`TYPE_FUNCTION`/
-`TYPE_RECORD` and **zero** unions, binders (`<T>`), applications (`Box<T>`), vectors, `list[T]`, tuples,
-parens, optional `[x]:` or rest `...r:` parameters. The generator calls **6 of 872 declared stub names**
-and reaches **1 of 37 overload sets**. No harness emits `library(...)`, so every conditional namespace and
-the whole NSE ladder is unreachable; no `setClass`/`setGeneric`/`R6Class`/`new()` anywhere.
-`metadata.rs` sits at **7.63%** regions, and `lints.rs` produces **zero findings in 250 programs**.
+Normalizing diagnostics to message shapes, all three semantics fuzz arms reach 60 shapes, of which
+33 are parser errors, 9 are distinct `type-mismatch` shapes and none are lints. The legacy corpus
+reaches 110 and the typing fixtures reach 80.
 
-### Grammar-directed generation, prototyped and measured rather than projected
+In 250 generated programs the annotation grammar produces `TYPE_REF`, `TYPE_FUNCTION` and
+`TYPE_RECORD`, and no unions, binders, applications, vectors, `list[T]`, tuples, parens, optional
+`[x]:` parameters or rest `...r:` parameters. The generator calls 6 of 872 declared stub names and
+reaches 1 of 37 overload sets. No harness emits `library(...)`, so every conditional namespace and
+the whole non-standard-evaluation ladder is unreachable, and nothing anywhere emits `setClass`,
+`setGeneric`, `R6Class` or `new()`. `metadata.rs` sits at 7.63% of regions, and `lints.rs` produces
+no findings in 250 programs.
 
-A ~250-line recursive generator over the R grammar × the `#:` grammar, 1,500 programs in **0.338 s**:
+### Grammar-directed generation, prototyped and measured
+
+A 250-line recursive generator over the R grammar crossed with the `#:` grammar produced 1,500
+programs in 0.338 s.
 
 | metric | best current arm | grammar prototype |
 |---|---|---|
-| parses clean | 35.3% | **100%** |
-| formats with ≥10 tokens | 8.0% | **41.3%** mutated |
-| `parser.rs` regions | 87.27% | **93.46%** |
-| semantic regions (9 files) | 11,073 | **12,888** |
-| diagnostic shapes | 60 | **95** (+59 new) |
-| distinct `type-mismatch` shapes | 9 | **17** |
-| lint shapes | 0 | **5** |
-| `ide::type_definition` hits | **0 / 7,884** | 80 / 23,826 |
+| parses clean | 35.3% | 100% |
+| formats with 10 or more tokens | 8.0% | 41.3% mutated |
+| `parser.rs` regions | 87.27% | 93.46% |
+| semantic regions across 9 files | 11,073 | 12,888 |
+| diagnostic shapes | 60 | 95 |
+| distinct `type-mismatch` shapes | 9 | 17 |
+| lint shapes | 0 | 5 |
+| `ide::type_definition` hits | 0 of 7,884 | 80 of 23,826 |
 
-Added *alongside* the existing arms (not replacing — soup still owns 24 parser-error shapes), semantic
-coverage goes 11,073 → **13,306 regions (+12.9 points)**. Typing fixtures still lead at 14,580, so the
-corpus beats synthesis and both beat noise.
+Add it alongside the existing arms rather than replacing them, because token soup still owns 24
+parser-error shapes. Semantic coverage then goes from 11,073 to 13,306 regions. The typing fixtures
+still lead at 14,580, so the corpus beats synthesis and both beat noise.
 
-### The best inputs are already in the tree and only one crate uses them
+### The best inputs are already in the tree, and only one crate uses them
 
-`fixture_sources_hold_invariants` exists **only in `format`**. The same 388 typing-fixture sources through
-the semantic pipeline reach **86.92% of `check.rs`** and 80 shapes, against the entire generated
-battery's 54.35% and 60. Wire it into `syntax`, `semantics` and `ide`, and use both corpora as *mutation
-seeds* rather than only fixed inputs.
+`fixture_sources_hold_invariants` exists only in `format`. The same 388 typing-fixture sources run
+through the semantic pipeline reach 86.92% of `check.rs` and 80 shapes, against the entire generated
+battery's 54.35% and 60. Wire it into `syntax`, `semantics` and `ide`, and use both corpora as
+mutation seeds rather than only as fixed inputs.
 
-**A fair criticism of the legacy-corpus arm as landed**: it runs one shared database over all 1,967 files,
-`file_diagnostics` only, asserting never-panic plus range geometry. That shared project changes what is
-tested — `unresolved` collapses from 284 to 148 while `duplicate` explodes from 20 to **2,182**, because
-1,967 unrelated files redeclare each other's names. Per-file with the full battery it reaches 110 shapes.
-Fix by batching into projects of a sane size and running the full `check_semantics_invariants`; the cost
-is fresh databases (~9 ms each in release, ~113 ms in debug), so this wants the batteries in release or a
-lower db-per-input count.
+The legacy-corpus arm as landed deserves one fair criticism. It runs one shared database over all
+1,967 files, calls `file_diagnostics` only, and asserts never-panic plus range geometry. That shared
+project changes what is tested: `unresolved` collapses from 284 to 148 while `duplicate` explodes
+from 20 to 2,182, because 1,967 unrelated files redeclare each other's names. Run per file with the
+full battery and it reaches 110 shapes. Fix it by batching into projects of a sane size and running
+the full `check_semantics_invariants`. The cost is fresh databases, at about 9 ms each in release
+and 113 ms in debug, so this wants the batteries in release or a lower count of databases per input.
 
 ### The IDE battery costs 216 s and never reaches the type-driven features
 
-`type_definition` returns `Some` **0 times in 7,884 offsets** — structurally, since it needs a
-`TyKind::Named` and no IDE seed declares a `@type`. `signature_help` fires at 0.5%. 86.7% of inputs do not
-parse. Swapping the 10 hand seeds for grammar-generated programs that declare and use nominals took
-`ide.rs` from 52.58% to **68.38%** on *fewer* inputs. Cap generated programs at ~10 statements — a
-150-input grammar sweep cost 81 s against 45 s for 300 tiny mutated ones.
+`type_definition` returns `Some` zero times in 7,884 offsets. That is structural, because it needs a
+`TyKind::Named` and no IDE seed declares a `@type`. `signature_help` fires at 0.5%, and 86.7% of
+inputs do not parse. Swapping the 10 hand-written seeds for grammar-generated programs that declare
+and use nominals took `ide.rs` from 52.58% to 68.38% on fewer inputs. Cap a generated program at
+about 10 statements, because a 150-input grammar sweep cost 81 s against 45 s for 300 tiny mutated
+ones.
 
 ### The semantics incremental invariant never performs a small edit
 
-`check_pipeline_reporting` derives its "edit" by generating an unrelated program, so the computed splice
-covers **97.3% of the old text on average** and only 1 pair in 250 touches ≤10%. `syntax::reparse` takes
-the full-parse fallback essentially always and salsa sees whole-file invalidation every time, so the
-splice-reuse path and per-item early cutoff — the architecture's core claim — are never exercised.
-Derive the edit from the source instead: replace or insert one statement at a boundary.
+`check_pipeline_reporting` derives its edit by generating an unrelated program, so the computed
+splice covers 97.3% of the old text on average and only one pair in 250 touches 10% or less.
+`syntax::reparse` therefore takes the full-parse fallback essentially always, and the engine sees
+whole-file invalidation every time. The splice-reuse path and per-item early cutoff, which are the
+architecture's core claim, are never exercised. Derive the edit from the source instead, by
+replacing or inserting one statement at a boundary.
 
-### Smaller, each with its measurement
+### Smaller items, each with its measurement
 
-- **The syntax edit stream degenerates but its coverage is fine.** 0/400 buffers parse clean, only 89
-  distinct shapes, and 60 steps lex to two tokens because an inserted `"` swallows the buffer — yet
-  `reparse.rs` is at 96.12% against a grammar-directed stream's 96.44%. Reset the buffer every ~20 steps
-  and skip near-empty ones; do **not** rewrite it.
-- **Coverage-guided fuzzing has never run.** `cargo fuzz` is not installed, `fuzz/corpus/` does not exist,
-  no CI job invokes it, and the root `cargo test` resolves to the product crate so `fuzz_deep` never runs
-  either — while the `REGRESSIONS` arrays (21 in `format`, 2 in `semantics`) are documented finds from
-  exactly that mechanism. `fuzz/` does still compile (`cargo +nightly check`, 83 s). Coverage judgement
-  costs one component: `rustup component add llvm-tools-preview` produced every number in this review.
-- **Two arms silently contribute zero inputs.** `corpus/` does not exist and nothing in CI or the justfile
-  fetches it, so `fuzz_corpus_seeded` in `syntax` and `format` returns early — ~1,050 budgeted inputs that
-  never run, behind a skip line `cargo test` hides. Same "green means nothing ran" species the
-  `FIXTURE_FILTER` guard already fixed.
-- **Surfaces with no fuzz coverage**: generated `.Rtypes` text never reaches the stub loader
-  (`stubs.rs` 60.67%); `PackageMetadata` appears in no harness; the IDE arm only ever uses
-  `DocumentKind::Package`. **The review's fourth item here was wrong and is corrected**: it reported
-  `syntax::literate::r_source_of_literate` as having "no test of any kind", but it has eight unit tests
-  and three of them already assert the byte-length invariant, including one for multibyte prose. The real
-  gap was only that the invariant was pinned on four hand-written documents rather than over generated
-  input, which the `syntax` battery now closes.
+- **The syntax edit stream degenerates, and its coverage is fine anyway.** No buffer of 400 parses
+  clean, only 89 distinct shapes appear, and 60 steps lex to two tokens because an inserted `"`
+  swallows the buffer. Yet `reparse.rs` sits at 96.12% against a grammar-directed stream's 96.44%.
+  Reset the buffer every 20 steps or so and skip a near-empty one. Do not rewrite it.
+- **Coverage-guided fuzzing has never run.** `cargo fuzz` is not installed, `fuzz/corpus/` does not
+  exist, no CI job invokes it, and the root `cargo test` resolves to the product crate so
+  `fuzz_deep` never runs either. Meanwhile the `REGRESSIONS` arrays, 21 in `format` and 2 in
+  `semantics`, are documented finds from exactly that mechanism. `fuzz/` does still compile, in 83 s
+  under `cargo +nightly check`. Judging coverage costs one component, because
+  `rustup component add llvm-tools-preview` produced every number in this review.
+- **Two arms silently contribute no inputs.** `corpus/` does not exist and nothing in CI or the
+  justfile fetches it, so `fuzz_corpus_seeded` in `syntax` and in `format` returns early. That is
+  about 1,050 budgeted inputs that never run, behind a skip line `cargo test` hides. It is the same
+  "green means nothing ran" species the `FIXTURE_FILTER` guard already fixed.
+- **Three surfaces have no fuzz coverage at all.** Generated `.Rtypes` text never reaches the stub
+  loader, which leaves `stubs.rs` at 60.67%. `PackageMetadata` appears in no harness. The IDE arm
+  only ever uses `DocumentKind::Package`.
+- **The review's fourth item here was wrong, and the correction is the useful part.** It reported
+  `syntax::literate::r_source_of_literate` as having no test of any kind. It has eight unit tests,
+  and three of them already assert the byte-length invariant, including one for multibyte prose. The
+  real gap was only that the invariant was pinned on four hand-written documents rather than over
+  generated input, which the `syntax` battery now closes.
 
-## Open — fuzzing economics and feedback-loop review (measured)
+## Open: what each hour of fuzzing compute buys
 
-A third independent review, asking what protection each hour of compute and minute of developer time
-actually buys. Every number below was produced on a 4-vCPU machine, debug profile unless stated. The
-headline: **fuzzing is 327.3 s of a 672 s local gate (49%), and CI runs none of it.** The rest of the
-gate is `legacy/` at 249.0 s (37.3%), the shipping crates' fixture suites at 68.8 s (10.3%) and
-`crates/ry` — the only thing CI runs — at 22.4 s (3.4%).
+A third independent review asked what protection each hour of compute and each minute of developer
+time actually buys. Every number came from a 4-vCPU machine, in the debug profile unless stated.
 
-Where this review **disagrees** with the input-generation review above, and the disagreement is real:
-that one wants the generated arms shrunk across the board; this one measures per-arm cost and wants
-`syntax` and `format` **grown** (they are 0.19–0.31 ms/input) while `ide` and `semantics` shrink
-(257–644 ms/input). Both independently conclude `format::fuzz_random_bytes` should be deleted.
+The headline is that fuzzing is 327.3 s of a 672 s local gate, which is 49%, and CI runs none of it.
+The rest of the gate is `legacy/` at 249.0 s, the shipping crates' fixture suites at 68.8 s, and
+`crates/ry`, which is the only thing CI runs, at 22.4 s.
 
-### The `extended` CI job runs zero tests — verified, not projected
+This review disagrees with the input-generation review above, and the disagreement is real. That one
+wants the generated arms shrunk across the board. This one measures per-arm cost and wants `syntax`
+and `format` grown, at 0.19 to 0.31 ms per input, while `ide` and `semantics` shrink, at 257 to
+644 ms per input. Both conclude independently that `format::fuzz_random_bytes` should be deleted.
 
-`cargo test --all-targets --all-features -- --list --ignored` → **0 tests, 0 benchmarks**, across all
-six binaries. Because the root `Cargo.toml` sets `default-members = ["crates/ry"]` and the workflow
-omits `--workspace`, the `extended` job is a full `lto = true` release build followed by an empty test
-run, on every push, with a 45-minute timeout. The blocking `check` job lists **171 tests, all in
-`crates/ry`**; the workspace has **707**, so **536 (75.8%) never run in CI**. `decisions.md` states "a
-bounded pass runs in the default test suite so CI fuzzes on every change" — that claim is false and has
-been for the pipeline's whole life. Fix the wording in `decisions.md` and the testing page independently
-of the workflow move.
+### CI runs 171 of the workspace's 712 tests, and its second job runs none
 
-### FIXED — `ide::completion` cost ~160–190 s per gate run to assert that strings are non-empty
+The root `Cargo.toml` sets `default-members = ["crates/ry"]` and the workflow omits `--workspace`.
+`cargo test --all-targets --all-features -- --list` therefore reports 171 tests, all in `crates/ry`,
+against the workspace's 712. Every fuzz arm lives in another crate. The second job runs
+`-- --ignored`, which lists no tests for the same reason, so it is a full release build with
+`lto = true` followed by an empty test run, on every push, under a 45-minute timeout.
 
-Per-offset on one warm database, 25 offsets: **completion 23.490 ms**, hover 0.044, hover_debug 0.039,
-code_actions 0.035, rename 0.033, definition 0.029, references 0.027, type_definition 0.024,
-signature_help 0.016. Completion is 587.26 ms of the 592.4 ms those nine features spend. Removing it
-from the harness's seed sweep: 6.34 s → 1.27 s debug (80%), 1.43 s → 0.08 s release (94%). The ide
-binary is 199.77 s of the 667.5 s battery, so completion alone is **~26% of the entire workspace test
-suite** — and its only assertion is `assert!(!item.label.is_empty())`. It is also mostly redundant: over
-the 10 seeds, 245 swept offsets produce **64 distinct results (73.9% duplicates)**.
+### `ide::fuzz_deep` makes a workspace-wide CI run time out
 
-Fixed by sampling once per completion context — the kind of token the cursor sits in or after. Two
-sharper-looking variants were measured and rejected: filtering to token boundaries saved only 5%
-(in short inputs nearly every sampled offset already is one), and keying on the *pair* of
-surrounding kinds saved 29%. Per-token-kind halves the harness (29.8 s → 16.8 s at `FUZZ_ITERS=50`,
-against a 6.2 s floor with completion removed entirely), and the full `ide` binary went 195 s → 94 s
-*while gaining* the two range oracles below.
+`ide::fuzz_deep` runs `iterations().max(5000)` sweeps. That `.max` floor means `FUZZ_ITERS` cannot
+lower it, which is the bug. Measured in release on that exact input shape, which is 1 to 12
+concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms. Five
+thousand sweeps is 55.4 minutes on 4 cores, against the job's 45-minute timeout on a 2-to-4 vCPU
+runner. That is before `semantics::fuzz_deep`, projected at about 4 minutes, and before the
+`test_stats.rs` instruments, which hard-assert on a corpus CI never fetches.
 
-### This is not a fuzzer; it is a fixed 498-program corpus re-derived at 124 s a run
+Fix the floor, make the stats instruments skip on an unfetched corpus the way `test_corpus.rs` does,
+and raise the timeout with measured headroom. All three come before the human moves
+`.github/pending-ci.yml` into place.
 
-All generators seed `SplitMix64` from compile-time constants with no entropy. Two runs of the semantics
-generator produce an **identical** set of **498 distinct programs**; drawing 100,000 times from the same
-generator reaches **87,203** distinct programs. The default budget samples **0.57% of its own generator's
-reach** and re-samples exactly that 0.57% forever. Split the two jobs it conflates: keep a small
-fixed-seed arm as the regression net it actually is, and give the exploratory arms a `FUZZ_SEED` env var
-defaulting to random, printing the seed on every failure, run on a schedule rather than in the blocking
-gate. Do **not** randomise the blocking gate — a failure surfacing on an unrelated change is a worse
-trade.
+### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
+
+Every generator seeds `SplitMix64` from compile-time constants with no entropy. Two runs of the
+semantics generator produce an identical set of 498 distinct programs, while drawing 100,000 times
+from the same generator reaches 87,203 distinct programs. The default budget samples 0.57% of its
+own generator's reach and re-samples exactly that 0.57% forever.
+
+Split the two jobs it conflates. Keep a small fixed-seed arm as the regression net it actually is.
+Give the exploratory arms a `FUZZ_SEED` environment variable defaulting to random, print the seed on
+every failure, and run them on a schedule rather than in the blocking gate. Do not randomize the
+blocking gate, because a failure surfacing on an unrelated change is a worse trade.
 
 ### The syntax arm is the best asset in the test architecture and gets 0.5% of the budget
 
-Distinct observable parser behaviours (error templates + node kinds) vs. iteration count:
+Distinct observable parser behaviors, counting error templates and node kinds, against iteration
+count:
 
-| syntax arm | 100 | 500 | **1500 (default)** | 6000 | 20000 | last new behaviour |
+| syntax arm | 100 | 500 | 1500 (default) | 6000 | 20000 | last new behavior |
 |---|---|---|---|---|---|---|
-| token_soup | 67 | 98 | **109** | 124 | 132 | iteration 19,024 |
-| random_bytes | 19 | 36 | **42** | 51 | 62 | iteration 17,012 |
-| seed_mutations | 71 | 107 | **124** | 143 | 158 | iteration 18,253 |
+| token_soup | 67 | 98 | 109 | 124 | 132 | iteration 19,024 |
+| random_bytes | 19 | 36 | 42 | 51 | 62 | iteration 17,012 |
+| seed_mutations | 71 | 107 | 124 | 143 | 158 | iteration 18,253 |
 
-All three at 20,000 iterations — 13× the default — cost **7 s total in debug** and were still finding new
-parser behaviour at iteration 19,024. Cost per input across the battery: syntax **0.19 ms**, format
-0.31 ms, semantics ~257 ms, ide **644 ms** — a 3,400× spread, with the weakest oracle sitting on the most
-expensive input. Raise the syntax budget to 20,000 (+7 s, +28% distinct behaviours) and pay for it out of
-the completion fix.
+All three at 20,000 iterations, which is thirteen times the default, cost 7 s total in debug and
+were still finding new parser behavior at iteration 19,024. Cost per input across the battery is
+0.19 ms for syntax, 0.31 ms for format, about 257 ms for semantics and 644 ms for ide. That is a
+spread of 3,400 times, with the weakest oracle sitting on the most expensive input. Raise the syntax
+budget to 20,000, which costs 7 s for 28% more distinct behaviors, and pay for it out of the
+completion fix.
 
-### Activating `.github/pending-ci.yml` as staged makes the `extended` job time out — a THIRD blocker
-
-`ide::fuzz_deep` runs `iterations().max(5000)` sweeps; that `.max` floor means `FUZZ_ITERS` **cannot
-lower it**, which is the bug. Measured in release on that exact input shape (1–12 concatenated seeds, avg
-214 bytes, 111 offsets/sweep): **665 ms per sweep × 5,000 = 55.4 minutes** on 4 cores, against the job's
-`timeout-minutes: 45` on a 2–4 vCPU runner. That is before `semantics::fuzz_deep` (~4 min projected) and
-the `test_stats.rs` instruments that hard-assert on a corpus CI never fetches. The two blockers already
-in this file are joined by this one, and it is the one that costs 45 minutes of runner time to discover.
-**Fix the floor, make the stats instruments skip on an unfetched corpus the way `test_corpus.rs` does,
-and raise the timeout with measured headroom — before the human `git mv`.**
-
-### The battery pays a 6.1× debug tax for identical assertions
+### The battery pays a debug tax of 6.1 times for identical assertions
 
 | binary | debug | release | speedup |
 |---|---|---|---|
-| syntax test_fuzz | 1.58 s | 0.10 s | 15.8× |
-| format test_fuzz | 2.31 s | 0.21 s | 11.0× |
-| semantics test_fuzz | 123.68 s | 8.62 s | 14.3× |
-| ide test_fuzz | 199.77 s | 44.40 s | 4.5× |
-| **total** | **327.34 s** | **53.33 s** | **6.1×** |
+| syntax test_fuzz | 1.58 s | 0.10 s | 15.8x |
+| format test_fuzz | 2.31 s | 0.21 s | 11.0x |
+| semantics test_fuzz | 123.68 s | 8.62 s | 14.3x |
+| ide test_fuzz | 199.77 s | 44.40 s | 4.5x |
+| total | 327.34 s | 53.33 s | 6.1x |
 
-Building the four release test binaries costs 143 s warm. Root cause of the semantics figure, measured
-directly: `install_shipped_stubs` is 0.4 ms (it sets a salsa input) but a fresh database + stubs + render
-is **118.2 ms** against **5.0 ms** without stubs — **113.2 ms of stub re-parse per fresh database**.
-`check_semantics_invariants` builds three fresh databases per input (394.8 ms), so **86% is stub
-re-parse** (97.7% in release). A render on a warm shared database is 3.8 ms — 30× cheaper. The earlier
-"four databases" fix landed and the ratio barely moved, because it was never about database count alone.
-Run the fuzz targets in release from `just gate`, and make a shared database the default arm with fresh
-ones only where determinism/incrementality genuinely needs them.
+Building the four release test binaries costs 143 s warm.
 
-### Coverage-guided fuzzing has no ratchet — nothing it learns survives the run
+The semantics figure has one root cause, measured directly. `install_shipped_stubs` is 0.4 ms,
+because it sets an input, but a fresh database plus stubs plus a render is 118.2 ms against 5.0 ms
+without stubs. That is 113.2 ms of stub re-parse per fresh database.
+`check_semantics_invariants` builds three fresh databases per input, at 394.8 ms, so 86% is stub
+re-parse, and 97.7% in release. A render on a warm shared database is 3.8 ms, which is thirty times
+cheaper. An earlier fix reduced the database count from four and the ratio barely moved, because it
+was never about database count alone.
 
-`fuzz/` **does compile on stable today** (`cargo check --all-targets` inside it: 75 s cold with an
-isolated target dir, **1.6 s warm**), so the compile-rot risk flagged earlier is real but not yet
-realised. `scripts/seed-fuzz-corpus.rs` writes 1,416 files / 5.7 MB into each of three corpora in 2 s,
-but it globs `.Rtypes` under `crates/` where there are **0** — all 11 `.Rtypes` (and 33 `.exports`) live
-in the top-level `types/`. So it seeds **zero stub files**, and zero of the 1,967 mined
-`corpus-legacy/*.R.corpus` programs, and never looks at `corpus/`. Its own doc comment ("plus the shipped
-stubs") and the testing page repeating it are both false. `fuzz/corpus`, `fuzz/artifacts` and
-`fuzz/Cargo.lock` are gitignored and no job persists them, so every run restarts from the same seeds and
-rediscovers the same shallow frontier. `REGRESSIONS` exists in `format` (21) and `semantics` (2), none in
-`syntax` or `ide`, and both constants were last modified ~60 commits ago — the pinning path works
-(`format` 0.12 s, `semantics` 0.94 s) and is simply not being fed. In value order: persist the corpus,
-fix the seeder to read `types/` and `corpus-legacy/`, and add the 1.6 s `cargo check` of `fuzz/` to the
-gate.
+Run the fuzz targets in release from `just gate`, and make a shared database the default arm, with
+fresh ones only where determinism or incrementality genuinely needs them.
+
+### Coverage-guided fuzzing has no ratchet, so nothing it learns survives the run
+
+`fuzz/` does compile on stable today. `cargo check --all-targets` inside it takes 75 s cold with an
+isolated target directory and 1.6 s warm, so the compile-rot risk flagged earlier is real but has
+not happened.
+
+`scripts/seed-fuzz-corpus.rs` writes 1,416 files and 5.7 MB into each of three corpora in 2 s, but
+it globs `.Rtypes` under `crates/`, where there are none. All 11 `.Rtypes` files, and 33 `.exports`
+files, live in the top-level `types/`. It therefore seeds no stub files, none of the 1,967 mined
+`corpus-legacy/*.R.corpus` programs, and it never looks at `corpus/`. Its own doc comment claims it
+adds the shipped stubs, and the testing page repeats that. Both are false.
+
+`fuzz/corpus`, `fuzz/artifacts` and `fuzz/Cargo.lock` are gitignored and no job persists them, so
+every run restarts from the same seeds and rediscovers the same shallow frontier. `REGRESSIONS`
+exists in `format` with 21 entries and in `semantics` with 2, and in neither `syntax` nor `ide`.
+Both constants were last modified about 60 commits ago, so the pinning path works, at 0.12 s for
+`format` and 0.94 s for `semantics`, and is simply not being fed.
+
+In value order: persist the corpus, fix the seeder to read `types/` and `corpus-legacy/`, and add
+the 1.6 s `cargo check` of `fuzz/` to the gate.
 
 ### The one failure mode fuzzing exists to catch is the one that prints no input
 
-`catch_unwind` counts: syntax **1**, format **1**, semantics **2**, ide **0** — and in `syntax`/`format`
-the single wrapper is on the legacy-corpus arm only. Every `assert!` in `check_parse_invariants` and
-`check_format_invariants` embeds `{input:?}`, so assertion failures replay fine; a genuine **panic**
-inside the generative arms prints a backtrace with **no input**, and a stack overflow (a live risk the
-harness itself acknowledges with `deep_nesting_is_refused_not_fatal`) aborts printing nothing.
-Recoverable today only because the seed is fixed — that property disappears the moment `FUZZ_SEED` lands,
-so this must land *with* it. `semantics::check_pipeline_reporting` is the correct pattern already in tree.
+`catch_unwind` appears once in `syntax`, once in `format`, twice in `semantics` and not at all in
+`ide`. In `syntax` and `format` the single wrapper is on the legacy-corpus arm only.
+
+Every `assert!` in `check_parse_invariants` and `check_format_invariants` embeds `{input:?}`, so an
+assertion failure replays fine. A genuine panic inside a generative arm prints a backtrace with no
+input, and a stack overflow aborts printing nothing. A stack overflow is a live risk the harness
+itself acknowledges, through `deep_nesting_is_refused_not_fatal`.
+
+This is recoverable today only because the seed is fixed, and that property disappears the moment
+`FUZZ_SEED` lands, so this has to land with it. `semantics::check_pipeline_reporting` is the correct
+pattern and is already in the tree.
 
 ### Two arms are silently dead and one is 99% wasted
 
-`syntax::fuzz_corpus_seeded` 0.11 s and `format::fuzz_corpus_seeded` 0.16 s — process startup only, both
-skipping via an `eprintln!` the blocking job never displays. `format::fuzz_random_bytes` reaches the
-formatter body **14/1500 (0.9%)** against token soup's 90/1500, so 1,396 of 1,500 iterations only re-test
-a refusal path `syntax` already covers on the same generator. Drop it and give the budget to
-`fuzz_seed_mutations`.
+`syntax::fuzz_corpus_seeded` costs 0.11 s and `format::fuzz_corpus_seeded` costs 0.16 s, which is
+process startup only. Both skip through an `eprintln!` the blocking job never displays.
+
+`format::fuzz_random_bytes` reaches the formatter body 14 times in 1500, which is 0.9%, against
+token soup's 90. So 1,396 of its 1,500 iterations only re-test a refusal path `syntax` already
+covers on the same generator. Drop it and give the budget to `fuzz_seed_mutations`.
 
 ### Radical alternatives, costed
 
-- **Release profile for the battery** — 327 s → 53 s, +143 s warm build. Highest value-per-line change in
-  the pipeline.
-- **Nightly coverage-guided run with a persisted corpus** — 10 min/target ≈ 30 min/night on a free
-  runner. Worth it *only* with persistence; without it, 30 min/night of rediscovering the same frontier.
-  Needs a human (workflow scope).
-- **OSS-Fuzz** — the three targets are already thin wrappers over exported batteries. Good fit, but only
-  after the replay path (`catch_unwind` + seeds) and the pinning path exist, or reports arrive with
-  nowhere to go.
-- **`cargo-llvm-cov` over the batteries** — not attempted; the saturation curves above answer the same
-  question in ~7 s. Reach for llvm-cov when deciding *which* invariants to add, not how many iterations.
+- **The release profile for the battery.** 327 s becomes 53 s, for 143 s of warm build. This is the
+  highest value per line in the pipeline.
+- **A nightly coverage-guided run with a persisted corpus.** About 10 minutes per target, so about
+  30 minutes a night on a free runner. Worth it only with persistence. Without it, that is 30
+  minutes a night rediscovering the same frontier. A human has to add it, because it needs workflow
+  scope.
+- **OSS-Fuzz.** The three targets are already thin wrappers over exported batteries, so it is a good
+  fit. Do it only after the replay path, meaning `catch_unwind` plus seed printing, and the pinning
+  path exist. Otherwise reports arrive with nowhere to go.
+- **`cargo-llvm-cov` over the batteries.** Not attempted. The saturation curves above answer the
+  same question in about 7 s. Reach for llvm-cov when deciding which invariants to add, not how many
+  iterations to run.
 
 ### Who lands what
 
-Agent-side today: completion sampling, release profile in `just gate`, the syntax budget raise,
-`catch_unwind` + seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/` type-check guard, the
-`fuzz_deep` floor and stats-instrument skip that unblock the CI move, the dead-arm cleanup, and the
-corrected wording in `decisions.md`/`testing.md`. Human required: the `git mv` of
-`.github/pending-ci.yml` (workflow scope, and **not before the `fuzz_deep` floor is fixed**), any
-scheduled fuzz job and its corpus cache, OSS-Fuzz submission.
+An agent can land all of these today: completion sampling, the release profile in `just gate`, the
+syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
+type-check guard, the `fuzz_deep` floor and the stats-instrument skip that unblock the CI move, and
+the dead-arm cleanup.
+
+A human is required for three things: the `git mv` of `.github/pending-ci.yml`, which needs workflow
+scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
+corpus cache, and an OSS-Fuzz submission.
 
 ## Open — test & fuzz architecture review
 
@@ -1909,6 +1925,15 @@ The end-to-end guard rests on the corpus suites.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **The IDE fuzz harness samples completion once per context instead of per offset.** Completion
+  was 587.26 ms of the 592.4 ms that nine features spent over 25 offsets, on a warm database, and
+  its only assertion was that a label is non-empty. It was also mostly redundant, because 245 swept
+  offsets over 10 seeds produced 64 distinct results. Sampling per completion context, which is the
+  kind of token the cursor sits in or after, halved the harness and took the whole `ide` binary from
+  195 s to 94 s while gaining two range oracles. Two sharper-looking variants were measured and
+  rejected: filtering to token boundaries saved 5%, because in a short input nearly every sampled
+  offset already is one, and keying on the pair of surrounding kinds saved 29%.
 
 - **One predicate decides whether a file shares a namespace with its siblings.** `cli.rs`'s
   `shares_a_namespace`, the server's `is_package_path` and `stats.rs` each answered that question,

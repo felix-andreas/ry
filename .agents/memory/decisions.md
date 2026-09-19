@@ -1173,8 +1173,8 @@ selection.
    variant, every `#:` annotation form, and every error-recovery scenario.
 4. Property tests: the tokens cover the input, node ranges nest, and reprinting equals the input.
 5. Fuzzing, both random bytes and structure-aware mutations, with never-panic and always-lossless
-   invariants. It ran against every parser increment from the first one, and CI runs a bounded
-   pass.
+   invariants. It ran against every parser increment from the first one, and a bounded pass runs in
+   the `syntax` crate's own test suite.
 6. Statement-reparse equivalence, so an incremental result tree equals a from-scratch tree for a
    randomized edit.
 7. Acceptance cross-check against R's own parser where an R installation exists. This is
@@ -1241,8 +1241,15 @@ things over a generator biased toward semantically live shapes, plus a token-sou
 - Incremental equivalence holds, so editing through the setter gives the same result as a fresh
   build. That is the red-green invariant.
 
-`FUZZ_ITERS` scales the budgets. A bounded pass runs in the default test suite, so CI fuzzes on
-every change, and the `fuzz_deep` variants carry the long runs.
+`FUZZ_ITERS` scales the budgets. A bounded pass runs in each crate's own test suite, and the
+`fuzz_deep` variants carry the long runs.
+
+**CI does not fuzz today, and it is worth stating plainly rather than assuming otherwise.** The root
+`Cargo.toml` sets `default-members = ["crates/ry"]` and the workflow omits `--workspace`, so
+`cargo test --all-targets --all-features` lists 171 tests where the workspace has 712. Every fuzz
+arm lives in another crate. The second job runs `-- --ignored`, which lists no tests at all for the
+same reason, so it is a release build followed by an empty test run. `backlog.md` holds the blockers
+that a workspace-wide CI run has to clear first.
 
 The first semantics fuzz runs found two real crashes within seconds. One was a non-converging
 cycle, where a growing self-referential type rode the iteration cap into a panic. The other was
