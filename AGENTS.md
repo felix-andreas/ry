@@ -102,7 +102,7 @@ This folder is the agent knowledge base, and it lives in the repository. `MEMORY
 - **Mid-term** holds active priorities, open bugs, and technical debt. These items live across sessions until they are done.
 - **Long-term** holds durable, non-obvious design decisions and their rationale. Record only what a future agent would otherwise rediscover. Keep each entry terse and point at the code or the docs.
 
-`MEMORY.md` also names every other knowledge document. Keep a separate document in this folder only for material of genuinely larger scope, and reference it from `MEMORY.md`. Two such documents exist today. `backlog.md` is the prioritized work punch-list. `decisions.md` is the settled architecture decision log. Never create a new knowledge file for something small. Inline it into the right horizon instead.
+`MEMORY.md` also names every other knowledge document. Keep a separate document in this folder only for material of genuinely larger scope, and reference it from `MEMORY.md`. Three such documents exist today. `backlog.md` is the prioritized work punch-list, and it holds open work only. `decisions.md` is the settled architecture decision log. `test-user-reports.md` holds the simulated-user findings that are closed, so a finding moves out of the backlog and into it when it is fixed. Never create a new knowledge file for something small. Inline it into the right horizon instead.
 
 A design document is not a memory file. Unsettled design work belongs in the docs site under `docs/src/content/docs/contributing/design/`. This covers proposals, open questions, and sketchpads. List a new design document on that folder's index page, and keep it out of the sidebar.
 

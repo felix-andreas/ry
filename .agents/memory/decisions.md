@@ -373,9 +373,9 @@ computed a gutter width, sliced the finding's first line out of a `LineIndex`, p
 by terminal cells, truncated a multi-line range with a dim note of its own wording, and printed a
 related location as a one-line `= note: ... --> path:line:col` trailer. A second path styled the
 `error: ` and `warning: ` prefixes with `console` and printed an underlying I/O failure with a bare
-`eprintln!` on the next line. `ConfigParseError` built its own `in <path> for <key> at line L,
-column C` sentence. That is three renderers and three notions of where a message points. Every
-improvement meant more hand-rolled layout.
+`eprintln!` on the next line. `ConfigParseError` built its own sentence of the form
+`in <path> for <key> at line L, column C`. That is three renderers and three notions of where a
+message points. Every improvement meant more hand-rolled layout.
 
 The shape now is one report type in the CLI, drawn by miette's `GraphicalReportHandler`. A report
 holds a severity, an optional diagnostic code, a message, an optional cause, an optional snippet
@@ -584,8 +584,9 @@ open-file overlay to drop the fold-edge walk to the number of open files.
 
 At an `if (is.null(x)) fallback else x` join where `x` and `fallback` are both unbound inference
 variables, the join used to unify the two variables. The type model deliberately never invents a
-union for a variable, which is a long-standing decision that keeps inference fast. `or_else(NULL,
-"text")` then bound the single variable to `NULL` from the first argument and rejected the second.
+union for a variable, which is a long-standing decision that keeps inference fast. The call
+`or_else(NULL, "text")` then bound the single variable to `NULL` from the first argument and
+rejected the second.
 That is a false positive on the coalesce idiom, and it was recorded as a structural design tension
 whose workaround was to annotate.
 
@@ -1398,207 +1399,527 @@ tripwire stays armed. The typing reference states the flexible-operand compariso
 
 # Decision record: union compatibility commits a flexible argument at first use, in program order
 
-**Status:** decided and ratified (agent-owned decision under the delegated ownership mandate). This resolves the recorded design fork on order-dependent compatibility commits.
+A flexible argument checked against a union-typed parameter binds to the whole union. With
+`f : fn(x: integer | character)`, the call `f(v)` pins `v := integer | character`. A later use of
+`v` against a different union, such as `g : fn(x: logical | character)`, then errors, even though
+the intersection `character` would satisfy both. The question was whether commits should be made
+order-free through constraint collection and intersection solving.
 
-Question: a flexible argument checked against a union-typed parameter binds to the whole union (`f(v)` with `f : fn(x: integer | character)` pins `v := integer | character`). A later use of `v` against a different union (`g : fn(x: logical | character)`) then errors even though the intersection (`character`) would satisfy both. Should commits be made order-free (constraint collection + intersection solving), or is first-use commitment the spec?
+First-use commitment is the specification. A flexible argument checked against an expected union
+binds to the whole union at that use, exactly as unification would. Uses commit in program order,
+and a later conflicting use reports at its own site against the committed type. The fix for a
+genuine intersection case is an explicit annotation naming the intended member type.
 
-Decision: **first-use commitment is the spec.** A flexible argument checked against an expected union binds to the whole union at that use, exactly as unification would; uses commit in program order; a later conflicting use reports at its own site against the committed type. The fix for a genuine intersection case is an explicit annotation with the intended member type.
+Three reasons.
 
-Rationale:
-- Program-order commitment is how the checker already treats every other type (`x <- 1L` then `x <- "s"`-style first-use-binds is standard HM); making unions special would demand intersection constraints — a new constraint former squarely on the traits frontier, deliberately out of scope.
-- The order-dependence is bounded and predictable: it never changes *whether* an inconsistent pair of contracts errors (some site always reports); it only decides *which* site is blamed — the later use, which is also where a reader's attention should go.
-- Program order is the order R evaluates, so the blamed site matches the first call that would misbehave at runtime under the committed reading.
+- Program-order commitment is how the checker already treats every other type. First use binds is
+  standard Hindley-Milner. Making unions special would demand intersection constraints, which is a
+  new constraint former squarely on the traits frontier and deliberately out of scope.
+- The order dependence is bounded and predictable. It never changes whether an inconsistent pair of
+  contracts errors, because some site always reports. It only decides which site is blamed, and
+  that is the later use, which is where a reader's attention should go.
+- Program order is the order R evaluates in, so the blamed site matches the first call that would
+  misbehave at run time under the committed reading.
 
-Impact: correctness — ratifies existing behavior (fixtures `flexible_argument_commits_to_the_union_at_first_use` / `union_commit_blames_the_later_conflicting_use` pin both orders; differentials green — the oracle agrees); simplicity — no constraint-solving machinery; the typing reference's union-compatibility section now states the commitment rule and its annotation escape hatch.
+Correctness: this ratifies existing behavior. The fixtures
+`flexible_argument_commits_to_the_union_at_first_use` and
+`union_commit_blames_the_later_conflicting_use` pin both orders. Simplicity: no constraint-solving
+machinery. The typing reference's union-compatibility section states the commitment rule and its
+annotation escape hatch.
 
-# Decision record: strict mode attributes recursive bindings the fixed point cannot fully type
+# Decision record: strict mode attributes a recursive binding the fixpoint cannot fully type
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Closes the recorded gap that deliberately-`Unknown` recursive schemes carried no strict origin.
+The canonical per-group interface fixpoint types converging recursion precisely. A top-level `fact`
+exports `fn(n: integer) -> integer`, and mutual `is_even` and `is_odd` export
+`<T: numeric> fn(n: T) -> logical`. Fixtures pin this, and it supersedes the older contract under
+which self-recursion deliberately stayed a tolerant `Unknown`. The typing reference is updated.
 
-Context and a finding along the way: the canonical per-group interface fixpoint types **converging** recursion precisely — a top-level `fact` exports `fn(n: integer) -> integer` and mutual `is_even`/`is_odd` export `<T: numeric> fn(n: T) -> logical` (fixtures pin this; the older "self-recursion deliberately stays tolerant `Unknown`" contract is superseded and the typing reference updated). What remains `Unknown` is: (a) growing self-reference pinned at the round cap — those already surface under strict through the undetermined-reference origin at the recursive read (the read sees literal `Unknown`); and (b) cycles that converge *with* `Unknown` embedded (`f <- function() f()` settles at `fn() -> Unknown`) — the read sees a function type, no origin fires anywhere, and the export silently carries `Unknown`. Case (b) was the attribution hole.
+Two shapes still resolve to `Unknown`.
 
-Chosen shape: after `item_check` adopts the canonical group scheme, if the member's body produced **no errors and no other strict origins** and the adopted scheme still contains `Unknown` (`types::contains_unknown`), a `StrictOriginKind::RecursiveUnknown` origin is recorded on the whole binding, rendered "strict mode: could not determine the full type of `f`; it is defined recursively — add a type annotation". The clean-body gate keeps the propagation doctrine: when anything inside the body already attributes the `Unknown`, the binding is not re-reported. Accepted over-report: a clean-bodied cycle member whose `Unknown` propagates from a *sibling's* origin is still attributed — detecting that would need group-wide origin bookkeeping inside the fixpoint, and the advice ("annotate this binding") genuinely closes the member's export regardless of the sibling.
+- **A growing self-reference pinned at the round cap.** These already surface under strict mode
+  through the undetermined-reference origin at the recursive read, because the read sees a literal
+  `Unknown`.
+- **A cycle that converges with `Unknown` embedded.** `f <- function() f()` settles at
+  `fn() -> Unknown`. The read sees a function type, so no origin fires anywhere, and the export
+  silently carries `Unknown`. This was the attribution hole.
 
-Impact: correctness — every `Unknown`-carrying export now has at least one strict attribution (fixtures cover self/mutual/annotated/growing/pure-self-call shapes); the differential accepts the two new-only findings as oracle deficits (legacy attributes nothing and panics on the growing shape); simplicity — one new origin kind and a type walk, no fixpoint machinery; incremental analysis — the check runs inside `item_check`, no new queries.
+After `item_check` adopts the canonical group scheme, a `StrictOriginKind::RecursiveUnknown` origin
+is recorded on the whole binding when two conditions hold: the member's body produced no errors and
+no other strict origins, and the adopted scheme still contains `Unknown` by `types::contains_unknown`.
+It renders as "strict mode: could not determine the full type of `f`; it is defined recursively;
+add a type annotation". The clean-body gate keeps the propagation doctrine, so a binding is not
+re-reported when something inside the body already attributes the `Unknown`.
 
-# Decision record: script frame semantics — sequential immediate reads, settled-frame deferred reads
+One over-report is accepted. A clean-bodied cycle member whose `Unknown` propagates from a
+sibling's origin is still attributed. Detecting that would need group-wide origin bookkeeping
+inside the fixpoint, and the advice to annotate this binding genuinely closes the member's export
+regardless of the sibling.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by the differential fuzz arm, which exposed that script unresolved checking was entirely missing and that cross-item resolution had no defined contract.
+Correctness: every `Unknown`-carrying export now has at least one strict attribution, and fixtures
+cover the self, mutual, annotated, growing and pure-self-call shapes. Simplicity: one new origin
+kind and a type walk, with no fixpoint machinery. Incremental analysis: the check runs inside
+`item_check`, so there are no new queries.
 
-Question: a script's top level is one frame executed top-down. What does a cross-item read resolve to — for naming (unresolved warnings), for the unused check, and for typing — when the frame holds several bindings of the name, when the read precedes every binding, and when the read sits inside a closure?
+# Decision record: script frame semantics
 
-Decision, one rule per read kind:
+A script's top level is one frame executed top-down. The question was what a cross-item read
+resolves to, for naming, for the unused check and for typing, when the frame holds several bindings
+of the name, when the read precedes every binding, and when the read sits inside a closure. The
+fuzz arm drove this, by exposing that script unresolved checking was entirely missing and that
+cross-item resolution had no defined contract.
 
-- **Immediate reads** (executed at their position in the top-down run) resolve sequentially: the nearest EARLIER top-level binding wins, before package globals and stubs. A use before every definition — including inside the very statement that first binds the name (`x <- x + 1L` with no earlier `x`) — is an unresolved name, because it errors at runtime.
-- **Deferred reads** (from inside a nested function — the closure runs after the frame settled) resolve against the whole document: the LAST top-level binding wins, the enclosing statement's own binding included, so self-recursion resolves and types through the cycle fixpoint (`a <- function() a()` exports `fn() -> Unknown` via the round cap; a later rebinding is what the recursive call actually sees at run time).
-- **Conditional top-level writes** (inside a top-level `if`/`for`/`while`/`repeat`) create the document's variable slot exactly as the package spec already said: later reads resolve to it; the slot exports no scheme yet, so such reads type `Unknown` (backlogged lift).
-- **Quiet reads** (data masking, opaque operators like `|>`) are never reported unresolved but count as uses for the unused check and get full navigation — at runtime they fall back to the enclosing binding.
-- The unused check follows the same model: deferred reads keep every binding of the name alive; immediate reads mark definers backward through conditional ones (a conditional rebinding does not end an earlier binding's liveness); a loop reading its carried variable keeps both its own write and the earlier binding alive (the first iteration reads the outer one).
+There is one rule per kind of read.
 
-The oracle's frame model differs by construction: one settled slot per name (no sequence), the slot minted before the statement's value resolves, forward captures unresolved, pipe reads not counted as uses, and an occurs-check that rejects some valid self-referential rebindings. Where the models disagree, the rewrite follows R's runtime and the typing reference, and the differential accepts the divergence explicitly: fixture-arm and ide-arm case allowlists with reasons, and the fuzz arm's narrow filters (site-scoped oracle deficits, in-statement slot tolerance, and unpaired type findings over the transitive closure of *unstable names* — multiply-bound, self-referential, or forward-captured). Every acceptance is rollup-counted so drift stays visible.
+- **An immediate read**, executed at its position in the top-down run, resolves sequentially. The
+  nearest earlier top-level binding wins, before package globals and stubs. A use before every
+  definition is an unresolved name, because it errors at run time. That includes a use inside the
+  very statement that first binds the name, such as `x <- x + 1L` with no earlier `x`.
+- **A deferred read**, from inside a nested function, resolves against the whole document, because
+  the closure runs after the frame settled. The last top-level binding wins, including the
+  enclosing statement's own binding, so self-recursion resolves and types through the cycle
+  fixpoint. `a <- function() a()` exports `fn() -> Unknown` through the round cap, and a later
+  rebinding is what the recursive call actually sees at run time.
+- **A conditional top-level write**, inside a top-level `if`, `for`, `while` or `repeat`, creates
+  the document's variable slot exactly as the package specification already said. A later read
+  resolves to it. The slot exports no scheme yet, so such a read types `Unknown`. Lifting that is
+  in the backlog.
+- **A quiet read**, from data masking or an opaque operator, is never reported unresolved. It still
+  counts as a use for the unused check and gets full navigation, because at run time it falls back
+  to the enclosing binding.
+- **The unused check follows the same model.** A deferred read keeps every binding of the name
+  alive. An immediate read marks definers backward through conditional ones, because a conditional
+  rebinding does not end an earlier binding's liveness. A loop that reads its carried variable
+  keeps both its own write and the earlier binding alive, because the first iteration reads the
+  outer one.
 
-Impact: correctness — scripts get the unresolved class for the first time (spec-mandated, previously silently absent), duplicate `@type`/`@alias` names now error at every site, and six fuzz-found gaps are fixed with fixtures pinning each; simplicity — one `deferred` bit threaded through `GlobalEnv` instead of a second resolver; incremental analysis — resolution facts stay per-item salsa queries (`frame_slot_positions` is one small per-file map).
+Correctness: scripts get the unresolved class for the first time, which the specification mandated
+and which was silently absent. A duplicate `@type` or `@alias` name now errors at every site, and
+six fuzz-found gaps are fixed with a fixture pinning each. Simplicity: one `deferred` bit threaded
+through `GlobalEnv`, instead of a second resolver. Incremental analysis: resolution facts stay
+per-item queries, and `frame_slot_positions` is one small per-file map.
 
-# Decision record: undeclared type names error once at the reference and compare like `Unknown`
+# Decision record: an undeclared type name errors once at the reference and compares like `Unknown`
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Closes the reported gap that a misspelled nominal inside a `@type` body (and every other annotation position) was silently lowered to an opaque nominal.
+A misspelled nominal inside a `@type` body, and in every other annotation position, was silently
+lowered to an opaque nominal. The shape now has three pieces, each with one source of truth.
 
-Chosen shape, three pieces with one source of truth each:
+- **Recording.** Annotation lowering, in `annotations::lower_annotation`, records every
+  `TyKind::Named` mint with the referencing token's range, in `Annotation::nominal_references`. A
+  primitive or an in-scope binder never reaches the record, because lowering resolves it first.
+  Binder scoping therefore stays single-sourced instead of being re-derived by a diagnostic walk.
+- **Reporting.** `unknown_type_diagnostics` checks the recorded references against the project's
+  `@type` and `@alias` declarations, plus the file's own for a script, and against the stub
+  corpus's nominal vocabulary. It errors at the precise token with a nearest-name hint, so
+  `Instument` asks whether you meant `Instrument`. A forward reference stays legal, because the
+  vocabulary is position-independent.
+- **Tolerance.** An undeclared nominal compares like `Unknown` at the relation level. `unify`,
+  `compatible` and the operator checks' `structural()` projection all consult one
+  `undeclared_nominal` predicate. The typo is therefore reported exactly once and never cascades
+  into a value-level mismatch, a call-site error in another item, or operator noise.
 
-- **Recording:** annotation lowering (`annotations::lower_annotation`) records every `TyKind::Named` mint with the referencing token's range (`Annotation::nominal_references`). Primitives and in-scope binders never reach the record because lowering resolves them first — so binder scoping stays single-sourced instead of being re-derived by a diagnostic walk.
-- **Reporting:** `unknown_type_diagnostics` checks the recorded references against the project's `@type`/`@alias` declarations (plus the file's own for scripts) and the stub corpus's nominal vocabulary, erroring at the precise token with a nearest-name hint (`Instument` → "Did you mean `Instrument`?"). Forward references stay legal — the vocabulary is position-independent.
-- **Tolerance:** an undeclared nominal compares like `Unknown` at the relation level (`unify`, `compatible`, and the operator checks' `structural()` projection all consult one `undeclared_nominal` predicate), so the typo is reported exactly once and never cascades into value-level mismatches, call-site errors in other items, or operator noise.
+The declared-annotation check was found along the way to silently skip `Named`, `Record` and
+`Tuple` declarations. A positive-list gate meant for tolerance had become a hole, so `#: Point` on
+a structural value minted the nominal without `@new`, which contradicts the nominal-introduction
+contract. The gate is now a negative list holding `Unknown` and `Any` only, which enforces the
+`@new` discipline at a declared site and checks a record or tuple declaration for the first time.
+The typing reference states both contracts.
 
-Along the way the declared-annotation check was found to silently skip `Named`, `Record`, and `Tuple` declarations (a positive-list gate meant for tolerance had become a hole): `#: Point` on a structural value minted the nominal without `@new`, contradicting the nominal-introduction contract and the oracle. The gate is now a negative list (`Unknown`/`Any` only), which both enforces the `@new` discipline at declared sites and checks record/tuple declarations for the first time. The typing reference states both contracts.
+Correctness: the bug class is closed, with fixtures and fuzz templates guarding it. Simplicity: one
+predicate instead of per-site suppression guards. Incremental analysis: the diagnostic is a
+per-file pass over already-lowered annotations.
 
-Impact: correctness — the reported bug class is closed with fixtures and fuzz templates guarding it; simplicity — one predicate instead of per-site suppression guards; incremental analysis — the diagnostic is a per-file pass over already-lowered annotations.
+# Decision record: an annotation shape violation refuses the whole block
 
-# Decision record: annotation shape violations refuse the whole block; the depth caps and vector-element rule keep the oracle's gating split
+The question was where annotation-shape validations live, and what happens to a violating block's
+typing payload. The validations cover directive ordering, duplicate and unknown type parameters,
+applied binders, the `@new` payload shape, nesting caps, vector-element atomicity, and attachment
+rules.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by the legacy-corpus differential arm, which itemized every annotation validation the oracle enforced and the rewrite silently skipped.
+- **One refusal semantics.** A block with any shape violation keeps only its errors. The whole
+  typing payload is dropped, which covers the declared type, definitions, `@new`, `@strict` and
+  nominal references. One mistake therefore yields one error and no follow-on findings.
+  `Annotation::errors` and `typing_errors` hold the errors, and `lower_annotation` strips the rest.
+  A consumer observes the payload's absence rather than a validity flag. An inlay hint gates on
+  surviving payload, meaning a declared type, `@new` or trust, rather than on the annotation's
+  presence, so a refused binding hints its inferred type again.
+- **Attachment is single-sourced.** `top_level_annotations` computes each top-level block's target
+  as attached, blank-line-separated or dangling. Both annotation application, in
+  `item_annotation_syntax`, and the dangling-annotation diagnostics read it. A blank line or an
+  interposed comment genuinely detaches the annotation. The checker previously applied silently
+  across a blank line, which contradicted the reference.
+- **Two classes gate differently, on purpose.** Past 160 levels of nesting the annotation shape is
+  refused and always reported. Past 128 the type is refused for checking, which is a typing-class
+  finding that disappears under `# typing: off`. The vector-element rule works the same way.
+  Lowering records every `[]` element with its range in `Annotation::vector_elements`, and a
+  diagnostics pass with the project vocabulary judges it: an alias expands, a nominal refuses, and
+  an undeclared name stays silent because the unknown-type error owns it. It reports in the typing
+  class at the use site. The vector finding does not strip the payload, because the judgment needs
+  vocabulary that lowering lacks, so the declared shape still serves hover and navigation. That is
+  an accepted and documented difference, visible only in exported schemes.
+- **A definition is top-level only.** A nested `@type` or `@alias` block errors and does not enter
+  the vocabulary, because `file_type_definitions` reads top-level children only.
 
-Question: where do annotation-shape validations live (directive ordering, duplicate/unknown type parameters, applied binders, `@new` payload shape, nesting caps, vector-element atomicity, attachment rules), and what happens to a violating block's typing payload?
+Correctness: the whole validation family closes, with fixtures pinning each shape and message.
+Simplicity: one errors vector and one attachment walk, instead of per-consumer validity checks.
+Incremental analysis: everything stays in per-file parse-pure passes except the vocabulary
+judgment, which joins the existing per-file semantic families.
 
-Chosen shape:
+# Decision record: a statement-level annotation attaches at any depth and applies where the expression infers
 
-- **One refusal semantics:** a block with any shape violation keeps only its errors — the whole typing payload (declared type, definitions, `@new`, `@strict`, nominal references) is dropped, so one mistake yields one error and no follow-on findings (`Annotation::errors` / `typing_errors`, stripped in `lower_annotation`). Consumers observe payload absence, not a validity flag; inlay hints gate on *surviving payload* (declared/`@new`/trusted), not annotation presence, so a refused binding hints its inferred type again.
-- **Attachment is single-sourced:** `top_level_annotations` computes each top-level block's target (attached / blank-line-separated / dangling); both annotation application (`item_annotation_syntax`) and the dangling-annotation diagnostics read it. A blank line or interposed comment now genuinely detaches the annotation — previously the rewrite silently applied across blank lines, unlike the oracle and the reference.
-- **Gating-faithful classes:** the two nesting caps mirror the oracle's split on purpose — past 160 levels the annotation shape is refused (always reported), past 128 the type is refused *for checking* (a typing-class finding that disappears under `# typing: off`). Same for the vector-element rule: lowering records every `[]` element with its range (`Annotation::vector_elements`), and a diagnostics pass with the project vocabulary judges it (aliases expand, nominals refuse, undeclared names stay silent — the unknown-type error owns those), reported in the typing class at the use site. The vector finding does NOT strip the payload (the judgment needs vocabulary lowering lacks), so the declared shape still serves hover/navigation — an accepted, documented difference from the oracle's whole-item abort, visible only in exported schemes.
-- **Definitions are top-level-only** and nested `@type`/`@alias` blocks error without entering the vocabulary (`file_type_definitions` reads top-level children only).
+An annotation below the item root used to be invisible to the checker, so the constructor idiom did
+nothing. Writing `#: @new Person` on a local assignment, or on a block-final expression inside a
+function body, was silently ignored.
 
-Impact: correctness — 14 legacy-corpus cases and the whole reported validation family close, with fixtures pinning each shape and message; simplicity — one errors vector and one attachment walk instead of per-consumer validity checks; incremental analysis — everything stays in per-file parse-pure passes except the vocabulary judgment, which joins the existing per-file semantic families.
+The shape keeps one source of truth per fact.
 
-# Decision record: statement-level annotations attach at any depth and apply where the expression infers
+- **Association.** `statement_annotations(parent)`, which is the existing adjacency walk, runs over
+  any statement sequence, whether the file root or a braced block. Top-level attachment,
+  expression-level attachment and the dangling-annotation diagnostics, which now cover a nested
+  block, therefore share one rule. `item_expression_annotations(db, item)` maps each attached block
+  inside an item to the annotated expression's HIR id by exact range. It is a plain function rather
+  than a tracked query, because `Annotation` carries text ranges with no memo plumbing, and its
+  callers are tracked queries whose dependencies already flow through `item_syntax` and `item_hir`.
+- **Application.** The checker owns one `apply_expression_annotation` seam. An assignment applies
+  it before the slot write, so the binding takes the annotated type. Every other expression applies
+  it where it infers. A non-assignment item root routes its own annotation through the same seam,
+  which closes the bare-expression checked-annotation gap. `@new` reuses `check_new_nominal`, which
+  checks the representation and mints the nominal. A checked declared type enforces the same
+  directional `compatible` contract as at the root, and `@trust` overrides unchecked. The loop-body
+  re-walk discards errors, which covers the new errors for free.
+- **IDE consequences.** Goto-type-definition and hover pick the nominal up from the recorded
+  expression types with no work on the feature side. An inlay hint skips an annotated nested
+  binding, because the annotation already names the type, which is symmetric with the root gate on
+  surviving payload.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Closes the largest legacy-corpus gap: annotations below the item root were invisible to the checker, so the constructor idiom (`#: @new Person` on a local assignment or block-final expression inside a function body) silently did nothing.
-
-Chosen shape, keeping one source of truth per fact:
-
-- **Association:** `statement_annotations(parent)` — the existing adjacency walk — runs over any statement sequence (the file root or a braced block), so top-level attachment, expression-level attachment, and the dangling-annotation diagnostics (now covering nested blocks) share one rule. `item_expression_annotations(db, item)` maps each attached block inside an item to the annotated expression's HIR id by exact range; it is a plain function, not a tracked query (`Annotation` carries `TextRange`s with no salsa-value plumbing, and its callers are tracked queries whose dependencies already flow through `item_syntax`/`item_hir`).
-- **Application:** the checker owns one `apply_expression_annotation` seam — assignments apply it before the slot write (the binding takes the annotated type), every other expression applies it where it infers, and a non-assignment item ROOT routes its own annotation through the same seam (closing the bare-expression checked-annotation gap). `@new` reuses `check_new_nominal` (representation check, nominal minted); a checked declared type enforces the same directional `compatible` contract as at the root; `@trust` overrides unchecked. Loop-body re-walk error discarding covers the new errors for free.
-- **IDE consequences:** goto-type-definition and hover pick the nominal up from the recorded expression types with no feature-side work; inlay hints skip annotated nested bindings (the annotation already names the type), symmetric with the root gate on surviving payload.
-
-Impact: correctness — eight corpus cases close (1515/1523 matching), with fixtures pinning the constructor idiom in both forms, the mismatch error at the value, trust, bare-expression checks, and nested blank-line detachment; simplicity — one association walk and one application seam instead of per-position special cases; incremental analysis — everything stays inside existing per-item queries.
+Correctness: fixtures pin the constructor idiom in both forms, the mismatch error at the value,
+trust, bare-expression checks and nested blank-line detachment. Simplicity: one association walk
+and one application seam, instead of per-position special cases. Incremental analysis: everything
+stays inside existing per-item queries.
 
 # Decision record: capture liveness is frame-scoped
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Settles which writes a closure's captured read keeps alive for the unused check — the corpus differential showed the rewrite marking by NAME across all frames, so a shadowed outer binding never warned.
+This settles which writes a closure's captured read keeps alive for the unused check. The checker
+marked by name across all frames, so a shadowed outer binding never warned.
 
-Rule: a read from inside a nested function keeps every write of the name alive **in the frame the read resolves to** (sequential rebindings of one name in one frame are a single runtime variable, and the closure runs after the frame settled), and no other frame's — a same-named binding in an enclosing frame that the resolved binding shadows is not what the closure reads, so it stays reportably dead. This is exactly R's environment semantics and agrees with the oracle.
+A read from inside a nested function keeps every write of the name alive in the frame the read
+resolves to, and in no other frame. Sequential rebindings of one name in one frame are a single
+run-time variable, and the closure runs after the frame settled. A same-named binding in an
+enclosing frame that the resolved binding shadows is not what the closure reads, so it stays
+reportably dead. This is exactly R's environment semantics.
 
-Mechanics: frames carry a stable identity (`Scope::id`, minted per defining expression like binding ids so loop re-walks reuse it), each assignment write records its slot's owning frame, and the capture sweep filters on frame + name. Writes recorded after the read stay covered by the existing per-slot `captured_slots` marking at the write site. The typing reference documents the rule with both directions as examples.
+The mechanics are these. A frame carries a stable identity in `Scope::id`, minted per defining
+expression like a binding id, so a loop re-walk reuses it. Each assignment write records its slot's
+owning frame, and the capture sweep filters on frame and name. A write recorded after the read
+stays covered by the existing per-slot `captured_slots` marking at the write site. The typing
+reference documents the rule with an example in each direction.
 
-Impact: correctness — two corpus cases close and a false-negative class (dead shadowed bindings in closure-heavy code) is gone; simplicity — one id per scope instead of a second liveness structure; incremental analysis — naming stays a per-item pure function.
+Correctness: a false-negative class is gone, which is a dead shadowed binding in closure-heavy
+code. Simplicity: one id per scope, instead of a second liveness structure. Incremental analysis:
+naming stays a per-item pure function.
 
-# Decision record: the last three parity lifts — conditional-slot schemes, export-edge constraint generalization, missing-formal flow
+# Decision record: conditional slots type, export edges generalize, and `missing()` flows through the environment
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). These closed the legacy-corpus differential to zero unexplained divergences, and the arm is now a default-suite gate.
+These three lifts closed the last gaps in cross-item typing.
 
-**Conditional top-level slots type.** A statement item's conditional write (`for (i in 1:3) total <- i`) already created the document's variable slot for naming; now it types: `ItemCheck::top_level_bindings` carries the settled, export-closed scheme of every name the item's top-level frame binds, `statement_binding_scheme(item, name)` projects it per binding (a value-eq firewall, with `global_scheme`-style cycle recovery — a statement item reading its own conditionally-written name routes back into its own check), and readers consult it after `package_definitions` (joined across multiple writers) and inside the script sequential search. The winner order is unchanged: an unconditional definition still shadows the slot.
+**A conditional top-level slot types.** A statement item's conditional write, such as
+`for (i in 1:3) total <- i`, already created the document's variable slot for naming. It now types.
+`ItemCheck::top_level_bindings` carries the settled, export-closed scheme of every name the item's
+top-level frame binds. `statement_binding_scheme(item, name)` projects it per binding, as a
+value-equality firewall with `global_scheme`-style cycle recovery, because a statement item reading
+its own conditionally written name routes back into its own check. Readers consult it after
+`package_definitions`, joined across multiple writers, and inside the script sequential search. The
+winner order is unchanged, so an unconditional definition still shadows the slot.
 
-**Export-edge closure generalizes constrained residuals.** `erase_residual_vars` erased every unbound variable to `Unknown`, destroying real information: `mixed_apply <- invoke(mirror)` lost its `numeric` bound and cross-item calls stopped checking. `close_scheme` now generalizes an unbound variable that CARRIES a constraint into a fresh scheme binder (synthetic names never display — the renderer canonicalizes rigids) and erases only unconstrained ones. Instantiation stays per reader, which matches R's call-by-call semantics for the immutable closures this shape produces.
+**The export edge generalizes a constrained residual.** `erase_residual_vars` erased every unbound
+variable to `Unknown`, which destroyed real information. `mixed_apply <- invoke(mirror)` lost its
+numeric bound, and cross-item calls stopped checking. `close_scheme` now generalizes an unbound
+variable that carries a constraint into a fresh scheme binder, and erases only an unconstrained
+one. The synthetic names never display, because the renderer canonicalizes rigids. Instantiation
+stays per reader, which matches R's call-by-call semantics for the immutable closures this shape
+produces.
 
-**`missing()` supplied-state flows through the environment.** A third entry kind (`EnvEntry::MissingFormal`) rides the existing branch mark/rollback/join discipline instead of a parallel liveness structure: the `missing(name)` guard's true edge marks a no-default formal's slot, a read of a marked slot errors ("would fail at run time"), any write supplies it back to an ordinary entry, and the marker is branch-local at joins (rejoined state means only "possibly missing", which reads as the supplied type — only definite runtime failures report, as the reference specifies).
+**`missing()` supplied state flows through the environment.** A third entry kind,
+`EnvEntry::MissingFormal`, rides the existing branch mark, rollback and join discipline instead of
+a parallel liveness structure. The true edge of a `missing(name)` guard marks the slot of a formal
+that has no default. A read of a marked slot errors, because it would fail at run time. Any write
+supplies it back to an ordinary entry. The marker is branch-local at a join, so a rejoined state
+means only possibly missing, which reads as the supplied type. Only a definite run-time failure
+reports, as the reference specifies.
 
-Impact: correctness — the corpus differential reaches 1,523/1,523 with one adjudicated acceptance and every new behavior pinned by fixtures in both directions; simplicity — each lift reuses an existing mechanism (per-item checks, the erase walk, the environment discipline) instead of adding a parallel structure; incremental analysis — two new tracked projections with value-eq firewalls, no new interface surfaces beyond them.
+Correctness: every new behavior is pinned by fixtures in both directions. Simplicity: each lift
+reuses an existing mechanism, which is the per-item check, the erase walk and the environment
+discipline, instead of adding a parallel structure. Incremental analysis: two new tracked
+projections with value-equality firewalls, and no new interface surfaces beyond them.
 
-# Decision record: NAMESPACE/DESCRIPTION metadata feeds resolution
+# Decision record: NAMESPACE and DESCRIPTION metadata feed resolution
 
-**Status:** decided and implemented (user ask: "importFrom should work"). Previously the NAMESPACE file was parsed only at the CLI/server layer for import-site problems (unknown-import, unused-import); resolution ignored what the package imports and DESCRIPTION was never read, so real packages saw two false-positive classes: bare reads of names imported from namespaces the stub corpus does not describe warned "could not resolve" (`importFrom(data.table, ':=')` code), and `pkg::` calls into any undescribed namespace warned "unknown package namespace" even for declared dependencies.
+The user asked for `importFrom` to work. The NAMESPACE file was parsed only at the CLI and server
+layer, for import-site problems such as an unknown import or an unused import. Resolution ignored
+what the package imports, and DESCRIPTION was never read. Real packages therefore saw two
+false-positive classes. A bare read of a name imported from a namespace the stub corpus does not
+describe warned that it could not resolve, which hits code using
+`importFrom(data.table, ':=')`. A `pkg::` call into any undescribed namespace warned about an
+unknown package namespace, even for a declared dependency.
 
-**Shape.** One new singleton salsa input, `metadata::PackageMetadata` — normalized (sorted, deduped) `(namespace, Option<name>)` import pairs plus the DESCRIPTION dependency name set — installed by hosts next to `StubSources` (CLI per target; the server at startup, refreshed on NAMESPACE buffer sync and NAMESPACE/DESCRIPTION watcher events, diffing the parsed facts so formatting edits do not invalidate). The NAMESPACE parser moved from the host crate into `semantics::metadata` (single source of truth; the host keeps problem rendering). Consumption is two predicates at the diagnostic edges: `imported_bare` joins the unresolved-check skip set, and `declared_dependency` quiets the unknown-namespace warning. Typing is untouched — imported-but-undescribed reads stay `Unknown` with the usual strict origin.
+One new singleton input, `metadata::PackageMetadata`, carries normalized import pairs of
+`(namespace, Option<name>)`, sorted and deduplicated, plus the DESCRIPTION dependency name set. A
+host installs it next to `StubSources`. The CLI installs it per target. The server installs it at
+startup and refreshes it on a NAMESPACE buffer sync and on NAMESPACE or DESCRIPTION watcher events,
+diffing the parsed facts so a formatting edit does not invalidate anything. The NAMESPACE parser
+moved from the host crate into `semantics::metadata`, which makes it the single source of truth,
+and the host keeps problem rendering.
 
-**The tolerance call.** `import(pkg)` of a namespace without stubs makes every otherwise-unresolved bare read in the package quiet: the export set is unknowable, and guessing would trade the zero-false-positive mandate for typo detection. Typo detection resumes when stubs describe `pkg` (then the export set gates exactly), and `importFrom` names are always exact. Bare resolution of stub names stays ungated (the earlier record) — metadata only ever widens the resolved universe, never narrows it.
+Consumption is two predicates at the diagnostic edges. `imported_bare` joins the unresolved-check
+skip set, and `declared_dependency` quiets the unknown-namespace warning. Typing is untouched, so
+an imported but undescribed read stays `Unknown` with the usual strict origin.
 
-**Impact.** Correctness: kills both false-positive classes on real packages; fixture suite `typing-imports` pins both directions (imported quiet, unimported still warns). Simplicity: two predicates over one input; no naming/inference changes. Performance/incremental: the predicates run only after every cheaper skip fails (genuinely unresolved names), and the input diffing confines invalidation to real metadata changes.
+One tolerance call matters. An `import(pkg)` of a namespace without stubs makes every otherwise
+unresolved bare read in the package quiet. The export set is unknowable, and guessing would trade
+the zero-false-positive mandate for typo detection. Typo detection resumes when stubs describe
+`pkg`, because the export set then gates exactly, and an `importFrom` name is always exact. Bare
+resolution of a stub name stays ungated, as the earlier record says. Metadata only ever widens the
+resolved universe, and never narrows it.
 
-# Decision record: data.table awareness — conditional stub namespace, result-shape classifier, typed-subject masking
+Correctness: both false-positive classes die on real packages, and the `typing-imports` fixture
+suite pins both directions, meaning an imported name is quiet and an unimported one still warns.
+Simplicity: two predicates over one input, with no naming or inference changes. Performance and
+incremental analysis: the predicates run only after every cheaper skip fails, which means on a
+genuinely unresolved name, and input diffing confines invalidation to a real metadata change.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; graduates contributing/design/data-masking.md "idea 1", the first rung of the data-masking ladder in contributing/design/open-questions.md §7).
+# Decision record: data.table awareness
 
-**The gap.** The masked-bracket recognition was purely syntactic and its result was always `Unknown`: chains lost their class after one bracket, `DT[speed > 20]` (no marker) warned "could not resolve speed" on the most idiomatic data.table line there is, and no shipped stub could give a value the `data.table` class in the first place.
+The masked-bracket recognition was purely syntactic and its result was always `Unknown`. A chain
+lost its class after one bracket. `DT[speed > 20]`, which carries no marker, warned that it could
+not resolve `speed`, on the most idiomatic data.table line there is. No shipped stub could give a
+value the `data.table` class in the first place.
 
-**Shape — three pieces, one gate each.**
-- **Conditional stub namespace.** `types/data.table.Rtypes` ships (the `@type data.table` nominal + ~45 high-traffic declarations) but joins `stub_library`'s fold only when `metadata::namespace_active` says the project uses the package: a DESCRIPTION dependency, a NAMESPACE import source, or a `library()`/`require()`/`requireNamespace()`/`loadNamespace()` call with a literal package argument in any project file (`metadata::file_attached_namespaces`, a per-file syntax scan; hosts union it into the new `PackageMetadata.attached` field — the CLI/stats once after load, the server incrementally per synced file plus the idle prime, never a per-keystroke sweep). Gating at the ASSEMBLY means every consumer (bare resolution, `pkg::` validation, nominal vocabulary, completion, shadow lints, typo suggestions, masked verbs) inherits the same universe with no per-site checks; while inactive, data.table behaves exactly like any undescribed package, so its names cannot steal typo warnings. The stub-assembly cycle risk (naming → stubs → activation → naming) is broken by keying activation ONLY on inputs (metadata) — never on naming or item queries.
-- **Result-shape classifier.** In `infer_index`: a single bracket whose subject resolves to the `data.table` nominal (from the shipped stub or any project `@type`) classifies `[.data.table` by the bracket's own syntax — no/empty `j` (filters, joins), `:=` calls, `.()`/`list()` calls, and any grouped `j` (`by =`/`keyby =`) keep the subject's class; other `j` shapes stay sound-refusal `Unknown` with a strict origin. The class is a real type: it survives chains, checks against annotations, constrains calls. Column knowledge (element types, membership, `:=` evolution) is deliberately NOT modeled — the typing reference documents the result-class table as the contract.
-- **Typed-subject masking.** The same classification records every read under the bracket's index arguments (nested closures included — they are created in the data's frame) in `ItemCheck::masked_reads`; the unresolved-warning renderer skips them. This is checker-derived masking on top of naming's syntactic recognition, so `DT[speed > 20]` and `DT[, x]` go quiet exactly when the subject's class is KNOWN — the syntactic path and its legacy-mirroring `Unknown` stay untouched for unknown subjects.
+The shape has three pieces, each with one gate.
 
-**Differential terms.** The oracle has no conditional-stub or classifier concept, so all behavioral fixtures live in the differential-excluded `typing-imports` suite (same terms as the metadata record); the corpus/differential harnesses install no `PackageMetadata`, so both arms and the legacy-corpus gate are structurally unaffected. Real-code corpus files that `require(data.table)` inside functions WILL activate under the real hosts — that is the feature, not drift.
+- **The stub namespace is conditional.** `types/data.table.Rtypes` ships, carrying the
+  `@type data.table` nominal and about 45 high-traffic declarations. It joins `stub_library`'s fold
+  only when `metadata::namespace_active` says the project uses the package. That means a
+  DESCRIPTION dependency, a NAMESPACE import source, or a `library()`, `require()`,
+  `requireNamespace()` or `loadNamespace()` call with a literal package argument in any project
+  file. `metadata::file_attached_namespaces` is a per-file syntax scan, and hosts union it into the
+  `PackageMetadata.attached` field. The CLI does it once after load, and the server does it
+  incrementally per synced file plus the idle prime, so there is never a per-keystroke sweep.
+  Gating at assembly means every consumer inherits the same universe with no per-site check, which
+  covers bare resolution, `pkg::` validation, the nominal vocabulary, completion, shadow lints,
+  typo suggestions and masked verbs. While inactive, data.table behaves exactly like any
+  undescribed package, so its names cannot steal a typo warning. The assembly cycle risk, which
+  runs naming to stubs to activation to naming, is broken by keying activation only on inputs. It
+  never keys on a naming or item query.
+- **A result-shape classifier runs in `infer_index`.** A single bracket whose subject resolves to
+  the `data.table` nominal, from the shipped stub or from any project `@type`, classifies
+  `[.data.table` by the bracket's own syntax. A missing or empty `j`, which covers filters and
+  joins, a `:=` call, a `.()` or `list()` call, and any grouped `j` with `by =` or `keyby =` all
+  keep the subject's class. Another `j` shape stays a sound refusal, so `Unknown` with a strict
+  origin. The class is a real type, so it survives chains, checks against annotations and
+  constrains calls. Column knowledge is deliberately not modelled, which covers element types,
+  membership and `:=` evolution. The typing reference documents the result-class table as the
+  contract.
+- **Masking uses the typed subject.** The same classification records every read under the
+  bracket's index arguments in `ItemCheck::masked_reads`, nested closures included, because they
+  are created in the data's frame. The unresolved-warning renderer skips them. This is
+  checker-derived masking on top of naming's syntactic recognition, so `DT[speed > 20]` and
+  `DT[, x]` go quiet exactly when the subject's class is known. The syntactic path stays untouched
+  for an unknown subject.
 
-**Impact.** Correctness: kills the dominant data.table false-positive class (bare column reads in unmarked brackets) and gives chains/annotations a real class to check; sound-by-refusal is preserved everywhere column knowledge would be needed. Simplicity: one assembly gate, one classifier function, one diagnostics skip. Incremental: activation reads only inputs; a flip rebuilds the stub library (rare, worth the full refresh); per-keystroke cost is one memoized single-file scan on the edited document.
+Correctness: this kills the dominant data.table false-positive class, which is a bare column read
+in an unmarked bracket, and gives a chain or an annotation a real class to check. Sound-by-refusal
+is preserved everywhere column knowledge would be needed. Simplicity: one assembly gate, one
+classifier function and one diagnostics skip. Incremental analysis: activation reads only inputs. A
+flip rebuilds the stub library, which is rare and worth the full refresh, and the per-keystroke
+cost is one memoized single-file scan on the edited document.
 
 # Decision record: the native pipe desugars at lowering
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; renegotiates the "mirror legacy's silence" term for `|>` specifically).
+`x |> f(y)` is not an operator in R at all. R's own parser rewrites it to `f(x, y)` before
+evaluation. Modelling it as an opaque binary operator, with quiet reads and a silent `Unknown`,
+threw away exact static knowledge on one of the most common constructs in modern R. Desugaring is
+not an approximation. It is R's definition.
 
-**Why.** `x |> f(y)` is not an operator in R at all — R's own parser rewrites it to `f(x, y)` before evaluation. Modeling it as an opaque binary operator (quiet reads, silent Unknown) threw away exact static knowledge on one of the most common constructs in modern R. Desugaring is not an approximation; it is R's definition.
+`hir::lower_pipe` intercepts `PIPE_GREATER` before binary lowering. A call on the right-hand side
+lowers as that call with the piped value inserted as the first positional argument. When a `_`
+placeholder sits as the whole value of exactly one named argument of that call, which `pipe_shape`
+determines by a syntax-level scan, the piped value is substituted as that argument's value instead.
+The `_` token never lowers, so nothing dangles in the arena. Everything R rejects keeps the old
+opaque-operator lowering, which is sound silence and never a guess. That covers a non-call
+right-hand side, a positional, repeated or nested `_`, and `_` as a tag.
 
-**Shape.** `hir::lower_pipe` intercepts `PIPE_GREATER` before binary lowering: a call right-hand side lowers as that call with the piped value inserted as the first positional argument, or — when a `_` placeholder sits as the whole value of exactly one named argument of that call (`pipe_shape`, a syntax-level scan) — substituted as that argument's value instead (the `_` token never lowers, so nothing dangles in the arena). Everything R rejects (non-call RHS, positional/repeated/nested `_`, `_` as a tag) keeps the old opaque-operator lowering — sound silence, never a guess. Naming, typing, overloads, arity checks, strict mode, and every IDE feature inherit the real call with zero changes; error blame on a bad piped value lands on the left-hand expression's own range.
+Naming, typing, overloads, arity checks, strict mode and every IDE feature inherit the real call
+with no changes. Error blame on a bad piped value lands on the left-hand expression's own range.
 
-**Differential terms.** The oracle never modeled pipes, so pipe cases where the rewrite reports real findings are oracle-deficit divergences: two `ACCEPTED_DIVERGENCES` entries (argument-mismatch through a pipe; the placeholder form's genuinely missing first argument). Two strict-suite cases that existed to pin "pipe is an unsupported-construct origin" were repurposed to a still-opaque construct (`%in%`); the scripts-suite pipe-liveness case now additionally shows the piped binding typing through. The magrittr `%>%` stays opaque (it is a real function with dot-substitution semantics, not parse-time sugar) — model it, if ever, as a separate decision.
+magrittr's `%>%` stays opaque. It is a real function with dot-substitution semantics rather than
+parse-time sugar, so modelling it would be a separate decision.
 
-**Impact.** Correctness: pipelines type end to end (`x |> length() |> sqrt()` is `double`), argument errors inside pipelines surface with precise blame, and R's placeholder pitfalls (missing first argument) are caught statically. Simplicity: one lowering seam, no checker/naming changes. Incremental: lowering-local; per-item firewalls unaffected.
+Correctness: a pipeline types end to end, so `x |> length() |> sqrt()` is `double`. An argument
+error inside a pipeline surfaces with precise blame, and R's placeholder pitfall of a missing first
+argument is caught statically. Simplicity: one lowering seam, with no checker or naming changes.
+Incremental analysis: the change is lowering-local, so per-item firewalls are unaffected.
 
-# Decision record: formal-aware @masked + the conditional dplyr namespace
+# Decision record: `@masked` is formal-aware, and dplyr is a conditional namespace
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+The contract was ahead of the implementation. The typing reference always said that a `@masked`
+argument matching a declared formal resolves normally, but naming hardcoded the first positional
+argument as the data. That breaks a zero-formal mask, where every argument is a column reference as
+in `join_by(x == y)`, and it breaks a named data argument.
 
-**The contract was ahead of the implementation.** The typing reference always said `@masked` arguments "matching the declared formals resolve normally" — but naming hardcoded first-positional-argument-is-data, which breaks zero-formal masks (`join_by(x == y)`: every argument is a column reference) and named data arguments. The stub loader now records each masked verb's formals declared before `...` (`StubLibrary::masked: name → leading formal names`, extracted from the lowered `FunctionType`), and the naming walk resolves an argument normally when it matches a leading formal by position or by name, masking everything the `...` absorbs — an empty formal list masks every argument. The base family (`with`/`within`, `subset`/`transform`) keeps its one data argument via its real formal names (`data`, `x`).
+The stub loader now records each masked verb's formals declared before `...`, as
+`StubLibrary::masked` mapping a name to its leading formal names, extracted from the lowered
+`FunctionType`. The naming walk resolves an argument normally when it matches a leading formal by
+position or by name, and masks everything the `...` absorbs. An empty formal list masks every
+argument. The base family of `with`, `within`, `subset` and `transform` keeps its one data argument
+through its real formal names, which are `data` and `x`.
 
-**dplyr rides the existing rails.** `dplyr.Rtypes` joins `CONDITIONAL_NAMESPACES` (the data.table record's activation semantics apply unchanged): the verb set is `@masked` and class-preserving (`<T> fn(.data: T, ...) -> T` — mutate on a data.frame is a data.frame, on the data.table nominal a data.table), joins preserve the left class, `join_by` is a zero-formal mask, and the tidy-select helpers plus verb vocabulary (`n()`, `row_number()`, `if_else`, ...) are declared so they resolve inside masks. Composed with the native-pipe desugar, a masked verb call in a pipeline is just a call: `df |> filter(cyl > 4) |> mutate(r = mpg / wt)` types class-preservingly with zero unresolved-column warnings. Where dplyr names collide with attached-stub names (`filter`, `lag` in stats), source order makes the dplyr declaration win exactly when dplyr is active — matching R's own attach shadowing.
+dplyr rides the existing rails. `dplyr.Rtypes` joins `CONDITIONAL_NAMESPACES`, so the data.table
+record's activation semantics apply unchanged. The verb set is `@masked` and class-preserving, as
+`<T> fn(.data: T, ...) -> T`, so `mutate` on a data.frame is a data.frame and on the data.table
+nominal is a data.table. A join preserves the left class. `join_by` is a zero-formal mask. The
+tidy-select helpers and the verb vocabulary, such as `n()`, `row_number()` and `if_else`, are
+declared so they resolve inside a mask. Composed with the native-pipe desugar, a masked verb call
+in a pipeline is just a call, so `df |> filter(cyl > 4) |> mutate(r = mpg / wt)` types
+class-preservingly with no unresolved-column warnings. Where a dplyr name collides with an attached
+stub name, such as `filter` or `lag` in stats, source order makes the dplyr declaration win exactly
+when dplyr is active, which matches R's own attach shadowing.
 
-**Impact.** Correctness: the documented masking contract is now the implemented one, and the dominant dplyr false-positive class (column reads in verbs, in projects without hand-written project stubs) disappears for declaring/attaching projects. Simplicity: no new mechanism — one map where a set was, one namespace entry. Incremental: unchanged (the masked map lives in the same set-once library).
+Correctness: the documented masking contract is now the implemented one, and the dominant dplyr
+false-positive class disappears for a project that declares or attaches dplyr. That class is a
+column read in a verb, in a project without hand-written project stubs. Simplicity: no new
+mechanism, just one map where a set was and one namespace entry. Incremental analysis: unchanged,
+because the masked map lives in the same set-once library.
 
 # Decision record: the shipping binary links no Apple frameworks
 
-**Status:** decided and implemented (user-directed criteria: fewer dependencies, no licensing exposure).
+The user set the criteria: fewer dependencies, and no licensing exposure.
 
-**Why it appeared.** Release macOS binaries are cross-linked on Linux by zig (cargo-zigbuild inside the nix build). Zig ships stubs for libSystem/libc/libm only — the pre-REPL binary linked nothing else, so the SDK-less link worked by accident. The REPL added the first Apple-framework edge: reedline → chrono(clock) → iana-time-zone → core-foundation-sys emits `-framework CoreFoundation`, which zig cannot resolve without a macOS SDK.
+A release macOS binary is cross-linked on Linux by zig, through cargo-zigbuild inside the nix
+build. Zig ships stubs for libSystem, libc and libm only. The binary linked nothing else before the
+REPL existed, so the SDK-less link worked by accident. The REPL added the first Apple-framework
+edge. reedline depends on chrono with the clock feature, which depends on iana-time-zone, which
+depends on core-foundation-sys, which emits `-framework CoreFoundation`. Zig cannot resolve that
+without a macOS SDK.
 
-**Shape.** `[patch.crates-io]` replaces iana-time-zone with `patches/iana-time-zone`, a version-matched stub whose `get_timezone()` always errors. Safe because chrono consults it only as a *fallback* after its primary timezone sources (`TZ`, `/etc/localtime`) and before its final UTC default — and the only local-time user in reedline is its default prompt's clock display, which the REPL does not use (it renders R's own prompt). The `release` justfile recipe preflights the aarch64-apple-darwin graph for known framework-linking crates so a regression fails in seconds with a named culprit instead of deep inside the nix zig link. The stub must stay version/feature-compatible with what chrono requests or cargo silently prefers the real crate — the preflight catches exactly that failure mode. One nix-specific trap: crane's dep-only builds compile dependencies against a *dummified* workspace copy (local `.rs` files emptied so the dependency cache survives source edits), which would empty the patch crate too and break chrono's compile — `flake.nix` restores `patches/` verbatim into the dummy source (crane's `extraDummyScript`), interpolating only that directory so the cache stays source-independent.
+`[patch.crates-io]` replaces iana-time-zone with `patches/iana-time-zone`, a version-matched stub
+whose `get_timezone()` always errors. That is safe because chrono consults it only as a fallback,
+after its primary timezone sources of `TZ` and `/etc/localtime` and before its final UTC default.
+The only local-time user in reedline is its default prompt's clock display, and the REPL does not
+use it, because it renders R's own prompt.
 
-**Alternative implemented first, then reverted:** fetching a macOS SDK (from the widely used third-party mirror of Apple's SDKs) and exporting `SDKROOT` for the darwin cross-build — mechanically verified (with the SDK the failing build links a valid arm64 Mach-O), most general, zero behavior delta. Reverted on user direction: it adds a large third-party artifact to the release closure and Apple's license on redistributed SDKs is gray. Vendoring the tarball is legally worse (you become the redistributor).
+The `release` recipe in the justfile preflights the aarch64-apple-darwin graph for known
+framework-linking crates, so a regression fails in seconds with a named culprit instead of deep
+inside the nix zig link. The stub must stay version-compatible and feature-compatible with what
+chrono requests, or cargo silently prefers the real crate, and the preflight catches exactly that.
 
-**Framework-free is sustainable for this product.** libR is dlopen'd at runtime (zero link-time deps), and a terminal REPL's plotting story is file output, terminal image protocols, or a browser — nothing on the roadmap needs `-framework` at link time. **Triggers to revisit:** a dependency that genuinely needs an Apple framework (native windows, clipboard integration), or signing/notarization pressure — at that point build the mac artifact on a real macOS runner (the only fully license-clean way to use Apple's SDK), which is also the natural home for running the REPL e2e suite against a real R in CI.
+One nix-specific trap applies. crane's dependency-only builds compile dependencies against a
+dummified workspace copy, where local `.rs` files are emptied so the dependency cache survives a
+source edit. That would empty the patch crate too and break chrono's compile, so `flake.nix`
+restores `patches/` verbatim into the dummy source through crane's `extraDummyScript`. It
+interpolates only that directory, so the cache stays source-independent.
 
-# Decision record: diagnostic rendering stays handrolled (miette rejected)
+One alternative was implemented first and then reverted. It fetched a macOS SDK from the widely
+used third-party mirror of Apple's SDKs and exported `SDKROOT` for the darwin cross-build. It was
+mechanically verified, because with the SDK the failing build links a valid arm64 Mach-O, and it is
+the most general option with no behavior change. The user directed reverting it. It adds a large
+third-party artifact to the release closure, and Apple's license on a redistributed SDK is gray.
+Vendoring the tarball is legally worse, because you become the redistributor.
 
-**Status:** decided and implemented (user delegated: "miette or similar, only if it doesn't add too much weight — otherwise handroll").
+Framework-free is sustainable for this product. libR is dlopen'd at run time, so it has no
+link-time dependency, and a terminal REPL's plotting story is file output, a terminal image
+protocol, or a browser. Nothing on the roadmap needs `-framework` at link time.
 
-**Why.** The CLI's human renderer already has the rustc shape (severity header, `-->` location, gutter, snippet, colored carets, related notes); adopting miette would mean rebuilding a working system around a new dependency tree (fancy feature: several transitive crates plus backtrace machinery) for visuals we largely have. The actual weaknesses were fixable in-place.
-
-**What changed.** The header now carries the diagnostic code (`warning[unused]:` — exactly what a `# roughly: allow(...)` suppression must spell, so the output teaches it); multi-line spans render their first line with the underline to end-of-line plus a dim "range continues for N more lines" note (previously every spanned line printed with one dangling caret); paths render relative to the working directory. Revisit miette only if requirements grow past this shape (multi-span labels, error chains with source causes).
+Two things would trigger a revisit: a dependency that genuinely needs an Apple framework, such as
+native windows or clipboard integration, or pressure to sign and notarize. At that point build the
+mac artifact on a real macOS runner, which is the only fully license-clean way to use Apple's SDK.
+That is also the natural home for running the REPL end-to-end suite against a real R in CI.
 
 # Decision record: the identity-parity program is retired
 
-**Status:** decided by the user, implemented.
+The user decided this.
 
-**What ended.** The differential suites that proved the rewrite equivalent to the frozen oracle — the typing/scripts/strict arms, the seeded fuzz differential, the legacy-corpus sweep, the real-file corpus arm, and the per-position IDE comparison, together with their adjudicated divergence ledgers — are deleted. The rewrite's own fixture suites are the semantics contract; improvements land on their own terms with no oracle renegotiation. The legacy ide fixture inputs worth keeping were ported first (81 cases; the port surfaced two real defects, recorded in the backlog).
+The differential suites that proved the rewrite equivalent to the frozen oracle are deleted. That
+covers the typing, scripts and strict arms, the seeded fuzz differential, the legacy-corpus sweep,
+the real-file corpus arm, and the per-position IDE comparison, together with their adjudicated
+divergence ledgers. The rewrite's own fixture suites are the semantics contract, and an improvement
+lands on its own terms with no oracle renegotiation. The legacy IDE fixture inputs worth keeping
+were ported first, which is 81 cases, and the port surfaced two real defects that the backlog
+records.
 
-**What remains.** `legacy/differential` is benchmark-only: `test_stats.rs` times and memory-measures the same corpus through both stacks. It — and the legacy crates it depends on — stay until the deletion sweep the user will call for; the perf witnesses migrate to a new-stack-only home as part of that sweep.
+`legacy/differential` is benchmark-only now. `test_stats.rs` times and memory-measures the same
+corpus through both stacks. It, and the legacy crates it depends on, stay until the deletion sweep
+the user will call for. The performance witnesses migrate to a home in the new stack as part of
+that sweep.
 
-**Impact.** Every future semantic improvement costs one fixture bless instead of a fixture bless plus per-arm adjudication entries; the battery loses its slowest suites; the deletion sweep's remaining prerequisite is only the witness migration.
+Every future semantic improvement now costs one fixture bless, instead of a fixture bless plus
+per-arm adjudication entries. The battery loses its slowest suites. The deletion sweep's only
+remaining prerequisite is the witness migration.
 
-# Decision record: vendored export manifests — the name-level truth beside the typed stubs
+# Decision record: a vendored export manifest carries the name-level truth beside the typed stubs
 
-**Status:** decided and implemented (closes the stub-completeness audit).
+The typed stub corpus, at about 530 declarations, was also the resolution universe. Any real
+standard-library export outside it warned that it could not resolve. `recover` and `traceback` were
+user-reported instances of a false-positive class of about 2,500 names, because base alone exports
+about 1,400. Chasing completeness with hand-written typed declarations does not scale, and it was
+never the corpus's job.
 
-**Problem.** The typed stub corpus (~530 declarations) was also the *resolution universe*: any real standard-library export outside it warned "could not resolve" (`recover`, `traceback` were user-reported instances of a ~2,500-name false-positive class — base alone exports ~1,400 names). Chasing completeness with hand-written typed declarations does not scale and was never the corpus's job.
+Every namespace R ships now pairs with a generated `types/<ns>.exports` manifest holding its
+complete export list from a live R session. `scripts/export-manifests.R` generates it, and the
+header records the R version. `datasets` uses the search-path listing, because its objects are lazy
+data rather than namespace exports.
 
-**Shape.** Every namespace R ships pairs with a generated `types/<ns>.exports` manifest — its complete export list from a live R session (`scripts/export-manifests.R`; header records the R version; currently R 4.6.1; `datasets` uses the search-path listing since its objects are lazy data, not namespace exports). The `StubSources` input carries `(sources, manifests)`; the loader unions manifest names into `exports_by_namespace` (so `pkg::name` validation and shadow lints see them) plus a flat `known_exports` set consulted by `package_scheme_exists` after schemes and nominals. A manifest name resolves everywhere a typed name does — bare, qualified, completion, typo-suggestion corpus — but types `Unknown`: precision stays the typed corpus's job; the manifest's job is silence about real names. Three tiers mirror R: default-attached namespaces (incl. the new `datasets`, whose famous frames are typed `data.frame` in `datasets.Rtypes`) are bare-visible unconditionally; R-shipped-but-unattached namespaces (`QUALIFIED_ONLY_NAMESPACES`: tools/parallel/compiler/grid/splines/stats4/tcltk) always validate `::` reads but gate bare visibility on attach/declare; conditional CRAN namespaces gate both, with their stubs.
+The `StubSources` input carries sources and manifests. The loader unions manifest names into
+`exports_by_namespace`, so `pkg::name` validation and shadow lints see them, and into a flat
+`known_exports` set that `package_scheme_exists` consults after schemes and nominals. A manifest
+name resolves everywhere a typed name does, which covers bare and qualified reads, completion and
+the typo-suggestion corpus, but it types `Unknown`. Precision stays the typed corpus's job, and the
+manifest's job is silence about a real name.
 
-**Audit teeth.** A unit test asserts every `.Rtypes` value declaration is a real export of its own namespace (`@type` nominals exempt — they name classes, not bindings; conditional namespaces may also override base names, e.g. data.table's class-preserving `merge`). Writing it immediately caught two misfiled declarations — `traceback` and `standardGeneric` are `base` exports, not `utils`/`methods` — both moved.
+Three tiers mirror R. A default-attached namespace is bare-visible unconditionally, which now
+includes `datasets`, whose famous frames are typed `data.frame` in `datasets.Rtypes`. A namespace R
+ships but does not attach always validates a `::` read but gates bare visibility on an attach or a
+declaration. Those are listed in `QUALIFIED_ONLY_NAMESPACES`: tools, parallel, compiler, grid,
+splines, stats4 and tcltk. A conditional CRAN namespace gates both, along with its stubs.
 
-**Aside discovered en route:** agent containers CAN have real R — `apt` + the CRAN repository installs current R in minutes (data.table/dplyr compile from source) — so R-dependent tooling (manifest regeneration, the REPL e2e suite) runs in-container after all; the long-standing "no agent container has R" assumption is dead.
+A unit test gives the corpus teeth. It asserts that every `.Rtypes` value declaration is a real
+export of its own namespace. A `@type` nominal is exempt, because it names a class rather than a
+binding, and a conditional namespace may override a base name, as data.table's class-preserving
+`merge` does. Writing the test immediately caught two misfiled declarations, because `traceback`
+and `standardGeneric` are base exports rather than utils and methods exports. Both moved.
 
-**Impact.** Kills the could-not-resolve false-positive class for the whole shipped standard library at zero check-time cost for unused names; completion and suggestions widen to the full export lists (non-syntactic names excluded from bare completion, backtick-quoted after `pkg::` — inserting them raw would change syntax); the not-exported warning for `pkg::name` becomes accurate instead of curated-subset-based.
+One thing was discovered on the way. An agent container can have real R. Installing it through
+`apt` and the CRAN repository takes minutes, and data.table and dplyr compile from source. R-dependent
+tooling therefore runs in-container after all, which covers manifest regeneration and the REPL
+end-to-end suite. The long-standing assumption that no agent container has R is dead.
+
+Correctness: the could-not-resolve false-positive class dies for the whole shipped standard
+library, at no check-time cost for an unused name. Completion and suggestions widen to the full
+export lists. A non-syntactic name is excluded from bare completion and is backtick-quoted after
+`pkg::`, because inserting it raw would change the syntax. The not-exported warning for `pkg::name`
+becomes accurate instead of based on a curated subset.
 
 # Decision record: the Zed extension versions on its own line
 
-**Status:** decided and implemented.
+Three shipped artifacts carry a version, and only two of them derive from the workspace
+`Cargo.toml`. The CLI is the source of truth. The VS Code extension bundles that binary, so its
+manifest carries the same number with the prerelease suffix stripped, because the marketplace
+rejects `X.Y.Z-alpha`. That is a mechanical derivation.
 
-**Problem.** Three shipped artifacts carry a version, and only two of them derive from the workspace `Cargo.toml`. The CLI is the source of truth; the VS Code extension bundles that binary, so its manifest carries the same number with the prerelease suffix stripped (the marketplace rejects `X.Y.Z-alpha`) — a mechanical derivation. The Zed extension bundles nothing: it locates a binary at run time (LSP settings path, then `PATH`, then the latest GitHub release), so its version describes the extension's own code and nothing about the CLI. That was settled once and still failed to hold — the release recipe stopped bumping it, and the number was then hand-realigned to the CLI's twice anyway, the second time with a test added to mandate the alignment. A version that must be manually resynchronized to a number it has no relationship with is the duplication, not the cure.
+The Zed extension bundles nothing. It locates a binary at run time, through the LSP settings path,
+then `PATH`, then the latest GitHub release. Its version therefore describes the extension's own
+code and says nothing about the CLI. That was settled once and still failed to hold. The release
+recipe stopped bumping it, the number was hand-realigned to the CLI's twice anyway, and the second
+time a test was added to mandate the alignment. A version that must be manually resynchronized to a
+number it has no relationship with is the duplication, not the cure.
 
-**Shape.** `editors/zed/extension.toml` is a plain-semver line of its own (`0.1.0`), restarted because the extension has never been published to Zed's registry and nothing constrains its history; the wasm crate's `Cargo.toml` version tracks that manifest rather than the workspace, and neither inherits `version.workspace`. It is bumped by hand when the extension changes. The release-metadata test asserts the VS Code derivation only, and its module doc states why the Zed manifest is absent — the test is the thing that would otherwise re-couple them. The prerelease suffix is dropped for good: `-alpha`/`-beta` name the CLI's release channel, which an extension that only locates a binary cannot be in.
+`editors/zed/extension.toml` is now a plain semver line of its own, at `0.1.0`. It restarted
+because the extension has never been published to Zed's registry and nothing constrains its
+history. The wasm crate's `Cargo.toml` version tracks that manifest rather than the workspace, and
+neither inherits `version.workspace`. It is bumped by hand when the extension changes. The
+release-metadata test asserts the VS Code derivation only, and its module documentation states why
+the Zed manifest is absent, because that test is what would otherwise re-couple them. The
+prerelease suffix is dropped for good, because `-alpha` and `-beta` name the CLI's release channel,
+and an extension that only locates a binary cannot be in one.
 
-**Impact.** One number per artifact with one owner each; a Zed release no longer implies a CLI release or vice versa. The recurring "align the stale zed extension version" commit has no reason to exist.
+Each artifact now has one number with one owner. A Zed release no longer implies a CLI release, or
+the reverse. The recurring commit that realigned the stale Zed extension version has no reason to
+exist.
