@@ -8,425 +8,262 @@
 - **Performance:** keystroke-to-diagnostics p50 ≤ 30 ms / p95 ≤ 100 ms at 300k LoC (read against the raw-parse floor the instrument prints — latency numbers swing ~1.4x with machine load); budgets pinned by `stats_witness` (per-line wall/memory/resolve-step ceilings) with the measurement instruments in `legacy/differential/tests/test_stats.rs`.
 - **No server-killing input** (no `unwrap` panics on protocol-legal messages).
 
-## Open — test-user round 3: typing enthusiasts (the type system, not the libraries)
+## Open: where findings point, and what the type system still refuses
 
-Three simulated users probing **the type checker itself** rather than package coverage, from the docs
-and `--help` only: one on parametric polymorphism and higher-order code, one on domain modelling and
-nullability, one adversarial about the `#:` surface and where carets land. Each judged **location and
-message as separate verdicts**, which is what makes this round different — a diagnostic that reads
-perfectly while blaming the wrong expression counts as a failure here.
+Three simulated users probed the type checker itself rather than package coverage, working from the
+docs and `--help` only. One worked on parametric polymorphism and higher-order code, one on domain
+modelling and nullability, and one adversarially on the `#:` surface and where carets land. Each
+judged location and message as separate verdicts, which is what made this round different. A
+diagnostic that reads perfectly while blaming the wrong expression counted as a failure.
 
-The four most serious claims were **re-verified independently** before filing; every one held, and two
-turned out worse than reported.
+Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
+measurement showed.
 
-Only the **open** findings are below; the closed ones, with what each measurement actually showed, are
-in `test-user-reports.md`.
+### Placement
 
-### D. Placement: precise inside an expression, coarse at every compound boundary
+Caret placement is good for ordinary nesting, which covers four-deep calls, multi-line arguments,
+lambdas and pipes. The renderer is display-width aware while JSON stays in codepoints. Every failure
+found was the same shape, which is a collapse to the outermost node, and one rule now covers them in
+the reference under "Where a finding points": a finding underlines the smallest expression its
+message is about. Comparison operators, a return-type mismatch with an `if` and `else` tail, `$` and
+`[[`, a surplus positional argument, a record mismatch and an annotation range ending at
+end-of-line all follow it now.
 
-Caret placement was found excellent for ordinary nesting (four-deep calls, multi-line arguments,
-lambdas, pipes) and the renderer is display-width aware while JSON stays in codepoints — both correct,
-which is rarer than it sounds. The failures were all "collapse to the outermost node", and **four of
-the five are fixed** under one rule now in the reference (§Where a finding points): a finding
-underlines the smallest expression its message is about.
+**One shape is still open.** A parse error was reported past the end of the file. The filed shape,
+which was line 10 of a 9-line file, does not reproduce. An unterminated `f <- function(x,` in a
+one-line file reports at `1:14-1:15`, which is in range. Either an earlier fix covered it or the
+note was imprecise. This needs a fresh reproduction before it can be worked, and it should be
+re-derived rather than trusted.
 
-- **FIXED** — comparison operators (`<`, `==`, `>=`, `!=`) underlined the whole binary expression, so
-  the underlined text contained both operand types and the message could not be read. They now blame
-  the right operand, which is the `found` half of `expected …, found …`, and is where arithmetic
-  already pointed. Worth recording: the *behaviour* is deliberate and correct — R coerces across
-  atomic families (`10L < "9"` is TRUE, comparing `"10" < "9"` as text) and the reference documents
-  the same-family rule as sound-by-refusal with that exact rationale, so only the caret was wrong.
-- **FIXED** — a return-type mismatch with an `if`/`else` tail blamed the whole construct, and the
-  offending arm's line was never rendered (the range clamps to the construct's first line). The
-  declared return is now checked against each expression that can produce the result — a block to
-  its tail, an `if`/`else` into both arms — and each failing one reports at its own site, the same
-  rule an explicit `return` follows. The whole body's type stays the verdict, so no finding is added
-  or dropped; when no single arm is at fault (an `if` with no `else` contributes an implicit `NULL`
-  belonging to no expression) the construct keeps the one finding.
-- **FIXED** — `$` / `[[` underlined the entire access chain rather than the bad key. Both now point
-  at the key, including a position (`x[[5L]]`). `ExpressionKind::Field` gained a `name_range`, the
-  same shape `CallArgument::name_range` already used for the same reason; `[[`'s key range came free
-  from the argument expression.
-- **FIXED (the surplus half)** — surplus positional arguments blamed the callee; they now blame the
-  first argument with no formal left to take it, which is the one the reader must remove. A
-  *missing* argument still blames the callee: there is no argument to point at.
-- **FIXED** — a record mismatch printed two long near-identical type dumps to diff by eye, and a
-  nested one never named the path. It now names the one field that failed, the same treatment the
-  function-mismatch fix gave a signature: *expected `logical` for field `active`, found `character`*,
-  and `retry.count` for a nested one. A field the value lacks, and one it has that is not declared,
-  each say so; a **renamed** field is the interesting case, because it goes missing and turns up
-  misspelled at once, so the finding names both (*expected a field `identifier` here, and this list
-  has `idenifier` instead*) rather than reporting the absence alone. Pairs fields by name, which is
-  what `compatible` does, so the explanation cannot disagree with the verdict — and optionality is
-  deliberately not compared, because `compatible` does not either. Whole types are still printed when
-  the failure is not about one field (a record against a non-record, or against `list[T]`), which is
-  the case they do explain. Every site that reports two types side by side goes through one
-  `Checker::mismatch`, so the narrowing cannot be present at one and missing at another; that also
-  picked up the `@new` nominal path for free.
+### Should strict mode report a binding whose exported type contains `Unknown`?
 
-  **The caret is FIXED too, so the documented exception is gone.** A type carries no source ranges, so
-  the field path is walked back against the expression that *built* the record — a `list(...)` call,
-  whose tagged arguments are its fields. The value's `ExprId` now rides on `CallArgument` (and reaches
-  `@new`, the declared-value checks and a parameter default), and the single `Checker::type_mismatch`
-  funnel returns the whole `TypeError` rather than just a kind, so the range narrows with the message
-  and cannot narrow at one site but not another. Which part gets the caret follows the message: the
-  offending **value** for a field whose type does not fit, the field's **name** for one the type does
-  not declare (that message is about the name), and the innermost list for a **missing** field, since
-  nothing at the path exists to point at. Where the walk finds nothing — a variable holding a record —
-  the whole value stays the blame and the message still names the field; pinned by a fixture.
-- **FIXED (the spill half)** — annotation ranges ending at end-of-line spilled onto the next line, so
-  editors squiggled across the break. Measured on a file of six deliberately broken `#:` regions:
-  **four of eight findings** ran from the end of one line to column 1 of the next. Cause: an error
-  reported *at* the current token blames that token, and at the end of a region the current token is
-  the **newline**, whose span is exactly the break. A blame range now never crosses a line break — it
-  collapses onto the last character of code on its own line (`Parser::on_one_line`, applied in
-  `push_error` so the semantic range is right for the JSON, LSP and CLI paths alike, not patched in a
-  renderer). Trailing whitespace is skipped so the caret lands on code: "expected a type" for
-  `#: integer |` now points at the `|`, and "expected a return type after `->`" at the `>`. Twenty-nine
-  fixture expectations moved by one character, every one of them off the newline and onto code. The
-  rule is in the reference under §Where a finding points.
+This is a design question, not a bug fix, and it needs volume measured before it is chosen.
 
-  **Still open (the other half)** — a parse error reported past the end of the file. The originally
-  filed shape (line 10 of a 9-line file) did **not** reproduce: an unterminated `f <- function(x,` in a
-  one-line file now reports at `1:14-1:15`, in range. Either an earlier fix covered it or the note was
-  imprecise; needs a fresh repro before it can be worked, and should be re-derived rather than trusted.
+The gap is real. `g <- f` closes to `g: fn(p: Unknown) -> Unknown`, which the
+`aliased_function_reference_exports_closed` fixture pins, and strict reports nothing. Calls through
+`g` are therefore unchecked while the run looks like a pass.
 
-### F. Smaller, but cheap
+Two earlier diagnoses of it were wrong, and the measurements are the keepable part.
 
-- **Both of the entries that used to sit here were misdiagnosed, and the measurements are the
-  keepable part.** They read: "`do.call` returns `Any`, which disables checking *and* blinds `strict`
-  — corpus-authored `Any` where the docs say `Any` should appear only when a user writes it", and
-  "`strict` only asks whether a binding *is* `Unknown`, not whether it *contains* one". Checked
-  against the tool:
+- **`Any` is not what blinds strict mode.** Changing `do.call`'s return from `Any` to `Unknown`
+  produces no strict finding at all. This was tried: the stub was edited, the binary rebuilt, and a
+  strict project run over `do.call(fun, args)`. Nothing.
+- **Strict mode has no binding-level `Unknown` test to widen.** It reports origins recorded at
+  construct sites, which are `UnsupportedConstruct`, `UndeterminedReference`, `LoopWidened` and
+  `RecursiveUnknown`. Nothing inspects a finished type.
+- **`Any` in the corpus is deliberate.** The shipped stubs declare 176 entries whose return is
+  `Any`, across nine files rather than just `base`, and none returning `Unknown`. The stub header
+  names each compromise.
+- The one behavioral difference between them is that `@if-unknown` coerces an `Unknown` and is
+  refused on an `Any`, saying that the value is already `Any` so the annotation should be dropped.
 
-  - **Changing `do.call`'s return from `Any` to `Unknown` produces no strict finding at all.** Tried
-    it: edited the stub, rebuilt, ran a strict project over `do.call(fun, args)`. Nothing. So `Any`
-    is not what blinds strict, and swapping it would have been a change with a false rationale in its
-    commit message.
-  - **Strict has no binding-level `Unknown` test to widen.** It reports *origins recorded at
-    construct sites* (`UnsupportedConstruct`, `UndeterminedReference`, `LoopWidened`,
-    `RecursiveUnknown`) — there is nothing that inspects a finished type, so "only asks whether it
-    *is* `Unknown`" describes a mechanism that does not exist.
-  - The gap the second entry was reaching for **is real**: `g <- f` closes to `g: fn(p: Unknown) -> Unknown`
-    (pinned by the `aliased_function_reference_exports_closed` fixture) and strict reports nothing,
-    so calls through `g` are unchecked and it looks like a pass.
-  - **`Any` is not corpus-authored by accident, and the docs were the wrong half.** The shipped stubs
-    declare **176** entries whose return is `Any` — across nine files, not just `base` — and
-    `-> Unknown` in **zero**, with the stub header naming each compromise. The reference bullet
-    claiming `Any` "should appear only because the user explicitly wrote it" was simply false, and is
-    fixed.
-  - The one behavioural difference between them, verified: `@if-unknown` coerces an `Unknown` and is
-    **refused** on an `Any` ("this is already `Any` — drop the annotation").
+Measure before deciding. Strict mode already emits 2879 findings on dplyr and 2458 on shiny with
+typing and strict forced on, and `erase_residual_vars` gives every aliased function `Unknown`
+parameters, so a containment sweep would fire on `g <- f`, an idiom ordinary R uses constantly.
+Decide it as a design note with numbers, not as a one-line widening.
 
-  **What is actually open**, then: should strict report a binding whose exported type *contains*
-  `Unknown`? That is a design question, not a bug fix, and it needs volume measured before it is
-  chosen — strict already emits **2879 findings on dplyr and 2458 on shiny** with typing and strict
-  forced on, and `erase_residual_vars` gives every aliased function `Unknown` parameters, so a
-  containment sweep would fire on an idiom (`g <- f`) that ordinary R uses constantly. Decide it as a
-  design note with numbers, not as a one-line widening.
-- **NOT cheap, and the current refusal is the sound choice — measured, so do not "just widen the
-  constraint".** Filed as: `logical` is accepted at a declared `integer` parameter but rejected at an
-  inferred `numeric` one, so the same function is accepted or rejected depending on whether the type
-  was written down. Both halves reproduce (`bump <- function(x) x + 1L; bump(TRUE)` is refused; the
-  same body under `#: fn(n: integer) -> integer` accepts it), and R does promote — `TRUE + 1L` is
-  `2L`, and the checker's own arithmetic rules say so.
+### Promotion needs to live in the type, not in the binding
 
-  The obvious repair is to bind the numeric variable to `integer` when a `logical` argument arrives,
-  which is exactly R's promotion. It is wrong, and the counter-example is ordinary R:
+Two findings are the same missing piece, and they should be designed together.
 
-  ```r
-  bump    <- function(x) x + 1L          # R: bump(TRUE) is 2L, integer
-  checked <- function(x) { stopifnot(x + 1L > 0L); x }   # R: checked(TRUE) is TRUE, logical
-  ```
+**A `logical` is accepted at a declared `integer` parameter and refused at an inferred numeric one.**
+Both halves reproduce. `bump <- function(x) x + 1L; bump(TRUE)` is refused, and the same body under
+`#: fn(n: integer) -> integer` accepts it. R does promote, because `TRUE + 1L` is `2L`, and the
+checker's own arithmetic rules say so. Verified against R 4.3.3.
 
-  Both infer `<T: numeric> fn(x: T) -> …`, and one binding of `T` cannot be `integer` for the first
-  and `logical` for the second — so the promotion produces a *wrong return type*, which the project
-  ranks below a refusal ("a gap means checks are skipped, not that wrong answers are produced").
-  Verified against R 4.3.3.
+Do not just widen the constraint. The obvious repair is to bind the numeric variable to `integer`
+when a `logical` argument arrives, which is exactly R's promotion, and it is wrong. The
+counter-example is ordinary R.
 
-  Closing it properly needs the promotion to live in the type, not the binding — a scheme like
-  `<T: numeric> fn(x: T) -> promote(T)`, i.e. a type-level function the language does not have. Same
-  family as the next item, and they should be designed together.
+```r
+bump    <- function(x) x + 1L                          # R: bump(TRUE) is 2L, integer
+checked <- function(x) { stopifnot(x + 1L > 0L); x }   # R: checked(TRUE) is TRUE, logical
+```
 
-- **A numeric variable shared by two parameters refuses ordinary mixed arithmetic** (found while
-  measuring the item above). `add <- function(a, b) a + b` infers `<T: numeric> fn(a: T, b: T) -> T`,
-  tying both operands to one variable, so `add(1L, 1.5)` reports ``expected `integer`, found
-  `double` `` — R gives `2.5`. This is a false positive on about as plain a piece of R as exists, and
-  it is the same missing piece: the operand types need a numeric *join* (`integer` with `double` is
-  `double`), not unification.
-- `@new` is unrestricted project-wide, so `domain-modeling.md`'s *"the only door in"* and
-  `concepts.md`'s *"provably came from there"* overstate it. Either add an encapsulation modifier or
-  soften both sentences to "by convention".
-- A narrowing failure on a field or behind `&&` produces a message **byte-identical** to having written
-  no guard at all. The docs know the fix ("lift the value into a local first"); the diagnostic should
-  say it.
-- Nominal unions are unchecked through `$` while structural unions are exact; and there is no
-  discriminator for nominal types (`is.list` is true of both arms), so tagged unions cannot be narrowed
-  at all.
-- An alias cycle is reported on the *use* with a whole-statement caret and never at the declaration; an
-  unused cyclic alias is not reported at all, though the reference says definition cycles are errors.
-- A second `#:` annotation on one line is silently swallowed (first wins), while harmless trailing prose
-  errors — the ambiguous input is the quiet one.
-- Missing-argument errors do not name the parameter, though the sibling wrong-name error lists all of
-  them. Near-miss suggestions have a length floor that misses short field names (`person$nam`).
+Both infer `<T: numeric> fn(x: T) -> ...`. One binding of `T` cannot be `integer` for the first and
+`logical` for the second, so the promotion produces a wrong return type. This project ranks a wrong
+answer below a refusal, because a gap means checks are skipped rather than that wrong answers are
+produced.
 
-**What the round says overall.** Both testers who could reach a verdict said the core is real — genuine
-HM with generalization, an occurs check, per-parameter variance, working generic nominals, airtight
-nominal distinctness, and no cascades outside the `@param` case. The gap is not the engine; it is that
-**diagnostics render the artifact unification left behind rather than the fact that failed**, and that
-the nominal story protects construction but nothing after it.
+**A numeric variable shared by two parameters refuses ordinary mixed arithmetic.**
+`add <- function(a, b) a + b` infers `<T: numeric> fn(a: T, b: T) -> T`, which ties both operands to
+one variable, so `add(1L, 1.5)` reports ``expected `integer`, found `double` `` where R gives `2.5`.
+That is a false positive on about as plain a piece of R as exists. The operand types need a numeric
+join, where `integer` with `double` is `double`, rather than unification.
 
-## Open — performance & memory review
+Closing either properly needs a scheme like `<T: numeric> fn(x: T) -> promote(T)`, which is a
+type-level function the annotation language does not have.
 
-An independent review that profiled before proposing. Its first finding is fixed (operands of an
-arithmetic or comparison operator were inferred twice per level, so a nested chain cost
-2^operators); these are the rest, in the order it recommended. Every number was taken on a 4-vCPU
-container with other work running, so treat them as upper bounds, and note that all in-container
-timings are effectively ≤2-core numbers.
+### Smaller open items
 
-### FIXED — the human reporter was quadratic in findings × file length
+- `@new` is unrestricted project-wide, so `domain-modeling.md` saying it is "the only door in" and
+  `concepts.md` saying a value "provably came from there" both overstate it. Either add an
+  encapsulation modifier or soften both sentences to say "by convention".
+- A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
+  writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
+  diagnostic should say it.
+- A nominal union is unchecked through `$` while a structural union is exact. There is also no
+  discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
+  be narrowed at all.
+- An alias cycle is reported on the use, with a whole-statement caret, and never at the declaration.
+  An unused cyclic alias is not reported at all, although the reference says a definition cycle is
+  an error.
+- A second `#:` annotation on one line is silently swallowed, because the first wins, while harmless
+  trailing prose errors. The ambiguous input is the quiet one.
+- A missing-argument error does not name the parameter, although the sibling wrong-name error lists
+  all of them.
+- A near-miss suggestion has a length floor that misses a short field name, such as `person$nam`.
 
-Neither review saw it, because both measured through `analysis-stats` or `--output json`, which never
-touch this path. On one file of 8,000 items where every item reports, the whole cold analysis was
-452.6 ms and `--output json` finished in 550 ms while plain `ry check` took 10,527 ms.
+### What the round said overall
 
-Localized by instrumenting the reporter rather than by inference: at 8,000 findings, `render` was
-6,811 ms of which `read_span` alone was **6,728 ms — 98.8%**; the snippet-rule filter was 5 ms and
-writing 88 ms. A standalone probe confirmed the shape in miette itself: `SourceCode for str` costs
-31 µs per span on a 1,000-line file and 245 µs on an 8,000-line one, because it locates a span's lines
-by walking from byte zero. Once per finding, that is findings × file length.
+Both testers who could reach a verdict said the core is real. They found genuine Hindley-Milner with
+generalization, an occurs check, per-parameter variance, working generic nominals, airtight nominal
+distinctness, and no cascades outside the `@param` case. The gap is not the engine. Diagnostics
+render the artifact unification left behind rather than the fact that failed, and the nominal story
+protects construction but nothing after it.
 
-Fixed by answering `read_span` over a bounded window — the span's lines plus a margin wider than the
-requested context — and translating the result back into whole-file coordinates. It **delegates to
-miette inside the window** rather than reimplementing `SpanContents`, so there is one implementation of
-what a snippet contains. A `LineStarts` table per file (miette's own line rule: `\n`, `\r\n`, or a lone
-`\r`) makes locating the window a binary search.
+## Open: performance and memory
 
-Interleaved, one file where every item reports: 1,000 findings 161→60 ms, 2,000 498→131, 4,000
-1,705→217, 8,000 **6,483→530 ms (13×)**, and the curve is now linear in findings rather than quadratic.
-On real packages, data.table 1,056→326 ms (3.1×). Rendered stderr is **byte-identical** on data.table,
-dplyr, ggplot2 and shiny, 1.24 MB of it on data.table alone, related-note snippets included. A
-differential test sweeps our window against miette's whole-file walk over `\n`, `\r\n`, lone-`\r` and
-mixed line endings, spans mid-line, across a break, at the very start and very end, and a file with no
-trailing newline — asserting data, span, line and line count all match.
+An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
+container with other work running, so treat each as an upper bound. Every in-container timing is
+effectively a two-core number.
 
-**Correction to this entry's own earlier evidence.** It claimed "position barely matters" from two
-20,501-line projects with 500 findings each costing 6.9 s and 8.0 s. That was inferred without
-splitting analysis from reporting, and it was wrong: those projects are analysis-bound (JSON 4.6 s,
-reporter 41 ms), so they were never evidence about the reporter at all. The claim happens to hold —
-`read_span` cost does track file length per span, measured directly above — but it was asserted from a
-measurement that could not show it.
+### Writes inside a test block enter the package namespace, and that is a correctness question
 
-### FIXED — a file-local name lookup scanned the file's item list
+This was framed as the interface fixpoint being superlinear in the size of the cyclic definition
+group. It is not. Profiled on `targets` 1.12.0, where `ry check` took 16.6 s on the JSON path so the
+reporter was not involved, `analysis-stats` attributed 16,341 ms of the 16,681 ms typecheck to one
+245-line file, `R/class_active.R`.
 
-`SalsaGlobals::frame_definition` answered "which item of this file binds this name" with a linear
-reverse scan of the item list, once per name looked up, so a file with many items *and* many distinct
-cross-item references cost their product. Neither factor is superlinear alone, which is why it hid —
-measured with each held fixed in turn:
+What it scales with is not the file count. 284 package files cost 0.35 s. Adding 238 unrelated
+package files costs 0.37 s. Adding the 238 `tests/testthat` files costs 16.6 s, and reclassifying
+those same files as scripts brings it back to 0.99 s. Bisecting by test-file count gives 384 ms at
+zero, 1.6 s at 30, 3.7 s at 60, 9.7 s at 120 and 22 s at 238, which is about 90 ms per added test
+file.
 
-| shape | 2,500 | 5,000 | 10,000 | 20,000 |
-|---|---|---|---|---|
-| items fixed at 200, call arguments vary | 43 ms | 70 ms | 131 ms | 245 ms |
-| call arguments fixed at 200, items vary | 76 ms | 137 ms | 269 ms | 576 ms |
-| **both vary together, references distinct** | 153 ms | 393 ms | 1,269 ms | **4,305 ms** |
+The mechanism comes from per-item execution counts and times. Query executions grow only 3.6 times
+while wall time grows 25 times, so re-execution volume is not the cause. One statement item was
+re-executed 139 times and its own cost grew with the file count. A write inside a `test_that` or
+`tar_test` block binds at the item's top level, because a bare `{...}` is not a scope, so
+`conditional_slot_items` publishes every one of them as a package-namespace conditional slot. A
+cross-file deferred read of a common local name such as `out` or `envir` then joins over every
+conditional writer of that name project-wide, which is hundreds of statement items across 238 files,
+and each join needs that item's check, which drags in the R6 record type.
 
-Both edges linear; together quadratic, and the joint cost is five times their sum — the signature of a
-per-lookup scan, since 200 × 20,000 is 4M steps against 20,000 × 20,000 at 400M.
+Two causes were ruled out by direct experiment, so nobody should repeat them. It is not the fixpoint
+round cap, because setting `SCHEME_ROUND_CAP` from 16 to 2 changed 9,690 ms to 9,760 ms. It is not
+the type-size ceiling, because lowering `TYPE_SIZE_CEILING` from 100,000 to 2,000 changed nothing.
 
-Replaced by `file_binders`, a memoized per-file index from name to the items binding it in file order.
-The ordering rule is preserved exactly: a binary search takes the last binder strictly above the
-reading item for an immediate read, and the last binder anywhere for a deferred read in a script,
-while a deferred read in a package still stands aside for the project-wide winner. Interleaved:
-20,000 × 20,000 goes **4,277 ms → 985 ms (4.3×)**, and the curve flattens from 30× to 11.6× across an
-8× growth — near-linear, with a mild residue not chased further.
+The performance half is fixed, and the ledger records both parts. What remains is the semantics.
+A write inside a `test_that` or `tar_test` block still enters the package namespace, which is wrong
+for those callees.
 
-Finding sets byte-identical on all four corpus packages and `targets`, and corpus timings unchanged
-within noise, which is expected: this removes a cliff rather than general cost. Two fixtures pin the
-ordering — three bindings of one name with an immediate read resolving to the middle one, and a
-script closure seeing the last binding in the file. Both fail against a first-instead-of-last error
-(along with three pre-existing fixtures) and both pass against the pre-change code, so they guard the
-contract rather than encode the refactor.
+**The rule has to key on the callee, and R decides it that way.** This was checked rather than
+assumed.
 
-### The package-path cost is test-block writes entering the package namespace — root cause found, one part fixed
+- The block's write does bind outward for `suppressWarnings({v <- 1})`, `invisible`, `system.time`,
+  `try` and `withCallingHandlers`, because a promise is forced in the caller's frame. A blanket rule
+  would manufacture a false `unresolved` finding on `try({cfg <- read()}); use(cfg)`.
+- It does not bind for `local({v <- 1})`, or for the `eval(substitute(b), new.env())` pattern that
+  `test_that` uses.
 
-The review framed this as the interface fixpoint being superlinear in the size of the cyclic
-definition group. **It is not.** Profiled on `targets` 1.12.0, where `ry check` took 16.6 s on the JSON
-path (so not the reporter): `analysis-stats` attributes 16,341 ms of the 16,681 ms typecheck to **one
-245-line file**, `R/class_active.R`. The instrument could only say this after the document-kind fix
-above; before that it measured a different program.
+The honest options are a known-verb list, covering testthat's `test_that`, `describe` and `it` and
+matching the existing `library`, `on.exit` and `local` precedent, or a stub annotation in the vein of
+`@masked`. A verb list alone is not enough for a real project, because `targets` wraps `test_that` in
+its own `tar_test`, and hardcoding a package's private wrapper is not a rule.
 
-What it scales with is not the file count. 284 package files cost 0.35 s; adding 238 *unrelated* package
-files costs 0.37 s; adding the 238 `tests/testthat` files costs 16.6 s, and reclassifying those same
-files as scripts brings it back to 0.99 s. Bisecting by test-file count: 0 → 384 ms, 30 → 1.6 s,
-60 → 3.7 s, 120 → 9.7 s, 238 → 22 s, about 90 ms per added test file.
-
-The mechanism, from per-item execution counts and times: query executions grow only 3.6× while wall
-time grows 25×, so it is not re-execution volume — one statement item was re-executed 139 times and its
-own cost grew with the file count. Writes inside a `test_that`/`tar_test` block bind at the **item's top
-level**, because a bare `{...}` is not a scope, so `conditional_slot_items` publishes every one of them
-as a package-namespace conditional slot. A cross-file (deferred) read of a common local name like `out`
-or `envir` then joins over every conditional writer of that name project-wide — hundreds of statement
-items across 238 files — and each join needs that item's check, which drags in the R6 record type.
-
-Two things ruled out by direct experiment, so nobody repeats them: it is **not** the fixpoint round cap
-(setting `SCHEME_ROUND_CAP` from 16 to 2 changed 9,690 ms to 9,760 ms) and **not** the type-size ceiling
-(lowering `TYPE_SIZE_CEILING` from 100,000 to 2,000 changed nothing).
-
-**Fixed here:** the quoting-form part. `quote`/`substitute`/`bquote`/`expression` arguments were binding
-their assignments, so `quote(x <- 1)` published `x` and every quoted call was type-checked. That alone
-takes `targets` from 16.6 s to 9.9 s and removes 151 findings, all false positives (139 arity and type
-errors reported against calls inside `quote({...})` — code R does not run there — and 12 unresolved
-reads of names mentioned in a quotation). See the type-system reference for the contract.
-
-**FIXED, and the design question turned out not to be on the critical path.** The remaining cost was the
-*join*, not the binding: `conditional_slot_scheme` called `statement_binding_scheme` for every writer of
-a name, unbounded, from a per-item read — so a name written at 238 documents' top levels made every read
-of it pay for all of them. Bounding the join at eight writers and widening past that to `Unknown` takes
-`targets` from 7.14 s to 0.74 s interleaved (**9.7×**, and 16.6 s → 0.74 s together with the quoting fix)
-with **byte-identical finding sets** on `targets` and all four corpus packages, and no regression
-elsewhere (dplyr 0.47→0.40 s, ggplot2 1.21→1.08 s, shiny and data.table flat). The bound is honest on its
-own terms: a union of dozens of unrelated types is not a fact a check can use, and real conditional slots
-have a handful of writers. Contract in the type-system reference; fixtures pin both sides of the bound.
-
-**Still open as a semantics question, but no longer blocking performance.** Writes inside a
-`test_that`/`tar_test` block still enter the package namespace, which is wrong for those callees — a
-correctness matter now, not a speed one. Scoping a block argument the way `local` is scoped also reaches
-0.89 s, but it cannot be done bluntly, and R decides the question by callee, which was checked rather
-than assumed:
-
-- `suppressWarnings({v <- 1})`, `invisible`, `system.time`, `try`, `withCallingHandlers` — the block's
-  write **does** bind outward, because a promise is forced in the caller's frame. A blanket rule would
-  manufacture false `unresolved` findings on `try({cfg <- read()}); use(cfg)`.
-- `local({v <- 1})` and the `eval(substitute(b), new.env())` pattern that `test_that` uses — it does
-  **not** bind.
-
-So the rule has to key on the callee, and the honest options are a known-verb list (testthat's
-`test_that`/`describe`/`it`, matching the existing `library`/`on.exit`/`local` precedent) or a stub
-annotation in the vein of `@masked`. A verb list alone is not enough for real projects: `targets` wraps
-`test_that` in its own `tar_test`, and hardcoding a package's private wrapper is not a rule. Whichever
-is chosen, one blocker comes with it, measured: scoping those blocks adds 87 `unused` warnings to
-`targets`, a mix of genuine dead stores (`expect_silent(tmp <- f(x))`) and cases that only look dead
-because a name is used in a nested closure. That needs its own answer before the change can land.
+One blocker comes with whichever is chosen, and it is measured. Scoping those blocks adds 87
+`unused` warnings to `targets`. They are a mix of genuine dead stores, such as
+`expect_silent(tmp <- f(x))`, and cases that only look dead because a name is used in a nested
+closure. That needs its own answer before the change can land.
 
 ### Memory, and the rest of the package-path measurements
 
-A review-authored synthetic of 1,550 files / 277,586 lines / 14,771 items reported **55.9 s and
-5,488 MiB peak** as package documents against **5.95 s and 343 MiB** as scripts, superlinear in file
-count (400 files 6.1 s, 800 files 10.8 s, 1,550 files 68 s). **That does not reproduce, and the
-generator's shape was never recorded.** A fresh synthetic package of 1,500 files / 42,000 lines /
-10,500 items — five functions plus a shared top-level conditional write per file, the shape the fixed
-join punishes hardest — costs **0.49 s and 111 MiB peak** after the bound, and 0.85 s before it. Treat
-the old figures as unverified unless someone reconstructs the generator; the shape that demonstrably
-cost is the unbounded join, and it is fixed.
+A review-authored synthetic of 1,550 files, 277,586 lines and 14,771 items reported 55.9 s and
+5,488 MiB peak as package documents against 5.95 s and 343 MiB as scripts, superlinear in file count
+at 6.1 s for 400 files, 10.8 s for 800 and 68 s for 1,550. **That does not reproduce, and the
+generator's shape was never recorded.** A fresh synthetic package of 1,500 files, 42,000 lines and
+10,500 items, holding five functions plus a shared top-level conditional write per file, which is
+the shape the join punishes hardest, costs 0.49 s and 111 MiB peak after the bound and 0.85 s
+before it. Treat the old figures as unverified unless someone reconstructs the generator.
 
-Other packages move much less as-package versus as-script (ggplot2 1.70/1.21, dplyr 0.72/0.58, shiny
-0.65/0.59), which fits the cause above: they have far fewer test-block writes landing in the namespace.
+Other packages move much less between the package and script shapes, at 1.70 against 1.21 for
+ggplot2, 0.72 against 0.58 for dplyr, and 0.65 against 0.59 for shiny. That fits the cause above,
+because they have far fewer test-block writes landing in the namespace.
 
-Sampling had put the time in **salsa cycle bookkeeping** around `statement_binding_scheme` and
-`item_check`, with 54 of 72 sampled thread stacks in `DependencyGraph::block_on` and `targets` getting
-**no parallel speedup at all** (17.43/17.81 s on one core against 17.43/16.99 s on four, ggplot2
-1.15×). That was a symptom of the unbounded conditional-slot joins, and **bounding them fixed the
-parallelism too**. Re-measured with `taskset` pinning core counts, best of two: `targets` 998 → 778 →
-599 ms at 1/2/4 cores (**1.67×**), data.table 420 → 309 → 278 (1.51×), ggplot2 1,388 → 1,255 → 1,033
-(1.34×). Read those against the container's ceiling — its 4 vCPUs deliver only ~1.8× of native compute
-at 4 threads — so `targets` is at roughly 93% of what is achievable here, and real hardware numbers
-would be worth having.
+Sampling had put the time in cycle bookkeeping around `statement_binding_scheme` and `item_check`,
+with 54 of 72 sampled thread stacks in `DependencyGraph::block_on` and `targets` getting no parallel
+speedup at all, at 17.43 s and 17.81 s on one core against 17.43 s and 16.99 s on four, while
+ggplot2 managed 1.15 times. That was a symptom of the unbounded conditional-slot joins, and bounding
+them fixed the parallelism too. Re-measured with `taskset` pinning core counts, best of two:
+`targets` goes 998 ms to 778 ms to 599 ms at one, two and four cores, which is 1.67 times;
+data.table goes 420 ms to 309 ms to 278 ms, which is 1.51 times; ggplot2 goes 1,388 ms to 1,255 ms
+to 1,033 ms, which is 1.34 times. Read those against the container's ceiling, because its 4 vCPUs
+deliver only about 1.8 times native compute at four threads. `targets` is therefore at roughly 93%
+of what is achievable here, and a number from real hardware would be worth having.
 
-Two facts about the fan-out worth knowing: `check` fans out over `available_parallelism()` while
-**`fmt` is a plain loop** (646 ms on one core against 644 ms on four, measured), and there is **no flag
-to control concurrency**. `available_parallelism()` honours CPU affinity and cgroup quotas, so
-`taskset -c 0-N` is the only lever today — enough for measuring, not something a user would find.
+Two facts about the fan-out are worth knowing. `check` fans out over `available_parallelism()` while
+`fmt` is a plain loop, measured at 646 ms on one core against 644 ms on four. There is also no flag
+to control concurrency. `available_parallelism()` honors CPU affinity and cgroup quotas, so
+`taskset -c 0-N` is the only lever today. That is enough for measuring, and not something a user
+would find.
 
-The memory note of ~300 MiB at 302K LoC holds for the script shape (343 MiB at 278K LoC) and is 16× off
-for the package shape. For reference, memory attribution in the healthy shape is parse +82 MiB,
-lower+naming +158 MiB, typecheck +47 MiB, diagnostics +28 MiB — HIR and naming dominate resident memory
-at rest, not interned types.
+The memory note of about 300 MiB at 302k lines holds for the script shape, at 343 MiB for 278k
+lines, and is sixteen times off for the package shape. Memory attribution in the healthy shape is
+parse at 82 MiB, lowering and naming at 158 MiB, typecheck at 47 MiB and diagnostics at 28 MiB. HIR
+and naming dominate resident memory at rest, not interned types.
 
-### FIXED — a per-item query re-derived the whole file
+### Fan the formatter out
 
-Three per-item costs that were each O(items in the file), so the analysis path was quadratic in a
-file's top-level items: `SalsaGlobals::arithmetic_classes` collected a `Vec<String>` of every item name
-and re-scanned it, `item_tree` was `returns(clone)` so the whole item list was cloned per item, and
-`for_item` found an item's index by linear search. Now a memoized per-file query, a borrow, and a
-memoized position index.
+On an identical file set of ggplot2's 339 files, 64,302 lines and 2.0 MiB, single-threaded on both
+sides, `fmt --check` takes 1.01 s and `check` takes 2.26 s. The formatter costs half what the type
+checker does.
 
-Measured on the analysis path with interleaved runs (`--output json`, so the reporter quadratic above
-does not contaminate it): 2,000 items 566 ms → 160 ms, 8,000 items 7,045 ms → 600 ms. That is quadratic
-(4× items, 12.5× time) becoming linear (4× items, 3.75× time), **11.7× at 8,000 items**. Unique corpus
-records byte-identical on all four packages.
+Format is 113 ms of parse plus about 890 ms of render, so the render is about eight times the parse,
+at 1.9 MiB/s against about 18 MiB/s for parsing. The actionable part is to fan `fmt` out the way
+`check` already does. The render's factor of eight was not localized and needs its own profile
+before anyone touches it.
 
-Worth knowing why the review's own numbers for this looked different: it reported the fixed case as
-0.07/0.13/0.26/0.56 s while its baselines were 0.28/0.61/2.15/6.22 s, but the fixed figures match the
-JSON path and the baselines match human output — the reporter quadratic sat inside the comparison.
-Measure both sides through the same output mode.
+### Suspected: `Checker::infer` deep-clones an `Expression` per call
 
-### The formatter is *not* slower than the type checker — it is single-threaded
+`let expression = self.module.expression(id).clone();` sits on the checker's hottest path. It clones
+a `NameRef(String)`, a `Call{arguments: Vec<Argument>}` and a `Binary{special_name: Option<String>}`
+per node, while most arms then re-extract only `Copy` fields. The clone exists only to release the
+borrow on `self.module`. It appeared in the profile solely as `drop_in_place` and allocator frames,
+so its cost was never isolated. Measure before acting.
 
-On an identical file set (ggplot2's 339 files, 64,302 lines, 2.0 MiB), single-threaded on both sides:
-`fmt --check` 1.01–1.02 s against `check` 2.26 s on one core. The formatter is **half** the type
-checker's cost, not double. The backlog's earlier comparison pitted a parallel command against a
-sequential one — `check` fans out over `available_parallelism()`, `fmt` is a plain `for` loop over
-files (`taskset -c 0` and `-c 0-3` give the formatter the same 1.0 s, confirming it).
+### Open from a fixed entry: the `BTreeMap` choice in `ItemNaming`
 
-What is true: format is 113 ms parse plus ~890 ms render, so the render is ~8× the parse (1.9–2.0
-MiB/s against ~18 MiB/s for parsing). Actionable: fan `fmt` out the way `check` already does. The
-render's 8× was not localized and needs its own profile before anyone touches it.
+`resolutions`, `bindings`, `non_locals`, `quiet_reads` and `namespace_reads` are pure lookups with
+no ordering requirement, and `BTreeMap::get` showed up under `infer_read`. Switching `item_hir` and
+`item_naming` to `returns(ref)` removed the node-walk half of that cost, so what is left is lookup
+only. Measure before switching, and check iteration order wherever any of these is walked to build
+diagnostics.
 
-### FIXED — `returns(clone)` on the two hottest per-item queries
+### Judged fast enough, so do not invent work here
 
-`item_hir` and `item_naming` were `returns(clone)`, and `ItemNaming` is `BTreeMap`/`BTreeSet`
-throughout, so each fetch was a node-by-node allocation walk. The review estimated 3–5 fetches per
-item and "roughly 8–13% of the cold pass, estimated, not measured end to end". Both halves were then
-measured rather than assumed: a counting probe puts ggplot2 at 14,753 `item_hir` and 16,173
-`item_naming` fetches for 2,736 items — 5.4 per item, matching the estimate — costing 178 ms and
-265 ms of fetch time, and data.table at 16,385 and 21,139 fetches costing 64 ms and 118 ms.
+Single-package cold analysis is 1.9 s and 88 MiB peak for ggplot2's 68k lines, 1.3 s and 72 MiB for
+mgcv's 37k lines after the chain fix, and 1.4 s for the 64k lines of `targets` as the instrument
+classifies it. Parse is only 2% to 7% of the pass, at about 0.9 microseconds per line.
 
-Now `returns(ref)`, with the call sites borrowing. Interleaved over three rounds, medians: ggplot2
-1,035 → 949 ms (8%), `targets` 640 → 559 ms (13%), data.table flat within noise. So the estimate held
-where it bit, and the realized saving is smaller than the measured fetch time because the memo lookup
-remains — only the clone is gone. Finding sets byte-identical on all four corpus packages and
-`targets`.
+`item_spans` identity is clean. `item_span_positions` is a memoized index, so `item_span_range` is a
+constant-time probe, and `item_spans` itself is consumed per file. Incrementality genuinely holds:
+every project reported zero item rechecks per keystroke and zero resolve steps, with edited-file
+diagnostics at a 2.5 ms median on ggplot2 and a 21.3 ms median at 277,586 lines, which is inside the
+stated bar. rowan re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
+binary search.
 
-**Peak memory is unchanged** (ggplot2 127.4 → 127.0 MiB, `targets` 94.2 → 93.8 MiB), which is the
-expected result and worth stating so nobody re-measures hoping otherwise: the clones were transient,
-so they cost allocator traffic rather than resident set, and peak is dominated by the memos themselves.
+### Two measurement lessons from this review
 
-**Still open from the same entry:** the `BTreeMap` choice. `resolutions`, `bindings`, `non_locals`,
-`quiet_reads` and `namespace_reads` are pure lookups with no ordering requirement, and `BTreeMap::get`
-showed up under `infer_read`. Removing the clone removed the node-walk half of that cost, so what is
-left is lookup only — measure before switching, and check iteration order where any of these is walked
-to build diagnostics.
+**Measure both sides through the same output mode.** The review reported a fixed case at 0.07, 0.13,
+0.26 and 0.56 s against baselines of 0.28, 0.61, 2.15 and 6.22 s. The fixed figures came from the
+JSON path and the baselines from human output, so the reporter's own quadratic sat inside the
+comparison.
 
-### FIXED — per-item clones of project-wide tables
-
-`check_item_with_annotation` cloned the whole project `@type`/`@alias` map and the arithmetic-class set
-per item and stored both owned on `InferenceTable`. Both are per-*file* facts and both are pure
-lookups, so they are now memoized per-file tracked queries returning `&'db`, with the table holding
-`Option<&'db …>`.
-
-Measured interleaved at a fixed 2,000 items as the declaration count grows, typecheck goes
-0 → 18.0/18.3 ms, 600 → 32.0/19.4 ms, 2,400 → **71.3 ms cloned against 27.5 ms borrowed** (2.6×), and
-the residual growth after the fix is the real work of resolving more nominals rather than copying.
-Finding sets byte-identical on all four corpus packages and on `targets`; no package regressed.
-
-### Suspected — `Checker::infer` deep-clones an `Expression` per call
-
-`let expression = self.module.expression(id).clone();` sits on the checker's hottest path, cloning
-`NameRef(String)`, `Call{arguments: Vec<Argument>}` and `Binary{special_name: Option<String>}` per
-node, while most arms then re-extract only `Copy` fields — the clone exists only to release the borrow
-on `self.module`. It appeared in the profile solely as `drop_in_place` and malloc/free frames, so its
-cost was never isolated. Measure before acting.
-
-### Judged fast enough — do not invent work here
-
-Single-package cold analysis (ggplot2 68K lines 1.9 s / 88 MiB peak; mgcv 37K lines 1.3 s / 72 MiB
-after the chain fix; targets 64K lines 1.4 s as the instrument classifies it), with parse only 2–7% of
-the pass at ~0.9 µs/line. `item_spans` identity is clean — `item_span_positions` is a memoized index
-so `item_span_range` is an O(1) probe, and `item_spans` itself is consumed per file; the quadratic
-above is a different query, not a regression of that one. Incrementality genuinely holds: every
-project reported zero item rechecks per keystroke and zero resolve steps, with edited-file diagnostics
-at 2.5 ms median on ggplot2 and **21.3 ms median at 277,586 lines**, inside the stated bar. And rowan
-re-anchoring is not the quadratic — `child_or_token_at_range` is a binary search.
+**Split analysis from reporting before drawing a conclusion about either.** An earlier entry claimed
+that position barely matters, from two 20,501-line projects with 500 findings each costing 6.9 s and
+8.0 s. Those projects are analysis-bound, at 4.6 s for JSON against 41 ms for the reporter, so they
+were never evidence about the reporter at all.
 
 ## Open — abstraction & duplication review
 
@@ -2087,6 +1924,56 @@ The end-to-end guard rests on the corpus suites.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **The human reporter was quadratic in findings times file length, and is now linear in findings.**
+  Neither review saw it, because both measured through `analysis-stats` or `--output json`, which
+  never touch that path. On one file of 8,000 reporting items, the whole cold analysis was 452.6 ms
+  and `--output json` finished in 550 ms while plain `ry check` took 10,527 ms. Instrumenting the
+  reporter put 6,728 ms of `render`'s 6,811 ms in `read_span`, which is 98.8%, because miette's
+  `SourceCode for str` locates a span's lines by walking from byte zero: 31 microseconds per span on
+  a 1,000-line file and 245 on an 8,000-line one. `read_span` now answers over a bounded window, the
+  span's lines plus a margin wider than the requested context, and translates back into whole-file
+  coordinates. It delegates to miette inside the window rather than reimplementing `SpanContents`,
+  so one implementation decides what a snippet contains, and a per-file `LineStarts` table makes
+  locating the window a binary search. Interleaved, 8,000 findings go from 6,483 ms to 530 ms.
+  Rendered stderr is byte-identical on data.table, dplyr, ggplot2 and shiny, related-note snippets
+  included. A differential test sweeps the window against miette's whole-file walk over every line
+  ending, spans mid-line, across a break, at the start and the end, and a file with no trailing
+  newline.
+
+- **A quoting form no longer binds its assignments.** `quote`, `substitute`, `bquote` and
+  `expression` arguments were binding, so `quote(x <- 1)` published `x` and every quoted call was
+  type-checked. Removing that takes `targets` from 16.6 s to 9.9 s and removes 151 findings, all
+  false positives: 139 arity and type errors against calls inside `quote({...})`, which R does not
+  run there, and 12 unresolved reads of names mentioned in a quotation. The type-system reference
+  holds the contract.
+
+- **A conditional slot's join is bounded at eight writers and widens past that to `Unknown`.**
+  `conditional_slot_scheme` called `statement_binding_scheme` for every writer of a name, unbounded,
+  from a per-item read, so a name written at 238 documents' top levels made every read of it pay for
+  all of them. The bound takes `targets` from 7.14 s to 0.74 s interleaved, and to 0.74 s from
+  16.6 s together with the quoting fix, with byte-identical finding sets on `targets` and all four
+  corpus packages and no regression elsewhere. It is honest on its own terms, because a union of
+  dozens of unrelated types is not a fact a check can use and a real conditional slot has a handful
+  of writers. Fixtures pin both sides of the bound.
+
+- **Three per-item queries stopped re-deriving the whole file.** `SalsaGlobals::arithmetic_classes`
+  collected a `Vec<String>` of every item name and re-scanned it, `item_tree` was `returns(clone)`
+  so the whole item list was cloned per item, and `for_item` found an item's index by linear search.
+  They are now a memoized per-file query, a borrow and a memoized position index. On the JSON path,
+  8,000 items go from 7,045 ms to 600 ms, which turns a quadratic into a linear curve.
+
+- **`item_hir` and `item_naming` return by reference.** Both were `returns(clone)`, and `ItemNaming`
+  is `BTreeMap` and `BTreeSet` throughout, so each fetch was a node-by-node allocation walk. A
+  counting probe put ggplot2 at 5.4 fetches per item, costing 178 ms and 265 ms of fetch time.
+  Interleaved medians improve 8% on ggplot2 and 13% on `targets`. Peak memory is unchanged, which is
+  the expected result: the clones were transient, so they cost allocator traffic rather than
+  resident set, and peak is dominated by the memos themselves.
+
+- **The project type map and arithmetic-class set are borrowed per file, not cloned per item.**
+  `check_item_with_annotation` cloned both and stored them owned on `InferenceTable`. Both are
+  per-file facts and pure lookups, so they are memoized per-file tracked queries returning a
+  reference. At a fixed 2,000 items with 2,400 declarations, typecheck goes from 71.3 ms to 27.5 ms.
 
 - **A package file got the position-aware lookup a script already had, so a later top-level write is
   no longer lost.** `SalsaGlobals` built its ordered item list for scripts only. A file is sourced
