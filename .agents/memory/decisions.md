@@ -1,5 +1,9 @@
 # Decision record: the analysis core is a memoized query framework
 
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
 The analysis core uses a memoized query framework with automatic,
 dependency-tracked invalidation. The substrate is salsa, and `crates/semantics`
 is the database.
@@ -451,8 +455,8 @@ representations.
 ## Guard narrowing
 
 Flow-sensitive narrowing is branch-edge entry refinement on the slot model, not a separate flow
-analysis. A recognized guard condition computes refined types for the guarded slot's two edges. A
-recognized condition is `is.null(x)`, a member of the `is.*` family, or a negation of one. Each
+analysis. `recognize_guard` accepts `is.null(x)`, a member of the `is.*` family, or a negation of
+one, and `guard_edges` computes refined types for the guarded slot's two edges. Each
 refinement is an ordinary undo-logged environment write inside the branch region. A branch write
 replaces it, the region rollback reverts it, and the branch join sees final values, so no new
 machinery is needed.
@@ -499,8 +503,8 @@ failure. `@return {TYPE}` and `@forall` are unchanged.
 
 # Decision record: a syntax error does not erase a file
 
-A single error node anywhere in a tree used to short-circuit `lower_with_diagnostics` to an empty
-module. One half-typed keystroke therefore dropped the file's whole export set. The package symbol
+A single error node anywhere in a tree used to short-circuit lowering to an empty module. One
+half-typed keystroke therefore dropped the file's whole export set. The package symbol
 index re-folded on every keystroke inside a broken window, dependents flooded with unresolved-name
 errors, and diagnostics, hover and completion went dark for the rest of the file. The single source
 of truth for what exists mid-edit was the parse tree's error bit, and it applied at file
@@ -534,6 +538,10 @@ analysis: typing inside a construct is the highest-churn edit state, and it now 
 blast radius.
 
 # Decision record: durability tiers and a memoized IDE read path
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
 
 The red-green engine used to validate every memo by deep-walking its recorded dependencies once per
 revision. The first read after any keystroke therefore re-walked every unopened file's parse,
@@ -592,10 +600,10 @@ rejected the second.
 That is a false positive on the coalesce idiom, and it was recorded as a structural design tension
 whose workaround was to annotate.
 
-The guard itself carries the missing information, so the fix is to consume it. In
-`condition_refinement`, when the recognized predicate is `is.null` and the guarded local slot
-resolves to a completely unconstrained inference variable `A`, meaning entry `Unbound` and
-constraint `Unconstrained`, bind `A := T | NULL` for a fresh `T`. The model already supports that
+The guard itself carries the missing information, so the fix is to consume it. In `guard_edges`,
+when the recognized predicate is `is.null` and the guarded local slot resolves to a completely
+unconstrained inference variable `A`, meaning entry `Unbound` and constraint `Unconstrained`, bind
+`A := T | NULL` for a fresh `T`. The model already supports that
 union shape from annotations, because `@param x {T | NULL}` produces exactly it, and the existing
 member filtering then narrows the edges. There is no new type form, no deferred union and no join
 special case. The coalesce body joins `fallback` with the narrowed `T` and generalizes to
@@ -763,6 +771,10 @@ the deliberately `Unknown` self-recursive schemes.
 
 # Decision record: a parse tree is not a memo value
 
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
 The `SourceText(f)` engine input used to be the parsed document, holding a rope and a tree-sitter
 tree, for every workspace file. A `Parse(f)` query projected it. Measured at 302k lines of code
 with `ry debug analysis-stats`, which reports per-phase resident-set growth for exactly this kind
@@ -801,6 +813,10 @@ on demand. The LRU bounds that, and per-file symbol items stay cached across req
 
 # Decision record: an all-files fold splits into a durable sub-fold and an open-file overlay
 
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
 Every all-files fold recorded one dependency edge per package file. That covers the symbol index,
 the completion index, declared globals, type definitions, the type index and both candidate orders.
 Each keystroke's validation therefore deep-walked every fold, which measured about 11,200 memo
@@ -830,6 +846,10 @@ pattern. Incremental analysis: an open or close transition is a rare HIGH change
 once, exactly like the existing durability downgrade.
 
 # Decision record: a same-file backward reference never routes through the interface
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
 
 A real 697k-line workspace report through `analysis-stats` found this. Typecheck was 95% of a
 300-second cold pass, one 170-line file took 4.9 s, and a keystroke in an 18.5k-line class file
@@ -879,6 +899,10 @@ file. Simplicity: one classification helper and two consumers. Incremental analy
 deep validation of interface memos on a hub file.
 
 # Decision record: one inference per file per revision, and a memoized typo hint
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
 
 Re-profiling the cold pass with `analysis-stats` after the interface-routing fix found this. The
 staged diagnostics phase was 66% of a 10-second cold pass at 302k lines of code, and stack sampling
@@ -930,6 +954,10 @@ regression of this kind is visible at a glance.
 
 # Decision record: the inference-state data model
 
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
 Callgrind over a 7.5k-line hub file, run after the demand-path fixes, drove this. Inference itself
 cost about 25 microseconds per line, and nearly all of it was allocator and tree churn rather than
 typing work.
@@ -971,6 +999,10 @@ the remaining follow-up, which is that whole-file inference and re-lowering are 
 floor for a huge file. The per-definition granularity design addresses it.
 
 # Decision record: interface SCC rounds run per definition, and skip on unchanged reads
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
 
 A 700k-line user workspace still spent 95% of a 179-second cold pass in typecheck after the
 demand-path and constant-factor rounds, with a 10-second keystroke in an 18.5k-line file. A
