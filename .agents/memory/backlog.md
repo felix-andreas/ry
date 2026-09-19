@@ -746,367 +746,269 @@ Two more things are deliberately not worth fixing. `render_semantics` and the ty
 `render_file` share a scheme loop and render different fact sets on purpose. `render_with_strict`
 builds a second database per case, which costs 114 ms across 22 cases.
 
-## Open — user reports (from the maintainer, not a simulated round)
+## Open: reports from the maintainer
 
 ### REPL resize is not tracked
 
-The width fix itself is closed and archived in `test-user-reports.md`. What stays open: a stock
-terminal session handles `SIGWINCH` by calling `R_SetOptionWidth`, which R does not export, and the
-console feed is the only other way in — the mechanism already shown to desynchronise the editor when
-used between prompts. Worth revisiting if someone finds a third route.
+The width fix itself is closed and archived in `test-user-reports.md`. What stays open is the
+mechanism. A stock terminal session handles `SIGWINCH` by calling `R_SetOptionWidth`, which R does
+not export. The console feed is the only other way in, and that is the mechanism already shown to
+desynchronize the editor when used between prompts. Worth revisiting if someone finds a third route.
 
-### A variable is reported as unused — NEEDS A REPRO
+### A variable is reported as unused, and this needs a reproduction
 
-Filed from a maintainer note that arrived truncated ("…variable is reported as unused"), so the
-triggering shape is unknown. Do not guess at it: the `unused` warning has several paths (script
-liveness, package top level, parameters, `shadows-namespace` interaction) and a fix aimed at the
-wrong one is worse than none. Ask for the snippet before working it.
+The maintainer's note arrived truncated, reading only that a variable is reported as unused, so the
+triggering shape is unknown. Do not guess at it. The `unused` warning has several paths, which are
+script liveness, the package top level, parameters, and the interaction with `shadows-namespace`. A
+fix aimed at the wrong one is worse than none. Ask for the snippet before working it.
 
-## Open — diagnostic wording is not styled consistently
+## Open: diagnostic wording is not styled consistently
 
-Six findings shown side by side in the README read as though five people wrote them: three
-`type-mismatch` messages are lowercase sentence fragments with em dashes, `Unexpected comma after last
-argument` and `Use TRUE, not T, for Boolean values` are capitalised (the second imperative), and
-``` `tmp` is assigned but never used. ``` is the only one carrying a full stop. Caught by a README
-reviewer who noticed the page claims a finding "says the same thing" everywhere while the sample
-visibly disagrees with itself.
+Six findings shown side by side in the README read as though five people wrote them. Three
+`type-mismatch` messages are lowercase sentence fragments. `Unexpected comma after last argument` and
+`Use TRUE, not T, for Boolean values` are capitalized, and the second is imperative. ``` `tmp` is
+assigned but never used. ``` is the only one carrying a full stop. A README reviewer caught it,
+noticing that the page claims a finding says the same thing everywhere while the sample visibly
+disagrees with itself.
 
-**Measured before acting, and the proposed rule does not survive it.** Across 62 message literals in
-`diagnostics.rs`: 36 lowercase with no period, 14 lowercase with a period, 9 capitalised. So
-"lowercase fragment, no period" is the plurality but nothing like a convention — and it cannot be
-applied blanket, because the capitalised ones are capitalised for reasons: `R's $ operator` is a
-proper noun, and `I could not resolve …` / `I do not know the type …` / `I cannot construct an
-infinite type` are first-person sentences. Lowercasing those yields `r's` and `i could not`.
+**The obvious rule does not survive measurement.** Across 62 message literals in `diagnostics.rs`,
+36 are lowercase with no period, 14 are lowercase with a period, and 9 are capitalized. So
+"lowercase fragment, no period" is the plurality and nothing like a convention. It also cannot be
+applied blanket, because the capitalized ones are capitalized for a reason. `R's $ operator` opens
+with a proper noun, and `I could not resolve ...`, `I do not know the type ...` and `I cannot
+construct an infinite type` are first-person sentences. Lowercasing those yields `r's` and
+`i could not`.
 
-The rule that actually fits the corpus is two-shape: a message that is a **complete sentence** is
-sentence-cased and ends with a period; a message that is a **fragment** (the expected/found family)
-is lowercase with none. Under that rule the real violations are far fewer than "five people wrote
-them" suggests — mostly sentences missing their period.
+The rule that fits the corpus has two shapes. A message that is a complete sentence is sentence-cased
+and ends with a period. A message that is a fragment, which is the expected-and-found family, is
+lowercase with no period. Under that rule the real violations are far fewer than "five people wrote
+them" suggests, and are mostly sentences missing their period.
 
-**Unblocked** — the reporter change that re-captured every rendered sample has landed, so a message
-reworded here only invalidates the samples that quote it. Whichever samples they are must be
-re-captured in the same slice: there is still no harness for that (see the next item), so it is a
-manual pass over the pages named in the docs-sample item below.
+This is unblocked. The reporter change that re-captured every rendered sample has landed, so
+rewording a message now invalidates only the samples that quote it. Those samples have to be
+re-captured in the same change. There is no harness for that yet, so it is a manual pass over the
+pages named in the next item.
 
-## Open — nothing verifies the rendered samples in the docs
+## Open: nothing verifies the rendered samples in the docs
 
-Roughly two dozen blocks across `features`, `getting-started`, `reference/{cli,configuration,diagnostic-codes}`,
-`type-checking/{tutorial,concepts,domain-modeling}`, `index.astro` and the README's generated
-`.github/diagnostic.svg` show real tool output. Nothing checks them, so they drift silently and the
-drift is only ever found by someone re-capturing by hand. Two things this proves rather than predicts:
+About two dozen blocks show real tool output. They live across `features`, `getting-started`,
+`reference/cli`, `reference/configuration`, `reference/diagnostic-codes`,
+`type-checking/tutorial`, `type-checking/concepts`, `type-checking/domain-modeling`, `index.astro`
+and the README's generated `.github/diagnostic.svg`. Nothing checks them, so they drift silently and
+the drift is only ever found when someone re-captures by hand.
+
+Two things this proves rather than predicts.
 
 - A reporter change left every one of them stale for days, and the cost of re-capturing them by hand
   is most of what made that change expensive to land.
-- A **parser** change — narrowing an unterminated argument list's boundary — silently falsified the
-  headline missing-comma sample in `features.md`, the very example chosen to show off the parser. It
-  was not noticed until the sample was re-run for an unrelated reason, and `main` had shipped it
-  wrong. This is the failure the "run the tool before claiming what it does" rule exists to prevent,
-  and it does not scale to prose that was true when written.
+- A parser change, narrowing an unterminated argument list's boundary, silently falsified the
+  headline missing-comma sample in `features.md`. That is the very example chosen to show off the
+  parser. Nobody noticed until the sample was re-run for an unrelated reason, and `main` had shipped
+  it wrong. This is the failure the "run the tool before claiming what it does" rule exists to
+  prevent, and that rule does not scale to prose that was true when it was written.
 
-**Shape of the fix.** Each sample needs its project (a `ry.toml`, one or more source files) and its
-command recorded next to it, so a harness can rebuild the project, run the command, and diff the
-captured block. Two candidate homes: a fixture-suite-style directory whose renderer output *is* the
-docs block, or front-matter/HTML comments in the pages naming a fixture directory. Prefer whichever
-lets the docs stay readable as prose — the samples are teaching material, not test data. The blocks
-that excerpt one finding out of several need a way to say so (a first-N-findings or a filter-by-code
-selector), because several pages legitimately do that.
+**Shape of the fix.** Each sample needs its project, meaning a `ry.toml` and one or more source
+files, and its command recorded next to it, so a harness can rebuild the project, run the command
+and diff the captured block. There are two candidate homes. One is a fixture-suite-style directory
+whose renderer output is the docs block. The other is front matter or an HTML comment in the page
+naming a fixture directory. Prefer whichever keeps the docs readable as prose, because the samples
+are teaching material rather than test data. A block that excerpts one finding out of several needs
+a way to say so, through a first-N-findings selector or a filter by code, because several pages
+legitimately do that.
 
 Until it exists, treat "changed a message or a blame range" as implying a manual sweep of the pages
 above, and say in the commit which ones were re-run.
 
-## Open — test-user round 2 findings
+## Open: findings from the second simulated-user round
 
-Five simulated users, each on a distinct project of their own writing, learning the tool from the
-docs alone (no source access) and trying to reach a clean run. Reports are the
-`users/feedback-*.md` files from that round. **Recorded here before any of it is fixed**, per user
-directive.
+Five simulated users each worked on a distinct project of their own writing, learned the tool from
+the docs alone with no source access, and tried to reach a clean run. The reports are the
+`users/feedback-*.md` files from that round. The findings that were fixed are ledger entries at the
+bottom of this file. What follows is what is still open, by theme, with the tester who found it
+named where their judgment is the point.
 
-### From the Shiny dashboard user (571-line app, 15 planted mistakes, reached a clean run in ~40 min)
+### A clean run still does not mean enough
 
-Their verdict: three real bugs found and welcomed, but "a clean run on a Shiny project means much
-less than the docs imply" — they finished with exit code 0 and five real bugs still in the code.
-Their own top three, in their order:
+Every tester reached this conclusion independently, and it is the round's headline. The Shiny
+dashboard tester finished with exit code 0 and five real bugs still in the code. The ETL engineer
+would not use `typing = true` as a merge gate, not because it is noisy but because "after these, a
+green run doesn't yet mean what it needs to mean at 3am". The Quarto analyst would have been "fully
+off by end of day, never knowing the default checks were not running".
 
-1. **One `library(pkg)` anywhere in the project disabled nearly all bare-name resolution, including
-   typos of in-scope locals and parameters. FIXED.** Their repro: a file containing only
-   `library(shiny)` made `repositry` — a one-letter typo of a **parameter in lexical scope on the same
-   line** — stop being reported, along with every other bare unresolved name; three planted typos
-   survived a `no problems` run on the real app. The blanket tolerance itself is right (an unstubbed
-   package's export set is unknowable), so the fix narrowed it in two ways: the near-miss carve-out
-   now covers locals and parameters of the enclosing item as well as top-level project symbols (a
-   name one edit away from a binding of your own is a typo, not somebody else's export), and a
-   `library()` naming the project itself buys no tolerance at all (the package author's #2). Both are
-   now documented on the `unresolved` row of `diagnostics.md`, in the reference's resolution rules,
-   and on the limitations page.
-2. **The required/optional annotation mismatch FIXED.** Optionality now comes from the formals — a
-   formal with a default is optional in R and no annotation can change that — so the exported
-   signature takes it from the code and the annotation's disagreement is reported once at the
-   definition, naming the fix (`write [currency]`). Callers of correct R are clean. The `[name]`
-   bracket form is now in the guide as well as the reference.
-3. **A parameter's type is not seeded from its default value** — `f <- function(s = settings) s$hsot`
-   is missed while `settings$hsot` and a local alias are both caught. **Analysed, and the obvious fix
-   is a false-positive generator, so it needs the design rather than a patch.** Binding the parameter
-   to its default's type makes every caller passing anything else wrong, and reporting the field
-   against the default's shape breaks the commonest idiom of all: `function(x = list()) x$name`, where
-   the default is an empty accumulator and callers supply the real record — R answers `NULL` there, so
-   an error would be plain wrong. The honest model is that such a parameter is
-   `default's type | whatever callers pass`, which is still open, so a field access on it should be at
-   most `T | NULL` (the same rule the accumulator fix established for unions) rather than an error.
-   Recovering the user's case needs to know the argument is never supplied anywhere — whole-program
-   information the checker does not have. Leave it missed rather than trade it for the class of false
-   positive this round spent its time removing.
+Two holes of that kind are still open.
 
-Also from them: `$` on an unannotated parameter constrains nothing, so the parameter accepts
-anything; `unresolved` changes severity when `strict` is on (documented now, in the diagnostics table
-and the reference); R6 is invisible (correctly
-documented, cost recorded); and they asked for a page saying what does and does not work for Shiny.
+- **A package with no manifest still buys the blanket tolerance.** Fifteen manifest-only CRAN
+  namespaces now close the common case, but a package a user names, such as `janitor`, still
+  switches unresolved detection off project-wide. The remedy is a two-line project stub, and the
+  limitations page says so on the user-facing side.
+- **A column name inside `DT[...]` is never validated.** `orders[, net := gross_ammount * 1.19]`
+  and `by = currrency` are both silently accepted, while the only name that did report was a correct
+  one. That is exactly inverted: silent where the typo is real and noisy where the name is right.
+  `limitations.md` should say plainly that column names are never validated.
 
-### From the TDD package author (`tallyr`, 500 lines, green in real R 4.3.3)
+### Two configuration defects that break CI
 
-Their package **passes in real R** (`pkgload::load_all` + `test_dir`), so every warning below is
-provably a false positive. Clean run cost 5 edits on 500 lines; they would enable `typing` in CI
-tomorrow and would **not** enable `strict`, `shadows-namespace` or `unused-parameter` — "three of
-five opt-in lints are unusable on a package with an S3 class and a testthat suite".
+- **Setting `[check] exclude` disables the built-in `renv/` and `packrat/` skip.** With no key the
+  walk finds 1 file. With `exclude = []` it finds 1 file. With `exclude = ["nothing-here/"]`, which
+  matches nothing, it walks renv and packrat both. The docs' own example, `exclude = ["scripts/"]`,
+  would drag an entire renv library into CI. A user-supplied list must extend the vendored defaults
+  rather than replace them.
+- **Any file in `stubs/` deactivates the shipped conditional namespaces.** One stub for an unrelated
+  package made 19 `data.table::` calls unresolved while bare `fread` still resolved, and it made
+  `data.table` unusable as an annotation type name, which silently suppressed a real type error.
 
-1. **`structure(list(...), class = "x")` erasing the record type FIXED.** It yielded `Unknown`,
-   against a documented promise of "a plain record; the class attribute is data", so the field typo
-   the guide headlines was caught on a bare `list()` and **silently dropped** once `class =` was
-   added — the objects real packages are built from. **31 of their 34 strict findings traced to this
-   one call.** `structure()` now returns its first argument's type, so the record survives.
-   Deliberately NOT changed: the class attribute still does not mint a nominal type — `@new` remains
-   the only nominal introduction, and reading `class[1]` instead would type a
-   `c("grouped_df", "tbl_df", "tbl", "data.frame")` value as `grouped_df` and then reject it at a
-   `data.frame` parameter. See `contributing/design/inline-type-syntax.md` §3.
-2. **`library(yourpkg)` in `tests/testthat.R` FIXED.** The project's own name — `DESCRIPTION`'s
-   `Package` field, now carried on the metadata input — earns no tolerance: its export set is not
-   unknowable, those exports being the project's own definitions. `usethis` generates that file, so
-   this was switching off unresolved detection in every testthat package. The Shiny user's #1 (the
-   near-miss carve-out reaching locals and parameters) is the other half and is also fixed.
-3. **`tests/testthat/helper-*.R` FIXED.** Files directly under `tests/testthat/` now share one
-   namespace, as testthat's own loading does (helpers first, then tests) — so a shared fixture is
-   neither `unused` at its definition nor `unresolved` at its uses, while a real typo in a test still
-   reports with the helper suggested. Documented in "where Roughly looks" and on the limitations
-   page.
-4. **`shadows-namespace` fires on locals inside `test_that()` and calls them "Top-level binding".**
-   Diagnosed but deliberately not patched yet: naming is *right* that the binding lives in the file's
-   frame, because R braces are not a scope and the checker cannot know `test_that` makes an
-   environment. What the lint needs is **syntactic** nesting — "written as a direct statement of the
-   file" — which the binding model does not currently distinguish from "belongs to the file's frame".
-   Adding that must not disturb the unused rules, where `TopLevel` means package-visible; both shadow
-   lints are default-off, so this waits for the model change rather than a special case. The wording
-   is part of the bug: a local two levels deep should never be called a top-level binding.
-5. **`unused-parameter` flagging user-defined S3 generics and their methods FIXED**, along with the
-   default-on `unused` reporting an S3 method as dead (a separate finding from the first round, same
-   missing knowledge). A project's own generics are now discovered by their bodies — a top-level
-   definition whose read set contains `UseMethod` — across the whole package namespace, so a generic
-   in `R/speak.R` covers `speak.dog` in `R/dog.R`; the generic itself is exempt too, since it declares
-   the dispatch argument and never touches it. `is_s3_method_name`/`s3_generics` live in
-   `semantics.rs` beside the other project-level projections, shared by the lint and the unused walk.
-6. **A bad `importFrom` FIXED — it is an error now**, matching its `export()` sibling: R refuses to
-   *load* such a package, so it is not survivable advice and must not pass a `--min-severity error`
-   gate. A bad `pkg::name` *read* stays a warning, and the reference says why: a bad import stops
-   loading outright, a bad qualified read fails only if that line runs.
-7. **`#: @new` does not stop `structure()` being a strict origin** — the documented S3 remedy failing
-   at exactly the site it exists for. Related to (1).
-8. **S3 generic/method signature consistency is unchecked** — both planted violations missed, and
-   `R CMD check` catches both. Roughly already does the rarer undefined-export check.
+### The traits tripwire, tripped a fifth time
 
-Docs gaps they hit: the adjacency rules say a plain `#` comment breaks `#:` attachment and never
-mention `#'`, so interleaving `#: @param` with roxygen's `#' @param` — the first thing a roxygen
-user tries — fails; the guide never shows `...` or `[optional]` in an annotation, and **every** S3
-method needs both; `configuration.md` omits `DESCRIPTION` as a project root marker.
+A `<T: numeric>` bound admits a `Date`, and the body's arithmetic then fails in R. A helper
+annotated `#: <T: numeric> fn(a: T, b: T) -> T` and called as `add_them(d1, d2)` is accepted, while
+the direct `d1 + d2` is correctly rejected with ``\`+\` is not defined between \`Date\` and \`Date\```.
+A one-line helper therefore launders a real error.
 
-What they praised: the partial-match catch (`sourc =` → `source`, which R silently accepts and
-nothing else in their toolchain catches), `NAMESPACE` being genuinely load-bearing with import-typo
-and undefined-export validation at the right line, **`#:` verified invisible to `R CMD check`**, the
-formatter and JSON output as production-ready, and the annotation-adjacency message for naming
-roxygen2 and giving the fix. They also confirmed the `expect_error` decision was right and that the
-"testing that something is rejected" subsection worked first try.
+The mechanism is the `declares_arithmetic` relaxation: a class that declares any arithmetic method
+satisfies `Numeric` wholesale. That does not follow. `Date` declares `+.Date` for `Date + integer`
+and has no `Date + Date`.
 
-### From the Quarto/Rmd analyst (656 lines across two literate documents, 10 planted mistakes)
+A constraint meaning "supports this operator with these operands" replaces both this relaxation and
+the operand tie. Do not patch it again. Design it.
 
-Their verdict: **"today, no"** — they would hit the ggplot2 errors within an hour and be fully off by
-end of day, *never knowing the default checks were not running*. **"With #1, #2, #3 fixed,
-permanently yes, including CI. That gap is three bugs, not a redesign."**
+One related leak: `sort`, `head` and `rev` on dates report ``found \`T[]\```, which leaks an unbound
+type variable.
 
-1. **`library()` of a common package killing unresolved-name checking project-wide FIXED** — the
-   third and loudest report of the same hole. The fix is that **a manifest is enough**: a namespace
-   with an `.exports` list has a knowable export set, so the blanket tolerance never applies to it,
-   and no types are needed. Fifteen manifest-only CRAN namespaces now ship (`tibble`, `tidyr`,
-   `readr`, `purrr`, `stringr`, `forcats`, `lubridate`, `magrittr`, `rlang`, `glue`, `scales`,
-   `knitr`, `jsonlite`, `R6`, `tidyverse`), every name from them typing `Unknown` while typos beside
-   them report with suggestions. `library(tidyverse)` additionally activates the nine packages it
-   *attaches* (`stubs::META_PACKAGE_MEMBERS`) — a meta-package re-exports almost nothing, and
-   activating members is also what hands such a project dplyr's and ggplot2's typed declarations
-   instead of a manifest's `Unknown`. A package with no manifest (`janitor`) still earns the
-   tolerance, correctly. Remaining: `janitor` and any other package a user names — the remedy is a
-   two-line project stub, and the limitations page now says so on the user-facing side.
-2. **ggplot2 `+` chains FIXED.** The corpus declared `+.ggplot` but nothing for a component pair,
-   so `theme_minimal() + theme(...)` and a chain whose left operand was lost through `%>%` fell
-   through to the numeric rules and reported arithmetic on a `gg`. R routes all of it through the
-   single `+.gg` method, which the corpus now declares; a genuine mistake (`plot + 1L`) is still
-   caught, naming both classes.
-3. **Inline `` `r expr` `` FIXED.** The conversion recognizes inline spans as code: the delimiter and
-   language tag blank to spaces, the expression keeps its bytes and its offset, and the closing
-   backtick becomes the `;` that separates two inline expressions on one prose line. So a value a
-   report only displays is used rather than unused, and a typo inside an inline expression reports at
-   the right line and column. A plain Markdown code span (`` `total` ``), a span naming another
-   language, `` `rate` `` (not an `r` tag), and an unclosed span all stay prose.
-4. **`source()` is not followed, so a helpers file is pure noise in both directions** — all ten
-   helper functions reported `unused`, and every *correct* call to them reported `unresolved`,
-   indistinguishable from their planted typo. It also killed the wrong-arity catch, which works well
-   within a file.
-5. **Byte-offset columns and the misaligned caret FIXED.** A reported column now counts characters —
-   in the rendered header, in `--output json`, and in the server's `file:line:column` hover strings —
-   and the caret is padded by terminal cells, so it lands under the glyph even for double-width text.
-   See the decision record; the JSON field documentation moved with it.
-6. **5 of 10 planted bugs caught, and all 5 were cosmetic** (`=`, `T`/`F`, trailing comma). Missed:
-   two column typos, two function-name typos, one wrong arity. Unknown *functions* inside `mutate`
-   and `filter` are swallowed along with the column names.
-7. **`fmt` on a target with no R in it FIXED** — it reports `0 files formatted` and exits 0, as
-   `check` already did. A stage with nothing to do must not fail a pipeline, and a pre-commit hook
-   handing the formatter a literate document it deliberately skips must not fail the commit.
-8. An unclosed chunk reports their English prose as an unresolved variable rather than the missing
-   fence. **The `strict` severity escalation is no longer silent** — the `unresolved` row of
-   `diagnostics.md` and the strict-mode section of the reference both say that turning strict on
-   raises every `unresolved` finding to an error without changing the count, and why that matters to a
-   `--min-severity error` gate. The behaviour itself is right (a name the checker cannot see is a hole
-   in the checked surface); being undocumented where a user looks was the bug.
+### Nominal subtyping, which is the same deferred design as S4 and R6 inheritance
 
-What they praised, and it is worth recording because it was the part they expected to be broken:
-**the literate handling itself is the strongest part of the tool.** Line numbers exact across all 545
-lines of `.qmd`/`.Rmd`, ASCII columns exact, prose ignored, every chunk-header form parsed (including
-`#| fig-cap: "A caption with = signs"` not fooling the `=` lint), `{python}`/`{sql}`/`{bash}`/`{ojs}`
-and bare fences all correctly skipped, CRLF and Sweave and no-YAML all mapped correctly, suppression
-comments working inside chunks. Also **zero false positives on 50 lines of idiomatic tidyverse** —
-bare column names through the whole verb set, `case_when`, `across(where(is.numeric), ~ .x * 2)`,
-tidyselect helpers, joins and `aes()` — which was their biggest fear going in.
-`getting-started.mdx`'s "where Roughly looks" section is "the best thing in the docs". The guide
-loses them where its showcase uses `list(...)`: swapping it for `read.csv()` makes the identical
-mistake report nothing, and the page calls that "the whole pitch" with no caveat at the point of
-contact.
+`data.table` is rejected where `data.frame` is expected, and the wrong direction is accepted.
+`needs_df(data.table(a = 1L))` is legal R and reports `expected data.frame, found data.table`, while
+`needs_dt(data.frame(a = 1L))`, the direction that really is wrong, reports nothing. R's class vector
+for a data.table is `c("data.table", "data.frame")`.
 
-### From the ETL engineer (919-line data.table/DBI pipeline, 12 planted mistakes, 8 caught)
+`TyKind::Named` matches by exact name and nothing in the compatibility relation carries a hierarchy.
+The tractable corner is a declared, acyclic nominal-extends-nominal relation in the stub vocabulary.
+Do it as that design, not as a data.table special case.
 
-Their verdict: `fmt --check` in CI today; `check --min-severity error` after two fixes; `typing =
-true` as a merge gate **not yet** — "not because it's noisy, but because after #1, #2 and #10 a green
-run doesn't yet mean what it needs to mean at 3am". Adoption cost: 34 warnings on first run, 30 of
-them `unknown package namespace 'DBI'`, fixed by a **3-line `DESCRIPTION` with `Imports:`** that no
-doc page mentions for this purpose — while the path the docs *do* recommend (hand-writing
-`stubs/*.Rtypes`) cost five files, fixed less, and was actively harmful (see 3).
+### `Date` does not survive real code
 
-1. **Column-name typos inside `DT[...]` are invisible** — `orders[, net := gross_ammount * 1.19]` and
-   `by = currrency` both silently accepted. Meanwhile the only name it *did* report was a correct one
-   (see 5). Exactly inverted: silent where the typo is real, noisy where the name is right. A known
-   gap, but `limitations.md` should say plainly that column names are never validated.
-2. **`library(pkg)` for an unstubbed package disables `unresolved` project-wide** — the **fourth
-   independent report**, and their version is the most damning: `library(totallyMadeUpPackage)`, a
-   package that *does not exist*, buys the same blanket tolerance. Their "clean run was a mirage".
-3. **CI BREAKER: setting `[check] exclude` disables the built-in `renv/`/`packrat/` skip.** No key →
-   1 file; `exclude = []` → 1 file; `exclude = ["nothing-here/"]`, matching nothing → renv and
-   packrat both walked. The docs' own example `exclude = ["scripts/"]` would drag an entire renv
-   library into CI. The user-supplied list must *extend* the vendored defaults, not replace them.
-4. **Any `stubs/` file deactivates the shipped conditional namespaces.** One stub for an unrelated
-   package made 19 `data.table::` calls unresolved while bare `fread` still resolved, and made
-   `data.table` unusable as an annotation type name — which silently suppressed a real type error.
-5. **`setkey`/`setorder`/`unique(DT, by=)` FIXED.** `setkey` and `setorder` name columns rather than
-   values, so they are `@masked` like the other NSE verbs (the `v`-suffixed forms take a character
-   vector and never needed it). `unique`'s fallback candidate is variadic now, because `unique` is a
-   generic whose methods take arguments base's signature does not name — the typed candidates stay
-   exact, so `unique(c(1L, 2L))` is still `integer[]`. Verifying that turned up one more: every
-   column-name parameter in the data.table stub was declared scalar `character`, so
-   `setkeyv(DT, c("id", "date"))` — the whole point of the `v` forms — was an error. They are
-   `character[]` now, which accepts one name or several.
-6. **`data.table` is rejected where `data.frame` is expected, and the wrong direction is accepted.**
-   `needs_df(data.table(a = 1L))` is legal R and reports `expected data.frame, found data.table`;
-   `needs_dt(data.frame(a = 1L))`, the direction that really is wrong, reports nothing. This is
-   **nominal subtyping** — R's class vector for a data.table is `c("data.table", "data.frame")` — and
-   it is the same deferred design as S4's `contains=` and R6's `inherit=`: `TyKind::Named` matches by
-   exact name and nothing in the compatibility relation carries a hierarchy. The tractable corner is a
-   *declared*, acyclic nominal-extends-nominal relation in the stub vocabulary; do it as that design,
-   not as a data.table special case.
-7. **`on.exit()` reads FIXED.** R stores the expression and runs it at return, so it observes the
-   *last* value of what it reads; a read inside it now keeps every write of that name in the frame
-   alive, exactly as a closure capture does. A genuine dead store beside a guard still reports.
-8. **Recursion defeats `is.logical()` narrowing** — the identical non-recursive function is clean.
-9. **A maybe-`NULL` value is only caught by arithmetic.** `toupper`, `nchar` and `substr` on a
-   `character | NULL` all pass, despite the guide promising this class of check.
+It survives `d + 1L`, `d2 - d1`, `d1 < d2`, `format`, `seq.Date` and a `while` cursor. It is lost to
+`Unknown` through `dates[i]`, `dates[mask]`, `for (d in dates)` and `Reduce`. It is wrong through
+`min` and `max`. The same bug is therefore caught in one place and missed in another: `cursor + cursor`
+after a `while` loop is flagged, and the identical `d + d` inside `for (d in dates)` is not. No doc
+describes this boundary.
 
-What they praised: record-field inference from a plain `list()` with `Did you mean batch_size?`
-("excellent and worth adopting for alone"); named-argument typo suggestions, arity checks,
-argument-order errors ranged on the argument, branch-union arithmetic and non-function calls all
-correct with "the best error wording I've seen in an R tool"; and **the data.table bracket really
-works** — a 162-line transform module using `:=`, `.SD`, `.SDcols`, `.N`, `dcast` and a non-equi join
-with `by = .EACHI` produced zero NSE complaints. Exit codes, JSON Lines, `--min-severity`, config
-discovery, unknown-key warnings and suppression comments all matched the docs. 0.15s on 919 lines in
-a debug build.
+Two related gaps. `#: @type TradeDate {Date}` disables all Date arithmetic, so `settle - trade` is
+rejected, which kills the guide's own recipe for domain types over dates. The working route is a
+project `.Rtypes` declaring `-.SettleDate`, which the guide never mentions, and a stub cannot see an
+inline `@type` anyway. Separately, `Date[]` is inexpressible, and `Days + Days` yields `double`, so a
+units tag dies on arithmetic.
 
-### From the time-series quant (620 lines, 10 planted mistakes, 3 caught)
+### Strict mode's own advice does not work
 
-Their headline: "the date/time operator modelling is the best static checking of R dates I have
-seen — and it is surrounded by false positives that fire on ordinary code, plus a `Date` type that
-evaporates the moment a date touches `c()`, `[`, `min()`, or a `for` loop." They would adopt lints
-and `unresolved` today, and `typing` on one module "because the date operator work is worth real
-money" — but not tell anyone with matrix-heavy code to turn typing on until (1) and (3) are fixed.
+The message says to add a type annotation, and no annotation form silences it. `#:`, `@if-unknown`,
+`@trust` and `#: Any` all still report, and the last contradicts the reference directly. Only
+`# ry: allow(strict)` works.
 
-1. **Their soundness diagnosis was WRONG, and the real problem behind it is FIXED.** Verified:
-   `min(Date)` is not typed `integer` — it selects the corpus's trailing `Any` candidate, so the check
-   is *skipped*, not wrong, and the quality bar holds. What the finding exposed is that `Any` is
-   exempt from strict mode, so the feature whose whole purpose is finding gaps missed the commonest
-   one. An overload selection that commits an `Any` return now records a strict origin, so
-   `min(d)` on a `Date` is reported under `strict = true`.
-2. **CONFIRMED and genuinely unsound-adjacent: a `<T: numeric>` bound admits a `Date`, and the body's
-   arithmetic then fails in R.** `#: <T: numeric> fn(a: T, b: T) -> T` called as `add_them(d1, d2)`
-   is accepted, while the direct `d1 + d2` is correctly rejected with `` `+` is not defined between
-   `Date` and `Date` `` — so a one-line helper launders a real error. This is the
-   `declares_arithmetic` relaxation: a class that declares *any* arithmetic method satisfies
-   `Numeric` wholesale, which does not follow — `Date` declares `+.Date` for `Date + integer` and has
-   no `Date + Date`. **This is the traits / third-constraint-kind tripwire, now tripped a fifth
-   time**, and it is the mechanism behind their missed "adding two dates via a helper" bug. A
-   constraint meaning "supports this operator with these operands" replaces both this relaxation and
-   the operand tie. Do not patch it again; design it.
-   Also: `sort`/`head`/`rev` on dates report ``found `T[]` ``, leaking an unbound type variable.
-3. **FP — `x[i, j]` on an unannotated parameter FIXED.** A subject whose shape the author never
-   wrote down is now sound-by-refusal for *any* index shape, which is what the reference already
-   promised; a subject whose shape *was* written down still refuses a shape no rule covers
-   (`c(1L, 2L)[1L, 2L]` is an error).
-4. **FP — `c()` on a classed value FIXED, and it does better than not erroring:** a class declaring
-   a `c.Class` method keeps its class through concatenation (`c(d1, d2)` is a `Date`, and
-   `dates + d2` is still refused as `Date + Date`), which is R's own dispatch rule. A nominal with no
-   such method is indeterminate rather than an error.
-5. **FP — `vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R
-   accepts a wider template; they confirmed with `roughly run` that
-   `vapply(1:3, function(i) i, numeric(1))` works.
-6. **`Date` does not survive real code.** Survives `d + 1L`, `d2 - d1`, `d1 < d2`, `format`,
-   `seq.Date` and `while` cursors; **lost to `Unknown`** through `dates[i]`, `dates[mask]`,
-   `for (d in dates)` and `Reduce`; **wrong** through `min`/`max`; **an error** through `c()`. The
-   same bug is caught in one place and missed in another — `cursor + cursor` after a `while` loop is
-   flagged, the identical `d + d` inside `for (d in dates)` is not. No doc describes this boundary.
-7. **`#: @type TradeDate {Date}` disables all Date arithmetic** — `settle - trade` is rejected — which
-   kills the guide's own recipe for domain types over dates. The working route is a project
-   `.Rtypes` declaring `-.SettleDate`, which the guide never mentions (and a stub cannot see an
-   inline `@type`, the gap already recorded below). Also **`Date[]` is inexpressible**, and
-   `Days + Days` yields `double`, so a units tag dies on arithmetic.
-8. **Strict mode's own advice does not work.** The message says "add a type annotation" and **no
-   annotation form silences it** — `#:`, `@if-unknown`, `@trust` and `#: Any` all still report, the
-   last contradicting `reference.md` directly. Only `# roughly: allow(strict)` works.
-9. **`&` and `|` are unmodelled**, so `TRUE & FALSE` is `Unknown` and every logical mask kills
-   downstream checking. The reference documents `&&`/`||` with no counterpart, and the only mention
-   of `&` is a parenthetical inside the NSE discussion.
-10. **Formatter — `m[i, , drop = FALSE]` becomes `m[i,, drop = FALSE]`**, removing the space that makes
-   the empty dimension slot visible, in exactly the code where miscounting slots is the bug. It is
-   idempotent, so deliberate, and undocumented.
-11. **Misleading message — any `X[Y]` annotation reports "only one compact annotation fits in a `#:`
-    block — separate the annotations with a blank line" when there is only one annotation.**
+### Missing type-system coverage, each with its repro
 
-What they praised: **every date expression R rejects or warns on was caught across 21 probes, with
-zero misses and zero false alarms**, including `Sys.time() - Sys.Date()` — which R only *warns*
-about and which they have shipped to production. `` `-` is not defined between `POSIXct` and
-`Date` `` is "the best message in the tool". Also: field-typo detection with the full inferred record
-shape, cross-file resolution with typo suggestions at zero config, arity messages in plain language,
-syntax-error recovery, clean CI-ready JSON, 31.5k lines across 120 files in 2.2s on a debug build,
-and `roughly run` with an embedded R letting them verify every claim ("underadvertised"). Units
-nominals and domain matrix types both work and produce excellent messages.
+- **A parameter's type is not seeded from its default value.** `f <- function(s = settings) s$hsot`
+  is missed while `settings$hsot` and a local alias are both caught. The obvious fix generates false
+  positives, so this needs the design rather than a patch. Binding the parameter to its default's
+  type makes every caller passing anything else wrong, and reporting the field against the default's
+  shape breaks the commonest idiom of all, `function(x = list()) x$name`, where the default is an
+  empty accumulator and callers supply the real record. R answers `NULL` there, so an error would be
+  plain wrong. The honest model is that such a parameter is the default's type unioned with whatever
+  callers pass, which is still open, so a field access on it should be at most `T | NULL`, the same
+  rule the accumulator fix established for unions. Recovering the tester's case needs to know the
+  argument is never supplied anywhere, which is whole-program information the checker does not have.
+  Leave it missed rather than trade it for the class of false positive this round spent its time
+  removing.
+- **`&` and `|` are unmodelled**, so `TRUE & FALSE` is `Unknown` and every logical mask kills
+  downstream checking. The reference documents `&&` and `||` with no counterpart, and the only
+  mention of `&` is a parenthetical inside the non-standard-evaluation discussion.
+- **A maybe-`NULL` value is only caught by arithmetic.** `toupper`, `nchar` and `substr` on a
+  `character | NULL` all pass, despite the guide promising this class of check.
+- **Recursion defeats `is.logical()` narrowing.** The identical non-recursive function is clean.
+- **`$` on an unannotated parameter constrains nothing**, so the parameter accepts anything.
+- **`#: @new` does not stop `structure()` being a strict origin**, so the documented S3 remedy fails
+  at exactly the site it exists for.
+- **S3 generic and method signature consistency is unchecked.** Both planted violations were missed,
+  and `R CMD check` catches both. ry already does the rarer undefined-export check.
+- **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
+  a wider template, which the tester confirmed with `ry run` on
+  `vapply(1:3, function(i) i, numeric(1))`.
+- **`source()` is not followed**, so a helpers file is pure noise in both directions. All ten helper
+  functions reported `unused`, and every correct call to them reported `unresolved`, which is
+  indistinguishable from the planted typo. It also killed the wrong-arity catch, which works well
+  within a file.
+- **A function name inside `mutate` and `filter` is swallowed** along with the column names.
+
+### Two lints need a model change rather than a patch
+
+- **`shadows-namespace` fires on a local inside `test_that()` and calls it a top-level binding.**
+  Naming is right that the binding lives in the file's frame, because R braces are not a scope and
+  the checker cannot know `test_that` makes an environment. What the lint needs is syntactic
+  nesting, meaning "written as a direct statement of the file", which the binding model does not
+  currently distinguish from "belongs to the file's frame". Adding that must not disturb the unused
+  rules, where `TopLevel` means package-visible. Both shadow lints are default-off, so this waits for
+  the model change rather than a special case. The wording is part of the bug, because a local two
+  levels deep should never be called a top-level binding.
+- **`unused-parameter`, `strict` and `shadows-namespace` were all unusable** on a package with an S3
+  class and a testthat suite, in the package author's words. Two of the three causes are fixed. The
+  shadow lint above is the third.
+
+### Formatter and message defects
+
+- **`m[i, , drop = FALSE]` becomes `m[i,, drop = FALSE]`**, which removes the space that makes the
+  empty dimension slot visible, in exactly the code where miscounting slots is the bug. It is
+  idempotent, so it is deliberate, and it is undocumented.
+- **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
+  annotations with a blank line" when there is only one annotation.**
+- **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
+  missing fence.
+
+### Documentation gaps the round hit
+
+- The adjacency rules say a plain `#` comment breaks `#:` attachment and never mention `#'`. So
+  interleaving `#: @param` with roxygen's `#' @param`, which is the first thing a roxygen user
+  tries, fails.
+- The guide never shows `...` or `[optional]` in an annotation, and every S3 method needs both.
+- `configuration.md` omits `DESCRIPTION` as a project root marker, and a three-line `DESCRIPTION`
+  with `Imports:` was what fixed 30 of the ETL engineer's 34 first-run warnings. The path the docs do
+  recommend, hand-writing `stubs/*.Rtypes`, cost five files, fixed less, and was actively harmful.
+- The guide's showcase uses `list(...)`. Swapping it for `read.csv()` makes the identical mistake
+  report nothing, and the page calls that the whole pitch with no caveat at the point of contact.
+
+### What the round praised
+
+Recording this matters, because several of these were the parts the testers expected to be broken.
+
+**Literate handling is the strongest part of the tool.** Line numbers were exact across all 545 lines
+of `.qmd` and `.Rmd`, ASCII columns exact, prose ignored, and every chunk-header form parsed,
+including `#| fig-cap: "A caption with = signs"` not fooling the `=` lint. `{python}`, `{sql}`,
+`{bash}` and `{ojs}` fences and bare fences were all correctly skipped, CRLF and Sweave and no-YAML
+all mapped correctly, and suppression comments worked inside chunks.
+
+**Date and time operator modelling is the best static checking of R dates the quant had seen.** Every
+date expression R rejects or warns on was caught across 21 probes, with no misses and no false
+alarms, including `Sys.time() - Sys.Date()`, which R only warns about and which they have shipped to
+production. ``\`-\` is not defined between \`POSIXct\` and \`Date\``` was "the best message in the
+tool".
+
+**The data.table bracket really works.** A 162-line transform module using `:=`, `.SD`, `.SDcols`,
+`.N`, `dcast` and a non-equi join with `by = .EACHI` produced no complaints about non-standard
+evaluation. There were also zero false positives on 50 lines of idiomatic tidyverse, covering bare
+column names through the whole verb set, `case_when`, `across(where(is.numeric), ~ .x * 2)`,
+tidyselect helpers, joins and `aes()`, which was the Quarto analyst's biggest fear going in.
+
+Also praised: record-field inference from a plain `list()` with a did-you-mean suggestion, which one
+tester called worth adopting for alone; named-argument typo suggestions, arity checks and
+argument-order errors ranged on the argument; branch-union arithmetic and non-function calls; the
+partial-match catch, which R silently accepts and nothing else in their toolchain catches; `NAMESPACE`
+being genuinely load-bearing, with import-typo and undefined-export validation at the right line;
+`#:` verified invisible to `R CMD check`; the formatter and JSON output as production-ready; exit
+codes, JSON Lines, `--min-severity`, config discovery, unknown-key warnings and suppression comments
+all matching the docs; syntax-error recovery; and `ry run` with an embedded R letting a tester verify
+every claim, which they called underadvertised. Units nominals and domain matrix types both work and
+produce good messages. One tester confirmed the `expect_error` decision was right and that the
+"testing that something is rejected" subsection worked first try. Performance was never a complaint:
+0.15 s on 919 lines and 31.5k lines across 120 files in 2.2 s, both on debug builds.
 
 ## Open — documentation review findings
 
@@ -1900,6 +1802,91 @@ The end-to-end guard rests on the corpus suites.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **A `library()` of an unstubbed package no longer disables bare-name resolution project-wide.**
+  Four independent testers reported this, and the most damning version was
+  `library(totallyMadeUpPackage)`, naming a package that does not exist, buying the same blanket
+  tolerance. The tolerance itself is right, because an unstubbed package's export set is unknowable,
+  so the fix narrowed it three ways. A manifest is enough, so a namespace with an `.exports` list
+  has a knowable export set and never earns the tolerance. The near-miss carve-out now covers locals
+  and parameters of the enclosing item as well as top-level project symbols, because a name one edit
+  away from a binding of your own is a typo rather than somebody else's export. And a `library()`
+  naming the project itself, through `DESCRIPTION`'s `Package` field, buys nothing, because those
+  exports are the project's own definitions. `usethis` generates the `tests/testthat.R` that does
+  this, so it was switching unresolved detection off in every testthat package.
+
+- **`structure(list(...), class = "x")` keeps its record type.** It yielded `Unknown` against a
+  documented promise that this is a plain record whose class attribute is data, so the field typo
+  the guide headlines was caught on a bare `list()` and silently dropped once `class =` was added.
+  Those are the objects real packages are built from, and 31 of one tester's 34 strict findings
+  traced to this one call. `structure()` now returns its first argument's type. The class attribute
+  deliberately still does not mint a nominal type, because `@new` remains the only nominal
+  introduction and reading `class[1]` would type a `c("grouped_df", "tbl_df", "tbl", "data.frame")`
+  value as `grouped_df` and then reject it at a `data.frame` parameter.
+
+- **Optionality comes from the formals.** A formal with a default is optional in R and no annotation
+  can change that, so the exported signature takes optionality from the code and an annotation's
+  disagreement is reported once at the definition, naming the fix. Callers of correct R are clean.
+
+- **Files directly under `tests/testthat/` share one namespace**, as testthat's own loading does,
+  with helpers first and then tests. A shared fixture is therefore neither `unused` at its definition
+  nor `unresolved` at its uses, while a real typo in a test still reports with the helper suggested.
+
+- **A project's own S3 generics are discovered by their bodies.** A top-level definition whose read
+  set contains `UseMethod` is a generic, across the whole package namespace, so a generic in
+  `R/speak.R` covers `speak.dog` in `R/dog.R`. The generic itself is exempt too, because it declares
+  the dispatch argument and never touches it. That fixes `unused-parameter` flagging a project's own
+  generics and their methods, and the default-on `unused` reporting an S3 method as dead.
+  `is_s3_method_name` and `s3_generics` live in `semantics.rs` beside the other project-level
+  projections, shared by the lint and the unused walk.
+
+- **A bad `importFrom` is an error**, matching its `export()` sibling, because R refuses to load such
+  a package, so it is not survivable advice and must not pass a `--min-severity error` gate. A bad
+  `pkg::name` read stays a warning, because a bad import stops loading outright while a bad
+  qualified read fails only if that line runs.
+
+- **ggplot2 `+` chains type.** The corpus declared `+.ggplot` and nothing for a component pair, so
+  `theme_minimal() + theme(...)`, and a chain whose left operand was lost through `%>%`, fell through
+  to the numeric rules and reported arithmetic on a `gg`. R routes all of it through the single
+  `+.gg` method, which the corpus now declares. A genuine mistake such as `plot + 1L` is still
+  caught, naming both classes.
+
+- **An inline `` `r expr` `` span is code.** The conversion blanks the delimiter and language tag to
+  spaces, the expression keeps its bytes and its offset, and the closing backtick becomes the `;`
+  that separates two inline expressions on one prose line. A value a report only displays is
+  therefore used rather than unused, and a typo inside an inline expression reports at the right line
+  and column. A plain Markdown code span, a span naming another language, a `` `rate` `` span that
+  is not an `r` tag, and an unclosed span all stay prose.
+
+- **`fmt` on a target with no R in it reports that it formatted no files and exits 0**, as `check`
+  already did. A stage with nothing to do must not fail a pipeline, and a pre-commit hook handing the
+  formatter a literate document it deliberately skips must not fail the commit.
+
+- **`setkey`, `setorder` and `unique(DT, by=)` work.** `setkey` and `setorder` name columns rather
+  than values, so they are `@masked` like the other non-standard-evaluation verbs, while the
+  `v`-suffixed forms take a character vector and never needed it. `unique`'s fallback candidate is
+  variadic, because `unique` is a generic whose methods take arguments base's signature does not
+  name, and the typed candidates stay exact so `unique(c(1L, 2L))` is still `integer[]`. Verifying
+  that turned up one more defect: every column-name parameter in the data.table stub was declared a
+  scalar `character`, so `setkeyv(DT, c("id", "date"))`, which is the whole point of the `v` forms,
+  was an error. They are `character[]` now, which accepts one name or several.
+
+- **A read inside `on.exit()` keeps every write of that name in the frame alive**, exactly as a
+  closure capture does, because R stores the expression and runs it at return so it observes the last
+  value of what it reads. A genuine dead store beside a guard still reports.
+
+- **An overload selection that commits an `Any` return records a strict origin.** `min(Date)` is not
+  typed `integer`. It selects the corpus's trailing `Any` candidate, so the check is skipped rather
+  than wrong, and the quality bar holds. What that exposed is that `Any` was exempt from strict mode,
+  so the feature whose whole purpose is finding gaps missed the commonest one.
+
+- **`x[i, j]` on an unannotated parameter is sound-by-refusal for any index shape**, which is what
+  the reference already promised. A subject whose shape was written down still refuses a shape no
+  rule covers, so `c(1L, 2L)[1L, 2L]` is an error.
+
+- **`c()` on a classed value keeps the class when a `c.Class` method is declared**, which is R's own
+  dispatch rule, so `c(d1, d2)` is a `Date` and `dates + d2` is still refused as `Date + Date`. A
+  nominal with no such method is indeterminate rather than an error.
 
 - **The IDE fuzz harness samples completion once per context instead of per offset.** Completion
   was 587.26 ms of the 592.4 ms that nine features spent over 25 offsets, on a warm database, and
