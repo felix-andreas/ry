@@ -265,63 +265,48 @@ that position barely matters, from two 20,501-line projects with 500 findings ea
 8.0 s. Those projects are analysis-bound, at 4.6 s for JSON against 41 ms for the reporter, so they
 were never evidence about the reporter at all.
 
-## Open — abstraction & duplication review
+## Open: abstraction and duplication
 
-An independent review looking for duplicated sources of truth and abstractions that earn nothing. Two
-findings from it are already fixed (a `GlobalEnv` fact that could be silently forgotten, and an
-operator list restated in two places); these are the rest.
+An independent review looked for duplicated sources of truth and for abstractions that earn nothing.
+These are the findings that are still open.
 
-### FIXED — three copies decided what a package file is, and they disagreed
+### Rename accepts `..1` as a new name, and the identifier rule is written twice
 
-`cli.rs`'s `shares_a_namespace`, the server's `is_package_path` and `stats.rs` each answered "does this
-file share a namespace with its siblings". The first two counted `R/` **and** `tests/testthat/`;
-`stats.rs` counted `R/` only, directly under a comment claiming it ordered files "exactly as the CLI and
-server do". Confirmed before fixing: on a testthat package `analysis-stats` reported 3 diagnostics
-where `check` reported 0. Now one predicate, called from all three, with the sorting key kept separate
-from the classification — collapsing those two questions into one flag is what caused it. Pinned by a
-CLI test that fails against the old instrument (2 diagnostics) and passes now.
+The server's `is_valid_r_identifier` restates a rule that `syntax::is_syntactic_name` already owns.
+Same reserved-word list, same start and continue classes, same `.5` exclusion. Call the lexer's rule
+instead of keeping a second copy, which removes about 60 lines.
 
-### Rename accepts `...` and `..1` as new names, and the identifier rule is written twice
+The dot-dot part of the finding as originally filed was wrong, and it was checked against R. Both
+`... <- 1` and `..1 <- 1` run, and `... <- 5` genuinely binds, because `get("...")` returns 5. They
+are not invalid assignment targets.
 
-The server's `is_valid_r_identifier` restates a rule `syntax::is_syntactic_name` already owns —
-same reserved-word list, same start/continue classes, same `.5` exclusion — so call the lexer's
-instead of keeping a second copy (≈−60 lines).
+The real defect is narrower and is only about a `..1`-style name. The assignment succeeds but the
+read cannot, because `..1` resolves as a positional slot of an enclosing `...` rather than as a
+variable. `..1 <- 7; ..1` fails with "..1 used in an incorrect context, no ... to look in". Renaming
+a variable to `..1` therefore turns every one of its reads into a run-time error silently, and
+rename must refuse it. `...` is a legal name, so refusing that one needs a different justification,
+such as shadowing the forwarding mechanism, or none at all.
 
-The dot-dot part of the finding as originally filed was **wrong and was checked against R**: `... <-
-1` and `..1 <- 1` both run, and `... <- 5` genuinely binds (`get("...")` returns 5), so these are not
-invalid assignment targets. The real defect is narrower and only about `..1`-style names: the
-assignment succeeds but the *read* cannot, because `..1` is resolved as a positional slot of an
-enclosing `...` rather than as a variable — `..1 <- 7; ..1` fails with ``..1 used in an incorrect
-context, no ... to look in``. So renaming a variable to `..1` silently turns every one of its reads
-into a runtime error, which rename must refuse; `...` is a legal name and refusing it needs a
-different justification (shadowing the forwarding mechanism) or none at all. Note that moving to
-`is_syntactic_name` does **not** fix this on its own — the lexer's rule accepts both spellings too.
+Moving to `is_syntactic_name` does not fix this on its own, because the lexer's rule accepts both
+spellings too.
 
 ### A dead-code batch, all of it hidden behind `let _ =`
 
-Seven items, compile-verified as unreachable, 44 lines. They survive because a `let _ = …` keeps the
-binding alive, which is also why the compiler never flagged them — the pattern to grep for.
+Seven items, compile-verified as unreachable, across 44 lines. They survive because a `let _ = ...`
+keeps the binding alive, which is also why the compiler never flagged them. That is the pattern to
+grep for.
 
 ### One rule table, written twice
 
 The lint rule metadata is restated rather than derived, so a rule can be added to one table and not
-the other. Single source of truth, then generate the second view.
+the other. Make one the single source of truth and generate the second view from it.
 
-### `use`-qualification sweep
+### A `use`-qualification sweep
 
-Roughly 80 sites fully qualify a function whose module is not imported at all, against the house style
-(types imported directly; functions get at least one module-level import unless ambiguity forces
-qualification). Mechanical, but do it as its own pass so the diff stays readable.
-
-### Two process defects worth fixing while in the area
-
-- `decisions.md` has drifted into a chronological execution log with Roughly-era naming, violating the
-  timeless, context-free rule it is itself supposed to enforce. Rewrite the stale entries as settled
-  decisions or drop them.
-- Memory says `zed_roughly` in the gate commands; the crate is `zed_ry`. Cargo does not fail on the
-  wrong name — `cargo tree --workspace --exclude zed_roughly` prints `warning: excluded package(s)
-  'zed_roughly' not found in workspace` and carries on, so the exclusion silently does nothing and the
-  one warning scrolls past in a long build log.
+About 80 sites fully qualify a function whose module is not imported at all, which is against the
+house style. A type is imported directly, and a function gets at least one module-level import
+unless ambiguity forces qualification. The change is mechanical, so do it as its own pass to keep
+the diff readable.
 
 ## Open — fuzzing input-generation review (measured)
 
@@ -1924,6 +1909,14 @@ The end-to-end guard rests on the corpus suites.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **One predicate decides whether a file shares a namespace with its siblings.** `cli.rs`'s
+  `shares_a_namespace`, the server's `is_package_path` and `stats.rs` each answered that question,
+  and they disagreed. The first two counted `R/` and `tests/testthat/` while `stats.rs` counted `R/`
+  only, directly under a comment claiming it ordered files exactly as the CLI and server do. On a
+  testthat package `analysis-stats` reported 3 diagnostics where `check` reported 0. All three now
+  call one predicate, with the sorting key kept separate from the classification, because
+  collapsing those two questions into one flag is what caused the drift. A CLI test pins it.
 
 - **The human reporter was quadratic in findings times file length, and is now linear in findings.**
   Neither review saw it, because both measured through `analysis-stats` or `--output json`, which
