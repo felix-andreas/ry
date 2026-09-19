@@ -580,196 +580,171 @@ A human is required for three things: the `git mv` of `.github/pending-ci.yml`, 
 scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
 corpus cache, and an OSS-Fuzz submission.
 
-## Open — test & fuzz architecture review
+## Open: test and fuzz architecture
 
-An independent review of the fuzzing and test architecture, with every claim measured rather than
-read off the code. Ranked; each item states the change and why it is worth it.
-
-### The CI gate runs the product crate's tests only — no fixture suite, no fuzz battery
-
-`Cargo.toml`'s `default-members = ["crates/ry"]` times `--all-targets` **without** `--workspace`
-resolves to the default member, so the blocking job runs 169 `crates/ry` tests and none of
-`syntax`/`semantics`/`format`/`ide`: no typing, lint, format, ide, tsr or errors fixtures, and no
-fuzz arm. `cargo test -q --all-targets -- --list | grep -iE "fixture|fuzz"` is empty. The `extended`
-job repeats the defect, so `fuzz_deep` never runs either. The widened commands are already staged in
-`.github/pending-ci.yml` and need a human with `workflow` scope to move the file.
-
-Two blockers before that move is safe, both agent-side:
-
-- Activating the staged file **reds the extended job immediately**: the five instruments in
-  `legacy/differential/tests/test_stats.rs` hard-assert on a corpus CI never fetches, unlike every
-  other corpus-dependent test, which skips with a note (the pattern is in `test_corpus.rs`). Make
-  them skip the same way.
-- The fuzz doctrine's own claim — "a bounded pass runs in the default test suite so CI fuzzes on
-  every change" in `decisions.md`, and the testing page by implication — is false until the move
-  lands. Correct the wording, or land the move first.
-
-### The default fuzz pass spends ~95% of its time re-parsing the shipped stubs
-
-Measured in isolation: `ide --test test_fuzz` 294.7 s, `semantics --test test_fuzz` 141.6 s, against
-`syntax` 0.89 s and `format` 0.34 s. The cause is not iteration count — a fresh database with the
-shipped stubs costs 113.3 ms per round versus 1.4 ms without them, and `stub_library` is 114.1 ms to
-parse and intern 601 names (0.008 ms memoized). `check_semantics_invariants` builds **four** fresh
-databases per input, so ~456 of its 480 ms is re-parsing `types/*.Rtypes`. `StubLibrary<'db>` is
-interned per database, so the levers are database count and iteration shape, not caching.
-
-- Delete the `second` rendering in `crates/semantics/src/testing.rs`: the later
-  `assert_eq!(before, first)` already compares two independently built fresh databases. Four
-  databases become three, −25% for five lines removed.
-- Sample offsets in the `ide` arm instead of sweeping every one. `ide::completion` costs 15.9 ms warm
-  on a 3-byte file and 20.5 ms on a 1.6 kB one — the work is per call over the 601-name corpus, not
-  per byte — so sweeping every offset is what makes this the most expensive test in the repo.
-  Token boundaries plus every k-th offset keeps the defect classes at ~1/8 the cost.
-- Durable fact worth keeping: raising `FUZZ_ITERS` on a semantics arm buys stub re-parsing at ~114 ms
-  a database, not coverage.
+A second independent review of the fuzzing and test architecture, with every claim measured rather
+than read off the code. The findings it shares with the two reviews above are written up there. These
+are the ones only it found, ranked, each stating the change and why it is worth it.
 
 ### The formatter battery cannot notice the formatter deleting code
 
 `check_format_invariants` asserts determinism, idempotence, and that the output re-formats. A
-formatter that silently dropped a statement passes all three. The missing oracle is the non-trivia
-token **kind** sequence, excluding `{`/`}`/`;`/`ANNOTATION_MARKER` (the formatter legitimately adds
-braces, splits `;` chains, and re-lays-out `#:` blocks). It was built and run: 0 mismatches over 1182
-fixture case sources (972 formatted) and 20 000 fuzz-shaped inputs (4073 formatted). The weaker
-formulations do not hold — raw token equality fails on 50 brace/semicolon insertions, text equality
-on 9 `'x'`→`"x"` normalizations — so kinds-with-those-four-excluded is the assertion to write, at
-about ten lines. Same run: the `format` harness's random-byte arm reaches the formatter body 14 times
-in 1500 (0.9%), a path `syntax`'s battery already covers on the same generators; shrink or drop it.
+formatter that silently dropped a statement passes all three.
+
+The missing oracle is the sequence of non-trivia token kinds, excluding `{`, `}`, `;` and
+`ANNOTATION_MARKER`, because the formatter legitimately adds braces, splits `;` chains and re-lays
+out `#:` blocks. It was built and run, with no mismatch over 1,182 fixture case sources, of which
+972 formatted, and 20,000 fuzz-shaped inputs, of which 4,073 formatted. The weaker formulations do
+not hold: raw token equality fails on 50 brace and semicolon insertions, and text equality fails on
+9 normalizations of `'x'` to `"x"`. So the assertion to write is kinds with those four excluded, at
+about ten lines.
 
 ### `crates/ry` has no property coverage, and the protocol edge panics
 
-The obvious property over `crates/ry/src/position.rs` — every byte offset converts and round-trips —
-finds 11 panics and 2 round-trip failures in twelve lines. Two distinct defects:
-`line_column_utf16`/`line_column_chars` slice `text[start..start + byte_column]` and panic for an
-offset inside a character (`line_column_utf16(1)` on `"é😀x\n"`), and `offset_utf16` clamps to a line
-length that has already had `\r\n` trimmed, so an offset at a CRLF terminator does not round-trip
-(`"a\r\nb\r\n"` offset 2 comes back 1). Reachability caveat, stated honestly: every offset this
-module *produces* is on a boundary, so the panic was not shown reachable from today's callers — but
-"IDE features never panic on stale ranges" is a stated soundness invariant with nothing enforcing it,
-and the CRLF break sits on the Windows default path.
+The obvious property over `crates/ry/src/position.rs`, that every byte offset converts and
+round-trips, finds 11 panics and 2 round-trip failures in twelve lines. There are two distinct
+defects.
 
-### The IDE arm is the most expensive test in the repo and asserts almost nothing
+- `line_column_utf16` and `line_column_chars` slice `text[start..start + byte_column]` and panic for
+  an offset inside a character. `line_column_utf16(1)` on `"é😀x\n"` is an example.
+- `offset_utf16` clamps to a line length that has already had `\r\n` trimmed, so an offset at a CRLF
+  terminator does not round-trip. On `"a\r\nb\r\n"`, offset 2 comes back as 1.
 
-Of 13 feature calls per offset only `hover` is checked, for determinism; eight are `let _ = …`, i.e.
-never-panic only. Nothing asserts the invariant that actually matters and that memory already states:
-every range a feature returns lies inside the file. `definition`, `references`, `rename`,
-`type_definition`, `code_actions`, `inlay_hints` and `document_symbols` all hand ranges straight to
-the editor. Assert in-bounds ranges and determinism for every range-returning feature, and pay for it
-with the offset sampling above — same wall clock, several times the oracle.
+One caveat, stated honestly: every offset this module produces is on a boundary, so the panic was
+not shown reachable from today's callers. But "an IDE feature never panics on a stale range" is a
+stated soundness invariant with nothing enforcing it, and the CRLF break sits on the Windows default
+path.
 
-### ~280 lines of fuzz harness are copy-pasted across four crates
+### The IDE arm asserts almost nothing
 
-`SplitMix64` exists four times (three byte-identical, the fourth adds `chance()`), `iterations()` four
-times identically, `corpus_sample()` twice byte-identically apart from one comment, and the
-byte-mutation loop three times. All four test crates already depend on `syntax::testing` for
-`env_var`, so the shared home exists: put `rng`, `iterations`, `corpus_sample` and `mutate_bytes`
-there. This replaces four copies with one; it is not a new abstraction.
+Of 13 feature calls per offset, only `hover` is checked, and only for determinism. Eight are
+`let _ = ...`, which is never-panic only.
 
-### Seeds are hand-maintained while 1183 fixture sources sit unused, and the reader is dead code
+Nothing asserts the invariant that actually matters and that memory already states: every range a
+feature returns lies inside the file. `definition`, `references`, `rename`, `type_definition`,
+`code_actions`, `inlay_hints` and `document_symbols` all hand ranges straight to the editor. Assert
+in-bounds ranges and determinism for every range-returning feature, and pay for it with the offset
+sampling the economics review costs out. That is the same wall clock for several times the oracle.
 
-`syntax::testing::parse_fixture_files` is public with zero callers — its doc comment advertises the
-cross-stack differential harness, retired with the identity-parity program. Meanwhile the batteries
-seed from 81 hand-written strings and never see the 1183 fixture cases, the richest R corpus in the
-repo and the one that grows with every slice. Seed the `syntax` and `format` batteries from it, delete
-the three `SEEDS` lists (~110 lines), and keep hand seeds only where they encode something fixtures do
-not. For `semantics` use fixture sources as *mutation* seeds, not one per input: 1183 × 480 ms is
-9.5 minutes.
+### About 280 lines of fuzz harness are copy-pasted across four crates
 
-### The libFuzzer corpus seeder reads the wrong directory for stubs
+`SplitMix64` exists four times, three of them byte-identical and the fourth adding `chance()`.
+`iterations()` exists four times identically. `corpus_sample()` exists twice, byte-identical apart
+from one comment. The byte-mutation loop exists three times.
 
-`scripts/seed-fuzz-corpus.rs` looks for `.Rtypes` under `crates/`, where there are none — every stub
-lives in the top-level `types/`. So the `.Rtypes` grammar gets no seed coverage, and both the script's
-docstring and the testing page's description of it are false. The same 173-line script hand-rolls
-SHA-1 (55 lines) purely for a filename libFuzzer never inspects, and hand-rolls a third copy of the
-fixture-file parser; nothing seeds `corpus/**/*.R` even once a human has fetched it. Rewrite it as a
-workspace target over `parse_fixture_files`, the top-level `types/`, and `corpus/` when present:
-~130 lines lighter and the bug gone.
+All four test crates already depend on `syntax::testing` for `env_var`, so the shared home exists.
+Put `rng`, `iterations`, `corpus_sample` and `mutate_bytes` there. That replaces four copies with
+one, and it is not a new abstraction.
 
-### Two real invariants hold today, are unasserted, and cost ~5 lines each
+### Seeds are hand-maintained while 1,183 fixture sources sit unused
 
-- **An `ERROR` node implies a reported error.** Over 20 000 fuzz-shaped inputs: zero counterexamples.
-  The converse legitimately fails (`for (x in items)` among six examples), so only this direction is
-  assertable. Without it, a silent parse failure lets the formatter mangle a file that reports clean.
-- **Monotone reporting.** 1/2/4/16/64 copies of one faulty item yield 1/2/4/16/64 findings; 1/4/32/128
-  faulty statements in one item yield 2/8/64/256. This is precisely the invariant a per-item or
-  per-file finding cap breaks — the regression three adoption reviews called a blocker — and nothing
-  guards it.
+`syntax::testing::parse_fixture_files` is public with no callers. Its doc comment advertises the
+cross-stack differential harness, which retired with the identity-parity program.
 
-### A timing-based scaling guard was attempted and does NOT discriminate — read this before retrying
+Meanwhile the batteries seed from 81 hand-written strings and never see the 1,183 fixture cases,
+which are the richest R corpus in the repo and the one that grows with every change. Seed the
+`syntax` and `format` batteries from it, delete the three `SEEDS` lists, which is about 110 lines,
+and keep a hand seed only where it encodes something the fixtures do not. For `semantics`, use
+fixture sources as mutation seeds rather than one per input, because 1,183 times 480 ms is 9.5
+minutes.
 
-The idea below is right, but the obvious implementation does not work in the default battery, and the
-attempt is recorded with numbers so the next one starts further along.
+### Two real invariants hold today, are unasserted, and cost about five lines each
 
-Normalizing by the growing unit is the first trap: per-*declaration* cost falls as declarations grow,
-because most of the run is fixed work, so that assertion passes against the very bug it targets. The
-sound method is a **four-corner interaction test** — measure (I, D), (2I, D), (I, 2D), (2I, 2D), and
-compare the last against the additive prediction, since a table copied per item is exactly the
-interaction term. Measured in debug at I=200, D=300:
+- **An `ERROR` node implies a reported error.** Over 20,000 fuzz-shaped inputs there was no
+  counterexample. The converse legitimately fails, with `for (x in items)` among six examples, so
+  only this direction is assertable. Without it, a silent parse failure lets the formatter mangle a
+  file that reports clean.
+- **Reporting is monotone.** One, two, four, sixteen and sixty-four copies of one faulty item yield
+  one, two, four, sixteen and sixty-four findings. One, four, thirty-two and one hundred
+  twenty-eight faulty statements in one item yield two, eight, sixty-four and two hundred
+  fifty-six. This is precisely the invariant a per-item or per-file finding cap breaks, which is the
+  regression three adoption reviews called a blocker, and nothing guards it.
+
+### A timing-based scaling guard does not discriminate, so read this before retrying
+
+The idea is right and the obvious implementation does not work in the default battery. The attempt
+is recorded with numbers so the next one starts further along.
+
+Normalizing by the growing unit is the first trap. Per-declaration cost falls as declarations grow,
+because most of the run is fixed work, so that assertion passes against the very bug it targets.
+
+The sound method is a four-corner interaction test. Measure `(I, D)`, `(2I, D)`, `(I, 2D)` and
+`(2I, 2D)`, then compare the last against the additive prediction, because a table copied per item
+is exactly the interaction term. Measured in debug at `I=200` and `D=300`:
 
 | | per-item copy present | after the fix |
 |---|---|---|
 | additive prediction | 699.7 ms | 663.2 ms |
-| actual (2I, 2D) | 717.2 ms | 641.5 ms |
-| interaction | **+17.5 ms** | −21.7 ms |
+| actual at (2I, 2D) | 717.2 ms | 641.5 ms |
+| interaction | +17.5 ms | -21.7 ms |
 
-A 39 ms swing on a 700 ms total is ~5%, indistinguishable from load noise. The signal only separates at
-sizes where the copy dominates — around 2,000 items × 2,400 declarations, which is where the release
-measurement showed 71 ms against 27 ms — and four corners at that size cost far more than a default
-suite should. An `#[ignore]`d witness was considered and rejected: the extended job that would run it
-does not currently run any of these suites, so it would be machinery nobody invokes.
+A 39 ms swing on a 700 ms total is about 5%, which is indistinguishable from load noise. The signal
+separates only at sizes where the copy dominates, which is around 2,000 items by 2,400 declarations,
+where the release measurement showed 71 ms against 27 ms. Four corners at that size cost far more
+than a default suite should. An `#[ignore]`d witness was considered and rejected, because the
+extended job that would run it does not currently run any of these suites, so it would be machinery
+nobody invokes.
 
-What would work is a structural assertion rather than a timing one — something that counts the copies
-directly — but nothing observable exists for it today.
+What would work is a structural assertion that counts the copies directly, rather than a timing one.
+Nothing observable exists for it today.
 
 ### No witness measures one file with many top-level items
 
-`stats_witness` is corpus-wide, i.e. many files. The shape that hid the known quadratic — one file,
-many annotated items — is measured by nothing. It is linear today: 100/400/1600 items cost
-0.24/0.65/3.36 s, i.e. 2.43/1.62/2.10 ms per item. One assertion that ms-per-item at 1600 stays within
-~2× of ms-per-item at 200 is the only cheap guard against the highest-severity performance class this
-project has actually shipped.
+`stats_witness` is corpus-wide, meaning many files. The shape that hid the known quadratic, which is
+one file with many annotated items, is measured by nothing.
+
+It is linear today: 100, 400 and 1,600 items cost 0.24 s, 0.65 s and 3.36 s, which is 2.43, 1.62 and
+2.10 ms per item. One assertion that milliseconds per item at 1,600 stays within about twice
+milliseconds per item at 200 is the only cheap guard against the highest-severity performance class
+this project has actually shipped.
 
 ### Smaller confirmed items
 
-- `crates/format/tests/test_format_docs.rs` falls back to `text.to_owned()` when a block header is not
-  `# name: directive`, publishing **unformatted input** as if it were formatter output. No block hits
-  it today (48 blocks, 0 fallbacks), so this is latent; `panic!` instead, one line.
-- `crates/syntax/tests/test_error_messages.rs` draws its own carets with its own line/column math, so
-  the golden suite pins a caret the product never prints. There are three newline-table
-  implementations in the shipping crates (`ry::position::LineIndex`, `format`'s `line_starts`/
-  `line_of`, this renderer); one `LineIndex` in `syntax` used by all three deletes two.
-- Dead code: `let _ = line_start;` in `crates/syntax/src/testing.rs` and `let _ = before_len;` in
-  `crates/syntax/tests/test_fuzz.rs` keep unused locals alive; `floor_char_boundary`/
-  `ceil_char_boundary` in that same file, and the same backward scan in `crates/semantics/src/testing.rs`,
-  are now in std; `probe/` is an empty untracked directory at the repo root.
-- The testing page claims each harness pins every input its targets have ever broken; only `format`
+- `crates/format/tests/test_format_docs.rs` falls back to `text.to_owned()` when a block header is
+  not `# name: directive`, which publishes unformatted input as if it were formatter output. No
+  block hits it today, across 48 blocks with no fallbacks, so it is latent. Call `panic!` instead,
+  in one line.
+- `crates/syntax/tests/test_error_messages.rs` draws its own carets with its own line and column
+  math, so the golden suite pins a caret the product never prints. There are three newline-table
+  implementations in the shipping crates: `ry::position::LineIndex`, `format`'s `line_starts` and
+  `line_of`, and this renderer. One `LineIndex` in `syntax`, used by all three, deletes two of them.
+- Dead code. `let _ = line_start;` in `crates/syntax/src/testing.rs` and `let _ = before_len;` in
+  `crates/syntax/tests/test_fuzz.rs` keep unused locals alive. `floor_char_boundary` and
+  `ceil_char_boundary` in that same file, and the same backward scan in
+  `crates/semantics/src/testing.rs`, are now in std. `probe/` is an empty untracked directory at the
+  repo root.
+- The testing page claims each harness pins every input its targets have ever broken. Only `format`
   and `semantics` have a `fuzz_regressions_hold_invariants`. `syntax` and `ide` have none.
 - `fuzz/` is its own workspace, so nothing in the default battery type-checks the three libFuzzer
-  targets — renaming a battery function breaks them silently until someone runs cargo-fuzz.
+  targets. Renaming a battery function breaks them silently until someone runs cargo-fuzz.
 
 ### Suspected, not confirmed
 
-- `ide::completion` does O(corpus) work per call and is not memoized (15.9 ms warm, essentially
-  file-size independent). That is a debug figure; one release measurement is warranted before any
-  product-latency claim, given it is a per-keystroke path.
-- `ProjectFiles::set_files` — the file-set change the server makes on open/close/create/delete — is
-  never fuzzed; every incremental arm mutates `set_text` only. Probing add/remove/reorder against
-  fresh databases with cross-file interface cycles found them all equivalent, so this is a coverage
-  gap rather than a live bug. It is the mutation that moves cross-file resolution winners.
-- Lowering, naming and inference have no stage-local invariants; they are covered only transitively
-  through `render_semantics`. Defensible as end-to-end fuzzing, but the doctrine's per-stage wording
-  overstates what is asserted. There is no naming invariant ("every `NameRef` resolves or is
-  reported") and no HIR range-containment invariant.
+- `ide::completion` does work proportional to the corpus per call and is not memoized, at 15.9 ms
+  warm and essentially independent of file size. That is a debug figure. One release measurement is
+  warranted before any claim about product latency, because it is a per-keystroke path.
+- `ProjectFiles::set_files`, which is the file-set change the server makes on open, close, create
+  and delete, is never fuzzed. Every incremental arm mutates `set_text` only. Probing add, remove
+  and reorder against fresh databases with cross-file interface cycles found them all equivalent, so
+  this is a coverage gap rather than a live bug. It is the mutation that moves cross-file resolution
+  winners.
+- Lowering, naming and inference have no stage-local invariants. They are covered only transitively
+  through `render_semantics`. That is defensible as end-to-end fuzzing, and the doctrine's per-stage
+  wording overstates what is asserted. There is no naming invariant saying that every `NameRef`
+  resolves or is reported, and no HIR range-containment invariant.
 
-### Judged fine — do not spend time here
+### Judged fine, so do not spend time here
 
-The fixture format and harness (1183 ids across 11 suites, zero malformed, duplicate-id rejection
-works across files, bless rewrites only the expectation span); the four empty-expectation cases, all
-legitimate negative contracts; the `syntax` fuzz suite, which is the best thing in the test
-architecture — five real invariants plus splice-reparse equivalence against from-scratch, tree *and*
-errors, over an edit stream, for 0.89 s; keeping regressions in `REGRESSIONS` rather than a committed
-corpus, with `fuzz/corpus` gitignored. Also deliberately **not** worth fixing: `render_semantics`
-versus the typing runner's `render_file` share a scheme loop but render different fact sets on
-purpose, and `render_with_strict` building a second database per case costs 114 ms × 22 cases.
+The fixture format and harness are sound: 1,183 ids across 11 suites, none malformed, duplicate-id
+rejection works across files, and bless rewrites only the expectation span. The four
+empty-expectation cases are all legitimate negative contracts. The `syntax` fuzz suite is the best
+thing in the test architecture, with five real invariants plus splice-reparse equivalence against
+from-scratch, covering the tree and the errors, over an edit stream, for 0.89 s. Keeping regressions
+in `REGRESSIONS` rather than in a committed corpus is right, with `fuzz/corpus` gitignored.
+
+Two more things are deliberately not worth fixing. `render_semantics` and the typing runner's
+`render_file` share a scheme loop and render different fact sets on purpose. `render_with_strict`
+builds a second database per case, which costs 114 ms across 22 cases.
 
 ## Open — user reports (from the maintainer, not a simulated round)
 
