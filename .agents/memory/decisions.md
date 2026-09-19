@@ -925,94 +925,298 @@ to one edge, which is `Typecheck`. `analysis-stats` now stages lint adjacently a
 diagnostics phase into lint, package naming with folds, and diagnostics rendering, so the next
 regression of this kind is visible at a glance.
 
-# Decision record: inference-state data model — dense entry table, hash-keyed hot maps, allocation-free free-variable walks
+# Decision record: the inference-state data model
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by callgrind over a 7.5K-LoC hub file after the demand-path fixes: inference itself was ~25µs/LoC, nearly all of it allocator and tree churn rather than typing work.
+Callgrind over a 7.5k-line hub file, run after the demand-path fixes, drove this. Inference itself
+cost about 25 microseconds per line, and nearly all of it was allocator and tree churn rather than
+typing work.
 
-Previous shape / structural weaknesses: (1) `free_type_variables` materialized the resolved form of a type — `resolve(clone)` at every recursion level — and allocated a fresh set per node; the per-check constraint sweep additionally cloned every recorded expression type into a `Vec` first. (2) The union-find `entries` table was a `BTreeMap` keyed by a *densely allocated* id, paying a tree search per resolve step. (3) `bind_module_letrec_placeholders` answered "is this candidate on a mutual cycle" with a transitive walk per candidate — quadratic over reference chains. (4) The winner test ran two linear scans per top-level assignment (`top_level_expression_ids.contains`, `find_exported_binding`), and `exported_value_schemes` re-scanned the module per exported symbol. (5) The environment, recorded-type, and overload-selection maps were ordered maps whose order nothing reads.
+Five weaknesses were structural.
 
-Chosen shape: free variables are collected by a read-only walker (`visit_unbound_variables`) that follows redirect chains without materializing the resolved form and mirrors union normalization (a member resolving to `Any`/`Unknown` absorbs the union); `entries` is a plain vector indexed by id (`EntryTable` — probe rollback truncates the tail; the id counter *is* the length, so a dangling id is unrepresentable); letrec mutual-cycle membership is one iterative Tarjan pass (SCC size ≥ 2; a self-edge alone never qualifies — semantics unchanged); `ResolutionContext` carries the precomputed top-level id set and exported-binding map, and `exported_value_schemes` batch-collects bindings in one walk; `environment`, `recorded_expression_types`, and `selected_overloads` are FxHash maps (never iterated in state; the public `ModuleCheck` fields stay ordered maps, converted once at assembly).
+1. `free_type_variables` materialized the resolved form of a type, calling `resolve` on a clone at
+   every recursion level, and allocated a fresh set per node. The per-check constraint sweep also
+   cloned every recorded expression type into a `Vec` first.
+2. The union-find `entries` table was a `BTreeMap` keyed by a densely allocated id, so it paid a
+   tree search per resolve step.
+3. `bind_module_letrec_placeholders` answered whether a candidate sits on a mutual cycle with a
+   transitive walk per candidate, which is quadratic over reference chains.
+4. The winner test ran two linear scans per top-level assignment, which are
+   `top_level_expression_ids.contains` and `find_exported_binding`, and `exported_value_schemes`
+   re-scanned the module per exported symbol.
+5. The environment, recorded-type and overload-selection maps were ordered maps whose order nothing
+   reads.
 
-Impact: correctness — none observable (all fixture, differential, and witness suites byte-exact; free-variable ordering preserved by sort-and-dedup where quantifier order matters); performance — hub-file whole-file inference 190ms → ~50ms (~4×) and hub keystroke 308ms → 168ms in the same session as the demand-path work; simplicity — one free-variable implementation instead of two, one dense table instead of map-plus-counter; incremental analysis — unchanged (all inside one query body). Remaining known follow-up lives in the backlog: whole-file inference and re-lowering are still the keystroke floor for huge files (the per-definition granularity design).
+The shape now is this. Free variables are collected by a read-only walker,
+`visit_unbound_variables`, which follows redirect chains without materializing the resolved form
+and mirrors union normalization, so a member resolving to `Any` or `Unknown` absorbs the union.
+`entries` is a plain vector indexed by id, as an `EntryTable`. Probe rollback truncates the tail,
+and the id counter is the length, so a dangling id is unrepresentable. Letrec mutual-cycle
+membership is one iterative Tarjan pass over components of size two or more, and a self-edge alone
+never qualifies, which leaves semantics unchanged. `ResolutionContext` carries the precomputed
+top-level id set and exported-binding map, and `exported_value_schemes` batch-collects bindings in
+one walk. `environment`, `recorded_expression_types` and `selected_overloads` are FxHash maps,
+because nothing iterates them in state. The public `ModuleCheck` fields stay ordered maps and are
+converted once at assembly.
 
-# Decision record: per-definition interface-SCC rounds with change-driven skips
+Correctness: nothing observable changed. All fixture, differential and witness suites stayed
+byte-exact, and free-variable ordering is preserved by sort-and-dedup where quantifier order
+matters. Performance: whole-file inference on the hub file went from 190 ms to about 50 ms, and a
+hub keystroke from 308 ms to 168 ms, measured alongside the demand-path work. Simplicity: one
+free-variable implementation instead of two, and one dense table instead of a map plus a counter.
+Incremental analysis: unchanged, because all of this is inside one query body. The backlog holds
+the remaining follow-up, which is that whole-file inference and re-lowering are still the keystroke
+floor for a huge file. The per-definition granularity design addresses it.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by the 700K-LoC user workspace still spending 95% of a 179-second cold pass in typecheck after the demand-path and constant-factor rounds, with a 10-second keystroke in an 18.5K-LoC file — and by a synthetic reproduction: 10 mutually-referencing files × 60 chained functions (3K LoC) cost 3.6s of typecheck.
+# Decision record: interface SCC rounds run per definition, and skip on unchanged reads
 
-Previous shape / structural weakness: interface edges are file-granular (they must mirror `infer_file`'s import set exactly, or a genuine cycle slips past the SCC routing into the accidental-cycle guard), and real packages reference each other's files both ways — so whole file clusters collapse into single interface SCCs. `resolve_interface_scc` re-inferred every member *file* per Jacobi round, and rounds grow with the in-SCC scheme-chain depth: O(chain depth × cluster LoC) per fixed point, re-paid on every keystroke into a member file. Additionally the per-round bookkeeping (full-table clone + a `render_type_scheme` of every member every round for the oscillation guard) and a per-symbol `SymbolScc` Tarjan that cloned every visited node's edge list were quadratic in cluster size.
+A 700k-line user workspace still spent 95% of a 179-second cold pass in typecheck after the
+demand-path and constant-factor rounds, with a 10-second keystroke in an 18.5k-line file. A
+synthetic reproduction of ten mutually referencing files with sixty chained functions each, which
+is 3k lines, cost 3.6 s of typecheck.
 
-Chosen shape:
-- **Files that provably decompose are re-inferred per member definition** (`scc_definition_plan`: every top-level binding a single-assignment function or scalar literal — schemes fixed at their defining site — no letrec members, no captured-write re-pass, no other statement writing the top-level frame). Each member definition is checked by `check_definition_scheme` against the round's table (in-SCC), memoized `GlobalScheme`s (out-of-SCC; provably acyclic — a cross-file symbol whose file reaches back into the cycle is itself a member), and locally-resolved same-file helper definitions (fetching their `GlobalScheme` would re-enter the fixed point through the file's own `Typecheck`). Under the plan's conditions this environment equals the whole-file walk's at every read, so results match up to inference-variable identity. Ineligible files (S4 blocks, monotype accumulation, letrec groups) keep whole-file rounds.
-- **Change-driven skips at both granularities:** a unit re-infers in round k only if one of its in-SCC reads (transitive through local helpers) changed in round k-1; the round function is pure in those reads, so the previous output is reused verbatim and the trajectory is identical. Contributions are per *file*, merged in ascending file order each round — a symbol exported by several member files keeps the exact last-writer-wins value (a single symbol-keyed map let a stale exporter overwrite the winner; caught by the differential and pinned by `test_interface_scc.rs`).
-- **One inference state per fixed point** (definition checks snapshot and roll back completely, keeping per-definition variable ids deterministic) instead of a stub-seeded template clone per definition; the oscillation-guard history records value *changes* only (consecutive duplicate renders affected nothing; a pure-oscillation pin can land one round later, covered by the round-cap slack, same converged table); `SymbolScc`'s Tarjan uses dense indices and borrows fetched edge lists.
+Interface edges are file-granular. They must mirror `infer_file`'s import set exactly, or a genuine
+cycle slips past the SCC routing into the accidental-cycle guard. Real packages reference each
+other's files both ways, so whole file clusters collapse into a single interface SCC.
+`resolve_interface_scc` re-inferred every member file per Jacobi round, and rounds grow with the
+in-SCC scheme-chain depth. The cost per fixed point is chain depth times cluster size, and it was
+re-paid on every keystroke into a member file. Two pieces of bookkeeping were quadratic in cluster
+size as well: the per-round full-table clone plus a `render_type_scheme` of every member every round
+for the oscillation guard, and a per-symbol `SymbolScc` Tarjan that cloned every visited node's edge
+list.
 
-Impact: correctness — differential suites byte-exact (including the multi-exporter regression the first cut introduced); performance — the cluster repro's typecheck 3.6s → 0.2s (18×) and its member-file keystroke 359ms → 34ms (10×), hub-workspace keystroke 168 → 136ms, big flat workspace unchanged; simplicity — the fixed point gains a planning phase but the convergence/pinning contract is unchanged; incremental analysis — keystrokes into cluster files re-run the fixed point at frontier cost instead of cluster cost. Known follow-ups (backlog): per-symbol `SymbolScc` is still quadratic for very large clusters (a file-level quotient-graph SCC would fix it); the `InterfaceScc` key carries the member list (heavy for huge components); the authoritative whole-file `Typecheck` remains the keystroke floor (the per-definition incremental inference design).
+The shape now has three parts.
 
-# Decision record: `roughly check` runs on the query engine
+- **A file that provably decomposes is re-inferred per member definition.** `scc_definition_plan`
+  admits a file when every top-level binding is a single-assignment function or a scalar literal,
+  so schemes are fixed at their defining site, and when the file has no letrec members, no
+  captured-write re-pass, and no other statement writing the top-level frame. Each member
+  definition is checked by `check_definition_scheme` against three sources: the round's table for
+  in-SCC reads, memoized `GlobalScheme`s for out-of-SCC reads, and locally resolved same-file
+  helper definitions. The out-of-SCC reads are provably acyclic, because a cross-file symbol whose
+  file reaches back into the cycle is itself a member. The same-file helpers must resolve locally,
+  because fetching their `GlobalScheme` would re-enter the fixed point through the file's own
+  `Typecheck`. Under the plan's conditions this environment equals the whole-file walk's at every
+  read, so results match up to inference-variable identity. An ineligible file keeps whole-file
+  rounds, which covers S4 blocks, monotype accumulation and letrec groups.
+- **Both granularities skip on unchanged reads.** A unit re-infers in round k only if one of its
+  in-SCC reads changed in round k-1, counting reads transitively through local helpers. The round
+  function is pure in those reads, so the previous output is reused verbatim and the trajectory is
+  identical. Contributions are per file and are merged in ascending file order each round, so a
+  symbol exported by several member files keeps the exact last-writer-wins value. A single
+  symbol-keyed map let a stale exporter overwrite the winner. The differential caught that, and
+  `test_interface_scc.rs` pins it.
+- **One inference state serves the whole fixed point.** A definition check snapshots and rolls back
+  completely, which keeps per-definition variable ids deterministic. This replaces a stub-seeded
+  template clone per definition. The oscillation-guard history records value changes only, because
+  a consecutive duplicate render affected nothing. A pure-oscillation pin can therefore land one
+  round later, which the round-cap slack covers and which converges to the same table. `SymbolScc`'s
+  Tarjan uses dense indices and borrows fetched edge lists.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+Correctness: the differential suites stayed byte-exact, including the multi-exporter regression the
+first cut introduced. Performance: the cluster reproduction's typecheck went from 3.6 s to 0.2 s
+and its member-file keystroke from 359 ms to 34 ms. The hub workspace keystroke went from 168 ms to
+136 ms, and a big flat workspace was unchanged. Simplicity: the fixed point gains a planning phase,
+and the convergence and pinning contract is unchanged. Incremental analysis: a keystroke into a
+cluster file re-runs the fixed point at frontier cost instead of cluster cost.
 
-Previous shape / duplicated performance surface: the CLI ran production's from-scratch `Analysis` + `run_full`, whose whole-file package-interface loop has the same file-cluster blowup the engine's fixed point fixed — so `roughly check` on a real mutually-referencing package stayed slow after the server got fast, and every future engine performance win would have needed a production twin.
+Three follow-ups are in the backlog. The per-symbol `SymbolScc` is still quadratic for a very large
+cluster, and a file-level quotient-graph SCC would fix it. The `InterfaceScc` key carries the member
+list, which is heavy for a huge component. The authoritative whole-file `Typecheck` remains the
+keystroke floor, which the per-definition incremental inference design addresses.
 
-Chosen shape: the CLI builds the same query graph the server uses — one `Engine` per check target, inputs fed in the server's `ProjectFiles` order (package files first, ascending root-relative path, so last-writer-wins winners are identical), config honored as-is — and renders each file through `assemble_engine_file_diagnostics` (`crates/roughly/src/diagnostics.rs`), the class-assembly/config-gating/type-error-rendering logic extracted from the server so the two surfaces cannot drift; suppressions apply against the source the CLI read. `run_full` remains purely the differential oracle — the one consumer that must stay engine-independent.
+# Decision record: `ry check` runs on the query engine
 
-Impact: correctness — the differential already asserts engine == `run_full` byte-exact on rendered diagnostics, so the CLI's output set is covered by construction (all 146 `roughly` tests, including the full CLI contract suite, pass unchanged; a diagnostic-heavy workspace produces the exact count the engine stats report); performance — the CLI inherits every engine property (per-symbol firewalls, per-definition SCC rounds, memoized typo hints, one parse per file): cluster repro 1.34s → 0.28s, hub-shaped workspace 2.95s → 1.90s (now parse-bound), and the gap grows with workspace size; simplicity — one fast path instead of two, one shared diagnostics assembly; incremental analysis — unaffected (the CLI engine is one-shot).
+The CLI used to run production's from-scratch `Analysis` and `run_full`. That path's whole-file
+package-interface loop has the same file-cluster blowup the engine's fixed point fixed, so
+`ry check` on a real mutually referencing package stayed slow after the server got fast. Every
+future engine performance win would also have needed a production twin.
 
-# Decision record: target architecture — greenfield rewrite on a hand-rolled parser, rowan-style syntax, and salsa
+The CLI now builds the same query graph the server uses. It creates one `Engine` per check target
+and feeds inputs in the server's `ProjectFiles` order, which is package files first and then
+ascending root-relative path, so last-writer-wins winners are identical. It honors the config as
+is. It renders each file through `assemble_engine_file_diagnostics` in `crates/ry/src/diagnostics.rs`,
+which holds the class assembly, config gating and type-error rendering extracted from the server so
+the two surfaces cannot drift. A suppression applies against the source the CLI read. `run_full`
+remains purely the differential oracle, which is the one consumer that must stay engine-independent.
 
-**Status:** decided (user-approved direction). This record is the contract for the rewrite; the phase gates below are mandatory. Amended after an adversarial review of this record (user-ratified): parity scope for syntax diagnostics, the sub-file incrementality mechanism, item granularity, salsa risk terms, the gate set (memory / LSP behavior / formatter), and the legacy-retention terms all reflect the amendments.
+Correctness: the differential already asserts that the engine and `run_full` agree byte-exactly on
+rendered diagnostics, so the CLI's output set is covered by construction. All 146 CLI crate tests
+pass unchanged, including the full CLI contract suite, and a diagnostic-heavy workspace produces
+the exact count the engine stats report. Performance: the CLI inherits every engine property, which
+covers per-symbol firewalls, per-definition SCC rounds, memoized typo hints and one parse per file.
+The cluster reproduction went from 1.34 s to 0.28 s, and a hub-shaped workspace from 2.95 s to
+1.90 s, which is now parse-bound. The gap grows with workspace size. Simplicity: one fast path
+instead of two, and one shared diagnostics assembly. Incremental analysis: unaffected, because the
+CLI engine is one-shot.
 
-## Why
+# Decision record: the shipping stack is a hand-written parser, rowan trees, and salsa
 
-The current stack's load-bearing limits are structural: tree-sitter caps syntax-error quality (opaque ERROR nodes), costs ~8µs/LoC (derived: ~2.5s of the 3.7s cold pass at 302K LoC is parse) and 60× source-size trees (measured via `analysis-stats`, forcing the rope-only/LRU machinery), and cannot see `#:` annotations (forcing the re-lexing subsystem over a reconstructed buffer); the analysis unit is the whole file (keystroke floor = whole-file re-inference; file-granular interface edges manufacture cluster SCCs); `CoreType` is a deep-cloned enum (allocation churn caps inference near a measured ~6µs/LoC; interned types are projected — external precedent, not yet measured here — to reach ~1); the engine is single-threaded by design. Each was diagnosed and mitigated in place; the mitigations are workarounds around the architecture, not the architecture.
+`docs/src/content/docs/contributing/architecture.md` describes the architecture as it stands. This
+record holds the reasoning behind it and the risks that come with it, so that no session
+re-derives either.
 
-## Target shape
+## Why the previous stack was replaced rather than tuned
 
-New crates, written from scratch; the crate graph enforces the layering (crate boundaries are the compiler-checked analog of "make illegal states unrepresentable"):
+Four limits were structural, and each had already been mitigated in place. A mitigation around an
+architecture is not an architecture.
 
-- `crates/syntax` — hand lexer (`#:` annotations lexed as structured trivia and parsed as first-class nodes with real spans), hand recursive-descent/Pratt parser, rowan green/red trees (lossless, width-only → position-independent subtrees; resident — the tree-bytes-per-source-byte ratio is *measured* on the real corpus at Phase 1 and feeds the memory gate; "~2× source" is an unsourced estimate until then), typed AST views, optional statement-level incremental reparse (an optimization, not load-bearing — see the corrected incrementality note below and in the appendix), hand-tuned recovery and Elm-quality syntax errors. Annotations are ONE internal concept with pluggable surface *spellings*, but the pluggability seam lives at annotation **recognition**, not the lexer: `#:` is structured trivia, while a valid-R inline form — R ≥ 4.4 ships the experimental `declare()` base primitive (runtime no-op; Posit's quickr already annotates with `declare(type(...))`) — is ordinary call syntax recognized at lowering. Depends on nothing semantic.
-- `crates/semantics` — the salsa database and all queries: per-**item** item tree and HIR with span maps — the analysis unit is the *item*, NOT the top-level statement: nested definitions are items too (fields/methods inside class-constructor calls such as `R6Class`/`setRefClass`/S4 blocks, and functions defined inside function bodies), otherwise R's common giant-single-statement OO files degenerate straight back to whole-file granularity; item identity hashes kind + name (+ parent, with an index disambiguator), never bare position or index, so inserting an item does not shift unrelated items' identities (copy rust-analyzer's *current* `AstIdMap` design — its pre-2025 index-based one had exactly the shifting problem). Naming; **interned/hash-consed types** (id equality, no deep clones); per-item inference with whole-file fallback for genuinely coupled files (letrec groups, captured-write re-pass, monotype accumulation — the `scc_definition_plan` eligibility analysis generalizes, and its recorded blockers — letrec-member exports, `top_level_capture_repass`, whole-file substitution coherence for recorded expression types — must be *resolved by the Phase 2 design*, not assumed away); **symbol-granular** interface resolved via salsa fixpoint cycles (kills fake cluster SCCs at the root; mapping the contract-pinned fixed-point semantics — rounds bounded by global count, period-2 oscillation pinning to `Unknown`, last-writer-wins winner order, walk-shadowed routing, letrec groups, self-recursion tolerance — onto `cycle_initial`/`cycle_fn` is a **named Phase 2 design deliverable**: salsa hard-panics at 200 iterations, so legacy's pin-and-continue must live inside the cycle function and reaching salsa's cap is a bug); parallel prime + snapshot reads; plus a plain from-scratch wiring of the same cores as the permanent differential oracle. Depends on syntax + salsa (pinned version; risk terms in the appendix).
-- `crates/ide` — features over semantics snapshots; sees only the query API. `crates/format` — formatter on syntax only (compiler-enforced). `crates/roughly` — LSP server + CLI (lands at cutover, taking the `roughly` bin name).
-- Position-independence note (corrected by the adversarial review): width-only green subtrees make an untouched item **structurally equal** across edits elsewhere in the file, so per-item derived values (item tree, HIR) compare equal and salsa's early cutoff prunes downstream work — **value equality, not pointer identity, is the mechanism** (rowan's green `Eq` is structural with a pointer fast path; its node cache dedups only ≤3-child nodes, so a from-scratch reparse shares no large subtrees; rust-analyzer's barriers are likewise `ItemTree`/`AstIdMap` value equality). Statement-splice reparse of open documents can make those compares pointer-fast, but it is an optional optimization: parse stays a pure per-file salsa query and correctness never depends on splicing.
+- tree-sitter capped syntax-error quality, because an error is an opaque ERROR node. It cost about
+  8 microseconds per line, derived from a cold pass at 302k lines of code where about 2.5 s of 3.7 s
+  was parsing. Its trees were about sixty times the source size, measured through `analysis-stats`,
+  which is what forced the rope-only input and the parse LRU. It also cannot see a `#:` annotation,
+  which forced a re-lexing subsystem over a reconstructed buffer.
+- The analysis unit was the whole file. That makes whole-file re-inference the keystroke floor, and
+  file-granular interface edges manufacture cluster SCCs.
+- `CoreType` was a deep-cloned enum. Allocation churn capped inference near a measured 6
+  microseconds per line.
+- The engine was single-threaded by design.
 
-**Legacy:** the existing crates are renamed and grouped under `legacy/` — `roughly` → `legacy/roughly-legacy`, `analysis` → `legacy/analysis-legacy`, `engine` → `legacy/engine-legacy` — with **package names suffixed but `[lib]`/`[[bin]]` target names unchanged** (lib `analysis`, lib `engine`, bin `roughly`), so zero source churn and the legacy stack keeps building and shipping untouched. It is frozen except for bug fixes: its roles are (a) the shipping product until cutover, (b) the cross-implementation oracle, and (c) the **benchmark baseline**. **User-directed retention terms:** the legacy stack is kept in-tree as reference and benchmark **until the rewrite is complete — every phase gate, Phase 4 included, met** — and only then deleted in one final sweep. **No code is ever shared or abstracted between the two stacks** (user-directed): duplication is deliberate and committed; introducing an abstraction to share code with legacy is a mistake even where the duplication is verbatim. `legacy/fixtures` (harness) stays with legacy; the new stack writes its own harness from scratch but reuses the fixture *data* files where they encode the semantics contract. The data files live inside the legacy crates' `tests/` trees, so everything the new stack keeps — fixture data, corpus manifests, golden baselines — must be **migrated into the new crates before the final deletion sweep**, and the Phase 2 fixture triage classifies every suite as semantics-contract (reused as-is) vs parser-artifact (re-baselined against the new parser).
+The limiting factors rank in this order: file-granular analysis, type-representation churn, parse
+cost and tree size, and single-threadedness. The last one is a division by the core count, while
+the first three are asymptotic or large per-operation wins. The ultimate ceiling is R's dynamic
+semantics, which is a semantics budget rather than an infrastructure one.
 
-## Phases and gates (each phase = one full-shape change, landed green)
+## Why rowan rather than a hand-written tree
 
-Phases are dependency order and gate definitions, not risk staging — no phase waters down scope, none is an evaluation checkpoint, and a session runs through as many as it can (see Appendix 2, "why the plan has phases").
+The parser is hand-written either way. rowan is not a parser. It is the tree data structure the
+hand-written parser emits, and nothing about parsing is delegated to it. The green and red design
+beats a classic typed AST of structs with spans for four reasons.
 
-- **Phase 0 — syntax contract first.** Build the corpus, the oracles, AND the fuzzing harness before the first line of parser code (see testing doctrine below) — fuzzing is a from-day-one instrument, not an afterthought. Gate: corpus assembled, including **tree-sitter-r's full parser test corpus imported AND converted into the fixture-harness format** (a hard requirement, user-directed: the new parser's suite is a superset of tree-sitter-r's); round-trip/acceptance harnesses run against tree-sitter as baseline; the fuzz harness (never-panic + always-lossless invariants) builds and runs against a stub parser, ready to fuzz every parser increment from its first commit.
-- **Phase 1 — `syntax`.** Gate: whole corpus green (converted tree-sitter-r suite included); byte-exact lossless round-trip everywhere incl. under fuzzing; acceptance parity with tree-sitter as *baseline* with **R's `parse()` as the referee** — where the two disagree, R wins and the case goes on a committed, adjudicated divergence allowlist (tree-sitter-r is a baseline, not an oracle; its parse bugs must not be baked into corpus expectations); ≥5× tree-sitter batch parse speed on the pinned real-world corpus, methodology committed with the bench (this is also where the asserted ~0.5–2µs/LoC becomes a measurement); zero panics under fuzzing; golden error-message suite established, and the messages must be **strictly better** than the tree-sitter-derived legacy wording — reviewed side-by-side (user requirement: not parity, improvement); tree bytes-per-source-byte measured on the real corpus (feeds the Phase 2 memory gate).
-- **Phase 2 — `semantics` (+`ide`, `format`).** Gate, with the parity scope made explicit (the earlier byte-exact-everything wording was unachievable — it contradicted Phase 1's better-errors goal): **semantic diagnostic classes** (naming, type, lint, strict) byte-exact against the untouched legacy stack over the legacy differential edit streams and fixture suites **on inputs both parsers parse identically**; the **syntax-diagnostic class is excluded from byte-exactness by design** and held instead to the golden error-message suite plus the policy contract ("a broken region reports its syntax error and nothing else", typing-reference §Syntax errors); on **malformed input** the differential asserts the policy contract and semantic-class agreement modulo recovery differences, never byte equality; any well-formed-input divergence traced to a legacy parse defect goes on the committed allowlist with justification. Per-position IDE parity for all 8 features incl. cross-file, same scoping. **Fixture triage** completed (semantics-contract vs parser-artifact suites). **Formatter gate:** the legacy golden suites, idempotence tests, and the byte-for-byte raw-string rule ported; output compared file-by-file against the legacy formatter over the corpus — divergences individually reviewed and either fixed or recorded as deliberate improvements, never silent. **Memory gate:** resident set measured at 300K LoC, linear in LoC, within 1.5× of the legacy stack on the same corpus (excess is diagnosed and justified in this record; salsa per-query `lru` and interned-value GC are the first levers). The **fixed-point-semantics mapping deliverable** (see the `semantics` crate bullet) designed, implemented, and covered by the differential. Legacy perf witnesses met or beaten — wall-clock budgets transfer verbatim; exec-counter witnesses are re-expressed as equivalent salsa execution-count witnesses, since the memo structures differ.
-- **Phase 3 — cutover.** New `crates/roughly` takes the bin name; legacy's `[[bin]]` target is renamed away in the same change (two same-named bins never coexist) but the legacy **crates stay in-tree** as frozen reference/benchmark until Phase 4 completes (user-directed). Differential reborn as semantics' from-scratch wiring vs its salsa wiring — an *invalidation* oracle only: it shares query bodies with the incremental path, so it is structurally blind to shared-rule bugs (the exact limitation Part B's analysis recorded); the **fixture suites are the semantics net** from here on. Gate: full workspace green; the **new LSP behavioral suite** green — a from-scratch port of `test_lsp`'s coverage: UTF-16 incl. non-BMP, latest-edit-wins cancellation, coherence-panic death, watched files, config reload + config-error diagnostics with toml spans, semantic tokens incl. `#:` type-notation coloring, suppression comments, signature-help label offsets; CLI contract suite green; memory re-measured at the ~700K-LoC scale; the analysis-stats budgets **committed as CI-checkable witnesses** (the MEMORY.md quality-bar numbers as artifacts, not prose — until then "budgets met" is unfalsifiable).
-- **Phase 4 — capitalize + final deletion.** Statement-cost keystrokes, multi-core cold pass (preceded by the parallel-cycle stress test in the doctrine), error-message polish, CI perf gates pinned to the quality-bar budgets — all measured against the retained legacy stack as the benchmark baseline. When every gate holds: run one final full-corpus cross-stack parity pass and **archive its report** (the cross-implementation window is the strongest oracle this project will ever have, and it closes here), complete the keep-list migration out of the legacy trees, then delete the legacy crates in one sweep.
+- **Losslessness.** Every byte lives in the tree, trivia included, and reprints exactly. A `#:`
+  comment is type syntax here, so the formatter, the byte-exact round trip and the annotation
+  tooling all come from the representation instead of from side tables.
+- **Error resilience.** Every parse yields a tree whose error nodes are local to the break, and the
+  typed AST layer returns `Option`, so a consumer never carries a parallel data model for broken
+  code.
+- **Position independence.** A green node carries a width and no absolute offset, so an untouched
+  item's subtree stays structurally equal after an edit elsewhere in the file. That is the property
+  per-item cutoffs are built on. An AST that carries spans shifts every span after any edit, which
+  kills sub-file incrementality at the root.
+- **Structural sharing.** Immutable refcounted subtrees with builder-level dedup of identical small
+  nodes keep the resident tree near twice the source bytes.
 
-## Testing doctrine for `syntax` (mandatory)
+Use the crate, not an in-house copy of the design. The value is subtle machinery already hardened
+over years in rust-analyzer: the thin-DST layout, red cursors with lazy offsets, node caching and
+splicing. Hand-rolling reproduces that code without the hardening and gains no design freedom.
+rowan is small and dependency-free enough to vendor or fork if divergence is ever needed, and Biome
+forked it, which is precedent for both its maturity and the exit hatch.
 
-The parser is the foundation of everything; it must be **extremely well tested — more is better, and duplicated coverage is welcome, never pruned for elegance**. Layers, all of them, not a selection: (1) tree-sitter-r's parser corpus imported wholesale **and converted into the fixture-harness format** (user requirement: the suite is at least tree-sitter-r's, expressed as fixtures); (2) a real-world parse corpus — R's base library sources plus top CRAN packages — checked for lossless round-trip and acceptance parity; (3) exhaustive hand-written per-construct suites (every operator, precedence pair, call form, literal form, string/raw-string/escape variant, `#:` annotation form, and every error-recovery scenario) with golden trees and golden error messages; (4) property tests (token cover = input, node ranges nest, reprint == input); (5) fuzzing — random bytes and structure-aware mutations — with never-panic + always-lossless invariants, wired up in Phase 0 and run against **every** parser increment from the very first (a parser that only handles literals gets fuzzed the day it exists), continuously thereafter (a corpus-seeded fuzz run is part of the phase gates, and CI runs a bounded fuzz pass); (6) statement-reparse equivalence (incremental result tree == from-scratch tree for randomized edits); (7) acceptance cross-check against R's own parser where an R installation exists (local-only, like every R-requiring test). Redundancy across these layers is a feature: the same construct covered five ways is the point.
+The acknowledged cost is that rowan traversal is dynamically kinded and slower than direct structs.
+That is why inference never walks it. The checker runs on per-item HIR, and rowan serves the
+fidelity layers, which are the IDE, the formatter and refactorings.
 
-## Constraints carried over
+Value equality is the mechanism, not pointer identity. rowan's green `Eq` is structural with a
+pointer fast path, and its node cache dedups only nodes with three children or fewer, so a
+from-scratch reparse shares no large subtree. rust-analyzer's barriers are likewise value equality
+on its `ItemTree` and `AstIdMap`. A statement-splice reparse of an open document can make those
+compares pointer-fast, but it is an optimization only. Parse stays a pure per-file query and
+correctness never depends on splicing.
 
-Differential discipline is non-negotiable at every phase; the typing semantics contract (`reference/type-system.md`) is unchanged by the rewrite; work lands directly on `main` (user directive); no new pull requests; full-shape invasive changes with fallout fixed in one sweep (see AGENTS.md "Do not think like a human"). Docs are phase deliverables, not afterthoughts: `architecture.md` carries a status note now (the in-house engine is the *current shipped* architecture; this record is the decided direction) and is rewritten at cutover; `structure.md` is replaced when `analysis-legacy` stops being the shape of the code; `testing.md` gains the new harness contract when that harness exists — each in the same session as the change it documents (AGENTS.md).
+## Why salsa rather than an in-house engine
 
-## Appendix: operational notes for the rewrite (so no session re-derives them)
+Two things would otherwise have to be hand-rolled: parallel snapshot reads with write
+cancellation, and first-class fixpoint cycles. Both are proven in rust-analyzer and in Astral's
+`ty`, whose type inference uses salsa fixpoints. A concurrent red-green memo core is the one
+component not worth building in-house. The query decomposition from the in-house engine is the
+asset that transferred: per-symbol firewalls, names-only cutoffs, and the durable and open fold
+split.
 
-- **Why statement-level reparse instead of tree-sitter-style GLR incrementality:** a hand parser is *estimated* at ~0.5–2µs/LoC (external precedent; no hand parser exists here yet — the Phase 1 bench converts this into a measurement) against tree-sitter's ~8µs/LoC here (derived from the recorded cold pass: ~2.5s of 3.7s at 302K LoC is parse), so even a full reparse of an 18K-LoC file is ~20ms; statement-level splice bounds keystrokes below that. The deep reason for rowan's width-only green nodes (corrected): an unchanged item's subtree is **structurally equal** after edits elsewhere in the file — position independence is what makes value equality hold across shifted offsets — so per-item derived values compare equal and salsa's early cutoff prunes downstream work. Pointer identity is NOT supplied by a from-scratch reparse (rowan's node cache dedups only ≤3-child nodes) and is not what rust-analyzer relies on either (its barriers are `ItemTree`/`AstIdMap` value equality); splice can upgrade the compares to pointer-fast for open documents, as an optimization only.
-- **Why salsa rather than extending the in-house engine:** parallel snapshot reads + write-cancellation and first-class fixpoint cycles (proven in rust-analyzer and Astral's `ty`, whose type inference uses salsa fixpoints) are precisely the two things we would otherwise hand-roll; a concurrent red-green memo core is the one component not worth building in-house. The in-house engine's query *decomposition* (per-symbol firewalls, names-only cutoffs, durable/open fold splits) is the asset that transfers. **Salsa risk terms (recorded so they are managed, not rediscovered):** pin the salsa version and upgrade deliberately — the public API churns hard and often (multiple breaking releases per year through 2026); vendoring/forking is the exit hatch, exactly as argued for rowan. Fixpoint non-convergence is a **hard panic at 200 iterations** — legacy's pin-to-`Unknown` lives inside the cycle function, and reaching salsa's cap is a bug, never a fallback. Interned-value GC is young (landed 2025) and both rust-analyzer (~4× memory on its salsa migration until tuned with per-query `lru`) and ty (multi-GB blowups) hit real memory cliffs — hence the Phase 2/3 memory gates, with per-query `lru` and interned GC as the first levers. Parallel + fixpoint iteration had real hang bugs (fixed upstream in 2025); a parallel-cycle stress test is part of the doctrine and gates Phase 4's multi-core work.
-- **Interned types are the deepest remaining inference win:** legacy `CoreType` is a deep-cloned enum; hash-consed id-based types (rustc/`ty` style — equality is id compare, substitution cached) are the difference between the measured ~6µs/LoC and a *projected* ~1µs/LoC ceiling (external precedent, proven or refuted at the Phase 2 perf gate). Design them in from the start; do not port the clone-based representation.
-- **Limiting factors, ranked** (what the rewrite is for): (1) file-granular analysis, (2) type-representation churn, (3) parse cost/tree size, (4) single-threadedness — (4) is a ÷cores multiplier while (1)–(3) are asymptotic or large per-op wins; the ultimate ceiling is R's dynamic semantics (a semantics budget, not infrastructure).
-- **Inline annotations (Python-style), future path:** annotations are ONE internal concept with pluggable surface spellings, and the seam is annotation *recognition* (lowering), not the lexer. Today `#:` (structured trivia); near-term option: runtime-neutral valid-R forms — R ≥ 4.4 ships `declare()` as an experimental base primitive (runtime no-op; quickr already uses `declare(type(...))`) — recognized as first-class annotations from ordinary call syntax; a true superset dialect (TypeScript road: inline syntax + strip step) stays a product decision, kept open by the pluggable design — never an architectural blocker. `#:` files must always remain valid ordinary R.
-- **Corpus mechanics:** tree-sitter-r's parser corpus lives in its GitHub repository (`test/corpus/`, MIT) — fetch from the repo, not the crates.io package (which may omit tests). Real-world corpus = R base library sources + top ~100 CRAN packages, stored under a **gitignored** corpus directory with a **committed manifest + fetch script** in `scripts/` (the fetch needs outbound network; run it wherever that exists). The R-`parse()` acceptance cross-check needs a local R installation — run it locally, skip gracefully elsewhere; because CI has no R, the Phase 1 acceptance-divergence allowlist is adjudicated against R once locally and then committed/pinned.
-- **Known-tricky lexer/parser cases to cover exhaustively from day one:** raw strings (`r"(...)"` / `R"[...]"` — legacy formatter has a byte-for-byte rule for a reason), escapes, `%op%` operators, backtick names, multi-line `#:` annotation blocks (consecutive `#:` lines stitch into one annotation region), statement-boundary/newline sensitivity (R's newline-vs-operator continuation rules), `]]` vs `] ]` disambiguation in nested indexing (`x[[y[1]]]`), the top-level `else`-after-newline error (legal inside braces, a parse error at top level — R language definition), `->`/`->>` assignment, `=` as assignment vs named-argument (context-dependent), unary-minus precedence (`-2^2` is `-(2^2)`), literal forms (hex, `L` integer, `i` complex), and `\(x)` lambdas (R ≥ 4.1) — these are where R parsers get subtle.
-- **Bin-name handover:** `roughly-legacy` keeps `[[bin]] name = "roughly"` until the Phase 3 cutover, where the new `crates/roughly` takes the bin name and legacy's bin target is renamed away in the same change (two same-named bins never coexist). The legacy *crates* stay in-tree as frozen reference/benchmark until the Phase 4 final sweep.
-- **What is frozen vs reused:** legacy crates frozen (oracle + shipping product + benchmark baseline; bug fixes only; never abstracted over or shared with the new stack — user-directed). The fixture *data* files encode the semantics contract and are reused — after the Phase 2 triage (semantics-contract vs parser-artifact) and after migrating out of the legacy `tests/` trees before the final sweep. The differential edit-stream **generators are legacy-API-coupled code, not data**: the generation logic (seeds, source alphabets, edit distributions) is re-implemented against the new stack's API — only the logic ports. `reference/type-system.md` is unchanged by the rewrite.
+Four salsa risks are recorded so they stay managed.
 
-## Appendix 2: recorded answers to direct user questions
+- **Pin the version and upgrade deliberately.** The public API churns hard and often, with several
+  breaking releases a year. Vendoring or forking is the exit hatch, exactly as for rowan.
+- **Fixpoint non-convergence is a hard panic at 200 iterations.** The pin-to-`Unknown` rule lives
+  inside the cycle function. Reaching salsa's cap is a bug, never a fallback.
+- **Interned-value garbage collection is young.** rust-analyzer used about four times the memory on
+  its salsa migration until it tuned per-query `lru`, and `ty` hit multi-gigabyte blowups. Per-query
+  `lru` and interned GC are the first levers when memory regresses.
+- **Parallel iteration over a fixpoint had real hang bugs**, fixed upstream. A parallel-cycle
+  stress test covers it.
 
-- **Dramatically better error messages are an explicit GOAL of the new parser, not a side effect** — for R syntax generally and for `#:` type annotations specifically. Recursive descent knows what it was parsing at every point, so the bar is: expected-token sets ("expected `)` or `,`"), paired-delimiter pointers ("unclosed `(` opened here" with both spans), statement-anchored recovery (one broken construct never poisons the file), and — because annotations are first-class grammar — real type-syntax errors with exact token spans *inside* `#:` comments ("expected a type after `|`"), replacing the coarse re-lexed lowering diagnostics of the legacy stack. Wording is pinned by the golden error-message suite (Phase 1 gate) and held to the AGENTS.md Elm/Rust diagnostics goal. **User directive (recorded verbatim in effect):** parity with legacy syntax-error output is explicitly NOT the bar — the messages must be strictly *better*; and the new parser's test suite must be at least tree-sitter-r's, ideally expressed in the fixture setup (hence the Phase 0 conversion requirement).
-- **Parsing is a per-file salsa query; do not try to make salsa statement-aware at the parse level.** File text is the salsa input, `parse(file)` the query: an edit re-parses only that file. Sub-file salsa invalidation of parsing is a chicken-and-egg (statement boundaries are only known *after* parsing) and buys nothing: the hand parse is the cheapest stage (est. ~1µs/LoC; a full 18K-LoC reparse ≈ 20ms), statement-level reparse is at most an *internal* optimization of the parse step, and the incrementality that matters happens one level down — an untouched item's subtree in the new tree is **structurally equal** to the old one (width-only greens make equality hold across shifted offsets), so per-item downstream queries (item tree, HIR, inference: the expensive stages) produce equal values and salsa's early cutoff prunes them. Same conclusion rust-analyzer reached (its barriers are `ItemTree`/`AstIdMap` value equality over full from-scratch reparses).
-- **Why rowan rather than a hand-rolled tree (the parser is hand-rolled either way):** rowan is not a parser — it is the tree data structure the hand-written parser emits; nothing about parsing is delegated. The green/red design beats a classic typed AST (structs with spans) for four load-bearing reasons: (1) losslessness — every byte including trivia lives in the tree and reprints exactly, and `#:` comments *are* type syntax here, so the formatter, byte-exact round-trip, and annotation tooling come from the representation instead of side tables; (2) error resilience — every parse yields a tree with error nodes local to the break, and the typed AST layer is `Option`-returning views, so consumers never carry a parallel broken-code data model; (3) position independence — width-only green nodes make untouched statements structurally identical across edits (pointer-identical too when splice reparse is used), the property per-item salsa cutoffs are built on (a span-carrying AST shifts every span after any edit, killing sub-file incrementality at the root); (4) structural sharing — immutable refcounted subtrees with builder-level dedup of identical small nodes keep the resident tree ~2× source bytes. Use the *crate*, not an in-house clone of the design: the value is subtle already-hardened machinery (thin-DST layout, red cursors with lazy offsets, node caching, splicing) proven for years in rust-analyzer; hand-rolling reproduces that code minus the hardening with zero design freedom gained, and rowan is small and dependency-free enough to vendor/fork if divergence is ever needed (Biome forked it — precedent for both maturity and the exit hatch). Acknowledged cost: rowan traversal is dynamically kinded and slower than direct structs — which is why inference never walks it; the checker runs on per-statement HIR, rowan serves the fidelity layers (IDE, formatter, refactorings).
-- **Why the plan has phases (they are not de-risking).** De-risking cuts scope to make failure cheap — MVPs, evaluation checkpoints, fallback ramps, user check-ins. The phases do none of that: every phase goes directly to full shape (Phase 1 is the complete parser, not a subset spike), there are no retreat ramps or reassessment gates, legacy is retained only as a parity-measurement instrument and benchmark baseline (never a fallback) and is deleted once every gate — Phase 4 included — holds, and gate failures are fixed forward. The phases are three mechanical things: topological dependency order (`semantics` consumes syntax trees; parity needs both stacks alive; a corpus must exist before it can be green), the per-logical-unit definition of "green" (each phase is one full-shape change landed green, per AGENTS.md), and diagnosis power (with the syntax layer already proven lossless/acceptance-exact, any Phase 2 parity failure is a semantics bug by construction — an entangled bring-up would leave the differential oracle unable to bisect). Phases are not pacing: a session runs through as many gates as it can in one sweep; work may overlap phase boundaries so long as gates land in order.
+## Item granularity and item identity
+
+The analysis unit is the item, not the top-level statement. A nested definition is an item too.
+That covers a field or method inside a class-constructor call such as `R6Class`, `setRefClass` or
+an S4 block, and a function defined inside a function body. Without that, R's common giant
+single-statement object-oriented files degenerate straight back to whole-file granularity.
+
+An item's identity hashes its kind and name, plus its parent with an index disambiguator. It never
+hashes a bare position or index, so inserting an item does not shift an unrelated item's identity.
+This follows rust-analyzer's current `AstIdMap` design. Its earlier index-based design had exactly
+the shifting problem.
+
+## An annotation is one concept with pluggable spellings
+
+Annotations are one internal concept, and the surface spelling is pluggable. The seam sits at
+annotation recognition during lowering, not in the lexer. `#:` is structured trivia today. R 4.4
+ships `declare()` as an experimental base primitive, which is a runtime no-op, and Posit's quickr
+already annotates with `declare(type(...))`. A valid-R inline form is therefore ordinary call
+syntax recognized at lowering. A true superset dialect, which is the TypeScript road of inline
+syntax plus a strip step, stays a product decision that the pluggable design keeps open. A `#:`
+file must always remain valid ordinary R.
+
+## Testing doctrine for `syntax`
+
+The parser is the foundation of everything, so it must be extremely well tested. More is better,
+and duplicated coverage is welcome and never pruned for elegance. All seven layers apply, not a
+selection.
+
+1. tree-sitter-r's parser corpus, imported wholesale and converted into the fixture-harness format.
+   The suite is at least tree-sitter-r's, expressed as fixtures.
+2. A real-world parse corpus, which is R's base library sources plus top CRAN packages, checked for
+   lossless round trip and acceptance parity.
+3. Exhaustive hand-written per-construct suites with golden trees and golden error messages. That
+   covers every operator, precedence pair, call form, literal form, string, raw string and escape
+   variant, every `#:` annotation form, and every error-recovery scenario.
+4. Property tests: the tokens cover the input, node ranges nest, and reprinting equals the input.
+5. Fuzzing, both random bytes and structure-aware mutations, with never-panic and always-lossless
+   invariants. It ran against every parser increment from the first one, and CI runs a bounded
+   pass.
+6. Statement-reparse equivalence, so an incremental result tree equals a from-scratch tree for a
+   randomized edit.
+7. Acceptance cross-check against R's own parser where an R installation exists. This is
+   local-only, like every test that requires R.
+
+Redundancy across these layers is the point. The same construct covered five ways is deliberate.
+
+## Cases where R parsers get subtle
+
+Cover all of these exhaustively: raw strings in the `r"(...)"` and `R"[...]"` forms, where the
+formatter has a byte-for-byte rule for a reason; escapes; `%op%` operators; backtick names;
+multi-line `#:` blocks, where consecutive `#:` lines stitch into one annotation region;
+statement-boundary and newline sensitivity, which is R's newline-versus-operator continuation rule;
+`]]` against `] ]` in nested indexing such as `x[[y[1]]]`; the top-level `else` after a newline,
+which is legal inside braces and a parse error at top level; `->` and `->>` assignment; `=` as
+assignment against `=` as a named argument, which is context-dependent; unary-minus precedence,
+where `-2^2` is `-(2^2)`; the hex, `L` integer and `i` complex literal forms; and `\(x)` lambdas
+from R 4.1.
+
+## Corpus mechanics
+
+tree-sitter-r's parser corpus lives in its GitHub repository under `test/corpus/`, MIT-licensed.
+Fetch it from the repository rather than from the crates.io package, which may omit tests. The
+real-world corpus is R's base library sources plus roughly the top 100 CRAN packages. It lives in a
+gitignored corpus directory, with a committed manifest and fetch script in `scripts/`. The fetch
+needs outbound network, so run it where that exists. The acceptance cross-check against R's
+`parse()` needs a local R installation. CI has no R, so the acceptance-divergence allowlist is
+adjudicated against R locally once and then committed.
+
+## Better syntax errors are a goal, not a side effect
+
+Dramatically better error messages are an explicit goal of the parser, for R syntax generally and
+for `#:` type annotations specifically. Recursive descent knows what it was parsing at every point,
+so the bar is: expected-token sets such as "expected `)` or `,`"; paired-delimiter pointers such as
+"unclosed `(` opened here" carrying both spans; statement-anchored recovery, so one broken
+construct never poisons the file; and, because annotations are first-class grammar, real type-syntax
+errors with exact token spans inside a `#:` comment, such as "expected a type after `|`". The
+golden error-message suite pins the wording, and the diagnostics goal in `AGENTS.md` sets the bar.
+
+## The legacy stack shares no code
+
+The legacy crates under `legacy/` are frozen. They take bug fixes only. No code is ever shared or
+abstracted between the two stacks, which is a user directive. The duplication is deliberate, and
+introducing an abstraction to share code with legacy is a mistake even where the duplication is
+verbatim.
 
 # Decision record: cross-stack differential parity — range containment and the oracle-divergence allowlist
 
