@@ -27,25 +27,26 @@ pub struct Annotation<'db> {
     /// `@type` / `@alias` definitions carried by this annotation.
     pub definitions: Vec<NamedDefinition<'db>>,
     /// Each definition's declaring directive range, parallel to
-    /// `definitions` — kept out of `NamedDefinition` so the interface maps
+    /// `definitions`. It is kept out of `NamedDefinition` so the interface maps
     /// built from definitions stay position-independent.
     pub definition_sites: Vec<TextRange>,
-    /// `@new Name` / `@new Name<ARGS>` — the annotated value checks against
-    /// the nominal's representation and the binding takes the nominal type.
+    /// `@new Name` or `@new Name<ARGS>`. The annotated value checks against
+    /// the nominal's representation, and the binding takes the nominal type.
     /// The range is the referenced type's, for diagnostics about the name.
     pub new_nominal: Option<(Name<'db>, Vec<Ty<'db>>, TextRange)>,
     /// A `#: @strict` / `#: @strict off` toggle.
     pub strict: Option<bool>,
-    /// `@trust TYPE` — the declared type applies unchecked.
+    /// `@trust TYPE`, where the declared type applies unchecked.
     pub trusted: bool,
-    /// `@if-unknown TYPE` — the declared type applies only where the checker
-    /// has nothing better than `Unknown`; using it on a value whose type is
+    /// `@if-unknown TYPE`, where the declared type applies only if the checker
+    /// has nothing better than `Unknown`. Using it on a value whose type is
     /// already known is an error, so a stale annotation cannot hide.
     pub if_unknown: bool,
     /// Annotation-shape violations: form mixing, directive ordering,
     /// duplicate or unknown type parameters, a non-nominal `@new` payload,
     /// nesting beyond the parse cap. A violating block carries no typing
-    /// payload — only its errors — so a broken annotation never cascades.
+    /// payload, and carries only its errors, so a broken annotation never
+    /// cascades.
     pub errors: Vec<(String, TextRange)>,
     /// Typing-gated violations (reported only when type checking is on):
     /// today the check-depth cap. Like `errors`, these strip the payload.
@@ -384,8 +385,8 @@ pub enum BlockRefusal {
 /// Checks the block's `#:` lines against the form-mixing rules.
 ///
 /// **One `#:` line commits to one form, and only whole lines are compared.**
-/// The rules are about lines — every refusal here tells the reader to separate
-/// something with a blank line — and a line's form is the form of the first
+/// The rules are about lines, because every refusal here tells the reader to
+/// separate something with a blank line. A line's form is the form of the first
 /// item on it.
 ///
 /// A line carrying a *second* form item did not parse as the form it committed
@@ -397,7 +398,7 @@ pub enum BlockRefusal {
 /// prescribed a blank line that would not have helped.
 pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
     // The parser wraps a region it refused in `ERROR`, so the block has no
-    // trustworthy payload — a refused higher-rank binder, for instance, leaves
+    // trustworthy payload. A refused higher-rank binder, for instance, leaves
     // its type parameters with nothing to bind them, and reporting each as an
     // unknown type would blame the author twice for one mistake.
     if node
@@ -543,10 +544,10 @@ struct Lowering<'db> {
     beyond_parse_depth: bool,
     /// Lowering the annotated definition's own declared type (a compact or
     /// `@trust` annotation): only there an elided `->` on the OUTERMOST
-    /// function type means "inferred from the body". Everywhere else — a
-    /// nested function type, `@param`/`@return` payloads, `@type`/`@alias`
-    /// bodies — an elided return means `NULL`, R's default for a function
-    /// that returns nothing declared.
+    /// function type means "inferred from the body". Everywhere else an elided
+    /// return means `NULL`, which is R's default for a function that returns
+    /// nothing declared. A nested function type, a `@param` or `@return`
+    /// payload, and a `@type` or `@alias` body are all such places.
     definition_type: bool,
 }
 

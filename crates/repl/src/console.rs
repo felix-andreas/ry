@@ -13,8 +13,8 @@
 //! delimiters, a trailing infix operator, an unterminated token at end of
 //! input). When the check wrongly says "complete", nothing breaks: R's own
 //! parser detects the incompleteness and calls the hook again with its `+`
-//! continuation prompt, which runs the editor again — our validator is the
-//! UX layer, R stays the authority.
+//! continuation prompt, which runs the editor again. The validator is the
+//! interface layer, and R stays the authority.
 
 use crate::ReplError;
 use crate::libr::{self, RApi};
@@ -34,11 +34,11 @@ use syntax::SyntaxKind;
 pub fn run(api: RApi, options: crate::RunOptions) -> Result<(), ReplError> {
     let mut console = Console::new(options.keybindings, options.batch, options.completer);
     // Windows console setup runs in RGui mode (the callback wiring requires
-    // it), which stamps `.Platform$GUI` as "Rgui" — packages take that as
-    // license to call Rgui-only GUI functions (menus, dialogs) that fail
-    // here. Rebind the honest front-end name before any user input runs.
-    // R sources the startup profiles before the first console read, so
-    // profile code still sees "Rgui" — an accepted gap.
+    // it), which stamps `.Platform$GUI` as "Rgui". A package takes that as
+    // license to call an Rgui-only GUI function, such as a menu or a dialog,
+    // which fails here. Rebind the honest front-end name before any user input
+    // runs. R sources the startup profiles before the first console read, so
+    // profile code still sees "Rgui", which is an accepted gap.
     #[cfg(windows)]
     console.pending.extend(
         b"invisible(local({ e <- baseenv(); locked <- bindingIsLocked(\".Platform\", e); \
@@ -76,8 +76,8 @@ pub fn run(api: RApi, options: crate::RunOptions) -> Result<(), ReplError> {
     //
     // `initialize` has already sourced the startup profiles, so a profile that
     // chose a width of its own has run: only R's untouched default is
-    // replaced. A resize is not tracked — R has no setter to call from a
-    // signal handler, and the console is the only other way in.
+    // replaced. A resize is not tracked, because R has no setter to call from
+    // a signal handler and the console is the only other way in.
     if interactive
         && let Ok((columns, _)) = crossterm::terminal::size()
         && columns > 0
@@ -105,8 +105,8 @@ thread_local! {
 
 type SharedSessionCompleter = std::sync::Arc<std::sync::Mutex<Box<dyn crate::SessionCompleter>>>;
 
-/// The editor owns its completer, but the console must also feed accepted
-/// lines back into the same object — hence the shared handle on both sides.
+/// The editor owns its completer, and the console must also feed accepted lines
+/// back into the same object, so both sides hold a shared handle.
 struct EditorCompleter(SharedSessionCompleter);
 
 impl reedline::Completer for EditorCompleter {
@@ -123,8 +123,8 @@ struct Console {
     /// Bytes of accepted input R has not consumed yet: the read hook hands
     /// them over in buffer-sized chunks across successive calls.
     pending: VecDeque<u8>,
-    /// Batch mode: once `pending` is exhausted the session ends (EOF)
-    /// instead of prompting — `ry run`'s driver.
+    /// In batch mode the session ends at end of input once `pending` is
+    /// exhausted, rather than prompting. This is what drives `ry run`.
     batch: bool,
     completer: Option<SharedSessionCompleter>,
 }
@@ -187,9 +187,9 @@ impl Console {
 
 /// The console feed must carry only `\n`: a real terminal never sends `\r`,
 /// and R's parser reports a raw one as an invalid token. Script files carry
-/// CRLF on Windows, and so does the editor's multiline buffer there —
-/// normalize every path into the feed, treating CRLF (and classic lone CR)
-/// as line endings exactly like R's own text-mode connections do.
+/// CRLF on Windows, and so does the editor's multiline buffer there. Normalize
+/// every path into the feed, treating a CRLF, and a classic lone CR, as line
+/// endings exactly as R's own text-mode connections do.
 fn normalize_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -270,8 +270,8 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
 }
 
 /// The `R_WriteConsoleEx` hook: 0 is regular output, anything else the
-/// error/message stream. Written unbuffered — prompt interleaving beats
-/// throughput at a console.
+/// error and message stream. It writes unbuffered, because prompt interleaving
+/// beats throughput at a console.
 extern "C" fn write_console_ex(text: *const c_char, length: c_int, output_type: c_int) {
     let _ = std::panic::catch_unwind(|| {
         if text.is_null() || length <= 0 {
@@ -290,9 +290,10 @@ extern "C" fn write_console_ex(text: *const c_char, length: c_int, output_type: 
     });
 }
 
-/// Ctrl-C: while the editor runs, the terminal is raw (no signal — reedline
-/// clears the line); while R evaluates, the terminal is restored, so Ctrl-C
-/// arrives as SIGINT and the handler raises R's cooperative interrupt flag.
+/// Ctrl-C behaves differently in the two states. While the editor runs the
+/// terminal is raw, so no signal arrives and reedline clears the line. While R
+/// evaluates the terminal is restored, so Ctrl-C arrives as SIGINT and the
+/// handler raises R's cooperative interrupt flag.
 #[cfg(unix)]
 fn install_sigint_handler() {
     unsafe {
@@ -394,8 +395,8 @@ impl Prompt for RPrompt {
     }
 }
 
-/// Syntax highlighting straight from ry's lexer — the same tokens the
-/// whole language tool sees, no second grammar.
+/// Syntax highlighting straight from ry's lexer. These are the same tokens the
+/// whole language tool sees, so there is no second grammar.
 struct LexerHighlighter;
 
 impl Highlighter for LexerHighlighter {
@@ -444,11 +445,11 @@ impl Validator for LexerValidator {
     }
 }
 
-/// Conservative completeness from lexer facts alone. Incomplete only when
-/// provably unfinished — open delimiters, a trailing infix operator or
-/// comma, or a token the lexer flagged as broken at end of input (an
-/// unterminated string). False "complete" verdicts are safe: R's parser
-/// asks for continuation itself.
+/// Conservative completeness from lexer facts alone. Input is incomplete only
+/// when it is provably unfinished. An open delimiter, a trailing infix operator
+/// or comma, and a token the lexer flagged as broken at end of input, such as
+/// an unterminated string, all prove it. A false "complete" verdict is safe,
+/// because R's parser asks for continuation itself.
 pub fn input_is_complete(text: &str) -> bool {
     if text.trim().is_empty() {
         return true;

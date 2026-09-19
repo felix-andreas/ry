@@ -8,8 +8,8 @@
 //! reintroduced only at the diagnostic-rendering edge.
 //!
 //! Error tolerance mirrors the project contract: a broken region lowers to
-//! `Missing` (no cascading diagnostics — its syntax error already marks it),
-//! and well-formed siblings lower normally.
+//! `Missing`, which cascades no diagnostic because its syntax error already
+//! marks it. A well-formed sibling lowers normally.
 
 use syntax::ast::AstNode as _;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
@@ -114,9 +114,9 @@ pub enum NaAtom {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Argument {
     pub name: Option<String>,
-    /// The argument NAME's range, when the argument is tagged — a distinct
-    /// source token, so a finding about the name points at the name rather
-    /// than at the value it is attached to (as `Parameter::range` does).
+    /// The argument NAME's range, when the argument is tagged. The name is a
+    /// distinct source token, so a finding about it points at the name rather
+    /// than at the value it is attached to, as `Parameter::range` does.
     pub name_range: Option<TextRange>,
     /// `None` is a positional hole (`f(, x)`) or an empty tagged value.
     pub value: Option<ExprId>,
@@ -126,8 +126,8 @@ pub struct Argument {
 pub struct Parameter {
     pub name: String,
     pub default: Option<ExprId>,
-    /// The parameter NAME's range (the binding site — not the default), so
-    /// navigation and rename target the name alone.
+    /// The parameter NAME's range, which is the binding site rather than the
+    /// default, so navigation and rename target the name alone.
     pub range: TextRange,
 }
 
@@ -645,10 +645,10 @@ impl Lowering {
     /// every IDE feature see the real semantics. R accepts only a call on
     /// the right-hand side, and a `_` placeholder only as the whole value of
     /// exactly one named argument (which then receives the piped value
-    /// instead of the first positional slot). Anything else — a non-call
-    /// right-hand side, a positional or repeated `_` — is an R error, so
-    /// those pipes keep the opaque-operator lowering (`None`) rather than
-    /// guessing.
+    /// instead of the first positional slot). Anything else is an R error, so
+    /// such a pipe keeps the opaque-operator lowering, which is `None`, rather
+    /// than guessing. A non-call right-hand side and a positional or repeated
+    /// `_` are both errors.
     fn lower_pipe(
         &mut self,
         lhs: Option<SyntaxNode>,
@@ -686,7 +686,7 @@ impl Lowering {
 
     /// Argument lowering with an optional pipe-placeholder substitution: the
     /// argument at `substitute`'s index takes the given (already lowered)
-    /// value instead of lowering its own — the `_` token never becomes an
+    /// value instead of lowering its own. The `_` token never becomes an
     /// expression, so nothing dangles in the arena.
     fn lower_arguments_substituting(
         &mut self,
@@ -829,8 +829,8 @@ fn literal_kind(node: &SyntaxNode) -> LiteralKind {
     }
 }
 
-/// A finite whole-number double literal (`1`, `2.0`) — the shape eligible for
-/// the literal-as-integer courtesy at parameter positions.
+/// A finite whole-number double literal, such as `1` or `2.0`. Such a literal
+/// may fill an integer parameter.
 pub fn is_whole_number_double(text: &str) -> bool {
     text.parse::<f64>()
         .is_ok_and(|value| value.fract() == 0.0 && value.is_finite())
@@ -922,8 +922,8 @@ enum PipeShape {
 /// no `_` anywhere means first-argument insertion; exactly one `_`, sitting
 /// as the whole value of a named argument of THIS call, receives the piped
 /// value; every other `_` use (positional, repeated, nested in a
-/// subexpression, or as an argument tag) is an R error — `None`, and the
-/// pipe stays an opaque operator.
+/// subexpression, or as an argument tag) is an R error. The result is `None`,
+/// and the pipe stays an opaque operator.
 fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
     let underscores: Vec<syntax::SyntaxToken> = call
         .descendants_with_tokens()

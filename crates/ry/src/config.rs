@@ -30,15 +30,15 @@ pub struct Config {
     pub format: format::Config,
     pub lint: LintConfig,
     pub check: CheckConfig,
-    /// The directory containing the loaded config file — the anchor for
-    /// relative patterns like `[check] exclude`. `None` for the built-in
-    /// default configuration.
+    /// The directory containing the loaded configuration file. It anchors a
+    /// relative pattern such as `[check] exclude`. It is `None` for the
+    /// built-in default configuration.
     pub source_directory: Option<PathBuf>,
     /// Keys the loaded file set that this version does not know, in file
-    /// order (e.g. `check.excluded`). The config still loads — forward
-    /// compatibility for files written against newer versions — and hosts
-    /// surface these as visible warnings. Wrong TYPES on known keys remain
-    /// hard errors.
+    /// order, such as `check.excluded`. The configuration still loads, which
+    /// keeps a file written against a newer version usable, and a host surfaces
+    /// these as visible warnings. A wrong TYPE on a known key remains a hard
+    /// error.
     pub unknown_keys: Vec<String>,
 }
 
@@ -91,10 +91,10 @@ impl Config {
     }
 
     /// The path [`discover`](Config::discover) would load for `target`, when
-    /// one exists — the file the language server must watch for live reloads
-    /// (it may sit in an ancestor *above* the workspace root). Resolution
-    /// failures degrade to `None`: the caller is deciding what to watch, and
-    /// `discover` itself reports the error.
+    /// one exists. This is the file the language server must watch for a live
+    /// reload, and it may sit in an ancestor *above* the workspace root. A
+    /// resolution failure degrades to `None`, because the caller is deciding
+    /// what to watch and `discover` itself reports the error.
     pub fn discover_path(target: impl AsRef<Path>) -> Option<PathBuf> {
         find_config_file(target.as_ref()).ok().flatten()
     }
@@ -118,8 +118,9 @@ impl Config {
         Config::parse(text, None)
     }
 
-    /// The one parse. `path` names the file a failure is reported against —
-    /// `None` for text that came from somewhere other than a file on disk.
+    /// The one parse. `path` names the file a failure is reported against. It
+    /// is `None` for text that came from somewhere other than a file on
+    /// disk.
     fn parse(text: &str, path: Option<&Path>) -> Result<Config, ConfigError> {
         let deserializer = toml::de::Deserializer::new(text);
         let mut unknown_keys = Vec::new();
@@ -140,7 +141,8 @@ impl Config {
 
 /// The nearest-ancestor search both `discover` and `discover_path` walk: the
 /// target's own directory (its parent when the target is a file), then each
-/// ancestor, for a `ry.toml` — or a `roughly.toml` under the former name.
+/// ancestor, for a `ry.toml`, or for a `roughly.toml` under the former
+/// name.
 fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
     // A relative path is made absolute first: its lexical parent chain ends
     // at the empty path, so walking it directly would never reach the real
@@ -149,9 +151,9 @@ fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
         path: target.to_path_buf(),
         source: error,
     })?;
-    // `std::path::absolute` keeps `..` components, and `parent()` strips them
-    // lexically — a target like `/a/b/../c.R` would walk `/a/b/..` and then
-    // back INTO `/a/b`, which is not an ancestor of the target at all.
+    // `std::path::absolute` keeps a `..` component, and `parent()` strips it
+    // lexically. A target like `/a/b/../c.R` would then walk `/a/b/..` and back
+    // INTO `/a/b`, which is not an ancestor of the target at all.
     let target = normalize_lexically(&target);
 
     let mut directory = if target.is_dir() {
@@ -258,8 +260,8 @@ impl ConfigParseError {
     }
 }
 
-/// The dotted key whose value sits at `offset` — the `[table]` header above it
-/// joined with the `key =` on its own line.
+/// The dotted key whose value sits at `offset`. It is the `[table]` header
+/// above the offset, joined with the `key =` on its own line.
 fn offending_key(text: &str, offset: usize) -> Option<String> {
     let before = text.get(..offset)?;
     let line_start = before.rfind('\n').map_or(0, |index| index + 1);

@@ -4,8 +4,8 @@
 //! The legacy stack also carried a `missing-comma` lint compensating for
 //! tree-sitter silently accepting `f(1 2)`; the hand parser rejects that
 //! input with a syntax error (as R itself does), so the lint no longer
-//! exists — the config key is still accepted for compatibility and has no
-//! effect.
+//! exists. The configuration key is still accepted for compatibility, and it
+//! has no effect.
 
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::{Db, SourceFile, item_naming, item_spans, parse};
@@ -75,7 +75,7 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
             // An S3 method's formals are R's choice, not the author's: the
             // method must match its generic, so `format.myclass(x, ...)` that
             // ignores `x` is correct code and reporting it is noise. The
-            // generic itself is the same case one step earlier — it declares
+            // generic itself is the same case one step earlier. It declares
             // the argument it dispatches on and hands the call straight to
             // `UseMethod`, so *every* formal it names is unused by
             // construction.
@@ -107,8 +107,8 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
 /// A top-level binding whose name the stub corpus already resolves bare
 /// wins over the stub for every read in the project: `base` names report
 /// `shadows-builtin`, names declared by another stub namespace report
-/// `shadows-namespace` (both default-off — rebinding is often deliberate,
-/// an S3 method or script masking).
+/// `shadows-namespace`. Both are off by default, because rebinding is often
+/// deliberate, such as an S3 method or a script masking a name.
 fn shadow_lints(
     db: &dyn Db,
     file: SourceFile,

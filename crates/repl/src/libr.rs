@@ -1,7 +1,7 @@
 //! Runtime binding to R's C API: locate the R installation, `dlopen` its
 //! shared library, and resolve the (deliberately minimal) symbol surface the
-//! console needs. No build-time linking anywhere — this crate builds and its
-//! unit tests run on machines with no R at all.
+//! console needs. There is no build-time linking anywhere, so this crate builds
+//! and its unit tests run on a machine with no R at all.
 //!
 //! The surface grows on demand and every addition must stay in one of the
 //! four shapes: a function pointer, a variadic function pointer, a mutable
@@ -30,8 +30,8 @@ pub struct RApi {
 
     setup_mainloop: unsafe extern "C" fn(),
     run_mainloop: unsafe extern "C" fn(),
-    /// `R_ParseEvalString(text, env)` — parses and evaluates one string. The
-    /// console cannot do this job: input fed through the read hook costs a
+    /// `R_ParseEvalString(text, env)` parses and evaluates one string. The
+    /// console cannot do this job. Input fed through the read hook costs a
     /// main-loop round trip, and one taken before the editor's first prompt
     /// leaves the terminal half-configured.
     parse_eval_string: unsafe extern "C" fn(*const c_char, *mut c_void) -> *mut c_void,
@@ -63,8 +63,9 @@ pub struct RApi {
     def_params_ex: unsafe extern "C" fn(*mut Rstart, c_int) -> c_int,
     #[cfg(windows)]
     set_params: unsafe extern "C" fn(*mut Rstart),
-    /// Lives in `Rgraphapp.dll`, not `R.dll`; required — `readconsolecfg`
-    /// dereferences graphapp state and crashes when it never ran.
+    /// This lives in `Rgraphapp.dll` rather than in `R.dll`, and it is
+    /// required. `readconsolecfg` dereferences graphapp state and crashes when
+    /// this never ran.
     #[cfg(windows)]
     ga_initapp: unsafe extern "C" fn(c_int, *mut c_void) -> c_int,
     #[cfg(windows)]
@@ -462,8 +463,8 @@ pub extern "C" fn sigint_to_r_flag(_signal: c_int) {
     }
 }
 
-/// `R_HOME` from the environment when set, else `R RHOME` from `PATH` —
-/// the same two-step every R front end uses.
+/// `R_HOME` from the environment when it is set, else `R RHOME` from `PATH`.
+/// This is the same two-step every R front end uses.
 fn discover_r_home() -> Result<PathBuf, ReplError> {
     if let Ok(home) = std::env::var("R_HOME")
         && !home.is_empty()
@@ -501,10 +502,10 @@ fn discover_r_home() -> Result<PathBuf, ReplError> {
 /// which exports `R_SHARE_DIR`/`R_INCLUDE_DIR`/`R_DOC_DIR`; embedding
 /// bypasses the wrapper. On distributions that relocate those directories
 /// (Fedora, RHEL), `R.home("share")` and friends would then fall back to
-/// nonexistent `{R_HOME}/<dir>` paths — so recover the values from the
-/// wrapper's plain `VAR=value` lines (substituted literally when R was
-/// installed). Best-effort by design: without the wrapper, R's own fallback
-/// is correct on standard layouts. Asking R itself (`R --vanilla -s`) would
+/// a nonexistent path under `{R_HOME}`. Recover the values from the wrapper's
+/// plain `VAR=value` lines instead, which R substituted literally when it was
+/// installed. This is best-effort by design, because without the wrapper R's
+/// own fallback is correct on a standard layout. Asking R itself (`R --vanilla -s`) would
 /// cost a few hundred milliseconds of startup; reading the script does not.
 #[cfg(unix)]
 fn export_wrapper_path_vars(r_home: &Path) {
@@ -523,8 +524,8 @@ fn export_wrapper_path_vars(r_home: &Path) {
 
 /// The value of a plain `NAME=value` line in the wrapper script, quotes
 /// stripped. A value still containing `$` is an unsubstituted shell
-/// expression this parser cannot evaluate — skipped rather than exported
-/// verbatim.
+/// expression this parser cannot evaluate, so it is skipped rather than
+/// exported verbatim.
 #[cfg(unix)]
 fn wrapper_path_var(script: &str, name: &str) -> Option<String> {
     let value = script.lines().find_map(|line| {
@@ -577,8 +578,8 @@ fn shared_library_path(r_home: &Path) -> Result<PathBuf, ReplError> {
 ///
 /// # Safety
 ///
-/// `prompt` must be null or a valid NUL-terminated C string — exactly what
-/// R passes its `R_ReadConsole` hook.
+/// `prompt` must be null or a valid NUL-terminated C string, which is exactly
+/// what R passes its `R_ReadConsole` hook.
 pub unsafe fn prompt_text(prompt: *const c_char) -> String {
     if prompt.is_null() {
         return String::new();

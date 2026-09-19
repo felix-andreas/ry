@@ -2,9 +2,9 @@
 //! property harness and the coverage-guided `fuzz/` target so the contract
 //! has one home. On every input: never panic (salsa fixpoints converge),
 //! deterministic rendering across fresh databases, in-bounds diagnostic and
-//! lint ranges, and incremental equivalence — editing through the salsa
-//! setter equals a fresh database on the edited text, and editing back
-//! restores the original output.
+//! lint ranges, and incremental equivalence. Editing through the salsa setter
+//! equals a fresh database on the edited text, and editing back restores the
+//! original output.
 
 use crate::diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics};
 use crate::lints::{LintConfig, LintLevel, NameStyle, lint_file};
@@ -15,8 +15,8 @@ use salsa::Setter as _;
 
 /// One canonical rendering of everything the pipeline produces for a file:
 /// exported schemes, diagnostics (typing and strict), and every lint under
-/// an everything-on configuration — so the determinism and incremental
-/// invariants cover the lint layer too. Asserts range geometry inline.
+/// an everything-on configuration, so the determinism and incremental
+/// invariants cover the lint layer too. It asserts range geometry inline.
 pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
     let mut output = String::new();
     for &item in item_tree(db, file) {
