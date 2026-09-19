@@ -495,146 +495,435 @@ The expanded parameter directive writes the name first and the braced type secon
 The JSDoc order is rejected with an error that names the new form rather than with a generic parse
 failure. `@return {TYPE}` and `@forall` are unchanged.
 
-# Decision record: error-tolerant lowering (syntax errors do not erase a file)
+# Decision record: a syntax error does not erase a file
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+A single error node anywhere in a tree used to short-circuit `lower_with_diagnostics` to an empty
+module. One half-typed keystroke therefore dropped the file's whole export set. The package symbol
+index re-folded on every keystroke inside a broken window, dependents flooded with unresolved-name
+errors, and diagnostics, hover and completion went dark for the rest of the file. The single source
+of truth for what exists mid-edit was the parse tree's error bit, and it applied at file
+granularity.
 
-Previous shape: any error node in a tree short-circuited `lower_with_diagnostics` to an EMPTY module, so one half-typed keystroke dropped the file's whole export set — the package symbol index re-folded on every keystroke inside a broken window, dependents flooded with unresolved-name errors, and diagnostics/hover/completion for the rest of the file went dark. The single source of truth for "what exists mid-edit" was the parse tree's error bit, applied at file granularity.
+The shape now is statement granularity, as rust-analyzer does it.
 
-Chosen shape (statement granularity, rust-analyzer-style):
-- Well-formed statements always lower; a broken file keeps every export whose statement parsed.
-- A broken statement contributes NOTHING (no names, no reads, no cascading diagnostics) — "a broken region reports its syntax error and nothing else" (typing-reference §Syntax errors is the contract).
-- Two salvage shapes inside broken regions: (a) sequence-level — an ERROR node's well-formed assignment children lower normally, fragments are filtered by kind (`ExpressionKind::Assign` keeps, everything else drops), and a well-formed non-assignment fragment sharing a line with a following ERROR sibling is dropped as the split half of the broken statement; (b) expression-level — a broken assignment with an intact name side keeps its definition with the value degraded to `ExpressionKind::Missing`.
-- `Missing` is a distinct HIR kind from `Unsupported`: both type `Unknown`, but `Missing` records no strict origin (the syntax error already covers the region) while `Unsupported` stays strict-relevant (a complete construct the checker cannot model).
-- A checked annotation on a `Missing`-valued definition binds its DECLARED type unchecked (a hole proves nothing; demanding proof is a guaranteed false mismatch), so annotated definitions keep their contract for callers mid-edit — zero downstream invalidation.
+- A well-formed statement always lowers. A broken file keeps every export whose statement parsed.
+- A broken statement contributes nothing: no names, no reads, and no cascading diagnostics. A
+  broken region reports its syntax error and nothing else. The contract is the syntax-errors
+  section of the typing reference.
+- Two salvage shapes apply inside a broken region. At sequence level, an error node's well-formed
+  assignment children lower normally. Fragments are filtered by kind, so `ExpressionKind::Assign`
+  is kept and everything else is dropped, and a well-formed non-assignment fragment that shares a
+  line with a following error sibling is dropped as the split half of the broken statement. At
+  expression level, a broken assignment with an intact name side keeps its definition and degrades
+  the value to `ExpressionKind::Missing`.
+- `Missing` is a distinct HIR kind from `Unsupported`. Both type as `Unknown`. `Missing` records no
+  strict origin, because the syntax error already covers the region. `Unsupported` stays
+  strict-relevant, because it marks a complete construct the checker cannot model.
+- A checked annotation on a `Missing`-valued definition binds its declared type unchecked. A hole
+  proves nothing, so demanding proof would be a guaranteed false mismatch. Annotated definitions
+  therefore keep their contract for callers mid-edit, which means zero downstream invalidation.
 
-Impact: correctness — no false unresolved/type errors from half-typed code (pinned by `test_malformed_lower` controls + the `error_tolerant_lowering` project fixtures); simplicity — one policy sentence governs all cases; performance — the malformed-flip engine witness went from "2 index refolds + referrer recheck" to "0 refolds, edited-file-only recheck" (exports byte-equal across the flip, early cutoff does the rest); incremental analysis — the highest-churn edit state (typing inside a construct) now has the smallest blast radius.
+Correctness: half-typed code produces no false unresolved-name or type errors. The
+`test_malformed_lower` controls and the `error_tolerant_lowering` project fixtures pin it.
+Simplicity: one policy sentence governs every case. Performance: the malformed-flip engine witness
+went from two index refolds plus a referrer recheck to no refolds and a recheck of the edited file
+only, because exports stay byte-equal across the flip and early cutoff does the rest. Incremental
+analysis: typing inside a construct is the highest-churn edit state, and it now has the smallest
+blast radius.
 
-# Decision record: durability tiers + memoized IDE read path (the editor-latency regression)
+# Decision record: durability tiers and a memoized IDE read path
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+The red-green engine used to validate every memo by deep-walking its recorded dependencies once per
+revision. The first read after any keystroke therefore re-walked every unopened file's parse,
+lower and naming chain. That is work proportional to the number of files times the chain depth, and
+it cost about 108 ms at 281k lines of code across 30k files before any real work started.
 
-Previous shape: the red-green engine validated every memo by deep-walking its recorded dependencies once per revision, so the first read after any keystroke re-walked every unopened file's parse/lower/naming chain (O(files × chain depth), ~108 ms at 281k LoC / 30k files before any real work started). On top of that, every hover/definition/completion request rebuilt a package-sized `NamesGlobal` map from the symbol index, and completion additionally primed every exporting file's `Lower` + `LocalNaming` to compute item kinds — an O(package) prime per keystroke-completion (95 ms at rest). The idle-preemption token pairing (frontend store-then-send, worker reset inside the idle unit) could lose a preemption and stall a read behind a full idle unit.
+Two more costs sat on top. Every hover, definition and completion request rebuilt a package-sized
+`NamesGlobal` map from the symbol index. Completion additionally primed every exporting file's
+`Lower` and `LocalNaming` to compute item kinds, which is a package-sized prime per
+keystroke-completion and cost 95 ms at rest. Separately, the idle-preemption token pairing could
+lose a preemption and stall a read behind a full idle unit, because the frontend stored the token
+and then sent, while the worker reset it inside the idle unit.
 
-Chosen shape:
-- **Durability in the core** (`engine.rs`): inputs declare `LOW` (open documents) or `HIGH` (everything else); a memo records the min durability its last recompute read; validation greens O(1) when `last_change[durability] ≤ verified_at`. The load-bearing subtlety: durability *transitions* must stay truthful on memos whose values never change — the deep-validation walk re-records each visited memo's durability minimum at the early-cutoff bump. Without that, opening a file (an equal-value HIGH→LOW downgrade) re-records only the recomputing bottom of the chain; every value-stable ancestor keeps its stale HIGH record and the next keystroke is invisible to its fast path — a stale read served as green. (Caught by a live probe during implementation; pinned by `durability_downgrade_flushes_through_cutoff_nodes`.)
-- **The winner index IS the IDE shape**: `PackageSymbolIndex`'s value is `NamesGlobal`, borrowed per request (`Shared` clone), never rebuilt. `DefiningItem` projects through it.
-- **Completion reads one fold**: per-file `CompletionExports` (label/kind/callability entries, value-equal across body edits) folded into `PackageCompletionIndex`; `generic::completion` takes the entries as an explicit parameter — the engine passes the memo, the from-scratch path builds per request.
-- **Lossless preemption pairing**: worker resets `idle_interrupt` before each empty poll; frontend flags after send. Every interleaving either delivers the job to the poll or leaves the flag set for the unit's next cancellation check.
+The shape now has four parts.
 
-Impact: correctness — unchanged behavior (IDE differential green; the downgrade staleness class is structurally closed and unit-pinned); simplicity — one new concept (durability) in the core, two new queries, one deleted per-request synthesis path; performance at 281k LoC / 30k files — hover 5.3→0.010 ms at rest and 142→44 ms after a keystroke, completion 95→26.5 / 228→90 ms, definition 5.4→0.032 / 108→20 ms, per-edit diagnostics 121→91 ms, cold 13.5→9.0 s (the type-definition-environment per-inference clone also removed); incremental analysis — the per-keystroke walk no longer touches unopened files' chains at all (committed witnesses: at-rest reads ≤ 32 memos, post-keystroke walk ≤ 12·N). Deferred lever recorded in `backlog.md`: durable sub-fold + open-file overlay to drop the fold-edge walk to O(open).
+- **Durability lives in the core**, in `engine.rs`. An input declares `LOW` for an open document
+  and `HIGH` for everything else. A memo records the minimum durability its last recompute read,
+  and validation greens in constant time when `last_change[durability] <= verified_at`. One
+  subtlety is load-bearing. A durability transition must stay truthful even on a memo whose value
+  never changes, so the deep-validation walk re-records each visited memo's durability minimum at
+  the early-cutoff bump. Without that, opening a file is an equal-value downgrade from HIGH to LOW
+  that re-records only the recomputing bottom of the chain. Every value-stable ancestor would keep
+  its stale HIGH record, the next keystroke would be invisible to its fast path, and a stale read
+  would be served as green. A live probe caught this during implementation, and
+  `durability_downgrade_flushes_through_cutoff_nodes` pins it.
+- **The winner index is the IDE shape.** The value of `PackageSymbolIndex` is a `NamesGlobal`,
+  borrowed per request through a `Shared` clone and never rebuilt. `DefiningItem` projects through
+  it.
+- **Completion reads one fold.** A per-file `CompletionExports` holds label, kind and callability
+  entries that stay value-equal across body edits, and they fold into `PackageCompletionIndex`.
+  `generic::completion` takes the entries as an explicit parameter, so the engine passes the memo
+  and the from-scratch path builds them per request.
+- **Preemption pairing is lossless.** The worker resets `idle_interrupt` before each empty poll and
+  the frontend flags after it sends. Every interleaving either delivers the job to the poll or
+  leaves the flag set for the unit's next cancellation check.
 
-# Decision record: is.null shaping of unconstrained inference variables
+Correctness: behavior is unchanged, the IDE differential is green, and the downgrade staleness
+class is structurally closed and unit-pinned. Simplicity: one new concept in the core, two new
+queries, and one deleted per-request synthesis path. Performance at 281k lines of code across 30k
+files, given at rest and then after a keystroke: hover went from 5.3 ms to 0.010 ms and from 142 ms
+to 44 ms, completion from 95 ms to 26.5 ms and from 228 ms to 90 ms, definition from 5.4 ms to
+0.032 ms and from 108 ms to 20 ms. Per-edit diagnostics went from 121 ms to 91 ms and a cold run
+from 13.5 s to 9.0 s, which also removed the per-inference clone of the type definition
+environment. Incremental analysis: the per-keystroke walk no longer touches an unopened file's
+chain at all. The committed witnesses bound an at-rest read to 32 memos and a post-keystroke walk
+to 12 per file. `backlog.md` records the deferred lever, which is a durable sub-fold plus an
+open-file overlay to drop the fold-edge walk to the number of open files.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+# Decision record: `is.null` shapes an unconstrained inference variable
 
-Previous shape: at an `if (is.null(x)) fallback else x` join with `x` and `fallback` both unbound inference variables, the join unified the two variables (the type model deliberately never invents a union *for* a variable — a long-standing HM-speed decision). `or_else(NULL, "text")` then bound the single variable to `NULL` from the first argument and rejected the second: a false positive on the coalesce/or-default idiom, previously recorded as a structural design tension with annotation as the workaround.
+At an `if (is.null(x)) fallback else x` join where `x` and `fallback` are both unbound inference
+variables, the join used to unify the two variables. The type model deliberately never invents a
+union for a variable, which is a long-standing decision that keeps inference fast. `or_else(NULL,
+"text")` then bound the single variable to `NULL` from the first argument and rejected the second.
+That is a false positive on the coalesce idiom, and it was recorded as a structural design tension
+whose workaround was to annotate.
 
-Chosen shape: **the guard itself carries the missing information, so consume it.** In `condition_refinement`, when the recognized predicate is `is.null` and the guarded local slot resolves to a *completely unconstrained* inference variable `A` (entry `Unbound`, constraint `Unconstrained`), bind `A := T | NULL` for a fresh `T` — a union shape the model already supports from annotations (`@param x {T | NULL}` produces exactly it) — and let the existing member filtering narrow the edges. No new type form, no deferred unions, no join special-casing: the coalesce body then joins `fallback` with the narrowed `T`, generalizing to `<T> fn(value: T | NULL, fallback: T) -> T`, byte-identical to the verified-clean annotated form. Negated guards work through the existing edge swap; constrained variables (a numeric bound contradicts a NULL member) and rigid/declared parameters (the annotation is the contract) are never reshaped.
+The guard itself carries the missing information, so the fix is to consume it. In
+`condition_refinement`, when the recognized predicate is `is.null` and the guarded local slot
+resolves to a completely unconstrained inference variable `A`, meaning entry `Unbound` and
+constraint `Unconstrained`, bind `A := T | NULL` for a fresh `T`. The model already supports that
+union shape from annotations, because `@param x {T | NULL}` produces exactly it, and the existing
+member filtering then narrows the edges. There is no new type form, no deferred union and no join
+special case. The coalesce body joins `fallback` with the narrowed `T` and generalizes to
+`<T> fn(value: T | NULL, fallback: T) -> T`, which is byte-identical to the verified-clean
+annotated form. A negated guard works through the existing edge swap. A constrained variable is
+never reshaped, because a numeric bound contradicts a `NULL` member, and neither is a rigid or
+declared parameter, because there the annotation is the contract.
 
-Deliberate consequence, pinned as a fixture: testing a parameter for `NULL` and then using it *unguarded* afterwards is now a genuine finding (`if (is.null(x)) 0L else 1L; x + 1L` errors) — the test declared `NULL` a possible inhabitant, and the annotated form of the same code already behaved this way, so the model is now consistent rather than lenient-when-unannotated.
+One consequence is deliberate and pinned as a fixture. Testing a parameter for `NULL` and then
+using it unguarded afterwards is now a genuine finding, so `if (is.null(x)) 0L else 1L; x + 1L`
+errors. The test declared `NULL` a possible inhabitant, and the annotated form of the same code
+already behaved this way, so the model is now consistent rather than lenient when unannotated.
 
-Impact: correctness — kills the last recorded idiom false positive from the sweep, with zero regressions across every fixture suite and the realworld corpus (no expectation changed anywhere else); simplicity — ~20 lines in one function, reusing the union machinery end to end; performance — one extra variable + union per shaped guard, negligible; incremental analysis — unaffected (a per-file inference detail).
+Correctness: this removes the last recorded idiom false positive from the sweep, with no
+regressions across any fixture suite or the real-world corpus, and no expectation changed anywhere
+else. Simplicity: about twenty lines in one function, reusing the union machinery end to end.
+Performance: one extra variable and union per shaped guard, which is negligible. Incremental
+analysis: unaffected, because this is a per-file inference detail.
 
-# Decision record: data-masked NSE resolution (data.table / with-family)
+# Decision record: data-masked resolution for data.table and the with-family
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; user-reported pain: data.table code drowned in could-not-resolve warnings).
+Every bare name in `DT[region == "west", .(total = sum(amount)), by = product]` used to fail
+lexical resolution and produce a could-not-resolve warning, plus type errors from the base
+index-arity rules. data.table evaluates `i`, `j` and `by` in the data's own frame. This is the same
+false-positive class that R CMD check and lintr hit on code that uses non-standard evaluation. `:=`
+lowered to `Unsupported`, which hid its operands from the IDE entirely. A user reported the pain
+directly, because data.table code drowned in could-not-resolve warnings.
 
-Previous shape: every bare name in `DT[region == "west", .(total = sum(amount)), by = product]` failed lexical resolution and produced a could-not-resolve warning (plus type errors from the base index-arity rules), because data.table evaluates i/j/by in the data's own frame — the same false-positive class R CMD check and lintr hit on NSE code. `:=` lowered to `Unsupported`, hiding its operands from the IDE entirely.
+The shape now recognizes a mask structurally in the naming walk and suppresses the diagnostic at
+the emission edge.
 
-Chosen shape — structural mask recognition in the naming walk, diagnostic suppression at the emission edge:
-- Two recognizers set a mask depth during resolution: a `[` bracket whose arguments carry an unambiguous data.table signature (`by =`/`keyby =` argument names; `:=` or `.()` calls; `.SD`/`.N`/`.I`/`.BY`/`.GRP`/`.EACHI` symbols — none of which occur in base indexing, so `m[i, j]` is untouched), and the base masking family `with`/`within`/`subset`/`transform` (callee not locally shadowed), which masks arguments after the data.
-- A read that fails lexical resolution inside a mask is recorded in `NamesLocal.masked_reads` **in addition to** `non_locals` — masked names still resolve stubs and package globals normally (a `sum` in `j` keeps its scheme; the first design that kept masked reads out of `non_locals` lost stub typing and was revised). Both could-not-resolve emitters (the analysis package pass and the engine's per-file query) skip masked ids; the typecheck fallthrough for unresolved non-locals was already silent `Unknown` with no strict origin.
-- The recognized bracket itself lands in `NamesLocal.masked_subsets` and types as silent `Unknown` before the base index-arity rules (`[.data.table` returns shapes those rules must not judge).
-- `:=` now lowers as an ordinary binary call so its operands stay visible to naming, hover, and the mask.
+- Two recognizers set a mask depth during resolution. The first is a `[` bracket whose arguments
+  carry an unambiguous data.table signature: a `by =` or `keyby =` argument name, a `:=` or `.()`
+  call, or one of the `.SD`, `.N`, `.I`, `.BY`, `.GRP` and `.EACHI` symbols. None of those occur in
+  base indexing, so `m[i, j]` is untouched. The second is the base masking family `with`, `within`,
+  `subset` and `transform`, whose callee must not be locally shadowed, and which masks the
+  arguments after the data.
+- A read that fails lexical resolution inside a mask is recorded in `NamesLocal.masked_reads` in
+  addition to `non_locals`. A masked name still resolves stubs and package globals normally, so a
+  `sum` in `j` keeps its scheme. The first design kept masked reads out of `non_locals` and lost
+  stub typing, so it was revised. Both could-not-resolve emitters skip masked ids, which are the
+  analysis package pass and the engine's per-file query. The typecheck fallthrough for an
+  unresolved non-local was already a silent `Unknown` with no strict origin.
+- The recognized bracket itself lands in `NamesLocal.masked_subsets` and types as a silent
+  `Unknown` before the base index-arity rules run, because `[.data.table` returns shapes those
+  rules must not judge.
+- `:=` lowers as an ordinary binary call, so its operands stay visible to naming, to hover and to
+  the mask.
 
-Deliberately NOT silenced: anything that resolves (locals, stubs, globals) keeps full checking inside masks; base indexing keeps lexical resolution and its warnings. Strict mode stays silent on masked column reads — NSE is a recognized dynamic construct with intended semantics, not an unmodeled hole. Future extension recorded in the backlog: honor `utils::globalVariables()` and generalize the mask marker into `.Rtypes` stub syntax so dplyr verbs can declare masked parameters.
+Some things are deliberately not silenced. Anything that resolves keeps full checking inside a
+mask, which covers locals, stubs and globals. Base indexing keeps lexical resolution and its
+warnings. Strict mode stays silent on a masked column read, because non-standard evaluation is a
+recognized dynamic construct with intended semantics rather than an unmodelled hole. The backlog
+records the extension: honor `utils::globalVariables()`, and generalize the mask marker into
+`.Rtypes` stub syntax so a dplyr verb can declare a masked parameter.
 
-Impact: correctness — kills the dominant NSE false-positive class with zero regressions (all suites; base-R control fixtures pin the non-masked behavior); simplicity — one mask-depth integer and two sets on the existing naming result, suppression at the existing emission edges; performance — a shallow per-bracket marker scan, negligible; incremental analysis — unaffected (per-file naming facts).
+Correctness: this removes the dominant non-standard-evaluation false-positive class with no
+regressions across the suites, and base-R control fixtures pin the non-masked behavior. Simplicity:
+one mask-depth integer and two sets on the existing naming result, with suppression at the existing
+emission edges. Performance: a shallow per-bracket marker scan, which is negligible. Incremental
+analysis: unaffected, because these are per-file naming facts.
 
-# Decision record: monomorphic recursion for function-valued assignments (letrec typing)
+# Decision record: recursion in a function-valued assignment is monomorphic
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). The naming half (a closure RHS sees its own target binding) landed separately; this is the typing half.
+The recursive read inside `fact <- function(k) ... fact(k - 1L) ...` resolved to a slot with no
+environment entry yet, so it typed as a silent `Unknown`. The recursion contributed nothing to the
+function's scheme, and a bad recursive signature went unnoticed. The naming half, where a closure
+right-hand side sees its own target binding, landed separately. This record is the typing half.
 
-Previous shape: the recursive read inside `fact <- function(k) ... fact(k - 1L) ...` resolved (post-naming-fix) to a slot with no environment entry yet, typing as silent `Unknown` — the recursion contributed nothing to the function's scheme and bad recursive signatures went unnoticed.
+The shape is the classic `let rec` rule, scoped to a function-valued assignment. Before the
+right-hand side is inferred, the target slot is pre-bound to a fresh inference variable created
+inside the binding's generalization level. The body's recursive reads unify against it, and the
+variable then unifies with the inferred function type. Recursion is monomorphic, so every recursive
+use shares one instantiation. Polymorphic recursion is undecidable in general and is not supported.
+The rule applies on the local-assignment path in both context and context-less inference, and a
+fixture driver pre-binds the global slot.
 
-Chosen shape — the classic `let rec` rule, scoped to function-valued assignments: before inferring the RHS, the target slot is pre-bound to a fresh inference variable (created inside the binding's generalization level); the body's recursive reads unify against it; the variable then unifies with the inferred function type. Recursion is **monomorphic** (all recursive uses share one instantiation; no polymorphic recursion — undecidable in general). Applied on the local-assignment path in both context and context-less inference (fixture drivers pre-bind the global slot). One subtlety: the top-level package-winner path writes the final generalized scheme to the global entry while `exported_value_schemes` reads the per-site *local* entry first — the pre-bound placeholder must be overwritten there too, or cross-file consumers see a dangling variable as `Unknown` (caught by the project-suite fixtures; the winner path now writes both entries).
+One subtlety matters. The top-level package-winner path writes the final generalized scheme to the
+global entry, while `exported_value_schemes` reads the per-site local entry first. The pre-bound
+placeholder must be overwritten in the local entry too, or a cross-file consumer sees a dangling
+variable as `Unknown`. The project-suite fixtures caught this, and the winner path now writes both
+entries.
 
-Deliberate scope limits, pinned by fixtures: `<<-`-defined recursion keeps the silent-`Unknown` behavior (rare; the enclosing-slot join semantics make a placeholder ambiguous); mutual recursion between two local closures stays a loud unresolved reference on the earlier-defined one (letrec visibility is per binding, not per block — full block-letrec is a recorded possible extension); top-level mutual recursion already resolves through the package interface fixed point, whose oscillation guard pins genuinely cyclic schemes to `Unknown`. Strict attribution for top-level recursion whose converged scheme retains `Unknown` (an origin on the binding) remains the open part (b) in the backlog — it needs identical attribution in both pipelines to keep the differential byte-exact.
+Three scope limits are deliberate and pinned by fixtures. Recursion defined with `<<-` keeps the
+silent `Unknown` behavior, because it is rare and the enclosing-slot join semantics make a
+placeholder ambiguous. Mutual recursion between two local closures stays a loud unresolved
+reference on the earlier-defined one, because letrec visibility is per binding and not per block. A
+full block letrec is a recorded possible extension. Top-level mutual recursion already resolves
+through the package interface fixed point, whose oscillation guard pins a genuinely cyclic scheme
+to `Unknown`.
 
-Impact: correctness — recursive helpers get real schemes and violations of recursively-inferred signatures are caught (`countdown("not an integer")` errors; previously silent); the polymorphic-identity and cross-file suites pin zero regressions; simplicity — one pre-bind + one unify on the existing assignment path; performance — one extra variable per function-valued assignment, negligible.
+Strict attribution for top-level recursion whose converged scheme retains `Unknown` is the open
+part, and the backlog records it. It needs an origin on the binding.
 
-# Decision record: bare-name resolution stays ungated by NAMESPACE imports
+Correctness: a recursive helper gets a real scheme, and a violation of a recursively inferred
+signature is caught, so `countdown("not an integer")` errors where it was previously silent. The
+polymorphic-identity and cross-file suites pin that nothing regressed. Simplicity: one pre-bind and
+one unify on the existing assignment path. Performance: one extra variable per function-valued
+assignment, which is negligible.
 
-**Status:** decided (agent-owned decision under the delegated ownership mandate); the full import model stays post-beta.
+# Decision record: bare-name resolution is not gated on NAMESPACE imports
 
-The fork: should a bare name resolving only via the stub corpus (`median` → the stats stub) require the package to import it (`importFrom(stats, median)` / `library(stats)`), or resolve unconditionally?
+The fork was this. Should a bare name that resolves only through the stub corpus, such as `median`
+against the stats stub, require the package to import it with `importFrom(stats, median)` or
+`library(stats)`, or should it resolve unconditionally?
 
-Decision: **unconditional resolution against the shipped corpus is correct, not a shortcut.** The shipped namespaces — base, stats, utils, methods, graphics, grDevices — are exactly the packages R attaches in every default session, so a bare `median` genuinely resolves at run time in the environments R code actually runs in. Project `.Rtypes` stubs are explicitly user-authored: writing one declares "my project uses these names" — gating them on NAMESPACE entries would only make the user say the same thing twice. What NAMESPACE gating would really buy — per-file visibility for *non-default* packages, masking warnings, `library()` attach ordering — requires the full import model (typing-design §6), which remains post-beta; when that lands, gating falls out of it naturally rather than being bolted on ahead of it. Until then, the NAMESPACE surface stays what it is today: import validation (typo detection against the corpus) and the opt-in `unused-import` lint.
+Unconditional resolution against the shipped corpus is correct, and it is not a shortcut. The
+shipped namespaces are base, stats, utils, methods, graphics and grDevices. R attaches exactly
+those in every default session, so a bare `median` genuinely resolves at run time in the
+environments R code actually runs in. A project `.Rtypes` stub is user-authored, and writing one
+already declares that the project uses those names. Gating on NAMESPACE entries would make the user
+say the same thing twice.
 
-Impact: no behavior change — this closes the fork by ratifying the current shape and pointing the future work at the import model.
+What NAMESPACE gating would really buy is per-file visibility for a non-default package, masking
+warnings, and `library()` attach ordering. All three need the full import model, which stays after
+the beta. Gating falls out of that model naturally, so bolting it on first would be wasted work.
+Until then the NAMESPACE surface stays what it is today: import validation, which detects a typo
+against the corpus, and the opt-in `unused-import` lint.
 
-# Decision record: top-level mutual recursion as whole-file letrec groups; self-recursion stays tolerant
+This record changes no behavior. It closes the fork by ratifying the current shape and pointing the
+future work at the import model.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+# Decision record: top-level mutual recursion forms whole-file letrec groups
 
-Previous shape: any top-level recursion — self or mutual — resolved through the package interface fixed point starting members at `Unknown`, and arithmetic/joins over `Unknown` cannot sharpen, so every recursive function exported an `Unknown`-flavored scheme; an annotated consumer (`#: logical` on `is_even(4L)`) false-errored `expected logical, found Unknown`.
+Any top-level recursion, whether self or mutual, used to resolve through the package interface
+fixed point with members starting at `Unknown`. Arithmetic and joins over `Unknown` cannot sharpen,
+so every recursive function exported an `Unknown`-flavored scheme. An annotated consumer then false
+errored, so `#: logical` on `is_even(4L)` reported `expected logical, found Unknown`.
 
-Chosen shape, in two deliberate halves:
-- **Mutual groups (≥ 2 members) are letrec groups.** A module pre-pass detects candidates (top-level function-valued assignments, last writer per symbol), overapproximates reference edges by source-range containment, and pre-binds every member on a *mutual* cycle to a fresh variable **one level below module scope** — the load-bearing subtlety: unification level-adjusts the group's shared variables up to the placeholders' level, so if the placeholders sat at module level, finalization's generalize would quantify nothing and the export would carry a *free* variable, which `import_scheme` on a consuming document erases to `Unknown` (found empirically: the producer's table was perfect while consumers saw `Unknown`). Members stay monomorphic through the module walk (siblings constrain each other), then one finalization pass exits the group level, defaults escaping numerics, generalizes each member, and rebinds both its environment keys. `is_even`/`is_odd` now exports `<T: numeric> fn(n: T) -> logical` and consumers check.
-- **Pure self-recursion at top level keeps the tolerant fixed point.** A first implementation applied letrec to self-loops too — and the realworld corpus immediately caught the cost: the idiomatic tree fold (`if (is.list(x)) sum(sapply(x, sum_leaves)) else x`) needs the recursive type `T = double | list[T]`, which HM cannot express; monomorphic recursion pinned the parameter to `double` and the nested-list call site false-errored. The old `Unknown` is load-bearing gradual tolerance for exactly this shape, so self-loops are excluded on purpose (the earlier whole-file variant also made every top-level function monomorphic in-file, breaking polymorphic reuse — `mirror(1L); mirror("x")` — which is why the scope is cycles, not all definitions).
+The shape has two deliberate halves.
 
-Fixtures pin all three behaviors with the rationale in-file: the typed mutual pair (project + context-less), the tolerant self-recursive package function, and the tree fold staying clean. Local (in-function) recursion is typed by the per-assignment letrec from the earlier slice; both pipelines share `check_module_with_naming`, so differential parity held with no pipeline-specific code.
+**A mutual group of two or more members is a letrec group.** A module pre-pass detects candidates,
+which are top-level function-valued assignments taking the last writer per symbol. It
+overapproximates reference edges by source-range containment and pre-binds every member on a mutual
+cycle to a fresh variable one level below module scope. That level is the load-bearing subtlety.
+Unification adjusts the group's shared variables up to the placeholders' level, so placeholders at
+module level would make finalization's generalize quantify nothing, and the export would carry a
+free variable. `import_scheme` on a consuming document erases a free variable to `Unknown`. This
+was found empirically, where the producer's table was perfect while consumers saw `Unknown`.
+Members stay monomorphic through the module walk, so siblings constrain each other. One
+finalization pass then exits the group level, defaults escaping numerics, generalizes each member,
+and rebinds both of its environment keys. `is_even` and `is_odd` now export
+`<T: numeric> fn(n: T) -> logical`, and a consumer checks against it.
 
-Impact: correctness — mutual recursion (previously always `Unknown` + consumer false positives) now types precisely, with zero regressions across every suite and the corpus; simplicity — one pre-pass, one finalization, a shared member map; performance — a per-module candidate scan bounded by arena size, negligible. Open remainder recorded in the backlog: strict attribution for the deliberately-`Unknown` self-recursive schemes.
+**Pure self-recursion at top level keeps the tolerant fixed point.** A first implementation applied
+letrec to a self-loop too, and the real-world corpus immediately caught the cost. The idiomatic
+tree fold `if (is.list(x)) sum(sapply(x, sum_leaves)) else x` needs the recursive type
+`T = double | list[T]`, which Hindley-Milner cannot express. Monomorphic recursion pinned the
+parameter to `double`, and the nested-list call site false errored. The old `Unknown` is
+load-bearing gradual tolerance for exactly this shape, so a self-loop is excluded on purpose. An
+earlier whole-file variant also made every top-level function monomorphic within the file, which
+broke polymorphic reuse such as `mirror(1L); mirror("x")`. That is why the scope is cycles rather
+than all definitions.
 
-# Decision record: parse trees are not memo values (rope-only corpus inputs, on-demand trees)
+Fixtures pin all three behaviors and carry the rationale in the file: the typed mutual pair in both
+the project and the context-less form, the tolerant self-recursive package function, and the tree
+fold staying clean. Local recursion inside a function is typed by the per-assignment letrec. Both
+pipelines share `check_module_with_naming`, so no pipeline-specific code was needed.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+Correctness: mutual recursion was always `Unknown` and caused consumer false positives. It now
+types precisely, with no regressions across any suite or the corpus. Simplicity: one pre-pass, one
+finalization and a shared member map. Performance: a per-module candidate scan bounded by arena
+size, which is negligible. The backlog records the open remainder, which is strict attribution for
+the deliberately `Unknown` self-recursive schemes.
 
-Previous shape / source of truth: the `SourceText(f)` engine input WAS the parsed document (rope + tree-sitter tree) for every workspace file, and a `Parse(f)` query projected it. Measured at 302K LoC (`roughly debug analysis-stats`, which now reports per-phase resident-set growth exactly for this kind of diagnosis): ~398 MiB of the ~1 GiB peak was trees retained for files nobody edits (~60× the source bytes), and the server parsed the whole workspace synchronously at load.
+# Decision record: a parse tree is not a memo value
 
-Chosen shape: a tree is a pure function of the text, so it never lives in an engine value. `SourceText` carries the rope plus an *optional* tree — open documents carry the host's incrementally-maintained tree (a keystroke still never re-parses), the corpus is rope-only — and `Key::Parse` is gone. Tree-consuming bodies (lowering, lint) and hosts call `RoughlyQueries::document_for`, which uses the input's tree or parses on demand into a small LRU (16 entries; served only when the cached rope equals the input's rope, so staleness is unrepresentable). Text-only consumers (LSP range encoding, annotation re-lexing, suppression scanning) read the rope and never materialize a tree. Whole-project IDE scans stay fast without resident trees via two `IdeDatabase` seams: `document_rope` (annotation scans re-lex text only) and `candidate_document_ids` (a conservative rope-substring prefilter — an identifier or S4 string spelled `name` implies `name` appears in the text), so references/rename/S4 navigation parse only documents that textually mention the target; the engine IDE view primes ropes and candidate trees per feature, and point queries keep their constant at-rest prime scope (benchmark witness).
+The `SourceText(f)` engine input used to be the parsed document, holding a rope and a tree-sitter
+tree, for every workspace file. A `Parse(f)` query projected it. Measured at 302k lines of code
+with `ry debug analysis-stats`, which reports per-phase resident-set growth for exactly this kind
+of diagnosis, about 398 MiB of the roughly 1 GiB peak was trees retained for files nobody edits.
+That is about sixty times the source bytes. The server also parsed the whole workspace
+synchronously at load.
 
-Also fixed in the same slice: `LoweringResult` holds its module behind `Rc` and the engine's `Lower` projects that pointer via `Stored::from_shared` (each HIR retained once, was twice), and `Expression` boxes its rare attached annotation (256 → 136 bytes per arena node).
+A tree is a pure function of the text, so it never lives in an engine value. `SourceText` carries
+the rope plus an optional tree. An open document carries the host's incrementally maintained tree,
+so a keystroke still never re-parses, and the corpus is rope-only. `Key::Parse` is gone. A
+tree-consuming body, such as lowering or lint, and a host alike call `RoughlyQueries::document_for`,
+which uses the input's tree or parses on demand into a small LRU of sixteen entries. The LRU serves
+an entry only when the cached rope equals the input's rope, so staleness is unrepresentable. A
+text-only consumer reads the rope and never materializes a tree, which covers LSP range encoding,
+annotation re-lexing and suppression scanning.
 
-Impact: correctness — unchanged, all differential suites byte-exact; simplicity — one query fewer, one honest ownership story for trees; performance — peak resident set 1014 → 294 MiB at 302K LoC, workspace load no longer parses anything (parsing spreads into the background prime), per-keystroke behavior unchanged; incremental analysis — dependencies unchanged (bodies record the same `SourceText` read). Known cost: the first workspace-symbols query and cold `references` on extremely common names re-parse candidates on demand (bounded by the LRU; per-file symbol items stay cached across requests).
+A whole-project IDE scan stays fast without resident trees through two `IdeDatabase` seams.
+`document_rope` lets an annotation scan re-lex text only. `candidate_document_ids` is a
+conservative rope-substring prefilter, because an identifier or S4 string spelled `name` implies
+`name` appears in the text. References, rename and S4 navigation therefore parse only documents
+that textually mention the target. The engine IDE view primes ropes and candidate trees per
+feature, and a point query keeps its constant at-rest prime scope, which a benchmark witnesses.
 
-# Decision record: all-files folds split into durable sub-fold + open-file overlay (OpenFiles input)
+Two memory fixes landed with it. `LoweringResult` holds its module behind an `Rc` and the engine's
+`Lower` projects that pointer through `Stored::from_shared`, so each HIR is retained once instead
+of twice. `Expression` boxes its rare attached annotation, which took an arena node from 256 bytes
+to 136.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; this was the recorded deferred lever, now confirmed by measurement).
+Correctness: unchanged, and all differential suites stayed byte-exact. Simplicity: one query fewer,
+and one honest ownership story for trees. Performance: the peak resident set went from 1014 MiB to
+294 MiB at 302k lines of code, workspace load parses nothing because parsing spreads into the
+background prime, and per-keystroke behavior is unchanged. Incremental analysis: dependencies are
+unchanged, because bodies record the same `SourceText` read. The known cost is that the first
+workspace-symbols query, and a cold `references` on an extremely common name, re-parse candidates
+on demand. The LRU bounds that, and per-file symbol items stay cached across requests.
 
-Previous shape: every all-files fold (symbol index, completion index, declared globals, type definitions, type index, both candidate orders) recorded one dependency edge per package file, so each keystroke's validation deep-walked every fold: ~11,200 memo visits per keystroke at 1248 files, growing linearly (measured by the analysis-stats typing probe, which now prints per-keystroke recompute counts and walk attribution).
+# Decision record: an all-files fold splits into a durable sub-fold and an open-file overlay
 
-Chosen shape: a new `OpenFiles` input (sorted file ids; a *defaulted* input — unset executes to the empty set, so headless hosts and tests need no change) splits each fold into (a) a durable sub-fold over non-open files, keyed by `ProjectFiles` position, which reads no LOW input and therefore greens in O(1) per keystroke via the durability fast path, and (b) the public fold, which merges the durable half with the open files' per-file values by position — replaying path-order last-writer-wins byte-identically. The split is value-identical for ANY `OpenFiles` contents (a misclassified file merely lands in the other half), so it is a pure performance seam; the host invariant is that it lists exactly the LOW-durability `SourceText` files (the server derives both from `open_documents` in one funnel). The engine memo table and cycle set hash with FxHash in the same slice (query keys are small integers; the walk hashes twice per visited slot).
+Every all-files fold recorded one dependency edge per package file. That covers the symbol index,
+the completion index, declared globals, type definitions, the type index and both candidate orders.
+Each keystroke's validation therefore deep-walked every fold, which measured about 11,200 memo
+visits per keystroke at 1248 files and grew linearly. The analysis-stats typing probe measured it,
+and it now prints per-keystroke recompute counts and walk attribution.
 
-Impact: correctness — unchanged (differential suites; fold values byte-identical by construction); performance — per-keystroke validation walk 11,244 → 278 slots and size-independent (equal at 1248 and 2496 files; the benchmark witness pins equality at 100 vs 300 files), keystroke median 6.7 → 4.9 ms at 302K LoC with recompute counts unchanged; simplicity — seven mechanical durable/public pairs with one shared pattern; incremental analysis — the open/close transition is a rare HIGH change that revalidates once, exactly like the existing durability downgrade.
+A new `OpenFiles` input holds sorted file ids. It is a defaulted input, so an unset input executes
+to the empty set and a headless host or a test needs no change. Each fold splits in two.
 
-# Decision record: same-file backward references never route through the interface (walk-shadowed imports dropped)
+- A durable sub-fold runs over non-open files, keyed by `ProjectFiles` position. It reads no LOW
+  input, so it greens in constant time per keystroke through the durability fast path.
+- The public fold merges the durable half with the open files' per-file values by position. It
+  replays path-order last-writer-wins byte-identically.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Found by a real 697K-LoC workspace report through `analysis-stats`: typecheck was 95% of a 300-second cold pass, one 170-LoC file took 4.9s, and a keystroke in an 18.5K-LoC class file took 16s.
+The split is value-identical for any contents of `OpenFiles`, because a misclassified file merely
+lands in the other half. It is therefore a pure performance seam. The host invariant is that
+`OpenFiles` lists exactly the LOW-durability `SourceText` files, and the server derives both from
+`open_documents` in one funnel. The engine memo table and cycle set hash with FxHash, because query
+keys are small integers and the walk hashes twice per visited slot.
 
-Previous shape / structural weakness: `infer_file` imported an interface scheme for *every* referenced package global — including symbols defined in the very file being inferred — and `InterfaceDeps` edges were file-granular. But the typecheck walk's winner path rebinds a symbol's global environment entry with the freshly inferred scheme at its defining assignment, so for any reference that first reads *after* that assignment ends, the imported scheme was provably shadowed dead weight. Its only observable effect was the dependency edge — which made every same-file reference chain (`h1` calls `h0`, `h2` calls `h1`, …, the dominant shape of real R packages) a fake mutual SCC: per-symbol Tarjan over a clique (~O(n²·r·log n) fetches per file) plus a fixed point re-inferring the whole file per round. A 150-LoC chain file cost 387ms; large hub files scaled worse than quadratically.
+Correctness: unchanged. The differential suites cover it, and fold values are byte-identical by
+construction. Performance: the per-keystroke validation walk went from 11,244 slots to 278 and is
+now size-independent. It is equal at 1248 and 2496 files, and the benchmark witness pins equality
+at 100 against 300 files. The keystroke median went from 6.7 ms to 4.9 ms at 302k lines of code
+with recompute counts unchanged. Simplicity: seven mechanical durable and public pairs sharing one
+pattern. Incremental analysis: an open or close transition is a rare HIGH change that revalidates
+once, exactly like the existing durability downgrade.
 
-Chosen shape: classify each referenced same-file-winner symbol by byte order — **walk-shadowed** (its last top-level assignment, the export/winner site, ends before its earliest non-local read starts) vs **forward** (anything else: self-recursion inside the defining range, forward references from earlier bodies, reads between repeated writes). Walk-shadowed symbols are not imported and contribute no `InterfaceDeps` edge (`walk_shadowed_definitions` in the engine's query layer, used identically by `infer_file` and `interface_deps` — the edge set must exactly mirror the fetch set or a genuine cycle would slip past the SCC routing into the accidental-cycle guard). Forward symbols keep today's exact interface path, including the deliberate self-recursion tolerance and the mutual-group letrec semantics. Semantics are unchanged by construction: a walk-shadowed import could never be observed (every read happens after the rebinding), so production needs no change and the differential stays byte-exact — verified by the full suite and pinned by a new counter witness (`backward_reference_chain_stays_off_the_interface_scc`).
+# Decision record: a same-file backward reference never routes through the interface
 
-In the same slice: a script's type-definition environment now overlays its own declarations on the memoized `PackageTypeDefinitions` clone (`TypeDefinitionEnvironment::extend_from_module`) instead of rebuilding from every package module's view — the rebuild recorded one edge per package file per script, an O(scripts × package files) cold cost and revalidation walk (2057 scripts × 503 files in the reporting workspace).
+A real 697k-line workspace report through `analysis-stats` found this. Typecheck was 95% of a
+300-second cold pass, one 170-line file took 4.9 s, and a keystroke in an 18.5k-line class file
+took 16 s.
 
-Impact: correctness — none (shadowed-import proof; all 36 suites green); performance — the chain-file pathology drops ~100× (387ms → 3.9ms at 150 LoC), a hub-shaped 59K-LoC workspace (1500-function hub + 300 chained files + 1500 scripts) cold-passes in 3.8s, keystrokes in hub files cost ~one authoritative re-inference of that file; simplicity — one classification helper, two consumers; incremental analysis — InterfaceDeps/SymbolScc graphs shrink to genuine cycles, collapsing the per-keystroke deep-validation of interface memos on hub files.
+`infer_file` imported an interface scheme for every referenced package global, including a symbol
+defined in the very file being inferred, and `InterfaceDeps` edges were file-granular. But the
+typecheck walk's winner path rebinds a symbol's global environment entry with the freshly inferred
+scheme at its defining assignment. For any reference that first reads after that assignment ends,
+the imported scheme was provably shadowed dead weight. Its only observable effect was the
+dependency edge, and that edge made every same-file reference chain a fake mutual strongly
+connected component. A chain where `h1` calls `h0` and `h2` calls `h1` is the dominant shape of a
+real R package. The cost was per-symbol Tarjan over a clique, plus a fixed point that re-inferred
+the whole file per round. A 150-line chain file cost 387 ms, and a large hub file scaled worse than
+quadratically.
 
-# Decision record: one inference per file per revision (Typecheck owns check + exports), and per-name typo-hint memoization
+Each referenced same-file-winner symbol is now classified by byte order.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Found by re-profiling the cold pass with `analysis-stats` after the interface-routing fix: the staged diagnostics phase was 66% of a 10-second cold pass at 302K LoC, and stack sampling attributed nearly all of it to the could-not-resolve typo hint.
+- **Walk-shadowed.** Its last top-level assignment, which is the export and winner site, ends
+  before its earliest non-local read starts.
+- **Forward.** Everything else: self-recursion inside the defining range, a forward reference from
+  an earlier body, and a read between repeated writes.
 
-Previous shape / duplicated work:
-1. `Typecheck(f)` and `ExportedSchemes(f)` each ran `infer_file` — the same whole-file inference, once with expression-type recording for diagnostics and once without for the exports. Every file whose exports were demanded paid two full inferences per revision; a keystroke in an open file paid both on its demand path.
-2. `unresolved_reference_diagnostic` recomputed the "did you mean" hint per reference *occurrence*: a full stub-corpus scan (~530 candidates) with four fresh `Vec` allocations per candidate inside the edit-distance DP. Workspaces that reference many unmodeled library names (the normal case — any codebase using packages without stubs) paid a multi-second cold cost and re-paid it per keystroke per edited file.
-3. `bind_module_letrec_placeholders` computed candidate reference edges by scanning the whole arena once per candidate (O(candidates × arena) per inference — quadratic in file size, on every inference of every file).
-4. `Diagnostics(f)` fetched `Typecheck` before the file-local tree readers, so inference's cross-file scheme chains evicted the file's tree from the bounded parse cache and `Lint` re-parsed the file — a hidden second parse per file on the server's cold prime.
+A walk-shadowed symbol is not imported and contributes no `InterfaceDeps` edge.
+`walk_shadowed_definitions` in the engine's query layer decides it, and `infer_file` and
+`interface_deps` use it identically. The edge set must mirror the fetch set exactly, or a genuine
+cycle would slip past the SCC routing into the accidental-cycle guard. A forward symbol keeps
+today's exact interface path, including the deliberate self-recursion tolerance and the
+mutual-group letrec semantics. Semantics are unchanged by construction, because a walk-shadowed
+import could never be observed: every read happens after the rebinding. Production therefore needs
+no change and the differential stays byte-exact. The full suite verified it, and the counter
+witness `backward_reference_chain_stays_off_the_interface_scc` pins it.
 
-Chosen shape: `Key::Typecheck` stores `FileInference { check: ModuleCheck, exports: Shared<Vec<ExportedValue>> }` from a single recording inference (recording is collection-only — it branches no inference outcome — so folding the exports run into the recording run is differential-safe by construction). `Key::ExportedSchemes` becomes a shared-pointer projection (`Stored::from_shared`) and keeps its role as the value-eq firewall referrers cut off on; when the whole `FileInference` compares equal (same-shape body edits), propagation now stops one level earlier at `Typecheck` itself. The typo hint is split into `unresolved_suggestion` (memoized per unresolved symbol in the query group — the value depends only on the name and the set-once stub corpus) + `unresolved_reference_with_suggestion` (rendering, shared verbatim by both pipelines); `nearest_name` reuses its DP rows and candidate buffer across the whole candidate scan. The letrec edge scan is one arena pass with a binary search over the (disjoint) candidate value ranges. `Diagnostics` fetches the tree-reading file-local queries adjacently before `Typecheck`.
+One related fix landed with it. A script's type-definition environment now overlays its own
+declarations on the memoized `PackageTypeDefinitions` clone, through
+`TypeDefinitionEnvironment::extend_from_module`, instead of rebuilding from every package module's
+view. The rebuild recorded one edge per package file per script, which is a cold cost and a
+revalidation walk proportional to scripts times package files. The reporting workspace had 2057
+scripts and 503 files.
 
-Impact: correctness — unchanged, all differential and fixture suites byte-exact; performance — cold pass at 302K LoC 10.1s → 3.7s (package-naming stage 3.75s → 0.06s, one parse per file instead of two, one inference per file instead of up to two), keystroke median 5.4ms → 1.7ms; memory — +4 MiB at 302K LoC (each file's exports now retained once behind the shared pointer; previously the same data lived in the `ExportedSchemes` memo); simplicity — one inference body instead of two call modes on the demand path; incremental analysis — the `ExportedSchemes` seam's dependencies collapse to one edge (`Typecheck`), and `analysis-stats` now stages lint adjacently and splits the old diagnostics phase into `lint` / `package naming (+folds)` / `diagnostics (render)` so the next regression of this kind is visible at a glance.
+Correctness: no change, by the shadowed-import argument, and all 36 suites are green. Performance:
+the chain-file pathology drops about a hundredfold, from 387 ms to 3.9 ms at 150 lines. A
+hub-shaped 59k-line workspace, meaning a 1500-function hub with 300 chained files and 1500 scripts,
+cold-passes in 3.8 s. A keystroke in a hub file costs about one authoritative re-inference of that
+file. Simplicity: one classification helper and two consumers. Incremental analysis: the
+`InterfaceDeps` and `SymbolScc` graphs shrink to genuine cycles, which collapses the per-keystroke
+deep validation of interface memos on a hub file.
+
+# Decision record: one inference per file per revision, and a memoized typo hint
+
+Re-profiling the cold pass with `analysis-stats` after the interface-routing fix found this. The
+staged diagnostics phase was 66% of a 10-second cold pass at 302k lines of code, and stack sampling
+attributed nearly all of it to the could-not-resolve typo hint.
+
+Four pieces of work were duplicated.
+
+1. `Typecheck(f)` and `ExportedSchemes(f)` each ran `infer_file`. That is the same whole-file
+   inference, once with expression-type recording for diagnostics and once without for the exports.
+   Every file whose exports were demanded paid two full inferences per revision, and a keystroke in
+   an open file paid both on its demand path.
+2. `unresolved_reference_diagnostic` recomputed the did-you-mean hint per reference occurrence.
+   That is a full stub-corpus scan over about 530 candidates, with four fresh `Vec` allocations per
+   candidate inside the edit-distance dynamic program. A workspace that references many unmodelled
+   library names is the normal case for any codebase using packages without stubs, and it paid a
+   multi-second cold cost and re-paid it per keystroke per edited file.
+3. `bind_module_letrec_placeholders` computed candidate reference edges by scanning the whole arena
+   once per candidate. That is quadratic in file size, on every inference of every file.
+4. `Diagnostics(f)` fetched `Typecheck` before the file-local tree readers. Inference's cross-file
+   scheme chains then evicted the file's tree from the bounded parse cache and `Lint` re-parsed the
+   file, which is a hidden second parse per file on the server's cold prime.
+
+The shape now is this. `Key::Typecheck` stores a
+`FileInference { check: ModuleCheck, exports: Shared<Vec<ExportedValue>> }` from a single recording
+inference. Recording is collection-only and branches no inference outcome, so folding the exports
+run into the recording run is safe by construction. `Key::ExportedSchemes` becomes a shared-pointer
+projection through `Stored::from_shared` and keeps its role as the value-equality firewall that
+referrers cut off on. When the whole `FileInference` compares equal, which happens on a same-shape
+body edit, propagation now stops one level earlier at `Typecheck` itself.
+
+The typo hint splits in two. `unresolved_suggestion` is memoized per unresolved symbol in the query
+group, because its value depends only on the name and the set-once stub corpus.
+`unresolved_reference_with_suggestion` renders, and both pipelines share it verbatim.
+`nearest_name` reuses its dynamic-programming rows and its candidate buffer across the whole
+candidate scan. The letrec edge scan is one arena pass with a binary search over the disjoint
+candidate value ranges. `Diagnostics` fetches the tree-reading file-local queries adjacently,
+before `Typecheck`.
+
+Correctness: unchanged, and all differential and fixture suites stayed byte-exact. Performance: the
+cold pass at 302k lines of code went from 10.1 s to 3.7 s, with the package-naming stage from
+3.75 s to 0.06 s, one parse per file instead of two, and one inference per file instead of up to
+two. The keystroke median went from 5.4 ms to 1.7 ms. Memory: 4 MiB more at 302k lines of code,
+because each file's exports are now retained once behind the shared pointer, where the same data
+previously lived in the `ExportedSchemes` memo. Simplicity: one inference body instead of two call
+modes on the demand path. Incremental analysis: the `ExportedSchemes` seam's dependencies collapse
+to one edge, which is `Typecheck`. `analysis-stats` now stages lint adjacently and splits the old
+diagnostics phase into lint, package naming with folds, and diagnostics rendering, so the next
+regression of this kind is visible at a glance.
 
 # Decision record: inference-state data model — dense entry table, hash-keyed hot maps, allocation-free free-variable walks
 
