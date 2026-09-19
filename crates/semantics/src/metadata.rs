@@ -11,15 +11,15 @@
 //! - a whole-namespace `import(pkg)` makes `pkg`'s stub exports known bare
 //!   reads; when no stubs describe `pkg`, its export set is unknowable, so
 //!   every otherwise-unresolved bare read is tolerated rather than guessed
-//!   (zero false positives over typo detection) — except for the project's
-//!   own package, whose exports are the definitions already in view;
+//!   (zero false positives over typo detection). The project's own package is
+//!   the exception, because its exports are the definitions already in view;
 //! - a `pkg::name` read of a namespace the stub corpus does not know is
 //!   tolerated when `pkg` is a declared dependency instead of warning about
 //!   an unknown namespace;
 //! - a **conditional stub namespace** (a shipped stub for a package R does
 //!   not attach by default, e.g. `data.table`) joins the resolution universe
 //!   only when the project declares the package or a file attaches it with a
-//!   `library()`-family call — see [`namespace_active`].
+//!   `library()`-family call. See [`namespace_active`].
 
 use crate::Db;
 use std::collections::BTreeSet;
@@ -27,8 +27,8 @@ use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 /// Import facts from `NAMESPACE` plus the dependency universe from
 /// `DESCRIPTION`. Absent input (no metadata files, single-file analysis)
-/// means no imports and no declared dependencies — resolution behaves exactly
-/// as before metadata existed.
+/// means no imports and no declared dependencies, so resolution behaves
+/// exactly as it did before metadata existed.
 #[salsa::input(singleton, debug)]
 pub struct PackageMetadata {
     /// `(namespace, None)` for `import(pkg)`; `(namespace, Some(name))` for
@@ -42,8 +42,9 @@ pub struct PackageMetadata {
     pub dependencies: BTreeSet<String>,
     /// Namespaces some project file attaches or loads with a
     /// `library()`-family call, unioned by the host from
-    /// [`file_attached_namespaces`] — the activation signal scripts have,
-    /// since only packages carry `DESCRIPTION`/`NAMESPACE` files.
+    /// [`file_attached_namespaces`]. This is the activation signal a script
+    /// has, because only a package carries `DESCRIPTION` and `NAMESPACE`
+    /// files.
     #[returns(ref)]
     pub attached: BTreeSet<String>,
     /// The project's own name, from `DESCRIPTION`'s `Package` field. Attaching
@@ -56,8 +57,9 @@ pub struct PackageMetadata {
 /// Whether a bare read of `name` is satisfied by the package's declared
 /// imports. Exact `importFrom` names always resolve (a typo against known
 /// stubs is already warned at the import site); a whole-namespace import
-/// resolves the namespace's stub exports, or — when no stubs describe the
-/// namespace — any name at all, since the export set is unknowable.
+/// resolves the namespace's stub exports. When no stubs describe the
+/// namespace it resolves any name at all, because the export set is
+/// unknowable.
 pub fn imported_bare(db: &dyn Db, name: &str) -> bool {
     imported_by_name(db, name) || imports_every_name(db)
 }
@@ -81,19 +83,19 @@ pub fn imported_by_name(db: &dyn Db, name: &str) -> bool {
         })
 }
 
-/// Whether the project pulls in a namespace whose export set is unknowable —
-/// a whole-namespace `import(pkg)` or a `library(pkg)` for a package no stub
-/// describes — and so cannot call *any* bare read unresolvable. A blanket
-/// tolerance, deliberately: zero false positives beats typo detection. It is
-/// not absolute, though — see `project_definition_suggestion`, because an
-/// unknown library cannot explain a near-miss of a name the project itself
-/// defines.
+/// Whether the project pulls in a namespace whose export set is unknowable, and
+/// so cannot call *any* bare read unresolvable. A whole-namespace `import(pkg)`
+/// and a `library(pkg)` for a package no stub describes both do that. The
+/// tolerance is blanket and deliberate, because zero false positives beats typo
+/// detection. It is not absolute. `project_definition_suggestion` is the
+/// exception, because an unknown library cannot explain a near-miss of a name
+/// the project itself defines.
 ///
 /// The project's **own** package earns nothing here, even though no stub
-/// describes it: `library(yourpkg)` is what `usethis` writes into
+/// describes it. `library(yourpkg)` is what `usethis` writes into
 /// `tests/testthat.R`, so every testthat package would otherwise lose
-/// unresolved detection entirely — and it is the one export set the checker
-/// already has, since those exports are the project's own definitions.
+/// unresolved detection entirely. It is also the one export set the checker
+/// already has, because those exports are the project's own definitions.
 pub fn imports_every_name(db: &dyn Db) -> bool {
     let Some(metadata) = PackageMetadata::try_get(db) else {
         return false;
@@ -144,16 +146,16 @@ pub fn namespace_active(db: &dyn Db, package: &str) -> bool {
     };
     named(package)
         // A meta-package attaches its members instead of re-exporting them, so
-        // `library(tidyverse)` has to activate them too — that is what puts
+        // `library(tidyverse)` has to activate them too. That is what puts
         // `mutate` within bare reach in R.
         || crate::stubs::META_PACKAGE_MEMBERS
             .iter()
             .any(|(meta, members)| members.contains(&package) && named(meta))
 }
 
-/// The attach union over a file set — how hosts assemble
-/// [`PackageMetadata`]'s attached set at load time (the server maintains it
-/// incrementally afterwards). Forces a parse of every file passed in, so
+/// The attach union over a file set. This is how a host assembles
+/// [`PackageMetadata`]'s attached set at load time, and the server maintains it
+/// incrementally afterwards. Forces a parse of every file passed in, so
 /// hosts call it where the workspace is parsed anyway.
 pub fn attached_union(
     db: &dyn Db,
@@ -169,8 +171,9 @@ pub fn attached_union(
 /// positional argument of `library()` / `require()` / `requireNamespace()` /
 /// `loadNamespace()` calls anywhere in the file, as a bare name or string
 /// literal (a computed name is invisible statically and stays unrecorded).
-/// Purely syntactic — a local binding shadowing `library` is not honored,
-/// which can only over-activate, and activation only ever ADDS resolution.
+/// The rule is purely syntactic. A local binding shadowing `library` is not
+/// honored, which can only over-activate, and activation only ever ADDS
+/// resolution.
 #[salsa::tracked(returns(clone))]
 pub fn file_attached_namespaces(db: &dyn Db, file: crate::SourceFile) -> BTreeSet<String> {
     let parse = crate::parse(db, file);
@@ -390,8 +393,8 @@ pub fn parse_description_package(source: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-/// The `Collate` field's file names in declared order — the package's source
-/// collation. `Collate.unix` applies when plain `Collate` is absent
+/// The `Collate` field's file names in declared order, which is the package's
+/// source collation. `Collate.unix` applies when plain `Collate` is absent
 /// (Windows-only collation is not modeled). Entries are whitespace-separated
 /// and conventionally quoted. Empty when neither field is present.
 pub fn parse_description_collate(source: &str) -> Vec<String> {

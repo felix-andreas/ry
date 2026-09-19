@@ -136,8 +136,9 @@ struct WorkerSeed {
     experimental_features: ExperimentalFeatures,
     /// The developer switch (`ry server --debug`, or `RY_DEBUG=1`):
     /// surfaces internal analysis facts such as the hover debug sections.
-    /// Deliberately NOT a `ry.toml` key — the config file is user-facing
-    /// contract, and this is an aid for people working on ry itself.
+    /// This is deliberately not a `ry.toml` key. The configuration file is
+    /// user-facing contract, and this switch is an aid for people working on ry
+    /// itself.
     debug: bool,
     cancel: CancelHandle,
     idle_interrupt: Arc<AtomicBool>,
@@ -234,8 +235,8 @@ impl ServerState {
     }
 
     /// Input-mutating notifications: flip the cancellation token FIRST so an
-    /// in-flight read abandons, then enqueue. A send failure is
-    /// unrecoverable — the analysis state can no longer mirror the client.
+    /// in-flight read abandons, then enqueue. A send failure is unrecoverable,
+    /// because the analysis state can no longer mirror the client.
     fn notify_edit<F>(&self, build: F) -> ControlFlow<async_lsp::Result<()>>
     where
         F: FnOnce(&mut Worker) + Send + 'static,
@@ -312,7 +313,8 @@ struct Worker {
     /// On-disk file per installed stub source, aligned with the `StubSources`
     /// order: shipped sources point at their materialized cache copies,
     /// project overrides at their real `stubs/*.Rtypes` files. `None` when
-    /// materialization failed — locations degrade, features never fail.
+    /// materialization failed. A location then degrades, and a feature never
+    /// fails.
     stub_source_paths: Vec<Option<PathBuf>>,
     namespace_documents: HashMap<PathBuf, String>,
     /// The DESCRIPTION `Collate` file names, in declared order.
@@ -323,9 +325,9 @@ struct Worker {
     /// Workspace files to warm at idle time; results are never published.
     prime_queue: VecDeque<PathBuf>,
     /// Per-file `library()`-family attach facts, non-empty sets only. Kept
-    /// current per synced/primed file — never by a whole-project sweep, so
-    /// keystroke work stays O(open documents); the idle prime fills in the
-    /// rest of the workspace shortly after startup.
+    /// current per synced or primed file, and never by a whole-project sweep,
+    /// so keystroke work stays proportional to the open documents. The idle
+    /// prime fills in the rest of the workspace shortly after startup.
     attached_by_file: HashMap<PathBuf, std::collections::BTreeSet<String>>,
 }
 
@@ -480,8 +482,9 @@ impl Worker {
     }
 
     /// The current NAMESPACE/DESCRIPTION facts: the open NAMESPACE buffer
-    /// wins over the on-disk file; DESCRIPTION is read from disk (it is not
-    /// a tracked document — saves arrive through the file watcher).
+    /// wins over the on-disk file. DESCRIPTION is read from disk, because it
+    /// is not a tracked document and its saves arrive through the file
+    /// watcher.
     fn current_metadata(&self) -> WorkspaceMetadata {
         let namespace_path = self.workspace_root.join("NAMESPACE");
         let namespace_text = self
@@ -539,7 +542,7 @@ impl Worker {
 
     /// Re-scans ONE file's `library()`-family attach facts (riding the parse
     /// the surrounding sync or prime work forces anyway) and, when the
-    /// project-wide union moved, updates the metadata input — every file's
+    /// project-wide union moved, updates the metadata input. Every file's
     /// resolution universe changes with it, so all diagnostics refresh.
     fn refresh_attached(&mut self, path: &Path) {
         let scanned = match self.files.get(path) {
@@ -653,11 +656,11 @@ impl Worker {
         self.rebuild_project_files();
     }
 
-    /// Recomputes the `ProjectFiles` input: package documents first — in
-    /// DESCRIPTION `Collate` order when declared (unlisted files after the
-    /// listed ones), then ascending by workspace-relative path — then
-    /// scripts; the order the last-writer-wins symbol index and the CLI
-    /// agree on.
+    /// Recomputes the `ProjectFiles` input. Package documents come first, in
+    /// the DESCRIPTION `Collate` order when it is declared, with unlisted files
+    /// after the listed ones, then ascending by workspace-relative path.
+    /// Scripts follow. This is the order the last-writer-wins symbol index and
+    /// the CLI agree on.
     fn rebuild_project_files(&mut self) {
         use salsa::Setter;
         let r_path = self.workspace_root.join("R");
@@ -771,7 +774,8 @@ impl Worker {
     }
 
     /// A deterministic, injective synthetic path for a non-`file:` URI,
-    /// under the workspace root. A pure table key — never read from disk.
+    /// under the workspace root. It is a pure table key and is never read from
+    /// disk.
     fn virtual_document_path(&self, uri: &lsp_types::Url) -> PathBuf {
         let encoded = uri
             .as_str()
@@ -893,8 +897,8 @@ impl Worker {
         }
     }
 
-    /// `utils.Rtypes:12:1`-style location of a stub declaration — the file
-    /// name is enough for a human; goto-definition does the jumping.
+    /// A `utils.Rtypes:12:1`-style location of a stub declaration. The file
+    /// name is enough for a human, and goto-definition does the jumping.
     fn render_stub_source_location(&self, target: ide::StubTarget) -> Option<String> {
         let path = self.stub_source_paths.get(target.source_index)?.as_ref()?;
         let sources = semantics::stubs::StubSources::try_get(&self.db)?;
@@ -1384,8 +1388,8 @@ impl Worker {
     }
 
     fn convert_diagnostic(&self, text: &str, diagnostic: Diagnostic) -> lsp_types::Diagnostic {
-        // The unnecessary tag lets editors render dead code faded — the
-        // conventional presentation for a value no read uses.
+        // The unnecessary tag lets an editor render dead code faded, which is
+        // the conventional presentation for a value no read uses.
         let tags = matches!(
             diagnostic.code,
             "unused" | "unused-parameter" | "unused-import"
@@ -2169,9 +2173,9 @@ impl LanguageServer for ServerState {
     }
 
     /// Format the selection, snapped outwards to whole top-level statements
-    /// and whole lines. R's top-level statements are laid out independently —
-    /// each starts at column zero and nothing above it changes its
-    /// indentation — so formatting that slice alone gives exactly what
+    /// and whole lines. R's top-level statements are laid out independently,
+    /// because each starts at column zero and nothing above it changes its
+    /// indentation. Formatting that slice alone therefore gives exactly what
     /// formatting the whole file would have given for those lines.
     fn range_formatting(
         &mut self,
@@ -2380,8 +2384,8 @@ impl LanguageServer for ServerState {
             // in-flight pull through the marker file, then hold until the
             // edit's cancellation flip lands (bounded by the configured
             // delay). The marker lets the test order its edit strictly after
-            // the pull has started — the flip provably targets this pull's
-            // token, not one a queued job would refresh away.
+            // the pull has started, so the flip provably targets this pull's
+            // token rather than one a queued job would refresh away.
             if let Some(delay) = std::env::var("RY_TEST_DELAY_PULL_MS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
@@ -2536,8 +2540,8 @@ fn empty_full_diagnostic_report() -> lsp_types::DocumentDiagnosticReportResult {
     ))
 }
 
-/// A content hash of the serialized diagnostics — correct under inter-file
-/// dependencies, where a document's own version does not move but its
+/// A content hash of the serialized diagnostics. It stays correct under an
+/// inter-file dependency, where a document's own version does not move but its
 /// diagnostics do.
 fn diagnostics_result_id(diagnostics: &[lsp_types::Diagnostic]) -> String {
     use std::hash::{Hash, Hasher};
@@ -2888,9 +2892,9 @@ fn delta_encode_tokens(
 /// Goto for a type name inside a `.Rtypes` buffer: the `@type NAME`
 /// Writes the embedded shipped stubs to a per-version cache directory so
 /// hover locations and goto-definition have real files to land in (the
-/// sources are compiled into the binary — rust-analyzer materializes sysroot
-/// sources the same way). Any failure degrades that source to "no location";
-/// analysis itself never depends on these files.
+/// sources are compiled into the binary, and rust-analyzer materializes
+/// sysroot sources the same way). Any failure degrades that source to no
+/// location, and analysis itself never depends on these files.
 fn materialize_shipped_stubs(shipped: &[(String, String)]) -> Vec<Option<PathBuf>> {
     let Some(cache) = dirs::cache_dir() else {
         return vec![None; shipped.len()];
