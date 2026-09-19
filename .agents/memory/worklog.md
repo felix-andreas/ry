@@ -1,16 +1,19 @@
 # Work log
 
-One line per autonomous work cycle, newest last. **This is the one file in
-`.agents/memory/` that is deliberately chronological** — the timeless rule that
-governs `MEMORY.md`, `backlog.md` and `decisions.md` does not apply here, so do
-not "fix" it into a knowledge document. Durable facts still belong in those files;
-this only records what happened, so a later session can see the shape of recent
-work without re-reading the git log.
+This file holds one line per autonomous work cycle, newest last.
 
-Format: `YYYY-MM-DD HH:MM — what landed. Loose end, if any.`
+It is the one file in `.agents/memory/` that is deliberately chronological. The timeless rule that
+governs `MEMORY.md`, `backlog.md` and `decisions.md` does not apply here, so do not turn it into a
+knowledge document. A durable fact still belongs in those files. This file only records what
+happened, so a later session can see the shape of recent work without re-reading the git log.
 
-Keep entries to one line. A cycle that found nothing worth doing says so; an empty
-line is more useful than invented work.
+Write an entry as `YYYY-MM-DD HH:MM: what landed. Loose end, if any.`
+
+Keep an entry to one line. A cycle that found nothing worth doing says so, because an empty line is
+more useful than invented work.
+
+Entries written before the project's writing rules landed keep their original wording. They are a
+record of what happened, so they are not rewritten.
 
 ---
 
