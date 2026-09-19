@@ -1,12 +1,23 @@
 # Backlog
 
-**Standing goal (user mandate): empty this list and keep the project at rust-analyzer quality.** The beta program that once organized it is complete; shipped work lives as one-line ledger entries at the bottom (rationale in `decisions.md`, contracts in the docs). Every open item sits in one of the sections below.
+The standing goal, which is a user mandate, is to empty this list and keep the project at
+rust-analyzer quality. Every open item sits in one of the sections below. Shipped work lives as a
+one-line ledger entry at the bottom, with the rationale in `decisions.md` and the contract in the
+docs.
 
-**Quality bar (acceptance):**
-- **Sound on idiomatic R:** no known accepts-then-crashes holes on supported constructs; unsupported constructs may be refused loudly (sound-by-refusal is acceptable) but never silently mistyped.
-- **Zero false positives on the ~200 most-used base functions** with `[check] typing = true` on idiomatic call forms.
-- **Performance:** keystroke-to-diagnostics p50 ≤ 30 ms / p95 ≤ 100 ms at 300k LoC (read against the raw-parse floor the instrument prints — latency numbers swing ~1.4x with machine load); budgets pinned by `stats_witness` (per-line wall/memory/resolve-step ceilings) with the measurement instruments in `legacy/differential/tests/test_stats.rs`.
-- **No server-killing input** (no `unwrap` panics on protocol-legal messages).
+The quality bar is four things.
+
+- **Sound on idiomatic R.** There are no known accepts-then-crashes holes on a supported construct.
+  An unsupported construct may be refused loudly, because sound-by-refusal is acceptable, and must
+  never be silently mistyped.
+- **No false positive on the roughly 200 most-used base functions**, with `[check] typing = true`,
+  on an idiomatic call form.
+- **Keystroke to diagnostics at a median of 30 ms or less and a 95th percentile of 100 ms or less,
+  at 300k lines.** Read those against the raw-parse floor the instrument prints, because a latency
+  number swings by about 1.4 times with machine load. `stats_witness` pins the budgets, as per-line
+  ceilings on wall time, memory and resolve steps, and the measurement instruments live in
+  `legacy/differential/tests/test_stats.rs`.
+- **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
 ## Open: where findings point, and what the type system still refuses
 
@@ -775,9 +786,9 @@ disagrees with itself.
 36 are lowercase with no period, 14 are lowercase with a period, and 9 are capitalized. So
 "lowercase fragment, no period" is the plurality and nothing like a convention. It also cannot be
 applied blanket, because the capitalized ones are capitalized for a reason. `R's $ operator` opens
-with a proper noun, and `I could not resolve ...`, `I do not know the type ...` and `I cannot
-construct an infinite type` are first-person sentences. Lowercasing those yields `r's` and
-`i could not`.
+with a proper noun, and three messages are first-person sentences: `I could not resolve ...`,
+`I do not know the type ...` and `I cannot construct an infinite type`. Lowercasing those yields
+`r's` and `i could not`.
 
 The rule that fits the corpus has two shapes. A message that is a complete sentence is sentence-cased
 and ends with a period. A message that is a fragment, which is the expected-and-found family, is
@@ -1387,94 +1398,87 @@ self-consistency checks.
 They remain content-blind in the sense the three injected bugs demonstrate. A uniformly wrong answer
 is deterministic, incremental and in-bounds.
 
-## Open — a package's own `pkg::name` reads are resolved but not validated
+## Open: a package's own `pkg::name` reads are not validated
 
-FIXED: the project's own package (from `DESCRIPTION`'s `Package` field) is now a known namespace
-whatever the stubs say, so `withr::defer()` inside `withr` reads the project's own definition and has
-its type instead of `Unknown`, and the `unknown package namespace` false positive is gone. The own
-package also wins over a stub namespace of the same name, matching the rule that a package binding
-shadows a stub name.
+The project's own package, taken from `DESCRIPTION`'s `Package` field, is a known namespace whatever
+the stubs say. `withr::defer()` inside `withr` therefore reads the project's own definition and has
+its type instead of `Unknown`. The own package also wins over a stub namespace of the same name,
+matching the rule that a package binding shadows a stub name.
 
-Still open: **the name itself is not checked**, so `withr::typoed_name()` reports nothing. Validating
-it against the project's definitions was implemented, measured, and removed — across the CRAN corpus
-every candidate report was a false positive, because a package's export set is not the set of names
-its sources bind:
+The name itself is still not checked, so `withr::typoed_name()` reports nothing. Validating it
+against the project's definitions was implemented, measured and removed, because across the CRAN
+corpus every candidate report was a false positive. A package's export set is not the set of names
+its sources bind. Five shapes showed up.
 
-- a **re-export** — `shiny` has `importFrom(htmltools, validateCssUnit)` beside
-  `export(validateCssUnit)`, so the name is exported with no definition in the package;
-- an **S4 generic** from `setGeneric("raster", ...)` (`raster`), which S4 opacity already covers;
-- a **lazy-loaded dataset** under `data/` — `survival::survexp.us` lives in `data/survexp.rda`;
-- a binding installed by **`.onLoad`** (`cli`'s `symbol`);
-- an **S3 generic re-exported from another package** (`broom`'s `glance`, from `generics`).
+- A re-export. `shiny` has `importFrom(htmltools, validateCssUnit)` beside
+  `export(validateCssUnit)`, so the name is exported with no definition in the package.
+- An S4 generic from `setGeneric("raster", ...)`, which S4 opacity already covers.
+- A lazy-loaded dataset under `data/`. `survival::survexp.us` lives in `data/survexp.rda`.
+- A binding installed by `.onLoad`, such as `cli`'s `symbol`.
+- An S3 generic re-exported from another package, such as `broom`'s `glance`, from `generics`.
 
-Closing this needs the package's real export set, which means reading `NAMESPACE` `export()` *and*
-resolving re-exports, plus a decision about `exportPattern` (a regex over names, so it makes the set
-unknowable and must fall back to silence). Worth doing — a typo in a self-qualified call is
-otherwise invisible — but it is a namespace-model slice, not a one-line check.
+Closing this needs the package's real export set, which means reading `NAMESPACE` `export()` and
+resolving re-exports, plus a decision about `exportPattern`. That last one is a regex over names, so
+it makes the set unknowable and must fall back to silence. It is worth doing, because a typo in a
+self-qualified call is otherwise invisible, but it is a namespace-model slice rather than a one-line
+check.
 
-## Open — a stdlib wrapper loses all type information (found while investigating the above)
+## Open: a stdlib wrapper loses all type information
 
-`function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every other
-set: wrapping a standard-library numeric function in one of your own throws the types away. The cause
-is the fact-beats-guess rule — the `Any` fallback fits while binding nothing, so it beats every
-candidate that would narrow `x`.
+`function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every
+other overload set. Wrapping a standard-library numeric function in one of your own throws the types
+away.
 
-The rule is right in general and the fallback is load-bearing: a nominal with an `Arith.`/`+.` method
-satisfies the numeric constraint, so forcing `x` numeric would reject a user's S3 class that
+The cause is the fact-beats-guess rule. The `Any` fallback fits while binding nothing, so it beats
+every candidate that would narrow `x`.
+
+The rule is right in general and the fallback is load-bearing. A nominal with an `Arith.` or `+.`
+method satisfies the numeric constraint, so forcing `x` numeric would reject a user's S3 class that
 legitimately defines `abs.myclass`. Any fix has to keep that working, which is why this is a design
-slice and not a tweak — the candidate shape is "if every non-fallback candidate imposes the same
-constraint, imposing it is a fact rather than a guess", which needs a decision record and adversarial
-review before it is written.
+slice rather than a tweak. The candidate shape is that if every non-fallback candidate imposes the
+same constraint, imposing it is a fact rather than a guess. That needs a decision record and
+adversarial review before it is written.
 
-**Prerequisite FIXED, and it was a live false positive on its own.** The escape hatch above only half
-worked: `declares_arithmetic` consulted the **stub library alone**, while operator dispatch resolves a
-method through the global scope, which includes the project's own sources. So a package defining
-`+.Money` had its `+` dispatched correctly and its class *refused* by the numeric constraint —
-`bump <- function(x) x + 1L; bump(price)` reported ``expected a numeric value (`integer` or
-`double`), found `Money` `` on code R runs fine (checked: R prints 6). The set is now computed from
-stubs **and** the project (`GlobalEnv::arithmetic_classes`, memoized per corpus and per project;
-a script's own top level counts too, the way its `@type` declarations already do) and carried on the
-inference table beside `definitions`. A class that declares no arithmetic method is still refused —
-R halts on that one too, checked both ways. Measured on the corpus: no finding changes across
-data.table, dplyr, ggplot2 and shiny, so this loosening removed nothing that was load-bearing there;
-the fixtures are the coverage.
+One thing is worth knowing before that slice starts. The escape hatch it depends on is only now
+actually general, because `declares_arithmetic` used to consult the stub library alone while
+operator dispatch resolves a method through the global scope. Any measurement of how often
+constraining `x` would reject real code, taken before that was fixed, overstates the cost.
 
-Worth knowing for the design slice above: the escape hatch it depends on is only now actually
-general. Any measurement of "how often would constraining `x` reject real code" taken before this
-would have overstated the cost.
+## Open: an ignored config key is a warning, and a warning can be missed
 
-## Open — a misplaced config key was a silent no-op, and the class of bug is not closed
+A key written at the top level that belongs under a table now names the table, saying that it is
+ignoring the config key and where it belongs, instead of saying only that it is unknown. Writing
+`typing = true` outside `[check]` used to load clean, check nothing and report no problems. That is
+the same failure mode as an unresolvable namespace disabling unresolved-name checking, and the one
+this project treats as the worst kind: a clean run indistinguishable from a run that never happened.
 
-FIXED for the specific case: a key written at the top level that belongs under a table now names the
-table (`ignoring config key `typing` — it belongs under `[check]``) instead of saying only that it is
-unknown. Writing `typing = true` outside `[check]` had loaded clean, checked nothing, and reported
-"no problems" — the same failure mode as an unresolvable namespace disabling unresolved-name
-checking, and the one this project treats as the worst kind: a clean run indistinguishable from a run
-that never happened.
+The reason this stays filed is that a warning can be missed. A config file is small, hand-written
+and rarely revisited, so the cost of refusing outright is low and the cost of proceeding is a
+project that silently is not checked.
 
-Still open, and the reason this stays filed: **an ignored key is a warning, and a warning can be
-missed.** A config file is small, hand-written and rarely revisited, so the cost of refusing outright
-is low and the cost of proceeding is a project that silently is not checked. Consider making an
-unknown key a hard error when the file is a *local* `ry.toml` while keeping the warning for forward
-compatibility only where it is actually needed. Decide it deliberately; the current forward-compat
-rationale (`config.rs`, `Config::unknown_keys`) is written down and is not obviously wrong.
+Consider making an unknown key a hard error when the file is a local `ry.toml`, and keeping the
+warning only where forward compatibility actually needs it. Decide it deliberately. The current
+forward-compatibility rationale is written down in `config.rs`, at `Config::unknown_keys`, and it is
+not obviously wrong.
 
-## Open — a `--jobs` flag, and why the fan-out is not linear
+## Open: a `--jobs` flag, and why the fan-out is not linear
 
-Two user-requested items, related but separate.
+These are two user-requested items, related but separate.
 
 ### `--jobs N`, spelled like cargo's
 
-`check` fans out over `std::thread::available_parallelism()` and there is **no way to control it**.
-The only lever today is CPU affinity — `taskset -c 0-N` works because `available_parallelism()`
-honours affinity and cgroup quotas — which is fine for measuring and undiscoverable for a user. Add
-`--jobs N` (cargo's spelling, `-j` short form), defaulting to the current behaviour, so the number is
-explicit and reproducible instead of depending on what the scheduler happens to expose. It also makes
-cross-machine measurement possible without fighting `taskset`.
+`check` fans out over `std::thread::available_parallelism()` and there is no way to control it. The
+only lever today is CPU affinity, because `available_parallelism()` honors affinity and cgroup
+quotas, so `taskset -c 0-N` works. That is fine for measuring and undiscoverable for a user.
 
-`fmt` is a plain loop over files and does not fan out at all — measured 646 ms on one core against
-644 ms on four. Either wire it to the same flag or say plainly in the docs that it is single-threaded;
-what should not stand is a `--jobs` flag that silently governs one subcommand and not the other.
+Add `--jobs N`, with cargo's spelling and its `-j` short form, defaulting to the current behavior,
+so the number is explicit and reproducible instead of depending on what the scheduler happens to
+expose. It also makes cross-machine measurement possible without fighting `taskset`.
+
+`fmt` is a plain loop over files and does not fan out at all, measured at 646 ms on one core against
+644 ms on four. Either wire it to the same flag or say plainly in the docs that it is
+single-threaded. What should not stand is a `--jobs` flag that silently governs one subcommand and
+not the other.
 
 ### Why the speedup is not linear, and what the default should be
 
@@ -1482,91 +1486,128 @@ Measured with `taskset`, best of two, on a 4-vCPU container:
 
 | | 1 core | 2 cores | 4 cores | speedup |
 |---|---|---|---|---|
-| ggplot2 | 1,388 ms | 1,255 ms | 1,033 ms | 1.34× |
-| data.table | 420 ms | 309 ms | 278 ms | 1.51× |
-| `targets` | 998 ms | 778 ms | 599 ms | 1.67× |
+| ggplot2 | 1,388 ms | 1,255 ms | 1,033 ms | 1.34x |
+| data.table | 420 ms | 309 ms | 278 ms | 1.51x |
+| `targets` | 998 ms | 778 ms | 599 ms | 1.67x |
 
-Read those against the container's own ceiling: its 4 vCPUs deliver roughly 1.8× of native compute at
-4 threads, so `targets` is already near what this machine can give and the numbers here **cannot
-distinguish real contention from the container**. Getting that separation needs a run on real
-hardware at 1/2/4/8/16 cores — the user has offered to measure, and `--jobs` above is what makes that
-clean.
+Read those against the container's own ceiling. Its 4 vCPUs deliver roughly 1.8 times native compute
+at four threads, so `targets` is already near what this machine can give, and these numbers cannot
+distinguish real contention from the container. Getting that separation needs a run on real hardware
+at 1, 2, 4, 8 and 16 cores. The user has offered to measure, and `--jobs` is what makes that clean.
 
-What is worth investigating once there are honest numbers, in order of prior suspicion:
+Three things are worth investigating once there are honest numbers, in order of prior suspicion.
 
-- **Amdahl, not contention.** Rendering is deliberately sequential in discovery order, and the
-  project-wide interface walk (`interface_sccs`) is one query on one thread. If the serial fraction is
-  ~40% the observed 1.34–1.67× is simply correct, and the answer is to parallelise the walk or accept
-  it — not to hunt locks. Measure the serial fraction first; it is the cheapest thing to rule in.
-- **Salsa cycle bookkeeping.** This *was* the dominant cost — 54 of 72 sampled stacks in
-  `DependencyGraph::block_on`, with `targets` getting no speedup at all — and bounding the
+- **Amdahl's law, not contention.** Rendering is deliberately sequential in discovery order, and the
+  project-wide interface walk in `interface_sccs` is one query on one thread. If the serial fraction
+  is about 40%, the observed 1.34 to 1.67 times is simply correct, and the answer is to parallelize
+  the walk or accept it rather than to hunt locks. Measure the serial fraction first. It is the
+  cheapest thing to rule in.
+- **Cycle bookkeeping.** This was the dominant cost, with 54 of 72 sampled stacks in
+  `DependencyGraph::block_on` and `targets` getting no speedup at all, and bounding the
   conditional-slot join fixed it. Re-sample before assuming any of it is left.
 - **The warm-up phase.** The cold pass warms per-item naming across cores first, precisely because
-  computing it inside the interface walk serializes the front half. Check the fan-out is actually
-  balanced there: files are dealt largest-first, which helps, but one enormous file still pins a
-  thread.
+  computing it inside the interface walk serializes the front half. Check that the fan-out is
+  actually balanced there. Files are dealt largest-first, which helps, but one enormous file still
+  pins a thread.
 
-On the default: keep `available_parallelism()`. It already honours cgroup quotas and affinity, which
+Keep `available_parallelism()` as the default. It already honors cgroup quotas and affinity, which
 is what a CI container needs, and nothing measured so far suggests over-subscription hurts. Revisit
-only if the real-hardware curve turns over at high core counts — that would point at memory bandwidth
+only if the real-hardware curve turns over at high core counts. That would point at memory bandwidth
 or allocator contention, and the fix would be a cap rather than a different formula.
 
-## Open — editor & polish
+## Open: editor polish
 
-- Hover type fences (user-confirmed: no highlighting in current editor builds): the server tags the fences `roughly-type` and the VS Code extension in-repo ships a grammar for that id — needs a released extension update to reach users. Zed renders the fence plain until its extension registers an equivalent fence language (tree-sitter grammar required); consider falling back to tagging fences `r` for Zed if that proves distant.
+Hover type fences do not highlight in current editor builds, which the user confirmed. The server
+tags the fences `roughly-type` and the in-repo VS Code extension ships a grammar for that id, so
+reaching users needs a released extension update. Zed renders the fence plain until its extension
+registers an equivalent fence language, which needs a tree-sitter grammar. Consider falling back to
+tagging fences `r` for Zed if that proves distant.
 
-## Open — structure & performance
+## Open: structure and performance
 
-- **Diagnostics-phase remainder:** the duplicate-binding/duplicate-type O(files²) walk is killed (see the ledger); the post-burst workspace revalidate (~1.1s at 713K LoC, user measurement) should shrink too — every file's diagnostics used to depend on every file's ranges through those walks, so any edit re-executed all of them — but re-measure on the real workspace to confirm before closing.
-- **The rewrite is complete and shipping** (decisions.md "target architecture" record): every phase gate holds — corpus/round-trip/acceptance/fuzzing, semantic parity via the differentials, cutover suites, perf + memory + keystroke budgets, order-independent fixpoint, multi-core stress. The legacy crates stay in-tree **by user directive** until the user asks for the final deletion sweep; when that comes, migrate the remaining fixture data out of the legacy trees and archive a final corpus parity report first.
-- **Parallel cold pass: measure on real hardware before optimizing further.** The investigation (`crates/roughly/examples/parallel_probe.rs` is the reproduction tool) found: (a) the long-recorded "4 workers buy only 1.2x" was mostly a measurement artifact — this container's 4 vCPUs deliver only ~1.8x of lock-free native compute at 4 threads (~1.2x at 2), so no in-container parallel number is meaningful; (b) the one real structural serializer was `interface_sccs` demanding naming for every item inside one salsa query (25-51% of cold wall depending on package shape) — fixed by the CLI's parallel per-item naming warm before the fan-out (mgcv cold pass 0.99s → 0.80s even in the throttled container); (c) salsa's same-query blocking is negligible (53 blocks per 5,657 executions) and the interface DAG is wide (ggplot2: 1,198 items, depth 22), so no fixpoint-scheduling work is warranted until a real-hardware measurement says otherwise.
-- **Coverage-guided fuzzing landed** (`fuzz/` crate, testing.md documents the workflow): libFuzzer targets `parse`, `format`, and `semantics` over the exported invariant batteries plus `scripts/seed-fuzz-corpus.rs` (a `cargo +nightly -Zscript` single-file script, like all of `scripts/`); the lint layer is folded into the semantics battery (everything-on config), closing the last unfuzzed stage. First sessions found and fixed nine formatter bugs and two splice-equivalence bugs (a middle ending mid-construct must refuse suffix reuse; an empty-suffix splice must not rebase the old end-of-file error) — all pinned in per-harness `REGRESSIONS` batteries. Remaining: a scheduled deep-fuzz run on real CI hardware, and an `llvm-cov` coverage report (recipe in testing.md; skipped in-container for disk).
-- CI: the widened whole-workspace workflow is staged in `.github/pending-ci.yml` — a human must `git mv` it into `.github/workflows/` (automated tokens lack workflow scope). Until then CI gates only the product crate's own suites; the workspace battery runs locally per slice. Authoritative perf numbers need the CI runner.
+- **The post-burst workspace revalidate should have shrunk.** The duplicate-binding and
+  duplicate-type walk that was quadratic in file count is gone, and the ledger records it. Every
+  file's diagnostics used to depend on every file's ranges through those walks, so any edit
+  re-executed all of them. The user measured the revalidate at about 1.1 s at 713k lines. Re-measure
+  on the real workspace before closing this.
+- **Measure the parallel cold pass on real hardware before optimizing it further.**
+  `crates/ry/examples/parallel_probe.rs` is the reproduction tool. The investigation found three
+  things. The long-recorded claim that four workers buy only 1.2 times was mostly a measurement
+  artifact, because this container's 4 vCPUs deliver only about 1.8 times of lock-free native
+  compute at four threads and about 1.2 times at two, so no in-container parallel number is
+  meaningful. The one real structural serializer was `interface_sccs` demanding naming for every
+  item inside one query, at 25% to 51% of cold wall depending on package shape, which the CLI's
+  parallel per-item naming warm before the fan-out fixed, taking mgcv's cold pass from 0.99 s to
+  0.80 s even in the throttled container. And same-query blocking is negligible, at 53 blocks per
+  5,657 executions, while the interface graph is wide, with ggplot2 at 1,198 items and depth 22, so
+  no fixpoint-scheduling work is warranted until a real-hardware measurement says otherwise.
+- **CI gates only the product crate.** The widened whole-workspace workflow is staged in
+  `.github/pending-ci.yml`, and a human must `git mv` it into `.github/workflows/`, because an
+  automated token lacks workflow scope. Until then the workspace battery runs locally per change.
+  Authoritative performance numbers need the CI runner.
 
-## Open — website & docs
+## Open: website and docs
 
-- (The landing-page hero animation is user-owned — do not touch.)
-- **One-line installer.** Today the non-Rust route is download-a-tarball-from-Releases; there is no
-  `curl … | sh`, Homebrew, or winget path (uv and Ruff both ship one). The installation page states
-  this is planned with no date — if the plan changes, that claim has to change with it.
+- **There is no one-line installer.** The non-Rust route today is downloading a tarball from
+  Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one. The
+  installation page states this is planned with no date, so if the plan changes that claim has to
+  change with it.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
-  rather than the newest build. The CI guide works around it by pinning an explicit tag; promoting a
+  rather than the newest build. The CI guide works around it by pinning an explicit tag. Promoting a
   release would let the docs recommend `latest` instead.
-- **Rework the typing reference's presentation** (`reference/type-system.md`, ~2700 lines): tables and
-  short bullets instead of prose subsections, preserving every normative claim. Deliberately deferred
-  out of the docs restructure so the contract got a dedicated pass.
+- **Rework the typing reference's presentation.** `reference/type-system.md` runs about 2,700 lines.
+  It wants tables and short bullets instead of prose subsections, preserving every normative claim.
+  This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.
 
-## Open — REPL (v1 shipped; the analysis wiring is the open rung)
+## Open: REPL
 
-- **v1 SHIPPED and e2e-VERIFIED against real R** (`crates/repl` behind `roughly repl`; `contributing/design/repl.md` has the architecture, status, and the two pty-harness requirements): runtime-loaded R (no build-time link — the workspace builds R-less everywhere), reedline console inside the ReadConsole hook, lexer highlighting, conservative completeness with R's continuation as the safety net, SIGINT interrupt routing. The pty e2e suite (skip-if-no-R) runs green against real R — agent containers CAN install R (recipe in MEMORY.md short-term), so run `cargo test -p roughly --test test_repl_e2e` before REPL-touching changes, anywhere.
-- **Analysis-backed Tab completion SHIPPED** (first analysis rung; `contributing/design/repl.md` has the seam design): typed signatures for stdlib names, session bindings, `pkg::` exports, manifest names — `SessionCompleter` seam keeps the repl crate syntax-only, `AnalysisCompleter` in roughly runs `ide::completion` over the session-as-script. **Open — remaining rungs:** live-session facts (the R environment listing unioned into completions), pre-evaluation diagnostics on pending input, hover on the input line, graphics-device story (versioned mirror structs, see the design record). The headless runner is shipped.
-- **REPL Windows: real-machine smoke test pending.** The embedding is implemented (`contributing/design/repl.md` has the recipe: Rstart callbacks via R_DefParamsEx's version handshake, sibling-DLL preloading, RGui→LinkDLL switch, UserBreak+deferred interrupt pair) and compile/clippy-verified against x86_64-pc-windows-gnu — but no Windows machine with R has ever executed it. Smoke: `roughly repl` (prompt, evaluate, Ctrl-C, vi mode) and `roughly run` (output, exit 0/1). Known caveat to watch: terminal VT input handling in the editor layer.
+The REPL ships behind `ry repl`, and `contributing/design/repl.md` holds the architecture and the
+two pty-harness requirements. R is loaded at runtime with no build-time link, so the workspace builds
+without R everywhere. The console is reedline inside the `ReadConsole` hook, with lexer
+highlighting, conservative completeness backed by R's continuation as the safety net, and SIGINT
+interrupt routing. The pty end-to-end suite skips when R is absent and runs green against real R. An
+agent container can install R, and `MEMORY.md` has the recipe, so run
+`cargo test -p ry-lang --test test_repl_e2e` before a REPL-touching change, anywhere.
 
-## Open — rename to `ry`: what is left
+Analysis-backed Tab completion ships as the first analysis rung, covering typed signatures for
+stdlib names, session bindings, `pkg::` exports and manifest names. The `SessionCompleter` seam keeps
+the repl crate syntax-only, and `AnalysisCompleter` in the product crate runs `ide::completion` over
+the session-as-script. The headless runner ships too.
 
-**Done.** The language is `ry`. The crate is `crates/ry`, published as `ry-lang` (plain `ry` is taken
-on crates.io) with both the library and binary named `ry`. Docs, editors, scripts, CI and the README
-carry the new name; documentation is pointed at ry-lang.org.
+Three rungs are open: live-session facts, meaning the R environment listing unioned into completions;
+pre-evaluation diagnostics on pending input; and hover on the input line. The graphics-device story
+is a fourth, and the design record describes the versioned mirror structs it needs.
 
-**Three surfaces keep their former spelling permanently**, because each lives where a rename breaks
-silently: `roughly.toml` is still read (both names are checked in one directory before walking up, so
-the new name wins a tie); `# roughly: allow(...)` still suppresses, which matters most because that
-one lives inside users' source files; and every `RY_*` variable falls back to its `ROUGHLY_*` name.
+**Windows needs a real-machine smoke test.** The embedding is implemented and
+`contributing/design/repl.md` has the recipe, covering Rstart callbacks through `R_DefParamsEx`'s
+version handshake, sibling-DLL preloading, the RGui-to-LinkDLL switch, and the UserBreak plus
+deferred-interrupt pair. It is compile-verified and clippy-verified against
+`x86_64-pc-windows-gnu`, and no Windows machine with R has ever executed it. The smoke test is
+`ry repl`, checking the prompt, evaluation, Ctrl-C and vi mode, and `ry run`, checking output and
+exit codes 0 and 1. One known caveat to watch is terminal VT input handling in the editor layer.
+
+## Open: what the rename to `ry` left for the user
+
+The rename itself is done. The language is `ry`, the crate is `crates/ry`, published as `ry-lang`
+because plain `ry` is taken on crates.io, with both the library and the binary named `ry`. Docs,
+editors, scripts, CI and the README carry the new name, and documentation points at ry-lang.org.
+
+Three surfaces keep their former spelling permanently, because each lives where a rename breaks
+silently. `roughly.toml` is still read, and both names are checked in one directory before walking
+up, so the new name wins a tie. `# roughly: allow(...)` still suppresses, which matters most because
+that one lives inside users' source files. Every `RY_*` variable falls back to its `ROUGHLY_*` name.
 The VS Code extension reads `ry.*` settings and falls back to `roughly.*`. The REPL history directory
 is moved once rather than renamed, so nobody loses their history.
 
-**Left for the user, because an agent should not decide them:**
+Three things are left for the user, because an agent should not decide them.
 
-- **The GitHub repository name.** Docs, badges and install commands now say `felix-andreas/ry`, so
-  they are wrong until the repository is renamed. GitHub redirects the old URLs, so this is safe to do
-  whenever — but it is currently the one inconsistency in the tree.
-- **The VS Code Marketplace identifier.** `package.json` now says `felix-andreas.ry`; the Marketplace
-  does **not** redirect an identifier, so publishing under it creates a new listing and starts
-  installs and ratings from zero. Revert that one field if keeping the listing matters more.
-- **Registering `ry-lang` on crates.io**, and `ry-lang.org`.
-- **The landing-page hero animation** (`docs/src/pages/index.astro`) still spells out "Roughly" in
-  particles — `ROUGHLY_LINES` is the ASCII art it draws. It is user-owned by standing instruction, so
-  it was left untouched deliberately; it needs the new name from whoever owns it.
+- **The GitHub repository name.** Docs, badges and install commands say `felix-andreas/ry`, so they
+  are wrong until the repository is renamed. GitHub redirects the old URLs, so this is safe to do
+  whenever, and it is currently the one inconsistency in the tree.
+- **The VS Code Marketplace identifier.** `package.json` says `felix-andreas.ry`. The Marketplace
+  does not redirect an identifier, so publishing under it creates a new listing and starts installs
+  and ratings from zero. Revert that one field if keeping the listing matters more.
+- **Registering `ry-lang` on crates.io, and `ry-lang.org`.**
 
 ## Open: what is left before the legacy tree can be deleted
 
@@ -1598,9 +1639,9 @@ high noise floor, because the sources are fragments whose declaring context live
 other files, so `@new Person` alone reports an unknown type. Adjudicating the type suites needs
 per-case context rather than a bulk pass.
 
-**What is left is the expectation half.** Write a triage that emits `(id, source, frozen
-expectation, new rendering)`, bucket it by shape, and adjudicate per suite against the type-system
-reference. Start with `naming`, which has 513 cases and no new-stack counterpart at all, then
+**What is left is the expectation half.** Write a triage that emits, for each case, its id, its
+source, its frozen expectation and its new rendering. Bucket the output by shape, and adjudicate it
+per suite against the type-system reference. Start with `naming`, which has 513 cases and no new-stack counterpart at all, then
 typecheck, `type_syntax`, diagnostics and IDE.
 
 The performance witnesses that apply to the new stack alone move out of `legacy/differential` before
@@ -1631,15 +1672,34 @@ pins to interact. What is pinned instead is the structural property the fix rest
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
 
-## Post-beta (explicitly out of scope for now)
+## Explicitly out of scope for now
 
-- Tags / discriminated unions via a compiler-known stdlib `match` (design in `contributing/design/open-questions.md` first).
-- S3 dispatch modeling (`UseMethod`) — prerequisite for honest `print`/`summary`/`plot`.
-- data.frame column-level typing; matrix dimensionality; real S4 typing.
-- Traits/typeclasses (tripwire: the third constraint kind).
-- CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
+- Tags and discriminated unions, through a stdlib `match` the checker knows about. Design it in
+  `contributing/design/open-questions.md` first.
+- Modelling S3 dispatch, meaning `UseMethod`. It is the prerequisite for an honest `print`,
+  `summary` and `plot`.
+- Column-level typing for a data.frame, matrix dimensionality, and real S4 typing.
+- Traits and typeclasses. The tripwire is the third constraint kind.
+- Auto-generating CRAN stubs through R introspection, R-version-keyed corpora, and stubtest
+  validation. All three need R.
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **`declares_arithmetic` is computed from the project as well as the stubs.** It consulted the stub
+  library alone, while operator dispatch resolves a method through the global scope, which includes
+  the project's own sources. A package defining `+.Money` therefore had its `+` dispatched correctly
+  and its class refused by the numeric constraint, so `bump <- function(x) x + 1L; bump(price)`
+  reported a numeric-value error on code R runs fine, where R prints 6. The set now comes from stubs
+  and the project, through `GlobalEnv::arithmetic_classes`, memoized per corpus and per project,
+  with a script's own top level counting the way its `@type` declarations already do, and it is
+  carried on the inference table beside `definitions`. A class that declares no arithmetic method is
+  still refused, and R halts on that one too, checked both ways. Measured on the corpus, no finding
+  changes across data.table, dplyr, ggplot2 and shiny, so this loosening removed nothing
+  load-bearing there. The fixtures are the coverage.
+
+- **A config key written outside its table names the table.** Writing `typing = true` outside
+  `[check]` loaded clean, checked nothing and reported no problems. The message now says which table
+  the key belongs under.
 
 - **A rendered type can be written back, and it means what it came from.** Every user-visible
   rendering of a type goes through `TypeRenderer`, and nothing checked that the string it produced
@@ -2065,94 +2125,129 @@ The end-to-end guard rests on the corpus suites.
   exclusion rather than two, and the workspace lost `extendr-api`, `extendr-engine` and `libR-sys`,
   which removes the build-time dependency on a local R.
 
-- **A non-converging cycle now terminates, because the refusal no longer depends on the round that produced it:** `item_check_recover` pinned only `scheme` at the round cap and took `ItemCheck`'s six other fields from the freshly recomputed value, so every round returned a different check, the recovery's own equality test could never succeed, and salsa iterated to its `MAX_ITERATIONS` of 200 — 184 rounds past the cap — then panicked with `too many cycle iterations`, or exhausted memory first, whichever the machine reached (the two symptoms were always one bug). Its sibling recoveries were safe only incidentally: `global_scheme_recover` and `statement_binding_recover` return a bare `TypeScheme`, so their pin is already a constant, and `item_check` is the only one of the three with a composite return. The pin now re-pins what was already returned, a fixed point by construction, and cuts both export surfaces rather than just one — `top_level_bindings` was leaking moving schemes out of an item that had already been declared non-converging, which its own doc comment said it did not. Verified on the real reproduction: rlang's whole package directory went from a 213-second death to a clean 9-second run reporting 806 findings, and the flattened 163-file variant that had been OOM-killed now finishes in 14 seconds. `refusal_is_idempotent` pins the property; `htmltools` still stalls with no cycle panic, confirming it is a genuinely separate pathology.
+- **A non-converging cycle terminates, because the refusal no longer depends on the round that
+  produced it.** `item_check_recover` pinned only `scheme` at the round cap and took `ItemCheck`'s
+  six other fields from the freshly recomputed value, so every round returned a different check and
+  the recovery's own equality test could never succeed. It iterated to the 200-iteration cap, 184
+  rounds past its own, then panicked with "too many cycle iterations" or exhausted memory first,
+  whichever the machine reached. Those two symptoms were always one bug. Its sibling recoveries were
+  safe only incidentally, because `global_scheme_recover` and `statement_binding_recover` return a
+  bare `TypeScheme` so their pin is already a constant, and `item_check` is the only one of the
+  three with a composite return. The pin now re-pins what was already returned, which is a fixed
+  point by construction, and it cuts both export surfaces rather than one, because
+  `top_level_bindings` was leaking moving schemes out of an item already declared non-converging,
+  which its own doc comment said it did not. Verified on the real reproduction: rlang's whole
+  package directory went from a 213-second death to a clean 9-second run reporting 806 findings, and
+  the flattened 163-file variant that had been killed for memory now finishes in 14 seconds.
+  `refusal_is_idempotent` pins the property.
 
-- **`ry check` no longer aborts on cyclic package interfaces:** `scc_schemes` was the one query in the interface-fixpoint chain with no salsa cycle recovery, while `item_check` and `global_scheme` — the queries either side of it — both had one. Its doc comment asserted that member checks run directly so "no salsa cycle forms", and the decision record reserved recovery "as a backstop for edges the static graph cannot see"; the backstop was never installed, so such an edge aborted the process. `interface_sccs` builds edges only from names appearing in an item's source, so a name the checker *constructs* is invisible to it and the group is not as maximal as the fixpoint assumes. Recovery pins the group to `Unknown` — the answer the round cap already gives — and refuses on first disagreement rather than iterating, because the group runs its own bounded fixpoint internally and letting salsa iterate it too multiplies those rounds into an out-of-memory kill (measured: the iterating version turned the panic into exit 137, which is worse than the bug). Verified on the real reproduction: rlang's `R/` went from exit 101 to a clean run with 838 findings.
+- **`ry check` no longer aborts on a cyclic package interface.** `scc_schemes` was the one query in
+  the interface-fixpoint chain with no cycle recovery, while `item_check` and `global_scheme` on
+  either side of it both had one. Its doc comment asserted that member checks run directly so no
+  cycle forms, and the decision record reserved recovery as a backstop for edges the static graph
+  cannot see. The backstop was never installed, so such an edge aborted the process.
+  `interface_sccs` builds edges only from names appearing in an item's source, so a name the checker
+  constructs is invisible to it and the group is not as maximal as the fixpoint assumes. Recovery
+  pins the group to `Unknown`, which is the answer the round cap already gives, and refuses on first
+  disagreement rather than iterating, because the group runs its own bounded fixpoint internally and
+  letting the outer one iterate it too multiplies those rounds into an out-of-memory kill. That was
+  measured: the iterating version turned the panic into exit 137, which is worse than the bug.
+  Verified on the real reproduction, where rlang's `R/` went from exit 101 to a clean run with 838
+  findings.
 
-- **A manifest is enough to keep unresolved detection alive, and fifteen CRAN namespaces now ship
-  one:** attaching a package whose exports the checker cannot enumerate disables the check
-  project-wide, which three independent adoption reviews reported as the single worst hole — a clean
-  run was indistinguishable from "not checked". Manifest-only namespaces (no `.Rtypes`, every name
-  `Unknown`) close it for the tidyverse, `knitr`, `rlang`, `glue`, `magrittr`, `scales`, `jsonlite`
-  and `R6`; `library(tidyverse)` activates the nine members it attaches, so dplyr's and ggplot2's
-  *typed* declarations come with it. The generator script now refuses to overwrite a manifest recorded
-  against a newer R than the running session, because doing so drops the names that version added and
-  turns each use into a false `unresolved`.
+- **Fifteen CRAN namespaces ship an export manifest.** A manifest-only namespace has no `.Rtypes`
+  and every name types `Unknown`, which is enough to keep unresolved detection alive. They cover the
+  tidyverse, `knitr`, `rlang`, `glue`, `magrittr`, `scales`, `jsonlite` and `R6`, and
+  `library(tidyverse)` activates the nine members it attaches, so dplyr's and ggplot2's typed
+  declarations come with it. The generator script refuses to overwrite a manifest recorded against a
+  newer R than the running session, because that drops the names the newer version added and turns
+  each use into a false `unresolved`.
 
-- **A bad `NAMESPACE` `importFrom` is an error, and the strict severity jump is documented:** R
-  refuses to load a package whose import names a non-export, so a warning let it pass a
-  `--min-severity error` gate — it now matches its `export()` sibling. A bad `pkg::name` read stays a
-  warning (it fails only if the line runs), and the reference states the asymmetry. Separately, two
-  reviews were surprised that `strict = true` raises every `unresolved` finding to an error; the
-  behaviour is right, so the diagnostics table and the strict-mode section now say so.
+- **`strict = true` raising every `unresolved` finding to an error is documented.** Two reviews were
+  surprised by it. The behavior is right, so the diagnostics table and the strict-mode section say
+  so.
 
-- **Reported columns count characters, and the caret lands under the glyph:** byte columns disagreed
-  with every editor on any line carrying non-ASCII text and pushed the caret right of the code it
-  accused — sometimes past the end of the line. Columns are characters now (header, JSON, and the
-  server's human-readable locations); caret padding is terminal cells, so double-width text aligns
-  too. The `--output json` field documentation changed with it (see `decisions.md`).
+- **A reported column counts characters, and the caret lands under the glyph.** `decisions.md` has
+  the record, and the `--output json` field documentation changed with it.
 
-- **S3 dispatch counts as a use, and a project's own generics are real generics:** the default-on
-  `unused` lint called `speak.dog` dead and the opt-in `unused-parameter` called a generic's dispatch
-  argument ignored — both false positives on working code, since dispatch is neither a read nor a call
-  the checker sees. A generic is now any top-level definition whose read set contains `UseMethod`,
-  unioned across the package namespace (a generic in one file covers a method in another), and both
-  the generic and its `generic.class` methods are exempt. `is_s3_method_name`/`s3_generics` sit in
-  `semantics.rs` with the other project-level projections rather than in the lint module, because two
-  diagnostic layers share them.
+- **Shape-preserving stubs preserve the shape.** `Filter` returned `list[T]` for every input, so
+  `Filter(f, c(1, 2, 3)) + 1` was a hard type error, where R selects with `[` and keeps the atomic
+  type. It declares the atomic, named-list and plain-list forms in that order now. `rev`, `unique`,
+  `head` and `tail` gained the named-list candidate too, so a name read off a reordered or sliced
+  list is no longer a missing-field error.
 
-- **A package's own `library()` call no longer silences unresolved names:** the unknowable-export-set
-  tolerance skips the project's own name (`DESCRIPTION`'s `Package`, now on the metadata input), so the
-  `library(yourpkg)` `usethis` writes into `tests/testthat.R` stops switching off unresolved detection
-  package-wide. Two independent adoption reviews hit this.
+- **Declaration order means first match everywhere.** The tiebreak where all-guesses meant the last
+  candidate wins is gone, because a general `Any` fallback is already a fact, which was the only
+  case it protected. A narrower candidate can therefore be declared first, which is what let
+  `lapply` gain `fn(x: list[named: T], ...) -> list[named: U]` without handing a value use of the
+  name the narrow contract. The all-fail diagnostic no longer buries the answer behind the count of
+  signatures tried: when every candidate fails identically, or one candidate got strictly further
+  into the argument list than the rest, that candidate's own finding is reported at its own
+  argument's range. Signature help stopped requiring a commitment, so an incomplete call lists the
+  set instead of showing nothing, with the committed candidate rendered instantiated for the call
+  site.
 
-- **Shape-preserving stubs actually preserve the shape:** `Filter` returned `list[T]` for every input, so `Filter(f, c(1, 2, 3)) + 1` — R selects with `[`, which keeps the atomic type — was a hard type error; it now declares the atomic, named-list and plain-list forms in that order. `rev`/`unique`/`head`/`tail` gained the named-list candidate too, so a name read off a reordered or sliced list is no longer a missing-field error (see the residual record in §Open).
+- **The check fan-out's worker threads run on `ANALYSIS_STACK_SIZE`.** They ran on default 2 MiB
+  stacks while cross-file interface resolution recurses per dependency edge, so a chain of about 500
+  definitions aborted the whole command. `analysis-stats` survived only because the command thread
+  already carried the larger stack. All three scoped spawns in `cli.rs` use it now, verified on a
+  5,000-file synthetic tree where a SIGABRT became a clean exit 1 with findings.
 
-- **Overload sets now read like the corpus is written, and `lapply` keeps its input's names:** the "all fits are guesses → last candidate wins" tiebreak is gone (a general `Any` fallback is already a *fact*, which was the only case it protected), so declaration order means first-match everywhere and a narrower candidate can be declared first — which is what let `lapply` gain `fn(x: list[named: T], ...) -> list[named: U]` without handing a value use of the name the narrow contract. The all-fail diagnostic no longer buries the answer behind "I tried all N signatures": when every candidate fails identically, or one candidate got strictly further into the argument list than the rest, that candidate's own finding is reported at its own argument's range. Signature help stopped requiring a commitment, so an incomplete call (`lapply(|)` — no candidate matches yet) lists the set instead of showing nothing, with the committed candidate rendered instantiated for the call site.
+- **The duplicate-diagnostics walk is no longer quadratic in file count.**
+  `duplicate_binding_diagnostics` and `duplicate_type_diagnostics` rebuilt a project-wide occurrence
+  map per file, and made every file's diagnostics depend on every file's ranges, so any edit
+  re-executed all of them. Range-free per-file name projections, which are `top_level_binding_names`
+  and `type_declaration_names` and stay value-equal under a body edit, now feed memoized project
+  duplicate maps filtered to real duplicates. Those maps are near-empty in a healthy project, which
+  is the value-equality firewall, and per-file diagnostics fetch ranges only for files actually
+  involved in a duplication. Same-tree A/B at about 530k lines across 5,000 files: the semantic
+  render went from 12.1 s to 3.7 s and the cold pass from 22.8 s to 14.4 s, with an identical
+  diagnostics byte count.
 
-- **`roughly check` stack overflow fixed:** the check fan-out's scoped worker threads ran on default 2 MiB stacks while cross-file interface resolution recurses per dependency edge — a ~500-file definition chain aborted the whole command (`analysis-stats` survived only because the command thread carries `ANALYSIS_STACK_SIZE`). All three scoped spawns in `cli.rs` now use `ANALYSIS_STACK_SIZE`; verified on the 5,000-file synthetic tree (SIGABRT → clean exit-1 with findings).
+- **Every real R export resolves, through a vendored manifest.** `decisions.md` has the record.
 
-- **Duplicate-diagnostics O(files²) walk killed:** `duplicate_binding_diagnostics`/`duplicate_type_diagnostics` rebuilt a project-wide occurrence map per file AND made every file's diagnostics depend on every file's ranges (any edit re-executed them all). Now: range-free per-file name projections (`top_level_binding_names`/`type_declaration_names`, value-equal under body edits) feed memoized project duplicate maps filtered to real duplicates (near-empty in healthy projects — the value-equality firewall), and per-file diagnostics fetch ranges only for files actually involved in a duplication. Same-tree A/B at ~530K LoC / 5,000 files: semantic render 12.1s → 3.7s, cold 22.8s → 14.4s, diagnostics byte-count identical.
+- **The diagnostics phase stopped scanning every project file per non-local read.**
+  `declared_global_variable` was work proportional to reads times files, at about 375 million memo
+  lookups on a script-heavy workspace, and a script-local cross-statement read paid the
+  project-wide guard chain before its own frame-slot resolution. One memoized project-level
+  `globalVariables` union set, `project_global_variable_declarations`, replaced it, with the guards
+  reordered cheapest first: masked, then frame slots, then package and stub, then super-globals,
+  then declared globals, then imports. Reproduced at 305k lines across 2,500 files, diagnostics went
+  from 22.7 s to 2.9 s and the cold total from 28.0 s to 8.9 s, with byte-identical output.
+  `analysis-stats` permanently splits that phase into semantic render, lints and assembly, which is
+  the instrument that found it.
 
-- **Export manifests — every real R export resolves:** `types/<ns>.exports` (generated from live R by `scripts/export-manifests.R`) covers every namespace R ships in three tiers — default-attached (now incl. `datasets`, famous frames typed `data.frame`) bare-visible unconditionally; `QUALIFIED_ONLY_NAMESPACES` (tools/parallel/compiler/grid/splines/stats4/tcltk) always valid after `::` but bare only when attached/declared; conditional CRAN namespaces gated with their stubs. Manifest names resolve (typing `Unknown` without a typed declaration), feed completion and typo suggestions, and a unit test pins every `.Rtypes` value declaration as a real export of its namespace (caught `traceback`/`standardGeneric` misfiled — both are base exports). Kills the could-not-resolve false-positive class for the whole shipped standard library.
-
-- **Diagnostics-phase whale killed (was 69-80% of the cold pass at scale):** `declared_global_variable` scanned every project file per non-local read — O(reads × files), ~375M memo lookups on a script-heavy workspace — and script-local cross-statement reads paid the project-wide guard chain before their own frame-slot resolution. Now one memoized project-level `globalVariables` union set (`project_global_variable_declarations`) plus cheapest-first guard order (masked → frame slots → package/stub → super-globals → declared globals → imports). Reproduced at 305K LoC / 2,500 files: diagnostics 22.7s → 2.9s, cold total 28.0s → 8.9s, diagnostic output byte-identical; `analysis-stats` permanently splits the phase into semantic render / lints / assembly — the instrument that found it.
-
-- **Formal-aware `@masked` + the conditional dplyr namespace:** the stub loader records each masked verb's pre-`...` formal names (`StubLibrary::masked` map) and naming resolves arguments matching them (position or name) while masking what `...` absorbs — zero-formal masks (`join_by`) mask everything, restoring the reference's documented contract; `dplyr.Rtypes` ships as the second conditional namespace with class-preserving `@masked` verbs (`<T> fn(.data: T, ...) -> T`), class-preserving joins, and the tidy-select/verb vocabulary, so piped verb chains type end to end with masked column reads (`dplyr` fixture group in typing-imports; decision record has the collision/shadowing note).
-- **The native pipe types as the call it is:** `hir::lower_pipe` desugars `x |> f(y)` to `f(x, y)` (R's own parse-time rewriting) with the `_` placeholder substituted as the one named argument R allows it to be (`pipe_shape`, syntax-level; the `_` token never lowers, nothing dangles); everything R rejects keeps the opaque-operator lowering. Naming/typing/overloads/arity/strict/IDE inherit the real call; piped-value errors blame the left-hand range; pipelines type end to end. Gate terms renegotiated via two `ACCEPTED_DIVERGENCES` entries (oracle never modeled pipes); the two strict cases that pinned pipe-as-origin repurposed to `%in%`; `%>%` deliberately stays opaque (a real function, not sugar). Reference documents the rule under Function calls → The native pipe.
-- **data.table awareness (NSE ladder rung 1):** a conditional stub namespace (`crates/semantics/stubs/data.table.Rtypes` — the `@type data.table` nominal + ~45 declarations) joins stub assembly only when `metadata::namespace_active` (DESCRIPTION/NAMESPACE declaration, or a `library()`-family call found by the per-file `file_attached_namespaces` scan, unioned into `PackageMetadata.attached` by the hosts — server incrementally per synced file + idle prime); a bracket whose subject is the `data.table` nominal masks all index reads (`ItemCheck::masked_reads` skips the unresolved warning — kills the `DT[speed > 20]` false-positive class) and classifies its result by `j`'s syntax (no/empty `j`, `:=`, `.()`/`list()`, grouped `j` keep the subject's class; the rest refuse as Unknown with a strict origin). Typing-reference "Data-masked evaluation" + stdlib-stubs "Conditional namespaces" are the contracts; `datatable` fixture group in the differential-excluded typing-imports suite; decision record has the cycle/keystroke-cost analysis.
-- **`analysis-stats` ported to the new stack (user ask):** `roughly debug analysis-stats [path]` (`crates/roughly/src/stats.rs`) assembles the workspace exactly as `check` does (stubs, metadata, Collate order) and reports staged cold-pass phase timings (load / parse / lower+naming / typecheck / render) with per-phase resident-set growth and peak, slowest-files-by-typecheck, and a typing-burst probe on the slowest + median + small files with `CHECK_EXECUTIONS`/`RESOLVE_CALLS` attribution and the raw re-parse latency floor. Forces typing on with a note; documented on the development docs page; CLI contract test pins the report sections.
-- **Missing-comma parse recovery (user ask, rust-analyzer style):** when a token that can start a new element follows a complete argument or parameter, the parser reports `` missing `,` between these arguments``/``…parameters`` anchored at the empty range right after the previous element — on that element's line, not wherever the next element starts — and parses the next element normally (a proper `ARGUMENT`/`PARAMETER` node, no `ERROR` wrapping, so downstream analysis sees the intended list). Junk that cannot start an element keeps the old `expected `,` or …, found …` recovery. `starts_expression` mirrors `primary`'s entry set (kept in lockstep); golden error cases pin single-line, cross-line, and junk-recovery shapes.
-- **`DESCRIPTION` `Collate` file order implemented:** `parse_description_collate` (`Collate`, falling back to `Collate.unix`); both hosts rank package files by Collate index before the path tiebreak (unlisted files order after the listed ones), the server reorders the project when a DESCRIPTION change moves the collation, and a CLI contract test pins the winner flip. Closes the reference's "Project file order" promise, which had no implementation.
-- **NAMESPACE/DESCRIPTION metadata feeds resolution (user ask):** `semantics::metadata` owns the NAMESPACE parser (moved from the host crate) plus a DCF DESCRIPTION dependency parser and the singleton `PackageMetadata` input; `importFrom(pkg, name)` names and stub-described `import(pkg)` exports are known bare reads, a stub-less `import(pkg)` tolerates all otherwise-unresolved bare reads (export set unknowable — the zero-false-positive rule), and `pkg::` reads of declared-but-undescribed namespaces stay quiet. Hosts install the input next to the stubs (server refreshes on NAMESPACE buffer sync + NAMESPACE/DESCRIPTION watcher events, diffing parsed facts). New `typing-imports` fixture suite (metadata directives documented in testing.md; excluded from the differential arm — the oracle has no metadata concept); typing-reference "Package imports" section is the contract; decision record in decisions.md.
-- **Blame-range precision (trailing trivia + parens):** the real-file corpus scan found two systematic same-finding range near-misses vs the oracle — expression ranges swallowing trailing whitespace/comments the Pratt loop consumed while peeking for the next operator (fixed: HIR lowering stores the trivia-trimmed significant range), and blame sites reporting a parenthesized wrapper instead of the expression inside (fixed: type-error blame drills through `Paren`; strict origins and missing-formal reads deliberately keep binding-site ranges). Both pinned by fixture cases verified to fail without the fixes; the scan's 39 paren + 8 trivia near-misses went to zero and file-level corpus matching rose 3,293 → 3,303/4,638.
-- **`[` on vectors defined (was the largest real-code gap):** the typing reference specifies the full index-shape × subject-shape matrix (scalar-like numeric/character index → the scalar-claim element, with the negative-index caveat documented under the flexible-operand compromise; vector-like and logical-mask indexes → the subject's vector shape, names surviving; character indexes legal on any vector; undetermined indexes claim scalar and stay unconstrained; list/function/complex/raw indexes error) and `subset_result` implements it through a `vector_index_shape` classifier. Seven fixture cases pin every row; the oracle never defined vector `[`, so its refusals are an oracle-deficit class in the shared filter (1,415 accepted on the real-file corpus — the rewrite stopped reporting them on real code) plus per-case adjudications in the fixture and IDE arms. The NSE/data-masking design ladder is recorded as typing-design question 7.
-- **Corpus-scale verification + dots-forwarding arity fix:** the real-file corpus arm reran after the cross-item-read and typed-NA changes — 3,322/4,638 files match (up 54 from the prior sweep; oracle-deficit acceptances rose ~975 because the rewrite now resolves reads the oracle cannot, e.g. R6 `self`/`private`). The sweep's one genuine false-positive class is fixed: a call argument that is the enclosing function's bare `...` forwards an unknown number of arguments, so such calls now skip both arity checks (`CallArgument::forwards_dots`; typing-reference Function calls documents the rule). The sweep harness also gained the documented-but-missing oracle-side panic guard (an oracle panic is counted and its file skipped instead of killing the run).
-- **Callback-idiom stub sweep closed by audit:** the capped-stub premise no longer holds — every high-use base/stats/utils stub already declares its real optional formals (`nchar`'s type/allowNA/keepNA included), and the remaining single-parameter stubs are genuinely unary in R; a fixture pins both directions (`nchar(x, type = "bytes")` directly and `lapply(list(...), nchar)` through callback forwarding).
-- **Overload/compatibility fixture sweep + reference fix:** ten typing cases pin overload-set rules (undetermined arguments use the general candidate, the catch-all corpus convention, value-use resolution, local shadowing disabling the set), numeric-variable generalization (`-x`, `x / 2`), and function-type compatibility (by-name parameter pairing, the rename refusal, parameter contravariance both directions, variadic-never-pairs-with-fixed); a CLI contract test reaches the no-matching-overload error through a fully-constrained project stub override (unreachable via shipped stubs — every set ends in an `Any` catch-all). Writing them exposed a reference/implementation contradiction on non-call uses of overloaded names: the implementation deliberately resolves to the last (most general) candidate with recorded rationale; the reference wrongly said first — the reference is fixed.
-- **Indexing/guard fixture sweep:** thirteen typing cases pin the documented `[[`/`[`/`$` rules (vector element extraction, the map-like positional/name-based asymmetry, declaration-ordered record positions, backtick fields, record slices, unpinned-parameter tolerance) and the guard-narrowing rules (negated guards, `is.numeric`/`is.function` families, scalar+vector family membership, guards that cannot fire, expression guards never narrowing, the tested-then-unguarded finding) — all matched the contract on first bless. The per-position IDE differential over the new cases caught one real defect, fixed: `$` field completion now offers non-syntactic names in their backtick-quoted (insertable) spelling via the new `syntax::is_syntactic_name`; plus one adjudication (the rewrite hints a scheme for an unpinned-field reader the oracle leaves untyped).
-- **Operator/constant fixture sweep + typed-NA fix:** eight typing cases pin the documented operator rules that had no fixture (`%%`/`%/%`, `^`/`**`, unary `-`/`!`, comparison families, `:` shapes incl. the scalar-numeric bound, `&&`/`||` scalar-only) and the reserved constants; writing them caught and fixed a real bug — the typed `NA_*` constants all lowered through the bare-`NA` catch-all and inferred `logical` (now `LiteralKind::Na(NaAtom)` carries the atom at lowering).
-- **Per-item interface projections:** whole-project walks (`interface_sccs`, `conditional_slot_items`, `script_definition`'s statement branch) read `item_interface_reads` / `item_top_level_names` — small tracked projections of naming — instead of full `ItemNaming`, so a body edit that shifts ranges without changing a name backdates and no project-wide walk re-executes per keystroke (event-counted by `examples/keystroke_probe.rs`: walks went 8/8 edits → 0/8; misc.r 8.2→4.9ms, zxx.R 5.9→3.3ms medians in-container). New-item edits still re-run the walks, as they must. Architecture.md documents the projection firewall.
-- **Shadow lints landed (default-off):** `shadows-builtin` (a top-level binding over a `base` export) and `shadows-namespace` (over another stub namespace's name, message names the shadowed symbol) in `lints::shadow_lints` — driven purely by the stub corpus's `exports_by_namespace`/`declaring_namespace` because bare resolution is ungated, so no NAMESPACE-import plumbing and no CLI/LSP drift; dotted S3 names are naturally exempt (not exports). Fixtures in the lints-style suite, CLI contract test, linter + configuration docs updated.
-- **Top-level unwritten-path reads observe the cross-item binding:** a top-level slot's read-before-write (a loop's first iteration, a rebinding statement's right-hand side) resolves through `GlobalEnv::scheme(name, deferred=false)` — nearest earlier item in scripts, definition winner/conditional slot in packages — mirroring the unused check's cross-item-read rule; the observed type is materialized as the slot's pre-state (`pre_materialized`, re-established after each loop-pass rollback) so the loop join keeps it and first-iteration type errors survive to the reported stable pass. Self-referential-only names keep the tolerant `Unknown` (cycle recovery's initial), and sequential script rebindings now chain types (`n <- n + 0.5` after `n <- 1L` is `double`). Typing-reference "Definite assignment" documents the rule.
-- **Missing-diagnostic probes closed:** generic-application arity errors at the applied name (`generic type `Box` expects 1 type argument, but found 2.`), non-generic-with-arguments, and bare-generic-must-be-applied (except under `@new`, whose representation check infers arguments) — vocabulary-side checks in the annotation-rule family over lowering-recorded `applied_references`, with mis-applied names flooring to `Unknown` in the relations so the one arity error never cascades. Probes confirmed missing-required-argument and duplicate-formal detection already existed; their wording now says what happened (`a required argument is missing`, `names the argument `x` more than once`).
-- **Legacy-corpus parity closed; the corpus arm is a default gate:** all 1,523 comparable single-file case inputs from the frozen stack's own suites match through the shared differential policy (1 adjudicated acceptance: the oracle blames a vector-element violation at the alias declaration where the rewrite blames the use site). The sweep drove, slice by slice: the annotation block-form validation package (attachment/dangling rules incl. the blank-line association fix, directive ordering, duplicate/unknown type parameters, applied binders, `@new` shape + on-alias, vector-element atomicity, nesting caps, definitions top-level-only; refused blocks drop their payload), declared-function shape checks (optional-needs-default, rest-position, both variadic directions; renderer places `...` at its boundary), expression-level annotations (the constructor idiom — statement-level attachment at any depth through one application seam), alias-typed callees calling through their expansion, elided nested returns meaning `NULL`, frame-scoped capture liveness (`Scope::id`), conditional top-level slots exporting per-binding schemes (`ItemCheck::top_level_bindings`, `statement_binding_scheme` with cycle recovery, joined across writers), export-edge generalization of constrained residual variables (`close_scheme`: `<T: numeric>` survives, unconstrained erases), and `missing()` supplied-state flow (`EnvEntry::MissingFormal`: reading a no-default formal on the missing branch errors; writes supply it; the marker is branch-local). Plus the differential fuzz arm (six gaps) and the unknown-type-name class (the reported `Instument` bug) from the same assessment.
-
-- **Error-message release pass:** the golden error suite grew 14 -> 78 cases organized by area, now covering every distinct lexer/parser message template plus recovery-locality and valid-stays-clean pinning (testing.md documents the coverage contract); writing it exposed and fixed a real cascade class — lexer `ERROR_TOKEN`s re-diagnosed by the parser (up to 4 reports for one mistake, now 1) via silent placeholder-atom consumption + statement-level suppression; the fuzz harness gained error-quality invariants (non-empty messages, in-bounds ranges, cascade bound linear in tokens). CI was red on the recorded newer-clippy trap (collapsible_match on 1.97) — fixed against CI's actual toolchain.
-- **Docs accuracy pass + truthful landing examples:** development.md rewritten for the shipping crate layout, testing.md's legacy-era half compressed into a scoped frozen-stack section, linter/configuration/stdlib-stubs stale claims fixed (missing-comma retirement, stub path), shipped stubs migrated into `crates/semantics/stubs/` (the product no longer include_str!s from the legacy tree), the staged CI's rationale refreshed — and the landing page's formatter examples replaced after verifying each against the real binary: the old panels showed behavior the formatter doesn't have (bracing `if` one-liners, splitting one-line pipelines, aligning `=` columns); the new panels show verified auto-bracing of loops, operator/comma spacing, and multi-line indent normalization, with the tabs' reserved-dimensions fix confirmed already in place.
-- **Formatter docs generation ported to the product:** `crates/format/tests/test_format_docs.rs` regenerates `docs/formatter.md` from `crates/format/tests/formatter.template.md` through the shipping formatter (every template example formats byte-identically to the legacy output); the legacy generator and its template copy are removed.
-- **Recursion precision + strict attribution:** the canonical interface fixpoint types converging recursion precisely (top-level `fact`: `fn(n: integer) -> integer`; mutual groups generalize — the old tolerant-`Unknown` self-recursion contract is superseded in the typing reference), and strict mode now attributes the remainder: a cycle member with a clean body whose exported scheme still carries `Unknown` gets a binding-level `RecursiveUnknown` origin; pinned-at-cap cycles keep their read-site origins (decisions.md).
-- **Corpus growth + wording polish:** the fetch manifest gained 28 large CRAN packages (Matrix/MASS/mgcv/survival/Hmisc/caret/sf/...) and the source-extension pattern widened to R's full set (`.R/.r/.S/.s/.q` — mgcv ships `.r`, Hmisc `.s`; the four corpus loaders match): corpus 507K -> 965K lines (81 packages, 30.5 MiB, 4640 files), all parsing with zero acceptance/round-trip divergences. At the new scale (per-process instrument protocol — batching the stats tests in one process pollutes the RSS numbers): new stack 19.0s (19.7µs/line) / 1.0 GiB resident vs legacy 30.3s / 2.0 GiB — 0.63x wall, 0.50x memory; parallel == sequential findings exactly (the canonical-fixpoint invariant holds at scale). The one new acceptance divergence was a real lexer bug (`..2dge` mislexed as `..2` + `dge` — R has no dot-dot token at lex time, so a longer name wins; fixed with a golden case). Diagnostic wording pass per the Rust/Elm bar: real pluralization for call-arity/named-argument errors, the `invalid semantics:` prefix dropped and the three `#:` block-form refusals rewritten to name the fix (separate blocks with a blank line), `NotAFunction`/`MixedListElements`/index-shape phrasing tightened.
-- **Product-surface polish batch (new stack):** hover definition summaries ("Local variable/Package global, defined at `path:line:col`", stub origin namespace + overload count, maybe-undefined note), `debug = true` hover debug sections (Lowering/Naming/Parsing), S4/R6 document-symbol hierarchy (kinds + R6 member children, workspace symbols include members with real kinds, `fn(params)` details), a deterministic cancelled-pull LSP test (`ROUGHLY_TEST_DELAY_PULL_MS` fault-injection seam holds the pull until the edit's flip lands), **unused warnings on by default** (user directive; `[check] unused = false` opts out) with two script-unused fixes it forced: bare-statement reads (`print(x)`) keep bindings alive, and a definer inside an R-grammar error region never warns.
-
-- **`roughly check` runs on the engine:** the CLI builds the same query graph the server uses (server `ProjectFiles` ordering, shared `assemble_engine_file_diagnostics` in `crates/roughly/src/diagnostics.rs`), so it inherits every engine performance property; `run_full` remains purely the differential oracle. Cluster repro check: 1.34s → 0.28s.
-- **Per-definition interface-SCC rounds:** mutually-referencing file clusters (one giant SCC under file-granular edges — THE real-workspace whale, 95% of a 700K-LoC user cold pass) now re-infer per member definition for provably-decomposable files (`scc_definition_plan`), with change-driven skips at both granularities, per-file contribution merges (exact last-writer-wins), one snapshot/rollback inference state per fixed point, change-event oscillation history, and a dense borrow-only `SymbolScc` Tarjan. Cluster repro: cold typecheck 3.6s → 0.2s, member-file keystroke 359 → 34ms. `analysis-stats` now bursts a median and a small file besides the slowest.
-- **Checker constant factors (~4× whole-file inference):** allocation-free free-variable walker (no more resolve-clone per recursion level), dense `EntryTable` vector for the union-find, Tarjan letrec-membership (was per-candidate transitive walks), precomputed winner-test lookups + batch exported bindings, FxHash for the never-iterated state maps; per-file interface edges (`WalkShadowed`/`FileInterfaceEdges`) projected per symbol (hub sweep 763→33ms).
-- **One inference per file per revision:** `Typecheck` owns `FileInference { check, exports }`; `ExportedSchemes` is a shared-pointer projection (still the value-eq firewall); the could-not-resolve typo hint is memoized per symbol with an allocation-free corpus scan; the letrec candidate-edge scan is one arena pass; `Diagnostics` fetches tree-readers adjacently (one parse per file on cold prime). Cold 10.1s → 3.7s at 302K LoC, keystroke 5.4 → 1.7ms; `analysis-stats` splits lint / package-naming / render stages, and a `profiling` cargo profile (release + symbols) supports sampling.
-- **Interface routing:** same-file backward references are walk-resolved, never interface-imported (kills the fake same-file SCC/Tarjan blowup — 100× on chain files; counter witness); scripts overlay their declarations on the memoized package type environment (was O(scripts × package files)).
-- **Semantics core:** multi-member unions; mutable-slot model with union joins; `<<-`/`->`/replacement forms; coercion policy; name-aware signature matching; `Unknown`/`Any` tolerance in `c`/`for`/`$`/`[[`/`[`; flow-sensitive guard narrowing (+ divergence-aware joins, `missing()` supplied-state); `is.null` shaping of unconstrained variables (unannotated coalesce); elided annotation returns; `...` as positioned rest parameter end-to-end; variadic bridging into callbacks; `switch`/`return` as checked control flow; dispatch-table `[[` unions; computed-key container refinement; positional `[[` record extraction; S4 `@` slot lowering.
-- **Stub unlock:** `T[]` constrained generics; overload sets (probe-committed, two-round selection, signature-help/hover display); opaque `@type` nominals (data.frame/factor/matrix/…); named-into-rest absorption (typed `read.csv`, `lm`); ~530-declaration corpus across 6 namespaces; project-stub namespaces (`pkg::name`); NAMESPACE import validation + `unused-import` lint; `library()`/`require()` NSE quoting; stub-error surfacing on every surface.
-- **Trust & UX:** config subsystem rebuild (nearest-ancestor discovery, per-lint severity, config-file diagnostics, reload refresh); per-file typing directives `# typing: on|off|strict` (tri-state `TypingMode`, one gate everywhere); data-masked NSE resolution (data.table brackets, with-family); strict-mode product story; unified lint framework; CLI rendering + exit-code contract; `roughly debug analysis-stats` workspace performance diagnosis.
-- **Editor:** hover quality (`name : TYPE`, overload notes, constraint display); annotation cursor features via re-lexing (hover/goto/completion in `#:` comments); insert-annotation code action (round-trips); unused fade-outs; formatter rewrite with `#:` block awareness; letrec naming (local recursive closures resolve).
-- **Engine & scheduling:** red-green core with per-symbol interface firewalls, SCC fixed point, tombstones, eviction, stacker-grown validation spine; durability tiers (open docs LOW, corpus HIGH; sound downgrade re-min through cutoff nodes); memoized completion index + `NamesGlobal`-valued symbol index (zero-copy reads); two-wave diagnostics publish + idle-time semantic wave + lossless preemption pairing + background prime; error-tolerant lowering ("a broken region reports its syntax error and nothing else"); differential correctness vs from-scratch oracle over adversarial edit streams, byte-exact, IDE features included; committed latency witnesses (at-rest reads ≤ 32 memos, size-independent post-keystroke walk, blast-radius exec counters); memory shape at scale (rope-only corpus inputs + on-demand trees, single-retained modules, boxed annotations: 1 GiB → ~300 MiB at 302K LoC) and O(open) keystroke validation (fold split over the `OpenFiles` seam, FxHash memo table: 11K → ~280 slots/keystroke); `analysis-stats` reports per-phase memory, typing-burst recompute counts, and walk attribution.
-- **Docs:** getting-started leads with a real bug; installation split out; typing guide + reference as contracts; architecture/structure/testing contributor pages; linter/configuration/stdlib-stubs pages current.
+- **`@masked` is formal-aware, and dplyr is a conditional namespace.** A masked verb's leading formals resolve normally and `...` masks the rest, so a zero-formal mask such as `join_by` masks everything. `decisions.md` has the record.
+- **The native pipe types as the call it is.** `hir::lower_pipe` desugars `x |> f(y)` to `f(x, y)`, R's own parse-time rewriting, with the `_` placeholder substituted where R allows it. `decisions.md` has the record.
+- **data.table is a conditional stub namespace with a result-shape classifier and typed-subject masking.** `decisions.md` has the record.
+- **`ry debug analysis-stats [path]` reports staged cold-pass phase timings and memory.** It lives in `crates/ry/src/stats.rs` and assembles the workspace exactly as `check` does, covering stubs, metadata and Collate order.
+- **A missing comma between arguments is reported and recovered from, rust-analyzer style.** The parser anchors the message at the empty range right after the previous element, on that element's line, and parses the next element as a proper node so downstream analysis sees the intended list. Junk that cannot start an element keeps the older recovery.
+- **`DESCRIPTION` `Collate` order is honored.** `parse_description_collate` reads `Collate`, falling back to `Collate.unix`, and both hosts rank package files by Collate index before the path tiebreak, with unlisted files ordering after listed ones.
+- **NAMESPACE and DESCRIPTION metadata feed resolution.** `decisions.md` has the record.
+- **Blame ranges are precise through trailing trivia and parentheses.** HIR lowering stores the trivia-trimmed significant range, so an expression range no longer swallows whitespace or a comment the Pratt loop consumed while peeking. Type-error blame drills through `Paren`, while strict origins and missing-formal reads deliberately keep binding-site ranges.
+- **`[` on vectors is defined**, across the full matrix of index shape against subject shape, implemented by `subset_result` through a `vector_index_shape` classifier. The typing reference is the contract and seven fixture cases pin every row.
+- **A call argument that is the enclosing function's bare `...` skips both arity checks**, because it forwards an unknown number of arguments. `CallArgument::forwards_dots` carries it.
+- **Every high-use base, stats and utils stub declares its real optional formals.** The capped-stub premise did not hold, and the remaining single-parameter stubs are genuinely unary in R. A fixture pins both the direct call and the callback-forwarded one.
+- **Ten typing fixtures pin the overload-set and function-compatibility rules.** Writing them exposed a reference contradiction on a non-call use of an overloaded name: the implementation resolves to the last and most general candidate with recorded rationale, and the reference wrongly said first. The reference is fixed.
+- **Thirteen typing fixtures pin the `[[`, `[` and `$` rules and the guard-narrowing rules.** The per-position IDE differential over them caught one real defect: `$` field completion now offers a non-syntactic name in its backtick-quoted, insertable spelling, through `syntax::is_syntactic_name`.
+- **Eight typing fixtures pin the operator rules and the reserved constants.** Writing them caught a real bug, because the typed `NA_*` constants all lowered through the bare-`NA` catch-all and inferred `logical`. `LiteralKind::Na(NaAtom)` carries the atom at lowering now.
+- **A whole-project walk reads a small tracked projection of naming, not full `ItemNaming`.** `item_interface_reads` and `item_top_level_names` serve `interface_sccs`, `conditional_slot_items` and `script_definition`'s statement branch, so a body edit that shifts ranges without changing a name backdates and no project-wide walk re-executes per keystroke. Measured by `examples/keystroke_probe.rs`, walks went from 8 of 8 edits to 0 of 8. A new-item edit still re-runs them, as it must.
+- **Two shadow lints ship, both default-off.** `shadows-builtin` covers a top-level binding over a `base` export and `shadows-namespace` covers one over another stub namespace's name. Both read the stub corpus only, because bare resolution is ungated, so there is no NAMESPACE plumbing and no drift between the CLI and the LSP. A dotted S3 name is naturally exempt, because it is not an export.
+- **A top-level slot's read-before-write observes the cross-item binding.** It resolves through `GlobalEnv::scheme(name, deferred = false)`, which is the nearest earlier item in a script and the definition winner or conditional slot in a package, mirroring the unused check's cross-item-read rule. The observed type is materialized as the slot's pre-state, re-established after each loop-pass rollback, so the loop join keeps it and a first-iteration type error survives to the reported stable pass. A self-referential-only name keeps the tolerant `Unknown`.
+- **Generic-application arity errors report at the applied name.** That covers a generic applied with the wrong number of type arguments, a non-generic given arguments, and a bare generic that must be applied, except under `@new`, whose representation check infers the arguments. A mis-applied name floors to `Unknown` in the relations, so the one arity error never cascades.
+- **The golden error suite covers every distinct lexer and parser message template**, at 78 cases organized by area, plus recovery-locality and valid-stays-clean pinning. Writing it exposed and fixed a real cascade class, where a lexer `ERROR_TOKEN` was re-diagnosed by the parser, giving up to four reports for one mistake and now giving one.
+- **The formatter docs page is generated by the shipping formatter.** `crates/format/tests/test_format_docs.rs` regenerates it from `crates/format/tests/formatter.template.md`, so every template example formats byte-identically to what the page shows.
+- **Converging recursion types precisely, and strict mode attributes the remainder.** `decisions.md` has both records.
+- **The corpus grew to 965k lines across 81 packages**, from 507k, after the fetch manifest gained 28 large CRAN packages and the source-extension pattern widened to R's full set of `.R`, `.r`, `.S`, `.s` and `.q`, because mgcv ships `.r` and Hmisc ships `.s`. Everything parses with no acceptance or round-trip divergence. The one new acceptance divergence was a real lexer bug, where `..2dge` mislexed as `..2` plus `dge`, because R has no dot-dot token at lex time so a longer name wins. A golden case pins it.
+- **A hover carries a definition summary**, naming whether the binding is a local variable or a package global and where it is defined, a stub's origin namespace and overload count, and a maybe-undefined note. With `debug = true` it also carries lowering, naming and parsing sections.
+- **`ry check` runs on the query engine.** `decisions.md` has the record.
+- **Interface SCC rounds run per definition, with change-driven skips.** `decisions.md` has the record.
+- **Whole-file inference got about four times faster from constant factors.** `decisions.md` has the record of the data model.
+- **One inference runs per file per revision, and the typo hint is memoized per symbol.** `decisions.md` has the record.
+- **A same-file backward reference is walk-resolved and never interface-imported**, which kills the fake same-file SCC blowup, about a hundredfold on a chain file. A script overlays its declarations on the memoized package type environment, where it used to rebuild from every package module. `decisions.md` has the record.
+- **The semantics core.** Multi-member unions, the mutable-slot model with union joins, `<<-`, `->` and the replacement forms, the coercion policy, name-aware signature matching, `Unknown` and `Any` tolerance in `c`, `for`, `$`, `[[` and `[`, and flow-sensitive guard narrowing with divergence-aware joins.
+- **The stub surface.** `T[]` constrained generics, overload sets with probe-committed two-round selection and signature-help and hover display, opaque `@type` nominals such as data.frame, factor and matrix, named-into-rest absorption that types `read.csv` and `lm`, and a corpus of about 530 declarations.
+- **Trust and user experience.** The config subsystem rebuild, with nearest-ancestor discovery, per-lint severity, config-file diagnostics and a reload refresh. Per-file typing directives `# typing: on`, `off` and `strict`, through a tri-state `TypingMode` with one gate everywhere. Data-masked resolution for non-standard evaluation.
+- **Editor features.** Hover quality, rendering `name : TYPE` with overload notes and constraint display. Annotation cursor features through re-lexing, giving hover, goto-definition and completion inside a `#:` comment. An insert-annotation code action that round-trips. Unused fade-outs. The formatter rewrite with `#:` block handling.
+- **The engine and its scheduling.** A red-green core with per-symbol interface firewalls, an SCC fixed point, tombstones, eviction and a stacker-grown validation spine. Durability tiers, with open documents LOW and the corpus HIGH, and a sound downgrade that re-mins through cutoff nodes. Memoized completion.
+- **The docs site.** Getting started leads with a real bug, installation is its own page, the typing guide and reference are contracts, and the architecture, structure and testing contributor pages are current.
