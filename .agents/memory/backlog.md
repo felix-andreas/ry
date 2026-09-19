@@ -1077,123 +1077,149 @@ condition" constraint, which is a fourth constraint kind and therefore the docum
 designing traits rather than accreting them. `contributing/design/open-questions.md` holds the
 reasoning.
 
-## Open — adoption review findings (unfixed items, each with a minimal repro)
+## Open: what the adoption reviews left
 
-Three independent black-box adoption reviews (an analysis-script user, a CRAN package author, a
-numerical-computing user; docs + `--help` only, no source access) simulated real projects and
-converged on the same walls. What they found and is now fixed is in the ledger; what remains is
-below, ranked by how often a real user hits it.
+Three independent black-box adoption reviews simulated real projects from the docs and `--help`
+only, with no source access. They were an analysis-script user, a CRAN package author and a
+numerical-computing user, and they converged on the same walls. What they found that is now fixed is
+in the ledger. What remains is below, ranked by how often a real user hits it.
 
-- **Overload selection with a flexible argument FIXED** (fact-versus-guess probing — see
-  `decisions.md`): a candidate that fits without narrowing the caller's open types beats one that
-  does not, and a single fitting candidate is selected outright. The apply family is now unblocked
-  but still untyped where its result shape is *value*-dependent: `sapply`/`mapply`/`Map`/`tapply`
-  stay `Any` because `simplify = FALSE` and a vector-returning callback change the result shape
-  without changing any argument type, so no overload set can discriminate them — typing only their
-  *parameters* (leaving the return `Any`) is the reachable win, at the cost of rejecting R's
-  function-name-as-string form (`sapply(x, "length")`, already rejected for `lapply`).
-- **The three object systems (S3 partial, S4 and R6 recognition-only). Re-measured, and two of the
-  four claims this entry used to make were stale — including the one it ranked first.**
+### The apply family is unblocked but still untyped where its result shape depends on a value
 
-  - **`setGeneric` is FIXED and was already fixed when this said otherwise.** The entry claimed
-    "`setGeneric("f", ...)` does not define `f`, so every call to a project's own S4 generic reports
-    `unresolved`", and ranked it the top fix. It does not reproduce: `set_generic_target` binds the
-    name, handles the `methods::setGeneric` form and the `name =` argument, and a control probe in the
-    same file confirms the `unresolved` check was live (`definitely_not_defined` reported; `area` did
-    not). Anyone who took the ranking at face value would have spent a cycle fixing a non-bug.
-  - **R6 was mischaracterised.** "R6 has no stub at all (`R6::R6Class` reports `unknown package
-    namespace R6`)" — R6 *does* ship an export manifest and is a conditional namespace, so it resolves
-    as soon as the project declares it (`DESCRIPTION` `Imports: R6`) or attaches it (`library(R6)`);
-    both verified clean. The message appears only for `R6::` in a project that declares neither, which
-    is the documented rule for *any* undeclared namespace and is deliberate. What is actually missing
-    is **typed** declarations — the class, its fields and its methods are `Unknown`, so `obj$typo()` is
-    silent and completion after `self$` offers every record field in the workspace.
-  - **Still true: an S4 slot typo is silent.** `setClass("A", representation(x = "numeric"))` then
-    `new("A", y = 1)` reports nothing; R halts with ``invalid name for slot of class "A": y``. `x@slot`
-    has no type either, and `setClass`/`setMethod`/`new` are `Any` stubs.
-  - **Still true: `UseMethod` is not modelled** — a generic call is `Unknown` — and
-    `structure(list(...), class = "dog")` produces a plain record, so the class attribute is data. S3
-    *operator* dispatch is real (`+.Date`, `Arith.X`, `Ops.X` are built and dispatched, and the linter
-    knows `generic.class` names).
+Overload selection with a flexible argument works now, through fact-versus-guess probing that
+`decisions.md` records. `sapply`, `mapply`, `Map` and `tapply` stay `Any`, because `simplify = FALSE`
+and a vector-returning callback change the result shape without changing any argument type, so no
+overload set can discriminate them.
 
-  All three systems are recognized structurally by the IDE outline (`classify_symbol_call`), which is
-  where the type-side work can start. **Revised fix order, cheapest real win first: the S4 slot-name
-  check**, then R6 class typing, then S4 slot types, then `UseMethod`.
+The reachable win is typing only their parameters and leaving the return `Any`. That costs R's
+function-name-as-string form, so `sapply(x, "length")` would be rejected, as it already is for
+`lapply`.
 
-  The slot check is bounded — `setClass` names the slots, `new("Class", ...)` names its arguments —
-  but **`contains =` is the trap**: a subclass legitimately takes its parent's slots, verified against
-  R (`setClass("C", contains = "P", …); new("C", x = 1, y = 2)` runs), so a check that does not follow
-  the inheritance chain turns correct code into a false positive. `representation(...)` and the
-  `slots =` form both need reading, and a class assembled dynamically must fall back to silence.
-- **Matrix SHAPE is still untracked.** `%*%`/`%o%`/`%x%` now return the `matrix` nominal and the class
-  has its arithmetic and comparison methods, so matrix expressions type and compose — but
-  `matrix`/`t`/`solve`/`dim`/`crossprod`/`diag`/`apply` still return `Any`, so a transposed dimension
-  or a non-conformable product is invisible. Declaring them `-> matrix` is easy; the value is in
-  *dimensions*, which needs a shape-carrying matrix type (see the data.frame row-type design). Note
-  the trap this session hit: making a constructor return a real nominal without also declaring the
-  class's operator methods turns every `m + 1` into a false error.
-- **A project's own `%op%` stays untyped by design** (the result is `Unknown`, a strict-mode origin):
-  it may be an NSE wrapper whose right operand is quoted, like magrittr's `%>%`, and checking that as
-  an ordinary call would reject correct code. Lowering `%op%` to the call it is (the documented `|>`
-  precedent) would type it and give goto/references on the operator — weigh that against the NSE risk
-  and the `unresolved` a bare-script `%>%` would gain.
-- **A list of functions FIXED**, and the cause was not the union: `function_compatible` demanded an
-  *exact* parameter count, so `mean` (one required plus two optional) could not serve a
-  one-argument callback interface, and the union of two such functions failed member-wise. Arity is
-  a range now — a function serves an interface when it accepts every call shape the interface
-  promises — so extra optional parameters are fine while requiring too many, or refusing an
-  argument the interface sends, still fail. `lapply(list(mean, sd), function(g) g(1:3))` is
-  `list[double]`. `lapply` keeps its input's names too (`list[named: T]` declared as its narrower
-  first candidate), which is what forced the overload tiebreak to become plain first-match — see
-  `decisions.md`.
-- **Everything from a `data.frame` is `Unknown`, and `Unknown` satisfies every annotation** — so on
-  data-frame-heavy code annotations look protective and are not. This is the design consequence that
-  decides the tool's value for analysis users; it needs at minimum a way to *see* that a check was
-  skipped (strict mode, once it reports origins).
-- **An S3 method declared in R being reported `unused` FIXED** — the unused walk shares the
-  method-name knowledge with the lints, and a project's own generics count, not just the corpus's.
-  Dispatch is still not a read, so the exemption is by name shape (`generic.class` for a generic that
-  exists), which is the same signal R itself uses to find the method.
-- **Only the STUB route to an operator method on a project nominal is blocked.** Declaring the method
-  as an annotated R function works (verified above), which is what an author writes anyway for a real
-  S3 class; the gap is narrower than "operator methods need ergonomics" — a `.Rtypes` stub cannot see
-  a `@type` the R source declares (`this declaration does not load: I do not know the type Meters`),
-  so only the stub spelling is unreachable. Decide whether stub sources should see project `@type`
-  declarations at all, or whether the R-side declaration is simply the answer and the docs should say
-  so.
-- **Smaller, each with a one-line repro in the reports:** messages leak unbound type variables (`list[T] | T[]`) and expand an alias on
-  only one side of an expected/found pair; `unused` false-positives on a write followed by `break`;
-  closure re-entry is unmodelled, so the `if (!is.null(cache)) return(cache); cache <<- v` memo idiom
-  yields `T | NULL`; (a generic parameter rejecting a non-`NULL` default is CORRECT, not a gap — `<T> fn(x: T, [fallback]: T)` defaulting to `0L` would return `0L` from a call the signature promises returns `character`; `T | NULL` with a `NULL` default works because `NULL` is a declared member); the `unused` write-then-`break`
-  false positive is NOT reproducible (verified across `for`/`while`/`repeat` and both used and genuinely
-  dead writes) — drop it unless a concrete shape resurfaces; no `--fix`, no stdin, and no CLI way to ask "what type is this?" (which makes debugging an inference surprise guesswork for a
-  CLI-only user). `sum(1, 2, 3,)` formatting to `sum(1, 2, 3, )` is NOT a defect and stays: the
-  trailing comma introduces a missing argument, so it parses identically to the `alist(, )` idiom the
-  space serves, and the `trailing-comma` lint reports the mistake.
-- **Literate documents are analysed by `check` but not by the editor.** `.Rmd` / `.qmd` / `.Rnw`
-  chunks are converted to an R program by blanking every non-R character (`syntax::literate`), so
-  ranges need no translation and `check` reports at the original line and column. The LSP path still
-  ignores them: `did_change` hands the engine incremental edits against the document the editor
-  holds, and the converted text is a different buffer, so wiring it needs the original text kept
-  alongside the analysed one (or the conversion applied per-edit). The formatter deliberately stays
-  out — most of an `.Rmd` is prose.
-- **An unannotated helper that wraps an operator over a class fails, and the tie is why.**
-  `add_layer <- function(plot, layer) plot + layer` infers `<T: numeric> fn(plot: T, layer: T)` — the
-  two flexible operands are tied to ONE variable — so `add_layer(base, geom_point())` reports
-  `expected ggplot, found gg`. Same shape for dates: `add_days <- function(d, n) d + n`. Annotating
-  the helper fixes it and the message is clear, but the tie is an over-commitment: R's `+` never
-  required its operands to share a type, and a class that declares `+.Class` accepts pairings the tie
-  forbids. **This is the "traits" / third-constraint-kind question in `contributing/design/open-questions.md`, now tripped a
-  third time by shipped features** — the right fix is a "supports this operator" constraint instead of
-  `Numeric`, replacing both the tie and the `declares_arithmetic` relaxation that lets an
-  arithmetic-declaring class satisfy `Numeric` today. Next stub corpus addition that returns a real
-  nominal will trip it again.
-- **A type error inside `expect_error(...)` — DECIDED: it stays reported**, and
-  `# roughly: allow(type-mismatch)` is the answer (decision record in `decisions.md`; documented on
-  the diagnostics page). Suppressing inside expectation payloads would blind genuine mistakes in
-  tests and needs an open-ended list of function families. The open follow-up is the stronger form:
-  a suppression that reports when the expected finding does *not* appear, like
-  `@ts-expect-error` — a feature for every code, not a special case.
+### The three object systems, re-measured
+
+Two of the four claims this entry used to make were stale, including the one it ranked first.
+
+- **`setGeneric` was already fixed when the entry said otherwise.** It claimed that
+  `setGeneric("f", ...)` does not define `f`, so every call to a project's own S4 generic reports
+  `unresolved`, and it ranked that the top fix. It does not reproduce. `set_generic_target` binds
+  the name, handles the `methods::setGeneric` form and the `name =` argument, and a control probe in
+  the same file confirmed the `unresolved` check was live, because `definitely_not_defined` reported
+  and `area` did not. Anyone who took the ranking at face value would have spent a cycle fixing a
+  non-bug.
+- **R6 was mischaracterized.** The entry said R6 has no stub at all, because `R6::R6Class` reports
+  an unknown package namespace. R6 does ship an export manifest and is a conditional namespace, so
+  it resolves as soon as the project declares it through `Imports: R6` in `DESCRIPTION` or attaches
+  it with `library(R6)`. Both were verified clean. The message appears only for `R6::` in a project
+  that declares neither, which is the documented rule for any undeclared namespace and is
+  deliberate. What is actually missing is typed declarations. The class, its fields and its methods
+  are `Unknown`, so `obj$typo()` is silent and completion after `self$` offers every record field in
+  the workspace.
+- **Still true: an S4 slot typo is silent.** `setClass("A", representation(x = "numeric"))` followed
+  by `new("A", y = 1)` reports nothing, where R halts with `invalid name for slot of class "A": y`.
+  `x@slot` has no type either, and `setClass`, `setMethod` and `new` are `Any` stubs.
+- **Still true: `UseMethod` is not modelled**, so a generic call is `Unknown`, and
+  `structure(list(...), class = "dog")` produces a plain record, so the class attribute is data. S3
+  operator dispatch is real, because `+.Date`, `Arith.X` and `Ops.X` are built and dispatched, and
+  the linter knows `generic.class` names.
+
+All three systems are recognized structurally by the IDE outline, in `classify_symbol_call`, which
+is where the type-side work can start. The fix order, cheapest real win first, is the S4 slot-name
+check, then R6 class typing, then S4 slot types, then `UseMethod`.
+
+The slot check is bounded, because `setClass` names the slots and `new("Class", ...)` names its
+arguments. But `contains =` is the trap. A subclass legitimately takes its parent's slots, verified
+against R, where `setClass("C", contains = "P", ...)` followed by `new("C", x = 1, y = 2)` runs. A
+check that does not follow the inheritance chain therefore turns correct code into a false positive.
+Both the `representation(...)` and the `slots =` form need reading, and a class assembled
+dynamically must fall back to silence.
+
+### Matrix shape is untracked
+
+`matrix`, `t`, `solve`, `dim`, `crossprod`, `diag` and `apply` all return `Any`, so a transposed
+dimension or a non-conformable product is invisible. Declaring them `-> matrix` is easy. The value
+is in dimensions, which needs a shape-carrying matrix type. The data.frame row-type design is the
+same shape of problem.
+
+One trap came out of the work that returned the `matrix` nominal: making a constructor return a real
+nominal without also declaring that class's operator methods turns every `m + 1` into a false error.
+
+### Everything from a `data.frame` is `Unknown`, and `Unknown` satisfies every annotation
+
+On data-frame-heavy code, annotations therefore look protective and are not. This is the design
+consequence that decides the tool's value for analysis users. It needs at minimum a way to see that
+a check was skipped, which is what strict mode does once it reports origins.
+
+### An unannotated helper that wraps an operator over a class fails, and the tie is why
+
+`add_layer <- function(plot, layer) plot + layer` infers `<T: numeric> fn(plot: T, layer: T)`, which
+ties the two flexible operands to one variable, so `add_layer(base, geom_point())` reports
+`expected ggplot, found gg`. Dates have the same shape, in `add_days <- function(d, n) d + n`.
+
+Annotating the helper fixes it and the message is clear, but the tie is an over-commitment. R's `+`
+never required its operands to share a type, and a class that declares `+.Class` accepts pairings
+the tie forbids.
+
+This is the same third-constraint-kind question recorded above and in
+`contributing/design/open-questions.md`. The right fix is a "supports this operator" constraint in
+place of `Numeric`, replacing both the tie and the `declares_arithmetic` relaxation. The next stub
+corpus addition that returns a real nominal will trip it again.
+
+### A project's own `%op%` stays untyped by design
+
+The result is `Unknown`, which is a strict-mode origin. It may be a non-standard-evaluation wrapper
+whose right operand is quoted, as magrittr's `%>%` is, and checking that as an ordinary call would
+reject correct code.
+
+Lowering `%op%` to the call it is, following the documented `|>` precedent, would type it and give
+goto-definition and references on the operator. Weigh that against the non-standard-evaluation risk
+and the `unresolved` finding a bare-script `%>%` would gain.
+
+### Only the stub route to an operator method on a project nominal is blocked
+
+Declaring the method as an annotated R function works, and that is what an author writes anyway for
+a real S3 class. The gap is narrower than "operator methods need ergonomics". A `.Rtypes` stub
+cannot see a `@type` the R source declares, reporting instead that the declaration does not load
+because it does not know the type. So only the stub spelling is unreachable.
+
+Decide whether a stub source should see a project's `@type` declarations at all, or whether the
+R-side declaration is simply the answer and the docs should say so.
+
+### Literate documents are analysed by `check` but not by the editor
+
+An `.Rmd`, `.qmd` or `.Rnw` chunk is converted to an R program by blanking every non-R character, in
+`syntax::literate`, so ranges need no translation and `check` reports at the original line and
+column.
+
+The LSP path still ignores them. `did_change` hands the engine incremental edits against the
+document the editor holds, and the converted text is a different buffer, so wiring it up needs the
+original text kept alongside the analysed one, or the conversion applied per edit. The formatter
+deliberately stays out, because most of an `.Rmd` is prose.
+
+### The stronger suppression form
+
+A type error inside `expect_error(...)` stays reported, and `# ry: allow(type-mismatch)` is the
+answer. `decisions.md` holds the record and the diagnostics page documents it. The open follow-up is
+the stronger form, which is a suppression that reports when the expected finding does not appear,
+like `@ts-expect-error`. That is a feature for every code, not a special case.
+
+### Smaller items, each with a one-line repro in the reports
+
+- A message leaks an unbound type variable, as `list[T] | T[]`, and expands an alias on only one
+  side of an expected-and-found pair.
+- Closure re-entry is unmodelled, so the memo idiom
+  `if (!is.null(cache)) return(cache); cache <<- v` yields `T | NULL`.
+- There is no `--fix`, no stdin input, and no CLI way to ask what type an expression has, which
+  makes debugging an inference surprise guesswork for a CLI-only user.
+
+Two items from the reports were checked and are not defects, recorded so they are not re-filed. A
+generic parameter rejecting a non-`NULL` default is correct, because `<T> fn(x: T, [fallback]: T)`
+defaulting to `0L` would return `0L` from a call the signature promises returns `character`, while
+`T | NULL` with a `NULL` default works because `NULL` is a declared member. The `unused`
+false-positive on a write followed by `break` does not reproduce, verified across `for`, `while` and
+`repeat` and over both used and genuinely dead writes, so drop it unless a concrete shape
+resurfaces. Separately, `sum(1, 2, 3,)` formatting to `sum(1, 2, 3, )` is not a defect and stays:
+the trailing comma introduces a missing argument, so it parses identically to the `alist(, )` idiom
+the space serves, and the `trailing-comma` lint reports the mistake.
 
 ## Open
 
