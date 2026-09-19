@@ -176,60 +176,6 @@ nominal distinctness, and no cascades outside the `@param` case. The gap is not 
 **diagnostics render the artifact unification left behind rather than the fact that failed**, and that
 the nominal story protects construction but nothing after it.
 
-## FIXED — a field write was lost across items in a package but not in a script
-
-Identical code, two answers. A structural record written at top level and read in a later top-level
-statement:
-
-```r
-#: list{name: character, age: integer}
-record <- list(name = "Ada", age = 36L)
-record$age <- "now a character"
-reading <- want_chr(record$age)      # wants character
-```
-
-As a **script** this is clean — the write retypes the field and the read sees `character`. In a
-**package** it reports ``expected `character`, found `integer` ``, so the write is lost at the item
-boundary and the read answers from the pre-write type. A package's `R/` files are sourced top-down,
-so the write really does happen first and the package answer is the false positive.
-
-Found while fixturing the nominal field-write fix, and pre-existing — the structural path is
-untouched by it. The write applies *within* one item either way (the same code inside a function body
-is clean in both kinds), so this is the cross-item export.
-
-**Diagnosed, not yet fixed.** The export is fine: naming does mint a `TopLevel` binding for a
-replacement target's base, so the writing statement item exports `record` with the written type in
-its `top_level_bindings`. The fault is precedence in `SalsaGlobals::scheme`, which resolves in this
-order:
-
-1. `script_definition` — position-aware, handles definitions *and* statement writers, and is the
-   reason scripts get this right. It is unreachable for a package, because `script_items` is only
-   populated for scripts.
-2. `package_definitions` — definition items only, no statement writers, no position.
-3. `conditional_slot_scheme` — where the statement writers actually live.
-
-A name with both a definition and later statement writes stops at (2), so every later write is
-invisible. `conditional_slot_items` already collects the writer; nothing ever asks it.
-
-The obvious repair — extend the position-aware same-file lookup to package files — has a constraint
-that must not be broken: `package_definitions` encodes "later files, and later assignments within one
-file, override earlier ones", so a same-file lookup that short-circuits would lose a later *file's*
-override. The two orderings have to compose rather than one replacing the other. The conditional case
-(`if (flag) record$age <- ...`) must still join rather than replace, which is what
-`conditional_slot_scheme` unions for.
-
-**Fixed by giving package files the position-aware lookup scripts already had.** `SalsaGlobals` built
-its ordered item list for scripts only; it is now built for both kinds, because a file is sourced
-top-down whichever it is. An **immediate** read consults the nearest earlier writer in its own file
-before the project-wide map, which is what makes the rewrite visible.
-
-The composition constraint is handled by splitting on the read kind rather than the document kind: a
-**deferred** read stands aside for a package and falls through to the project-wide winner, because a
-function body runs after the whole package is sourced, so a later file's override must win. In a
-script the closure runs once that file's frame has settled, so it still scans the file. Verified:
-forward references from a function body, mutual recursion, self-recursion, and a later file
-overriding an earlier one all still resolve correctly.
-
 ## Open — performance & memory review
 
 An independent review that profiled before proposing. Its first finding is fixed (operands of an
@@ -1054,33 +1000,6 @@ selector), because several pages legitimately do that.
 
 Until it exists, treat "changed a message or a blame range" as implying a manual sweep of the pages
 above, and say in the commit which ones were re-run.
-
-## FIXED — release-artifact versions had drifted apart
-
-`Cargo.toml` was `0.3.0-alpha`, `editors/code/package.json` `0.3.0`, `editors/zed/extension.toml`
-`0.2.4-alpha`, and nothing kept the three in step.
-
-**Decided: one source of truth with one mechanical derivation, enforced by a test rather than a
-script.** The workspace `Cargo.toml` version is the truth, and the VS Code manifest carries it with
-any prerelease suffix removed (that manifest's version has to be a plain `major.minor.patch`). The
-derivation is mechanical, so a mismatch is always a stale file and never a judgement call.
-
-**Superseded in part:** this first also required the Zed manifest to carry the version verbatim,
-which was wrong — that extension ships no binary, so it versions on its own line. See the decision
-record in `decisions.md`.
-
-A *stamping script* was considered and not written. A script only helps if someone runs it, and the
-workspace CI that would is still staged in `.github/pending-ci.yml` awaiting a human `git mv` — while
-`cargo test` runs on every slice. So the enforcement is two tests in
-`crates/ry/tests/test_release_metadata.rs`, and the assertion message names the exact line to write.
-Confirmed by running it against the drift before fixing it: it failed with
-``editors/zed/extension.toml is stale: write `version = "0.3.0-alpha"` `` and simultaneously confirmed
-the VS Code number was already correct — so the "may be deliberate" guess about that one was right.
-The Zed half of that verdict did not survive review: the drift there was the *design*, not a bug.
-
-Its own file rather than an addition to `test_cli.rs`, which is explicitly the *binary's* behaviour
-contract (rendering, JSON, exit codes) — shipped-artifact metadata is a different component.
-
 
 ## Open — test-user round 2 findings
 
@@ -1940,36 +1859,6 @@ resolving re-exports, plus a decision about `exportPattern` (a regex over names,
 unknowable and must fall back to silence). Worth doing — a typo in a self-qualified call is
 otherwise invisible — but it is a namespace-model slice, not a one-line check.
 
-## Closed — the overload corpus is NOT inflated by missing grammar (investigated; premise was false)
-
-This was filed as "two absent stub-grammar features"; both features exist, and collapsing the corpus
-buys one line. Recorded so it is not re-derived.
-
-**The constrained binder already works**, in `#:` annotations and `.Rtypes` files alike. Measured:
-`zzabs : <T: numeric> fn(x: T) -> T` in a project stub types `zzabs(1L)` as `integer`, `zzabs(2.5)`
-as `double`, `zzabs(c(1L, 2L))` as `integer[]`, `zzabs(c(1.5, 2.5))` as `double[]`, and rejects
-`zzabs("no")`. Vectors included — so the "shape-mirroring return" is not a separate missing feature
-either; it falls out of the binder.
-
-**The extra candidates are not redundancy, they carry facts a binder cannot state.** Three of them:
-
-- **`logical` promotes to `integer`, it does not preserve.** R gives `abs(TRUE)` → `integer`, so a
-  type-preserving binder would be wrong; the concrete `fn(x: integer) -> integer` candidate is what
-  catches logical, because a concrete `integer` parameter accepts `logical` by coercion while a
-  `numeric`-constrained *variable* refuses it. That asymmetry is deliberate and correct here.
-- Sets whose int and logical arms are already unioned into one line (`cumsum`, `cummin`, `cummax`)
-  gain nothing: the binder replaces a line that already covers two cases.
-- `min`/`max`/`range`/`sort` carry a `character` candidate, which no numeric binder subsumes.
-
-A trial collapse of `abs` from five candidates to four was behaviour-identical across seven probes
-(scalar/vector × integer/double, logical, logical vector, and the wrapper) — and `abs` is the only
-set with that scalar-and-vector-times-int-and-double shape. One line, in one function, is not worth a
-corpus-wide edit, so it was reverted.
-
-Wording trap, still worth keeping: never say these functions "have no principal scheme" — they do,
-and now the declaration language *can* spell it. The reason for the sets is R's coercion table, not
-the grammar.
-
 ## Open — a stdlib wrapper loses all type information (found while investigating the above)
 
 `function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every other
@@ -2016,180 +1905,6 @@ is low and the cost of proceeding is a project that silently is not checked. Con
 unknown key a hard error when the file is a *local* `ry.toml` while keeping the warning for forward
 compatibility only where it is actually needed. Decide it deliberately; the current forward-compat
 rationale (`config.rs`, `Config::unknown_keys`) is written down and is not obviously wrong.
-
-## FIXED — strict mode now surfaces reads tolerated by an unknown attached package
-
-The blanket tolerance was the one hole strict mode left open, and three docs pages had claimed the
-opposite before saying plainly that it did not close it. With a `library(<package with no
-manifest>)` in the project, a read of a name nothing defines produced **no finding at all** under
-`[check] typing = true, strict = true`. That is the failure mode this project treats as worst: a
-clean run that reads as "I understood everything" while an unknown `library()` silently switched a
-whole class of checking off project-wide.
-
-Closed by making the two streams share one decision instead of one of them guessing. The tolerance
-was a `continue` buried in a 65-line loop in `unresolved_diagnostics`; that loop is now
-`classify_non_local_read`, returning `Resolvable` / `Tolerated` / `Unresolved`. The ordinary check
-reports the last, strict reports the middle — so strict reports **exactly** the reads the ordinary
-check let through, and the two cannot drift. (Duplicating the tolerance rule into `strict_diagnostics`
-was the obvious alternative and is the shape that caused the arithmetic-constraint bug: two places
-deciding the same thing from different sources.)
-
-Verified end to end rather than reasoned: strict on reports each tolerated read; strict **off** is
-still silent, which is the whole point of the tolerance; a near miss of a name the project itself
-binds was never tolerated and stays an `unresolved` finding; and the remedy the message names — a
-`stubs/<pkg>.Rtypes` — actually closes it.
-
-**This cannot be a fixture, and finding that out cost a blessed pair of them that tested nothing.**
-The tolerance keys on `PackageMetadata`, a salsa input only a real project sets, so a single-file
-fixture never triggers it — the two fixtures written first blessed as ordinary `unresolved` warnings
-while their comments claimed to be testing strict. They were deleted; the test lives in the CLI
-suite (`strict_reports_a_read_the_attached_package_tolerance_silenced`), which builds real projects,
-and asserts all three behaviours above.
-
-## FIXED (htmltools, and now mgcv too — a THIRD cause) — spinning on CPU at flat memory
-
-**`mgcv` is closed, and it was neither of the causes below.** It was the exponential re-inference of
-arithmetic operands: `R/gamlss.r` holds machine-written symbolic derivatives, one statement with 248
-arithmetic operators, and each level re-walked both operand subtrees. Measured on the release binary:
-before, `ry check /tmp/pkgbench/mgcv` did not finish in 180 s; after, 1.98 s and 2.01 s. The fix is in
-`infer_binary`, and the finding is written up in the performance review section above. The rest of this
-entry is the `htmltools` history, kept for the self-referential-record analysis it contains.
-
-
-
-Checking `htmltools`'s package directory (7,669 lines) runs past **five minutes** at 100% CPU and
-**42 MB RSS**, measured at 182 seconds. Constant memory is the distinguishing fact: it rules out the
-non-converging-fixpoint shape that made `rlang` fail, and that diagnosis held — fixing the fixpoint
-took `rlang` from a 213-second death to a 9-second clean run and left `htmltools` timing out
-unchanged, with no cycle panic in its output. So this is an algorithm that is superlinear or
-non-terminating within a bounded working set. `mgcv` (37,253 lines) behaves the same way.
-
-### Localised and profiled; the fix is NOT where the time is spent
-
-**One file does it.** Timing each `htmltools/R/*.R` alone: every file completes under 900 ms except
-`tag_query.R` (1,563 lines), which alone exceeds 25 s. Start there, not with the package.
-
-**The shape.** `tagQuery_` defines a local closure `newTagQuery(selected)` that returns
-`structure(list(...))` whose ~40 fields are closures each calling `newTagQuery` again. So the record
-type is *self-referential through its own fields*, and the type expands per level rather than being
-folded. Prefix-bisection points at the line completing the first such method — but note prefix
-bisection is confounded here, because a truncated prefix has a syntax error and syntax errors suppress
-checking; the cliff is partly that the code became parseable.
-
-**Where the time goes**, from a symbolised sample of the running process:
-`semantics::types::substitute_rigid` recursing into `salsa::interned::…::intern`. Every instantiation
-of a scheme mentioning that type walks and re-interns the whole thing.
-
-**The time is NOT wasted work, which is the finding that matters.** Two candidate fixes in
-`substitute_rigid` were implemented and measured, and both were reverted:
-
-- returning `ty` unchanged when the substitution is empty (monomorphic instantiation);
-- a memoised per-interned-type `rigid_names` set, returning any subtree whose rigids are disjoint from
-  the substitution unchanged.
-
-Neither moved `tag_query.R` at all, and an interleaved A/B on 323K lines showed **no** difference
-(baseline 4.69–4.93 s, patched 4.69–4.75 s). So the substituted rigids genuinely pervade a genuinely
-enormous type: the walk is doing real work on a type that should never have grown that large.
-
-**Corrected by measurement: `substitute_rigid` WAS the hot path, and the earlier "no output" readings
-were an instrumentation artifact.** A counter printing to stderr through a pipe loses its output when
-`timeout` kills the process, so three separate probes read as silence and were taken as evidence the
-function was cold. Redirecting stderr to a file instead showed **278 million calls in 40 seconds**.
-Always redirect a probe to a file when the process under test will be killed, and always make the
-probe fire once on entry so its silence can be distinguished from its absence.
-
-**Fixed, and it is the DAG-as-tree bug.** Interning makes a type a DAG — one subtree is reached by
-every path mentioning it — and a record whose ~40 fields all return that record is reached once per
-field per level, so an unmemoised walk is exponential in depth. `substitute_rigid` now memoises per
-node for the duration of one top-level call, which is sound because the substitution is fixed for that
-call and a node's answer cannot depend on how it was reached. On the pathological file the walk drops
-from 278M calls to under 2M; interleaved on both corpora it wins every round by ~2%, with identical
-findings.
-
-**The hang is still open, and the memo did not fix it** — a second bottleneck now dominates
-`tag_query.R`. Re-sample the profile to find it; the sampler and the corrected probe method are the
-tools to use.
-
-### The type's growth is now measured, and it is combinatorial, not iterative
-
-Instrumenting the captured-write join to report the **tree** size (paths, not distinct nodes) of each
-type it erases, largest-so-far only:
-
-```
-877 -> 8823 -> 104655 -> 104657 -> 1046623 -> 5000000 (probe ceiling)
-```
-
-Roughly ten times per step. So the type genuinely explodes, every walk over it is a symptom, and
-making individual walks cheaper cannot fix it — which matches the evidence, because each memoised
-walk simply hands the hot spot to the next one.
-
-**Six fixes have been implemented, measured, and reverted.** Recorded so none is tried a seventh time:
-
-1. `substitute_rigid` early-out on an empty substitution — no effect.
-2. `substitute_rigid` memoised disjoint-rigid skip — no effect.
-3. `substitute_rigid` matching by reference instead of cloning `TyKind` — no effect.
-4. `substitute_rigid` per-node memo — **kept** (278M calls to under 2M, ~2% on both corpora,
-   identical findings) but does **not** fix the hang.
-5. `erase_vars` as a tracked query — no effect on the hang, unmeasured on normal input, reverted.
-6. Capping how many times one captured slot's join may grow — no effect, and the *reason* is the
-   useful part: the cap is per slot, and each of the ~40 method slots grows only once or twice. The
-   explosion is the **product across slots**, not iteration within one, so no per-slot counter can
-   see it.
-
-**FIXED, exactly there.** `type_size` is a tracked query counting a type **as a tree** — paths, not
-distinct nodes — saturating at a ceiling of 100,000, and `Checker::record` gives any composite past
-that ceiling `Unknown` instead. Tree size is the number that matters because a consumer walking a type
-pays the tree it denotes, while sharing keeps the stored graph small; a distinct-node count is blind to
-exactly the case this exists for. Only composites are measured, so scalars never pay for the ask.
-
-Results: `tag_query.R` **>200 s → 56 ms**, the whole `htmltools` package **>5 min → 129 ms**. Findings
-are byte-identical across 1,951 files of real CRAN sources (p18, MASS, ggplot2), and interleaved it is
-~7% *faster* on 323k lines, winning every round — the ceiling cuts off moderately oversized types too.
-`record` is the right site because every expression's inferred type passes through it; the capture-join
-site, tried first, fires only nine times on that file and bounding it changed nothing.
-
-**`mgcv` was NOT the same bug, and it is now closed** — see the head of this entry. The shared-cause
-assumption in this item's title was wrong twice over: the cause turned out to be exponential
-re-inference of arithmetic operands, not type growth at all.
-
-**Remaining from the original item.** The bound has to be on the size of a constructed type itself — Widening past the bound to `Unknown` is the sound-by-refusal move the loop join already
-makes for a variable whose type keeps growing structurally. Computing the size cheaply needs care: the
-DAG is small while the tree is enormous, so a distinct-node count will not see the problem and a naive
-tree count is itself exponential — it wants a memoised size where `size(node) = 1 + sum(size(child))`,
-which is O(DAG) and yields the true tree magnitude.
-That is the recursion-widening question (fold to a recursive nominal, or widen to `Unknown` past a size
-bound), which is a semantics design decision rather than an optimisation, and wants a decision record.
-A size bound on constructed types would also be a general safety net: nothing currently caps how large
-one type may get.
-
-**Measurement trap, learned here the hard way.** Do not A/B two binaries in separate blocks on this
-machine. A non-interleaved comparison showed baseline 9.6 s against patched 4.8 s — an apparent 2×
-win that was entirely load drift from a build still finishing during the baseline block. Interleaving
-the two binaries run-by-run showed the true difference: zero. Any perf claim here needs interleaved
-runs.
-
-Both outliers from the same investigation are now accounted for. **`MASS` is closed** — it took 6.5 s
-and now takes 0.31 s and 0.36 s, from the operand-inference fix; the R6 suspicion was wrong, it was
-arithmetic chains. **`targets`** was the other, and its cause is the conditional-slot finding above,
-where the remaining half is written up; R6 was a suspect there too and is likewise not the cause.
-
-**Missing end-to-end coverage for both cycle fixes.** Neither has a fixture. The failing inputs are
-whole CRAN packages, and synthetic cases built from the suspected mechanisms did not reproduce
-either one — for the non-convergence, a self-growing definition, three mutual-recursion shapes and an
-overloaded-call cycle all converge fine, because a single item pins and settles and the bug needs
-several members' pins to interact. What is pinned instead is the structural property the fix rests on
-(`refusal_is_idempotent` in `semantics.rs`), which is the part that can be tested without
-reproducing the cycle. The end-to-end guard rests on the corpus suites.
-
-## REFUTED — the formatter is NOT slower than the type checker; it is single-threaded
-
-The premise was a measurement error, and the correction is in the performance review section above:
-`ry check .` fans out over `available_parallelism()` while `ry fmt` is a plain `for` loop over files,
-so the original 5.6 s versus 10.1 s compared a parallel command against a sequential one. On an
-identical file set with both single-threaded, the formatter costs **half** what the type checker does
-(1.01 s against 2.26 s on one core). What remains open is the actionable part — fan `fmt` out the way
-`check` already does — plus an unlocalized fact worth a profile of its own: the render is ~8× the
-parse (1.9 MiB/s against ~18 MiB/s).
 
 ## Open — a `--jobs` flag, and why the fan-out is not linear
 
@@ -2274,62 +1989,6 @@ or allocator contention, and the fix would be a cap rather than a different form
 - **Analysis-backed Tab completion SHIPPED** (first analysis rung; `contributing/design/repl.md` has the seam design): typed signatures for stdlib names, session bindings, `pkg::` exports, manifest names — `SessionCompleter` seam keeps the repl crate syntax-only, `AnalysisCompleter` in roughly runs `ide::completion` over the session-as-script. **Open — remaining rungs:** live-session facts (the R environment listing unioned into completions), pre-evaluation diagnostics on pending input, hover on the input line, graphics-device story (versioned mirror structs, see the design record). The headless runner is shipped.
 - **REPL Windows: real-machine smoke test pending.** The embedding is implemented (`contributing/design/repl.md` has the recipe: Rstart callbacks via R_DefParamsEx's version handshake, sibling-DLL preloading, RGui→LinkDLL switch, UserBreak+deferred interrupt pair) and compile/clippy-verified against x86_64-pc-windows-gnu — but no Windows machine with R has ever executed it. Smoke: `roughly repl` (prompt, evaluate, Ctrl-C, vi mode) and `roughly run` (output, exit 0/1). Known caveat to watch: terminal VT input handling in the editor layer.
 
-## FIXED — the `rofy` crate is deleted
-
-The user gave an explicit go for `rofy` alone, conditional on parity, and then asked for it. **Every
-other crate under `legacy/` still needs its own explicit go and stays in-tree until then** — see the
-note below on why this is not a precedent.
-
-Parity was established by reading both crates rather than assuming. `rofy`'s whole surface was
-multiline editing, command history with reverse search, an optional vi mode, syntax highlighting, a
-hinter, and a vi-aware prompt. `crates/repl` has every one — `LexerValidator`, `FileBackedHistory`,
-`reedline::Vi` behind `--keybindings vi`, `LexerHighlighter`, `DefaultHinter`, `RPrompt` — and exceeds
-them with Tab completion through a `ColumnarMenu` and history *persisted to a file* where `rofy` kept
-it in memory for the session. One deliberate difference: highlighting runs off ry's own lexer rather
-than tree-sitter, which is the better answer — one parser, not two.
-
-Nothing depended on it. The removal took the crate, the `rofy` and `publish-rofy` justfile recipes,
-the `--exclude rofy` in the staged CI and the justfile gate, and prose in `decisions.md`,
-`contributing/development.md` and `contributing/design/repl.md`. The R-`parse()` acceptance
-cross-check the old entry warned about never used `rofy` — `corpus_acceptance` compares against
-tree-sitter-r; `decisions.md` only said to run it locally "like `rofy`", an analogy now rewritten.
-
-**The payoff is the gate, as predicted.** The canonical invocation is now
-`cargo test --workspace --exclude zed_ry` — one exclusion, not two, and one fewer thing a future
-session gets wrong. Deleting the crate also dropped `extendr-api`, `extendr-engine` and `libR-sys`
-from the workspace (89 lines out of `Cargo.lock`), which removes the build-time dependency on a local
-R entirely.
-
-**This is not a precedent for the rest of `legacy/`, and the reason is measured.** `rofy` was a
-predecessor of a shipped component with a 266-line surface that could be read in full. `analysis-legacy`
-is different in kind: it holds **2,830 fixture cases** against the new stack's 1,192, and **the new
-code does not run a single one of them** — `legacy/fixtures` is a harness-only crate and
-`analysis-legacy/tests/test_fixtures.rs` drives those cases against the frozen oracle, with no
-new-stack test reading those directories. Case-name overlap is 15 of 138 for ide and 1 for the whole
-typecheck suite, so the corpus was reimplemented rather than ported. Name overlap understates
-behavioural overlap and should not be read as 2,830 cases of missing coverage — but it does establish
-that nothing has shown the new suites cover what those do.
-
-**The inputs are now mined, which is the part that transfers.** 1,967 distinct sources live in
-`crates/syntax/tests/corpus-legacy/` and run in the `syntax`, `format` and `semantics` invariant
-batteries (see the testing page). Expectations deliberately did **not** come with them: the naming
-suite renders binding-resolution trees and the type suites use an older notation, so bulk-blessing
-would encode today's behavior as the contract. What ran was measured rather than assumed — all 2,447
-extracted sources through `ry check`, **zero crashes and zero non-clean exits** — and the invariants
-pass on all of them, so this arm is a regression net rather than a bug-finder today.
-
-Two findings from the mining worth keeping. The frozen `type_syntax` suite stores **bare annotation
-bodies** without the `#:` marker, because that stack parsed the type grammar standalone; 287 of its 303
-cases therefore read as `expected a statement, found @` until the marker is prepended, which is a
-format difference and not a parser gap. And automated *semantic* mining has a high noise floor: the
-sources are fragments whose declaring context lives in the case's other files, so `@new Person` alone
-reports an unknown type. Adjudicating the type suites needs per-case context, not a bulk pass.
-
-What is left before deleting that directory is the **expectation** half: a differential triage
-emitting (id, source, frozen expectation, new rendering), bucketed by shape, adjudicated per suite
-against the type-system reference. Priority `naming` (513 cases, no new-stack counterpart at all),
-then typecheck, type_syntax, diagnostics, ide.
-
 ## Open — rename to `ry`: what is left
 
 **Done.** The language is `ry`. The crate is `crates/ry`, published as `ry-lang` (plain `ry` is taken
@@ -2356,6 +2015,69 @@ is moved once rather than renamed, so nobody loses their history.
   particles — `ROUGHLY_LINES` is the ASCII art it draws. It is user-owned by standing instruction, so
   it was left untouched deliberately; it needs the new name from whoever owns it.
 
+## Open: what is left before the legacy tree can be deleted
+
+Every crate under `legacy/` needs its own explicit go from the user and stays in-tree until then.
+The `rofy` deletion is not a precedent, and the reason is measured. `rofy` was a predecessor of a
+shipped component with a 266-line surface that could be read in full. `analysis-legacy` is different
+in kind. It holds 2,830 fixture cases against the new stack's 1,192, and the new code runs none of
+them. `legacy/fixtures` is a harness-only crate, and `analysis-legacy/tests/test_fixtures.rs` drives
+those cases against the frozen oracle, with no new-stack test reading those directories. Case-name
+overlap is 15 of 138 for the IDE suite and 1 for the whole typecheck suite, so the corpus was
+reimplemented rather than ported. Name overlap understates behavioral overlap, so do not read it as
+2,830 cases of missing coverage. It does establish that nothing has shown the new suites cover what
+those do.
+
+The inputs are mined already, and that is the part that transfers. 1,967 distinct sources live in
+`crates/syntax/tests/corpus-legacy/` and run in the `syntax`, `format` and `semantics` invariant
+batteries. The testing page describes them. Expectations deliberately did not come with them,
+because the naming suite renders binding-resolution trees and the type suites use an older notation,
+so bulk-blessing would encode today's behavior as the contract. What runs was measured rather than
+assumed: all 2,447 extracted sources through `ry check`, with zero crashes and zero non-clean exits,
+and the invariants pass on all of them. This arm is therefore a regression net rather than a
+bug-finder today.
+
+Two findings from the mining are worth keeping. The frozen `type_syntax` suite stores bare
+annotation bodies without the `#:` marker, because that stack parsed the type grammar standalone.
+287 of its 303 cases therefore read as "expected a statement, found @" until the marker is
+prepended, which is a format difference and not a parser gap. Automated semantic mining also has a
+high noise floor, because the sources are fragments whose declaring context lives in the case's
+other files, so `@new Person` alone reports an unknown type. Adjudicating the type suites needs
+per-case context rather than a bulk pass.
+
+**What is left is the expectation half.** Write a triage that emits `(id, source, frozen
+expectation, new rendering)`, bucket it by shape, and adjudicate per suite against the type-system
+reference. Start with `naming`, which has 513 cases and no new-stack counterpart at all, then
+typecheck, `type_syntax`, diagnostics and IDE.
+
+The performance witnesses that apply to the new stack alone move out of `legacy/differential` before
+the deletion sweep. That is the sweep's only other prerequisite.
+
+## Open: a size bound on a constructed type, and a decision on recursion widening
+
+`TYPE_SIZE_CEILING` caps a type at the point it is recorded, which stops the pathology. The general
+question is still open: nothing caps how large one constructed type may get in the first place.
+
+Widening past a bound to `Unknown` is the sound-by-refusal move the loop join already makes for a
+variable whose type keeps growing structurally. The alternative is folding to a recursive nominal.
+Choosing between them is a semantics design decision rather than an optimization, so it wants a
+decision record.
+
+Computing the size cheaply needs care. The graph is small while the tree is enormous, so a
+distinct-node count will not see the problem and a naive tree count is itself exponential. It wants
+a memoized size where the size of a node is one plus the sum of its children's sizes, which is
+linear in the graph and yields the true tree magnitude. `types::type_size` already has that shape.
+
+## Open: neither cycle fix has end-to-end coverage
+
+Neither the non-convergence fix nor the missing cycle recovery has a fixture. The failing inputs are
+whole CRAN packages, and a synthetic case built from the suspected mechanism reproduced neither. For
+the non-convergence, a self-growing definition, three mutual-recursion shapes and an overloaded-call
+cycle all converge fine, because a single item pins and settles while the bug needs several members'
+pins to interact. What is pinned instead is the structural property the fix rests on, which is
+`refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
+The end-to-end guard rests on the corpus suites.
+
 ## Post-beta (explicitly out of scope for now)
 
 - Tags / discriminated unions via a compiler-known stdlib `match` (design in `contributing/design/open-questions.md` first).
@@ -2365,6 +2087,62 @@ is moved once rather than renamed, so nobody loses their history.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **A package file got the position-aware lookup a script already had, so a later top-level write is
+  no longer lost.** `SalsaGlobals` built its ordered item list for scripts only. A file is sourced
+  top-down whichever kind it is, so an immediate read now consults the nearest earlier writer in its
+  own file before the project-wide map. The composition constraint splits on the read kind rather
+  than the document kind: a deferred read in a package stands aside and falls through to the
+  project-wide winner, because a function body runs after the whole package is sourced, so a later
+  file's override must win. In a script the closure runs once that file's frame has settled, so it
+  still scans the file. `file_binders` indexes it per file, which took an interleaved 20,000 by
+  20,000 case from 4,277 ms to 985 ms.
+
+- **A composite type past `TYPE_SIZE_CEILING` records as `Unknown`, which closed a hang.** A record
+  whose forty fields all return that record grew through 877, 8823, 104655 and 1046623 nodes. One
+  1,563-line file ran past 200 s and now takes 56 ms, and the package holding it went from over five
+  minutes to 129 ms. Findings are byte-identical across 1,951 files of real CRAN sources, and
+  interleaved it is about 7% faster on 323k lines. Six other fixes were implemented, measured and
+  reverted first, and `MEMORY.md` records the walk-with-a-memo rule they taught.
+
+- **Exponential re-inference of arithmetic operands is fixed in `infer_binary`.** One statement with
+  248 arithmetic operators re-walked both operand subtrees per level. `mgcv` did not finish in 180 s
+  and now takes about 2 s. `MASS` went from 6.5 s to about 0.3 s from the same fix. R6 was suspected
+  in both and was the cause in neither.
+
+- **Strict mode reports a read that the attached-package tolerance silenced.** `unresolved_diagnostics`
+  buried the tolerance in a `continue`. `classify_non_local_read` now returns `Resolvable`,
+  `Tolerated` or `Unresolved`. The ordinary check reports the last and strict reports the middle, so
+  strict reports exactly the reads the ordinary check let through and the two cannot drift.
+
+- **Release-artifact versions have one source of truth each.** The workspace `Cargo.toml` version is
+  the truth, and the VS Code manifest carries it with any prerelease suffix removed, because that
+  manifest needs a plain `major.minor.patch`. Two tests in `crates/ry/tests/test_release_metadata.rs`
+  enforce the derivation, and the assertion message names the exact line to write. A stamping script
+  was considered and not written, because a script only helps if someone runs it while `cargo test`
+  runs on every slice. The Zed manifest versions on its own line, which `decisions.md` records.
+
+- **The formatter is not slower than the type checker.** The original reading compared a parallel
+  command against a sequential one, because `ry check .` fans out over `available_parallelism()`
+  while `ry fmt` is a plain loop. On an identical file set with both single-threaded, the formatter
+  costs 1.01 s against the checker's 2.26 s. Fanning `fmt` out is still open, as is the unlocalized
+  fact that the render is about eight times the parse, at 1.9 MiB/s against about 18 MiB/s.
+
+- **The overload corpus is not inflated by a missing grammar feature.** The constrained binder works
+  in a `#:` annotation and in a `.Rtypes` file alike, and shape-mirroring falls out of it: a project
+  stub declaring `zzabs : <T: numeric> fn(x: T) -> T` types `zzabs(1L)` as `integer` and
+  `zzabs(c(1.5, 2.5))` as `double[]`, and rejects `zzabs("no")`. The extra candidates carry facts a
+  binder cannot state. `abs(TRUE)` is an `integer`, so a type-preserving binder would be wrong, and
+  a concrete `integer` parameter accepts `logical` by coercion where a numeric-constrained variable
+  refuses it. `min`, `max`, `range` and `sort` carry a `character` candidate no numeric binder
+  subsumes. Collapsing `abs` from five candidates to four was behavior-identical and was reverted,
+  because one line in one function is not worth a corpus-wide edit.
+
+- **The `rofy` crate is deleted.** `crates/repl` covers its whole surface and exceeds it with Tab
+  completion and history persisted to a file, and it highlights off ry's own lexer rather than a
+  second parser. The canonical test invocation is now `cargo test --workspace --exclude zed_ry`, one
+  exclusion rather than two, and the workspace lost `extendr-api`, `extendr-engine` and `libR-sys`,
+  which removes the build-time dependency on a local R.
 
 - **A non-converging cycle now terminates, because the refusal no longer depends on the round that produced it:** `item_check_recover` pinned only `scheme` at the round cap and took `ItemCheck`'s six other fields from the freshly recomputed value, so every round returned a different check, the recovery's own equality test could never succeed, and salsa iterated to its `MAX_ITERATIONS` of 200 — 184 rounds past the cap — then panicked with `too many cycle iterations`, or exhausted memory first, whichever the machine reached (the two symptoms were always one bug). Its sibling recoveries were safe only incidentally: `global_scheme_recover` and `statement_binding_recover` return a bare `TypeScheme`, so their pin is already a constant, and `item_check` is the only one of the three with a composite return. The pin now re-pins what was already returned, a fixed point by construction, and cuts both export surfaces rather than just one — `top_level_bindings` was leaking moving schemes out of an item that had already been declared non-converging, which its own doc comment said it did not. Verified on the real reproduction: rlang's whole package directory went from a 213-second death to a clean 9-second run reporting 806 findings, and the flattened 163-file variant that had been OOM-killed now finishes in 14 seconds. `refusal_is_idempotent` pins the property; `htmltools` still stalls with no cycle panic, confirming it is a genuinely separate pathology.
 

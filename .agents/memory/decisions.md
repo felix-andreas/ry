@@ -157,9 +157,11 @@ Three things are ruled out.
 A declaration file is the one sanctioned exception. A `.Rtypes` stub may do something a user's own
 annotated code may not, and today that is ad-hoc overloading. The exception is bounded on purpose.
 The cost of a non-principal feature is proportional to how much code it applies to, and the stub
-surface is a fixed corpus the project maintains. The need there is real. R's base library was never
-designed with types, so no principal scheme describes `min` or `abs`, and a gradual checker that
-cannot describe the standard library is not usable. A user's `#:` annotation stays pure
+surface is a fixed corpus the project maintains. The need there is real, and it comes from R's coercion
+table rather than from a gap in the declaration language. `abs(TRUE)` is an `integer`, so a
+type-preserving `<T: numeric> fn(x: T) -> T` would be wrong for a `logical` argument, and `min`
+accepts `character`, which no numeric binder covers. Never say these functions have no principal
+scheme. A gradual checker that cannot describe the standard library is not usable. A user's `#:` annotation stays pure
 Hindley-Milner, which is what keeps the user-facing promise honest.
 
 ## An overload set is a bounded, ordered probe
