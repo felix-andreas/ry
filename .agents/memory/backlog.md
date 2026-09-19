@@ -1221,182 +1221,114 @@ resurfaces. Separately, `sum(1, 2, 3,)` formatting to `sum(1, 2, 3, )` is not a 
 the trailing comma introduces a missing argument, so it parses identically to the `alist(, )` idiom
 the space serves, and the `trailing-comma` lint reports the mistake.
 
-## Open
+## Open: semantics
 
- — semantics
+### A list operation over a record still loses the field types
 
-- (Stub completeness audit CLOSED by the export-manifest layer — see the decision record and `stdlib-stubs.md` §Export manifests. `uname`-style reports remain user-project names: the fix stays a project stub or the DESCRIPTION-import tolerance.)
+`rev`, `unique`, `head`, `tail` and `Filter` declare a `list[named: T]` candidate ahead of the plain
+list one, so a name survives and a field read is `T | NULL` rather than a missing-field error. But a
+fixed-shape input coerces to a name-keyed list on the way in, so the exact field types are gone and
+the read stays nullable.
 
-- **Legacy ide fixture port DONE** (fixtures directive, first half): 81 cases ported into `crates/ide/tests/ide/*_ported.R.test` (real legacy corpus: 134 cases / 206 operation sites; ~36 already covered; 15 skipped as genuinely multi-file — the harness is one `SourceFile` per case; deliberate improvements blessed). Cross-file navigation coverage now rests on the LSP tests — consider a multi-file fixture harness extension if that surface grows.
+Only a shape-mirroring return, meaning "the same record", fixes it, and the type language has no way
+for a stub to say that. `rev` is the case where that claim would be exactly right, because it
+reorders and drops nothing, while `head`, `tail` and `Filter` genuinely may drop a name and are
+correctly nullable. This is the same family as the data.frame row-type and matrix-shape designs.
 
-- (Design forks all DECIDED — two-flexible comparison stays unconstrained without a third constraint kind, union compatibility commits flexibles at first use in program order, NAMESPACE bare-resolution stays ungated; decisions.md has the three records.)
-- **FIXED — an annotation in a call's argument list is now reported.** It attached to nothing and
-  said nothing, so a deliberately wrong type beside a lambda argument was invisible. The cause:
-  `statement_annotations` sees an `ARGUMENT` node next, which is not an expression kind, so the block
-  classifies as dangling and never attaches — and the placement walk visits only statement sequences,
-  never an argument list, so nothing reported it either.
+### One residual on annotating a lambda
 
-  **The scope is narrower than this item claimed, and getting that wrong twice is the lesson.** The
-  first implementation reported every annotation the placement walk did not reach, which is a false
-  positive on four positions that do attach; it was built, measured, and reverted. Verified against a
-  no-annotation control, because an uncontrolled probe read `lapply`'s own "not a function" error as
-  evidence the annotation had applied:
+Reporting that an annotation in a call's argument list is silent does not give the lambda parameter
+an annotatable position. That stays the one genuine expressiveness argument for inline type syntax,
+which `contributing/design/inline-type-syntax.md` records. The message says to lift the function to
+its own binding, rather than to move it up a line, which would annotate the wrong thing.
 
-  | position | parent node | attaches? |
-  | --- | --- | --- |
-  | braceless function body | `FUNCTION_DEF` | yes |
-  | braceless `if` branch | `IF_EXPR` | yes |
-  | parenthesised expression | `PAREN_EXPR` | yes |
-  | call argument, any target | `ARGUMENT_LIST` | **no** |
+### Cross-file navigation coverage rests on the LSP tests
 
-  So the check keys on `ARGUMENT_LIST` alone. Two fixtures pin the reports and two pin the
-  attaching positions, so a future widening has to break them first.
+81 legacy IDE fixture cases are ported into `crates/ide/tests/ide/*_ported.R.test`. Fifteen more were
+skipped as genuinely multi-file, because the harness takes one `SourceFile` per case. Consider
+extending the fixture harness to multiple files if that surface grows.
 
-  Residual gap, unchanged: reporting the silence does not give the lambda parameter an annotatable
-  position, which stays the one genuine expressiveness argument for inline type syntax
-  (`contributing/design/inline-type-syntax.md` §3). The message says to lift the function to its own
-  binding rather than "move it up a line", which would annotate the wrong thing.
-- Overload candidates when touched: `is`, `extends`, `grep(value =)`, `cor` (vector vs matrix — needs matrix nominals). `Date`/`POSIXct` arithmetic refuses loudly today — revisit if real code makes it noisy.
-- **A list operation over a RECORD still loses the field types.** `rev`/`unique`/`head`/`tail`/`Filter` now declare a `list[named: T]` candidate ahead of the plain list one, so a name survives and a field read is `T | NULL` instead of a missing-field error — but a fixed-shape input coerces to a name-keyed list on the way in, so the exact field types are gone and the read stays nullable. Only a shape-mirroring return ("the same record") fixes it, and the type language has no way for a stub to say that; `rev` is the case where the claim would be exactly right (it reorders and drops nothing), while `head`/`tail`/`Filter` genuinely may drop a name and are correctly nullable. Same family as the data.frame row-type and matrix-shape designs.
+### Overload candidates worth adding when the area is touched
 
-## Open — lowering fidelity (each one pinned wrong-but-current in `crates/semantics/tests/lowering/`)
+`is`, `extends`, `grep(value =)`, and `cor`, where the vector and matrix forms differ and which
+therefore needs matrix nominals. `Date` and `POSIXct` arithmetic refuses loudly today, so revisit it
+if real code makes that noisy.
 
-Found by dumping the HIR directly instead of reading it off the far-end type. Each has a fixture case
-whose comment says the expected shape, so fixing one turns its case red and forces a deliberate
-re-bless.
+## Open: lowering fidelity
 
-- **A trailing empty argument position is dropped, so `m[1, ]` and `m[1]` lower identically**
-  (`indexing__a_trailing_empty_index_position_is_dropped`). R distinguishes them — `` `[`(m, 1, ) ``
-  is arity 3, `` `[`(m, 1) `` arity 2 — and for a data frame they return different things (a row vs
-  a column). The cause is in the *parser*: `argument_list` emits an empty `ARGUMENT` only when a
-  comma arrives while an argument is still expected, so a leading or interior hole survives
-  (`m[, 1]` is right) and a trailing one vanishes. Fixing it needs the parser to close a pending
-  position when the closer follows a comma; the HIR side already models the hole
-  (`Argument { value: None }`).
-- **The R 4.3 extraction placeholder is not desugared**
-  (`pipes__an_extraction_placeholder_is_not_desugared`). `x |> _$a` is `x$a` in R, and `_[[i]]`,
-  `_[i]`, `_@s` likewise. `lower_pipe` accepts only a `CALL_EXPR` right-hand side, so these stay an
-  opaque `Binary Pipe` whose field access reads a name `_` that exists nowhere. `pipe_shape` needs a
-  second shape for "the placeholder is the head of an extraction chain", substituting the piped
-  value for the `_` in place.
-- **An empty control-flow head slots the BODY into the condition**
-  (`broken__an_empty_if_condition_slots_the_body_into_the_condition`, plus the `while` and `for`
-  siblings). `if () 1L` lowers to `If(condition: 1L, then: Missing)` because the `IF_EXPR` arm reads
-  its children positionally and the parser emits no placeholder for the missing head. Contained
-  today only because a broken item's type diagnostics are suppressed — verified: a sibling item in
-  the same file still type-checks, so the suppression is per item, not per file — but IDE reads of
-  the region see the wrong slot. The fix is to key the slots off the head delimiters rather than off
-  child order.
-- **A hexadecimal literal keeps a text no consumer can parse**
-  (`literals__a_hexadecimal_literal_keeps_a_text_no_consumer_can_parse`). Literals store source text
-  and every reader parses it with Rust's decimal `parse`, which rejects `0x`. Observable: with
-  `pair: list{a: integer, b: character}`, `pair[[2L]]` resolves `character` while `pair[[0x2L]]`
-  falls back to `integer | character`. `integer_literal_position` and `is_whole_number_double` both
-  need a radix-aware parse.
+Each item below was found by dumping the HIR directly instead of reading it off the far-end type.
+Each has a fixture case in `crates/semantics/tests/lowering/` whose comment states the expected
+shape, so fixing one turns its case red and forces a deliberate re-bless.
+
+- **A trailing empty argument position is dropped, so `m[1, ]` and `m[1]` lower identically.** The
+  case is `indexing__a_trailing_empty_index_position_is_dropped`. R distinguishes them, because
+  `` `[`(m, 1, ) `` has arity 3 and `` `[`(m, 1) `` has arity 2, and for a data frame they return
+  different things: a row against a column. The cause is in the parser. `argument_list` emits an
+  empty `ARGUMENT` only when a comma arrives while an argument is still expected, so a leading or
+  interior hole survives, which is why `m[, 1]` is right, and a trailing one vanishes. The fix is
+  for the parser to close a pending position when the closer follows a comma. The HIR side already
+  models the hole, as `Argument { value: None }`.
+- **The R 4.3 extraction placeholder is not desugared.** The case is
+  `pipes__an_extraction_placeholder_is_not_desugared`. `x |> _$a` is `x$a` in R, and `_[[i]]`,
+  `_[i]` and `_@s` behave likewise. `lower_pipe` accepts only a `CALL_EXPR` right-hand side, so
+  these stay an opaque `Binary Pipe` whose field access reads a name `_` that exists nowhere.
+  `pipe_shape` needs a second shape for a placeholder at the head of an extraction chain,
+  substituting the piped value for the `_` in place.
+- **An empty control-flow head slots the body into the condition.** The cases are
+  `broken__an_empty_if_condition_slots_the_body_into_the_condition` and its `while` and `for`
+  siblings. `if () 1L` lowers to `If(condition: 1L, then: Missing)`, because the `IF_EXPR` arm reads
+  its children positionally and the parser emits no placeholder for the missing head. This is
+  contained today only because a broken item's type diagnostics are suppressed. The suppression is
+  per item rather than per file, verified by a sibling item in the same file still type-checking.
+  But an IDE read of the region sees the wrong slot. The fix is to key the slots off the head
+  delimiters rather than off child order.
+- **A hexadecimal literal keeps a text no consumer can parse.** The case is
+  `literals__a_hexadecimal_literal_keeps_a_text_no_consumer_can_parse`. A literal stores source
+  text, and every reader parses it with Rust's decimal `parse`, which rejects `0x`. It is
+  observable: with `pair: list{a: integer, b: character}`, `pair[[2L]]` resolves `character` while
+  `pair[[0x2L]]` falls back to `integer | character`. Both `integer_literal_position` and
+  `is_whole_number_double` need a radix-aware parse.
 - **`:=` publishes a definition the HIR does not make.** `classify_top_level` lists `COLON_EQ` among
-  the assignment spellings, so `x := 1L` names its item `x` and a later `y <- x` resolves — but
-  lowering (correctly) makes it a call to a function `:=` that binds nothing, and R binds nothing
-  either. Two sources of truth for what an item defines, and the item tree is the wrong one. Pinned
-  by `assignment__a_walrus_lowers_to_a_call_because_it_binds_nothing`, whose header shows the
+  the assignment spellings, so `x := 1L` names its item `x` and a later `y <- x` resolves. Lowering
+  correctly makes it a call to a function `:=` that binds nothing, and R binds nothing either. That
+  is two sources of truth for what an item defines, and the item tree is the wrong one. The case is
+  `assignment__a_walrus_lowers_to_a_call_because_it_binds_nothing`, whose header shows the
   disagreement.
 
-## Open — naming fidelity (found by testing name resolution directly, in `crates/semantics/tests/naming/`)
+## Open: naming fidelity
 
 Found by rendering `ItemNaming` instead of reading resolution off a downstream type or diagnostic.
-Ordered by severity. The first four were re-verified against the shipping binary on a throwaway
-project before being written down here.
+The fixed findings are ledger entries. These are what remain, ordered by severity.
 
-- **FIXED — `<<-` inside `local()` missed the enclosing function frame and produced a wrong TYPE.**
-  The super-assignment search was bounded at `current_function_depth()`; with scopes
-  `[TopLevel, Function(f), Local]` that is `1`, so `0..1` skipped `f`'s own frame at index 1 and the
-  write escaped to the global environment. The bound is now `self.scopes.len() - 1` — everything
-  strictly outside the current scope — which coincides with the old one whenever the current scope
-  *is* the function frame, which is why the closure spelling was always right. Checked against R:
-  `function() { v <- 1L; local({ v <<- "two" }); v }` returns `"two"` and now types
-  `integer | character` like its closure twin; two `local`s deep still reaches the frame (R: `"deep"`);
-  and an intervening `local` that binds the same name still catches the write, leaving the outer slot
-  alone (R: `1`). Only the super-assignment site changed — `current_function_depth` still bounds the
-  read and capture logic, where a function boundary genuinely is the thing that matters.
-- **FIXED — a named data argument broke positional masking, and the `base::` spelling masked
-  nothing.** Two false `unresolved` findings on code R runs. The positional counter was not advanced
-  past formals already claimed by name, so `with(data = frame, column_a)` read `column_a` as the data
-  and evaluated it in the caller's frame; matching now follows R's own rule (names claim their formal
-  first, remaining positionals fill what is left), which also makes the reordered
-  `with(column_a, data = frame)` correct. And the `Namespace` arm consulted only stub-declared
-  `@masked` verbs, so `base::with` and `base::subset` masked nothing; the base family is now
-  recognized under `base` as well as bare. Controls confirm the data argument itself is still
-  checked (`with(no_such_frame, …)` still reports), an in-item local `with` still masks nothing, and
-  `somepkg::with` is still treated as its own function.
-- **A *top-level* definition of a masking verb does not suppress masking, unlike an in-item one.**
-  Found while adding the controls above, and **pre-existing** — verified identical before the fix.
-  `with <- function(data, expr) expr` at top level followed by `with(frame, name)` in another item
-  still masks, because cross-item resolution happens above `item_naming`, so the callee read is not
-  in `resolutions` and the shadow is invisible to the walk. The same item-firewall limitation the
-  naming suite already states; the fix needs the file's own top-level binders consulted at the
-  masking check, which `file_binders` can answer.
-- **FIXED — `switch` was walked as an ordinary call, so its branches were sequential writes.** Two
-  halves, in both passes. Naming reported a false `unused` on the first branch's write
-  (`switch(key, a = { r <- 1L }, b = { r <- 2L })` — live whenever `key == "a"`) and missed the
-  `maybe-undefined` on a later read, which R reports as `object 'r' not found` when nothing matches.
-  The checker had the same shape: it unioned the branch *values* correctly but inferred them in
-  sequence, so a later branch's write won outright and
-  `switch(k, a = { r <- 1L }, { r <- "d" })` typed `r` as plain `character` where the `if` spelling
-  joins to `character | integer`. Both now fork from the entry state per alternative and join, which
-  is `infer_if`'s two-arm shape generalized to many. Checked against R for each shape: a matched key
-  returns its branch, an unmatched one with no default errors, a default catches it, and
-  `switch(k, a = , b = …)` falls through to one branch rather than two. A branch that cannot fall
-  through (`stop()`) contributes no state, as a diverging `if` arm does not, and a local binding
-  named `switch` makes the call an ordinary one again.
-- **FIXED — `repeat`'s post-loop state wrongly included the never-assigned path.** `loop_body` reused
-  the converged loop-*head* state as the exit state, so `Unassigned` from the first iteration survived
-  a loop that always assigns. Fixed properly rather than by dropping the join: `break` now records the
-  reaching-write state where it occurs, and a loop that cannot be skipped exits through exactly those
-  points joined with the body's end state. That is precise in both directions —
-  `repeat { x <- 1L; break }` reports nothing (R returns 1) while
-  `repeat { if (cond) break; y <- 1L; break }` still does (R errors when `cond` is TRUE). A loop with
-  no `break` at all keeps the conservative head join, since it leaves by a jump the walk does not
-  model. Found only because the new `maybe-undefined` code made the state visible for the first time.
-- **FIXED — a write-only `<<-` reported its initializer unused, and deleting it changed behaviour.**
-  `make_flag <- function() { flag <- FALSE; function() flag <<- TRUE }` gave a false `unused flag`,
-  but the initializer is what makes `<<-` find a slot at all: remove it and the write goes to the
-  global environment instead. The read path already marked a frame's writes used on a capture
-  (`mark_slot_read`); the `<<-` target path now does the same for the frame it resolves into. Fixing
-  this was not optional alongside the `local()` fix above — that fix makes the write land on the
-  frame's slot, which is exactly what turned the initializer into an apparent dead store. Verified a
-  real dead store still reports, and that an outer binding shadowed by an intervening frame is still
-  correctly dead.
-- **Rebinding `local` makes the rebinding itself read as a dead store.** The `Local` HIR node carries
-  no callee expression, so nothing reads a user-defined `local` and a false `unused local` fires. The
-  docs sanction treating the syntactic call as the construct; they do not mention that the shadowing
-  definition then reports as dead.
-- **FIXED — the "might be undefined" warning the reference promised now exists, as an opt-in.**
-  `maybe_undefined` was computed by naming and surfaced nowhere. It is now the `maybe-undefined`
-  code, gated on `[check] maybe-undefined = true`. **Off by default on measured evidence**: with it
-  on, six real packages report 442 findings (data.table 242 in 12k lines, shiny 86, MASS 45,
-  ggplot2 42, dplyr 18, targets 9), and the dominant shape is correlated guards the flow cannot
-  see — in `data.table/R/print.data.table.R` the flagged `index_dt` is assigned only in one branch,
-  but the read is guarded by `show.indices`, which the *same* branch sets to `FALSE`. Safe code,
-  unprovable by flow. Default-on would have been the "a clean run means nothing" failure the
-  adoption reviews already flagged. A top-level variable's unwritten path is exempt, per the
-  contract: at run time it reaches the enclosing environment.
-- **`library`/`require`/`help` quoting ignores local shadowing, unlike every sibling recognizer.**
-  `quote`, `on.exit` and the masking family all guard with `!resolutions.contains_key(callee)`; the
-  attach family does not. The docs call this a limitation, but the inconsistency lives inside one
-  function.
+- **A top-level definition of a masking verb does not suppress masking, unlike an in-item one.**
+  This was found while adding controls for the named-data-argument fix and is pre-existing, verified
+  identical before that fix. `with <- function(data, expr) expr` at top level, followed by
+  `with(frame, name)` in another item, still masks. Cross-item resolution happens above
+  `item_naming`, so the callee read is not in `resolutions` and the shadow is invisible to the walk.
+  That is the same item-firewall limitation the naming suite already states. The fix needs the
+  file's own top-level binders consulted at the masking check, which `file_binders` can answer.
+- **Rebinding `local` makes the rebinding itself read as a dead store.** The `Local` HIR node
+  carries no callee expression, so nothing reads a user-defined `local` and a false `unused local`
+  fires. The docs sanction treating the syntactic call as the construct. They do not mention that
+  the shadowing definition then reports as dead.
+- **`library`, `require` and `help` quoting ignores local shadowing, unlike every sibling
+  recognizer.** `quote`, `on.exit` and the masking family all guard with
+  `!resolutions.contains_key(callee)`. The attach family does not. The docs call this a limitation,
+  and the inconsistency lives inside one function.
 
-Renderer gaps in the naming suite itself, none of them a product bug:
+### Renderer gaps in the naming suite, none of them a product bug
 
-- **A replacement base renders as a read (`->`) though it is also the write**, because
-  `assignment_targets` collects only `ExpressionKind::Assign { target }` and for `x$field <- v` the
-  target is the `Field` node, not the base name.
-- **An *unresolved* replacement base renders two contradictory lines at one span** — both
-  `u -> b0` and `u -> non-local deferred`, because the base expression id lands in `resolutions` and
-  in `non_locals`. Both underlying facts are right (unresolved read plus slot-creating write); the
-  rendering is what is wrong, and this is the shape where the missing write/read distinction becomes
-  actively misleading. No case covers it yet.
+- **A replacement base renders as a read, with `->`, although it is also the write.**
+  `assignment_targets` collects only `ExpressionKind::Assign { target }`, and for `x$field <- v` the
+  target is the `Field` node rather than the base name.
+- **An unresolved replacement base renders two contradictory lines at one span.** Both `u -> b0` and
+  `u -> non-local deferred` appear, because the base expression id lands in `resolutions` and in
+  `non_locals`. Both underlying facts are right, being an unresolved read plus a slot-creating
+  write. The rendering is what is wrong, and this is the shape where the missing write-versus-read
+  distinction becomes actively misleading. No case covers it yet.
 - **`quote(x <- 1L)` mints a vestigial slot.** `premint_frame_assignments` walks call arguments
   without knowing about quoting, so a `b0 x local` binding appears that nothing writes and nothing
-  resolves to. Harmless; a premint fix should re-bless the case that pins it.
+  resolves to. It is harmless, and a premint fix should re-bless the case that pins it.
 
 ## Open — fuzzing oracle-strength review (measured, and it found two live bugs)
 
@@ -1811,6 +1743,88 @@ The end-to-end guard rests on the corpus suites.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **`<<-` inside `local()` reaches the enclosing function frame.** The super-assignment search was
+  bounded at `current_function_depth()`. With scopes `[TopLevel, Function(f), Local]` that is 1, so
+  `0..1` skipped `f`'s own frame at index 1 and the write escaped to the global environment. The
+  bound is now `self.scopes.len() - 1`, meaning everything strictly outside the current scope, which
+  coincides with the old bound whenever the current scope is the function frame. That is why the
+  closure spelling was always right. Checked against R:
+  `function() { v <- 1L; local({ v <<- "two" }); v }` returns `"two"` and now types
+  `integer | character` like its closure twin, two `local`s deep still reaches the frame, and an
+  intervening `local` that binds the same name still catches the write and leaves the outer slot
+  alone. Only the super-assignment site changed, because `current_function_depth` still bounds the
+  read and capture logic, where a function boundary genuinely is what matters.
+
+- **A named data argument no longer breaks positional masking, and `base::with` masks.** Two false
+  `unresolved` findings on code R runs. The positional counter was not advanced past formals already
+  claimed by name, so `with(data = frame, column_a)` read `column_a` as the data and evaluated it in
+  the caller's frame. Matching now follows R's own rule, where names claim their formal first and
+  remaining positionals fill what is left, which also makes the reordered
+  `with(column_a, data = frame)` correct. Separately, the `Namespace` arm consulted only
+  stub-declared `@masked` verbs, so `base::with` and `base::subset` masked nothing. The base family
+  is recognized under `base` as well as bare. Controls confirm the data argument itself is still
+  checked, an in-item local `with` still masks nothing, and `somepkg::with` is still its own
+  function.
+
+- **`switch` forks from the entry state per alternative and joins.** It was walked as an ordinary
+  call, so its branches were sequential writes, and both passes were wrong. Naming reported a false
+  `unused` on the first branch's write in
+  `switch(key, a = { r <- 1L }, b = { r <- 2L })`, which is live whenever `key == "a"`, and missed
+  the `maybe-undefined` on a later read, which R reports as `object 'r' not found` when nothing
+  matches. The checker unioned the branch values correctly but inferred them in sequence, so a later
+  branch's write won outright and `switch(k, a = { r <- 1L }, { r <- "d" })` typed `r` as plain
+  `character` where the `if` spelling joins to `character | integer`. The new shape is `infer_if`'s
+  two-arm form generalized to many. Checked against R for each shape: a matched key returns its
+  branch, an unmatched one with no default errors, a default catches it, and `switch(k, a = , b = ...)`
+  falls through to one branch rather than two. A branch that cannot fall through, such as one ending
+  in `stop()`, contributes no state, as a diverging `if` arm does not, and a local binding named
+  `switch` makes the call an ordinary one again.
+
+- **A `repeat` loop exits through its `break` points.** `loop_body` reused the converged loop-head
+  state as the exit state, so `Unassigned` from the first iteration survived a loop that always
+  assigns. `break` now records the reaching-write state where it occurs, and a loop that cannot be
+  skipped exits through exactly those points joined with the body's end state. That is precise in
+  both directions: `repeat { x <- 1L; break }` reports nothing, and R returns 1, while
+  `repeat { if (cond) break; y <- 1L; break }` still reports, and R errors when `cond` is TRUE. A
+  loop with no `break` at all keeps the conservative head join, because it leaves by a jump the walk
+  does not model. This was found only because the new `maybe-undefined` code made the state visible
+  for the first time.
+
+- **A write-only `<<-` no longer reports its initializer unused.**
+  `make_flag <- function() { flag <- FALSE; function() flag <<- TRUE }` gave a false
+  `unused flag`, but the initializer is what makes `<<-` find a slot at all: remove it and the write
+  goes to the global environment instead. The read path already marked a frame's writes used on a
+  capture, through `mark_slot_read`, and the `<<-` target path now does the same for the frame it
+  resolves into. Fixing this was not optional alongside the `local()` fix, because that fix makes
+  the write land on the frame's slot, which is exactly what turned the initializer into an apparent
+  dead store. A real dead store still reports, and an outer binding shadowed by an intervening frame
+  is still correctly dead.
+
+- **The `maybe-undefined` warning the reference promised exists, as an opt-in.** `maybe_undefined`
+  was computed by naming and surfaced nowhere. It is now the `maybe-undefined` code, gated on
+  `[check] maybe-undefined = true`. It is off by default on measured evidence: with it on, six real
+  packages report 442 findings, at 242 for data.table's 12k lines, 86 for shiny, 45 for MASS, 42 for
+  ggplot2, 18 for dplyr and 9 for targets. The dominant shape is a correlated guard the flow cannot
+  see. In `data.table/R/print.data.table.R` the flagged `index_dt` is assigned only in one branch,
+  but the read is guarded by `show.indices`, which that same branch sets to `FALSE`. That is safe
+  code the flow cannot prove. Default-on would have been the "a clean run means nothing" failure the
+  adoption reviews already flagged. A top-level variable's unwritten path is exempt, per the
+  contract, because at run time it reaches the enclosing environment.
+
+- **An annotation in a call's argument list is reported.** It attached to nothing and said nothing,
+  so a deliberately wrong type beside a lambda argument was invisible. `statement_annotations` sees
+  an `ARGUMENT` node next, which is not an expression kind, so the block classified as dangling and
+  never attached, and the placement walk visits only statement sequences, never an argument list, so
+  nothing reported it either. The scope is narrower than the filed item claimed, and getting that
+  wrong twice is the lesson. A first implementation reported every annotation the placement walk did
+  not reach, which false-positives on four positions that do attach, and it was built, measured and
+  reverted. Verified against a no-annotation control, because an uncontrolled probe read `lapply`'s
+  own "not a function" error as evidence the annotation had applied. A braceless function body under
+  `FUNCTION_DEF`, a braceless `if` branch under `IF_EXPR` and a parenthesised expression under
+  `PAREN_EXPR` all attach. Only a call argument, under `ARGUMENT_LIST`, does not, so the check keys
+  on `ARGUMENT_LIST` alone. Two fixtures pin the reports and two pin the attaching positions, so a
+  future widening has to break them first.
 
 - **A numeric condition is accepted**, because R coerces one, where zero is false and anything else
   is true. That covers `if (length(x))`, `while (n)` and `!length(x)`. A `character`, `complex`,
