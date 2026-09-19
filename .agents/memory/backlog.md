@@ -1330,165 +1330,62 @@ The fixed findings are ledger entries. These are what remain, ordered by severit
   without knowing about quoting, so a `b0 x local` binding appears that nothing writes and nothing
   resolves to. It is harmless, and a premint fix should re-bless the case that pins it.
 
-## Open — fuzzing oracle-strength review (measured, and it found two live bugs)
+## Open: what can be wrong while every fuzz arm stays green
 
-The third of three independent fuzzing reviews, asking the complementary question to the other two:
-not *what inputs do we feed* or *what does it cost*, but **what can be wrong while every arm stays
-green**. Method: injected-bug experiments against a byte-copy of `crates/` built as its own workspace,
-so the shipping `test_fuzz` targets ran verbatim against mutated code. Baseline and restored-copy
-controls both green. Oracle corpus = 1,967 mined legacy-corpus programs + 1,192 fixture sources.
+The third of three independent fuzzing reviews asked the complementary question to the other two.
+Not what inputs the fuzzers feed, and not what they cost, but what can be wrong while every arm
+stays green.
 
-### FIXED — the type renderer printed types that could not be written back, and one that meant something else
+The method was injected-bug experiments against a byte copy of `crates/` built as its own workspace,
+so the shipping `test_fuzz` targets ran verbatim against mutated code. The baseline and the restored
+copy were both green. The oracle corpus was 1,967 mined legacy-corpus programs plus 1,192 fixture
+sources.
 
-Every user-visible rendering of a type — hover, inlay hints, `expected X, found Y` — goes through
-`TypeRenderer`, and nothing checks that the string it produces is readable by the `#:` grammar or that
-it denotes the type it came from. The oracle is the type system's own contract: `#: TYPE` asserts the
-value is compatible with `TYPE`, and the checker just proved the value *has* that type, so
-re-declaring the rendered scheme above the definition must add no finding. 3,159 sources → 1,131
-re-declarations → **41 violations** (5 grammar refusals, 39 type errors). Two classes, both confirmed
-end-to-end with the real binary:
+Five oracles it proposed are now implemented, and the ledger records them. Three of them caught a
+live bug. What follows is what the review left open.
 
-- **Record field names are rendered unquoted.** `list(\`max size\` = 10L)` renders
-  `list{max size: integer}`, which the annotation grammar refuses. A stress sweep of 14 shapes fails
-  7 — and one fails *silently*: `list(\`a,b\` = 1L)` renders `list{a,b: integer}`, which **parses as
-  `list{a}`**, producing a bogus `type-mismatch` plus a bogus "I do not know the type `a`".
-- **`scalar numeric` is rendered but is not a writable constraint.** `function(n) 1:n` renders the
-  scheme `<T: scalar numeric> fn(n: T) -> double[]`; only `numeric` and `atomic` are writable
-  (`type-system.md` §Type parameters), so the renderer and the grammar disagree.
+### The parser accepts escape sequences R rejects
 
-This is the same class the codebase already documents one instance of — "a function member of a union
-must render parenthesized … a type copied out of a finding into an annotation changes meaning". The
-rule was applied to unions and never to field names or constraint spellings, and nothing enforces it
-generally. Cost of the oracle: 36 s over the whole in-tree corpus in release, dominated by the known
-~113 ms/db stub tax; under a second with a shared database. Scoped to `semantics/tests/typing` it is a
-default-suite-sized battery today.
+The lexer's string scanner skips any escaped character wholesale, with a comment calling escape
+validity a semantic concern. No semantic layer checks it, so every malformed escape is silently
+accepted. Verified with R as the referee: `"\u{1F600}"` has five hex digits and `\u` takes at most
+four, so R refuses it with `invalid \u{xxxx} sequence` while ry reports nothing.
 
-### FIXED — a `<T: numeric>` binder's constraint was dropped inside a self-recursive body
+R's rules to implement are `\x` with 1 to 2 hex digits, `\u` with 1 to 4 hex digits either bare or
+braced, `\U` with 1 to 8 hex digits either bare or braced, `\0` through `\7` as octal with 1 to 3
+digits, the named escapes, and `unrecognized escape in character string` for anything else.
 
-`type-system.md` §Type parameters is explicit that with `<T: numeric> fn(x: T) -> T` the body may use
-`x` numerically. Confirmed false positive:
+The fixture case `syntax/tests/syntax::quoting__escape_soup` sits in
+`crates/syntax/tests/in-tree-acceptance-allowlist.txt` labelled as this gap. Implementing the check
+should remove that entry and re-bless the case.
 
-```
-#: <T: numeric> fn(n: T) -> integer
-countdown <- function(n) if (n <= 0L) 0L else countdown(n - 1L)
-  x expected a numeric value (`integer` or `double`), found `T`
-```
+### One surface has no oracle at all
 
-Narrowed by minimal pairs: the same annotation over a non-recursive body using `x + 1L` or `x > 0L` is
-clean, and the *unannotated* `countdown` is clean — so writing down the checker's own inferred type
-turns a clean file into a failing one.
+`PackageMetadata` is referenced by no fuzz arm, so the attach tolerance, `imports_every_name` and the
+whole NAMESPACE and DESCRIPTION layer are dark to fuzzing. Fixtures cannot reach them either. Only
+`crates/ry/tests/test_cli.rs` can.
 
-**Root cause, and it is the design-review shape this file already records once**: two places decided
-whether a type satisfies a numeric constraint and they read different scopes. `Checker` carried
-`rigid_constraints`, so the *operand* path knew `<T: numeric>` admits arithmetic — which is why
-`x + 1L` was clean — while `constraint_rejects` in the unification path had no case for
-`TyKind::Rigid` at all and fell through to `false`. A self-recursive call is exactly where the two
-meet: it instantiates the scheme, producing a fresh constrained variable, and unifies it with the
-body's own rigid `T`. Fixed by moving `rigid_constraints` off `Checker` and onto `InferenceTable`,
-where admissibility is decided — the same move `arithmetic_classes` already made for the same
-reason. A binder is admitted when its declared bound implies the required one, expressed as
-`declared.join(required) == declared` so the lattice order is not enumerated a second time.
-Verified still enforced: `<T>` with no bound used numerically is refused, and calling a numeric
-scheme with `character` is refused.
+### Oracles that hold, each measured, none of which found a bug
 
-### FIXED — an omitted optional argument yielded `Any`, discarding the default's known type
-
-`function(x = 1) x` inferred `<T> fn([x]: T) -> T`, and a call omitting the argument left the
-parameter a free variable, so `lucky()` was **`Any`** rather than `double`. `Any` is compatible with
-everything, so the consequence was silence: `nchar(lucky())` — `nchar(1)` in R — reported nothing.
-The same gap made the checker reject a scheme it had inferred itself, which is how the round-trip
-oracle found it.
-
-Both halves are fixed and the oracle's allowlist is now empty (527 schemes, 0 unwritable).
-
-- **`FunctionType.named` is now `Vec<Parameter>` rather than `Vec<RecordField>`**, carrying
-  `default: Option<Ty>`. Reusing the record-field struct for parameters was the reason the default
-  had nowhere to live; a record field has no default and never will. The default's type had to be
-  threaded through every traversal that walks a function type — substitution, `erase_vars`,
-  `resolve`, `adjust_levels`, `occurs`, `walk_unbound_vars`, `contains_unknown`, `type_size` — and
-  skipping any of the first three would have been unsound rather than imprecise (a variable hiding
-  in a default, un-substituted or un-level-adjusted). `Parameter::types()` is the one iterator they
-  all go through so a future field cannot be half-walked.
-- **A call that omits an optional argument unifies the parameter with the default's type.** Skipped
-  when the call forwards `...`, where the argument may be arriving through the dots. A default that
-  cannot fit its own parameter is the definition's mistake and stays reported there.
-- **A declared default is checked against an instantiation of the declared type, not the rigid
-  binder.** A binder is the caller's choice and omitting the argument is the one call where the
-  default makes that choice, so `#: <T> fn([x]: T) -> T` over `function(x = 1) x` is honest.
-  Controls verified: a concrete declared type still refuses a `NULL` default, a wrong-typed one, and
-  `<T: numeric>` still refuses a character default.
-### FIXED — formatter preservation was kind-only, so a token's spelling could change invisibly
-
-`significant_kinds` compares `Vec<SyntaxKind>`. A formatter emitting the wrong *bytes* for a token —
-exactly what a stale or off-by-one `raw()` range produces — preserves kinds perfectly, and R is
-case-sensitive, so this is a miscompile. Injected bug: uppercase the first letter of IDENT tokens ≥4
-chars. The shipping `format` battery passed **8/8**, including `fixture_sources_hold_invariants` and
-`legacy_corpus_holds_invariants`; a `(kind, text)` oracle caught **1,723 of 2,731** sources. Pristine
-baseline 0 violations, cost **0.1 s** for all 3,159 sources — cheaper than the check it replaces.
-(Control: a mutant dropping the `L` suffix *was* caught, because `1L`→`1` crosses a kind boundary. The
-blind spot is precisely within-kind.) Worth having alongside it: **format ⇒ semantics agreement**,
-formatting must not change the diagnostic multiset — pristine 0 divergent over 2,224, cost 20–35 s.
-
-### FIXED — nothing bounded the parse-error count from below; the oracle already existed and never ran
-
-`check_parse_invariants` guards against an error *cascade* but never asserts that a broken file reports
-anything, while the parser carries a lot of dedup and first-wins logic (`error_at`, `error_unclosed`,
-`statement_left_group_open`). Injected bug: drop zero-width ranges in `push_error`, a plausible "a
-zero-width caret underlines nothing" polish change. All four `test_fuzz` binaries stayed green while
-750 → 694 parse errors and **24 of 489 broken files became silently clean**. The catch:
-`crates/syntax/tests/test_corpus.rs::corpus_acceptance` is exactly the right differential and it
-`return`s silently because it points only at the gitignored fetched `corpus/`. Pointed at in-tree
-inputs, `theirs-only-error` (we accept, tree-sitter rejects) goes **2 → 22** on the corpus and
-**11 → 815** over 20,000 seed mutations. The `ours-only-error` direction is noisy (mostly `#:`
-annotations tree-sitter reads as comments) so gate only the `theirs-only` direction; a baseline of 11
-in 20,000 is small enough to allowlist. `tree-sitter-r` is already a dev-dependency; cost **97 ms**
-for the in-tree corpus, 765 ms for 20,000 mutations. **An oracle explicitly marked unproven:** "an
-`ERROR` node implies at least one reported error" holds (0 violations over 3,159 sources and 400,000
-fuzz inputs) but did *not* fire on this bug — the dropped errors came from files with no `ERROR` node.
-Prefer the differential.
-
-### FIXED — IDE ranges were checked for in-bounds-ness, never for what they cover
-
-The ide battery asserts `range.end() <= text.len()`. A rename whose edits are all shifted one byte
-passes — and corrupts the user's file. Injected bug: off-by-one at the one place in `occurrences`
-where item-relative ranges are re-anchored to absolute offsets, which is the design's own documented
-single re-anchoring edge. The shipping battery passed **2/2**; a *name-identity* oracle (the text at
-every definition target and rename edit must be the identifier under the cursor) caught **748** bad
-edits, and a *round-trip* oracle (definition at a reference lands on a range `references` reports, and
-back) caught **358**. Pristine baseline 0 over 3,466 identifier positions and 1,389 definitions, cost
-**4 s**.
-
-### Oracles that hold — coverage the fuzzers lack, no bug found, each measured
+These are coverage the fuzzers lack. Each is worth adding on its own terms.
 
 | oracle | result | cost |
 |---|---|---|
-| **middle edits** through incremental equivalence (the in-tree arm replaces whole text; the cargo-fuzz target truncates and appends — neither covers a common prefix *and* suffix) | 568 checked, 0 divergent | 9 s |
-| **project-file-set churn** — no arm ever changes `ProjectFiles`, though hosts add and remove files constantly | 120 removals, 0 divergent | 2 s |
-| **parallel vs sequential** on generated input (`ry check` really does fan out; `test_parallel.rs` covers 3 hand-written programs) | 30 × 8 files, 0 divergent | 0.9 s |
-| **two-wave superset** — a `parse_stage_diagnostics` finding that vanishes from `file_diagnostics` is an editor flicker; asserted only for hand-written cases | 3,159 sources, 0 lost | 25 s |
-| **leading-comment metamorphic** | 2,197 compared, 0 divergent | 36 s |
-| **alpha-rename metamorphic** | 3/1,162 hits, all three the transform's own fault (an edit-distance suggestion, a stub-shadowing name, string-form binders an IDENT-only rename missed); capture-avoiding transform 0/994 — usable only with the filters | 20 s |
+| **Middle edits** through incremental equivalence. The in-tree arm replaces whole text and the cargo-fuzz target truncates and appends, so neither covers a common prefix and suffix together. | 568 checked, none divergent | 9 s |
+| **Project-file-set churn.** No arm ever changes `ProjectFiles`, though hosts add and remove files constantly. | 120 removals, none divergent | 2 s |
+| **Parallel against sequential** on generated input. `ry check` really does fan out, and `test_parallel.rs` covers three hand-written programs. | 30 runs over 8 files, none divergent | 0.9 s |
+| **Two-wave superset.** A `parse_stage_diagnostics` finding that vanishes from `file_diagnostics` is an editor flicker, and this is asserted only for hand-written cases. | 3,159 sources, none lost | 25 s |
+| **Leading-comment metamorphic.** | 2,197 compared, none divergent | 36 s |
+| **Alpha-rename metamorphic.** 3 of 1,162 hits, all three the transform's own fault: an edit-distance suggestion, a stub-shadowing name, and string-form binders an IDENT-only rename missed. A capture-avoiding transform hit 0 of 994. | usable only with the filters | 20 s |
 
-### Open — the parser accepts escape sequences R rejects (found by the differential's first run)
+### One hypothesis killed
 
-The lexer's string scanner skips any escaped character wholesale, with a comment calling escape
-validity "a semantic concern" — but no semantic layer checks it, so every malformed escape is
-silently accepted. Verified with R as referee: `"\u{1F600}"` has five hex digits and `\u` takes at
-most four, so R refuses it with `invalid \u{xxxx} sequence` while `ry` reports nothing. R's rules to
-implement: `\x` 1–2 hex, `\u` 1–4 hex (bare or braced), `\U` 1–8 hex (bare or braced), `\0`–`\7`
-octal 1–3 digits, the named escapes, and `unrecognized escape in character string` for anything
-else. The fixture case `syntax/tests/syntax::quoting__escape_soup` currently sits in
-`crates/syntax/tests/in-tree-acceptance-allowlist.txt` labelled as this gap; implementing the check
-should remove that entry and re-bless the case.
+The semantics battery is not comparing mostly-empty renderings. Over 250 generated programs exactly
+one is empty and the mean is 462 characters. Determinism and incremental equivalence are meaningful
+self-consistency checks.
 
-**One surface with no oracle at all:** `PackageMetadata` is referenced by zero fuzz arms, so attach
-tolerance, `imports_every_name` and the whole NAMESPACE/DESCRIPTION layer are fuzz-dark — and fixtures
-cannot reach them either, only `crates/ry/tests/test_cli.rs` can.
-
-**One hypothesis killed:** the semantics battery is *not* comparing mostly-empty renderings — over 250
-generated programs exactly 1 is empty and the mean is 462 characters. Determinism and incremental
-equivalence are meaningful self-consistency checks. They remain content-blind in the sense the three
-injected bugs demonstrate: a uniformly wrong answer is deterministic, incremental, and in-bounds.
+They remain content-blind in the sense the three injected bugs demonstrate. A uniformly wrong answer
+is deterministic, incremental and in-bounds.
 
 ## Open — a package's own `pkg::name` reads are resolved but not validated
 
@@ -1743,6 +1640,94 @@ The end-to-end guard rests on the corpus suites.
 - CRAN stub auto-generation via R introspection, R-version-keyed corpora, stubtest validation (R-dependent). (NAMESPACE/DESCRIPTION awareness moved to Open — semantics by user ask.)
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **A rendered type can be written back, and it means what it came from.** Every user-visible
+  rendering of a type goes through `TypeRenderer`, and nothing checked that the string it produced
+  was readable by the `#:` grammar or denoted the type it came from. The oracle is the type system's
+  own contract: `#: TYPE` asserts the value is compatible with `TYPE`, and the checker just proved
+  the value has that type, so re-declaring the rendered scheme above the definition must add no
+  finding. Over 3,159 sources it made 1,131 re-declarations and found 41 violations, being 5 grammar
+  refusals and 39 type errors, in two classes. A record field name was rendered unquoted, so
+  ``list(`max size` = 10L)`` rendered `list{max size: integer}`, which the grammar refuses, and
+  ``list(`a,b` = 1L)`` rendered `list{a,b: integer}`, which parses as `list{a}` and produces a bogus
+  `type-mismatch` plus a bogus unknown-type error. And `scalar numeric` was rendered although only
+  `numeric` and `atomic` are writable constraints. This is the same class the codebase already
+  documented one instance of, where a function member of a union must render parenthesized. The rule
+  had been applied to unions and never to field names or constraint spellings.
+
+- **A `<T: numeric>` binder keeps its constraint inside a self-recursive body.** The reference is
+  explicit that with `<T: numeric> fn(x: T) -> T` the body may use `x` numerically, and a
+  self-recursive body reported `expected a numeric value, found T`. Minimal pairs narrowed it: the
+  same annotation over a non-recursive body using `x + 1L` or `x > 0L` was clean, and the
+  unannotated function was clean, so writing down the checker's own inferred type turned a clean
+  file into a failing one. The root cause is the design-review shape this file records elsewhere:
+  two places decided whether a type satisfies a numeric constraint and they read different scopes.
+  `Checker` carried `rigid_constraints`, so the operand path knew `<T: numeric>` admits arithmetic,
+  while `constraint_rejects` in the unification path had no case for `TyKind::Rigid` and fell
+  through to false. A self-recursive call is exactly where the two meet, because it instantiates the
+  scheme into a fresh constrained variable and unifies it with the body's own rigid `T`.
+  `rigid_constraints` moved off `Checker` and onto `InferenceTable`, where admissibility is decided,
+  which is the same move `arithmetic_classes` already made for the same reason. A binder is admitted
+  when its declared bound implies the required one, expressed as `declared.join(required) == declared`
+  so the lattice order is not enumerated a second time.
+
+- **An omitted optional argument takes the default's type.** `function(x = 1) x` inferred
+  `<T> fn([x]: T) -> T`, and a call omitting the argument left the parameter a free variable, so
+  `lucky()` was `Any` rather than `double`. `Any` is compatible with everything, so the consequence
+  was silence, and `nchar(lucky())`, which is `nchar(1)` in R, reported nothing. The same gap made
+  the checker reject a scheme it had inferred itself, which is how the round-trip oracle found it.
+  `FunctionType.named` is a `Vec<Parameter>` rather than a `Vec<RecordField>` now, carrying
+  `default: Option<Ty>`, because reusing the record-field struct for parameters was why the default
+  had nowhere to live, and a record field has no default and never will. The default's type had to
+  be threaded through every traversal that walks a function type, and skipping substitution,
+  `erase_vars` or `resolve` would have been unsound rather than imprecise, because a variable can
+  hide in a default un-substituted or un-level-adjusted. `Parameter::types()` is the one iterator
+  they all go through, so a future field cannot be half-walked. A call that omits an optional
+  argument unifies the parameter with the default's type, skipped when the call forwards `...`,
+  where the argument may be arriving through the dots. A default that cannot fit its own parameter
+  is the definition's mistake and stays reported there. A declared default is checked against an
+  instantiation of the declared type rather than the rigid binder, because a binder is the caller's
+  choice and omitting the argument is the one call where the default makes that choice. Controls
+  verified that a concrete declared type still refuses a `NULL` default and a wrong-typed one, and
+  that `<T: numeric>` still refuses a character default.
+
+- **Formatter preservation compares a token's text, not only its kind.** `significant_kinds`
+  compared a `Vec<SyntaxKind>`, so a formatter emitting the wrong bytes for a token, which is
+  exactly what a stale or off-by-one `raw()` range produces, preserved kinds perfectly. R is
+  case-sensitive, so that is a miscompile. The injected bug uppercased the first letter of IDENT
+  tokens of four characters or more. The shipping `format` battery passed all eight arms, including
+  both corpus invariants, and a `(kind, text)` oracle caught 1,723 of 2,731 sources. The pristine
+  baseline has no violations and costs 0.1 s for all 3,159 sources, which is cheaper than the check
+  it replaces. A control mutant dropping the `L` suffix was caught by the old oracle, because
+  `1L` to `1` crosses a kind boundary, so the blind spot was precisely within-kind. Worth having
+  alongside it is format-implies-semantics agreement, where formatting must not change the
+  diagnostic multiset, with a pristine baseline of no divergence over 2,224 sources at 20 to 35 s.
+
+- **The acceptance differential runs against in-tree inputs.** `check_parse_invariants` guards
+  against an error cascade and never asserted that a broken file reports anything, while the parser
+  carries a lot of dedup and first-wins logic. The injected bug dropped zero-width ranges in
+  `push_error`, which is a plausible polish change. All four `test_fuzz` binaries stayed green while
+  parse errors went from 750 to 694 and 24 of 489 broken files became silently clean.
+  `crates/syntax/tests/test_corpus.rs::corpus_acceptance` is exactly the right differential, and it
+  returned silently because it pointed only at the gitignored fetched `corpus/`. Pointed at in-tree
+  inputs, the theirs-only-error direction, where ry accepts and tree-sitter rejects, goes from 2 to
+  22 on the corpus and from 11 to 815 over 20,000 seed mutations. The ours-only direction is noisy,
+  mostly `#:` annotations tree-sitter reads as comments, so only theirs-only is gated, and a
+  baseline of 11 in 20,000 is small enough to allowlist. `tree-sitter-r` was already a
+  dev-dependency, and the cost is 97 ms for the in-tree corpus and 765 ms for 20,000 mutations. One
+  oracle is explicitly marked unproven: "an `ERROR` node implies at least one reported error" holds,
+  with no violation over 3,159 sources and 400,000 fuzz inputs, but it did not fire on this bug,
+  because the dropped errors came from files with no `ERROR` node. Prefer the differential.
+
+- **An IDE range is checked for what it covers, not only for being in bounds.** The battery asserted
+  `range.end() <= text.len()`, so a rename whose edits are all shifted one byte passed and corrupted
+  the user's file. The injected bug was an off-by-one at the one place in `occurrences` where
+  item-relative ranges are re-anchored to absolute offsets, which is the design's own documented
+  single re-anchoring edge. The shipping battery passed both arms. A name-identity oracle, where the
+  text at every definition target and rename edit must be the identifier under the cursor, caught
+  748 bad edits, and a round-trip oracle, where definition at a reference lands on a range
+  `references` reports and back, caught 358. The pristine baseline has no violations over 3,466
+  identifier positions and 1,389 definitions, and costs 4 s.
 
 - **`<<-` inside `local()` reaches the enclosing function frame.** The super-assignment search was
   bounded at `current_function_depth()`. With scopes `[TopLevel, Function(f), Local]` that is 1, so
