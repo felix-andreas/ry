@@ -16,17 +16,6 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
-    let experimental_features = cli::parse_experimental_flags(
-        &cli.experimental_features
-            .as_ref()
-            .map(|flags| {
-                flags
-                    .iter()
-                    .flat_map(|flag| flag.split(' '))
-                    .collect::<Vec<&str>>()
-            })
-            .unwrap_or_default(),
-    );
 
     // Embedded R must run on the MAIN thread: it assumes it owns the thread
     // it initializes on (stack checking, signal expectations).
@@ -79,7 +68,7 @@ fn main() -> ExitCode {
             // The flag wins; the env var is the ambient fallback for setups
             // where editing server arguments is awkward.
             let debug = debug || matches!(std::env::var("RY_DEBUG").as_deref(), Ok("1"));
-            cli::server(experimental_features, debug);
+            cli::server(debug);
             ExitCode::SUCCESS
         }
         Command::Debug(debug) => match debug {
@@ -116,30 +105,13 @@ fn exit_code(result: Result<Outcome, CommandError>) -> ExitCode {
 // `name` is set explicitly: clap defaults to the Cargo package name, which is
 // `ry-lang` because the registry name `ry` was taken — but the command the user
 // typed, and the one every diagnostic and doc page names, is `ry`.
-#[command(name = "ry", version, after_help = experimental_features_help())]
+#[command(name = "ry", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
     /// Ignored ... here only to please VS Code
     #[clap(long, default_value_t = true)]
     stdio: bool,
-    // Accepted anywhere but documented only in the root help's trailing
-    // section (a clap global cannot be hidden from subcommand help
-    // selectively, and repeating it under every subcommand is noise).
-    #[clap(long, global = true, hide = true)]
-    experimental_features: Option<Vec<String>>,
-}
-
-fn experimental_features_help() -> String {
-    let features = ry::config::ExperimentalFeatures::KNOWN
-        .iter()
-        .map(|feature| format!("            {} — {}", feature.name, feature.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Global options:\n      --experimental-features <FEATURES>\n          \
-         Enable experimental features (space-separated, or \"all\" for every one):\n{features}"
-    )
 }
 
 #[derive(Debug, Subcommand)]

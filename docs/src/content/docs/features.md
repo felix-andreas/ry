@@ -114,6 +114,11 @@ that reflows to a column limit would rewrite one of them, and the next diff woul
 instead of the change you made. The style is fixed apart from indent width and line endings; the
 reasoning is in [formatting rules](/reference/formatting-rules#philosophy).
 
+In an editor you can also format just what you selected. The selected lines come out exactly as
+formatting the whole file would have left them, and nothing else in the file moves — so tidying the
+function you are working on does not put the rest of the file in your diff. The details are in
+[formatting a selection](/reference/formatting-rules#formatting-a-selection).
+
 ## Rename
 
 Rename does not search and replace. It runs the same analysis that answers go-to-definition: every

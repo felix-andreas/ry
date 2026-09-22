@@ -908,3 +908,51 @@ Impact: correctness — the corpus differential reaches 1,523/1,523 with one adj
 **Shape.** `editors/zed/extension.toml` is a plain-semver line of its own (`0.1.0`), restarted because the extension has never been published to Zed's registry and nothing constrains its history; the wasm crate's `Cargo.toml` version tracks that manifest rather than the workspace, and neither inherits `version.workspace`. It is bumped by hand when the extension changes. The release-metadata test asserts the VS Code derivation only, and its module doc states why the Zed manifest is absent — the test is the thing that would otherwise re-couple them. The prerelease suffix is dropped for good: `-alpha`/`-beta` name the CLI's release channel, which an extension that only locates a binary cannot be in.
 
 **Impact.** One number per artifact with one owner each; a Zed release no longer implies a CLI release or vice versa. The recurring "align the stale zed extension version" commit has no reason to exist.
+
+# Decision record: range formatting is cut out of the whole file's formatted form
+
+**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+
+**Previous shape.** The language server formatted a *slice* of the document: it snapped the
+selection outwards to whole top-level statements, cut that text out, and ran the formatter on it
+alone. Four facts live outside a slice and decide its layout, so all four were lost — the
+indentation depth it sits at, a `# fmt: off` region opened above it, a `# fmt: skip-file` header,
+and the line endings the rest of the file uses. There was no second source of truth to disagree
+with, because nothing checked the slice against what the whole file would have produced; the
+feature shipped behind an experimental flag and had two tests.
+
+**Chosen shape.** `format::format_range(source, config, selection)` formats the **whole file** and
+returns the edits that carry the selected lines to what that run produced, leaving every other line
+byte for byte as it was. Whole-document formatting is the same call over the whole file, so the two
+requests cannot disagree about what a line should look like, and both return minimal edits (an
+editor keeps the cursor, the folds and the scroll position).
+
+**Which lines may be swapped comes from pairing the two parse trees, never from diffing their
+lines.** A line diff answers "which lines look different", which is the wrong question: it pairs
+lines that merely read alike, and a span cut that way can be text the formatter would never produce
+for any input — the first implementation deleted an annotation block's closing `#: }` because an
+identical `#: }` sat a line above. The walk descends the two trees together and stops wherever their
+shapes diverge, so a span always holds whole constructs on both sides; a structural rewrite (bracing
+a bare `if` body wraps it in a node the source has no counterpart for) stops the walk at the `if`,
+and the difference belongs to the `if` as a whole, which is the only way to describe it.
+
+**Statements are the unit, and that is forced, not chosen.** This formatter decides how to break a
+call from that call's *own* line structure, so swapping a formatted argument into a half-formatted
+call can flip the decision for the whole call and produce a third text. Statements have no such
+coupling — each starts its own line at a fixed indent and nothing above it decides how it breaks —
+which is the same property the feature rests on. They nest, so selecting one line of a long function
+still rewrites only that line's statement, and a comment standing between statements is a unit of
+its own. Within one span, leading and trailing lines that are already identical are trimmed off,
+which is exact (the same swap, narrower) and is what keeps a one-space fix inside a long call from
+rewriting the call.
+
+**Impact.** Correctness: the contract is satisfied by construction rather than by agreement between
+two formatters. Simplicity: no second formatting path, no indentation reconstruction, no diff
+dependency. Performance: one extra format plus one extra parse per request, both linear, against an
+interactive action the user asked for. Incrementality: unaffected — the formatter is syntax-only and
+holds no analysis state.
+
+**The experimental-features machinery is gone with it.** `range_formatting` was its only entry, so
+the flag, the registry, the CLI help section, and the VS Code `ry.experimentalFeatures` setting were
+an empty frame once the feature graduated. A future experimental feature rebuilds it; carrying a
+registry with nothing in it would have meant a flag that accepts no name and prints an empty list.

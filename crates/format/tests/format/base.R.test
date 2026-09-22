@@ -886,6 +886,25 @@ fn( # (
   # 2
 ) # )
 
+#---- comment_between_argument_name_and_value
+fn(x, y # note
+= 2)
+#++++
+fn(x, y # note
+  = 2)
+
+#---- comment_between_parameter_name_and_default
+f <- function(x, y # note
+= 2) x
+#++++
+f <- function(
+  x,
+  y # note
+    = 2
+) {
+  x
+}
+
 #==== extract
 #---- basic
 x$y

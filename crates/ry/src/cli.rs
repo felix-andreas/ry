@@ -2,7 +2,7 @@
 //! findings (diagnostics, or files a `fmt --check`/`--diff` run would
 //! change), 2 usage/configuration/IO errors.
 
-use crate::config::{self, ExperimentalFeatures};
+use crate::config;
 use crate::diagnostics::{apply_suppressions, document_diagnostics};
 use crate::namespace;
 use crate::position::LineIndex;
@@ -1337,8 +1337,8 @@ pub fn fmt(
     })
 }
 
-pub fn server(experimental_features: ExperimentalFeatures, debug: bool) {
-    crate::server::run(experimental_features, debug);
+pub fn server(debug: bool) {
+    crate::server::run(debug);
 }
 
 pub fn ast(path: &Path) -> Result<(), CommandError> {
@@ -1360,34 +1360,6 @@ pub fn ast(path: &Path) -> Result<(), CommandError> {
         );
     }
     Ok(())
-}
-
-pub fn parse_experimental_flags(flags: &[impl AsRef<str>]) -> ExperimentalFeatures {
-    let mut features = ExperimentalFeatures::default();
-    for flag in flags.iter().flat_map(|flag| flag.as_ref().split(' ')) {
-        match flag {
-            "" => {}
-            "all" => {
-                for feature in ExperimentalFeatures::KNOWN {
-                    let enabled = features.enable(feature.name);
-                    debug_assert!(enabled, "KNOWN feature must enable");
-                }
-            }
-            name => {
-                if !features.enable(name) {
-                    let known = ExperimentalFeatures::KNOWN
-                        .iter()
-                        .map(|feature| feature.name)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    warn(&format!(
-                        "unknown experimental feature: '{name}' (known: {known}, or \"all\")"
-                    ));
-                }
-            }
-        }
-    }
-    features
 }
 
 fn print_diff(old: &str, new: &str) {

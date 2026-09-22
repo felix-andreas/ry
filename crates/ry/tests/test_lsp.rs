@@ -11,10 +11,10 @@ use async_lsp::lsp_types::{
     DidOpenTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
     DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentRangeFormattingParams,
     FormattingOptions, GeneralClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse,
-    HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
-    PartialResultParams, Position, PositionEncodingKind, PublishDiagnosticsParams,
+    HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams, OneOf,
+    PartialResultParams, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
     ShowMessageParams, TextDocumentClientCapabilities, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Url,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceFolder,
 };
 use async_lsp::panic::{CatchUnwind, CatchUnwindLayer};
@@ -343,6 +343,11 @@ async fn initialize_reports_capabilities() {
     assert!(capabilities.rename_provider.is_some());
     assert!(capabilities.completion_provider.is_some());
     assert!(capabilities.document_formatting_provider.is_some());
+    assert_eq!(
+        capabilities.document_range_formatting_provider,
+        Some(OneOf::Left(true)),
+        "range formatting is a shipped feature, not one a flag turns on"
+    );
     assert!(capabilities.document_symbol_provider.is_some());
     assert!(capabilities.inlay_hint_provider.is_some());
     assert!(capabilities.signature_help_provider.is_some());
@@ -652,47 +657,266 @@ async fn formatting() {
     context.shutdown().await;
 }
 
-#[tokio::test]
-async fn range_formatting_snaps_to_whole_statements() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    // A selection covering part of the middle line only: the edit must cover
-    // that whole statement and leave its neighbours alone.
-    let edits = context
+/// Ask for the edits that format `range` of the open document.
+async fn range_edits(context: &mut TestContext, uri: &Url, range: Range) -> Option<Vec<TextEdit>> {
+    context
         .server
         .range_formatting(DocumentRangeFormattingParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
-            range: Range::new(Position::new(1, 1), Position::new(1, 2)),
+            range,
             options: FormattingOptions::default(),
             work_done_progress_params: WorkDoneProgressParams::default(),
         })
         .await
         .expect("range formatting failed")
-        .expect("expected range formatting edits");
+}
+
+#[tokio::test]
+async fn range_formatting_takes_the_statement_the_selection_touches() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    // Part of the middle line only: the edit covers that whole line and
+    // leaves its neighbours alone.
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 1), Position::new(1, 2)),
+    )
+    .await
+    .expect("expected range formatting edits");
     assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "y <- 2");
+    assert_eq!(edits[0].new_text, "y <- 2\n");
     assert_eq!(edits[0].range.start, Position::new(1, 0));
-    assert_eq!(edits[0].range.end, Position::new(1, 4));
+    assert_eq!(edits[0].range.end, Position::new(2, 0));
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn range_formatting_ignores_a_selection_holding_no_statement() {
+async fn range_formatting_takes_the_line_a_bare_caret_sits_on() {
     let mut context = setup_test(&[]).await;
-    let uri = context.open("R/fmt.R", "x <- 1\n\n\ny <- 2\n").await;
+    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 2), Position::new(1, 2)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "y <- 2\n");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_leaves_the_line_a_whole_line_selection_stops_at() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    // Selecting one whole line sends (1,0)..(2,0), which covers nothing of
+    // line 2 — an editor sends exactly this for "these lines".
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 0), Position::new(2, 0)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].range.end, Position::new(2, 0));
+    assert_eq!(edits[0].new_text, "y <- 2\n");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_accepts_a_selection_sent_end_first() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 3), Position::new(1, 1)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "y <- 2\n");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_reaches_a_statement_inside_a_function() {
+    let mut context = setup_test(&[]).await;
+    let uri = context
+        .open("R/fmt.R", "f<-function(x){\n  a<-1\n  b<-2\n  c<-3\n}\n")
+        .await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(2, 3), Position::new(2, 3)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "  b <- 2\n");
+    assert_eq!(edits[0].range.start, Position::new(2, 0));
+    assert_eq!(edits[0].range.end, Position::new(3, 0));
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_skips_a_formatting_off_region_inside_the_selection() {
+    let mut context = setup_test(&[]).await;
+    let uri = context
+        .open(
+            "R/fmt.R",
+            "before<-1\n# fmt: off\nweird   <-  1\n# fmt: on\nafter<-1\n",
+        )
+        .await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(0, 0), Position::new(4, 8)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    let texts: Vec<&str> = edits.iter().map(|edit| edit.new_text.as_str()).collect();
+    assert_eq!(texts, ["before <- 1\n", "after <- 1\n"]);
+    assert_eq!(edits[0].range.start, Position::new(0, 0));
+    assert_eq!(edits[1].range.start, Position::new(4, 0));
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_returns_no_edits_for_lines_already_laid_out() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x <- 1\ny <- 2\nz<-3\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(0, 0), Position::new(1, 6)),
+    )
+    .await
+    .expect("expected an answer, not a refusal");
+    assert!(edits.is_empty(), "{edits:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_refuses_on_syntax_errors() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/bad.R", "x <- (\ny<-2\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 0), Position::new(1, 4)),
+    )
+    .await;
+    assert!(edits.is_none(), "{edits:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_clamps_a_range_past_the_end_of_the_document() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x<-1\ny<-2\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 0), Position::new(99, 99)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "y <- 2\n");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_positions_count_utf16_units() {
+    let mut context = setup_test(&[]).await;
+    // Each emoji is 4 UTF-8 bytes and 2 UTF-16 units, so a byte-counting
+    // server would pick the wrong line and the wrong column here.
+    let uri = context
+        .open("R/emoji.R", "a<-\"😀😀\"\nb<-\"🎉\"\nc<-1\n")
+        .await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 5), Position::new(1, 5)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "b <- \"🎉\"\n");
+    assert_eq!(edits[0].range.start, Position::new(1, 0));
+    assert_eq!(edits[0].range.end, Position::new(2, 0));
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_keeps_the_documents_line_endings() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/crlf.R", "x<-1\r\ny<-2\r\nz<-3\r\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 1), Position::new(1, 1)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "y <- 2\r\n");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn formatting_only_replaces_the_lines_that_change() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x <- 1\ny<-2\nz <- 3\n").await;
     let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
     let edits = context
         .server
-        .range_formatting(DocumentRangeFormattingParams {
+        .formatting(DocumentFormattingParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
-            range: Range::new(Position::new(1, 0), Position::new(2, 0)),
             options: FormattingOptions::default(),
             work_done_progress_params: WorkDoneProgressParams::default(),
         })
         .await
-        .expect("range formatting failed");
-    assert!(edits.is_none(), "{edits:?}");
+        .expect("formatting failed")
+        .expect("expected formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "y <- 2\n");
+    assert_eq!(edits[0].range.start, Position::new(1, 0));
+    assert_eq!(edits[0].range.end, Position::new(2, 0));
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn formatting_an_already_formatted_document_makes_no_edits() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x <- 1\ny <- 2\n").await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = context
+        .server
+        .formatting(DocumentFormattingParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            options: FormattingOptions::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect("formatting failed")
+        .expect("expected an answer, not a refusal");
+    assert!(edits.is_empty(), "{edits:?}");
     context.shutdown().await;
 }
 
@@ -834,7 +1058,7 @@ use async_lsp::lsp_types::{
     DiagnosticWorkspaceClientCapabilities, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
     DidSaveTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, FileChangeType,
     FileEvent, InlayHintParams, InsertTextFormat, ParameterInformationSettings, ParameterLabel,
-    Range, ReferenceContext, ReferenceParams, RenameParams, SignatureHelpClientCapabilities,
+    ReferenceContext, ReferenceParams, RenameParams, SignatureHelpClientCapabilities,
     SignatureHelpParams, SignatureInformationSettings, SymbolKind, WorkspaceClientCapabilities,
 };
 

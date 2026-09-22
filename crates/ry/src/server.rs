@@ -4,7 +4,7 @@
 //! token), so the latest edit always wins; a panic on the worker is a
 //! coherence failure and terminates the process deterministically.
 
-use crate::config::{CONFIG_FILE_NAME, Config, ConfigError, ExperimentalFeatures};
+use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
 use crate::diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics};
 use crate::position::{LineColumn, LineIndex};
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
@@ -28,12 +28,12 @@ use syntax::{SyntaxKind, TextRange, TextSize};
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
 
-pub fn run(experimental_features: ExperimentalFeatures, debug: bool) {
-    run_async(experimental_features, debug);
+pub fn run(debug: bool) {
+    run_async(debug);
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn run_async(experimental_features: ExperimentalFeatures, debug: bool) {
+async fn run_async(debug: bool) {
     install_panic_hook();
     let runtime = tokio::runtime::Handle::current();
 
@@ -44,7 +44,6 @@ async fn run_async(experimental_features: ExperimentalFeatures, debug: bool) {
 
         let seed = WorkerSeed {
             client: client.clone(),
-            experimental_features,
             debug,
             cancel: cancel.clone(),
             idle_interrupt: idle_interrupt.clone(),
@@ -133,7 +132,6 @@ enum Job {
 
 struct WorkerSeed {
     client: ClientSocket,
-    experimental_features: ExperimentalFeatures,
     /// The developer switch (`ry server --debug`, or `RY_DEBUG=1`):
     /// surfaces internal analysis facts such as the hover debug sections.
     /// Deliberately NOT a `ry.toml` key — the config file is user-facing
@@ -293,7 +291,6 @@ struct Worker {
     cancel: CancelHandle,
     current_token: salsa::CancellationToken,
     idle_interrupt: Arc<AtomicBool>,
-    experimental_features: ExperimentalFeatures,
     /// The developer switch (see [`WorkerSeed::debug`]).
     debug: bool,
     encoding: PositionEncoding,
@@ -409,7 +406,6 @@ impl Worker {
             cancel: seed.cancel,
             current_token,
             idle_interrupt: seed.idle_interrupt,
-            experimental_features: seed.experimental_features,
             debug: seed.debug,
             encoding,
             supports_pull_diagnostics,
@@ -435,7 +431,7 @@ impl Worker {
         worker.install_metadata();
         worker.load_workspace_sources();
 
-        let result = initialize_result(encoding, worker.experimental_features);
+        let result = initialize_result(encoding);
         (worker, result)
     }
 
@@ -810,7 +806,22 @@ impl Worker {
     }
 
     fn to_offset(&self, text: &str, position: lsp_types::Position) -> TextSize {
-        let index = LineIndex::new(text);
+        self.to_offset_with(&LineIndex::new(text), text, position)
+    }
+
+    fn to_position(&self, text: &str, offset: TextSize) -> lsp_types::Position {
+        self.to_position_with(&LineIndex::new(text), text, offset)
+    }
+
+    /// Against a line table the caller already built — building one per
+    /// position walks the whole document, which a request converting many of
+    /// them cannot afford.
+    fn to_offset_with(
+        &self,
+        index: &LineIndex,
+        text: &str,
+        position: lsp_types::Position,
+    ) -> TextSize {
         let column = LineColumn {
             line: position.line,
             column: position.character,
@@ -821,13 +832,69 @@ impl Worker {
         }
     }
 
-    fn to_position(&self, text: &str, offset: TextSize) -> lsp_types::Position {
-        let index = LineIndex::new(text);
+    fn to_position_with(
+        &self,
+        index: &LineIndex,
+        text: &str,
+        offset: TextSize,
+    ) -> lsp_types::Position {
         let column = match self.encoding {
             PositionEncoding::Utf8 => index.line_column(offset),
             PositionEncoding::Utf16 => index.line_column_utf16(offset, text),
         };
         lsp_types::Position::new(column.line, column.column)
+    }
+
+    /// The edits that format `range` of the document at `uri` — the whole
+    /// document when there is no range — as the protocol spells them.
+    ///
+    /// Both formatting requests come through here, so they can never disagree
+    /// about what a line should look like, and both answer with the minimal
+    /// edits, which is what lets an editor keep the cursor, the folds and the
+    /// scroll position where they were.
+    ///
+    /// A refusal (the file does not parse) surfaces as "no edits": there is no
+    /// layout to offer for a file whose structure is unknown, and a protocol
+    /// error would put a message in the user's face for a file they are in the
+    /// middle of typing.
+    fn format_document(
+        &mut self,
+        uri: &lsp_types::Url,
+        range: Option<lsp_types::Range>,
+    ) -> Option<Vec<lsp_types::TextEdit>> {
+        let path = self.document_path(uri)?;
+        let file = *self.files.get(&path)?;
+        let text = self.text(file);
+        let index = LineIndex::new(&text);
+        let selection = match range {
+            None => TextRange::up_to(TextSize::of(text.as_str())),
+            // A client is not obliged to send the two ends in order, and an
+            // inverted range would be a panic rather than a bad edit.
+            Some(range) => {
+                let first = self.to_offset_with(&index, &text, range.start);
+                let second = self.to_offset_with(&index, &text, range.end);
+                TextRange::new(first.min(second), first.max(second))
+            }
+        };
+        let edits = match format::format_range(&text, self.config.format, selection) {
+            Ok(edits) => edits,
+            Err(error) => {
+                tracing::error!("formatting failed: {error:?}");
+                return None;
+            }
+        };
+        Some(
+            edits
+                .into_iter()
+                .map(|edit| lsp_types::TextEdit {
+                    range: lsp_types::Range {
+                        start: self.to_position_with(&index, &text, edit.range.start()),
+                        end: self.to_position_with(&index, &text, edit.range.end()),
+                    },
+                    new_text: edit.new_text,
+                })
+                .collect(),
+        )
     }
 
     fn to_range(&self, text: &str, range: TextRange) -> lsp_types::Range {
@@ -1579,10 +1646,7 @@ fn config_message(error: &ConfigError) -> String {
     }
 }
 
-fn initialize_result(
-    encoding: PositionEncoding,
-    experimental: ExperimentalFeatures,
-) -> lsp_types::InitializeResult {
+fn initialize_result(encoding: PositionEncoding) -> lsp_types::InitializeResult {
     lsp_types::InitializeResult {
         capabilities: lsp_types::ServerCapabilities {
             position_encoding: Some(encoding.kind()),
@@ -1609,9 +1673,7 @@ fn initialize_result(
                 },
             )),
             document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
-            document_range_formatting_provider: Some(lsp_types::OneOf::Left(
-                experimental.range_formatting,
-            )),
+            document_range_formatting_provider: Some(lsp_types::OneOf::Left(true)),
             document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
             hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
             inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
@@ -2137,118 +2199,15 @@ impl LanguageServer for ServerState {
         &mut self,
         params: lsp_types::DocumentFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
-        self.read(move |worker| {
-            let Some(path) = worker.document_path(&params.text_document.uri) else {
-                return Ok(None);
-            };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            match format::format(&text, worker.config.format) {
-                Ok(formatted) => {
-                    let index = LineIndex::new(&text);
-                    let end_line = index.line_count() - 1;
-                    let end =
-                        lsp_types::Position::new(end_line, index.line_length(end_line, &text));
-                    Ok(Some(vec![lsp_types::TextEdit {
-                        range: lsp_types::Range {
-                            start: lsp_types::Position::new(0, 0),
-                            end,
-                        },
-                        new_text: formatted,
-                    }]))
-                }
-                // A refusal (syntax errors) surfaces as "no edits".
-                Err(error) => {
-                    tracing::error!("formatting failed: {error:?}");
-                    Ok(None)
-                }
-            }
-        })
+        self.read(move |worker| Ok(worker.format_document(&params.text_document.uri, None)))
     }
 
-    /// Format the selection, snapped outwards to whole top-level statements
-    /// and whole lines. R's top-level statements are laid out independently —
-    /// each starts at column zero and nothing above it changes its
-    /// indentation — so formatting that slice alone gives exactly what
-    /// formatting the whole file would have given for those lines.
     fn range_formatting(
         &mut self,
         params: lsp_types::DocumentRangeFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some(path) = worker.document_path(&params.text_document.uri) else {
-                return Ok(None);
-            };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let selection = TextRange::new(
-                worker.to_offset(&text, params.range.start),
-                worker.to_offset(&text, params.range.end),
-            );
-
-            let root = syntax::parse(&text).syntax_node();
-            let mut covered: Option<TextRange> = None;
-            for node in root.children() {
-                let node_range = node.text_range();
-                // An empty selection (a bare cursor) still picks the statement
-                // it sits in, so "format selection" with nothing selected
-                // formats the statement under the caret rather than nothing.
-                let intersects = node_range.start() < selection.end()
-                    && selection.start() < node_range.end()
-                    || node_range.contains(selection.start());
-                if !intersects {
-                    continue;
-                }
-                covered = Some(match covered {
-                    Some(current) => current.cover(node_range),
-                    None => node_range,
-                });
-            }
-            // A selection holding no statement (blank lines, comments only)
-            // has nothing to lay out.
-            let Some(covered) = covered else {
-                return Ok(None);
-            };
-
-            let start = text[..usize::from(covered.start())]
-                .rfind('\n')
-                .map_or(0, |index| index + 1);
-            let end = text[usize::from(covered.end())..]
-                .find('\n')
-                .map_or(text.len(), |index| usize::from(covered.end()) + index);
-            let slice = &text[start..end];
-
-            match format::format(slice, worker.config.format) {
-                Ok(formatted) => {
-                    // The replaced span stops before the line terminator, so
-                    // the formatter's trailing newline would add a blank line.
-                    let formatted = formatted.trim_end_matches('\n').to_owned();
-                    if formatted == slice {
-                        return Ok(Some(Vec::new()));
-                    }
-                    let range = worker.to_range(
-                        &text,
-                        TextRange::new(
-                            TextSize::try_from(start).unwrap_or_default(),
-                            TextSize::try_from(end).unwrap_or_default(),
-                        ),
-                    );
-                    Ok(Some(vec![lsp_types::TextEdit {
-                        range,
-                        new_text: formatted,
-                    }]))
-                }
-                // A refusal (syntax errors) surfaces as "no edits", exactly as
-                // whole-document formatting does.
-                Err(error) => {
-                    tracing::error!("range formatting failed: {error:?}");
-                    Ok(None)
-                }
-            }
+            Ok(worker.format_document(&params.text_document.uri, Some(params.range)))
         })
     }
 
