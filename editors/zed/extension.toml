@@ -1,6 +1,6 @@
 id = "ry"
 name = "ry"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["Felix Andreas"]
 description = "An R language server and code formatter, written in Rust."

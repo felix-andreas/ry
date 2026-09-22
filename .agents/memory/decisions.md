@@ -908,3 +908,17 @@ Impact: correctness — the corpus differential reaches 1,523/1,523 with one adj
 **Shape.** `editors/zed/extension.toml` is a plain-semver line of its own (`0.1.0`), restarted because the extension has never been published to Zed's registry and nothing constrains its history; the wasm crate's `Cargo.toml` version tracks that manifest rather than the workspace, and neither inherits `version.workspace`. It is bumped by hand when the extension changes. The release-metadata test asserts the VS Code derivation only, and its module doc states why the Zed manifest is absent — the test is the thing that would otherwise re-couple them. The prerelease suffix is dropped for good: `-alpha`/`-beta` name the CLI's release channel, which an extension that only locates a binary cannot be in.
 
 **Impact.** One number per artifact with one owner each; a Zed release no longer implies a CLI release or vice versa. The recurring "align the stale zed extension version" commit has no reason to exist.
+
+# Decision record: the Linux release binary is static musl
+
+**Status:** decided (user directive: the Linux release binary is static) and implemented.
+
+**Problem.** The Linux package was crane's native build against nixpkgs' glibc, so the shipped binary's ELF interpreter and RUNPATH were `/nix/store/…` paths: it started only on a machine whose store held that exact glibc.
+
+**Shape.** Every release binary is linked by zig through cargo-zigbuild; Linux targets `x86_64-unknown-linux-musl`, which links statically by default: no interpreter, no dynamic section, and it runs in an empty root filesystem. Every release derivation sets `allowedReferences = [ ]`, so an interpreter, RUNPATH, or any other store path in the output fails the build instead of shipping. The Linux package runs the test suite on the musl build itself, so the tests exercise what ships. The asset is named by its real triple (`ry-x86_64-unknown-linux-musl.tar.gz`); the Zed extension looks for that name.
+
+**mimalloc, musl only.** musl's allocator made `ry check` 2–5x slower on real packages (rlang 0.8s → 2.7s, dplyr 0.4s → 1.9s); with mimalloc the static binary is on par with the glibc build (rlang about a quarter slower, ggplot2, dplyr, testthat and `fmt --check` as fast or faster). It is a `cfg(target_env = "musl")` dependency because glibc's allocator is already fine, and the macOS and Windows builds should not carry a C dependency they do not need. zig compiles its C, so the flake needs no musl C toolchain.
+
+**Rejected.** *Static glibc* (`+crt-static` on the gnu target): its `dlopen` loads the system libc a second time beside libR, and R then runs against an uninitialized libc (measured: "Error parsing /proc/self/maps", "R home directory is not defined") — worse than refusing. *Dynamic glibc with a standard interpreter* (zig's versioned gnu targets): portable across glibc distributions and keeps the REPL, but it is not static and does not run on musl distributions.
+
+**Accepted cost.** A static binary cannot `dlopen`, so `ry repl` and `ry run` do not work in the Linux release binary. `libr::load` refuses up front on `cfg!(target_feature = "crt-static")` and names the from-source install; the REPL e2e suite skips there. **Trigger to revisit:** demand for the console from prebuilt-binary Linux users — then ship a second, dynamically linked Linux asset for it rather than giving up the static one.

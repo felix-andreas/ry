@@ -1,8 +1,14 @@
 use clap::{Parser, Subcommand};
+#[cfg(target_env = "musl")]
+use mimalloc::MiMalloc;
 use ry::cli::{self, CommandError, Outcome, OutputFormat};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing_subscriber::prelude::*;
+
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: MiMalloc = MiMalloc;
 
 fn main() -> ExitCode {
     tracing_subscriber::registry()

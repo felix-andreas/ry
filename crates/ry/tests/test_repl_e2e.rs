@@ -1,7 +1,8 @@
 //! End-to-end tests for `ry repl`, driving the real binary through a
 //! pseudo-terminal: type input, watch R evaluate. They need a local R
-//! installation, so they SKIP (loudly, but green) where none exists — CI has
-//! no R, and by decision these run locally before REPL-touching changes:
+//! installation and a dynamically linked `ry` to load it into, so they SKIP
+//! (loudly, but green) otherwise — CI has no R, and by decision these run
+//! locally before REPL-touching changes:
 //!
 //! ```sh
 //! cargo test -p ry-lang --test test_repl_e2e -- --nocapture
@@ -19,6 +20,10 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 fn r_available() -> bool {
+    if cfg!(target_feature = "crt-static") {
+        eprintln!("skipped: a statically linked ry cannot load R");
+        return false;
+    }
     let available = std::process::Command::new("R")
         .arg("RHOME")
         .output()

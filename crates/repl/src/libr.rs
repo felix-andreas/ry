@@ -157,6 +157,17 @@ pub fn interrupt_r() {
 
 #[cfg(unix)]
 pub fn load() -> Result<RApi, ReplError> {
+    // A static binary cannot embed R: musl's static `dlopen` always fails, and
+    // static glibc's loads the system libc a second time beside libR, which
+    // leaves R running against an uninitialized libc.
+    if cfg!(target_feature = "crt-static") {
+        return Err(ReplError(
+            "this ry binary is statically linked, so it cannot load R; \
+             install ry from source to use `ry repl` and `ry run`: \
+             cargo install --git https://github.com/felix-andreas/ry ry-lang"
+                .to_owned(),
+        ));
+    }
     let r_home = discover_r_home()?;
     let library_path = shared_library_path(&r_home)?;
     // R packages with compiled code link libR themselves; RTLD_GLOBAL makes

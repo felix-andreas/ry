@@ -180,11 +180,11 @@ release $version:
         fi
     done
 
-    nix build .#ry-linux-x86_64 -o release/nix/x86_64-unknown-linux-gnu
+    nix build .#ry-linux-x86_64 -o release/nix/x86_64-unknown-linux-musl
     nix build .#ry-macos-aarch64 -o release/nix/aarch64-apple-darwin
     nix build .#ry-windows-x86_64 -o release/nix/x86_64-pc-windows-gnu
 
-    just package-tar x86_64-unknown-linux-gnu $dir
+    just package-tar x86_64-unknown-linux-musl $dir
     just package-tar aarch64-apple-darwin $dir
     just package-zip x86_64-pc-windows-gnu $dir
 
@@ -192,7 +192,7 @@ release $version:
     rm -rf editors/code/bin
     just build-extension $kind --out ../../$dir/ry.vsix
 
-    just build-platform-vsix x86_64-unknown-linux-gnu linux-x64 ry $dir $kind
+    just build-platform-vsix x86_64-unknown-linux-musl linux-x64 ry $dir $kind
     just build-platform-vsix aarch64-apple-darwin darwin-arm64 ry $dir $kind
     just build-platform-vsix x86_64-pc-windows-gnu win32-x64 ry.exe $dir $kind
 
@@ -209,7 +209,7 @@ publish-github $version $notes="":
     fi
     git push
     gh release create $version $prerelease_flag \
-    	"release/$version/ry-x86_64-unknown-linux-gnu.tar.gz#ry CLI (linux-x64)" \
+    	"release/$version/ry-x86_64-unknown-linux-musl.tar.gz#ry CLI (linux-x64)" \
     	"release/$version/ry-aarch64-apple-darwin.tar.gz#ry CLI (darwin-arm64)" \
     	"release/$version/ry-x86_64-pc-windows-gnu.zip#ry CLI (win32-x64)" \
     	"release/$version/ry.vsix#VS Code extension (client only)" \
@@ -220,7 +220,7 @@ publish-github $version $notes="":
 
 publish-github-update $version:
     gh release upload $version \
-        "release/$version/ry-x86_64-unknown-linux-gnu.tar.gz#ry CLI (linux-x64)" \
+        "release/$version/ry-x86_64-unknown-linux-musl.tar.gz#ry CLI (linux-x64)" \
         "release/$version/ry-aarch64-apple-darwin.tar.gz#ry CLI (darwin-arm64)" \
         "release/$version/ry-x86_64-pc-windows-gnu.zip#ry CLI (win32-x64)" \
         "release/$version/ry.vsix#VS Code extension (client only)" \

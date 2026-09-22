@@ -18,7 +18,8 @@ The complete command-line surface of the `ry` binary.
 | `debug` | **Not stable.** Development commands: `debug ast` dumps a syntax tree, `debug analysis-stats` reports where analysis time and memory go. Output shape can change at any time |
 
 `check`, `fmt`, and `server` need no R installation. `repl` and `run` locate and load the R on your
-machine; their walkthrough lives in [ry at the R console](/guides/r-console).
+machine, which the statically linked prebuilt Linux binary cannot do; their walkthrough lives in
+[ry at the R console](/guides/r-console).
 
 Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 

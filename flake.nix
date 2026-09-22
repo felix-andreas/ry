@@ -44,6 +44,7 @@
             toolchain.default.override {
               targets = [
                 "x86_64-unknown-linux-gnu"
+                "x86_64-unknown-linux-musl"
                 "x86_64-pc-windows-gnu"
                 "aarch64-apple-darwin"
               ];
@@ -85,11 +86,6 @@
             strictDeps = true;
           };
 
-          commonArgsLinux = commonArgs // {
-            cargoExtraArgs = "-p ry-lang";
-            CARGO_BUILD_TARGET = "x86_64-unknown-linux-gnu";
-          };
-
           # The dep-only builds compile dependencies against a dummified copy
           # of the workspace: every local .rs file is replaced by an empty
           # stub so the dependency cache survives source edits. The
@@ -102,31 +98,19 @@
             cp -r --no-preserve=mode ${./patches} "$out"/patches
           '';
 
-          cargoArtifactsLinux = craneLib.buildDepsOnly (
-            commonArgsLinux
-            // {
-              extraDummyScript = keepPatchesInDummySrc;
-            }
-          );
-          packageLinux = craneLib.buildPackage (
-            commonArgsLinux
-            // {
-              cargoArtifacts = cargoArtifactsLinux;
-              # The LSP tests exercise stub materialization, which writes to
-              # the user cache directory — the sandbox's HOME is not
-              # writable, so give it a real one.
-              preCheck = ''
-                export XDG_CACHE_HOME="$TMPDIR/.cache"
-              '';
-            }
-          );
-
-          # The macOS binaries cross-link with zig, which bundles link stubs
-          # for libSystem only — no Apple frameworks. The dependency graph is
-          # kept framework-free on purpose (see patches/iana-time-zone and the
-          # preflight in the justfile's release recipe), so no macOS SDK is
-          # needed here.
-          makeCrossArgs =
+          # Every release binary is linked by zig, which bundles each target's
+          # C runtime and link stubs, so no target SDK or C cross toolchain is
+          # needed.
+          #
+          # - Linux targets musl, which links statically: the binary has no
+          #   ELF interpreter and no RUNPATH, so it runs on any x86_64 Linux
+          #   distribution. It is the one binary the build machine can run,
+          #   so it is the one that runs the test suite.
+          # - macOS: zig bundles link stubs for libSystem only — no Apple
+          #   frameworks. The dependency graph is kept framework-free on
+          #   purpose (see patches/iana-time-zone and the preflight in the
+          #   justfile's release recipe), so no macOS SDK is needed here.
+          makeReleaseArgs =
             target:
             commonArgs
             // {
@@ -137,6 +121,9 @@
                 pkgs.zig
               ];
 
+              # zig keeps its compilation cache in the user cache directory,
+              # and so does the stub materialization the LSP tests exercise.
+              # The sandbox's HOME is not writable, so give it a real one.
               preBuild =
                 ''
                   export XDG_CACHE_HOME="$TMPDIR/.cache"
@@ -164,37 +151,38 @@
                   export RUSTFLAGS="-L native=$synchronization_lib_dir''${RUSTFLAGS:+ $RUSTFLAGS}"
                 '';
 
-              doCheck = false;
+              doCheck = target == "x86_64-unknown-linux-musl";
             };
 
-          makeCrossArtifacts =
-            target:
-            craneLib.buildDepsOnly (
-              (makeCrossArgs target)
-              // {
-                extraDummyScript = keepPatchesInDummySrc;
-                buildPhaseCargoCommand = "cargo zigbuild --release -p ry-lang";
-                checkPhaseCargoCommand = "true";
-              }
-            );
-
-          buildCrossPackage =
+          buildReleasePackage =
             target:
             craneLib.buildPackage (
-              (makeCrossArgs target)
+              (makeReleaseArgs target)
               // {
-                cargoArtifacts = makeCrossArtifacts target;
+                cargoArtifacts = craneLib.buildDepsOnly (
+                  (makeReleaseArgs target)
+                  // {
+                    extraDummyScript = keepPatchesInDummySrc;
+                    buildPhaseCargoCommand = "cargo zigbuild --release -p ry-lang";
+                    checkPhaseCargoCommand = "cargo-zigbuild test --release --no-run -p ry-lang";
+                  }
+                );
                 buildPhaseCargoCommand = ''
                   cargoBuildLog=$(mktemp cargoBuildLogXXXX.json)
                   cargo zigbuild --release --message-format json-render-diagnostics -p ry-lang >"$cargoBuildLog"
                 '';
+                checkPhaseCargoCommand = "cargo-zigbuild test --release -p ry-lang";
+                # A release binary runs on machines without Nix, so it must not
+                # reference anything in the Nix store: an ELF interpreter or
+                # RUNPATH there fails this build instead of shipping.
+                allowedReferences = [ ];
               }
             );
         in
         {
-          ry-linux-x86_64 = packageLinux;
-          ry-macos-aarch64 = buildCrossPackage "aarch64-apple-darwin";
-          ry-windows-x86_64 = buildCrossPackage "x86_64-pc-windows-gnu";
+          ry-linux-x86_64 = buildReleasePackage "x86_64-unknown-linux-musl";
+          ry-macos-aarch64 = buildReleasePackage "aarch64-apple-darwin";
+          ry-windows-x86_64 = buildReleasePackage "x86_64-pc-windows-gnu";
         }
       );
 

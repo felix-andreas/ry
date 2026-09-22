@@ -2,7 +2,7 @@
 name = "zed_ry"
 # Tracks extension.toml (the version Zed publishes), not the CLI release: this
 # extension ships no binary, it only locates one.
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [lib]

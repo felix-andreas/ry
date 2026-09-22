@@ -44,4 +44,12 @@ This file starts from the type-checker work; earlier history lives in the git lo
   cancellation; per-edit output is verified byte-identical to a from-scratch rebuild.
 - The R grammar tracks the published `tree-sitter-r` 1.3.0.
 
+### Fixed
+
+- **The prebuilt Linux binary runs on any x86_64 distribution.** It used to load its C library
+  from a Nix store path, so it did not start outside Nix. It is now statically linked against musl
+  and published as `ry-x86_64-unknown-linux-musl.tar.gz` (formerly
+  `ry-x86_64-unknown-linux-gnu.tar.gz`); the Zed extension looks for the new name. A static binary
+  cannot load R, so `ry repl` and `ry run` need ry built from source on Linux.
+
 [Unreleased]: https://github.com/felix-andreas/ry/compare/main...HEAD

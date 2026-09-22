@@ -82,7 +82,7 @@ impl Extension {
             },
             os = match platform {
                 Os::Mac => "apple-darwin",
-                Os::Linux => "unknown-linux-gnu",
+                Os::Linux => "unknown-linux-musl",
                 Os::Windows => "pc-windows-gnu",
             },
             ext = match platform {

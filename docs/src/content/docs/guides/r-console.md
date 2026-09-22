@@ -70,6 +70,17 @@ There is one requirement beyond "R is installed": it must have been built as a s
 (`--enable-R-shlib`). Every CRAN binary distribution is. If yours is not, ry reports that and names
 the directory it looked in.
 
+ry itself must be able to load a shared library, too. The prebuilt Linux binary is statically
+linked, so it cannot, and the console stops before looking for R:
+
+```
+$ ry repl
+error: this ry binary is statically linked, so it cannot load R; install ry from source to use `ry repl` and `ry run`: cargo install --git https://github.com/felix-andreas/ry ry-lang
+```
+
+On Linux, [install ry from source](/installation#command-line) to use the console. The macOS and
+Windows binaries load R directly.
+
 R 4.2 or newer is what this is developed and tested against, and it is required on Windows. Nothing
 checks the version, so an older R fails at load time with a missing-symbol error rather than a clear
 message.

@@ -22,7 +22,7 @@ jobs:
         env:
           RY_VERSION: 0.3.0-alpha
         run: |
-          curl -sSL "https://github.com/felix-andreas/ry/releases/download/${RY_VERSION}/ry-x86_64-unknown-linux-gnu.tar.gz" \
+          curl -sSL "https://github.com/felix-andreas/ry/releases/download/${RY_VERSION}/ry-x86_64-unknown-linux-musl.tar.gz" \
             | tar xz
           sudo mv ry /usr/local/bin/
       - name: Check

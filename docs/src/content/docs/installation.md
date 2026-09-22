@@ -44,14 +44,19 @@ and each archive holds a single `ry` binary:
 
 | Platform | Asset |
 | --- | --- |
-| Linux x86_64 | `ry-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 | `ry-x86_64-unknown-linux-musl.tar.gz` |
 | macOS aarch64 | `ry-aarch64-apple-darwin.tar.gz` |
 | Windows x86_64 | `ry-x86_64-pc-windows-gnu.zip` |
 
 ```bash
-curl -sSL https://github.com/felix-andreas/ry/releases/download/0.3.0-alpha/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -sSL https://github.com/felix-andreas/ry/releases/download/0.3.0-alpha/ry-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo mv ry /usr/local/bin/
 ```
+
+The Linux binary is statically linked, so it runs on any x86_64 distribution, glibc- or musl-based.
+Releases up to 0.3.1-beta published a `-linux-gnu` archive instead, a binary that loads its C
+library from a Nix store path and does not start outside Nix. A static binary cannot load R, so on
+Linux the [R console](/guides/r-console) (`ry repl` and `ry run`) needs ry built from source.
 
 Name the tag explicitly. Every release so far is marked a pre-release, so `releases/latest/`
 resolves to an older stable tag rather than the newest build.
@@ -65,7 +70,8 @@ cargo install --git https://github.com/felix-andreas/ry ry-lang
 The package is `ry-lang` because the name `ry` was already taken on crates.io; the binary it
 installs is `ry`.
 
-This is also the route for architectures without a prebuilt binary.
+This is also the route for architectures without a prebuilt binary, and for the R console on
+Linux.
 
 **Planned:** a one-line installer, so neither a manual download nor a Rust toolchain is needed. It
 is not scheduled.

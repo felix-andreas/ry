@@ -49,6 +49,11 @@ futures.workspace = true
 [target.'cfg(not(unix))'.dependencies]
 tokio-util.workspace = true
 
+# The Linux release binary is static musl, and musl's allocator makes the
+# multithreaded analysis several times slower than glibc's.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"
+
 [dev-dependencies]
 async-lsp.workspace = true
 unicode-width.workspace = true
