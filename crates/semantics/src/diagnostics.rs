@@ -765,16 +765,9 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
         let Some(name) = item.name(db).clone() else {
             continue;
         };
-        let Some(node) = crate::item_node(db, item) else {
+        let Some(range) = crate::item_name_range(db, item) else {
             continue;
         };
-        let range = node
-            .descendants()
-            .find(|child| {
-                child.kind() == syntax::SyntaxKind::NAME && child.text().to_string() == name
-            })
-            .map(|child| child.text_range())
-            .unwrap_or_else(|| TextRange::empty(node.text_range().start()));
         sites.push((name, range));
     }
     sites
@@ -1441,6 +1434,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         if let Some(name) = item_name.clone()
             && let Some(module) = crate::item_hir(db, item)
             && let Some(root) = module.root
+            && let Some(name_range) = crate::item_name_range(db, item)
         {
             let root_range = module.expression(root).range;
             let statement_range =
@@ -1449,15 +1443,6 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // statement: the value being computed is fine, the binding is what
             // is dead. `broken` still consults the whole statement, because a
             // syntax error anywhere in it suppresses the finding.
-            let name_range = naming
-                .bindings
-                .values()
-                .find(|binding| {
-                    binding.kind == crate::naming::BindingKind::TopLevel && binding.name == name
-                })
-                .map_or(statement_range, |binding| {
-                    TextRange::new(binding.range.start() + offset, binding.range.end() + offset)
-                });
             if !broken(statement_range) {
                 definers.push(Definer {
                     item_index: index,

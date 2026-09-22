@@ -1664,60 +1664,83 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
 /// Kind + name of one top-level statement, mirroring R assignment spellings:
 /// `<-`, `=`, `<<-`, `:=` bind on the left, `->`, `->>` on the right.
 fn classify_top_level(node: &syntax::SyntaxNode) -> (ItemKind, Option<String>) {
+    match top_level_definition(node) {
+        Some(definition) => (definition.kind, Some(definition.name)),
+        None => (ItemKind::Statement, None),
+    }
+}
+
+/// Where a named item spells the name it defines (file-absolute): the
+/// assignment target, or the `setGeneric` name string. An edge-only view like
+/// [`item_node`], for diagnostics and navigation that point at the name rather
+/// than the whole definition.
+pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::TextRange> {
+    let node = item_node(db, item)?;
+    top_level_definition(&node).map(|definition| definition.name_range)
+}
+
+/// What a named top-level statement defines. The one reading of a statement's
+/// shape both item identity and the name's source site derive from, so the two
+/// cannot disagree about which name a statement binds.
+struct TopLevelDefinition {
+    kind: ItemKind,
+    name: String,
+    name_range: syntax::TextRange,
+}
+
+fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition> {
     use syntax::SyntaxKind;
-    if let Some(name) = set_generic_target(node) {
-        return (ItemKind::Function, Some(name));
+    if let Some((name, name_range)) = set_generic_target(node) {
+        return Some(TopLevelDefinition {
+            kind: ItemKind::Function,
+            name,
+            name_range,
+        });
     }
     if node.kind() != SyntaxKind::BINARY_EXPR {
-        return (ItemKind::Statement, None);
+        return None;
     }
-    let binary = syntax::ast::BinaryExpr::cast(node.clone());
-    let Some(binary) = binary else {
-        return (ItemKind::Statement, None);
-    };
-    let Some(operator) = binary.operator() else {
-        return (ItemKind::Statement, None);
-    };
+    let binary = syntax::ast::BinaryExpr::cast(node.clone())?;
+    let operator = binary.operator()?;
     let (target, value) = match operator.kind() {
         SyntaxKind::LESS_MINUS
         | SyntaxKind::EQ
         | SyntaxKind::LESS2_MINUS
         | SyntaxKind::COLON_EQ => (binary.lhs(), binary.rhs()),
         SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (binary.rhs(), binary.lhs()),
-        _ => return (ItemKind::Statement, None),
+        _ => return None,
     };
-    let name = target
-        .clone()
-        .and_then(syntax::ast::Name::cast)
+    let target = target?;
+    let name = syntax::ast::Name::cast(target.clone())
         .and_then(|name| name.text())
         .or_else(|| {
             // A string target (`"name" <- ...`) defines the unquoted name.
-            target.as_ref().and_then(|node| {
-                (node.kind() == SyntaxKind::LITERAL
-                    && node
-                        .first_token()
-                        .is_some_and(|t| t.kind() == SyntaxKind::STRING))
-                .then(|| {
-                    let text = node.text().to_string();
-                    text.trim_matches(['"', '\'']).to_owned()
-                })
+            (target.kind() == SyntaxKind::LITERAL
+                && target
+                    .first_token()
+                    .is_some_and(|t| t.kind() == SyntaxKind::STRING))
+            .then(|| {
+                let text = target.text().to_string();
+                text.trim_matches(['"', '\'']).to_owned()
             })
-        });
-    if name.is_none() {
-        return (ItemKind::Statement, None);
-    }
+        })?;
     let kind = match value.map(|value| value.kind()) {
         Some(SyntaxKind::FUNCTION_DEF) => ItemKind::Function,
         _ => ItemKind::Value,
     };
-    (kind, name)
+    Some(TopLevelDefinition {
+        kind,
+        name,
+        name_range: target.text_range(),
+    })
 }
 
 /// The name a top-level `setGeneric("name", ...)` call binds — the one S4
 /// registration call that creates a bare-name binding in the global
 /// environment (`setClass`/`setMethod` register class metadata under
-/// internal names, referenced through strings, so they bind nothing).
-fn set_generic_target(node: &syntax::SyntaxNode) -> Option<String> {
+/// internal names, referenced through strings, so they bind nothing). Paired
+/// with the range of the string spelling it.
+fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::TextRange)> {
     use syntax::SyntaxKind;
     if node.kind() != SyntaxKind::CALL_EXPR {
         return None;
@@ -1772,7 +1795,7 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<String> {
         return None;
     }
     let name = text[1..text.len() - 1].to_owned();
-    (!name.is_empty()).then_some(name)
+    (!name.is_empty()).then(|| (name, string.text_range()))
 }
 
 #[cfg(test)]

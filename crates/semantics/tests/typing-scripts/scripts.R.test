@@ -76,6 +76,17 @@ helper <- function(count) {
 helper: <T: numeric> fn(count: T) -> T
 0..6 warning[unused] `helper` is assigned but never used.
 
+#---- unused_super_assignment_marks_the_name
+counter <<- 0L
+#++++
+counter: integer
+0..7 warning[unused] `counter` is assigned but never used.
+
+#---- unused_generic_marks_the_name_string
+setGeneric("area", function(shape) standardGeneric("area"))
+#++++
+11..17 warning[unused] `area` is assigned but never used.
+
 #---- a_declared_contract_survives_a_failing_body
 #: fn(spec: character) -> integer
 steps_for <- function(spec) "not an integer"

@@ -176,6 +176,14 @@ nominal distinctness, and no cascades outside the `@param` case. The gap is not 
 **diagnostics render the artifact unification left behind rather than the fact that failed**, and that
 the nominal story protects construction but nothing after it.
 
+- **A script's `setGeneric("area", …)` is invisible to navigation from a call.** Hover's definition
+  line reaches the name string, but goto-definition, references and rename on `area(1)` answer nothing:
+  `target_at` accepts a non-local only when some item declares it as a top-level *slot*
+  (`global_declaration_exists`), and naming mints no slot for a string-named generic.
+- **Top-level `x := 1` is an item named `x`, yet R binds nothing.** Item classification treats `:=` as a
+  left-binding spelling while the HIR lowers it to a call of `:=` (data.table/rlang), so the script
+  unused check reports "`x` is assigned but never used" on a statement that assigns nothing.
+
 ## FIXED — goto-definition landed on the wrong token, and a stray quote blanked the rest of a file
 
 Opened by the IDE fuzz battery at a raised budget (`FUZZ_ITERS=1200 cargo test -p ide --test
@@ -192,8 +200,9 @@ serious one.
 2. **Goto-definition took the item's FIRST `NAME` node.** That reads `name <- value` correctly and
    every other shape wrong: a right assignment declares its name last, so every jump to `total` in
    `compute(1) -> total` landed inside `compute`. Valid R, wrong position, and it was reached by
-   hover, goto and the document outline alike. Naming already knows which token declares the item, so
-   `declared_name_range` asks it and keeps the syntax scan only for shapes naming binds nothing for.
+   hover, goto and the document outline alike. The item's name site is now `item_name_range`, read
+   from the same statement classification that gives the item its name (so `setGeneric("area", …)`
+   lands on the string, not on `setGeneric`).
 3. **A declaration was unreachable from its own first character.** Expressions are ranked
    end-inclusively so a cursor just past a name still means that name; where two siblings abut
    (`"s"broken <- …` in recovered source) that handed the cursor the expression it had just left, and
