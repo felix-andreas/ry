@@ -3,13 +3,13 @@ title: Features
 description: What ry gives you with no configuration, and the one setting that turns on type errors
 ---
 
-Everything below works with no configuration and no annotations. The last section needs one line of
-configuration.
+Everything on this page works with no configuration and no annotations, except the last section,
+which needs one line of configuration.
 
 ## Navigation and completion
 
-ry is a standard language server, so go-to-definition, find-references, completion and hover work
-in VS Code, Zed, Neovim and Helix alike. It reads your whole project, so a name defined in one file
+ry is a standard language server, so go-to-definition, find-references, completion, and hover work
+in VS Code, Zed, Neovim, and Helix alike. It reads your whole project, so a name defined in one file
 completes in another:
 
 ```r
@@ -24,8 +24,8 @@ normalise_re      # completes to normalise_region
 
 ## Syntax errors
 
-ry parses R with its own hand-written parser rather than calling R or reusing a grammar. That
-is what makes these messages possible. Forget a comma in a list:
+ry parses R with its own hand-written parser instead of calling R or reusing a grammar, and that is
+what makes messages like this one possible. Forget a comma in a list:
 
 ```r
 config <- list(
@@ -43,7 +43,7 @@ Error: unexpected symbol in:
   subtitle"
 ```
 
-ry reports what is missing, and points at the place it should go:
+ry reports what is missing and points at the place it belongs:
 
 ```text
 syntax-error
@@ -63,7 +63,7 @@ rather than the token it stopped on.
 
 ## Formatting
 
-`ry fmt` fixes spacing, indentation and bracing:
+`ry fmt` fixes spacing, indentation, and bracing:
 
 ```r
 x<-c(1,2,3)
@@ -75,8 +75,8 @@ x <- c(1, 2, 3)
 if (x > 1) { y <- 2 }
 ```
 
-It does not decide where your line breaks go. Both of these are already formatted, and both stay
-exactly as written:
+What it does not do is decide where your line breaks go. Both of these are already formatted, and
+both stay exactly as written:
 
 ```r
 totals <- summarise(data, by = region)
@@ -94,27 +94,27 @@ reasoning is in [formatting rules](/reference/formatting-rules#philosophy).
 
 ## Rename
 
-Rename does not search and replace. It runs the same analysis that answers go-to-definition: every
-occurrence is resolved to the binding it refers to, and only the occurrences bound to the one you
+Rename is not search and replace. It runs the same analysis that answers go-to-definition: every
+occurrence is resolved to the binding it refers to, and only the occurrences of the binding you
 picked are edited.
 
-This matters because the same word is not the same thing twice. A local `total` inside one function
-and a global `total` used by another are different bindings. A parameter shadows the global of the
-same name for the length of the function. The word appearing inside a string is not a binding at
+That matters because the same word is often two different things. A local `total` inside one
+function and a global `total` used by another are different bindings, a parameter shadows the global
+of the same name for the length of its function, and the word inside a string is not a binding at
 all. Renaming one of them must leave the others alone, across every file in the project.
 
 ## The type checker
 
 The features above know which binding each name refers to. The type checker also knows what kind of
-value that binding holds, so completion can offer what is inside a value rather than just the names
-in scope:
+value that binding holds, so completion can offer what is *inside* a value, not just the names in
+scope:
 
 ```r
 account <- list(holder = "ada", balance = 120.5)
 account$        # balance, holder, with their types
 ```
 
-Nothing declared those fields. Hovering a function you never annotated gives you its full type:
+Nothing declared those fields. Hover a function you never annotated, and you get its full type:
 
 ```r
 make <- function(x) list(x, 1L)
@@ -124,10 +124,10 @@ make <- function(x) list(x, 1L)
 make: <T> fn(x: T) -> list{T, integer}
 ```
 
-It takes a value of any type `T` and returns a two-element list of that value and an integer.
-Inference produced that, and it runs whether or not type errors are reported.
+It takes a value of any type `T` and returns a two-element list holding that value and an integer.
+Inference worked that out, and inference runs whether or not type errors are reported.
 
-Reporting the places where those types disagree is what is off by default:
+What is off by default is *reporting* the places where those types disagree. One line turns it on:
 
 ```toml
 # ry.toml
@@ -160,9 +160,9 @@ type-mismatch
 
 That took one line of configuration, no annotations, and no change to the code.
 
-Type checking a whole project is affordable because analysis is incremental: an edit re-checks only
-what that edit could have affected, not the project. ry is tested against roughly 970,000 lines of
-real R, which is 69 CRAN packages plus R's base library.
+Type checking a whole project stays affordable because the analysis is incremental: an edit
+re-checks only what that edit could have affected, not the whole project. ry is tested against
+roughly 970,000 lines of real R: 69 CRAN packages plus R's base library.
 
 - [Tutorial](/type-checking/tutorial) puts it on real code
 - [Concepts](/type-checking/concepts) explains how it works out what it knows
