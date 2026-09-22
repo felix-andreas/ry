@@ -3,7 +3,8 @@ title: CLI
 description: Every ry command, flag, exit code, and JSON field
 ---
 
-The complete command-line surface of the `ry` binary.
+This page lists everything the `ry` binary accepts on the command line, what it prints, and how it
+exits.
 
 ## Commands
 
@@ -17,8 +18,8 @@ The complete command-line surface of the `ry` binary.
 | `help` | Prints help for the binary or for one command |
 | `debug` | **Not stable.** Development commands: `debug ast` dumps a syntax tree, `debug analysis-stats` reports where analysis time and memory go. Output shape can change at any time |
 
-`check`, `fmt`, and `server` need no R installation. `repl` and `run` locate and load the R on your
-machine; their walkthrough lives in [ry at the R console](/guides/r-console).
+`check`, `fmt`, and `server` need no R installation. `repl` and `run` find and load the R on your
+machine, and [ry at the R console](/guides/r-console) walks through them.
 
 Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 
@@ -31,7 +32,9 @@ Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 | `--stdio` | n/a | n/a | Accepted and ignored. It exists so VS Code's default launch arguments do not error |
 | `--experimental-features` | `FEATURES` | none | Space-separated feature names, or `all` |
 
-Only `range_formatting` exists today, and only the language server reads it, so the flag does nothing for `check`, `fmt`, `repl`, or `run`. An unknown name prints a warning on stderr and is ignored rather than treated as a usage error.
+The only feature today is `range_formatting`, which only the language server reads, so the flag does
+nothing for `check`, `fmt`, `repl`, or `run`. An unknown feature name prints a warning on stderr and is
+ignored rather than treated as a usage error.
 
 ## check
 
@@ -49,17 +52,16 @@ ry check --min-severity error  # only errors report and gate
 | `--output` | `human` \| `json` | `human` | `human` renders diagnostics with source snippets on **stderr** and one summary line on **stdout**. `json` writes [JSON Lines](#json-output) on **stdout** and prints no summary |
 | `--min-severity` | `warning` \| `error` | `warning` | Findings below the floor are neither reported nor counted toward the [exit code](#exit-codes) |
 
-Analysis always covers the whole project a named path belongs to. The project is the nearest
-ancestor holding `ry.toml` or `DESCRIPTION`, and otherwise the target's own directory. Cross-file names resolve
-identically however you spell the paths. Only reporting is scoped to what you named.
+Analysis always covers the whole project a named path belongs to: the nearest ancestor directory
+holding `ry.toml` or `DESCRIPTION`, or else the target's own directory. Cross-file names therefore
+resolve the same way however you spell the paths, and only the reporting is limited to what you named.
 
-Type errors are opt-in through `[check] typing` in
-[`ry.toml`](/reference/configuration); the codes themselves are listed in
-[Diagnostic codes](/reference/diagnostic-codes).
+Type errors are opt-in through `[check] typing` in [`ry.toml`](/reference/configuration), and every
+code is listed in [Diagnostic codes](/reference/diagnostic-codes).
 
-Each finding is headed by its [diagnostic code](/reference/diagnostic-codes), then the message, then
-the source it was found in. A companion location is drawn nested under the finding, from its own file. The sibling binding
-that an overwrite warning points at is one.
+Each finding starts with its [diagnostic code](/reference/diagnostic-codes), followed by the message
+and the source it was found in. A companion location, such as the other binding an overwrite warning
+points at, is drawn nested under the finding, from its own file.
 
 ```console
 $ ry check
@@ -102,8 +104,8 @@ unresolved
 3 problems in 1 file
 ```
 
-In a terminal the output uses unicode box drawing and colour. `NO_COLOR` turns the colour off. A
-pipe or a file gets the plain ASCII shown above.
+In a terminal the output uses Unicode box drawing and colour, and `NO_COLOR` turns the colour off.
+A pipe or a file gets the plain ASCII shown above.
 
 ## fmt
 
@@ -120,8 +122,8 @@ ry fmt --diff     # show the change without writing, exit 1
 | `--diff` | n/a | off | Writes nothing. Prints a coloured unified diff per changed file. Takes precedence over `--check` |
 | `-v`, `--verbose` | n/a | off | Adds a throughput line after the summary |
 
-All `fmt` output goes to **stderr**. That covers the diffs, the `Would reformat:` lines, and the summary. The rules it
-applies are documented in [Formatting rules](/reference/formatting-rules).
+All `fmt` output, including the diffs, the `Would reformat:` lines, and the summary, goes to
+**stderr**. The rules it applies are documented in [Formatting rules](/reference/formatting-rules).
 
 ```console
 $ ry fmt --diff
@@ -136,7 +138,7 @@ Diff in ./messy.R:
 
 ## server
 
-Speaks the Language Server Protocol over stdio; editors start it for you.
+Runs the Language Server Protocol over stdio. Your editor starts it for you.
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
@@ -161,17 +163,17 @@ ry R console, R at <the R_HOME it found>. Type q() or Ctrl-D to quit.
 
 ## run
 
-Runs one R file through the same embedded R and exits. The file argument is required.
+Runs one R file through the same embedded R, then exits. The file argument is required.
 
 | Argument | Required | Effect |
 | -------- | -------- | ------ |
 | `FILE` | yes | The R file to execute. A top-level error stops the script and exits 1, the way `Rscript` behaves |
 
-`run` prints R's own startup banner; it is not a quiet runner.
+`run` prints R's own startup banner, so it is not a silent runner.
 
 ## Exit codes
 
-`check` and `fmt` share one scheme, which is what CI gates on.
+`check` and `fmt` share one scheme, which is what CI gates on:
 
 | Code | `check` | `fmt` |
 | ---- | ------- | ----- |
@@ -188,8 +190,8 @@ The other commands:
 | `repl` | Session ended normally | n/a | R could not be found or loaded, or a `--file` script could not be read |
 | `debug ast` | The tree was printed. Parse errors are listed but do not change the code | n/a | The file could not be read |
 
-Any usage error exits `2`. That covers an unknown flag, a missing required argument, an invalid
-enum value, and `ry` with no command at all.
+Any usage error exits `2`: an unknown flag, a missing required argument, an invalid choice for a
+flag, or `ry` with no command at all.
 
 ## JSON output
 
@@ -213,8 +215,9 @@ wrapping array, no summary object, nothing else on the stream. Keys are alphabet
 | `related` | array | Companion locations, `[]` when there are none. Each entry has `path`, `line`, `column`, `endLine`, `endColumn`, and `message`. A `duplicate` finding names both sites |
 
 A related location is dropped when its file is outside the files this run analyzed, rather than
-reported with an unusable path. A warning the CLI itself emits stays on stderr as human text and never appears as JSON. An unknown
-config key and an unreadable file are such warnings.
+reported with a path you could not use. Warnings the CLI emits about its own run, such as an unknown
+configuration key or an unreadable file, stay on stderr as human-readable text and never appear as
+JSON.
 
-These field names are a contract; see [Continuous integration](/guides/continuous-integration) for a
+These field names are a contract. [Continuous integration](/guides/continuous-integration) shows a
 job that consumes them.

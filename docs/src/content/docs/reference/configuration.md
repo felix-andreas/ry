@@ -39,7 +39,7 @@ $ ry fmt --diff project/../outside.R
 
 ### Project root
 
-The project root is a separate decision: it sets the analysis scope, meaning which files see each other's definitions, rather than which configuration is loaded.
+The project root is a separate question from which configuration applies. It sets the analysis scope, meaning which files see each other's definitions:
 
 | Situation | Root |
 | --- | --- |
@@ -86,7 +86,7 @@ Type inference always runs, so hover, inlay hints, and signature help work whate
 
 A `# typing: off`, `# typing: on`, or `# typing: strict` line at the top of a file replaces both `typing` and `strict` for that file. See [the per-file directive](/reference/type-system#per-file-directive).
 
-Four rules govern `exclude`:
+The `exclude` patterns work like this:
 
 - Patterns are anchored at the directory holding `ry.toml`, and follow gitignore rules: `scripts/` excludes that whole subtree, `**/generated` matches at any depth, `!` re-includes.
 - Excluded directories are pruned without being walked, so exclusion cuts checking time, not just output.

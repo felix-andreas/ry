@@ -3,7 +3,8 @@ title: Diagnostic codes
 description: Every code ry can emit, what triggers it, and how to silence it
 ---
 
-Every finding ry reports carries a stable code. This page lists them all.
+Every finding ry reports carries a stable code, and this page lists them all, along with what
+triggers each one and how to silence it.
 
 ## How to read a finding
 
@@ -24,7 +25,9 @@ unresolved
 | `R/a.R:2:22` | File, line, and character column of where the finding starts |
 | `^^^^` | The exact source range the finding is about. That is the name, the token, or the expression, not the whole statement |
 
-Some findings add a related location, drawn nested under the finding from its own file. `duplicate` uses it to point at the other definition. See [the CLI reference](/reference/cli) for the JSON shape.
+Some findings add a related location, drawn nested under the finding from its own file; `duplicate`
+uses one to point at the other definition. [The CLI reference](/reference/cli) shows how these appear
+in JSON.
 
 ## Suppressing a finding
 
@@ -45,9 +48,14 @@ total = 1L  # ry: allow(assignment-operator)
 flag <- T  ## ry: allow(all)
 ```
 
-The marker is found by a line scan, not a parse: the first `#` on the line, all leading `#` stripped, then the literal `ry:` and `allow(` up to the first `)`. So `## ry: allow(x)` and `#ry:allow(x)` both work. A `#` inside a string literal earlier on the line moves where the scan starts.
+The marker is found by scanning the line rather than parsing it: the scan takes the first `#` on the
+line, strips every leading `#`, and then looks for the literal `ry:` and `allow(` up to the first `)`.
+So `## ry: allow(x)` and `#ry:allow(x)` both work, and a `#` inside a string earlier on the line moves
+where the scan starts.
 
-**Not suppressible**, because these are not reported against an R source file: `stub` (reported on `.Rtypes`), `config`, and the `unresolved` / `unused-import` findings reported on `NAMESPACE`.
+Some findings cannot be suppressed this way, because they are not reported against an R source
+file: `stub` (reported on `.Rtypes` files), `config`, and the `unresolved` and `unused-import` findings
+reported on `NAMESPACE`.
 
 ### Silencing a whole class
 
@@ -57,7 +65,9 @@ The marker is found by a line scan, not a parse: the first `#` on the line, all 
 | `# typing: on` | Turns type checking on for this file | File |
 | `# typing: strict` or `#: @strict` | Turns on type checking and strict mode for this file | File |
 
-`# typing: off` does **not** silence an `annotation` finding. A malformed `#:` comment is reported whether or not the file is type-checked. An unrecognized value such as `# typing: onn` is itself reported as an `annotation` error.
+`# typing: off` does **not** silence `annotation` findings: a malformed `#:` comment is reported
+whether or not the file is type-checked. An unrecognized value such as `# typing: onn` is itself
+reported as an `annotation` error.
 
 Several R idioms are recognized directly, with no comment needed:
 
@@ -69,7 +79,8 @@ Several R idioms are recognized directly, with no comment needed:
 | A name starting with `.` or `_` | Never reports `unused` |
 | `library(pkg)` for a package with no shipped stub | `unresolved` is suppressed project-wide, except for near misses of names your own project binds |
 
-Formatting is suppressed by a different mechanism, which is `# fmt: skip`, `# fmt: off` with `# fmt: on`, and `# fmt: skip-file`. See [formatting rules](/reference/formatting-rules).
+Formatting has its own suppression comments, `# fmt: skip`, `# fmt: off` with `# fmt: on`, and
+`# fmt: skip-file`, described in [formatting rules](/reference/formatting-rules).
 
 ## The codes
 
@@ -86,7 +97,7 @@ Most codes are on by default. These are the opt-ins, all configured in [`ry.toml
 | `shadows-builtin` | `[lint] shadows-builtin = "warn"` or `"error"` |
 | `shadows-namespace` | `[lint] shadows-namespace = "warn"` or `"error"` |
 
-To go the other way: `[check] unused = false`, and any `[lint]` code set to `"off"`.
+To go the other way, set `[check] unused = false`, or set any `[lint]` code to `"off"`.
 
 ### Syntax
 
@@ -95,17 +106,31 @@ To go the other way: `[check] unused = false`, and any `[lint]` code set to `"of
 | `syntax-error` | error | yes | Anything the R parser rejects. The message varies with the failure ("unclosed `(`; expected `)` to close the parameter list"); the code does not |
 | `syntax-error` | error | yes | An assignment target R refuses: a computed value or a number where a name belongs, as in `1 + a <- 2` |
 
-R parses an assignment to a non-name and fails at run time, so the mistake is real although the parse looks clean. The commonest cause is a line ending in an operator, which pulls the next line in as its right-hand side, and the message says so when that is what happened.
+R parses an assignment to something that is not a name and only fails when it runs, so the parse
+looks clean even though the mistake is real. The most common cause is a line that ends in an
+operator and so pulls the next line in as its right-hand side; when that is what happened, the message
+says so. A target headed by `!` is exempt: `!` binds tighter than `<-`, so `expr(!!name <- value)` has
+the same shape but builds an assignment instead of performing one.
 
-A `!`-headed target is exempt. `!` binds tighter than `<-`, so `expr(!!name <- value)` builds an assignment rather than performing one and has the same shape.
+A few principles govern how syntax errors are reported:
 
-A finding names the grammar the source broke, not the stage that found it. Broken R reports as `syntax-error`, and a broken `#:` comment reports as `annotation`. A type expression that does not parse and a form the annotation grammar refuses, such as a nested `<T>` binder, both report as `annotation`.
+**The code names whose grammar was broken, not which stage noticed.** Broken R reports as
+`syntax-error`, and a broken `#:` comment as `annotation`. So a type expression that does not parse,
+and a form the annotation grammar deliberately refuses, such as a nested `<T>` binder, both report as
+`annotation`.
 
-One mistake produces one finding. A `#:` region reports once, plus at most one unclosed opener. An unterminated argument or parameter list ends at the next statement rather than adopting it.
+**One mistake produces one finding.** A `#:` region reports once, plus at most one unclosed opener,
+and an unterminated argument or parameter list ends at the next statement instead of swallowing it.
 
-A mistake stays on its own line. R lets a string or a backtick-quoted name span lines, so an unclosed one could swallow every statement below it, which is exactly what a stray quote does while you are still typing it. An unterminated one therefore ends at its line break. The quote is reported where it opens, and the rest of the file keeps its diagnostics, definitions, and completions.
+**A mistake stays on its own line.** R lets a string or a backtick-quoted name span lines, so an
+unclosed one could swallow every statement below it, which is exactly what a stray quote does while
+you are still typing it. An unterminated one therefore ends at its line break: the quote is reported
+where it opens, and the rest of the file keeps its diagnostics, definitions, and completions.
 
-A statement that fails to parse as R suppresses every name-resolution and typing finding that overlaps it. A broken annotation suppresses nothing outside its own block, and inside it the refusal is the only finding.
+**Broken code hides nothing else.** A statement that fails to parse as R suppresses every
+name-resolution and typing finding that overlaps it, because the checker draws no conclusions from
+source it could not read. A broken annotation suppresses nothing outside its own block, and inside the
+block the refusal is the only finding.
 
 ### Name resolution
 
@@ -123,7 +148,8 @@ A statement that fails to parse as R suppresses every name-resolution and typing
 
 ### Typing
 
-`annotation` covers malformed `#:` comments and is always on. `type-mismatch` and `strict` are opt-in; see [type-system reference](/reference/type-system) for the semantics behind them.
+`annotation` covers malformed `#:` comments and is always on. `type-mismatch` and `strict` are
+opt-in, and the [type system reference](/reference/type-system) has the semantics behind them.
 
 | Code | Severity | On by default | Triggered by |
 | --- | --- | --- | --- |
@@ -153,7 +179,9 @@ A statement that fails to parse as R suppresses every name-resolution and typing
 | `strict` | error | no | A binding defined recursively |
 | `strict` | error | no | A name that resolves only because an attached package's export set is unknown. Declare the package with a `.Rtypes` stub to check it |
 
-Enabling `strict` also raises every `unresolved` finding in the file from warning to error. The count does not change; the severity does, which matters if `--min-severity error` gates your build.
+Enabling `strict` also raises every `unresolved` finding in the file from a warning to an error.
+The count does not change, but the severity does, which matters if `--min-severity error` gates your
+build.
 
 ### Lint
 
@@ -168,7 +196,9 @@ Enabling `strict` also raises every `unresolved` finding in the file from warnin
 | `shadows-builtin` | as configured | no | A top-level binding whose name `base` exports. Requires stubs to be installed |
 | `shadows-namespace` | as configured | no | A top-level binding whose name a non-`base` stub namespace declares and that resolves bare (`stats::filter`, `utils::head`) |
 
-`missing-comma` is retired and never emitted. The parser rejects `f(1 2)` as a syntax error, exactly as R does. The config key still parses so old configs keep loading, and is ignored.
+`missing-comma` is retired and never emitted, because the parser now rejects `f(1 2)` as a syntax
+error, exactly as R does. The configuration key still parses, so old configurations keep loading, and
+is ignored.
 
 ### Tooling
 
