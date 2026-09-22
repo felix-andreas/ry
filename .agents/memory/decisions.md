@@ -1,910 +1,1966 @@
-# Decision record: incremental architecture & recheck-trigger model
+# Decision record: the analysis core is a memoized query framework
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+The analysis core uses a memoized query framework with automatic,
+dependency-tracked invalidation. The substrate is salsa, and `crates/semantics`
+is the database.
+
+The alternative was to hand-roll incrementality per structure, with a
+reverse-dependency index, an incremental package naming pass, an incremental
+type index, and debug-only drift assertions that compared each incremental
+result against a full rebuild. That model shipped first and was then replaced.
+
+Four reasons decided it, and they still apply to anything proposed in this area.
 
-**Status:** Part A (recheck trigger) — decided. Part B (hand-roll vs. memoized-query framework) — **DIRECTOR-DRIVEN: direction is to pursue the memoized-query framework, validated by a de-risking spike before any production migration** (the user directed, verbatim, that driving this fork forward is the Director's responsibility — it is NOT deferred to the user). Part C (value-interface-table slice) — **paused; subsumed by the framework if the spike confirms.**
-
-## RESOLUTION (2026-06-28) — how Part B is being driven
-
-The Director owns this decision (per the user's explicit directive). Resolved direction, quality-first: **pursue the memoized-query / automatic-invalidation framework**, because the hand-rolled safety net is provably incomplete (debug-only — now also release-gated — AND blind to shared-rule bugs) and the silent-stale bug class keeps recurring; a framework makes that class structurally impossible, and the project's own roadmap (stub framework + namespace edges) trips the adopt-a-framework tripwire regardless.
-
-This is driven **with evidence, not blind**, via a **de-risking SPIKE** (investigation, no production change — within CTO autonomy):
-1. Build a shadow prototype of the query engine (in-house red-green, or salsa) over one phase-chain: `parse(file)` → `lower(file)` → `local_naming(file)`.
-2. Run it alongside the current pipeline and cross-check its outputs against the existing drift oracles on the seeded soak.
-3. Measure overhead (memory + per-edit time) vs. the hand-rolled path.
-4. Report a **go/no-go** with evidence: is the query model clean for R, what is the overhead, does the cross-check stay green.
-
-On **go**, proceed to a phased migration (keep tree-sitter parsing + the M2 HM type core; migrate phase-by-phase; run the existing drift oracles as the live cross-check during migration; retire them only once the query path is the source of truth). The full production migration is the point at which any remaining user-gate applies; the spike itself is investigation. On **no-go**, the spike's evidence justifies staying hand-rolled-within-limits and this record is updated with the finding.
-
-## REWRITE EXECUTION (user-directed, 2026-06-28)
-
-The spike returned GO. The user directed the rewrite be done as a **separate crate**, experimentally, and that the Director lead it (trusting the CTO + experts), verifying highest-possible quality at the end. Terms:
-
-- **Separate crate.** Build the new memoized-query engine in its own crate (promote the shelved spike `643d85a`), NOT behind a feature flag in `analysis`. The production `analysis` crate stays untouched and green throughout.
-- **Duplication is allowed and committed.** For experimentation, do not prematurely share code between the new crate and `analysis`; commit the experiment freely.
-- **Substrate is the CTO/architect's call** (salsa crate vs. the in-house red-green engine from the spike), justified in the design.
-- **Pipeline as memoized queries:** parse → lower → local_naming → package_naming → typecheck, with automatic dependency-tracked invalidation (no hand-maintained reverse-dep index / dirty-set / string fingerprints — they dissolve into recorded query dependencies).
-- **Validation = differential cross-check against the old engine** (new-engine output == `analysis` output over a ported fixture subset). This **subsumes the F1 differential fuzzer** — F1's invariant becomes the rewrite's new-vs-old test. Keep tree-sitter + the M2 type core (they become query bodies, not rewrites).
-- **Quality bar (Director + Expert verify before any cutover):** the silent-stale bug class is structurally impossible (no mirrored state ⇒ no drift oracle needed); cancellation + parallelism available; per-edit cost is O(blast-radius) and competitive; the code is cleaner than the hand-rolled model. Production cutover is a separate, later decision made on this evidence.
-
-**Recorded:** 2026-06-28, after two independent expert reviews commissioned with *effort explicitly excluded and engineering quality as the sole criterion* — the persistent RA/LSP expert (full M1–M4 context) and a fresh outside reviewer (no stake in prior work). They agreed on Parts A and C and **split on Part B**; that split is itself the key signal.
-
-### Execution status (R0–R3, 2026-06-28/29) — `engine` crate, `analysis` untouched
-
-- **R0** — `engine` crate stands up the in-house red-green substrate (CTO's call over salsa; justified in `crates/engine/DESIGN.md`). Generic core: revision clock, type-erased slots, runtime dependency recording, red-green validation + early cutoff, accidental-cycle guard, `remove_input` tombstones. Expert-ratified after the design gaps were closed (per-symbol granularity, deletion, R2-vs-full-rebuild, concurrency).
-- **R1** — the real pipeline wired as queries reusing `analysis` pub fns (no rewrite): parse → lower → local_naming → the per-symbol interface (`ExportedNames` names-only cutoff → `PackageSymbolIndex` → `DefiningItem` firewall → `GlobalScheme`) → typecheck → diagnostics. The recorded per-symbol dependency set **is** the M3 reverse-dep index, reconstructed automatically (granularity demonstrated by exec-counter tests). Re-export cycles (R1b) and the **general** value-reference interface cycle resolve via a Tarjan-SCC bounded fixed-point porting the production round-cap + `Unknown`-pinning.
-- **R2 — DIFFERENTIAL PARITY (the correctness gate).** `new == analysis`'s **full from-scratch `run_full`** (never its incremental path; production drift oracles self-check the oracle), byte-exact on rendered `(start,end,code,severity,message)`, asserted after **every** edit over 10 curated scenarios + a randomized cyclic/adversarial stream (8 seeds × 300 steps: edit→query→edit, add→delete→re-add, package↔script flips, renames, re-export+value cycles, **malformed input**, **`unused:true`**). Covers local-naming + package-naming + type + strict. Expert adversarially verified the machinery is genuinely honest (exclusions applied symmetrically by code, never masking within a compared class) and found two hidden divergences, now CLOSED: **GAP #3** (malformed-input lowering — the engine's `Lower` now short-circuits to an empty `Module` on `root.has_error()`, matching production) and **GAP #4** (unused-local warnings now emitted, gated by `unused`). Tombstone resurrection hardened (`fetch_optional` → empty, not panic).
-- **R3 — blast-radius + cancellation.** Recompute is **blast-radius-bounded** (exec-counter-proven: a body edit re-infers exactly the edited file + its referrers, **zero** O(package) folds) — substantiating O(blast-radius) *recompute* (parity alone proves no under-invalidation; this proves no over-recompute). Per-edit ~10–13× faster than the old engine at 9k/94k/281k LoC. **Honest caveat:** wall time is *not* flat in N — the residual O(N) is the red-green validation walk (one hash-lookup + cutoff-bump per file, no inference; salsa pays it too); driving it sub-linear is a deferred durability slice. Cooperative cancellation built (revision/token-checked, latest-edit-wins, additive).
-
-### Honest cutover-blocker list (replaces the earlier "2 exclusions" framing)
-
-Before any production cutover (a separate, later, user-gated decision), these must land — the parity gate is genuine for everything the engine *models*, but the engine does not yet model:
-
-1. **Lowering / syntax-error diagnostics** — **CLOSED (2026-06-29, `d315feb`).** `lower_with_diagnostics` is now `pub`; the engine's `LoweringDiagnostics(f)` query calls it (the same function production lowers through), so both branches — `collect_syntax_errors` on a malformed tree and the lowering-pass diagnostics on a well-formed one — are reproduced and compared. (`AnnotationError` stays dead but is compared, not excluded.)
-2. **Lint diagnostics** — **CLOSED (2026-06-29, `d315feb`).** `Lint(f)` query calls the same `analysis::lint::analyze` with the `[lint]` config (folded into the `Config` input). The differential now compares all six classes with **zero exclusions**.
-3. **IDE feature queries** *(added by Director verification 2026-06-29 — omitted from the CTO's original list; the single largest unmodeled surface).* The engine models only the **diagnostic** pipeline (parse→lower→naming→typecheck→diagnostics). The interactive query layer production's `analysis` serves — **hover, completion, goto-definition, references, rename, inlay hints, signature help** — is not modeled at all (the engine's query keys are all diagnostic-pipeline). A clean cutover that retires the old incremental path must port these to the engine (a large slice — they re-expose the engine's naming/type facts as IDE queries) **or** accept a hybrid (diagnostics on the new engine, IDE queries staying on the old `analysis` path, two engines coexisting). This dominates the cutover cost and is the main input to the cutover-scope decision. **(Cutover Phase 2 — the 7 interactive features are ported to engine-backed queries and proven at full per-position parity incl. cross-file, with the Class-1 granularity exec-counter proof; symbols ports with the Phase 3 server wiring. See the Phase 2 status below.)**
-4. **LSP/CLI integration** — the engine is not wired into the shipped binary; that integration (and running it off-thread with the cancellation token) is its own slice. **(Cutover Phase 3.)**
-5. **Sub-linear validation walk** — the residual O(N) per-edit (perf, not correctness): a durability / changed-input-tracking or sharded-def-map slice. **(Out of cutover scope; perf-only, deferred.)**
-
-## CUTOVER EXECUTION (user-directed, 2026-06-29)
-
-The user **DECIDED on a full production cutover**, quality-first, risk explicitly acceptable: **git + the differential harness are the safety net — no shadow-mode / soak / gated-staging ceremony; move fast, fix forward.** End-state = **ONE incremental model (the engine)** + the computational cores (M2 HM type checker, naming, IDE logic) reused as query bodies; the hand-rolled `analysis` incremental layer (M3 reverse-dep index, M4 incremental naming/type-index, dirty-set, fingerprints, winner-diff, **all drift oracles + the seeded soak**) is the **deletion target**. "analysis untouched" is **lifted** — refactor `analysis` freely, preferring to expose its real functions as query bodies over duplication.
-
-Six done-bar gates: (a) full diagnostic parity, zero exclusions; (b) IDE parity per feature incl. cross-file; (c) all hand-rolled indexes + drift oracles + soak deleted, no surviving mirror; (d) LSP/CLI off-thread on the engine + cancellable + UTF-16 + coherence-panic preserved; (e) memory bounded at 281k (or LRU); (f) net deletion > addition.
-
-**GATE (e) — GATED + ACCEPTED (measured `crates/engine/tests/test_memory.rs`, release, `--test-threads=1`, counting global allocator = live heap bytes):** engine vs. from-scratch `analysis`, ITEMS_PER_FILE=5 / CHAIN_LEN=8 synthetic package:
-
-| LoC | files | engine live heap | analysis live heap | old/new |
-|---|---|---|---|---|
-| 8.8k | 937 | 29.9 MB | 15.0 MB | 0.50x |
-| 88k | 9375 | 286.2 MB | 146.2 MB | 0.51x |
-| 264k | 28125 | 908.3 MB | 436.8 MB | 0.48x |
-
-**Verdict — within budget, accepted; no LRU needed now.** The engine is **linear** in LoC (~3.4 KB/LoC, stable across all three scales — no superlinear blowup) at a **constant ~2x** the from-scratch baseline. The 2x is the deliberate, bounded space-for-time cost of full memoization (every derived fact cached so an edit recomputes only its blast radius); the constant factor across 30x scale change confirms it is overhead, not a leak. At the 300k-LoC target this projects to ~1.0 GB live heap, comfortably within a modern dev machine's budget and in line with mature incremental servers (rust-analyzer routinely holds multiple GB on large workspaces). **Future lever if ever needed:** LRU/arena eviction of cold memos (the substrate already supports red-green recompute, so dropping a cold memo is sound) could roughly halve it — recorded as a non-blocking optimization, not a gate failure.
-
-Two load-bearing constraints (from the RA/LSP Expert): **(1) sequencing** — per IDE surface, build the engine query → stand up its IDE differential (engine == old `analysis` IDE output, cross-file included) → green → only THEN delete the old IDE impl; keep `analysis::run_full` frozen as the diagnostic oracle until cutover is proven. **(2) granularity** — Class-1 per-keystroke features (hover/local-goto/completion/inlay/signature) must be O(1)-on-cached-`Typecheck(f)` + sub-linear span lookup (exec-counter-proven: a point query on an unchanged file ⇒ zero `Typecheck` re-runs); Class-2 cross-file (references/rename/workspace-symbols/cross-file-goto) may be O(project)-with-text-prefilter but must not resurrect an occurrence mirror or bleed a coarse dep into Class-1.
-
-**Plan (5 phases, green per slice):** 1 — complete diagnostics (done-bar a); 2 — IDE: refactor `ide.rs` generic over an `IdeDatabase` fact-provider trait (`Analysis` = frozen oracle, `EngineIde` = engine-backed), port the 8 features reusing the identical orchestration, stand up the IDE differential + exec-counter granularity + direct fact-parity (done-bar b); 3 — wire LSP/CLI to the engine off-thread + cancellation + UTF-16 + coherence-panic (done-bar d); 4 — delete the hand-rolled incremental machinery + drift oracles + soak, rewrite `run_full` as a clean from-scratch oracle (done-bar c, f); 5 — memory bench (done-bar e).
-
-**Status (2026-06-29):**
-- **Phase 1 — DONE (`d315feb`).** Lowering + lint queries; differential compares all six classes with zero exclusions; engine 44 / analysis 86 / roughly 72 green.
-- **Phase 5 memory bench — DONE (`09a47cc`).** Engine vs `analysis` resident (fully-warmed all-files worst case): ~1.35–1.4× old, **linear** (ratio 0.71–0.76 stable from 9k→264k LoC), 802 MB vs 566 MB at 264k. Bounded, not catastrophic ⇒ **no LRU needed** (`slot_count()` remains the hook). Production is demand-driven, so real residency is far below this worst case.
-- **Phase 2 IDE — 7 interactive features DONE + proven (`98d785c`, `79f5cb2`, `9f73179`, `c11ba16`); symbols deferred to Phase 3.** `analysis::ide` is now generic over `pub trait IdeDatabase` (10 fact methods); the 7 features (hover/inlay/signature/definition/references/rename/completion) live in `analysis::ide::generic::*` over `&dyn IdeDatabase`, with `Analysis` (frozen oracle) and `engine::ide_view::EngineIde` (engine-backed, prime-then-borrow over a per-call `Caches` + `PathTable` bijection) both implementing the trait so the identical orchestration runs on both. **Done-bar (b) evidence:** `test_ide_differential` (8) sweeps **every cursor position** over single-file/cross-file/S4/script workspaces, cold (6) + incremental edit-streams (2: add/delete/tombstone-readd/reclassify + interface edits), asserting `EngineIde` == a fresh-`Analysis` oracle for all 7 features; `test_ide_granularity` (3) is the exec-counter Class-1 proof (repeated point query ⇒ 0 `Typecheck` reruns; unrelated edit ⇒ 0 for the queried file; own-body edit ⇒ exactly 1). The sweep forced a real fix: the engine's authoritative `Typecheck` now records per-expression types (`expression_types_by_id`) + strict origins (off for the discarded `GlobalScheme`/SCC checks); diagnostic differential stays green (20). **Symbols (document + workspace)** is purely structural (`roughly::symbols` over `index::index(tree, rope)`, no `IdeDatabase`, no analysis phase); its differential **landed** (`f7ceef0`, `crates/roughly/tests/test_symbols_differential.rs`): engine-served symbol output == the `analysis` oracle for document + ranked workspace symbols. `engine` is now a `roughly` dependency. **Done-bar (b) is fully closed for all 8 IDE features.**
-
-### Phase 3 / 4 execution plan (NEXT — server + CLI rewire, then deletion)
-
-Foundation laid: `roughly` depends on `engine`; `EngineIde`/`PathTable` serve IDE; the symbols adapter (`engine_package_items` in the symbols differential) serves symbols; the diagnostic render path is the differential's `engine_diagnostics` (fetch `Diagnostics(f)` + `FallbackRange`, render `type_errors` via `with_interner`+`Diagnostic::from_inference_error`, gate `unused`/`typing`/`strict` by `Config`). The shipped binary still runs entirely on `Analysis`; the cutover has NOT touched `server.rs`/`cli.rs` yet.
-
-**Phase 3 progress (committed, `test_lsp` green = 44 throughout):** `f6ebf91` **3a** — engine fed in lockstep in `ServerState` (`Engine`+`PathTable`+path→FileId allocator, `sync_engine_from_analysis` mirrors text after every mutation, `ProjectFiles` ordered package-first by `package_path_key`), reads still on `analysis`. `a0c6ea0` **3b** — diagnostics served by the engine (`convert_document_diagnostics` renders `FileDiagnostics`). `4667584` **3c** — the 7 IDE handlers call `EngineIde`. `4c4f246` **3d** — symbols served by engine `Parse` trees (`package_items_map` is now `&self`, selects package `FileId`s from the path table). `1f72dba` **3e-1** — dropped the now-dead `run_fast`/`run_full` passes (analysis outputs unread); `did_save` republishes all OPEN documents from the engine. **State now: the engine serves ALL user-facing reads (diagnostics + IDE + symbols) in the shipped binary, no per-keystroke analysis pass; `analysis_state` remains only as the document rope/tree buffer (`add_document_from_source`/`edit_document`/`document`) + position-conversion source.**
-
-**Phase 3 — COMPLETE (gate d).** 3e-2 (server is engine-only; staged `61be4e3`→`3e1dff3`) and 3f (off-thread + cancellation; `7f49432`→`0f902da`) landed; the concurrency review returned GO and its note-2 hardening (fail-loud on any panic escaping a worker job) landed `8b244b7`. **The shipped LSP server runs entirely on the engine, off the main thread, with latest-edit-wins cancellation, UTF-16 intact, and the coherence-`panic!` discipline preserved.** The original remaining-work designs are kept below for reference.
-
-**Phase 3 remaining (reference — now done):**
-- **3e-2 — remove `analysis_state` (text-ownership transfer).** Replace it with `documents: HashMap<PathBuf, Document>` (open-doc edit buffers, reusing `analysis::Document::{parse, apply_changes}`) + a `tree_sitter::Parser`. `document()`/`opened_document()` → `documents.get(path)`; `to_internal_*` (request doc, always open) → `documents[path].rope()`; `to_lsp_*` (may target a CLOSED cross-file file) → the engine `Parse` rope (uniform, so closed-file UTF-16 ranges stay correct — do NOT regress to raw line/char). Write path feeds the engine directly: `did_open` parses a `Document` + `set_input(SourceText/DocumentKind)` + `rebuild_project_files`; `did_change` converts each LSP range against the evolving `documents[path].rope()` (NOT the engine `Parse` rope, which is stale until `set_input`), `apply_changes` one at a time, then `set_input(SourceText = documents[path].rope().to_string())`; `did_close` drops the buffer, and for a package file on disk `set_input(SourceText from disk)` else `remove_input`+`rebuild_project_files`; the `initialize` scan + `did_change_watched_files` read disk text directly (`std::fs::read_to_string`) and `set_input`. `rebuild_project_files` orders package files ascending by `package_path_key` (base-relative, `\`→`/`) then scripts — last-writer-wins then equals production's `max_by_key(package_path_key)` winner. Drop `sync_engine_from_analysis`, the `analysis_state` field, and the `Analysis` import. This is one atomic increment (the server will not compile mid-migration); land it whole + `test_lsp` green.
-- **3f — DONE (`7f49432` `with_cancellation`, `c7c7d17` worker, `7b749c6` cancellable reads, `0f902da` real-read cancellation test, `8b244b7` fail-loud hardening). Concurrency review: GO** (one dedicated `!Send`/`!Sync` worker thread; serial job loop is the concurrency bound, so `ConcurrencyLayer` was dropped; `cancellable` reads return the type's empty default on `Cancelled`; edit path uses plain uncancellable `fetch` so push diagnostics always complete; coherence panics → `process::exit(1)`). The original design:** The engine is `!Send`/`!Sync` (`Rc`/`RefCell`), so it cannot move per-request or be shared: it lives on ONE dedicated `std::thread` worker (`EngineWorker`) that owns ALL analysis state (engine, `paths`, `file_ids`, `next_file_id`, `documents`, `parser`) plus `config`, `position_encoding`, a `ClientSocket` clone (to publish diagnostics), capabilities, `workspace_root`. The async-lsp `ServerState` becomes a thin frontend holding `sender: mpsc::Sender<Job>` + `cancel: Arc<AtomicBool>` + `client` (for error messages). `Job` is an enum with one variant per LSP op: lifecycle notifications (DidOpen/Change/Close/Save/WatchedFiles/Initialize/Initialized/ConfigChange) and requests (Hover/Completion/Definition/Inlay/Signature/References/Rename/DocumentSymbol/WorkspaceSymbol/Diagnostic, each carrying its params + a `tokio::sync::oneshot::Sender<Result<…>>`). The worker loops `while let Ok(job) = rx.recv()` and dispatches to the migrated handler bodies (the current ServerState methods move to `EngineWorker` near-verbatim; position conversion + LSP response building stay with them since they need the engine ropes/buffers). Request frontends serialize params → `send(Job)` → `box_future(async { reply_rx.await })` (non-blocking await). **Cancellation (latest-edit-wins, DESIGN §6):** every edit notification frontend does `cancel.store(true)` BEFORE sending its job; the worker, at the START of each READ job, does `cancel.store(false)` then runs the engine fetch via `fetch_cancellable(cancel.clone())`. An edit arriving mid-read flips the token → the read's `fetch_cancellable` unwinds the `Cancelled` sentinel → the worker catches it at the job boundary and replies empty → then processes the queued edit; the next read resets+runs. Serial worker ⇒ no overlap. **Coherence-panic:** the worker's lifecycle handlers keep their `panic!`/`expect`; install a startup panic hook that ignores the `Cancelled` payload but `process::abort()`s on any OTHER worker-thread panic, preserving "a sync failure is unrecoverable process death". **UTF-16** position handling is unchanged (stays in the worker). **Test:** prove latest-edit-wins (the engine's `test_cancellation.rs` already proves `fetch_cancellable` abandons from another thread; the server-level test asserts the worker flips the token on edits and serves correct post-edit results). This is a large, high-consequence concurrency rewrite of the shipped binary — implement carefully, `test_lsp` green throughout.
-  - **CONCURRENCY REVIEW — corrected design (ADJUST verdict; core architecture validated, 4 fixes):**
-    1. **Single shared `Arc<AtomicBool>` is correct** — serial worker ⇒ exactly one read in flight ⇒ one bool suffices (no per-read token / revision counter needed). All cancellation interleavings are benign: a read queued before a not-yet-applied edit resets the token + completes against a consistent pre-edit snapshot (correct-for-its-version; client reconciles by version) — edits do NOT reset the token, the next read's reset covers any stale `true`.
-    2. **Use `Relaxed` (not SeqCst)** for both store + load — single atomic location, no companion memory gated by it (engine state is worker-only; the reply rides the oneshot's own ordering). The engine already loads `Relaxed`. CORRECT RATIONALE: cancellation visibility comes from single-location atomic coherence, NOT the mpsc send/recv happens-before (that edge only orders the edit *dequeue*, which is after the in-flight read already finished).
-    3. **DEADLOCK FIX (required):** async-lsp's `ConcurrencyLayer::poll_ready` returns `Pending` once `max_concurrency` request futures are in flight, and MainLoop's inner dispatch loop awaits that gate WITHOUT polling `self.tasks` — so replied-but-pending read futures freeze, never drop their semaphore guard ⇒ total stall under a burst of pending reads. Set `max_concurrency` effectively unbounded OR drop `ConcurrencyLayer` (the serial worker IS the bound; dropping loses only `$/cancelRequest` early-abort, which the token supersedes).
-    4. **Coherence-panic → death (required, two SEPARATE mechanisms):** `CatchUnwindLayer` wraps only the FRONTEND request service, never the worker thread, so a non-`Cancelled` worker panic would leave a zombie server (errors every request, drops every edit). (a) Startup panic hook = PRINT only: suppress the `Cancelled` payload, else call the default hook; do NOT abort in the hook (it runs for every routine per-keystroke `Cancelled` unwind too). (b) Worker loop = `catch_unwind(AssertUnwindSafe(handle))` per job; non-`Cancelled` payload → `std::process::exit(1)` after the hook printed (the ONLY path to coherence-death on the worker thread). Frontend maps `send` failure + oneshot `RecvError` → `ResponseError`, never `unwrap`.
-    - **Channel primitives:** unbounded `std::sync::mpsc` IN (never bounded — a full bounded channel blocks `send` on the runtime thread), tokio `oneshot` BACK, worker blocking `recv()`. `publish_diagnostics` is a non-blocking `unbounded_send` — sound from the worker off-runtime. Async client-requests (register_capability on `initialized`, workspace_diagnostic_refresh on `did_save`) MUST use a captured `tokio::runtime::Handle::spawn` (bare `tokio::spawn` panics off-runtime); fire-and-forget, nothing needs `&mut self` after the await.
-    - **Construction gate:** the `!Send` `EngineWorker` MUST be built INSIDE the `std::thread::spawn` closure (the closure is `Send`-bounded; the engine is `!Send`). The closure captures only `Send` things (rx, cancel, ClientSocket, config, runtime Handle). ALL state-dependent logic incl. early-return validations (`opened_document().is_none()` etc.) moves to the worker; the frontend is stateless except sender/cancel/client.
-    - **Edits stay non-cancellable** (run to completion via plain `fetch`): `did_change` publishes only the edited file, so abandoning it on a newer different-file edit would leave that file's diagnostics stale.
-
-**Phase 3 (gate d) — original per-handler mapping (for reference):**
-- **State.** Replace `ServerState.analysis_state: Analysis` with `engine: Engine<RoughlyQueries>` + `paths: PathTable` + a `FileId` allocator (`HashMap<PathBuf, FileId>` + `next_file_id`) + the workspace file SET feeding `ProjectFiles`. **Single source of document text = the engine's `SourceText` input;** the current rope/tree for a file is `engine.fetch::<ParsedDocument>(Parse(f)).0` (rope for UTF-16 conversion, tree for symbols) — do NOT keep a second persistent server-side rope. On `did_change`: convert the change range against the current `Parse` rope, clone it, apply the incremental edits, `set_input(SourceText(f), new_text)` (whole-file reparse per edit — the engine has no incremental tree-sitter reparse; the memory bench shows this is fine).
-- **Lifecycle → inputs** (every site that today mutates `analysis_state`): `initialize` scan (`index::source_file_paths`) → per file allocate `FileId`, `set_input(SourceText from disk, DocumentKind::Package)`, add to `ProjectFiles`; `did_open` → `set_input(SourceText=text, DocumentKind` by `is_package_path)`, add to `ProjectFiles`, track open; `did_change` → above; `did_close` → package-on-disk: `set_input(SourceText from disk)`, else `remove_input(SourceText)+DocumentKind` + drop from `ProjectFiles`/`PathTable`; `did_save` → republish (inputs already fresh); `did_change_watched_files` → external R add/change/delete = set/remove inputs + `ProjectFiles`; config file → `set_input(Config, …)` (fold `[lint]`+`[check]` into the engine `Config`). `set_input` is infallible, so the **coherence-`panic!` discipline (gate d)** moves to: a `did_change` for a non-open doc, a missing `FileId`, and disk-read failures on scan/close — keep these as `panic!`/`expect`, never continue on stale state.
-- **Reads.** Diagnostics → port `engine_diagnostics`; IDE → `EngineIde`; symbols → `engine_package_items`. UTF-16 stays exactly: `position.rs` converts against the engine `Parse` rope.
-- **Off-thread + cancellation (gate d, the NEW infra — LAST sub-slice, separable).** The engine is `!Sync` (`Rc`/`RefCell`), so "off-thread" = the engine lives on ONE dedicated worker thread; the main async-lsp thread sends edits/requests over a channel and awaits replies. Install an `Arc<AtomicBool>` cancellation token flipped on each new edit (latest-edit-wins), passed to `fetch_cancellable`; install the startup panic-hook that swallows the `Cancelled` payload (DESIGN §6). This delivers Part A's debounced live-as-you-type tiers.
-
-**Phase 4 — DONE (`2ceffa5`, gates c + f).** Deleted the M3 reverse-dep index, M4/M4.3 candidate + materialized indexes, dirty-set, fingerprints, winner-diff baselines, all five `assert_*_consistent` drift oracles, the `verify-incremental` feature, the `test_incremental.rs` soak, the recompute-scope fixture machinery (`RecomputeReason`/`render_recompute_scope`/`recompute_scope.R.test`), `run_fast`, and the interface/typecheck fingerprint cache fields. `resolve_package`/`typecheck` are now clean from-scratch passes (`resolve_package` calls `rebuild_package_naming` — the former drift oracle, now production — plus a fresh `build_type_index`; `typecheck` runs the interface fixed-point over ALL package docs each round, oscillation guard intact, then re-checks every doc). `run_full` + `analysis::ide` stay reachable as the differential's permanent regression net. **Net −2463 lines** (109 added, 2572 deleted); grep confirms zero surviving mirror/oracle; the engine differential stays green (proves `run_full` correct); 192 tests pass, `cargo check --all-targets` clean. **CLI decision (deliberate):** `cli.rs` keeps `run_full` — a one-shot batch check needs no incrementality and `run_full` is now exactly a clean from-scratch pass, so it is the correct CLI path; no engine wiring for the CLI.
-
-## CUTOVER COMPLETE — all six done-bar gates met (awaiting Expert final verification)
-
-- **(a) full diagnostic parity, zero exclusions** — `test_differential` (engine == `analysis::run_full`, byte-exact over curated + randomized adversarial streams), incl. the strict-origin non-empty case.
-- **(b) IDE parity per feature incl. cross-file** — all 8 features (hover/inlay/signature/completion/definition/references/rename + symbols) proven via `test_ide_differential` (every-position sweep, cold + incremental + randomized) and `test_symbols_differential`; Class-1 granularity exec-counter-proven for every per-keystroke feature (`test_ide_granularity`). Expert-accepted.
-- **(c) no surviving mirror/oracle** — Phase 4 deleted the M3/M4 machinery + all five drift oracles + `verify-incremental` + `test_incremental.rs` soak + `run_fast`; grep confirms zero surviving `reverse_dependenc*`/`dirty_documents`/`maintain_package_naming`/`patch_*`/`assert_*_consistent`.
-- **(d) LSP/CLI off-thread on the engine + cancellable + UTF-16 + coherence-panic** — the server runs entirely on the engine on a dedicated worker thread with latest-edit-wins cancellation (`test_cancellation`/`test_read_cancellation` + functional `test_lsp`); concurrency-review GO + note-2 hardening. CLI on the clean `run_full` one-shot pass (deliberate).
-- **(e) memory bounded** — engine ~1.35–1.4× `analysis` resident, linear to 264k LoC (`test_memory`, `09a47cc`).
-- **(f) net deletion > addition** — net **−902 lines** since the cutover baseline `d2cedc9` (4569 ins / 5471 del); Phase 4 alone −2463.
-
-Status: **green** — engine + analysis + roughly tests pass, `cargo check --all-targets` clean. The hand-rolled incremental model is gone; the engine is the single incremental analysis backend behind the shipped LSP server + the differential `run_full` oracle as the permanent regression net.
-
-Original Phase 4 plan (for reference): from `analysis` remove the M3 reverse-dependency index, M4 incremental package naming + type index, dirty-set, dependency/type fingerprints, winner-diff, ALL `assert_*_consistent` drift oracles + the `verify-incremental` feature, the seeded soak (`test_incremental.rs`), `run_fast`, and the incremental `edit_document`/`add_document_*`/`delete_document` maintenance. **Keep** the computational cores (HM type checker, naming, lowering, `ide::generic`) — they are the engine's query bodies. Rewrite `run_full` as a clean from-scratch oracle (build fresh, lower/resolve/typecheck, NO mirrors) retained ONLY as the differential oracle. This is where gate (f) net-deletion is realized (the bespoke mirrors + oracles dwarf the engine query bodies, which reuse the cores). `cli.rs` batch check → build an engine over all files + fetch `Diagnostics`; formatting stays out of scope.
-
-**Phase 4 prerequisite findings (verified during 3e):**
-- **Phase 4 is UNBLOCKED and not gated on 3e-2.** Post-3e-1 the server calls no `run_fast`/`run_full`, so the incremental machinery is dead and deletable now. `Analysis::{add_document, edit_document}` call `invalidate_document` + `bump_package_version` (incremental hooks) — Phase 4 deletes `invalidate_document` and the indexes, so it must **strip those two calls** from `add_document`/`edit_document`, leaving them pure doc-store (parse/insert + rope/tree edit + version). The differential oracle (`build_oracle`) and a server still holding `analysis`-as-doc-store both keep working through that simplification, so Phase 4 can land **before or after** 3e-2/3f. Given Phase 4 is the highest-value (gates c+f) and lowest-risk remaining work (deleting dead code, validated by the surviving engine↔`run_full` differential), it is a reasonable next slice on its own.
-- **`run_full` after Phase 4** = `lint` + (if typing||strict) a from-scratch `typecheck` over the freshly-parsed doc store, no incremental maintenance — kept solely as the differential oracle (with `analysis::ide`). Deletion targets confirmed: `reverse_dependencies`, the M4 candidate/materialized type+value indexes, `dirty_documents`, dependency/type fingerprints, winner-diff baselines (`last_typecheck_global_bindings` etc.), the five `assert_*_consistent` oracles + their call-site blocks, the `verify-incremental` feature (+ the `roughly` passthrough), `tests/test_incremental.rs` (soak), and `run_fast`.
-
-**3e-2 doc-set subtlety (for when it lands):** the engine's file set = OPEN docs (server-owned `Document` buffers) ∪ CLOSED package docs (text read from disk on scan/close/watched). `documents: HashMap` holds only OPEN buffers; closed package files live only as engine `SourceText` inputs (set from disk, re-set only when they change on disk). `did_change` MUST resolve each change range against the evolving open buffer (`documents[path].rope()` updated per change by `apply_changes`), never the engine `Parse` rope (synced once after the batch, so stale for the 2nd+ change in a batch).
-
-**Pre-final-sign-off breadth residuals (Expert-flagged after accepting gate (b)) — ALL CLOSED (`a9013f1`, `d66d202`, `5a0187b`), landed before Phase 4 retires the oracle:**
-1. **DONE (`a9013f1`)** — Extend the Class-1 granularity exec-counter proof to ALL per-keystroke features — completion, inlay hints, signature help, local goto — not just hover. Completion especially fetches a different set (`PackageSymbolIndex` on top of `Typecheck`), so prove a point query on an unchanged file ⇒ 0 `Typecheck` reruns for each (`test_ide_granularity`).
-2. **DONE (`d66d202`)** — randomized IDE differential stream (`randomized_ide_differential_stream`, 3 seeds × 25 steps, full per-position sweep after each add/edit/delete/reclassify).
-3. **DONE (`5a0187b`)** — strict-origin non-empty case (`strict_origin_non_empty_matches_production`: `x <- 1L %then% 2L` forces an O1 `Unsupported`→`Unknown` origin; non-vacuity asserted, parity through the harness, cleared with `@trust Any`).
-
-## Why this exists
-
-M1–M4 built hand-rolled incremental analysis — reverse-dependency index, incremental package naming, incremental type index — each guarded by debug "drift assertions" (incremental result == full rebuild) plus a seeded soak. Along the way we caught **4+ silent-staleness bugs** (winner-diff baseline staleness from intervening IDE queries; script-vs-package drift; the fixed-point round-cap leaving deep chains stale; the bare-block predicate gap). Before building the next slice (incremental value-interface-table), we stopped to decide the foundation.
-
----
-
-## Part A — Recheck trigger model (DECIDED)
-
-Both experts corrected the common "rust-analyzer checks on save" belief:
-- rust-analyzer runs **two** diagnostic streams: (1) its own native type/name diagnostics **live as you type** (debounced, cancellable on the salsa snapshot), and (2) `cargo check` **flycheck on save** for authoritative full errors. Save-only applies to stream (2) *because there is a slower authoritative backstop to defer to.*
-- **Roughly has no stream (2). It *is* the only R type checker** (no prior static checker for R exists). So save-only would give the user **zero type feedback while typing** — strictly worse than rust-analyzer.
-
-**Decision — tiered, debounced, live-as-you-type, with save as a force-full pass:**
-- **Per-keystroke, debounced ~150–250 ms:** syntax + lint + lower + file-local naming + the **edited file's own** type errors. Budget: p95 ≤ 100 ms (feels live).
-- **Cross-file / package diagnostics:** debounced ~300–500 ms after typing settles, **bounded to blast radius**, cancellable (latest edit wins).
-- **On save:** force a full authoritative pass (natural commit point + safety net).
-- **Interactive queries** (hover / completion / goto / signature help): on demand, < 50–100 ms.
-
-This is a forward design target; the current server does not yet implement the debounce/cancel tiers (that is part of the deferred M5 "off-thread responsiveness" work).
-
----
-
-## Part B — Hand-roll vs. memoized-query framework (OPEN — user's call)
-
-The fork: continue hand-rolling per-structure incrementality (guarded by drift assertions), **or** adopt a memoized-query / automatic-invalidation substrate (salsa, or a minimal in-house red-green engine) so invalidation is correct-by-construction.
-
-**Both experts agree on two things:** salsa's *heavy* machinery (macro expansion, trait/coherence solver, multi-crate graph, durability tiers) is genuinely **unneeded** for R — the real question is only its **core**: memoized queries with automatic dependency-tracked invalidation. And: the drift-assertion safety net has a real hole (below) that should be closed regardless.
-
-**Fresh reviewer → (c) keep hand-rolling, within strict limits + a salsa "tripwire".**
-- R's dependency graph is shallow and static (source → lower → naming → interface → check; one-hop reverse-dep + one bounded fixed-point for re-exports). salsa's machinery tames *deep, dynamic* graphs — importing it for a shallow static one is machinery for its own sake.
-- salsa relocates rather than eliminates the discipline (you must route every read through a tracked query; an off-query read reintroduces the same staleness).
-- Migrating already-correct, drift-asserted, soak-covered code is a fresh net-negative bug surface; salsa's own API has churned hard.
-- Adopt a framework **only when a tripwire fires** (see below).
-
-**RA/LSP expert → (b) adopt a memoized-query framework** (and it *changed its recommendation toward this* once told to weigh quality over effort).
-- The 4+ silent-stale bugs are empirical evidence that hand-rolling the invalidation **core** is error-prone *independent of R's simplicity*.
-- The safety net is **structurally incomplete**: the drift assertions are **debug-only**, and they are **blind to shared-rule bugs** (incremental and oracle share the membership predicate, so a wrong *rule* is invisible — mitigated only by fixtures). It cannot catch the full bug class even in principle.
-- "R is simpler" justifies not needing salsa's macro/trait machinery, but **not** its core — which is exactly what keeps getting hand-rolled wrong. R's regularity makes the **migration easy**, not the framework unnecessary.
-- The real dividing line is **automatic dependency-tracked invalidation vs. hand-maintained mirrored invalidation.** In a framework the *tracked* path is the natural default; hand-rolled makes the *untracked* path the default (read `global_bindings` directly) and tracking the bespoke addition you can forget — which is how every one of these bugs happened.
-- A framework also delivers **cancellation, parallelism, and LRU eviction** structurally — all of which the Part A live-debounced model and the 300k responsiveness goal need, and none of which hand-rolling provides without large bespoke effort that reproduces the same bug class.
-
-**Tripwires that flip the decision to a framework** (per the fresh reviewer; the expert argues these are imminent enough to adopt now):
-1. **Cross-file / whole-program type inference** (the architecture page's one-hop premise explicitly says this voids one-hop and forces a worklist).
-2. **R namespace dependency edges** — `::`/`:::`, `library()`/`requireNamespace()` load-order, imported-package symbols. **Note: the planned stub framework introduces exactly this**, so it likely crosses this tripwire on its own.
-3. **Dynamic dispatch resolution across files** (S4/R6 method dispatch creating data-dependent edges).
-
-**Tie-breaker under the stated criteria (quality-first, effort irrelevant):** tilts toward the framework — "migration is risky/work" is the conservative view's main weight, and effort is excluded; and the project's own roadmap (stub framework + namespace resolution) likely trips the conservative reviewer's *own* tripwire. The recommended shape is a **de-risked incremental migration**: keep tree-sitter parsing (superior — lossless, free incremental reparse) and the now-sound M2 HM type core (they become the bodies of `parse`/`infer` queries, not rewrites); migrate phase-by-phase; **run the existing drift oracles as a live cross-check *during* migration**, retiring them only once the query path is proven; do a query-grain spike (per-file vs per-binding) first.
-
-**Deferred migration query graph (for when chosen):** `parse(file)` → `lower(file)` → `local_naming(file)` → `package_naming` → `interface(file)` → `check(file)` → `diagnostics(file)`; inputs = per-file text + config. The reverse-dep index dissolves into salsa's recorded dependencies; the interface fixed-point maps to a cyclic query with `Unknown` recovery (the existing oscillation-pinning maps directly); string fingerprints are replaced by salsa early-cutoff.
-
-**This decision is the user's** (AGENTS.md gates large incremental-analysis direction changes on user sign-off). Recorded here so the decision is made on the full analysis, not rediscovered.
-
----
-
-## Part C — The value-interface-table slice (PAUSED)
-
-`build_package_interface_table` is O(all package globals) with deep scheme clones, **rebuilt 2–3× per recheck regardless of edit blast radius** (~62 ms of the ~77 ms single-file recheck at ~60k synthetic globals; the winner-diff is a same-class ~8 ms cost). It is the **last O(package) flat-recheck cost** — recheck still scales with package size, not edit size.
-
-Both experts: **not urgent** at real R package sizes (hundreds–low-thousands of exports, not 60k) under the Part A debounced model — the cost hides inside the debounce window. **Necessary at the 300k target**, where O(globals) dominates flat recheck. **But it should not be built as the next hand-rolled slice:** if Part B chooses a framework, the table becomes a memoized query and is *subsumed* — hand-rolling it first would be wasted and add a sixth bespoke mirror+oracle. If Part B stays hand-rolled, do it as an **in-place patch of the existing table** (patch only `changed_globals`/winner-flips, which M3/M4 already compute) — **no new mirrored index, no sixth oracle**. If it can't be done without a new mirror, that is the signal it isn't worth doing yet.
-
----
-
-## No-regret action (correct regardless of Part B) — DO NOW
-
-The drift assertions are `#[cfg(debug_assertions)]` and the soak runs in debug, so **release-path incremental correctness is unverified except indirectly.** Both experts call this the cheapest, highest-value hardening available. Action: make the drift-oracle + seeded-soak a hard CI gate that also exercises the **release** routing, and broaden the soak's adversarial interleavings (edit→IDE-query→edit, add→delete→re-add, package↔script transitions). This holds whether we keep hand-rolling or migrate (during a migration it becomes the cross-check).
-
-## Open risk to carry
-
-The **one-hop premise** ("a single reverse-dep hop suffices only because inference never flows across files") is the load-bearing assumption of the entire hand-rolled model. It is stated in prose and enforced by nothing at compile time — a future contributor adding a small cross-file inference shortcut silently voids it. Either encode it as a loud invariant at the inference boundary, or treat its violation as an automatic Part-B = framework trigger.
-
-# Decision record: standard-library stub format
-
-## DECIDED — dedicated declaration-only stub files
-
-Stdlib type information ships as **dedicated declaration-only stub files**, not ordinary R files (the current `crates/analysis/src/stdlib_base.R` placeholder-body approach — `length <- function(x) 0L` harvested by ignoring the body — is retired). The accepted shape is the Expert's design: a flat list of `name : <type-expr>` declarations that **reuse the existing type-expression parser** (so the only new grammar is a thin declaration-line layer, not a second type system); a function body is unrepresentable, so "declaration-only" is enforced structurally the way `.d.ts`/`.pyi` do. Override precedence (project stub wins over shipped stdlib, selected by detected R version) reuses the existing `stdlib.rs` `load_with_overrides` fold; the assembled stub library stays a **set-once input kept out of the incremental dependency graph** (engine invariant — do not route stub files through `did_change`).
-
-**File extension:** a dedicated one, name to be chosen by the CTO + Expert design pass — **not** `.Rstub` (that specific name was vetoed). Candidates: `.Rtypes` / `.Ri` / `.Rtypes` / `.Rdecl`; avoid collisions with `.Rd` (R documentation), `.Rmd`, `.Rda`/`.RData`.
-
-**Overloads:** v1 uses `Any` for ad-hoc overloads only. Genuinely parametric higher-order functions (`lapply`, `Map`, `Reduce`, `identity`, …) must get **real generic types** via the existing `<T> fn(...)` polymorphism — they are NOT widened to `Any`. Only functions whose return type varies by argument type (`abs`, `rep`, `seq`) fall back to `Any`/`Incomplete` for now. The permanent solution — **traits in the type system vs. overload sets** — is deferred to a later decision. The declaration grammar must permit repeated declarations of one name now, so adopting either later needs no corpus rewrite.
-
-**Syntax highlighting:** LSP semantic tokens first (one server implementation colours both inline `#:` annotations and the stub files, in every LSP client, reusing spans the server already computes); a tree-sitter/TextMate grammar for offline/static highlighting is a later nice-to-have that reuses the declaration grammar.
-
-**Open questions routed to the CTO design pass:** (1) does `type_syntax` already expose a parse-a-bare-type entry point, or must one be extracted (effort driver); (2) per-namespace vs per-item stub file granularity, and whether editing a project stub live triggers a coarse (non-incremental) re-seed vs a restart; (3) `pkg::name` needs a real `NamespaceGet` HIR node (currently `Unsupported`) for re-exports — confirm deferral to the CRAN tier. The full Expert proposal (ecosystem precedent from `.pyi`/`.d.ts`, worked format examples, the precedence stack) should be folded into `docs/.../stdlib-stubs.md` when the format is built.
-
-# Decision record: beta semantics & quality program
-
-**Status: DECIDED (user-ratified).** Direction chosen after a full adversarial audit of the type checker core, LSP surface, formatter, config, stub corpus, and engine, with findings verified empirically. The prioritized execution list is `backlog.md`; the user chose **semantics-first sequencing** and delegated the flow-model and strict-mode calls ("do what is necessary to achieve best quality"; "we want a sound type checker; it is okay to not support every R construct"). The contract page (`reference/type-system.md`) is updated contract-first per Phase-1 item as it is implemented.
-
-## R variable model — mutable slots with union joins
-
-The fresh-binding-per-`<-` (let-shadowing) model is retired: it is not R. R assignment mutates the current function-scope environment, so a branch or loop assignment must be visible after the construct. Decided model:
-
-- A function scope holds **mutable variable slots**; each `<-`/`=`/`->` writes the slot, `<<-`/`->>` walks the lexical chain to the nearest enclosing slot.
-- A read sees the **union of reaching definitions** at that point (a conditional write joins with the prior type; a loop-body write joins across iterations).
-- Unused detection falls out: a **write** that no read reaches is unused (report assignments, not bindings).
-- Flow-sensitive *narrowing* (`if (is.null(x))`) is a later layer on the same model, not part of this decision.
-
-Rationale: the old model was verified unsound (`x <- 1L; if (f) x <- "two"; x + 1L` typechecked clean and crashes at runtime) and produced unused-lint false positives on the two most idiomatic R patterns (conditional update, loop accumulator). No lint-local fix existed.
-
-## Multi-member unions — join/annotation-only, never in unification variables
-
-General unions `A | B | C` (normalized: flat, deduped, order-insensitive; `T | NULL` becomes the special case) are adopted for joins and annotations. **The HM-speed guardrail:** a union imposes no union *constraints* on inference variables (plain substitution-binding of a variable **to** a union value is permitted, like any other type) — unification stays syntactic (a union unifies only with a structurally equal union); all member-wise directional logic lives in `check_compatibility`. This keeps inference decidable and fast and matches the existing unification-is-the-invariant-floor split. Tags/discriminated-union `match` (post-beta) builds on these unions.
+- Hand-rolling the invalidation core is empirically error-prone, independent of
+  how simple R's dependency graph is. The hand-rolled model produced several
+  silent-stale bugs, where analysis served an answer computed from text the user
+  had already changed.
+- The safety net was structurally incomplete. The drift assertions ran under
+  `cfg(debug_assertions)` only, so release-path correctness was unverified. They
+  were also blind to a shared-rule bug, because the incremental path and the
+  oracle shared the membership predicate, so a wrong rule was invisible to both.
+- The real dividing line is automatic dependency-tracked invalidation against
+  hand-maintained mirrored invalidation. In a framework the tracked path is the
+  default, and an untracked read is the exception. Hand-rolling inverts that, so
+  every new read is a chance to reintroduce staleness.
+- A framework delivers cancellation, parallelism, and eviction structurally. The
+  live-as-you-type model below needs all three, and hand-rolling provides none
+  of them without large additional machinery.
+
+Only salsa's core is wanted, which is memoized queries with automatic
+invalidation. Its heavier machinery, for macro expansion, a trait and coherence
+solver, and a multi-crate graph, is aimed at a deep, dynamic dependency graph.
+R's graph is shallow and static, so that machinery stays unused.
+
+`docs/src/content/docs/contributing/architecture.md` is the contract for what
+the core does today. Read it before touching the analysis core or the server's
+scheduling.
+
+# Decision record: diagnostics are live as you type, not on save
+
+Diagnostics publish while the user types rather than only on save.
+
+rust-analyzer runs two diagnostic streams. It publishes its own type and name
+diagnostics live as you type, debounced and cancellable, and it runs
+`cargo check` on save for the authoritative full error set. ry has no second
+stream, because it is the only static type checker for R. Publishing on save
+alone would therefore give a user zero type feedback while typing, which is
+strictly worse than what rust-analyzer does.
+
+The interactive queries, which are hover, completion, goto, and signature help,
+answer on demand rather than on a schedule.
+
+The architecture page records how the server implements this today, through a
+fast first wave and a settled wave at idle time.
+
+
+# Decision record: the standard library ships as declaration-only stub files
+
+Standard-library type information ships as dedicated declaration-only files with
+the extension `.Rtypes`, rather than as ordinary R files.
+
+The retired approach shipped stubs as R files carrying a placeholder body, such
+as `length <- function(x) 0L`, and harvested the `#:` annotation while ignoring
+the body. That let a stub carry a meaningless, unreachable function body, and it
+required a full parse and lowering just to reach the annotation. In a
+declaration-only file a body is unrepresentable, so a stub cannot drift into
+carrying one, and the loader parses only declarations.
+
+The extension avoids colliding with R's own family, which is `.Rd` for
+documentation, plus `.Rmd`, `.Rda`, and `.RData`. `.Rstub` was considered and
+rejected.
+
+An ad-hoc overload uses an ordered overload set. A genuinely parametric
+higher-order function, such as `lapply`, `Map`, `Reduce`, or `identity`, gets a
+real generic type through the existing `<T> fn(...)` polymorphism, and is never
+widened to `Any`.
+
+Highlighting a stub file goes through LSP semantic tokens. One server
+implementation then colours both an inline `#:` annotation and a stub file, in
+every LSP client, reusing spans the server already computes.
+
+`docs/src/content/docs/contributing/authoring-stubs.md` is the contract for the
+format, the overload rules, and the export manifests.
+
+# Decision record: the beta semantics
+
+This record holds the core type-system decisions. `backlog.md` holds the prioritized work that
+follows from them. The semantics contract is `reference/type-system.md`, and it is updated before
+the behavior it describes ships.
+
+## The R variable model is mutable slots with union joins
+
+R assignment mutates the current function-scope environment. A branch or loop assignment is
+therefore visible after the construct. A model that creates a fresh binding per `<-`, which is
+let-shadowing, does not describe R, so it is not used. The model is this.
+
+- A function scope holds mutable variable slots. Each `<-`, `=` and `->` writes the slot. Each
+  `<<-` and `->>` walks the lexical chain to the nearest enclosing slot.
+- A read sees the union of the reaching definitions at that point. A conditional write joins with
+  the prior type. A loop-body write joins across iterations.
+- Unused detection falls out of the model. A write that no read reaches is unused, so the report
+  names an assignment rather than a binding.
+
+Flow-sensitive narrowing is a later layer on the same model. It is not part of this decision.
+
+The let-shadowing model was unsound. `x <- 1L; if (f) x <- "two"; x + 1L` typechecked clean and
+crashes at run time. It also reported the conditional update and the loop accumulator as unused,
+and both are idiomatic R. No fix inside the lint alone was possible.
+
+## A multi-member union is for joins and annotations, never for a unification variable
+
+A general union `A | B | C` comes from a join or from an annotation. It normalizes flat,
+deduplicated and order-insensitive, and `T | NULL` is a special case of it.
+
+A union imposes no union constraint on an inference variable. That is what keeps inference fast.
+Binding a variable to a union value by plain substitution is allowed, like any other type.
+Unification stays syntactic, so a union unifies only with a structurally equal union. All
+member-wise directional logic lives in `check_compatibility`. Inference therefore stays decidable
+and fast, and the split follows the existing rule that unification is the invariant floor.
 
 ## A type error inside a test assertion stays reported
 
-`expect_error(f("bad type"))` is how an author tests that a function refuses bad input, and the
-call inside it really is type-incorrect, so the finding is *true*. The question was whether an
+`expect_error(f("bad type"))` is how an author tests that a function refuses bad input. The call
+inside it really is type-incorrect, so the finding is true. The open question was whether an
 expectation that asserts a condition should suppress type findings in its payload.
 
-**It should not.** Blanket-suppressing inside `expect_error` and its siblings would also silence a
-genuine mistake in the test — a misspelled callee, the wrong argument passed by accident — and test
+It should not. Suppressing everything inside `expect_error` and its siblings would also silence a
+genuine mistake in the test, such as a misspelled callee or an argument passed by accident. Test
 code deserves the same checking as everything else. It would also be a special case for one
-function family with an open-ended tail (`expect_warning`, `expect_condition`, `expect_snapshot(error =
-TRUE)`, `tryCatch`, `try`), which is the kind of accretion the design bar refuses.
+function family with an open-ended tail: `expect_warning`, `expect_condition`,
+`expect_snapshot(error = TRUE)`, `tryCatch` and `try`.
 
-The answer is the general mechanism that already exists: `# roughly: allow(type-mismatch)` on the
-assertion. It is explicit, it is local, and it says what it means. Documented on the diagnostics
-page under "testing that something is rejected".
+The answer is the general mechanism that already exists, which is `# ry: allow(type-mismatch)` on
+the assertion. It is explicit, it is local, and it says what it means. The diagnostics page
+documents it under "testing that something is rejected".
 
-Worth revisiting only for the stronger form TypeScript's `@ts-expect-error` has: a suppression that
-*itself* reports when the expected finding does not appear, turning "ignore this" into "assert a
-finding here". That is a feature, not a special case, and it would apply to every code.
+One stronger form is worth revisiting. TypeScript's `@ts-expect-error` reports when the expected
+finding does not appear, which turns "ignore this" into "assert a finding here". That is a feature
+rather than a special case, and it would apply to every code.
 
-## The type system is Hindley-Milner, and stays fast to check (user directive)
+## The type system is Hindley-Milner, and stays fast to check
 
-**Only admit features that are fast to check — which means HM.** The bar for any proposed addition to the type system is: does it keep inference to unification over the existing constraint mechanism, decidable and linear-ish, with no search and no global solving? If not, it does not go in, however useful it looks. Soundness and speed are not traded for expressiveness.
+This is a user directive. Admit only a feature that is fast to check, which means Hindley-Milner.
+Ask one question of any proposed addition. Does it keep inference to unification over the existing
+constraint mechanism, decidable and close to linear, with no search and no global solving? If it
+does not, it does not go in, however useful it looks. Expressiveness never buys soundness or speed.
 
-What this rules out, so nobody re-derives it: **type classes / traits** (declined, not deferred — see the tripwire note in `contributing/design/open-questions.md`), **general subtyping** (subtype inference is a different, slower algorithm than unification; a declared *coercion* at a named boundary is HM and is the shape any variance work must take), and any construct requiring backtracking search over a program-wide constraint set.
+Three things are ruled out.
 
-**The sanctioned exception is declaration files.** A `.Rtypes` stub may do things a user's own annotated code may not — today that means ad-hoc overloading. The exception is bounded on purpose: the cost of a non-principal feature is proportional to how much code it applies to, and a stub surface is a fixed, curated corpus the project itself maintains, not user code. It is also where the need is real: R's base library was never designed with types, so no principal scheme describes `min` or `abs`, and a gradual checker that cannot describe the standard library is not usable at all. A user's `#:` annotation stays pure HM, which is what keeps the *user-facing* promise ("your code, checked, fast") honest.
+- Type classes and traits are declined rather than deferred.
+  `contributing/design/open-questions.md` records the reasoning.
+- General subtyping is out, because subtype inference is a different and slower algorithm than
+  unification. A declared coercion at a named boundary is Hindley-Milner, and that is the shape any
+  variance work must take.
+- Any construct that requires backtracking search over a program-wide constraint set is out.
 
-## Overload sets — bounded ordered probes
+A declaration file is the one sanctioned exception. A `.Rtypes` stub may do something a user's own
+annotated code may not, and today that is ad-hoc overloading. The exception is bounded on purpose.
+The cost of a non-principal feature is proportional to how much code it applies to, and the stub
+surface is a fixed corpus the project maintains. The need there is real, and it comes from R's coercion
+table rather than from a gap in the declaration language. `abs(TRUE)` is an `integer`, so a
+type-preserving `<T: numeric> fn(x: T) -> T` would be wrong for a `logical` argument, and `min`
+accepts `character`, which no numeric binder covers. Never say these functions have no principal
+scheme. A gradual checker that cannot describe the standard library is not usable. A user's `#:` annotation stays pure
+Hindley-Milner, which is what keeps the user-facing promise honest.
 
-Functions whose result type depends on the argument type get **ordered overload sets** (stub surface first; repeating a name within one `.Rtypes` source appends a candidate; a later source replaces a name's whole set). Call sites try schemes in declaration order using the existing probe-then-rollback machinery; first compatible match wins. Principal-type purity is knowingly relaxed *at overload sites only* (declaration order is semantic — the TS/mypy model).
+## An overload set is a bounded, ordered probe
 
-**Scope is the point, and it is enforced, not conventional:** only a plain or namespace-qualified name whose declarations come from a `.Rtypes` source can be overloaded (`GlobalEnv::overloads` reads the stub library and returns `None` the moment a script or package binding shadows the name). A project's own R code cannot declare an overload set, and should not gain the ability — see the HM record above. Project override stubs *can*, because a `.Rtypes` file is a declaration file for foreign code either way.
+A function whose result type depends on the argument type gets an ordered overload set, on the stub
+surface first. Repeating a name within one `.Rtypes` source appends a candidate. A later source
+replaces a name's whole set. A call site tries the schemes in declaration order using the existing
+probe-then-rollback machinery, and the first compatible match wins. Principal-type purity is
+relaxed at overload sites only, because declaration order carries meaning there. This is the
+TypeScript and mypy model.
 
-**Overloads are the escape hatch, not the mechanism, and the corpus is the pressure gauge.** Of the 35 sets the corpus declares, about a dozen are atomic-family promotion (`abs`, `min`, `sum`, the `cum*` family — a numeric constraint in disguise), about a dozen are shape dispatch (`head`, `rev`, `Filter`, `lapply` — a stand-in for shape-mirroring returns, which also explains why `abs` needs one candidate per shape *and* per family), nine are S3 operator method tables (`+.Date`, `Arith.difftime` — dispatch, which needs a multi-entry table under any design and would survive untouched), and two are genuinely two-form functions. So two thirds are workarounds for two absent features, both of which are HM-compatible and both in `backlog.md`. Watch that ratio: a rising count of promotion/shape sets is the signal to build those two features, never to design traits.
+The scope is enforced rather than conventional. Only a plain or namespace-qualified name whose
+declarations come from a `.Rtypes` source can be overloaded. `GlobalEnv::overloads` reads the stub
+library and returns `None` as soon as a script or package binding shadows the name. A project's own
+R code cannot declare an overload set, and should not gain the ability, for the Hindley-Milner
+reason above. A project override stub can, because a `.Rtypes` file is a declaration file for
+foreign code either way.
 
-Three call-site rules keep selection sound (implemented in `try_overloaded_call`):
+Overloads are the escape hatch, not the mechanism, and the corpus is the pressure gauge. Of the 35
+sets the corpus declares:
 
-- **Arguments are inferred once, before any probe.** Expression inference writes environment/recorded-type state the probe snapshot does not reverse, so probes run only instantiation + argument *matching* (the signature-matching half of function-call inference is split out as `match_arguments` for exactly this reason).
-- **A fit is a fact or a guess.** The caller's open inference variables are recorded before probing (`collect_unbound_vars`); a candidate that fits while leaving every one of them untouched — same representative, same entry, so binding, redirecting and constraint-tightening all count as touching — was chosen by the concrete arguments, and it beats a candidate that fits only by narrowing them (which would over-commit a `function(x) sum(x)` wrapper). Facts beat guesses, and **among fits of the same kind declaration order decides — the first wins**, which keeps one reading of order everywhere (first-match at call sites, most-specific-first in the corpus, and the last declaration for a value use of the name). A lone fit is never a guess — it is the only signature that accepts the call. Probing rolls back, so the winner is re-probed to commit; matching is a pure function of the table, which is back in its pre-probe state, so the fit repeats.
-  - **A last-fitting-wins tiebreak was tried and removed:** its purpose was to keep `function(x) sum(x)` from committing to a narrow candidate, and the fact rule already does that — a general fallback taking `Any` accepts *without binding*, so it is a fact and outranks every guess above it. Last-wins additionally forced any set whose candidates differ only in a *sequence* shape (`lapply`, named list in → named list out; a lambda callback makes every candidate a guess) to be declared most-general-first, which contradicts both the corpus convention and the value-use rule, which resolves a non-call use of the name to the LAST declaration and would then hand out the narrower contract.
-- **Strict-then-courtesy rounds.** The whole-number-literal-as-integer courtesy is disabled in the first selection round (`sum(1, 2)` must pick the double candidate — R computes a double) and re-enabled in a second round only when nothing matched strictly (a name whose only fitting candidate wants `integer` still accepts `foo(1)`). Exact matches outrank conversions.
+- About a dozen are atomic-family promotion: `abs`, `min`, `sum` and the `cum*` family. Each is a
+  numeric constraint in disguise.
+- About a dozen are shape dispatch: `head`, `rev`, `Filter` and `lapply`. Each stands in for a
+  shape-mirroring return. This also explains why `abs` needs one candidate per shape and per
+  family.
+- Nine are S3 operator method tables, such as `+.Date` and `Arith.difftime`. Those are dispatch.
+  They need a multi-entry table under any design and would survive untouched.
+- Two are genuinely two-form functions.
 
-**All-fail wording: name the set only when the candidates disagree about what is wrong.** `NoMatchingOverload` ("no overload of `f` matches — I tried all N declared signatures", plus the first candidate's failure as a hint) is right when the call could have meant any of several shapes and each rejects it elsewhere or differently — `pick("word")` against `fn(integer)` and `fn(double)` is refused at the same argument by both, and neither reason is *the* answer. Two failure shapes have a single answer, and the wrapper buries it along with the argument's own range (it blames the whole call): every candidate failing for the *identical* reason, and one candidate getting strictly further into the call than any other — measured as the index of the first argument each blames, with a whole-call verdict (arity, unknown name) counting as no progress. The deeper candidate is the signature the caller meant: a two-parameter callback handed to `lapply` is refused at the callback by the candidate that accepted the sequence and at the sequence by the candidate that wanted a named list, so the callback is the finding.
+Two thirds are therefore workarounds for two absent features. Both features are
+Hindley-Milner-compatible and both are in `backlog.md`. Watch that ratio. A rising count of
+promotion sets or shape sets is the signal to build those two features, never to design traits.
 
-## R's object systems — the boundary is dispatch, not Hindley-Milner
+Three call-site rules keep selection sound. `try_overloaded_call` implements them.
 
-A recurring claim is that S3/S4/R6 support is fundamentally at odds with a Hindley-Milner core, and
-that supporting it therefore costs soundness or speed. **That is the wrong diagnosis, and it is
-recorded here so it is not re-derived.** The declarative core of all three systems maps onto
-machinery the checker already has and already relies on: nominal types with a checked representation
-(`@type` + `@new`), record field projection on a nominal, and declaration-ordered overload sets.
-The existence proof is that **S3 dispatch already runs inside the inference core**: an operator on a
-nominal is dispatched through `+.Class` / `Arith.Class` / `Ops.Class`, statically, soundly, today.
-S4 inverts the claim hardest — `setClass` is a record declaration with slot types written literally
-in source, `new(...)` a named-argument constructor call, `x@slot` a field projection,
-`setMethod(signature = ...)` an overload candidate — so it is *more* statically declared than the
-`#:` annotations the checker already consumes. Hand-writing the equivalent (`@type` + a wrapper
-constructor carrying `@new`) yields full checking of slot types and constructor arity with no strain
-on inference at all; the gap is a lowering pass, not type theory.
+- **Arguments are inferred once, before any probe.** Expression inference writes environment and
+  recorded-type state that the probe snapshot does not reverse. A probe therefore runs
+  instantiation and argument matching only. The signature-matching half of function-call inference
+  is split out as `match_arguments` for this reason.
+- **A fit is either a fact or a guess.** The caller's open inference variables are recorded before
+  probing, by `collect_unbound_vars`. A candidate that fits while leaving every one of them
+  untouched was chosen by the concrete arguments, so it is a fact. Untouched means the same
+  representative and the same entry, so binding, redirecting and tightening a constraint all count
+  as touching. A fact beats a candidate that fits only by narrowing those variables, which would
+  over-commit a wrapper such as `function(x) sum(x)`. Among fits of the same kind, declaration
+  order decides and the first wins. That keeps one reading of order everywhere: first match at a
+  call site, most specific first in the corpus, and the last declaration for a value use of the
+  name. A lone fit is never a guess, because it is the only signature that accepts the call.
+  Probing rolls back, so the winner is re-probed to commit. Matching is a pure function of the
+  table, and the table is back in its pre-probe state, so the fit repeats.
+- **Selection runs a strict round, then a courtesy round.** The courtesy that reads a whole-number
+  literal as an integer is off in the first round, so `sum(1, 2)` picks the double candidate, which
+  is what R computes. It is on in a second round that runs only when nothing matched strictly, so a
+  name whose only fitting candidate wants `integer` still accepts `foo(1)`. An exact match outranks
+  a conversion.
 
-**Three things genuinely do keep dispatch out, and they are the real reasons:**
+A last-fitting-wins tiebreak was tried and removed. Its purpose was to stop `function(x) sum(x)`
+from committing to a narrow candidate, and the fact rule already does that. A general fallback
+taking `Any` accepts without binding, so it is a fact and outranks every guess above it. Last-wins
+also forced any set whose candidates differ only in a sequence shape to be declared
+most-general-first. `lapply` is such a set, where a named list in gives a named list out, and a
+lambda callback makes every candidate a guess. That order contradicts both the corpus convention
+and the value-use rule, which resolves a non-call use of the name to the last declaration and would
+then hand out the narrower contract.
 
-- **Dispatch needs a class known at the call site.** Inside an unannotated `function(x) speak(x)` the
-  argument is an open inference variable, so there is nothing to dispatch on and the only sound
+When every candidate fails, name the set only when the candidates disagree about what is wrong.
+`NoMatchingOverload` says that no overload of `f` matches, gives the number of declared signatures
+tried, and adds the first candidate's failure as a hint. That is right when the call could have
+meant several shapes and each one rejects it elsewhere or for a different reason. `pick("word")`
+against `fn(integer)` and `fn(double)` is refused at the same argument by both, and neither reason
+is the answer.
+
+Two failure shapes have a single answer, and the wrapper buries it along with the argument's own
+range, because the wrapper blames the whole call. The first shape is every candidate failing for
+the identical reason. The second is one candidate getting strictly further into the call than any
+other, measured as the index of the first argument each one blames, where a whole-call verdict such
+as an arity error or an unknown name counts as no progress. The deeper candidate is the signature
+the caller meant. A two-parameter callback handed to `lapply` is refused at the callback by the
+candidate that accepted the sequence, and at the sequence by the candidate that wanted a named
+list, so the callback is the finding.
+
+## The boundary for R's object systems is dispatch, not Hindley-Milner
+
+A recurring claim is that S3, S4 and R6 support is fundamentally at odds with a Hindley-Milner
+core, and that supporting it therefore costs soundness or speed. That is the wrong diagnosis, and
+it is recorded here so nobody re-derives it.
+
+The declarative core of all three systems maps onto machinery the checker already has and relies
+on: a nominal type with a checked representation, written `@type` plus `@new`, record field
+projection on a nominal, and declaration-ordered overload sets. The existence proof is that S3
+dispatch already runs inside the inference core. An operator on a nominal is dispatched statically
+and soundly today, through `+.Class`, `Arith.Class` or `Ops.Class`. S4 inverts the claim hardest.
+`setClass` is a record declaration with slot types written literally in source, `new(...)` is a
+named-argument constructor call, `x@slot` is a field projection, and `setMethod(signature = ...)`
+is an overload candidate. S4 is therefore more statically declared than the `#:` annotations the
+checker already consumes. Hand-writing the equivalent, which is `@type` plus a wrapper constructor
+carrying `@new`, already checks slot types and constructor arity with no strain on inference. The
+gap is a lowering pass, not type theory.
+
+Three things genuinely do keep dispatch out, and they are the real reasons.
+
+- **Dispatch needs a class known at the call site.** Inside an unannotated `function(x) speak(x)`
+  the argument is an open inference variable, so there is nothing to dispatch on and the only sound
   answer is `Unknown`. R code is most dynamic exactly where dispatch matters most, so generic
-  dispatch structurally underdelivers where it would be used. (Same shape as overload selection with
-  a flexible argument: never guess, fall back.)
-- **Inheritance is subtyping, and there is none.** `TyKind::Named` matches by exact name (type
-  arguments aside); no hierarchy exists anywhere in the compatibility relation. S4's `contains=` and
-  R6's `inherit=` require one, and nominal subtyping is a new axis in `compatible` and in the
-  union/join rules — the one place where a soundness regression is a real risk rather than a worry.
+  dispatch structurally underdelivers where it would be used. This is the same shape as overload
+  selection with a flexible argument: never guess, fall back.
+- **Inheritance is subtyping, and there is none.** `TyKind::Named` matches by exact name, type
+  arguments aside. No hierarchy exists anywhere in the compatibility relation. S4's `contains=` and
+  R6's `inherit=` require one. Nominal subtyping is a new axis in `compatible` and in the union and
+  join rules, and it is the one place where a soundness regression is a real risk.
 - **A generic's method set is global mutable state, which fights the interface firewall.** Any file
-  may add `print.foo`. If "the methods of generic G" is an input to every call of G, one new method
-  invalidates every call site in the workspace. Incremental support needs a separately memoized
-  method-set query per generic, so that adding a method invalidates only calls to that generic and
-  editing a method body invalidates nothing. Getting this wrong turns a single edit into a full
-  revalidate at 300k LoC.
+  may add `print.foo`. If the method set of a generic is an input to every call of that generic,
+  one new method invalidates every call site in the workspace. Incremental support needs a
+  separately memoized method-set query per generic, so that adding a method invalidates only calls
+  to that generic and editing a method body invalidates nothing. Getting this wrong turns a single
+  edit into a full revalidation at 300,000 lines of code.
 
-**Therefore one decision splits into three, decided separately:**
+One decision therefore splits into three, decided separately.
 
-1. **False positives are defects, not deferred features.** `setGeneric("f", ...)` not defining `f`
-   (so every call to a project's own S4 generic reports `unresolved`) and the absent R6 stub
-   (`R6::R6Class` reporting an unknown namespace) are bugs. They cost nothing in soundness or speed
-   and are fixed independently of any object-system ambition.
-2. **Declarations may become nominals; this is the cheap win.** Recognizing `setClass` and
+1. **A false positive is a defect, not a deferred feature.** `setGeneric("f", ...)` not defining
+   `f`, so that every call to a project's own S4 generic reports `unresolved`, is a bug. So is the
+   absent R6 stub, which makes `R6::R6Class` report an unknown namespace. Neither costs anything in
+   soundness or speed, and both are fixed independently of any object-system ambition.
+2. **A declaration may become a nominal, and this is the cheap win.** Recognizing `setClass` and
    `R6Class(public = list(...))` as class declarations that produce a nominal with typed slots or
-   fields catches the mistakes users actually make (slot and field typos, constructor arity) with no
-   subtyping, no new global state, and per-file firewalling like any other item.
-3. **Dispatch and inheritance stay unmodelled** on the three grounds above, and an unmodelled
-   construct stays `Unknown` — a coverage limit reported by strict mode, never a guess. Revisit only
-   with a memoized per-generic method-set query and a decided nominal-subtyping design.
+   fields catches the mistakes users actually make, which are slot and field typos and constructor
+   arity. It needs no subtyping, no new global state, and it firewalls per file like any other
+   item.
+3. **Dispatch and inheritance stay unmodelled**, on the three grounds above. An unmodelled
+   construct stays `Unknown`, which strict mode reports as a coverage limit rather than a guess.
+   Revisit only with a memoized per-generic method-set query and a decided nominal-subtyping
+   design.
 
-## `T[]` — atomic-element constraint, not traits
+## `T[]` carries an atomic-element constraint, not a trait
 
-The core vector generalizes to carry an element *type* (so it can hold a variable), with a new **atomic-element constraint** kind on inference variables — the same mechanism as the existing numeric constraint (`<T: numeric>`), rendered `<T: atomic>`. This resolves the former open question (typing-design §1) in favor of option (a): the constraint mechanism is already built, proven, and fast; a trait system is not justified by this need alone.
+The core vector generalizes to carry an element type, so it can hold a variable. That needs a new
+atomic-element constraint kind on an inference variable. It is the same mechanism as the existing
+numeric constraint `<T: numeric>`, and it renders as `<T: atomic>`. A trait system is not justified
+by this need alone, because the constraint mechanism is already built, proven and fast.
 
-Implementation notes: valid vector elements are `Scalar(_)`, a constrained `Variable(_)`, and `Any`/`Unknown` (statically untracked element). `Constraint` became a proper lattice merged via `join` (not `Ord`): numeric ∧ atomic-element = `ScalarNumeric` (a scalar `integer`/`double`, rendered `<T: scalar numeric>`), which defaults to `double` at binding boundaries like plain numeric. Annotation lowering records the atomic-element bound directly on the element variable's entry rather than through `constrain_type`, because the element may be a rigid `<T>` binder — the annotation itself makes the promise there, while a function body must not add bounds the annotation never declared.
+A valid vector element is a `Scalar(_)`, a constrained `Variable(_)`, or `Any` or `Unknown` for an
+element the checker does not track. `Constraint` is a lattice merged by `join` rather than by
+`Ord`. Numeric meets atomic-element as `ScalarNumeric`, which is a scalar `integer` or `double`,
+renders as `<T: scalar numeric>`, and defaults to `double` at a binding boundary like plain
+numeric. Annotation lowering records the atomic-element bound directly on the element variable's
+entry instead of going through `constrain_type`, because the element may be a rigid `<T>` binder.
+The annotation itself makes the promise there, while a function body must not add a bound the
+annotation never declared.
 
 ## Coercion policy at parameter positions
 
-Three verified false-positive factories are fixed at the compatibility level: whole-number `double` literals are accepted at `integer` parameters (generalizing the rule `:` already had); `integer` widens to `double` at parameter positions; vectorized stdlib stubs declare `T[]` parameters so scalars coerce up (instead of scalar parameters falsely rejecting vectors). Rationale: with the old policy, the *more precise* a stub was, the more false positives it produced (`seq_len(10)`, `toupper(c("a","b"))`, `round(x, 2)` all errored) — which pressure-cooked the corpus toward `Any`.
+Three verified false-positive factories are fixed at the compatibility level.
+
+- A whole-number `double` literal is accepted at an `integer` parameter. This generalizes the rule
+  `:` already had.
+- `integer` widens to `double` at a parameter position.
+- A vectorized stdlib stub declares `T[]` parameters, so a scalar coerces up. A scalar parameter
+  would otherwise reject a vector.
+
+The old policy punished precision. The more precise a stub was, the more false positives it
+produced. `seq_len(10)`, `toupper(c("a","b"))` and `round(x, 2)` all errored, which pressured the
+corpus toward `Any`.
 
 ## Signature matching is name-aware
 
-Annotation-vs-definition parameter matching by flat position (spec'd and implemented) was an accepts-then-crashes soundness hole: R call sites match by **name**, so a positional zip routes values to wrongly-typed formals. Both the contract and the implementation switch to name-aware matching where names exist.
+An R call site matches arguments by name. Matching an annotation against a definition by flat
+position therefore routes a value to a wrongly-typed formal, which accepts code that crashes at run
+time. Both the contract and the implementation match by name where names exist.
 
 ## Strict mode
 
-Strict = **Unknown origins are errors AND unresolved-name references are errors** (they stop being plain naming warnings under strict); a recursion-induced `Unknown` return is an origin. Explicit `Any` remains the sanctioned escape hatch — "allowed unknown" is expressed by annotating, never silently. **Per-file toggle:** a top-of-file `#: @strict` / `#: @strict off` directive overrides the config default in both pipelines (the gates are already per-file; derive the directive from the parse so incrementality holds). Sound-by-refusal is acceptable policy: an unsupported construct may be refused loudly; it must never be silently mistyped.
+Under strict mode an `Unknown` origin is an error, and an unresolved-name reference is an error
+rather than a plain naming warning. A recursion-induced `Unknown` return is an origin. Explicit
+`Any` remains the sanctioned escape hatch, so an allowed unknown is expressed by annotating it and
+never silently.
 
-## A reported column counts characters; caret art counts terminal cells
+A `#: @strict` or `#: @strict off` directive at the top of a file overrides the configured default
+in both pipelines. The gates are already per file, and the directive is derived from the parse so
+incrementality holds.
 
-The CLI reported byte columns, in the rendered header and in `--output json` alike, and padded the caret by the same byte count. On any line carrying non-ASCII text before the finding — which R source does as soon as a string holds a name, a unit, or an em dash — the number disagreed with every editor and the caret sat visibly to the right of the code it accused, sometimes past the end of the line. Byte columns served nobody: a consumer would have to re-read the file as bytes to use one, and no editor or reviewer counts that way.
+Refusing an unsupported construct loudly is acceptable policy. Mistyping one silently is not.
 
-Two units, because the two jobs are different. **A column is characters** (`LineIndex::line_column_chars` for the JSON `column`/`endColumn` fields and the server's human-readable `file:line:column` strings; the CLI's snippet source re-counts miette's byte column the same way for the report header) — the number a person can act on. **Underline art is terminal cells**, because a CJK character or an emoji occupies two of them and a character count would under-pad; the graphical reporter measures them, so the two units never have to be reconciled by hand again. The JSON field documentation changed with it (a stated contract, so the change is deliberate and recorded here). The LSP protocol path is untouched: it converts to the negotiated encoding — UTF-16 by default — at the protocol edge, which is what LSP specifies and what byte columns were never meant to serve.
+## A reported column counts characters, and caret art counts terminal cells
 
-## The CLI reports through miette, not a hand-rolled renderer
+The CLI reported byte columns in the rendered header and in `--output json` alike, and padded the
+caret by the same byte count. R source carries non-ASCII text as soon as a string holds a name or a
+unit. On such a line the number disagreed with every editor, and the caret sat to the right of the
+code it accused, sometimes past the end of the line. A byte column served nobody, because a
+consumer would have to re-read the file as bytes to use one, and no editor counts that way.
 
-**Previously** every user-facing message the CLI printed was assembled by hand. `render_human_diagnostic` computed a gutter width, sliced the finding's first line out of a `LineIndex`, padded a caret row by terminal cells, truncated multi-line ranges with a dim note of its own wording, and printed related locations as one-line `= note: … --> path:line:col` trailers. Beside it, a second path styled `error: ` / `warning: ` prefixes with `console` and printed an underlying I/O failure with a bare `eprintln!` on the next line, and `ConfigParseError` built its own `in <path> for <key> at line L, column C` sentence. Three renderers, three notions of where a message points, and every improvement (a related location deserving its own snippet, a config error deserving its own line of source) meant more hand-rolled layout.
+The two jobs need two units.
 
-**Target shape:** one report type in the CLI, drawn by `miette`'s `GraphicalReportHandler`. A report is a severity, an optional diagnostic code, a message, an optional cause, an optional snippet (named source + labelled range), and nested related reports — enough for a finding, a companion note, and a bare failure alike, so the same reporter draws all of them. Errors that know their own source implement `miette::Diagnostic` themselves (`ConfigError` carries the config text and the toml span), and the CLI hands them to the same entry point. The look follows the destination: colour and unicode on an attended terminal, monochrome unicode when colour is refused, plain ASCII into a pipe or a file.
+- **A column counts characters.** `LineIndex::line_column_chars` produces the JSON `column` and
+  `endColumn` fields and the server's `file:line:column` strings. The CLI's snippet source
+  re-counts miette's byte column the same way for the report header. This is the number a person
+  can act on. The JSON field documentation changed with it, and that is a stated contract, so the
+  change is recorded here.
+- **Underline art counts terminal cells.** A CJK character or an emoji occupies two cells, so a
+  character count would under-pad. The graphical reporter measures cells, so the two units never
+  have to be reconciled by hand.
 
-**Impact.** *Correctness:* the underline is the library's, so multi-byte and wide glyphs are handled in one audited place; related locations are drawn from their own file instead of being reduced to a coordinate; a configuration failure is shown rather than described. *Simplicity:* the caret/gutter/width arithmetic is gone, and `RelatedNote` resolution moved out of the parallel worker into the sequential render step, so the workers now return plain diagnostics. *Performance:* the reporter is built once (`LazyLock`) instead of re-derived per finding, and the snippet source is borrowed — a custom `SourceCode` impl rather than `NamedSource`, which owns its text and would copy the whole file into every finding reported against it. *Incremental analysis:* untouched; this is presentation, and the JSON Lines contract is unchanged.
+The LSP path is untouched. It converts to the negotiated encoding, UTF-16 by default, at the
+protocol edge. That is what LSP specifies, and it is not what a byte column was ever meant to
+serve.
 
-**Two things miette does not do for us.** It counts the header column in **bytes**, so the borrowed-source `read_span` re-counts it in characters — otherwise the human header and the JSON record would disagree about the same finding. And it draws every line a range covers, so a range spanning more than three lines is clamped to its first line with the reach stated in the label; a finding on a long item must not print the item.
+## The CLI reports through miette
 
-**The theme is ours, not the stock one.** A snippet is a window on the source, not a box: the gutter runs unbroken down every row (`vbar_break = vbar`, in place of the stock dotted `·` row), the header opens with a plain rule rather than a corner (`ltop = hbar`), the range is underlined with carets (`underline = '^'`), and the closing rule under each snippet is dropped — one line saved per finding, and a run of findings prints dozens. The closer is the one part that is not themeable: miette hardcodes it from `lbot`+`hbar`, both of which the cause-chain arrows and multi-line span brackets also draw, so it is filtered out of the rendered string instead, matching only a line that is *nothing but* the rule (a nested report indents its own, in the parent's colour).
+Every user-facing message the CLI printed used to be assembled by hand. `render_human_diagnostic`
+computed a gutter width, sliced the finding's first line out of a `LineIndex`, padded a caret row
+by terminal cells, truncated a multi-line range with a dim note of its own wording, and printed a
+related location as a one-line `= note: ... --> path:line:col` trailer. A second path styled the
+`error: ` and `warning: ` prefixes with `console` and printed an underlying I/O failure with a bare
+`eprintln!` on the next line. `ConfigParseError` built its own sentence of the form
+`in <path> for <key> at line L, column C`. That is three renderers and three notions of where a
+message points. Every improvement meant more hand-rolled layout.
 
-**The README's hero image is generated, and its renderer had to learn the palette.** `scripts/render-diagnostic-svg.rs` runs `ry check` under a pty and turns the ANSI it emits into an SVG, because GitHub strips escapes from code blocks but honours a `<style>` block inside an embedded SVG. Its SGR parser matched whole escape bodies, which handled the previous renderer's single-parameter codes and silently dropped every compound one the graphical reporter emits (`36;1;4` for the underlined locus, `35;1` for the caret) — the failure is a *monochrome image that still looks plausible*, so the render is worth an eye after any change to the palette, not just a re-run. Parameters are applied one at a time now, with cyan/magenta/green/yellow and underline added. The snippet-closing-rule width is read off miette 7.6, which hardcodes it; `check_draws_the_snippet_as_a_window` fails if an upgrade moves it, verified by changing the constant.
+The shape now is one report type in the CLI, drawn by miette's `GraphicalReportHandler`. A report
+holds a severity, an optional diagnostic code, a message, an optional cause, an optional snippet
+made of a named source and a labelled range, and nested related reports. That is enough for a
+finding, a companion note and a bare failure alike, so one reporter draws all of them. An error
+that knows its own source implements `miette::Diagnostic` itself. `ConfigError` carries the config
+text and the toml span, and the CLI hands it to the same entry point. The look follows the
+destination: colour and unicode on an attended terminal, monochrome unicode when colour is refused,
+and plain ASCII into a pipe or a file.
 
-## Annotation formatter — parse, then pretty-print
+The effect on each axis:
 
-The per-line re-indent walk (no bracket matching, lines never split) is replaced: join the `#:` block, parse it with the real `type_syntax` parser, pretty-print with **per-bracket hug bits** (an opener followed by content on its own line stays hugged; its closer mirrors it), honoring `indent_width`; on parse failure the block is left verbatim (which also ends prose corruption, and removes the drifted duplicate tokenizer). Both the fully expanded and the hugged style are stable fixed points; mixed shapes normalize.
+- Correctness. The underline is the library's, so a multi-byte or wide glyph is handled in one
+  audited place. A related location is drawn from its own file instead of being reduced to a
+  coordinate. A configuration failure is shown rather than described.
+- Simplicity. The caret, gutter and width arithmetic is gone. `RelatedNote` resolution moved out of
+  the parallel worker into the sequential render step, so a worker returns a plain diagnostic.
+- Performance. The reporter is built once in a `LazyLock` instead of being re-derived per finding.
+  The snippet source is borrowed through a custom `SourceCode` implementation rather than a
+  `NamedSource`, which owns its text and would copy the whole file into every finding reported
+  against it.
+- Incremental analysis. Untouched. This is presentation, and the JSON Lines contract is unchanged.
+
+Two things miette does not do here. It counts the header column in bytes, so the borrowed source's
+`read_span` re-counts it in characters. Otherwise the human header and the JSON record would
+disagree about the same finding. It also draws every line a range covers, so a range spanning more
+than three lines is clamped to its first line with the reach stated in the label. A finding on a
+long item must not print the item.
+
+The theme is the project's own, not the stock one. A snippet is a window on the source, not a box.
+The gutter runs unbroken down every row, with `vbar_break = vbar` in place of the stock dotted row.
+The header opens with a plain rule rather than a corner, with `ltop = hbar`. The range is
+underlined with carets, with `underline = '^'`. The closing rule under each snippet is dropped,
+which saves one line per finding, and a run of findings prints dozens. The closer is the one part
+that is not themeable. miette builds it from `lbot` and `hbar`, and the cause-chain arrows and the
+multi-line span brackets draw from those too, so it is filtered out of the rendered string instead.
+The filter matches only a line that is nothing but the rule, because a nested report indents its
+own in the parent's colour.
+
+The README's hero image is generated, and its renderer had to learn the palette.
+`scripts/render-diagnostic-svg.rs` runs `ry check` under a pty and turns the ANSI it emits into an
+SVG, because GitHub strips escapes from a code block but honours a `<style>` block inside an
+embedded SVG. Its SGR parser matched whole escape bodies. That handled the previous renderer's
+single-parameter codes and silently dropped every compound one the graphical reporter emits, such
+as `36;1;4` for the underlined locus and `35;1` for the caret. The failure mode is a monochrome
+image that still looks plausible, so the render is worth an eye after any change to the palette.
+Parameters are applied one at a time now, and cyan, magenta, green, yellow and underline were
+added. The snippet-closing-rule width is read off miette 7.6, which hardcodes it.
+`check_draws_the_snippet_as_a_window` fails if an upgrade moves it, which was verified by changing
+the constant.
+
+## The annotation formatter parses, then pretty-prints
+
+The formatter used to re-indent a `#:` block line by line, with no bracket matching, and it never
+split a line. It now joins the block, parses it with the real annotation type parser, and
+pretty-prints the result with per-bracket hug bits, honoring `indent_width`. An opener followed by
+content on its own line stays hugged, and its closer mirrors it. On a parse failure the block is
+left verbatim, which also ends prose corruption and removed the drifted duplicate tokenizer. Both
+the fully expanded style and the hugged style are stable fixed points, and a mixed shape
+normalizes.
 
 ## Config subsystem
 
-Workspace root comes from `InitializeParams` (never process CWD); discovery = nearest `roughly.toml` ancestor of the target, identical in LSP and CLI; unknown keys are **errors with toml spans**, surfaced as diagnostics on `roughly.toml` plus a window message — never a startup panic; config reload triggers a diagnostics refresh; one config struct chain end-to-end (the four parallel representations collapse).
+The workspace root comes from `InitializeParams` and never from the process working directory.
+Discovery finds the nearest configuration file in an ancestor directory, identically in the LSP and
+in the CLI. An unknown key is an error with a toml span, surfaced as a diagnostic on the
+configuration file plus a window message, and never as a startup panic. A config reload triggers a
+diagnostics refresh. One config struct chain runs end to end, replacing four parallel
+representations.
 
 ## Guard narrowing
 
-Flow-sensitive narrowing is implemented as **branch-edge entry refinement on the slot model**, not
-a separate flow analysis: a recognized guard condition (`is.null(x)`, the `is.*` family, negation)
-computes refined types for the guarded slot's two edges, and each refinement is an ordinary
-undo-logged environment write inside the branch region — branch writes replace it, the region
-rollback reverts it, and the branch join sees final values with no new machinery. Early-exit
-persistence falls out of divergence-aware joins: a branch that never falls through (`return`,
-`stop`, `break`, `next`, blocks ending in them) contributes neither value nor state, so the
-surviving edge's refinement (and only it) applies after the `if`.
-
-Deliberate limits, for soundness and zero false positives:
-- **Union member filtering only.** Family guards do not invent a shape for `Any`/`Unknown` — a
-  refined `character | character[]` would false-positive against scalar-claim stub signatures.
-  The one non-union refinement is `is.null`'s true edge on `Any`/`Unknown` → `NULL`.
-- **Statically undecidable members stay on both edges** (inference variables, flexible-element
-  vectors, opaque nominals — `is.list(data.frame)` is true at runtime).
-- **Local slots only** (parameters, function/script locals). Package globals keep winner
-  semantics; guarded *expressions* (`is.null(x$field)`) are not tracked.
-- **No `&&`/`||` decomposition** and no in-condition narrowing (the right conjunct of
-  `!is.null(x) && x > 0` does not yet see the refinement) — recorded follow-ups.
-- The guarded key is resolved exactly as a read resolves (local slot under a naming context; the
-  flat global entry in context-less fixture states), so fixtures and production share one path.
-
-## Expanded annotation syntax: `@param name {TYPE}`
-
-**DECIDED (user-proposed, ratified).** The expanded parameter directive is `@param name {TYPE}` / `@param [name] {TYPE}` — name first, braced type second — replacing the JSDoc-ordered `@param name {TYPE}`. Rationale: (1) the wrapping payload (the type) becomes the trailing element, so multi-line types continue cleanly under the directive instead of leaving the name dangling after the closing braces; (2) one shape across all directives (`@type Name {TYPE}`, `@alias Name<T> {TYPE}`, `@param name {TYPE}`); (3) the grammar becomes unambiguous — the name is a single identifier token right after the directive, which retires the swallow-the-tail-as-name ambiguity and leaves room for an optional trailing description as a first-class extension. The old order is rejected with a targeted error naming the new form, not a generic parse failure. `@return {TYPE}` / `@forall` are unchanged.
-
-# Decision record: error-tolerant lowering (syntax errors do not erase a file)
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
-
-Previous shape: any error node in a tree short-circuited `lower_with_diagnostics` to an EMPTY module, so one half-typed keystroke dropped the file's whole export set — the package symbol index re-folded on every keystroke inside a broken window, dependents flooded with unresolved-name errors, and diagnostics/hover/completion for the rest of the file went dark. The single source of truth for "what exists mid-edit" was the parse tree's error bit, applied at file granularity.
-
-Chosen shape (statement granularity, rust-analyzer-style):
-- Well-formed statements always lower; a broken file keeps every export whose statement parsed.
-- A broken statement contributes NOTHING (no names, no reads, no cascading diagnostics) — "a broken region reports its syntax error and nothing else" (typing-reference §Syntax errors is the contract).
-- Two salvage shapes inside broken regions: (a) sequence-level — an ERROR node's well-formed assignment children lower normally, fragments are filtered by kind (`ExpressionKind::Assign` keeps, everything else drops), and a well-formed non-assignment fragment sharing a line with a following ERROR sibling is dropped as the split half of the broken statement; (b) expression-level — a broken assignment with an intact name side keeps its definition with the value degraded to `ExpressionKind::Missing`.
-- `Missing` is a distinct HIR kind from `Unsupported`: both type `Unknown`, but `Missing` records no strict origin (the syntax error already covers the region) while `Unsupported` stays strict-relevant (a complete construct the checker cannot model).
-- A checked annotation on a `Missing`-valued definition binds its DECLARED type unchecked (a hole proves nothing; demanding proof is a guaranteed false mismatch), so annotated definitions keep their contract for callers mid-edit — zero downstream invalidation.
-
-Impact: correctness — no false unresolved/type errors from half-typed code (pinned by `test_malformed_lower` controls + the `error_tolerant_lowering` project fixtures); simplicity — one policy sentence governs all cases; performance — the malformed-flip engine witness went from "2 index refolds + referrer recheck" to "0 refolds, edited-file-only recheck" (exports byte-equal across the flip, early cutoff does the rest); incremental analysis — the highest-churn edit state (typing inside a construct) now has the smallest blast radius.
-
-# Decision record: durability tiers + memoized IDE read path (the editor-latency regression)
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
-
-Previous shape: the red-green engine validated every memo by deep-walking its recorded dependencies once per revision, so the first read after any keystroke re-walked every unopened file's parse/lower/naming chain (O(files × chain depth), ~108 ms at 281k LoC / 30k files before any real work started). On top of that, every hover/definition/completion request rebuilt a package-sized `NamesGlobal` map from the symbol index, and completion additionally primed every exporting file's `Lower` + `LocalNaming` to compute item kinds — an O(package) prime per keystroke-completion (95 ms at rest). The idle-preemption token pairing (frontend store-then-send, worker reset inside the idle unit) could lose a preemption and stall a read behind a full idle unit.
-
-Chosen shape:
-- **Durability in the core** (`engine.rs`): inputs declare `LOW` (open documents) or `HIGH` (everything else); a memo records the min durability its last recompute read; validation greens O(1) when `last_change[durability] ≤ verified_at`. The load-bearing subtlety: durability *transitions* must stay truthful on memos whose values never change — the deep-validation walk re-records each visited memo's durability minimum at the early-cutoff bump. Without that, opening a file (an equal-value HIGH→LOW downgrade) re-records only the recomputing bottom of the chain; every value-stable ancestor keeps its stale HIGH record and the next keystroke is invisible to its fast path — a stale read served as green. (Caught by a live probe during implementation; pinned by `durability_downgrade_flushes_through_cutoff_nodes`.)
-- **The winner index IS the IDE shape**: `PackageSymbolIndex`'s value is `NamesGlobal`, borrowed per request (`Shared` clone), never rebuilt. `DefiningItem` projects through it.
-- **Completion reads one fold**: per-file `CompletionExports` (label/kind/callability entries, value-equal across body edits) folded into `PackageCompletionIndex`; `generic::completion` takes the entries as an explicit parameter — the engine passes the memo, the from-scratch path builds per request.
-- **Lossless preemption pairing**: worker resets `idle_interrupt` before each empty poll; frontend flags after send. Every interleaving either delivers the job to the poll or leaves the flag set for the unit's next cancellation check.
-
-Impact: correctness — unchanged behavior (IDE differential green; the downgrade staleness class is structurally closed and unit-pinned); simplicity — one new concept (durability) in the core, two new queries, one deleted per-request synthesis path; performance at 281k LoC / 30k files — hover 5.3→0.010 ms at rest and 142→44 ms after a keystroke, completion 95→26.5 / 228→90 ms, definition 5.4→0.032 / 108→20 ms, per-edit diagnostics 121→91 ms, cold 13.5→9.0 s (the type-definition-environment per-inference clone also removed); incremental analysis — the per-keystroke walk no longer touches unopened files' chains at all (committed witnesses: at-rest reads ≤ 32 memos, post-keystroke walk ≤ 12·N). Deferred lever recorded in `backlog.md`: durable sub-fold + open-file overlay to drop the fold-edge walk to O(open).
-
-# Decision record: is.null shaping of unconstrained inference variables
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
-
-Previous shape: at an `if (is.null(x)) fallback else x` join with `x` and `fallback` both unbound inference variables, the join unified the two variables (the type model deliberately never invents a union *for* a variable — a long-standing HM-speed decision). `or_else(NULL, "text")` then bound the single variable to `NULL` from the first argument and rejected the second: a false positive on the coalesce/or-default idiom, previously recorded as a structural design tension with annotation as the workaround.
-
-Chosen shape: **the guard itself carries the missing information, so consume it.** In `condition_refinement`, when the recognized predicate is `is.null` and the guarded local slot resolves to a *completely unconstrained* inference variable `A` (entry `Unbound`, constraint `Unconstrained`), bind `A := T | NULL` for a fresh `T` — a union shape the model already supports from annotations (`@param x {T | NULL}` produces exactly it) — and let the existing member filtering narrow the edges. No new type form, no deferred unions, no join special-casing: the coalesce body then joins `fallback` with the narrowed `T`, generalizing to `<T> fn(value: T | NULL, fallback: T) -> T`, byte-identical to the verified-clean annotated form. Negated guards work through the existing edge swap; constrained variables (a numeric bound contradicts a NULL member) and rigid/declared parameters (the annotation is the contract) are never reshaped.
-
-Deliberate consequence, pinned as a fixture: testing a parameter for `NULL` and then using it *unguarded* afterwards is now a genuine finding (`if (is.null(x)) 0L else 1L; x + 1L` errors) — the test declared `NULL` a possible inhabitant, and the annotated form of the same code already behaved this way, so the model is now consistent rather than lenient-when-unannotated.
-
-Impact: correctness — kills the last recorded idiom false positive from the sweep, with zero regressions across every fixture suite and the realworld corpus (no expectation changed anywhere else); simplicity — ~20 lines in one function, reusing the union machinery end to end; performance — one extra variable + union per shaped guard, negligible; incremental analysis — unaffected (a per-file inference detail).
-
-# Decision record: data-masked NSE resolution (data.table / with-family)
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; user-reported pain: data.table code drowned in could-not-resolve warnings).
-
-Previous shape: every bare name in `DT[region == "west", .(total = sum(amount)), by = product]` failed lexical resolution and produced a could-not-resolve warning (plus type errors from the base index-arity rules), because data.table evaluates i/j/by in the data's own frame — the same false-positive class R CMD check and lintr hit on NSE code. `:=` lowered to `Unsupported`, hiding its operands from the IDE entirely.
-
-Chosen shape — structural mask recognition in the naming walk, diagnostic suppression at the emission edge:
-- Two recognizers set a mask depth during resolution: a `[` bracket whose arguments carry an unambiguous data.table signature (`by =`/`keyby =` argument names; `:=` or `.()` calls; `.SD`/`.N`/`.I`/`.BY`/`.GRP`/`.EACHI` symbols — none of which occur in base indexing, so `m[i, j]` is untouched), and the base masking family `with`/`within`/`subset`/`transform` (callee not locally shadowed), which masks arguments after the data.
-- A read that fails lexical resolution inside a mask is recorded in `NamesLocal.masked_reads` **in addition to** `non_locals` — masked names still resolve stubs and package globals normally (a `sum` in `j` keeps its scheme; the first design that kept masked reads out of `non_locals` lost stub typing and was revised). Both could-not-resolve emitters (the analysis package pass and the engine's per-file query) skip masked ids; the typecheck fallthrough for unresolved non-locals was already silent `Unknown` with no strict origin.
-- The recognized bracket itself lands in `NamesLocal.masked_subsets` and types as silent `Unknown` before the base index-arity rules (`[.data.table` returns shapes those rules must not judge).
-- `:=` now lowers as an ordinary binary call so its operands stay visible to naming, hover, and the mask.
-
-Deliberately NOT silenced: anything that resolves (locals, stubs, globals) keeps full checking inside masks; base indexing keeps lexical resolution and its warnings. Strict mode stays silent on masked column reads — NSE is a recognized dynamic construct with intended semantics, not an unmodeled hole. Future extension recorded in the backlog: honor `utils::globalVariables()` and generalize the mask marker into `.Rtypes` stub syntax so dplyr verbs can declare masked parameters.
-
-Impact: correctness — kills the dominant NSE false-positive class with zero regressions (all suites; base-R control fixtures pin the non-masked behavior); simplicity — one mask-depth integer and two sets on the existing naming result, suppression at the existing emission edges; performance — a shallow per-bracket marker scan, negligible; incremental analysis — unaffected (per-file naming facts).
-
-# Decision record: monomorphic recursion for function-valued assignments (letrec typing)
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). The naming half (a closure RHS sees its own target binding) landed separately; this is the typing half.
-
-Previous shape: the recursive read inside `fact <- function(k) ... fact(k - 1L) ...` resolved (post-naming-fix) to a slot with no environment entry yet, typing as silent `Unknown` — the recursion contributed nothing to the function's scheme and bad recursive signatures went unnoticed.
-
-Chosen shape — the classic `let rec` rule, scoped to function-valued assignments: before inferring the RHS, the target slot is pre-bound to a fresh inference variable (created inside the binding's generalization level); the body's recursive reads unify against it; the variable then unifies with the inferred function type. Recursion is **monomorphic** (all recursive uses share one instantiation; no polymorphic recursion — undecidable in general). Applied on the local-assignment path in both context and context-less inference (fixture drivers pre-bind the global slot). One subtlety: the top-level package-winner path writes the final generalized scheme to the global entry while `exported_value_schemes` reads the per-site *local* entry first — the pre-bound placeholder must be overwritten there too, or cross-file consumers see a dangling variable as `Unknown` (caught by the project-suite fixtures; the winner path now writes both entries).
-
-Deliberate scope limits, pinned by fixtures: `<<-`-defined recursion keeps the silent-`Unknown` behavior (rare; the enclosing-slot join semantics make a placeholder ambiguous); mutual recursion between two local closures stays a loud unresolved reference on the earlier-defined one (letrec visibility is per binding, not per block — full block-letrec is a recorded possible extension); top-level mutual recursion already resolves through the package interface fixed point, whose oscillation guard pins genuinely cyclic schemes to `Unknown`. Strict attribution for top-level recursion whose converged scheme retains `Unknown` (an origin on the binding) remains the open part (b) in the backlog — it needs identical attribution in both pipelines to keep the differential byte-exact.
-
-Impact: correctness — recursive helpers get real schemes and violations of recursively-inferred signatures are caught (`countdown("not an integer")` errors; previously silent); the polymorphic-identity and cross-file suites pin zero regressions; simplicity — one pre-bind + one unify on the existing assignment path; performance — one extra variable per function-valued assignment, negligible.
-
-# Decision record: bare-name resolution stays ungated by NAMESPACE imports
-
-**Status:** decided (agent-owned decision under the delegated ownership mandate); the full import model stays post-beta.
-
-The fork: should a bare name resolving only via the stub corpus (`median` → the stats stub) require the package to import it (`importFrom(stats, median)` / `library(stats)`), or resolve unconditionally?
-
-Decision: **unconditional resolution against the shipped corpus is correct, not a shortcut.** The shipped namespaces — base, stats, utils, methods, graphics, grDevices — are exactly the packages R attaches in every default session, so a bare `median` genuinely resolves at run time in the environments R code actually runs in. Project `.Rtypes` stubs are explicitly user-authored: writing one declares "my project uses these names" — gating them on NAMESPACE entries would only make the user say the same thing twice. What NAMESPACE gating would really buy — per-file visibility for *non-default* packages, masking warnings, `library()` attach ordering — requires the full import model (typing-design §6), which remains post-beta; when that lands, gating falls out of it naturally rather than being bolted on ahead of it. Until then, the NAMESPACE surface stays what it is today: import validation (typo detection against the corpus) and the opt-in `unused-import` lint.
-
-Impact: no behavior change — this closes the fork by ratifying the current shape and pointing the future work at the import model.
-
-# Decision record: top-level mutual recursion as whole-file letrec groups; self-recursion stays tolerant
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
-
-Previous shape: any top-level recursion — self or mutual — resolved through the package interface fixed point starting members at `Unknown`, and arithmetic/joins over `Unknown` cannot sharpen, so every recursive function exported an `Unknown`-flavored scheme; an annotated consumer (`#: logical` on `is_even(4L)`) false-errored `expected logical, found Unknown`.
-
-Chosen shape, in two deliberate halves:
-- **Mutual groups (≥ 2 members) are letrec groups.** A module pre-pass detects candidates (top-level function-valued assignments, last writer per symbol), overapproximates reference edges by source-range containment, and pre-binds every member on a *mutual* cycle to a fresh variable **one level below module scope** — the load-bearing subtlety: unification level-adjusts the group's shared variables up to the placeholders' level, so if the placeholders sat at module level, finalization's generalize would quantify nothing and the export would carry a *free* variable, which `import_scheme` on a consuming document erases to `Unknown` (found empirically: the producer's table was perfect while consumers saw `Unknown`). Members stay monomorphic through the module walk (siblings constrain each other), then one finalization pass exits the group level, defaults escaping numerics, generalizes each member, and rebinds both its environment keys. `is_even`/`is_odd` now exports `<T: numeric> fn(n: T) -> logical` and consumers check.
-- **Pure self-recursion at top level keeps the tolerant fixed point.** A first implementation applied letrec to self-loops too — and the realworld corpus immediately caught the cost: the idiomatic tree fold (`if (is.list(x)) sum(sapply(x, sum_leaves)) else x`) needs the recursive type `T = double | list[T]`, which HM cannot express; monomorphic recursion pinned the parameter to `double` and the nested-list call site false-errored. The old `Unknown` is load-bearing gradual tolerance for exactly this shape, so self-loops are excluded on purpose (the earlier whole-file variant also made every top-level function monomorphic in-file, breaking polymorphic reuse — `mirror(1L); mirror("x")` — which is why the scope is cycles, not all definitions).
-
-Fixtures pin all three behaviors with the rationale in-file: the typed mutual pair (project + context-less), the tolerant self-recursive package function, and the tree fold staying clean. Local (in-function) recursion is typed by the per-assignment letrec from the earlier slice; both pipelines share `check_module_with_naming`, so differential parity held with no pipeline-specific code.
-
-Impact: correctness — mutual recursion (previously always `Unknown` + consumer false positives) now types precisely, with zero regressions across every suite and the corpus; simplicity — one pre-pass, one finalization, a shared member map; performance — a per-module candidate scan bounded by arena size, negligible. Open remainder recorded in the backlog: strict attribution for the deliberately-`Unknown` self-recursive schemes.
-
-# Decision record: parse trees are not memo values (rope-only corpus inputs, on-demand trees)
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
-
-Previous shape / source of truth: the `SourceText(f)` engine input WAS the parsed document (rope + tree-sitter tree) for every workspace file, and a `Parse(f)` query projected it. Measured at 302K LoC (`roughly debug analysis-stats`, which now reports per-phase resident-set growth exactly for this kind of diagnosis): ~398 MiB of the ~1 GiB peak was trees retained for files nobody edits (~60× the source bytes), and the server parsed the whole workspace synchronously at load.
-
-Chosen shape: a tree is a pure function of the text, so it never lives in an engine value. `SourceText` carries the rope plus an *optional* tree — open documents carry the host's incrementally-maintained tree (a keystroke still never re-parses), the corpus is rope-only — and `Key::Parse` is gone. Tree-consuming bodies (lowering, lint) and hosts call `RoughlyQueries::document_for`, which uses the input's tree or parses on demand into a small LRU (16 entries; served only when the cached rope equals the input's rope, so staleness is unrepresentable). Text-only consumers (LSP range encoding, annotation re-lexing, suppression scanning) read the rope and never materialize a tree. Whole-project IDE scans stay fast without resident trees via two `IdeDatabase` seams: `document_rope` (annotation scans re-lex text only) and `candidate_document_ids` (a conservative rope-substring prefilter — an identifier or S4 string spelled `name` implies `name` appears in the text), so references/rename/S4 navigation parse only documents that textually mention the target; the engine IDE view primes ropes and candidate trees per feature, and point queries keep their constant at-rest prime scope (benchmark witness).
-
-Also fixed in the same slice: `LoweringResult` holds its module behind `Rc` and the engine's `Lower` projects that pointer via `Stored::from_shared` (each HIR retained once, was twice), and `Expression` boxes its rare attached annotation (256 → 136 bytes per arena node).
-
-Impact: correctness — unchanged, all differential suites byte-exact; simplicity — one query fewer, one honest ownership story for trees; performance — peak resident set 1014 → 294 MiB at 302K LoC, workspace load no longer parses anything (parsing spreads into the background prime), per-keystroke behavior unchanged; incremental analysis — dependencies unchanged (bodies record the same `SourceText` read). Known cost: the first workspace-symbols query and cold `references` on extremely common names re-parse candidates on demand (bounded by the LRU; per-file symbol items stay cached across requests).
-
-# Decision record: all-files folds split into durable sub-fold + open-file overlay (OpenFiles input)
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; this was the recorded deferred lever, now confirmed by measurement).
-
-Previous shape: every all-files fold (symbol index, completion index, declared globals, type definitions, type index, both candidate orders) recorded one dependency edge per package file, so each keystroke's validation deep-walked every fold: ~11,200 memo visits per keystroke at 1248 files, growing linearly (measured by the analysis-stats typing probe, which now prints per-keystroke recompute counts and walk attribution).
-
-Chosen shape: a new `OpenFiles` input (sorted file ids; a *defaulted* input — unset executes to the empty set, so headless hosts and tests need no change) splits each fold into (a) a durable sub-fold over non-open files, keyed by `ProjectFiles` position, which reads no LOW input and therefore greens in O(1) per keystroke via the durability fast path, and (b) the public fold, which merges the durable half with the open files' per-file values by position — replaying path-order last-writer-wins byte-identically. The split is value-identical for ANY `OpenFiles` contents (a misclassified file merely lands in the other half), so it is a pure performance seam; the host invariant is that it lists exactly the LOW-durability `SourceText` files (the server derives both from `open_documents` in one funnel). The engine memo table and cycle set hash with FxHash in the same slice (query keys are small integers; the walk hashes twice per visited slot).
-
-Impact: correctness — unchanged (differential suites; fold values byte-identical by construction); performance — per-keystroke validation walk 11,244 → 278 slots and size-independent (equal at 1248 and 2496 files; the benchmark witness pins equality at 100 vs 300 files), keystroke median 6.7 → 4.9 ms at 302K LoC with recompute counts unchanged; simplicity — seven mechanical durable/public pairs with one shared pattern; incremental analysis — the open/close transition is a rare HIGH change that revalidates once, exactly like the existing durability downgrade.
-
-# Decision record: same-file backward references never route through the interface (walk-shadowed imports dropped)
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Found by a real 697K-LoC workspace report through `analysis-stats`: typecheck was 95% of a 300-second cold pass, one 170-LoC file took 4.9s, and a keystroke in an 18.5K-LoC class file took 16s.
-
-Previous shape / structural weakness: `infer_file` imported an interface scheme for *every* referenced package global — including symbols defined in the very file being inferred — and `InterfaceDeps` edges were file-granular. But the typecheck walk's winner path rebinds a symbol's global environment entry with the freshly inferred scheme at its defining assignment, so for any reference that first reads *after* that assignment ends, the imported scheme was provably shadowed dead weight. Its only observable effect was the dependency edge — which made every same-file reference chain (`h1` calls `h0`, `h2` calls `h1`, …, the dominant shape of real R packages) a fake mutual SCC: per-symbol Tarjan over a clique (~O(n²·r·log n) fetches per file) plus a fixed point re-inferring the whole file per round. A 150-LoC chain file cost 387ms; large hub files scaled worse than quadratically.
-
-Chosen shape: classify each referenced same-file-winner symbol by byte order — **walk-shadowed** (its last top-level assignment, the export/winner site, ends before its earliest non-local read starts) vs **forward** (anything else: self-recursion inside the defining range, forward references from earlier bodies, reads between repeated writes). Walk-shadowed symbols are not imported and contribute no `InterfaceDeps` edge (`walk_shadowed_definitions` in the engine's query layer, used identically by `infer_file` and `interface_deps` — the edge set must exactly mirror the fetch set or a genuine cycle would slip past the SCC routing into the accidental-cycle guard). Forward symbols keep today's exact interface path, including the deliberate self-recursion tolerance and the mutual-group letrec semantics. Semantics are unchanged by construction: a walk-shadowed import could never be observed (every read happens after the rebinding), so production needs no change and the differential stays byte-exact — verified by the full suite and pinned by a new counter witness (`backward_reference_chain_stays_off_the_interface_scc`).
-
-In the same slice: a script's type-definition environment now overlays its own declarations on the memoized `PackageTypeDefinitions` clone (`TypeDefinitionEnvironment::extend_from_module`) instead of rebuilding from every package module's view — the rebuild recorded one edge per package file per script, an O(scripts × package files) cold cost and revalidation walk (2057 scripts × 503 files in the reporting workspace).
-
-Impact: correctness — none (shadowed-import proof; all 36 suites green); performance — the chain-file pathology drops ~100× (387ms → 3.9ms at 150 LoC), a hub-shaped 59K-LoC workspace (1500-function hub + 300 chained files + 1500 scripts) cold-passes in 3.8s, keystrokes in hub files cost ~one authoritative re-inference of that file; simplicity — one classification helper, two consumers; incremental analysis — InterfaceDeps/SymbolScc graphs shrink to genuine cycles, collapsing the per-keystroke deep-validation of interface memos on hub files.
-
-# Decision record: one inference per file per revision (Typecheck owns check + exports), and per-name typo-hint memoization
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Found by re-profiling the cold pass with `analysis-stats` after the interface-routing fix: the staged diagnostics phase was 66% of a 10-second cold pass at 302K LoC, and stack sampling attributed nearly all of it to the could-not-resolve typo hint.
-
-Previous shape / duplicated work:
-1. `Typecheck(f)` and `ExportedSchemes(f)` each ran `infer_file` — the same whole-file inference, once with expression-type recording for diagnostics and once without for the exports. Every file whose exports were demanded paid two full inferences per revision; a keystroke in an open file paid both on its demand path.
-2. `unresolved_reference_diagnostic` recomputed the "did you mean" hint per reference *occurrence*: a full stub-corpus scan (~530 candidates) with four fresh `Vec` allocations per candidate inside the edit-distance DP. Workspaces that reference many unmodeled library names (the normal case — any codebase using packages without stubs) paid a multi-second cold cost and re-paid it per keystroke per edited file.
-3. `bind_module_letrec_placeholders` computed candidate reference edges by scanning the whole arena once per candidate (O(candidates × arena) per inference — quadratic in file size, on every inference of every file).
-4. `Diagnostics(f)` fetched `Typecheck` before the file-local tree readers, so inference's cross-file scheme chains evicted the file's tree from the bounded parse cache and `Lint` re-parsed the file — a hidden second parse per file on the server's cold prime.
-
-Chosen shape: `Key::Typecheck` stores `FileInference { check: ModuleCheck, exports: Shared<Vec<ExportedValue>> }` from a single recording inference (recording is collection-only — it branches no inference outcome — so folding the exports run into the recording run is differential-safe by construction). `Key::ExportedSchemes` becomes a shared-pointer projection (`Stored::from_shared`) and keeps its role as the value-eq firewall referrers cut off on; when the whole `FileInference` compares equal (same-shape body edits), propagation now stops one level earlier at `Typecheck` itself. The typo hint is split into `unresolved_suggestion` (memoized per unresolved symbol in the query group — the value depends only on the name and the set-once stub corpus) + `unresolved_reference_with_suggestion` (rendering, shared verbatim by both pipelines); `nearest_name` reuses its DP rows and candidate buffer across the whole candidate scan. The letrec edge scan is one arena pass with a binary search over the (disjoint) candidate value ranges. `Diagnostics` fetches the tree-reading file-local queries adjacently before `Typecheck`.
-
-Impact: correctness — unchanged, all differential and fixture suites byte-exact; performance — cold pass at 302K LoC 10.1s → 3.7s (package-naming stage 3.75s → 0.06s, one parse per file instead of two, one inference per file instead of up to two), keystroke median 5.4ms → 1.7ms; memory — +4 MiB at 302K LoC (each file's exports now retained once behind the shared pointer; previously the same data lived in the `ExportedSchemes` memo); simplicity — one inference body instead of two call modes on the demand path; incremental analysis — the `ExportedSchemes` seam's dependencies collapse to one edge (`Typecheck`), and `analysis-stats` now stages lint adjacently and splits the old diagnostics phase into `lint` / `package naming (+folds)` / `diagnostics (render)` so the next regression of this kind is visible at a glance.
-
-# Decision record: inference-state data model — dense entry table, hash-keyed hot maps, allocation-free free-variable walks
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by callgrind over a 7.5K-LoC hub file after the demand-path fixes: inference itself was ~25µs/LoC, nearly all of it allocator and tree churn rather than typing work.
-
-Previous shape / structural weaknesses: (1) `free_type_variables` materialized the resolved form of a type — `resolve(clone)` at every recursion level — and allocated a fresh set per node; the per-check constraint sweep additionally cloned every recorded expression type into a `Vec` first. (2) The union-find `entries` table was a `BTreeMap` keyed by a *densely allocated* id, paying a tree search per resolve step. (3) `bind_module_letrec_placeholders` answered "is this candidate on a mutual cycle" with a transitive walk per candidate — quadratic over reference chains. (4) The winner test ran two linear scans per top-level assignment (`top_level_expression_ids.contains`, `find_exported_binding`), and `exported_value_schemes` re-scanned the module per exported symbol. (5) The environment, recorded-type, and overload-selection maps were ordered maps whose order nothing reads.
-
-Chosen shape: free variables are collected by a read-only walker (`visit_unbound_variables`) that follows redirect chains without materializing the resolved form and mirrors union normalization (a member resolving to `Any`/`Unknown` absorbs the union); `entries` is a plain vector indexed by id (`EntryTable` — probe rollback truncates the tail; the id counter *is* the length, so a dangling id is unrepresentable); letrec mutual-cycle membership is one iterative Tarjan pass (SCC size ≥ 2; a self-edge alone never qualifies — semantics unchanged); `ResolutionContext` carries the precomputed top-level id set and exported-binding map, and `exported_value_schemes` batch-collects bindings in one walk; `environment`, `recorded_expression_types`, and `selected_overloads` are FxHash maps (never iterated in state; the public `ModuleCheck` fields stay ordered maps, converted once at assembly).
-
-Impact: correctness — none observable (all fixture, differential, and witness suites byte-exact; free-variable ordering preserved by sort-and-dedup where quantifier order matters); performance — hub-file whole-file inference 190ms → ~50ms (~4×) and hub keystroke 308ms → 168ms in the same session as the demand-path work; simplicity — one free-variable implementation instead of two, one dense table instead of map-plus-counter; incremental analysis — unchanged (all inside one query body). Remaining known follow-up lives in the backlog: whole-file inference and re-lowering are still the keystroke floor for huge files (the per-definition granularity design).
-
-# Decision record: per-definition interface-SCC rounds with change-driven skips
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by the 700K-LoC user workspace still spending 95% of a 179-second cold pass in typecheck after the demand-path and constant-factor rounds, with a 10-second keystroke in an 18.5K-LoC file — and by a synthetic reproduction: 10 mutually-referencing files × 60 chained functions (3K LoC) cost 3.6s of typecheck.
-
-Previous shape / structural weakness: interface edges are file-granular (they must mirror `infer_file`'s import set exactly, or a genuine cycle slips past the SCC routing into the accidental-cycle guard), and real packages reference each other's files both ways — so whole file clusters collapse into single interface SCCs. `resolve_interface_scc` re-inferred every member *file* per Jacobi round, and rounds grow with the in-SCC scheme-chain depth: O(chain depth × cluster LoC) per fixed point, re-paid on every keystroke into a member file. Additionally the per-round bookkeeping (full-table clone + a `render_type_scheme` of every member every round for the oscillation guard) and a per-symbol `SymbolScc` Tarjan that cloned every visited node's edge list were quadratic in cluster size.
-
-Chosen shape:
-- **Files that provably decompose are re-inferred per member definition** (`scc_definition_plan`: every top-level binding a single-assignment function or scalar literal — schemes fixed at their defining site — no letrec members, no captured-write re-pass, no other statement writing the top-level frame). Each member definition is checked by `check_definition_scheme` against the round's table (in-SCC), memoized `GlobalScheme`s (out-of-SCC; provably acyclic — a cross-file symbol whose file reaches back into the cycle is itself a member), and locally-resolved same-file helper definitions (fetching their `GlobalScheme` would re-enter the fixed point through the file's own `Typecheck`). Under the plan's conditions this environment equals the whole-file walk's at every read, so results match up to inference-variable identity. Ineligible files (S4 blocks, monotype accumulation, letrec groups) keep whole-file rounds.
-- **Change-driven skips at both granularities:** a unit re-infers in round k only if one of its in-SCC reads (transitive through local helpers) changed in round k-1; the round function is pure in those reads, so the previous output is reused verbatim and the trajectory is identical. Contributions are per *file*, merged in ascending file order each round — a symbol exported by several member files keeps the exact last-writer-wins value (a single symbol-keyed map let a stale exporter overwrite the winner; caught by the differential and pinned by `test_interface_scc.rs`).
-- **One inference state per fixed point** (definition checks snapshot and roll back completely, keeping per-definition variable ids deterministic) instead of a stub-seeded template clone per definition; the oscillation-guard history records value *changes* only (consecutive duplicate renders affected nothing; a pure-oscillation pin can land one round later, covered by the round-cap slack, same converged table); `SymbolScc`'s Tarjan uses dense indices and borrows fetched edge lists.
-
-Impact: correctness — differential suites byte-exact (including the multi-exporter regression the first cut introduced); performance — the cluster repro's typecheck 3.6s → 0.2s (18×) and its member-file keystroke 359ms → 34ms (10×), hub-workspace keystroke 168 → 136ms, big flat workspace unchanged; simplicity — the fixed point gains a planning phase but the convergence/pinning contract is unchanged; incremental analysis — keystrokes into cluster files re-run the fixed point at frontier cost instead of cluster cost. Known follow-ups (backlog): per-symbol `SymbolScc` is still quadratic for very large clusters (a file-level quotient-graph SCC would fix it); the `InterfaceScc` key carries the member list (heavy for huge components); the authoritative whole-file `Typecheck` remains the keystroke floor (the per-definition incremental inference design).
-
-# Decision record: `roughly check` runs on the query engine
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
-
-Previous shape / duplicated performance surface: the CLI ran production's from-scratch `Analysis` + `run_full`, whose whole-file package-interface loop has the same file-cluster blowup the engine's fixed point fixed — so `roughly check` on a real mutually-referencing package stayed slow after the server got fast, and every future engine performance win would have needed a production twin.
-
-Chosen shape: the CLI builds the same query graph the server uses — one `Engine` per check target, inputs fed in the server's `ProjectFiles` order (package files first, ascending root-relative path, so last-writer-wins winners are identical), config honored as-is — and renders each file through `assemble_engine_file_diagnostics` (`crates/roughly/src/diagnostics.rs`), the class-assembly/config-gating/type-error-rendering logic extracted from the server so the two surfaces cannot drift; suppressions apply against the source the CLI read. `run_full` remains purely the differential oracle — the one consumer that must stay engine-independent.
-
-Impact: correctness — the differential already asserts engine == `run_full` byte-exact on rendered diagnostics, so the CLI's output set is covered by construction (all 146 `roughly` tests, including the full CLI contract suite, pass unchanged; a diagnostic-heavy workspace produces the exact count the engine stats report); performance — the CLI inherits every engine property (per-symbol firewalls, per-definition SCC rounds, memoized typo hints, one parse per file): cluster repro 1.34s → 0.28s, hub-shaped workspace 2.95s → 1.90s (now parse-bound), and the gap grows with workspace size; simplicity — one fast path instead of two, one shared diagnostics assembly; incremental analysis — unaffected (the CLI engine is one-shot).
-
-# Decision record: target architecture — greenfield rewrite on a hand-rolled parser, rowan-style syntax, and salsa
-
-**Status:** decided (user-approved direction). This record is the contract for the rewrite; the phase gates below are mandatory. Amended after an adversarial review of this record (user-ratified): parity scope for syntax diagnostics, the sub-file incrementality mechanism, item granularity, salsa risk terms, the gate set (memory / LSP behavior / formatter), and the legacy-retention terms all reflect the amendments.
-
-## Why
-
-The current stack's load-bearing limits are structural: tree-sitter caps syntax-error quality (opaque ERROR nodes), costs ~8µs/LoC (derived: ~2.5s of the 3.7s cold pass at 302K LoC is parse) and 60× source-size trees (measured via `analysis-stats`, forcing the rope-only/LRU machinery), and cannot see `#:` annotations (forcing the re-lexing subsystem over a reconstructed buffer); the analysis unit is the whole file (keystroke floor = whole-file re-inference; file-granular interface edges manufacture cluster SCCs); `CoreType` is a deep-cloned enum (allocation churn caps inference near a measured ~6µs/LoC; interned types are projected — external precedent, not yet measured here — to reach ~1); the engine is single-threaded by design. Each was diagnosed and mitigated in place; the mitigations are workarounds around the architecture, not the architecture.
-
-## Target shape
-
-New crates, written from scratch; the crate graph enforces the layering (crate boundaries are the compiler-checked analog of "make illegal states unrepresentable"):
-
-- `crates/syntax` — hand lexer (`#:` annotations lexed as structured trivia and parsed as first-class nodes with real spans), hand recursive-descent/Pratt parser, rowan green/red trees (lossless, width-only → position-independent subtrees; resident — the tree-bytes-per-source-byte ratio is *measured* on the real corpus at Phase 1 and feeds the memory gate; "~2× source" is an unsourced estimate until then), typed AST views, optional statement-level incremental reparse (an optimization, not load-bearing — see the corrected incrementality note below and in the appendix), hand-tuned recovery and Elm-quality syntax errors. Annotations are ONE internal concept with pluggable surface *spellings*, but the pluggability seam lives at annotation **recognition**, not the lexer: `#:` is structured trivia, while a valid-R inline form — R ≥ 4.4 ships the experimental `declare()` base primitive (runtime no-op; Posit's quickr already annotates with `declare(type(...))`) — is ordinary call syntax recognized at lowering. Depends on nothing semantic.
-- `crates/semantics` — the salsa database and all queries: per-**item** item tree and HIR with span maps — the analysis unit is the *item*, NOT the top-level statement: nested definitions are items too (fields/methods inside class-constructor calls such as `R6Class`/`setRefClass`/S4 blocks, and functions defined inside function bodies), otherwise R's common giant-single-statement OO files degenerate straight back to whole-file granularity; item identity hashes kind + name (+ parent, with an index disambiguator), never bare position or index, so inserting an item does not shift unrelated items' identities (copy rust-analyzer's *current* `AstIdMap` design — its pre-2025 index-based one had exactly the shifting problem). Naming; **interned/hash-consed types** (id equality, no deep clones); per-item inference with whole-file fallback for genuinely coupled files (letrec groups, captured-write re-pass, monotype accumulation — the `scc_definition_plan` eligibility analysis generalizes, and its recorded blockers — letrec-member exports, `top_level_capture_repass`, whole-file substitution coherence for recorded expression types — must be *resolved by the Phase 2 design*, not assumed away); **symbol-granular** interface resolved via salsa fixpoint cycles (kills fake cluster SCCs at the root; mapping the contract-pinned fixed-point semantics — rounds bounded by global count, period-2 oscillation pinning to `Unknown`, last-writer-wins winner order, walk-shadowed routing, letrec groups, self-recursion tolerance — onto `cycle_initial`/`cycle_fn` is a **named Phase 2 design deliverable**: salsa hard-panics at 200 iterations, so legacy's pin-and-continue must live inside the cycle function and reaching salsa's cap is a bug); parallel prime + snapshot reads; plus a plain from-scratch wiring of the same cores as the permanent differential oracle. Depends on syntax + salsa (pinned version; risk terms in the appendix).
-- `crates/ide` — features over semantics snapshots; sees only the query API. `crates/format` — formatter on syntax only (compiler-enforced). `crates/roughly` — LSP server + CLI (lands at cutover, taking the `roughly` bin name).
-- Position-independence note (corrected by the adversarial review): width-only green subtrees make an untouched item **structurally equal** across edits elsewhere in the file, so per-item derived values (item tree, HIR) compare equal and salsa's early cutoff prunes downstream work — **value equality, not pointer identity, is the mechanism** (rowan's green `Eq` is structural with a pointer fast path; its node cache dedups only ≤3-child nodes, so a from-scratch reparse shares no large subtrees; rust-analyzer's barriers are likewise `ItemTree`/`AstIdMap` value equality). Statement-splice reparse of open documents can make those compares pointer-fast, but it is an optional optimization: parse stays a pure per-file salsa query and correctness never depends on splicing.
-
-**Legacy:** the existing crates are renamed and grouped under `legacy/` — `roughly` → `legacy/roughly-legacy`, `analysis` → `legacy/analysis-legacy`, `engine` → `legacy/engine-legacy` — with **package names suffixed but `[lib]`/`[[bin]]` target names unchanged** (lib `analysis`, lib `engine`, bin `roughly`), so zero source churn and the legacy stack keeps building and shipping untouched. It is frozen except for bug fixes: its roles are (a) the shipping product until cutover, (b) the cross-implementation oracle, and (c) the **benchmark baseline**. **User-directed retention terms:** the legacy stack is kept in-tree as reference and benchmark **until the rewrite is complete — every phase gate, Phase 4 included, met** — and only then deleted in one final sweep. **No code is ever shared or abstracted between the two stacks** (user-directed): duplication is deliberate and committed; introducing an abstraction to share code with legacy is a mistake even where the duplication is verbatim. `legacy/fixtures` (harness) stays with legacy; the new stack writes its own harness from scratch but reuses the fixture *data* files where they encode the semantics contract. The data files live inside the legacy crates' `tests/` trees, so everything the new stack keeps — fixture data, corpus manifests, golden baselines — must be **migrated into the new crates before the final deletion sweep**, and the Phase 2 fixture triage classifies every suite as semantics-contract (reused as-is) vs parser-artifact (re-baselined against the new parser).
-
-## Phases and gates (each phase = one full-shape change, landed green)
-
-Phases are dependency order and gate definitions, not risk staging — no phase waters down scope, none is an evaluation checkpoint, and a session runs through as many as it can (see Appendix 2, "why the plan has phases").
-
-- **Phase 0 — syntax contract first.** Build the corpus, the oracles, AND the fuzzing harness before the first line of parser code (see testing doctrine below) — fuzzing is a from-day-one instrument, not an afterthought. Gate: corpus assembled, including **tree-sitter-r's full parser test corpus imported AND converted into the fixture-harness format** (a hard requirement, user-directed: the new parser's suite is a superset of tree-sitter-r's); round-trip/acceptance harnesses run against tree-sitter as baseline; the fuzz harness (never-panic + always-lossless invariants) builds and runs against a stub parser, ready to fuzz every parser increment from its first commit.
-- **Phase 1 — `syntax`.** Gate: whole corpus green (converted tree-sitter-r suite included); byte-exact lossless round-trip everywhere incl. under fuzzing; acceptance parity with tree-sitter as *baseline* with **R's `parse()` as the referee** — where the two disagree, R wins and the case goes on a committed, adjudicated divergence allowlist (tree-sitter-r is a baseline, not an oracle; its parse bugs must not be baked into corpus expectations); ≥5× tree-sitter batch parse speed on the pinned real-world corpus, methodology committed with the bench (this is also where the asserted ~0.5–2µs/LoC becomes a measurement); zero panics under fuzzing; golden error-message suite established, and the messages must be **strictly better** than the tree-sitter-derived legacy wording — reviewed side-by-side (user requirement: not parity, improvement); tree bytes-per-source-byte measured on the real corpus (feeds the Phase 2 memory gate).
-- **Phase 2 — `semantics` (+`ide`, `format`).** Gate, with the parity scope made explicit (the earlier byte-exact-everything wording was unachievable — it contradicted Phase 1's better-errors goal): **semantic diagnostic classes** (naming, type, lint, strict) byte-exact against the untouched legacy stack over the legacy differential edit streams and fixture suites **on inputs both parsers parse identically**; the **syntax-diagnostic class is excluded from byte-exactness by design** and held instead to the golden error-message suite plus the policy contract ("a broken region reports its syntax error and nothing else", typing-reference §Syntax errors); on **malformed input** the differential asserts the policy contract and semantic-class agreement modulo recovery differences, never byte equality; any well-formed-input divergence traced to a legacy parse defect goes on the committed allowlist with justification. Per-position IDE parity for all 8 features incl. cross-file, same scoping. **Fixture triage** completed (semantics-contract vs parser-artifact suites). **Formatter gate:** the legacy golden suites, idempotence tests, and the byte-for-byte raw-string rule ported; output compared file-by-file against the legacy formatter over the corpus — divergences individually reviewed and either fixed or recorded as deliberate improvements, never silent. **Memory gate:** resident set measured at 300K LoC, linear in LoC, within 1.5× of the legacy stack on the same corpus (excess is diagnosed and justified in this record; salsa per-query `lru` and interned-value GC are the first levers). The **fixed-point-semantics mapping deliverable** (see the `semantics` crate bullet) designed, implemented, and covered by the differential. Legacy perf witnesses met or beaten — wall-clock budgets transfer verbatim; exec-counter witnesses are re-expressed as equivalent salsa execution-count witnesses, since the memo structures differ.
-- **Phase 3 — cutover.** New `crates/roughly` takes the bin name; legacy's `[[bin]]` target is renamed away in the same change (two same-named bins never coexist) but the legacy **crates stay in-tree** as frozen reference/benchmark until Phase 4 completes (user-directed). Differential reborn as semantics' from-scratch wiring vs its salsa wiring — an *invalidation* oracle only: it shares query bodies with the incremental path, so it is structurally blind to shared-rule bugs (the exact limitation Part B's analysis recorded); the **fixture suites are the semantics net** from here on. Gate: full workspace green; the **new LSP behavioral suite** green — a from-scratch port of `test_lsp`'s coverage: UTF-16 incl. non-BMP, latest-edit-wins cancellation, coherence-panic death, watched files, config reload + config-error diagnostics with toml spans, semantic tokens incl. `#:` type-notation coloring, suppression comments, signature-help label offsets; CLI contract suite green; memory re-measured at the ~700K-LoC scale; the analysis-stats budgets **committed as CI-checkable witnesses** (the MEMORY.md quality-bar numbers as artifacts, not prose — until then "budgets met" is unfalsifiable).
-- **Phase 4 — capitalize + final deletion.** Statement-cost keystrokes, multi-core cold pass (preceded by the parallel-cycle stress test in the doctrine), error-message polish, CI perf gates pinned to the quality-bar budgets — all measured against the retained legacy stack as the benchmark baseline. When every gate holds: run one final full-corpus cross-stack parity pass and **archive its report** (the cross-implementation window is the strongest oracle this project will ever have, and it closes here), complete the keep-list migration out of the legacy trees, then delete the legacy crates in one sweep.
-
-## Testing doctrine for `syntax` (mandatory)
-
-The parser is the foundation of everything; it must be **extremely well tested — more is better, and duplicated coverage is welcome, never pruned for elegance**. Layers, all of them, not a selection: (1) tree-sitter-r's parser corpus imported wholesale **and converted into the fixture-harness format** (user requirement: the suite is at least tree-sitter-r's, expressed as fixtures); (2) a real-world parse corpus — R's base library sources plus top CRAN packages — checked for lossless round-trip and acceptance parity; (3) exhaustive hand-written per-construct suites (every operator, precedence pair, call form, literal form, string/raw-string/escape variant, `#:` annotation form, and every error-recovery scenario) with golden trees and golden error messages; (4) property tests (token cover = input, node ranges nest, reprint == input); (5) fuzzing — random bytes and structure-aware mutations — with never-panic + always-lossless invariants, wired up in Phase 0 and run against **every** parser increment from the very first (a parser that only handles literals gets fuzzed the day it exists), continuously thereafter (a corpus-seeded fuzz run is part of the phase gates, and CI runs a bounded fuzz pass); (6) statement-reparse equivalence (incremental result tree == from-scratch tree for randomized edits); (7) acceptance cross-check against R's own parser where an R installation exists (local-only, like every R-requiring test). Redundancy across these layers is a feature: the same construct covered five ways is the point.
-
-## Constraints carried over
-
-Differential discipline is non-negotiable at every phase; the typing semantics contract (`reference/type-system.md`) is unchanged by the rewrite; work lands directly on `main` (user directive); no new pull requests; full-shape invasive changes with fallout fixed in one sweep (see AGENTS.md "Do not think like a human"). Docs are phase deliverables, not afterthoughts: `architecture.md` carries a status note now (the in-house engine is the *current shipped* architecture; this record is the decided direction) and is rewritten at cutover; `structure.md` is replaced when `analysis-legacy` stops being the shape of the code; `testing.md` gains the new harness contract when that harness exists — each in the same session as the change it documents (AGENTS.md).
-
-## Appendix: operational notes for the rewrite (so no session re-derives them)
-
-- **Why statement-level reparse instead of tree-sitter-style GLR incrementality:** a hand parser is *estimated* at ~0.5–2µs/LoC (external precedent; no hand parser exists here yet — the Phase 1 bench converts this into a measurement) against tree-sitter's ~8µs/LoC here (derived from the recorded cold pass: ~2.5s of 3.7s at 302K LoC is parse), so even a full reparse of an 18K-LoC file is ~20ms; statement-level splice bounds keystrokes below that. The deep reason for rowan's width-only green nodes (corrected): an unchanged item's subtree is **structurally equal** after edits elsewhere in the file — position independence is what makes value equality hold across shifted offsets — so per-item derived values compare equal and salsa's early cutoff prunes downstream work. Pointer identity is NOT supplied by a from-scratch reparse (rowan's node cache dedups only ≤3-child nodes) and is not what rust-analyzer relies on either (its barriers are `ItemTree`/`AstIdMap` value equality); splice can upgrade the compares to pointer-fast for open documents, as an optimization only.
-- **Why salsa rather than extending the in-house engine:** parallel snapshot reads + write-cancellation and first-class fixpoint cycles (proven in rust-analyzer and Astral's `ty`, whose type inference uses salsa fixpoints) are precisely the two things we would otherwise hand-roll; a concurrent red-green memo core is the one component not worth building in-house. The in-house engine's query *decomposition* (per-symbol firewalls, names-only cutoffs, durable/open fold splits) is the asset that transfers. **Salsa risk terms (recorded so they are managed, not rediscovered):** pin the salsa version and upgrade deliberately — the public API churns hard and often (multiple breaking releases per year through 2026); vendoring/forking is the exit hatch, exactly as argued for rowan. Fixpoint non-convergence is a **hard panic at 200 iterations** — legacy's pin-to-`Unknown` lives inside the cycle function, and reaching salsa's cap is a bug, never a fallback. Interned-value GC is young (landed 2025) and both rust-analyzer (~4× memory on its salsa migration until tuned with per-query `lru`) and ty (multi-GB blowups) hit real memory cliffs — hence the Phase 2/3 memory gates, with per-query `lru` and interned GC as the first levers. Parallel + fixpoint iteration had real hang bugs (fixed upstream in 2025); a parallel-cycle stress test is part of the doctrine and gates Phase 4's multi-core work.
-- **Interned types are the deepest remaining inference win:** legacy `CoreType` is a deep-cloned enum; hash-consed id-based types (rustc/`ty` style — equality is id compare, substitution cached) are the difference between the measured ~6µs/LoC and a *projected* ~1µs/LoC ceiling (external precedent, proven or refuted at the Phase 2 perf gate). Design them in from the start; do not port the clone-based representation.
-- **Limiting factors, ranked** (what the rewrite is for): (1) file-granular analysis, (2) type-representation churn, (3) parse cost/tree size, (4) single-threadedness — (4) is a ÷cores multiplier while (1)–(3) are asymptotic or large per-op wins; the ultimate ceiling is R's dynamic semantics (a semantics budget, not infrastructure).
-- **Inline annotations (Python-style), future path:** annotations are ONE internal concept with pluggable surface spellings, and the seam is annotation *recognition* (lowering), not the lexer. Today `#:` (structured trivia); near-term option: runtime-neutral valid-R forms — R ≥ 4.4 ships `declare()` as an experimental base primitive (runtime no-op; quickr already uses `declare(type(...))`) — recognized as first-class annotations from ordinary call syntax; a true superset dialect (TypeScript road: inline syntax + strip step) stays a product decision, kept open by the pluggable design — never an architectural blocker. `#:` files must always remain valid ordinary R.
-- **Corpus mechanics:** tree-sitter-r's parser corpus lives in its GitHub repository (`test/corpus/`, MIT) — fetch from the repo, not the crates.io package (which may omit tests). Real-world corpus = R base library sources + top ~100 CRAN packages, stored under a **gitignored** corpus directory with a **committed manifest + fetch script** in `scripts/` (the fetch needs outbound network; run it wherever that exists). The R-`parse()` acceptance cross-check needs a local R installation — run it locally, skip gracefully elsewhere; because CI has no R, the Phase 1 acceptance-divergence allowlist is adjudicated against R once locally and then committed/pinned.
-- **Known-tricky lexer/parser cases to cover exhaustively from day one:** raw strings (`r"(...)"` / `R"[...]"` — legacy formatter has a byte-for-byte rule for a reason), escapes, `%op%` operators, backtick names, multi-line `#:` annotation blocks (consecutive `#:` lines stitch into one annotation region), statement-boundary/newline sensitivity (R's newline-vs-operator continuation rules), `]]` vs `] ]` disambiguation in nested indexing (`x[[y[1]]]`), the top-level `else`-after-newline error (legal inside braces, a parse error at top level — R language definition), `->`/`->>` assignment, `=` as assignment vs named-argument (context-dependent), unary-minus precedence (`-2^2` is `-(2^2)`), literal forms (hex, `L` integer, `i` complex), and `\(x)` lambdas (R ≥ 4.1) — these are where R parsers get subtle.
-- **Bin-name handover:** `roughly-legacy` keeps `[[bin]] name = "roughly"` until the Phase 3 cutover, where the new `crates/roughly` takes the bin name and legacy's bin target is renamed away in the same change (two same-named bins never coexist). The legacy *crates* stay in-tree as frozen reference/benchmark until the Phase 4 final sweep.
-- **What is frozen vs reused:** legacy crates frozen (oracle + shipping product + benchmark baseline; bug fixes only; never abstracted over or shared with the new stack — user-directed). The fixture *data* files encode the semantics contract and are reused — after the Phase 2 triage (semantics-contract vs parser-artifact) and after migrating out of the legacy `tests/` trees before the final sweep. The differential edit-stream **generators are legacy-API-coupled code, not data**: the generation logic (seeds, source alphabets, edit distributions) is re-implemented against the new stack's API — only the logic ports. `reference/type-system.md` is unchanged by the rewrite.
-
-## Appendix 2: recorded answers to direct user questions
-
-- **Dramatically better error messages are an explicit GOAL of the new parser, not a side effect** — for R syntax generally and for `#:` type annotations specifically. Recursive descent knows what it was parsing at every point, so the bar is: expected-token sets ("expected `)` or `,`"), paired-delimiter pointers ("unclosed `(` opened here" with both spans), statement-anchored recovery (one broken construct never poisons the file), and — because annotations are first-class grammar — real type-syntax errors with exact token spans *inside* `#:` comments ("expected a type after `|`"), replacing the coarse re-lexed lowering diagnostics of the legacy stack. Wording is pinned by the golden error-message suite (Phase 1 gate) and held to the AGENTS.md Elm/Rust diagnostics goal. **User directive (recorded verbatim in effect):** parity with legacy syntax-error output is explicitly NOT the bar — the messages must be strictly *better*; and the new parser's test suite must be at least tree-sitter-r's, ideally expressed in the fixture setup (hence the Phase 0 conversion requirement).
-- **Parsing is a per-file salsa query; do not try to make salsa statement-aware at the parse level.** File text is the salsa input, `parse(file)` the query: an edit re-parses only that file. Sub-file salsa invalidation of parsing is a chicken-and-egg (statement boundaries are only known *after* parsing) and buys nothing: the hand parse is the cheapest stage (est. ~1µs/LoC; a full 18K-LoC reparse ≈ 20ms), statement-level reparse is at most an *internal* optimization of the parse step, and the incrementality that matters happens one level down — an untouched item's subtree in the new tree is **structurally equal** to the old one (width-only greens make equality hold across shifted offsets), so per-item downstream queries (item tree, HIR, inference: the expensive stages) produce equal values and salsa's early cutoff prunes them. Same conclusion rust-analyzer reached (its barriers are `ItemTree`/`AstIdMap` value equality over full from-scratch reparses).
-- **Why rowan rather than a hand-rolled tree (the parser is hand-rolled either way):** rowan is not a parser — it is the tree data structure the hand-written parser emits; nothing about parsing is delegated. The green/red design beats a classic typed AST (structs with spans) for four load-bearing reasons: (1) losslessness — every byte including trivia lives in the tree and reprints exactly, and `#:` comments *are* type syntax here, so the formatter, byte-exact round-trip, and annotation tooling come from the representation instead of side tables; (2) error resilience — every parse yields a tree with error nodes local to the break, and the typed AST layer is `Option`-returning views, so consumers never carry a parallel broken-code data model; (3) position independence — width-only green nodes make untouched statements structurally identical across edits (pointer-identical too when splice reparse is used), the property per-item salsa cutoffs are built on (a span-carrying AST shifts every span after any edit, killing sub-file incrementality at the root); (4) structural sharing — immutable refcounted subtrees with builder-level dedup of identical small nodes keep the resident tree ~2× source bytes. Use the *crate*, not an in-house clone of the design: the value is subtle already-hardened machinery (thin-DST layout, red cursors with lazy offsets, node caching, splicing) proven for years in rust-analyzer; hand-rolling reproduces that code minus the hardening with zero design freedom gained, and rowan is small and dependency-free enough to vendor/fork if divergence is ever needed (Biome forked it — precedent for both maturity and the exit hatch). Acknowledged cost: rowan traversal is dynamically kinded and slower than direct structs — which is why inference never walks it; the checker runs on per-statement HIR, rowan serves the fidelity layers (IDE, formatter, refactorings).
-- **Why the plan has phases (they are not de-risking).** De-risking cuts scope to make failure cheap — MVPs, evaluation checkpoints, fallback ramps, user check-ins. The phases do none of that: every phase goes directly to full shape (Phase 1 is the complete parser, not a subset spike), there are no retreat ramps or reassessment gates, legacy is retained only as a parity-measurement instrument and benchmark baseline (never a fallback) and is deleted once every gate — Phase 4 included — holds, and gate failures are fixed forward. The phases are three mechanical things: topological dependency order (`semantics` consumes syntax trees; parity needs both stacks alive; a corpus must exist before it can be green), the per-logical-unit definition of "green" (each phase is one full-shape change landed green, per AGENTS.md), and diagnosis power (with the syntax layer already proven lossless/acceptance-exact, any Phase 2 parity failure is a semantics bug by construction — an entangled bring-up would leave the differential oracle unable to bisect). Phases are not pacing: a session runs through as many gates as it can in one sweep; work may overlap phase boundaries so long as gates land in order.
-
-# Decision record: cross-stack differential parity — range containment and the oracle-divergence allowlist
-
-**Context.** The Phase 2 gate holds the rewrite's semantic diagnostic classes (`type`, `unresolved`, `unused`) byte-exact against the legacy oracle. The first cross-stack differential run surfaced two structural tensions: (a) the rewrite frequently blames a *tighter* range than legacy for the same finding (the value expression instead of the whole assignment, the callee instead of the whole call) — which is the repo's stated diagnostics goal, not a defect; (b) legacy emits findings that are simply wrong (forward-captured bindings flagged unresolved and unused) where the rewrite's naming pass is correct.
-
-**Decision.**
-- **Range containment counts as parity.** Two findings match when class and message are byte-identical and the new range equals or lies inside the legacy range. Ranges strictly tighter than the oracle's are an intended improvement and never a divergence; a *wider* or shifted range still fails. Message text and finding **count** remain byte-exact.
-- **Oracle defects go on a committed allowlist, per case, with the reason.** The harness (`legacy/differential/tests/test_differential.rs`) fails on any unexplained divergence and also fails when an allowlisted case starts matching (stale entries must be removed). Current entries: the three forward-capture scoping cases where legacy reports false unresolved/unused findings.
-- **Diagnostic wording is adopted from legacy verbatim during the rewrite** for the compared classes (call-matcher arity and named-argument errors, annotation-parameter mismatch, the `@new` representation phrasing, the `#:` block-form refusals). Wording improvements are deliberately deferred to after cutover so parity stays byte-exact while the oracle exists; range precision is the one axis allowed to improve now (covered by containment).
-
-**Consequences.** The differential is a hard gate from its first commit (`0` unexplained divergences), not a triage report. The `@new` value check reports the applied representation as the expected type (the value is checked against the representation; naming the nominal would restate the `@new` line). Invalid `#:` blocks (mixed compact/expanded/definition forms) carry no typing payload — the refusal is the block's only contribution, matching legacy's drop-the-block behavior, and the three legacy refusal wordings are reproduced exactly.
-
-# Decision record: fuzzing is pipeline-wide, from each stage's first commit (user directive)
-
-**Context.** The testing doctrine in the greenfield-rewrite record made fuzzing mandatory for the `syntax` crate from day one. The user extended this: fuzzing must cover the OTHER pipeline stages too — it is never an afterthought bolted on later, for any layer.
-
-**Decision.** Every pipeline stage gets fuzz + property coverage the day it exists, alongside its fixtures: lowering, naming, inference, diagnostics, the salsa incremental layer, and later the formatter and IDE features (formatter: idempotence + losslessness under fuzz; IDE: never-panic per cursor position). The semantics harness (`crates/semantics/tests/test_fuzz.rs`) is the template: never-panic across the full pipeline (salsa fixpoints must converge), determinism across fresh databases, diagnostic-range geometry, and incremental-equivalence (edit through the setter == fresh build — the red-green invariant), over a generator biased toward semantically live shapes plus a token-soup robustness arm. `FUZZ_ITERS` scales budgets; a bounded pass runs in the default test suite so CI fuzzes on every change, and `fuzz_deep` variants carry the long runs.
-
-**Validation.** The first semantics fuzz runs found two real crashes within seconds — a non-converging salsa cycle (a growing self-referential type riding the iteration cap into a panic; the legacy oracle crashes on the same input) and inference variables leaking through exported schemes into foreign tables — both of the class that only surfaces "in the large", exactly what per-stage fuzzing exists to catch early.
-
-# Decision record: wording is free to improve — the oracle pins findings, not prose (user directive)
-
-**Context.** The differential-parity record adopted legacy diagnostic wording verbatim so the semantic classes could be compared byte-exact, deferring improvements to after cutover. The user lifted that constraint: messages need not copy the oracle — improving them is welcome.
-
-**Decision.** The cross-stack differential matches findings on **class + range containment only** (a legacy finding pairs with a distinct new finding of the same class whose range is equal or inside legacy's; counts must pair fully). Message text is not compared; pairs whose messages differ are collected into an informational "wording differences" section of each report, so deliberate improvements stay visible and accidental regressions are still noticeable. The oracle therefore pins **which findings exist and where** — existence, class, position, and count — which is the semantically load-bearing part. Wording already adopted from legacy stays (no churn for its own sake); future wording follows the repo's Rust/Elm diagnostics bar instead of the oracle, and the golden fixture suites are the wording contract.
-
-**Consequences.** Divergences that were pure prose differences reclassify as matches; remaining corpus divergences are genuinely semantic (missing/extra findings or misplaced ranges). The fixture suites — which render the new stack's own messages — remain the authority on wording quality.
-
-# Decision record: deep-resolve is memoized per binding epoch with cycle-cut-to-Unknown (replacing depth truncation)
-
-**Context.** `InferenceTable::resolve` (the deep resolver in `crates/semantics/src/infer.rs`) walked the interned type structure recursively with only a depth-64 cap as protection. Interned types form a DAG — shared subtrees appear once in memory but were re-resolved once per occurrence, and a self-referential binding (a variable whose binding transitively contains itself, or a self-referential alias) expanded as a tree up to the cap. On the real-file corpus (~507K lines) this was measured at 397 million inner resolve steps — resolve alone cost more wall time than the legacy stack's entire pipeline — and the depth cap also *truncated meaning*: past depth 64 a type silently stayed unexpanded, a position-dependent semantics no cache could be layered onto.
-
-**Decision.** Deep-resolve is a memoized walk over the interned DAG with explicit cycle detection:
-
-- **Cycle cut:** the walk carries a `visiting` stack of variables under expansion; re-encountering one is an infinite type and resolves to `Unknown`, matching the pin-to-Unknown doctrine used everywhere self-reference grows (salsa fixpoint cap, loop widening). Alias expansion keeps a depth guard as a pure resource backstop, not a semantics.
-- **Per-node memo, clean-flag discipline:** results cache in `resolve_cache` keyed by the interned type, but only CLEAN subtrees — those with no cycle cut beneath — are stored, because a node containing a variable currently being expanded resolves differently at top level.
-- **Epoch invalidation:** every binding mutation and rollback bumps an epoch counter; the cache self-clears on epoch mismatch. No entry can ever serve a stale binding, and the common case (many resolves between mutations, e.g. rendering a whole item's diagnostics) hits warm.
-
-**Impact.** Corpus inner resolve steps 397M → 4.2M (linear in corpus size); resolve wall 30.8s → 0.3s; whole new-stack corpus pass 53.2s → 12.7s, beating the legacy stack's 13.9s. Semantically the change replaces silent depth truncation with the established cycle semantics — infinite types resolve to `Unknown` at the point of self-reference instead of arbitrarily deep expansion — which the fixture, fuzz, and both differential suites confirm is observation-equivalent everywhere covered. `RESOLVE_CALLS` stays as a standing instrument: near-linear step counts are now an invariant the perf harness can watch.
-
-# Decision record: Phase 3 cutover — the new stack is the product
-
-**Context.** The greenfield-rewrite plan's Phase 3: a new `crates/roughly` takes the product surface (LSP server + CLI) on the syntax/semantics/ide/format stack, with the legacy crates staying in-tree as oracle and benchmark.
-
-**Decision (executed).**
-- The new `crates/roughly` owns the `roughly` lib and bin names; the legacy targets renamed to `roughly_legacy`/`roughly-legacy` in the same change that created the new bin (two same-named targets never coexist). Workspace `default-members` now points at the new crate, so the bare cargo commands and the active CI gate the new product.
-- **Server threading and cancellation:** one async-lsp frontend thread and one worker thread owning the salsa database. Latest-edit-wins rides salsa's cancellation token: `notify_edit` cancels before enqueueing; a flip is consumed by whichever in-flight query it kills, and every subsequent job starts on a fresh storage-handle clone. Chosen over a hand-rolled cooperative flag because salsa checks its token at every operation — no instrumentation of query bodies needed.
-- **The publish waves gate on a real query split.** `parse_stage_diagnostics` (syntax/annotation classes) exists as its own salsa query precisely so the first wave never computes naming or type checking; filtering the full set post-hoc would pay the whole cost and only hide it. `file_diagnostics` builds on the same query, keeping the first wave a faithful subset by construction.
-- **The host assembly is shared** (`crates/roughly/src/diagnostics.rs`): config gating, per-file typing modes, strict escalation, lints, and suppression comments run identically for the server's publish path and `roughly check`, so the two surfaces cannot drift.
-- Lints were ported to `semantics::lints` (the `missing-comma` lint retired: the hand parser rejects `f(1 2)` as R does — the lint compensated for tree-sitter over-acceptance; its config key stays accepted, inert). `globalVariables` suppression and stub-loader problem reporting (`stub_source_problems`, incl. `@masked` variadic validation and unknown-nominal checks) were built during the port after the contract suites exposed them as gaps.
-- **Deliberately not ported:** the legacy CLI's `debug analysis-stats`/`debug index` (the measurement instrument on the new stack is `test_stats`), and per-diagnostic related locations (duplicate top-level binding notes) — the new `Diagnostic` has no related-location model yet; recorded as open work, not silently dropped.
-
-**Validation.** The CLI contract suite (27 tests) and the LSP behavioral suite (59 tests, driving the real binary over stdio) pin the surface; the full workspace, both release differentials, clippy, and fmt stay green; `stats_witness` asserts the perf/memory budgets as CI-checkable thresholds.
-
-# Decision record: canonical per-group interface fixpoint — cyclic schemes are forcing-order-independent
-
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by a corpus-scale finding from the multi-core instrument: 64852 findings when per-file phases were pre-forced versus 64835 when file diagnostics were forced directly — both counts stable across runs and thread counts (one worker equals four exactly), so the delta was never a parallelism race but query-order semantics.
-
-Previous shape / structural weakness: cyclic package-interface groups resolved through salsa's dynamic cycle recovery alone (`item_check_recover` / `global_scheme_recover`): whichever member was queried first became the cycle head, the fixpoint iterated from that head, and a group still changing at the round cap pinned *from that head's perspective* — so which items lost their types to `Unknown` depended on which query happened to arrive first. Every individual forcing order was deterministic, but hover-then-check, check-then-hover, and differently-ordered cold passes could disagree with each other. The legacy stack's whole-package rounds were entry-order-independent; the rewrite's per-item cycle heads were not.
-
-Chosen shape (in `crates/semantics/src/semantics.rs`):
-- `interface_sccs(files)` — the static interface-reference graph: an edge from each named package definition item to the winner of every global name its body reads (`non_locals` plus validated `namespace_reads`), condensed by one iterative Tarjan pass in canonical order (project file order, item order within a file). Only *cyclic* groups (more than one member, or a self-edge) are recorded.
-- `scc_schemes(files, group)` — the canonical fixpoint of one group: every member starts at the tolerant `Unknown` scheme; each round re-checks every member against the *previous* round's table (Jacobi — one propagation hop per round, so within-round order cannot matter either); convergence is scheme-table equality; a group still changing at the round cap (16, shared with the salsa backstop) pins **all** members to `Unknown` — the only entry-order-free pin. Member checks run `check_item_with_annotation` directly against an overlay environment (`SccGlobals`: round table first, ordinary global resolution otherwise; stub overloads suppressed for member names) — never through `item_check` — so no salsa cycle forms.
-- `item_check` **adopts** the canonical scheme as a member's exported scheme (single source of truth: export, hover, and every downstream reader see the fixpoint value, not the one-hop-ahead re-derivation the item's own check just computed), and `global_scheme` reads `item_check` only. The salsa cycle recovery stays as a backstop for reference edges the static graph cannot see.
-
-Impact: correctness — forward, reverse, and phase-pre-forced forcing render identical diagnostics (regression test `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`; the corpus instruments now agree at 64835 findings for both forcing shapes), and the growing-self-reference pin stays `Unknown`; simplicity — the fixpoint is an ordinary tracked query over an explicit graph instead of emergent salsa cycle-head dynamics; performance — the sequential corpus pass *improved* 12.7s → 10.1s (canonical rounds replace salsa's per-head cycle re-iteration), while keystrokes in a 53K-line package pay ~3ms more per edit (~8%; the once-per-revision validation walk of `interface_sccs`, whose dependency surface is every item's naming — narrowing that surface to a per-item read-name projection is the known lever if it ever matters); incremental analysis — the graph derives from naming only, so edits that leave every member's read-set unchanged backdate `interface_sccs` and the group fixpoint re-runs only when a member's check output changes.
-
-# Decision record: no third constraint kind — two-flexible comparisons stay unconstrained
-
-**Status:** decided and ratified (agent-owned decision under the delegated ownership mandate). This resolves the recorded design fork on two-flexible-operand comparisons without tripping the traits tripwire.
-
-Question: `function(a, b) a < b` — should comparing two flexible operands constrain them (to each other, or to a new "comparable" constraint kind covering numeric/`character`/`logical`)?
-
-Decision: **no.** Two flexible comparison operands stay fully unconstrained — the function infers as `<T, U> fn(a: T, b: U) -> logical` and cross-family calls are accepted. A flexible operand is still constrained to numeric when its partner is concretely numeric (existing rule), and two concretely-known families must still match.
-
-Rationale:
-- R's runtime comparison coerces across atomic families (`1 < "2"` is legal, character-compares `"1" < "2"`), so any constraint tying flexible operands to a family or to each other rejects legal programs the checker cannot prove wrong.
-- A "comparable" constraint would be the third independent constraint kind — the recorded traits tripwire. Comparisons alone do not justify designing traits: the constraint would be nearly vacuous (every atomic family is comparable), buying almost no precision for real machinery cost.
-- The same-family error on two *concrete* operands stays: that case is decidable and catches real bugs (`x < "10"`).
-
-Impact: correctness — ratifies existing behavior (fixture `two_flexible_comparison_stays_unconstrained`; both differentials green, so the oracle agrees); simplicity — no new machinery, the traits tripwire stays armed; the typing reference now states the flexible-operand comparison rules explicitly.
+Flow-sensitive narrowing is branch-edge entry refinement on the slot model, not a separate flow
+analysis. `recognize_guard` accepts `is.null(x)`, a member of the `is.*` family, or a negation of
+one, and `guard_edges` computes refined types for the guarded slot's two edges. Each
+refinement is an ordinary undo-logged environment write inside the branch region. A branch write
+replaces it, the region rollback reverts it, and the branch join sees final values, so no new
+machinery is needed.
+
+Early-exit persistence falls out of divergence-aware joins. A branch that never falls through
+contributes neither a value nor state, so the surviving edge's refinement applies after the `if`,
+and only that edge's. A branch never falls through when it ends in `return`, `stop`, `break` or
+`next`, or in a block ending in one of them.
+
+The limits below are deliberate, for soundness and for zero false positives.
+
+- **Only union members are filtered.** A family guard does not invent a shape for `Any` or
+  `Unknown`, because a refined `character | character[]` would false-positive against a stub
+  signature that claims a scalar. The one non-union refinement is the true edge of `is.null` on
+  `Any` or `Unknown`, which becomes `NULL`.
+- **A statically undecidable member stays on both edges.** That covers an inference variable, a
+  flexible-element vector and an opaque nominal. `is.list(data.frame)` is true at run time.
+- **Only a local slot narrows.** That is a parameter, a function local or a script local. A package
+  global keeps winner semantics, and a guarded expression such as `is.null(x$field)` is not
+  tracked.
+- **`&&` and `||` are not decomposed**, and narrowing does not apply inside the condition. The
+  right conjunct of `!is.null(x) && x > 0` does not yet see the refinement. Both are recorded
+  follow-ups.
+- The guarded key resolves exactly as a read resolves. That is the local slot under a naming
+  context, or the flat global entry in a context-less fixture state, so a fixture and production
+  share one path.
+
+## The expanded parameter directive is `@param name {TYPE}`
+
+The expanded parameter directive writes the name first and the braced type second, as
+`@param name {TYPE}` or `@param [name] {TYPE}`. JSDoc writes the type first, as
+`@param {TYPE} name`, and that order is rejected. There are three reasons.
+
+- The wrapping payload is the type, so putting it last lets a multi-line type continue cleanly
+  under the directive instead of leaving the name dangling after the closing brace.
+- It gives one shape across all directives: `@type Name {TYPE}`, `@alias Name<T> {TYPE}` and
+  `@param name {TYPE}`.
+- The grammar becomes unambiguous. The name is a single identifier token right after the directive.
+  That retires the ambiguity of swallowing the tail as a name, and it leaves room for an optional
+  trailing description later.
+
+The JSDoc order is rejected with an error that names the new form rather than with a generic parse
+failure. `@return {TYPE}` and `@forall` are unchanged.
+
+# Decision record: a syntax error does not erase a file
+
+A single error node anywhere in a tree used to short-circuit lowering to an empty module. One
+half-typed keystroke therefore dropped the file's whole export set. The package symbol
+index re-folded on every keystroke inside a broken window, dependents flooded with unresolved-name
+errors, and diagnostics, hover and completion went dark for the rest of the file. The single source
+of truth for what exists mid-edit was the parse tree's error bit, and it applied at file
+granularity.
+
+The shape now is statement granularity, as rust-analyzer does it.
+
+- A well-formed statement always lowers. A broken file keeps every export whose statement parsed.
+- A broken statement contributes nothing: no names, no reads, and no cascading diagnostics. A
+  broken region reports its syntax error and nothing else. The contract is the syntax-errors
+  section of the typing reference.
+- Two salvage shapes apply inside a broken region. At sequence level, an error node's well-formed
+  assignment children lower normally. Fragments are filtered by kind, so `ExpressionKind::Assign`
+  is kept and everything else is dropped, and a well-formed non-assignment fragment that shares a
+  line with a following error sibling is dropped as the split half of the broken statement. At
+  expression level, a broken assignment with an intact name side keeps its definition and degrades
+  the value to `ExpressionKind::Missing`.
+- `Missing` is a distinct HIR kind from `Unsupported`. Both type as `Unknown`. `Missing` records no
+  strict origin, because the syntax error already covers the region. `Unsupported` stays
+  strict-relevant, because it marks a complete construct the checker cannot model.
+- A checked annotation on a `Missing`-valued definition binds its declared type unchecked. A hole
+  proves nothing, so demanding proof would be a guaranteed false mismatch. Annotated definitions
+  therefore keep their contract for callers mid-edit, which means zero downstream invalidation.
+
+Correctness: half-typed code produces no false unresolved-name or type errors. The
+`test_malformed_lower` controls and the `error_tolerant_lowering` project fixtures pin it.
+Simplicity: one policy sentence governs every case. Performance: the malformed-flip engine witness
+went from two index refolds plus a referrer recheck to no refolds and a recheck of the edited file
+only, because exports stay byte-equal across the flip and early cutoff does the rest. Incremental
+analysis: typing inside a construct is the highest-churn edit state, and it now has the smallest
+blast radius.
+
+# Decision record: durability tiers and a memoized IDE read path
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+The red-green engine used to validate every memo by deep-walking its recorded dependencies once per
+revision. The first read after any keystroke therefore re-walked every unopened file's parse,
+lower and naming chain. That is work proportional to the number of files times the chain depth, and
+it cost about 108 ms at 281k lines of code across 30k files before any real work started.
+
+Two more costs sat on top. Every hover, definition and completion request rebuilt a package-sized
+`NamesGlobal` map from the symbol index. Completion additionally primed every exporting file's
+`Lower` and `LocalNaming` to compute item kinds, which is a package-sized prime per
+keystroke-completion and cost 95 ms at rest. Separately, the idle-preemption token pairing could
+lose a preemption and stall a read behind a full idle unit, because the frontend stored the token
+and then sent, while the worker reset it inside the idle unit.
+
+The shape now has four parts.
+
+- **Durability lives in the core**, in `engine.rs`. An input declares `LOW` for an open document
+  and `HIGH` for everything else. A memo records the minimum durability its last recompute read,
+  and validation greens in constant time when `last_change[durability] <= verified_at`. One
+  subtlety is load-bearing. A durability transition must stay truthful even on a memo whose value
+  never changes, so the deep-validation walk re-records each visited memo's durability minimum at
+  the early-cutoff bump. Without that, opening a file is an equal-value downgrade from HIGH to LOW
+  that re-records only the recomputing bottom of the chain. Every value-stable ancestor would keep
+  its stale HIGH record, the next keystroke would be invisible to its fast path, and a stale read
+  would be served as green. A live probe caught this during implementation, and
+  `durability_downgrade_flushes_through_cutoff_nodes` pins it.
+- **The winner index is the IDE shape.** The value of `PackageSymbolIndex` is a `NamesGlobal`,
+  borrowed per request through a `Shared` clone and never rebuilt. `DefiningItem` projects through
+  it.
+- **Completion reads one fold.** A per-file `CompletionExports` holds label, kind and callability
+  entries that stay value-equal across body edits, and they fold into `PackageCompletionIndex`.
+  `generic::completion` takes the entries as an explicit parameter, so the engine passes the memo
+  and the from-scratch path builds them per request.
+- **Preemption pairing is lossless.** The worker resets `idle_interrupt` before each empty poll and
+  the frontend flags after it sends. Every interleaving either delivers the job to the poll or
+  leaves the flag set for the unit's next cancellation check.
+
+Correctness: behavior is unchanged, the IDE differential is green, and the downgrade staleness
+class is structurally closed and unit-pinned. Simplicity: one new concept in the core, two new
+queries, and one deleted per-request synthesis path. Performance at 281k lines of code across 30k
+files, given at rest and then after a keystroke: hover went from 5.3 ms to 0.010 ms and from 142 ms
+to 44 ms, completion from 95 ms to 26.5 ms and from 228 ms to 90 ms, definition from 5.4 ms to
+0.032 ms and from 108 ms to 20 ms. Per-edit diagnostics went from 121 ms to 91 ms and a cold run
+from 13.5 s to 9.0 s, which also removed the per-inference clone of the type definition
+environment. Incremental analysis: the per-keystroke walk no longer touches an unopened file's
+chain at all. The committed witnesses bound an at-rest read to 32 memos and a post-keystroke walk
+to 12 per file. `backlog.md` records the deferred lever, which is a durable sub-fold plus an
+open-file overlay to drop the fold-edge walk to the number of open files.
+
+# Decision record: `is.null` shapes an unconstrained inference variable
+
+At an `if (is.null(x)) fallback else x` join where `x` and `fallback` are both unbound inference
+variables, the join used to unify the two variables. The type model deliberately never invents a
+union for a variable, which is a long-standing decision that keeps inference fast. The call
+`or_else(NULL, "text")` then bound the single variable to `NULL` from the first argument and
+rejected the second.
+That is a false positive on the coalesce idiom, and it was recorded as a structural design tension
+whose workaround was to annotate.
+
+The guard itself carries the missing information, so the fix is to consume it. In `guard_edges`,
+when the recognized predicate is `is.null` and the guarded local slot resolves to a completely
+unconstrained inference variable `A`, meaning entry `Unbound` and constraint `Unconstrained`, bind
+`A := T | NULL` for a fresh `T`. The model already supports that
+union shape from annotations, because `@param x {T | NULL}` produces exactly it, and the existing
+member filtering then narrows the edges. There is no new type form, no deferred union and no join
+special case. The coalesce body joins `fallback` with the narrowed `T` and generalizes to
+`<T> fn(value: T | NULL, fallback: T) -> T`, which is byte-identical to the verified-clean
+annotated form. A negated guard works through the existing edge swap. A constrained variable is
+never reshaped, because a numeric bound contradicts a `NULL` member, and neither is a rigid or
+declared parameter, because there the annotation is the contract.
+
+One consequence is deliberate and pinned as a fixture. Testing a parameter for `NULL` and then
+using it unguarded afterwards is now a genuine finding, so `if (is.null(x)) 0L else 1L; x + 1L`
+errors. The test declared `NULL` a possible inhabitant, and the annotated form of the same code
+already behaved this way, so the model is now consistent rather than lenient when unannotated.
+
+Correctness: this removes the last recorded idiom false positive from the sweep, with no
+regressions across any fixture suite or the real-world corpus, and no expectation changed anywhere
+else. Simplicity: about twenty lines in one function, reusing the union machinery end to end.
+Performance: one extra variable and union per shaped guard, which is negligible. Incremental
+analysis: unaffected, because this is a per-file inference detail.
+
+# Decision record: data-masked resolution for data.table and the with-family
+
+Every bare name in `DT[region == "west", .(total = sum(amount)), by = product]` used to fail
+lexical resolution and produce a could-not-resolve warning, plus type errors from the base
+index-arity rules. data.table evaluates `i`, `j` and `by` in the data's own frame. This is the same
+false-positive class that R CMD check and lintr hit on code that uses non-standard evaluation. `:=`
+lowered to `Unsupported`, which hid its operands from the IDE entirely. A user reported the pain
+directly, because data.table code drowned in could-not-resolve warnings.
+
+The shape now recognizes a mask structurally in the naming walk and suppresses the diagnostic at
+the emission edge.
+
+- Two recognizers set a mask depth during resolution. The first is a `[` bracket whose arguments
+  carry an unambiguous data.table signature: a `by =` or `keyby =` argument name, a `:=` or `.()`
+  call, or one of the `.SD`, `.N`, `.I`, `.BY`, `.GRP` and `.EACHI` symbols. None of those occur in
+  base indexing, so `m[i, j]` is untouched. The second is the base masking family `with`, `within`,
+  `subset` and `transform`, whose callee must not be locally shadowed, and which masks the
+  arguments after the data.
+- A read that fails lexical resolution inside a mask is recorded in `NamesLocal.masked_reads` in
+  addition to `non_locals`. A masked name still resolves stubs and package globals normally, so a
+  `sum` in `j` keeps its scheme. The first design kept masked reads out of `non_locals` and lost
+  stub typing, so it was revised. Both could-not-resolve emitters skip masked ids, which are the
+  analysis package pass and the engine's per-file query. The typecheck fallthrough for an
+  unresolved non-local was already a silent `Unknown` with no strict origin.
+- The recognized bracket itself lands in `NamesLocal.masked_subsets` and types as a silent
+  `Unknown` before the base index-arity rules run, because `[.data.table` returns shapes those
+  rules must not judge.
+- `:=` lowers as an ordinary binary call, so its operands stay visible to naming, to hover and to
+  the mask.
+
+Some things are deliberately not silenced. Anything that resolves keeps full checking inside a
+mask, which covers locals, stubs and globals. Base indexing keeps lexical resolution and its
+warnings. Strict mode stays silent on a masked column read, because non-standard evaluation is a
+recognized dynamic construct with intended semantics rather than an unmodelled hole. The backlog
+records the extension: honor `utils::globalVariables()`, and generalize the mask marker into
+`.Rtypes` stub syntax so a dplyr verb can declare a masked parameter.
+
+Correctness: this removes the dominant non-standard-evaluation false-positive class with no
+regressions across the suites, and base-R control fixtures pin the non-masked behavior. Simplicity:
+one mask-depth integer and two sets on the existing naming result, with suppression at the existing
+emission edges. Performance: a shallow per-bracket marker scan, which is negligible. Incremental
+analysis: unaffected, because these are per-file naming facts.
+
+# Decision record: recursion in a function-valued assignment is monomorphic
+
+The recursive read inside `fact <- function(k) ... fact(k - 1L) ...` resolved to a slot with no
+environment entry yet, so it typed as a silent `Unknown`. The recursion contributed nothing to the
+function's scheme, and a bad recursive signature went unnoticed. The naming half, where a closure
+right-hand side sees its own target binding, landed separately. This record is the typing half.
+
+The shape is the classic `let rec` rule, scoped to a function-valued assignment. Before the
+right-hand side is inferred, the target slot is pre-bound to a fresh inference variable created
+inside the binding's generalization level. The body's recursive reads unify against it, and the
+variable then unifies with the inferred function type. Recursion is monomorphic, so every recursive
+use shares one instantiation. Polymorphic recursion is undecidable in general and is not supported.
+The rule applies on the local-assignment path in both context and context-less inference, and a
+fixture driver pre-binds the global slot.
+
+One subtlety matters. The top-level package-winner path writes the final generalized scheme to the
+global entry, while `exported_value_schemes` reads the per-site local entry first. The pre-bound
+placeholder must be overwritten in the local entry too, or a cross-file consumer sees a dangling
+variable as `Unknown`. The project-suite fixtures caught this, and the winner path now writes both
+entries.
+
+Three scope limits are deliberate and pinned by fixtures. Recursion defined with `<<-` keeps the
+silent `Unknown` behavior, because it is rare and the enclosing-slot join semantics make a
+placeholder ambiguous. Mutual recursion between two local closures stays a loud unresolved
+reference on the earlier-defined one, because letrec visibility is per binding and not per block. A
+full block letrec is a recorded possible extension. Top-level mutual recursion already resolves
+through the package interface fixed point, whose oscillation guard pins a genuinely cyclic scheme
+to `Unknown`.
+
+Strict attribution for top-level recursion whose converged scheme retains `Unknown` is the open
+part, and the backlog records it. It needs an origin on the binding.
+
+Correctness: a recursive helper gets a real scheme, and a violation of a recursively inferred
+signature is caught, so `countdown("not an integer")` errors where it was previously silent. The
+polymorphic-identity and cross-file suites pin that nothing regressed. Simplicity: one pre-bind and
+one unify on the existing assignment path. Performance: one extra variable per function-valued
+assignment, which is negligible.
+
+# Decision record: bare-name resolution is not gated on NAMESPACE imports
+
+The fork was this. Should a bare name that resolves only through the stub corpus, such as `median`
+against the stats stub, require the package to import it with `importFrom(stats, median)` or
+`library(stats)`, or should it resolve unconditionally?
+
+Unconditional resolution against the shipped corpus is correct, and it is not a shortcut. The
+shipped namespaces are base, stats, utils, methods, graphics and grDevices. R attaches exactly
+those in every default session, so a bare `median` genuinely resolves at run time in the
+environments R code actually runs in. A project `.Rtypes` stub is user-authored, and writing one
+already declares that the project uses those names. Gating on NAMESPACE entries would make the user
+say the same thing twice.
+
+What NAMESPACE gating would really buy is per-file visibility for a non-default package, masking
+warnings, and `library()` attach ordering. All three need the full import model, which stays after
+the beta. Gating falls out of that model naturally, so bolting it on first would be wasted work.
+Until then the NAMESPACE surface stays what it is today: import validation, which detects a typo
+against the corpus, and the opt-in `unused-import` lint.
+
+This record changes no behavior. It closes the fork by ratifying the current shape and pointing the
+future work at the import model.
+
+# Decision record: top-level mutual recursion forms whole-file letrec groups
+
+Any top-level recursion, whether self or mutual, used to resolve through the package interface
+fixed point with members starting at `Unknown`. Arithmetic and joins over `Unknown` cannot sharpen,
+so every recursive function exported an `Unknown`-flavored scheme. An annotated consumer then false
+errored, so `#: logical` on `is_even(4L)` reported `expected logical, found Unknown`.
+
+The shape has two deliberate halves.
+
+**A mutual group of two or more members is a letrec group.** A module pre-pass detects candidates,
+which are top-level function-valued assignments taking the last writer per symbol. It
+overapproximates reference edges by source-range containment and pre-binds every member on a mutual
+cycle to a fresh variable one level below module scope. That level is the load-bearing subtlety.
+Unification adjusts the group's shared variables up to the placeholders' level, so placeholders at
+module level would make finalization's generalize quantify nothing, and the export would carry a
+free variable. `import_scheme` on a consuming document erases a free variable to `Unknown`. This
+was found empirically, where the producer's table was perfect while consumers saw `Unknown`.
+Members stay monomorphic through the module walk, so siblings constrain each other. One
+finalization pass then exits the group level, defaults escaping numerics, generalizes each member,
+and rebinds both of its environment keys. `is_even` and `is_odd` now export
+`<T: numeric> fn(n: T) -> logical`, and a consumer checks against it.
+
+**Pure self-recursion at top level keeps the tolerant fixed point.** A first implementation applied
+letrec to a self-loop too, and the real-world corpus immediately caught the cost. The idiomatic
+tree fold `if (is.list(x)) sum(sapply(x, sum_leaves)) else x` needs the recursive type
+`T = double | list[T]`, which Hindley-Milner cannot express. Monomorphic recursion pinned the
+parameter to `double`, and the nested-list call site false errored. The old `Unknown` is
+load-bearing gradual tolerance for exactly this shape, so a self-loop is excluded on purpose. An
+earlier whole-file variant also made every top-level function monomorphic within the file, which
+broke polymorphic reuse such as `mirror(1L); mirror("x")`. That is why the scope is cycles rather
+than all definitions.
+
+Fixtures pin all three behaviors and carry the rationale in the file: the typed mutual pair in both
+the project and the context-less form, the tolerant self-recursive package function, and the tree
+fold staying clean. Local recursion inside a function is typed by the per-assignment letrec. Both
+pipelines share `check_module_with_naming`, so no pipeline-specific code was needed.
+
+Correctness: mutual recursion was always `Unknown` and caused consumer false positives. It now
+types precisely, with no regressions across any suite or the corpus. Simplicity: one pre-pass, one
+finalization and a shared member map. Performance: a per-module candidate scan bounded by arena
+size, which is negligible. The backlog records the open remainder, which is strict attribution for
+the deliberately `Unknown` self-recursive schemes.
+
+# Decision record: a parse tree is not a memo value
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+The `SourceText(f)` engine input used to be the parsed document, holding a rope and a tree-sitter
+tree, for every workspace file. A `Parse(f)` query projected it. Measured at 302k lines of code
+with `ry debug analysis-stats`, which reports per-phase resident-set growth for exactly this kind
+of diagnosis, about 398 MiB of the roughly 1 GiB peak was trees retained for files nobody edits.
+That is about sixty times the source bytes. The server also parsed the whole workspace
+synchronously at load.
+
+A tree is a pure function of the text, so it never lives in an engine value. `SourceText` carries
+the rope plus an optional tree. An open document carries the host's incrementally maintained tree,
+so a keystroke still never re-parses, and the corpus is rope-only. `Key::Parse` is gone. A
+tree-consuming body, such as lowering or lint, and a host alike call `RoughlyQueries::document_for`,
+which uses the input's tree or parses on demand into a small LRU of sixteen entries. The LRU serves
+an entry only when the cached rope equals the input's rope, so staleness is unrepresentable. A
+text-only consumer reads the rope and never materializes a tree, which covers LSP range encoding,
+annotation re-lexing and suppression scanning.
+
+A whole-project IDE scan stays fast without resident trees through two `IdeDatabase` seams.
+`document_rope` lets an annotation scan re-lex text only. `candidate_document_ids` is a
+conservative rope-substring prefilter, because an identifier or S4 string spelled `name` implies
+`name` appears in the text. References, rename and S4 navigation therefore parse only documents
+that textually mention the target. The engine IDE view primes ropes and candidate trees per
+feature, and a point query keeps its constant at-rest prime scope, which a benchmark witnesses.
+
+Two memory fixes landed with it. `LoweringResult` holds its module behind an `Rc` and the engine's
+`Lower` projects that pointer through `Stored::from_shared`, so each HIR is retained once instead
+of twice. `Expression` boxes its rare attached annotation, which took an arena node from 256 bytes
+to 136.
+
+Correctness: unchanged, and all differential suites stayed byte-exact. Simplicity: one query fewer,
+and one honest ownership story for trees. Performance: the peak resident set went from 1014 MiB to
+294 MiB at 302k lines of code, workspace load parses nothing because parsing spreads into the
+background prime, and per-keystroke behavior is unchanged. Incremental analysis: dependencies are
+unchanged, because bodies record the same `SourceText` read. The known cost is that the first
+workspace-symbols query, and a cold `references` on an extremely common name, re-parse candidates
+on demand. The LRU bounds that, and per-file symbol items stay cached across requests.
+
+# Decision record: an all-files fold splits into a durable sub-fold and an open-file overlay
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+Every all-files fold recorded one dependency edge per package file. That covers the symbol index,
+the completion index, declared globals, type definitions, the type index and both candidate orders.
+Each keystroke's validation therefore deep-walked every fold, which measured about 11,200 memo
+visits per keystroke at 1248 files and grew linearly. The analysis-stats typing probe measured it,
+and it now prints per-keystroke recompute counts and walk attribution.
+
+A new `OpenFiles` input holds sorted file ids. It is a defaulted input, so an unset input executes
+to the empty set and a headless host or a test needs no change. Each fold splits in two.
+
+- A durable sub-fold runs over non-open files, keyed by `ProjectFiles` position. It reads no LOW
+  input, so it greens in constant time per keystroke through the durability fast path.
+- The public fold merges the durable half with the open files' per-file values by position. It
+  replays path-order last-writer-wins byte-identically.
+
+The split is value-identical for any contents of `OpenFiles`, because a misclassified file merely
+lands in the other half. It is therefore a pure performance seam. The host invariant is that
+`OpenFiles` lists exactly the LOW-durability `SourceText` files, and the server derives both from
+`open_documents` in one funnel. The engine memo table and cycle set hash with FxHash, because query
+keys are small integers and the walk hashes twice per visited slot.
+
+Correctness: unchanged. The differential suites cover it, and fold values are byte-identical by
+construction. Performance: the per-keystroke validation walk went from 11,244 slots to 278 and is
+now size-independent. It is equal at 1248 and 2496 files, and the benchmark witness pins equality
+at 100 against 300 files. The keystroke median went from 6.7 ms to 4.9 ms at 302k lines of code
+with recompute counts unchanged. Simplicity: seven mechanical durable and public pairs sharing one
+pattern. Incremental analysis: an open or close transition is a rare HIGH change that revalidates
+once, exactly like the existing durability downgrade.
+
+# Decision record: a same-file backward reference never routes through the interface
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+A real 697k-line workspace report through `analysis-stats` found this. Typecheck was 95% of a
+300-second cold pass, one 170-line file took 4.9 s, and a keystroke in an 18.5k-line class file
+took 16 s.
+
+`infer_file` imported an interface scheme for every referenced package global, including a symbol
+defined in the very file being inferred, and `InterfaceDeps` edges were file-granular. But the
+typecheck walk's winner path rebinds a symbol's global environment entry with the freshly inferred
+scheme at its defining assignment. For any reference that first reads after that assignment ends,
+the imported scheme was provably shadowed dead weight. Its only observable effect was the
+dependency edge, and that edge made every same-file reference chain a fake mutual strongly
+connected component. A chain where `h1` calls `h0` and `h2` calls `h1` is the dominant shape of a
+real R package. The cost was per-symbol Tarjan over a clique, plus a fixed point that re-inferred
+the whole file per round. A 150-line chain file cost 387 ms, and a large hub file scaled worse than
+quadratically.
+
+Each referenced same-file-winner symbol is now classified by byte order.
+
+- **Walk-shadowed.** Its last top-level assignment, which is the export and winner site, ends
+  before its earliest non-local read starts.
+- **Forward.** Everything else: self-recursion inside the defining range, a forward reference from
+  an earlier body, and a read between repeated writes.
+
+A walk-shadowed symbol is not imported and contributes no `InterfaceDeps` edge.
+`walk_shadowed_definitions` in the engine's query layer decides it, and `infer_file` and
+`interface_deps` use it identically. The edge set must mirror the fetch set exactly, or a genuine
+cycle would slip past the SCC routing into the accidental-cycle guard. A forward symbol keeps
+today's exact interface path, including the deliberate self-recursion tolerance and the
+mutual-group letrec semantics. Semantics are unchanged by construction, because a walk-shadowed
+import could never be observed: every read happens after the rebinding. Production therefore needs
+no change and the differential stays byte-exact. The full suite verified it, and the counter
+witness `backward_reference_chain_stays_off_the_interface_scc` pins it.
+
+One related fix landed with it. A script's type-definition environment now overlays its own
+declarations on the memoized `PackageTypeDefinitions` clone, through
+`TypeDefinitionEnvironment::extend_from_module`, instead of rebuilding from every package module's
+view. The rebuild recorded one edge per package file per script, which is a cold cost and a
+revalidation walk proportional to scripts times package files. The reporting workspace had 2057
+scripts and 503 files.
+
+Correctness: no change, by the shadowed-import argument, and all 36 suites are green. Performance:
+the chain-file pathology drops about a hundredfold, from 387 ms to 3.9 ms at 150 lines. A
+hub-shaped 59k-line workspace, meaning a 1500-function hub with 300 chained files and 1500 scripts,
+cold-passes in 3.8 s. A keystroke in a hub file costs about one authoritative re-inference of that
+file. Simplicity: one classification helper and two consumers. Incremental analysis: the
+`InterfaceDeps` and `SymbolScc` graphs shrink to genuine cycles, which collapses the per-keystroke
+deep validation of interface memos on a hub file.
+
+# Decision record: one inference per file per revision, and a memoized typo hint
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+Re-profiling the cold pass with `analysis-stats` after the interface-routing fix found this. The
+staged diagnostics phase was 66% of a 10-second cold pass at 302k lines of code, and stack sampling
+attributed nearly all of it to the could-not-resolve typo hint.
+
+Four pieces of work were duplicated.
+
+1. `Typecheck(f)` and `ExportedSchemes(f)` each ran `infer_file`. That is the same whole-file
+   inference, once with expression-type recording for diagnostics and once without for the exports.
+   Every file whose exports were demanded paid two full inferences per revision, and a keystroke in
+   an open file paid both on its demand path.
+2. `unresolved_reference_diagnostic` recomputed the did-you-mean hint per reference occurrence.
+   That is a full stub-corpus scan over about 530 candidates, with four fresh `Vec` allocations per
+   candidate inside the edit-distance dynamic program. A workspace that references many unmodelled
+   library names is the normal case for any codebase using packages without stubs, and it paid a
+   multi-second cold cost and re-paid it per keystroke per edited file.
+3. `bind_module_letrec_placeholders` computed candidate reference edges by scanning the whole arena
+   once per candidate. That is quadratic in file size, on every inference of every file.
+4. `Diagnostics(f)` fetched `Typecheck` before the file-local tree readers. Inference's cross-file
+   scheme chains then evicted the file's tree from the bounded parse cache and `Lint` re-parsed the
+   file, which is a hidden second parse per file on the server's cold prime.
+
+The shape now is this. `Key::Typecheck` stores a
+`FileInference { check: ModuleCheck, exports: Shared<Vec<ExportedValue>> }` from a single recording
+inference. Recording is collection-only and branches no inference outcome, so folding the exports
+run into the recording run is safe by construction. `Key::ExportedSchemes` becomes a shared-pointer
+projection through `Stored::from_shared` and keeps its role as the value-equality firewall that
+referrers cut off on. When the whole `FileInference` compares equal, which happens on a same-shape
+body edit, propagation now stops one level earlier at `Typecheck` itself.
+
+The typo hint splits in two. `unresolved_suggestion` is memoized per unresolved symbol in the query
+group, because its value depends only on the name and the set-once stub corpus.
+`unresolved_reference_with_suggestion` renders, and both pipelines share it verbatim.
+`nearest_name` reuses its dynamic-programming rows and its candidate buffer across the whole
+candidate scan. The letrec edge scan is one arena pass with a binary search over the disjoint
+candidate value ranges. `Diagnostics` fetches the tree-reading file-local queries adjacently,
+before `Typecheck`.
+
+Correctness: unchanged, and all differential and fixture suites stayed byte-exact. Performance: the
+cold pass at 302k lines of code went from 10.1 s to 3.7 s, with the package-naming stage from
+3.75 s to 0.06 s, one parse per file instead of two, and one inference per file instead of up to
+two. The keystroke median went from 5.4 ms to 1.7 ms. Memory: 4 MiB more at 302k lines of code,
+because each file's exports are now retained once behind the shared pointer, where the same data
+previously lived in the `ExportedSchemes` memo. Simplicity: one inference body instead of two call
+modes on the demand path. Incremental analysis: the `ExportedSchemes` seam's dependencies collapse
+to one edge, which is `Typecheck`. `analysis-stats` now stages lint adjacently and splits the old
+diagnostics phase into lint, package naming with folds, and diagnostics rendering, so the next
+regression of this kind is visible at a glance.
+
+# Decision record: the inference-state data model
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+Callgrind over a 7.5k-line hub file, run after the demand-path fixes, drove this. Inference itself
+cost about 25 microseconds per line, and nearly all of it was allocator and tree churn rather than
+typing work.
+
+Five weaknesses were structural.
+
+1. `free_type_variables` materialized the resolved form of a type, calling `resolve` on a clone at
+   every recursion level, and allocated a fresh set per node. The per-check constraint sweep also
+   cloned every recorded expression type into a `Vec` first.
+2. The union-find `entries` table was a `BTreeMap` keyed by a densely allocated id, so it paid a
+   tree search per resolve step.
+3. `bind_module_letrec_placeholders` answered whether a candidate sits on a mutual cycle with a
+   transitive walk per candidate, which is quadratic over reference chains.
+4. The winner test ran two linear scans per top-level assignment, which are
+   `top_level_expression_ids.contains` and `find_exported_binding`, and `exported_value_schemes`
+   re-scanned the module per exported symbol.
+5. The environment, recorded-type and overload-selection maps were ordered maps whose order nothing
+   reads.
+
+The shape now is this. Free variables are collected by a read-only walker,
+`visit_unbound_variables`, which follows redirect chains without materializing the resolved form
+and mirrors union normalization, so a member resolving to `Any` or `Unknown` absorbs the union.
+`entries` is a plain vector indexed by id, as an `EntryTable`. Probe rollback truncates the tail,
+and the id counter is the length, so a dangling id is unrepresentable. Letrec mutual-cycle
+membership is one iterative Tarjan pass over components of size two or more, and a self-edge alone
+never qualifies, which leaves semantics unchanged. `ResolutionContext` carries the precomputed
+top-level id set and exported-binding map, and `exported_value_schemes` batch-collects bindings in
+one walk. `environment`, `recorded_expression_types` and `selected_overloads` are FxHash maps,
+because nothing iterates them in state. The public `ModuleCheck` fields stay ordered maps and are
+converted once at assembly.
+
+Correctness: nothing observable changed. All fixture, differential and witness suites stayed
+byte-exact, and free-variable ordering is preserved by sort-and-dedup where quantifier order
+matters. Performance: whole-file inference on the hub file went from 190 ms to about 50 ms, and a
+hub keystroke from 308 ms to 168 ms, measured alongside the demand-path work. Simplicity: one
+free-variable implementation instead of two, and one dense table instead of a map plus a counter.
+Incremental analysis: unchanged, because all of this is inside one query body. The backlog holds
+the remaining follow-up, which is that whole-file inference and re-lowering are still the keystroke
+floor for a huge file. The per-definition granularity design addresses it.
+
+# Decision record: interface SCC rounds run per definition, and skip on unchanged reads
+
+This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
+under `legacy/`. It is recorded because the query decomposition itself transferred, and the
+architecture record says which parts did.
+
+A 700k-line user workspace still spent 95% of a 179-second cold pass in typecheck after the
+demand-path and constant-factor rounds, with a 10-second keystroke in an 18.5k-line file. A
+synthetic reproduction of ten mutually referencing files with sixty chained functions each, which
+is 3k lines, cost 3.6 s of typecheck.
+
+Interface edges are file-granular. They must mirror `infer_file`'s import set exactly, or a genuine
+cycle slips past the SCC routing into the accidental-cycle guard. Real packages reference each
+other's files both ways, so whole file clusters collapse into a single interface SCC.
+`resolve_interface_scc` re-inferred every member file per Jacobi round, and rounds grow with the
+in-SCC scheme-chain depth. The cost per fixed point is chain depth times cluster size, and it was
+re-paid on every keystroke into a member file. Two pieces of bookkeeping were quadratic in cluster
+size as well: the per-round full-table clone plus a `render_type_scheme` of every member every round
+for the oscillation guard, and a per-symbol `SymbolScc` Tarjan that cloned every visited node's edge
+list.
+
+The shape now has three parts.
+
+- **A file that provably decomposes is re-inferred per member definition.** `scc_definition_plan`
+  admits a file when every top-level binding is a single-assignment function or a scalar literal,
+  so schemes are fixed at their defining site, and when the file has no letrec members, no
+  captured-write re-pass, and no other statement writing the top-level frame. Each member
+  definition is checked by `check_definition_scheme` against three sources: the round's table for
+  in-SCC reads, memoized `GlobalScheme`s for out-of-SCC reads, and locally resolved same-file
+  helper definitions. The out-of-SCC reads are provably acyclic, because a cross-file symbol whose
+  file reaches back into the cycle is itself a member. The same-file helpers must resolve locally,
+  because fetching their `GlobalScheme` would re-enter the fixed point through the file's own
+  `Typecheck`. Under the plan's conditions this environment equals the whole-file walk's at every
+  read, so results match up to inference-variable identity. An ineligible file keeps whole-file
+  rounds, which covers S4 blocks, monotype accumulation and letrec groups.
+- **Both granularities skip on unchanged reads.** A unit re-infers in round k only if one of its
+  in-SCC reads changed in round k-1, counting reads transitively through local helpers. The round
+  function is pure in those reads, so the previous output is reused verbatim and the trajectory is
+  identical. Contributions are per file and are merged in ascending file order each round, so a
+  symbol exported by several member files keeps the exact last-writer-wins value. A single
+  symbol-keyed map let a stale exporter overwrite the winner. The differential caught that, and
+  `test_interface_scc.rs` pins it.
+- **One inference state serves the whole fixed point.** A definition check snapshots and rolls back
+  completely, which keeps per-definition variable ids deterministic. This replaces a stub-seeded
+  template clone per definition. The oscillation-guard history records value changes only, because
+  a consecutive duplicate render affected nothing. A pure-oscillation pin can therefore land one
+  round later, which the round-cap slack covers and which converges to the same table. `SymbolScc`'s
+  Tarjan uses dense indices and borrows fetched edge lists.
+
+Correctness: the differential suites stayed byte-exact, including the multi-exporter regression the
+first cut introduced. Performance: the cluster reproduction's typecheck went from 3.6 s to 0.2 s
+and its member-file keystroke from 359 ms to 34 ms. The hub workspace keystroke went from 168 ms to
+136 ms, and a big flat workspace was unchanged. Simplicity: the fixed point gains a planning phase,
+and the convergence and pinning contract is unchanged. Incremental analysis: a keystroke into a
+cluster file re-runs the fixed point at frontier cost instead of cluster cost.
+
+Three follow-ups are in the backlog. The per-symbol `SymbolScc` is still quadratic for a very large
+cluster, and a file-level quotient-graph SCC would fix it. The `InterfaceScc` key carries the member
+list, which is heavy for a huge component. The authoritative whole-file `Typecheck` remains the
+keystroke floor, which the per-definition incremental inference design addresses.
+
+# Decision record: `ry check` runs on the query engine
+
+The CLI used to run production's from-scratch `Analysis` and `run_full`. That path's whole-file
+package-interface loop has the same file-cluster blowup the engine's fixed point fixed, so
+`ry check` on a real mutually referencing package stayed slow after the server got fast. Every
+future engine performance win would also have needed a production twin.
+
+The CLI now builds the same query graph the server uses. It creates one `Engine` per check target
+and feeds inputs in the server's `ProjectFiles` order, which is package files first and then
+ascending root-relative path, so last-writer-wins winners are identical. It honors the config as
+is. It renders each file through `assemble_engine_file_diagnostics` in `crates/ry/src/diagnostics.rs`,
+which holds the class assembly, config gating and type-error rendering extracted from the server so
+the two surfaces cannot drift. A suppression applies against the source the CLI read. `run_full`
+remains purely the differential oracle, which is the one consumer that must stay engine-independent.
+
+Correctness: the differential already asserts that the engine and `run_full` agree byte-exactly on
+rendered diagnostics, so the CLI's output set is covered by construction. All 146 CLI crate tests
+pass unchanged, including the full CLI contract suite, and a diagnostic-heavy workspace produces
+the exact count the engine stats report. Performance: the CLI inherits every engine property, which
+covers per-symbol firewalls, per-definition SCC rounds, memoized typo hints and one parse per file.
+The cluster reproduction went from 1.34 s to 0.28 s, and a hub-shaped workspace from 2.95 s to
+1.90 s, which is now parse-bound. The gap grows with workspace size. Simplicity: one fast path
+instead of two, and one shared diagnostics assembly. Incremental analysis: unaffected, because the
+CLI engine is one-shot.
+
+# Decision record: the shipping stack is a hand-written parser, rowan trees, and salsa
+
+`docs/src/content/docs/contributing/architecture.md` describes the architecture as it stands. This
+record holds the reasoning behind it and the risks that come with it, so that no session
+re-derives either.
+
+## Why the previous stack was replaced rather than tuned
+
+Four limits were structural, and each had already been mitigated in place. A mitigation around an
+architecture is not an architecture.
+
+- tree-sitter capped syntax-error quality, because an error is an opaque ERROR node. It cost about
+  8 microseconds per line, derived from a cold pass at 302k lines of code where about 2.5 s of 3.7 s
+  was parsing. Its trees were about sixty times the source size, measured through `analysis-stats`,
+  which is what forced the rope-only input and the parse LRU. It also cannot see a `#:` annotation,
+  which forced a re-lexing subsystem over a reconstructed buffer.
+- The analysis unit was the whole file. That makes whole-file re-inference the keystroke floor, and
+  file-granular interface edges manufacture cluster SCCs.
+- `CoreType` was a deep-cloned enum. Allocation churn capped inference near a measured 6
+  microseconds per line.
+- The engine was single-threaded by design.
+
+The limiting factors rank in this order: file-granular analysis, type-representation churn, parse
+cost and tree size, and single-threadedness. The last one is a division by the core count, while
+the first three are asymptotic or large per-operation wins. The ultimate ceiling is R's dynamic
+semantics, which is a semantics budget rather than an infrastructure one.
+
+## Why rowan rather than a hand-written tree
+
+The parser is hand-written either way. rowan is not a parser. It is the tree data structure the
+hand-written parser emits, and nothing about parsing is delegated to it. The green and red design
+beats a classic typed AST of structs with spans for four reasons.
+
+- **Losslessness.** Every byte lives in the tree, trivia included, and reprints exactly. A `#:`
+  comment is type syntax here, so the formatter, the byte-exact round trip and the annotation
+  tooling all come from the representation instead of from side tables.
+- **Error resilience.** Every parse yields a tree whose error nodes are local to the break, and the
+  typed AST layer returns `Option`, so a consumer never carries a parallel data model for broken
+  code.
+- **Position independence.** A green node carries a width and no absolute offset, so an untouched
+  item's subtree stays structurally equal after an edit elsewhere in the file. That is the property
+  per-item cutoffs are built on. An AST that carries spans shifts every span after any edit, which
+  kills sub-file incrementality at the root.
+- **Structural sharing.** Immutable refcounted subtrees with builder-level dedup of identical small
+  nodes keep the resident tree near twice the source bytes.
+
+Use the crate, not an in-house copy of the design. The value is subtle machinery already hardened
+over years in rust-analyzer: the thin-DST layout, red cursors with lazy offsets, node caching and
+splicing. Hand-rolling reproduces that code without the hardening and gains no design freedom.
+rowan is small and dependency-free enough to vendor or fork if divergence is ever needed, and Biome
+forked it, which is precedent for both its maturity and the exit hatch.
+
+The acknowledged cost is that rowan traversal is dynamically kinded and slower than direct structs.
+That is why inference never walks it. The checker runs on per-item HIR, and rowan serves the
+fidelity layers, which are the IDE, the formatter and refactorings.
+
+Value equality is the mechanism, not pointer identity. rowan's green `Eq` is structural with a
+pointer fast path, and its node cache dedups only nodes with three children or fewer, so a
+from-scratch reparse shares no large subtree. rust-analyzer's barriers are likewise value equality
+on its `ItemTree` and `AstIdMap`. A statement-splice reparse of an open document can make those
+compares pointer-fast, but it is an optimization only. Parse stays a pure per-file query and
+correctness never depends on splicing.
+
+## Why salsa rather than an in-house engine
+
+Two things would otherwise have to be hand-rolled: parallel snapshot reads with write
+cancellation, and first-class fixpoint cycles. Both are proven in rust-analyzer and in Astral's
+`ty`, whose type inference uses salsa fixpoints. A concurrent red-green memo core is the one
+component not worth building in-house. The query decomposition from the in-house engine is the
+asset that transferred: per-symbol firewalls, names-only cutoffs, and the durable and open fold
+split.
+
+Four salsa risks are recorded so they stay managed.
+
+- **Pin the version and upgrade deliberately.** The public API churns hard and often, with several
+  breaking releases a year. Vendoring or forking is the exit hatch, exactly as for rowan.
+- **Fixpoint non-convergence is a hard panic at 200 iterations.** The pin-to-`Unknown` rule lives
+  inside the cycle function. Reaching salsa's cap is a bug, never a fallback.
+- **Interned-value garbage collection is young.** rust-analyzer used about four times the memory on
+  its salsa migration until it tuned per-query `lru`, and `ty` hit multi-gigabyte blowups. Per-query
+  `lru` and interned GC are the first levers when memory regresses.
+- **Parallel iteration over a fixpoint had real hang bugs**, fixed upstream. A parallel-cycle
+  stress test covers it.
+
+## Item granularity and item identity
+
+The analysis unit is the item, not the top-level statement. A nested definition is an item too.
+That covers a field or method inside a class-constructor call such as `R6Class`, `setRefClass` or
+an S4 block, and a function defined inside a function body. Without that, R's common giant
+single-statement object-oriented files degenerate straight back to whole-file granularity.
+
+An item's identity hashes its kind and name, plus its parent with an index disambiguator. It never
+hashes a bare position or index, so inserting an item does not shift an unrelated item's identity.
+This follows rust-analyzer's current `AstIdMap` design. Its earlier index-based design had exactly
+the shifting problem.
+
+## An annotation is one concept with pluggable spellings
+
+Annotations are one internal concept, and the surface spelling is pluggable. The seam sits at
+annotation recognition during lowering, not in the lexer. `#:` is structured trivia today. R 4.4
+ships `declare()` as an experimental base primitive, which is a runtime no-op, and Posit's quickr
+already annotates with `declare(type(...))`. A valid-R inline form is therefore ordinary call
+syntax recognized at lowering. A true superset dialect, which is the TypeScript road of inline
+syntax plus a strip step, stays a product decision that the pluggable design keeps open. A `#:`
+file must always remain valid ordinary R.
+
+## Testing doctrine for `syntax`
+
+The parser is the foundation of everything, so it must be extremely well tested. More is better,
+and duplicated coverage is welcome and never pruned for elegance. All seven layers apply, not a
+selection.
+
+1. tree-sitter-r's parser corpus, imported wholesale and converted into the fixture-harness format.
+   The suite is at least tree-sitter-r's, expressed as fixtures.
+2. A real-world parse corpus, which is R's base library sources plus top CRAN packages, checked for
+   lossless round trip and acceptance parity.
+3. Exhaustive hand-written per-construct suites with golden trees and golden error messages. That
+   covers every operator, precedence pair, call form, literal form, string, raw string and escape
+   variant, every `#:` annotation form, and every error-recovery scenario.
+4. Property tests: the tokens cover the input, node ranges nest, and reprinting equals the input.
+5. Fuzzing, both random bytes and structure-aware mutations, with never-panic and always-lossless
+   invariants. It ran against every parser increment from the first one, and a bounded pass runs in
+   the `syntax` crate's own test suite.
+6. Statement-reparse equivalence, so an incremental result tree equals a from-scratch tree for a
+   randomized edit.
+7. Acceptance cross-check against R's own parser where an R installation exists. This is
+   local-only, like every test that requires R.
+
+Redundancy across these layers is the point. The same construct covered five ways is deliberate.
+
+## Cases where R parsers get subtle
+
+Cover all of these exhaustively: raw strings in the `r"(...)"` and `R"[...]"` forms, where the
+formatter has a byte-for-byte rule for a reason; escapes; `%op%` operators; backtick names;
+multi-line `#:` blocks, where consecutive `#:` lines stitch into one annotation region;
+statement-boundary and newline sensitivity, which is R's newline-versus-operator continuation rule;
+`]]` against `] ]` in nested indexing such as `x[[y[1]]]`; the top-level `else` after a newline,
+which is legal inside braces and a parse error at top level; `->` and `->>` assignment; `=` as
+assignment against `=` as a named argument, which is context-dependent; unary-minus precedence,
+where `-2^2` is `-(2^2)`; the hex, `L` integer and `i` complex literal forms; and `\(x)` lambdas
+from R 4.1.
+
+## Corpus mechanics
+
+tree-sitter-r's parser corpus lives in its GitHub repository under `test/corpus/`, MIT-licensed.
+Fetch it from the repository rather than from the crates.io package, which may omit tests. The
+real-world corpus is R's base library sources plus roughly the top 100 CRAN packages. It lives in a
+gitignored corpus directory, with a committed manifest and fetch script in `scripts/`. The fetch
+needs outbound network, so run it where that exists. The acceptance cross-check against R's
+`parse()` needs a local R installation. CI has no R, so the acceptance-divergence allowlist is
+adjudicated against R locally once and then committed.
+
+## Better syntax errors are a goal, not a side effect
+
+Dramatically better error messages are an explicit goal of the parser, for R syntax generally and
+for `#:` type annotations specifically. Recursive descent knows what it was parsing at every point,
+so the bar is: expected-token sets such as "expected `)` or `,`"; paired-delimiter pointers such as
+"unclosed `(` opened here" carrying both spans; statement-anchored recovery, so one broken
+construct never poisons the file; and, because annotations are first-class grammar, real type-syntax
+errors with exact token spans inside a `#:` comment, such as "expected a type after `|`". The
+golden error-message suite pins the wording, and the diagnostics goal in `AGENTS.md` sets the bar.
+
+## The legacy stack shares no code
+
+The legacy crates under `legacy/` are frozen. They take bug fixes only. No code is ever shared or
+abstracted between the two stacks, which is a user directive. The duplication is deliberate, and
+introducing an abstraction to share code with legacy is a mistake even where the duplication is
+verbatim.
+
+# Decision record: every pipeline stage is fuzzed from its first commit
+
+This is a user directive. The testing doctrine made fuzzing mandatory for the `syntax` crate from
+day one. It applies to every other pipeline stage too. Fuzzing is never bolted on later, for any
+layer.
+
+Every stage gets fuzz and property coverage the day it exists, alongside its fixtures. That covers
+lowering, naming, inference, diagnostics, the incremental layer, the formatter and the IDE
+features. The formatter is fuzzed for idempotence and losslessness. An IDE feature is fuzzed for
+never panicking at any cursor position.
+
+The semantics harness at `crates/semantics/tests/test_fuzz.rs` is the template. It asserts four
+things over a generator biased toward semantically live shapes, plus a token-soup robustness arm.
+
+- Nothing panics across the full pipeline, which includes fixpoints converging.
+- Results are deterministic across fresh databases.
+- Diagnostic ranges have valid geometry.
+- Incremental equivalence holds, so editing through the setter gives the same result as a fresh
+  build. That is the red-green invariant.
+
+`FUZZ_ITERS` scales the budgets. A bounded pass runs in each crate's own test suite, and the
+`fuzz_deep` variants carry the long runs.
+
+**CI does not fuzz today, and it is worth stating plainly rather than assuming otherwise.** The root
+`Cargo.toml` sets `default-members = ["crates/ry"]` and the workflow omits `--workspace`, so
+`cargo test --all-targets --all-features` lists 171 tests where the workspace has 712. Every fuzz
+arm lives in another crate. The second job runs `-- --ignored`, which lists no tests at all for the
+same reason, so it is a release build followed by an empty test run. `backlog.md` holds the blockers
+that a workspace-wide CI run has to clear first.
+
+The first semantics fuzz runs found two real crashes within seconds. One was a non-converging
+cycle, where a growing self-referential type rode the iteration cap into a panic. The other was
+inference variables leaking through exported schemes into foreign tables. Both are of the class
+that only surfaces in the large, which is exactly what per-stage fuzzing exists to catch early.
+
+# Decision record: diagnostic wording follows the project's own bar
+
+This is a user directive. A message does not have to copy any other implementation, and improving
+one is welcome.
+
+Wording follows the diagnostics bar in `AGENTS.md`, which is the Rust and Elm standard. The golden
+fixture suites are the wording contract, and they render the stack's own messages.
+
+# Decision record: deep resolve is memoized per binding epoch and cuts a cycle to `Unknown`
+
+`InferenceTable::resolve`, the deep resolver in `crates/semantics/src/infer.rs`, walked the interned
+type structure recursively with only a depth-64 cap as protection. Interned types form a directed
+acyclic graph, so a shared subtree appears once in memory but was re-resolved once per occurrence.
+A self-referential binding, meaning a variable whose binding transitively contains itself or a
+self-referential alias, expanded as a tree up to the cap. On the real-file corpus of about 507k
+lines this measured 397 million inner resolve steps, and resolve alone cost more wall time than the
+legacy stack's entire pipeline. The depth cap also truncated meaning. Past depth 64 a type silently
+stayed unexpanded, which is a position-dependent semantics that no cache can be layered onto.
+
+Deep resolve is now a memoized walk over the interned graph with explicit cycle detection.
+
+- **A cycle cuts to `Unknown`.** The walk carries a `visiting` stack of the variables under
+  expansion. Re-encountering one means an infinite type, and it resolves to `Unknown`. That matches
+  the pin-to-`Unknown` doctrine used everywhere self-reference grows, including the fixpoint cap and
+  loop widening. Alias expansion keeps a depth guard as a pure resource backstop, not as a
+  semantics.
+- **Only a clean subtree is memoized.** A result caches in `resolve_cache` keyed by the interned
+  type, but only when no cycle was cut beneath it. A node containing a variable currently being
+  expanded resolves differently at top level.
+- **An epoch invalidates the cache.** Every binding mutation and rollback bumps an epoch counter,
+  and the cache self-clears on an epoch mismatch. No entry can serve a stale binding. The common
+  case, which is many resolves between mutations such as rendering a whole item's diagnostics, hits
+  warm.
+
+Correctness: silent depth truncation is replaced by the established cycle semantics, so an infinite
+type resolves to `Unknown` at the point of self-reference instead of expanding arbitrarily deep.
+The fixture and fuzz suites confirm this is observation-equivalent everywhere covered. Performance:
+corpus inner resolve steps went from 397 million to 4.2 million, which is linear in corpus size.
+Resolve wall time went from 30.8 s to 0.3 s, and a whole corpus pass from 53.2 s to 12.7 s.
+`RESOLVE_CALLS` stays as a standing instrument, because a near-linear step count is now an
+invariant the performance harness can watch.
+
+# Decision record: the server threads one worker, and publishes diagnostics in two waves
+
+The server runs one async-lsp frontend thread and one worker thread that owns the database.
+
+**Cancellation rides the database's own token.** `notify_edit` cancels before it enqueues. A flip
+is consumed by whichever in-flight query it kills, and every subsequent job starts on a fresh
+storage-handle clone, so the latest edit wins. This was chosen over a hand-rolled cooperative flag
+because the database checks its token at every operation, which means no query body needs
+instrumenting.
+
+**The publish waves gate on a real query split.** `parse_stage_diagnostics` covers the syntax and
+annotation classes and exists as its own query precisely so the first wave never computes naming or
+type checking. Filtering the full set afterwards would pay the whole cost and only hide it.
+`file_diagnostics` builds on the same query, which keeps the first wave a faithful subset by
+construction.
+
+**The host assembly is shared**, in `crates/ry/src/diagnostics.rs`. Config gating, per-file typing
+modes, strict escalation, lints and suppression comments run identically for the server's publish
+path and for `ry check`, so the two surfaces cannot drift.
+
+Two smaller decisions sit alongside. The `missing-comma` lint is retired, because the hand parser
+rejects `f(1 2)` as R does and the lint only compensated for tree-sitter over-accepting it. Its
+config key stays accepted and inert. Per-diagnostic related locations, such as the note on a
+duplicate top-level binding, are not implemented, because `Diagnostic` has no related-location
+model yet. That is recorded as open work rather than silently dropped.
+
+The CLI contract suite and the LSP behavioral suite pin the surface. The LSP suite drives the real
+binary over stdio. `stats_witness` asserts the performance and memory budgets as CI-checkable
+thresholds.
+
+# Decision record: the interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order
+
+A corpus-scale finding from the multi-core instrument drove this. Pre-forcing the per-file phases
+gave 64852 findings, and forcing file diagnostics directly gave 64835. Both counts were stable
+across runs and thread counts, and one worker equalled four exactly, so the difference was never a
+parallelism race. It was query-order semantics.
+
+A cyclic package-interface group used to resolve through dynamic cycle recovery alone, in
+`item_check_recover` and `global_scheme_recover`. Whichever member was queried first became the
+cycle head, the fixpoint iterated from that head, and a group still changing at the round cap
+pinned from that head's perspective. Which items lost their types to `Unknown` therefore depended
+on which query happened to arrive first. Every individual forcing order was deterministic, but
+hover-then-check, check-then-hover and differently ordered cold passes could disagree with each
+other. The legacy stack's whole-package rounds were entry-order-independent. Per-item cycle heads
+were not.
+
+The shape now lives in `crates/semantics/src/semantics.rs` and has three parts.
+
+- `interface_sccs(files)` builds the static interface-reference graph. It draws an edge from each
+  named package definition item to the winner of every global name its body reads, which is
+  `non_locals` plus validated `namespace_reads`. One iterative Tarjan pass condenses it in
+  canonical order, which is project file order and then item order within a file. Only a cyclic
+  group is recorded, meaning one with more than one member or with a self-edge.
+- `scc_schemes(files, group)` is the canonical fixpoint of one group. Every member starts at the
+  tolerant `Unknown` scheme. Each round re-checks every member against the previous round's table,
+  which is Jacobi iteration, so one propagation hop happens per round and within-round order cannot
+  matter either. Convergence is scheme-table equality. A group still changing at the round cap,
+  which is 16 and shared with the backstop, pins all members to `Unknown`. That is the only
+  entry-order-free pin. A member check runs `check_item_with_annotation` directly against an
+  overlay environment called `SccGlobals`, which reads the round table first and falls back to
+  ordinary global resolution, and which suppresses stub overloads for member names. It never runs
+  through `item_check`, so no cycle forms.
+- `item_check` adopts the canonical scheme as a member's exported scheme, which keeps a single
+  source of truth. Export, hover and every downstream reader see the fixpoint value rather than the
+  one-hop-ahead re-derivation the item's own check just computed. `global_scheme` reads `item_check`
+  only. The dynamic cycle recovery stays as a backstop for reference edges the static graph cannot
+  see.
+
+Correctness: forward, reverse and phase-pre-forced forcing now render identical diagnostics. The
+regression test is `cyclic_group_answers_are_forcing_order_independent` in
+`crates/semantics/tests/test_parallel.rs`, and the corpus instruments agree at 64835 findings for
+both forcing shapes. The growing-self-reference pin stays `Unknown`. Simplicity: the fixpoint is an
+ordinary tracked query over an explicit graph, instead of emergent cycle-head dynamics.
+Performance: the sequential corpus pass improved from 12.7 s to 10.1 s, because canonical rounds
+replace per-head cycle re-iteration. A keystroke in a 53k-line package costs about 3 ms more, which
+is about 8%. That is the once-per-revision validation walk of `interface_sccs`, whose dependency
+surface is every item's naming. Narrowing that surface to a per-item read-name projection is the
+known lever if it ever matters. Incremental analysis: the graph derives from naming only, so an
+edit that leaves every member's read set unchanged backdates `interface_sccs`, and the group
+fixpoint re-runs only when a member's check output changes.
+
+# Decision record: there is no third constraint kind, so two flexible comparison operands stay unconstrained
+
+The question was whether comparing two flexible operands in `function(a, b) a < b` should constrain
+them, either to each other or to a new comparable constraint kind covering numeric, `character` and
+`logical`.
+
+It should not. Two flexible comparison operands stay fully unconstrained. The function infers as
+`<T, U> fn(a: T, b: U) -> logical`, and a cross-family call is accepted. A flexible operand is
+still constrained to numeric when its partner is concretely numeric, which is the existing rule,
+and two concretely known families must still match.
+
+Three reasons.
+
+- R's runtime comparison coerces across atomic families. `1 < "2"` is legal and compares
+  `"1" < "2"` as characters. Any constraint tying flexible operands to a family, or to each other,
+  therefore rejects a legal program the checker cannot prove wrong.
+- A comparable constraint would be the third independent constraint kind, which is the recorded
+  traits tripwire. Comparisons alone do not justify designing traits. The constraint would be
+  nearly vacuous, because every atomic family is comparable, so it would buy almost no precision
+  for real machinery cost.
+- The same-family error on two concrete operands stays. That case is decidable and catches a real
+  bug, such as `x < "10"`.
+
+Correctness: this ratifies existing behavior, pinned by the fixture
+`two_flexible_comparison_stays_unconstrained`. Simplicity: no new machinery, and the traits
+tripwire stays armed. The typing reference states the flexible-operand comparison rules explicitly.
 
 # Decision record: union compatibility commits a flexible argument at first use, in program order
 
-**Status:** decided and ratified (agent-owned decision under the delegated ownership mandate). This resolves the recorded design fork on order-dependent compatibility commits.
+A flexible argument checked against a union-typed parameter binds to the whole union. With
+`f : fn(x: integer | character)`, the call `f(v)` pins `v := integer | character`. A later use of
+`v` against a different union, such as `g : fn(x: logical | character)`, then errors, even though
+the intersection `character` would satisfy both. The question was whether commits should be made
+order-free through constraint collection and intersection solving.
 
-Question: a flexible argument checked against a union-typed parameter binds to the whole union (`f(v)` with `f : fn(x: integer | character)` pins `v := integer | character`). A later use of `v` against a different union (`g : fn(x: logical | character)`) then errors even though the intersection (`character`) would satisfy both. Should commits be made order-free (constraint collection + intersection solving), or is first-use commitment the spec?
+First-use commitment is the specification. A flexible argument checked against an expected union
+binds to the whole union at that use, exactly as unification would. Uses commit in program order,
+and a later conflicting use reports at its own site against the committed type. The fix for a
+genuine intersection case is an explicit annotation naming the intended member type.
 
-Decision: **first-use commitment is the spec.** A flexible argument checked against an expected union binds to the whole union at that use, exactly as unification would; uses commit in program order; a later conflicting use reports at its own site against the committed type. The fix for a genuine intersection case is an explicit annotation with the intended member type.
+Three reasons.
 
-Rationale:
-- Program-order commitment is how the checker already treats every other type (`x <- 1L` then `x <- "s"`-style first-use-binds is standard HM); making unions special would demand intersection constraints — a new constraint former squarely on the traits frontier, deliberately out of scope.
-- The order-dependence is bounded and predictable: it never changes *whether* an inconsistent pair of contracts errors (some site always reports); it only decides *which* site is blamed — the later use, which is also where a reader's attention should go.
-- Program order is the order R evaluates, so the blamed site matches the first call that would misbehave at runtime under the committed reading.
+- Program-order commitment is how the checker already treats every other type. First use binds is
+  standard Hindley-Milner. Making unions special would demand intersection constraints, which is a
+  new constraint former squarely on the traits frontier and deliberately out of scope.
+- The order dependence is bounded and predictable. It never changes whether an inconsistent pair of
+  contracts errors, because some site always reports. It only decides which site is blamed, and
+  that is the later use, which is where a reader's attention should go.
+- Program order is the order R evaluates in, so the blamed site matches the first call that would
+  misbehave at run time under the committed reading.
 
-Impact: correctness — ratifies existing behavior (fixtures `flexible_argument_commits_to_the_union_at_first_use` / `union_commit_blames_the_later_conflicting_use` pin both orders; differentials green — the oracle agrees); simplicity — no constraint-solving machinery; the typing reference's union-compatibility section now states the commitment rule and its annotation escape hatch.
+Correctness: this ratifies existing behavior. The fixtures
+`flexible_argument_commits_to_the_union_at_first_use` and
+`union_commit_blames_the_later_conflicting_use` pin both orders. Simplicity: no constraint-solving
+machinery. The typing reference's union-compatibility section states the commitment rule and its
+annotation escape hatch.
 
-# Decision record: strict mode attributes recursive bindings the fixed point cannot fully type
+# Decision record: strict mode attributes a recursive binding the fixpoint cannot fully type
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Closes the recorded gap that deliberately-`Unknown` recursive schemes carried no strict origin.
+The canonical per-group interface fixpoint types converging recursion precisely. A top-level `fact`
+exports `fn(n: integer) -> integer`, and mutual `is_even` and `is_odd` export
+`<T: numeric> fn(n: T) -> logical`. Fixtures pin this, and it supersedes the older contract under
+which self-recursion deliberately stayed a tolerant `Unknown`. The typing reference is updated.
 
-Context and a finding along the way: the canonical per-group interface fixpoint types **converging** recursion precisely — a top-level `fact` exports `fn(n: integer) -> integer` and mutual `is_even`/`is_odd` export `<T: numeric> fn(n: T) -> logical` (fixtures pin this; the older "self-recursion deliberately stays tolerant `Unknown`" contract is superseded and the typing reference updated). What remains `Unknown` is: (a) growing self-reference pinned at the round cap — those already surface under strict through the undetermined-reference origin at the recursive read (the read sees literal `Unknown`); and (b) cycles that converge *with* `Unknown` embedded (`f <- function() f()` settles at `fn() -> Unknown`) — the read sees a function type, no origin fires anywhere, and the export silently carries `Unknown`. Case (b) was the attribution hole.
+Two shapes still resolve to `Unknown`.
 
-Chosen shape: after `item_check` adopts the canonical group scheme, if the member's body produced **no errors and no other strict origins** and the adopted scheme still contains `Unknown` (`types::contains_unknown`), a `StrictOriginKind::RecursiveUnknown` origin is recorded on the whole binding, rendered "strict mode: could not determine the full type of `f`; it is defined recursively — add a type annotation". The clean-body gate keeps the propagation doctrine: when anything inside the body already attributes the `Unknown`, the binding is not re-reported. Accepted over-report: a clean-bodied cycle member whose `Unknown` propagates from a *sibling's* origin is still attributed — detecting that would need group-wide origin bookkeeping inside the fixpoint, and the advice ("annotate this binding") genuinely closes the member's export regardless of the sibling.
+- **A growing self-reference pinned at the round cap.** These already surface under strict mode
+  through the undetermined-reference origin at the recursive read, because the read sees a literal
+  `Unknown`.
+- **A cycle that converges with `Unknown` embedded.** `f <- function() f()` settles at
+  `fn() -> Unknown`. The read sees a function type, so no origin fires anywhere, and the export
+  silently carries `Unknown`. This was the attribution hole.
 
-Impact: correctness — every `Unknown`-carrying export now has at least one strict attribution (fixtures cover self/mutual/annotated/growing/pure-self-call shapes); the differential accepts the two new-only findings as oracle deficits (legacy attributes nothing and panics on the growing shape); simplicity — one new origin kind and a type walk, no fixpoint machinery; incremental analysis — the check runs inside `item_check`, no new queries.
+After `item_check` adopts the canonical group scheme, a `StrictOriginKind::RecursiveUnknown` origin
+is recorded on the whole binding when two conditions hold: the member's body produced no errors and
+no other strict origins, and the adopted scheme still contains `Unknown` by `types::contains_unknown`.
+It renders as "strict mode: could not determine the full type of `f`; it is defined recursively;
+add a type annotation". The clean-body gate keeps the propagation doctrine, so a binding is not
+re-reported when something inside the body already attributes the `Unknown`.
 
-# Decision record: script frame semantics — sequential immediate reads, settled-frame deferred reads
+One over-report is accepted. A clean-bodied cycle member whose `Unknown` propagates from a
+sibling's origin is still attributed. Detecting that would need group-wide origin bookkeeping
+inside the fixpoint, and the advice to annotate this binding genuinely closes the member's export
+regardless of the sibling.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by the differential fuzz arm, which exposed that script unresolved checking was entirely missing and that cross-item resolution had no defined contract.
+Correctness: every `Unknown`-carrying export now has at least one strict attribution, and fixtures
+cover the self, mutual, annotated, growing and pure-self-call shapes. Simplicity: one new origin
+kind and a type walk, with no fixpoint machinery. Incremental analysis: the check runs inside
+`item_check`, so there are no new queries.
 
-Question: a script's top level is one frame executed top-down. What does a cross-item read resolve to — for naming (unresolved warnings), for the unused check, and for typing — when the frame holds several bindings of the name, when the read precedes every binding, and when the read sits inside a closure?
+# Decision record: script frame semantics
 
-Decision, one rule per read kind:
+A script's top level is one frame executed top-down. The question was what a cross-item read
+resolves to, for naming, for the unused check and for typing, when the frame holds several bindings
+of the name, when the read precedes every binding, and when the read sits inside a closure. The
+fuzz arm drove this, by exposing that script unresolved checking was entirely missing and that
+cross-item resolution had no defined contract.
 
-- **Immediate reads** (executed at their position in the top-down run) resolve sequentially: the nearest EARLIER top-level binding wins, before package globals and stubs. A use before every definition — including inside the very statement that first binds the name (`x <- x + 1L` with no earlier `x`) — is an unresolved name, because it errors at runtime.
-- **Deferred reads** (from inside a nested function — the closure runs after the frame settled) resolve against the whole document: the LAST top-level binding wins, the enclosing statement's own binding included, so self-recursion resolves and types through the cycle fixpoint (`a <- function() a()` exports `fn() -> Unknown` via the round cap; a later rebinding is what the recursive call actually sees at run time).
-- **Conditional top-level writes** (inside a top-level `if`/`for`/`while`/`repeat`) create the document's variable slot exactly as the package spec already said: later reads resolve to it; the slot exports no scheme yet, so such reads type `Unknown` (backlogged lift).
-- **Quiet reads** (data masking, opaque operators like `|>`) are never reported unresolved but count as uses for the unused check and get full navigation — at runtime they fall back to the enclosing binding.
-- The unused check follows the same model: deferred reads keep every binding of the name alive; immediate reads mark definers backward through conditional ones (a conditional rebinding does not end an earlier binding's liveness); a loop reading its carried variable keeps both its own write and the earlier binding alive (the first iteration reads the outer one).
+There is one rule per kind of read.
 
-The oracle's frame model differs by construction: one settled slot per name (no sequence), the slot minted before the statement's value resolves, forward captures unresolved, pipe reads not counted as uses, and an occurs-check that rejects some valid self-referential rebindings. Where the models disagree, the rewrite follows R's runtime and the typing reference, and the differential accepts the divergence explicitly: fixture-arm and ide-arm case allowlists with reasons, and the fuzz arm's narrow filters (site-scoped oracle deficits, in-statement slot tolerance, and unpaired type findings over the transitive closure of *unstable names* — multiply-bound, self-referential, or forward-captured). Every acceptance is rollup-counted so drift stays visible.
+- **An immediate read**, executed at its position in the top-down run, resolves sequentially. The
+  nearest earlier top-level binding wins, before package globals and stubs. A use before every
+  definition is an unresolved name, because it errors at run time. That includes a use inside the
+  very statement that first binds the name, such as `x <- x + 1L` with no earlier `x`.
+- **A deferred read**, from inside a nested function, resolves against the whole document, because
+  the closure runs after the frame settled. The last top-level binding wins, including the
+  enclosing statement's own binding, so self-recursion resolves and types through the cycle
+  fixpoint. `a <- function() a()` exports `fn() -> Unknown` through the round cap, and a later
+  rebinding is what the recursive call actually sees at run time.
+- **A conditional top-level write**, inside a top-level `if`, `for`, `while` or `repeat`, creates
+  the document's variable slot exactly as the package specification already said. A later read
+  resolves to it. The slot exports no scheme yet, so such a read types `Unknown`. Lifting that is
+  in the backlog.
+- **A quiet read**, from data masking or an opaque operator, is never reported unresolved. It still
+  counts as a use for the unused check and gets full navigation, because at run time it falls back
+  to the enclosing binding.
+- **The unused check follows the same model.** A deferred read keeps every binding of the name
+  alive. An immediate read marks definers backward through conditional ones, because a conditional
+  rebinding does not end an earlier binding's liveness. A loop that reads its carried variable
+  keeps both its own write and the earlier binding alive, because the first iteration reads the
+  outer one.
 
-Impact: correctness — scripts get the unresolved class for the first time (spec-mandated, previously silently absent), duplicate `@type`/`@alias` names now error at every site, and six fuzz-found gaps are fixed with fixtures pinning each; simplicity — one `deferred` bit threaded through `GlobalEnv` instead of a second resolver; incremental analysis — resolution facts stay per-item salsa queries (`frame_slot_positions` is one small per-file map).
+Correctness: scripts get the unresolved class for the first time, which the specification mandated
+and which was silently absent. A duplicate `@type` or `@alias` name now errors at every site, and
+six fuzz-found gaps are fixed with a fixture pinning each. Simplicity: one `deferred` bit threaded
+through `GlobalEnv`, instead of a second resolver. Incremental analysis: resolution facts stay
+per-item queries, and `frame_slot_positions` is one small per-file map.
 
-# Decision record: undeclared type names error once at the reference and compare like `Unknown`
+# Decision record: an undeclared type name errors once at the reference and compares like `Unknown`
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Closes the reported gap that a misspelled nominal inside a `@type` body (and every other annotation position) was silently lowered to an opaque nominal.
+A misspelled nominal inside a `@type` body, and in every other annotation position, was silently
+lowered to an opaque nominal. The shape now has three pieces, each with one source of truth.
 
-Chosen shape, three pieces with one source of truth each:
+- **Recording.** Annotation lowering, in `annotations::lower_annotation`, records every
+  `TyKind::Named` mint with the referencing token's range, in `Annotation::nominal_references`. A
+  primitive or an in-scope binder never reaches the record, because lowering resolves it first.
+  Binder scoping therefore stays single-sourced instead of being re-derived by a diagnostic walk.
+- **Reporting.** `unknown_type_diagnostics` checks the recorded references against the project's
+  `@type` and `@alias` declarations, plus the file's own for a script, and against the stub
+  corpus's nominal vocabulary. It errors at the precise token with a nearest-name hint, so
+  `Instument` asks whether you meant `Instrument`. A forward reference stays legal, because the
+  vocabulary is position-independent.
+- **Tolerance.** An undeclared nominal compares like `Unknown` at the relation level. `unify`,
+  `compatible` and the operator checks' `structural()` projection all consult one
+  `undeclared_nominal` predicate. The typo is therefore reported exactly once and never cascades
+  into a value-level mismatch, a call-site error in another item, or operator noise.
 
-- **Recording:** annotation lowering (`annotations::lower_annotation`) records every `TyKind::Named` mint with the referencing token's range (`Annotation::nominal_references`). Primitives and in-scope binders never reach the record because lowering resolves them first — so binder scoping stays single-sourced instead of being re-derived by a diagnostic walk.
-- **Reporting:** `unknown_type_diagnostics` checks the recorded references against the project's `@type`/`@alias` declarations (plus the file's own for scripts) and the stub corpus's nominal vocabulary, erroring at the precise token with a nearest-name hint (`Instument` → "Did you mean `Instrument`?"). Forward references stay legal — the vocabulary is position-independent.
-- **Tolerance:** an undeclared nominal compares like `Unknown` at the relation level (`unify`, `compatible`, and the operator checks' `structural()` projection all consult one `undeclared_nominal` predicate), so the typo is reported exactly once and never cascades into value-level mismatches, call-site errors in other items, or operator noise.
+The declared-annotation check was found along the way to silently skip `Named`, `Record` and
+`Tuple` declarations. A positive-list gate meant for tolerance had become a hole, so `#: Point` on
+a structural value minted the nominal without `@new`, which contradicts the nominal-introduction
+contract. The gate is now a negative list holding `Unknown` and `Any` only, which enforces the
+`@new` discipline at a declared site and checks a record or tuple declaration for the first time.
+The typing reference states both contracts.
 
-Along the way the declared-annotation check was found to silently skip `Named`, `Record`, and `Tuple` declarations (a positive-list gate meant for tolerance had become a hole): `#: Point` on a structural value minted the nominal without `@new`, contradicting the nominal-introduction contract and the oracle. The gate is now a negative list (`Unknown`/`Any` only), which both enforces the `@new` discipline at declared sites and checks record/tuple declarations for the first time. The typing reference states both contracts.
+Correctness: the bug class is closed, with fixtures and fuzz templates guarding it. Simplicity: one
+predicate instead of per-site suppression guards. Incremental analysis: the diagnostic is a
+per-file pass over already-lowered annotations.
 
-Impact: correctness — the reported bug class is closed with fixtures and fuzz templates guarding it; simplicity — one predicate instead of per-site suppression guards; incremental analysis — the diagnostic is a per-file pass over already-lowered annotations.
+# Decision record: an annotation shape violation refuses the whole block
 
-# Decision record: annotation shape violations refuse the whole block; the depth caps and vector-element rule keep the oracle's gating split
+The question was where annotation-shape validations live, and what happens to a violating block's
+typing payload. The validations cover directive ordering, duplicate and unknown type parameters,
+applied binders, the `@new` payload shape, nesting caps, vector-element atomicity, and attachment
+rules.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Driven by the legacy-corpus differential arm, which itemized every annotation validation the oracle enforced and the rewrite silently skipped.
+- **One refusal semantics.** A block with any shape violation keeps only its errors. The whole
+  typing payload is dropped, which covers the declared type, definitions, `@new`, `@strict` and
+  nominal references. One mistake therefore yields one error and no follow-on findings.
+  `Annotation::errors` and `typing_errors` hold the errors, and `lower_annotation` strips the rest.
+  A consumer observes the payload's absence rather than a validity flag. An inlay hint gates on
+  surviving payload, meaning a declared type, `@new` or trust, rather than on the annotation's
+  presence, so a refused binding hints its inferred type again.
+- **Attachment is single-sourced.** `top_level_annotations` computes each top-level block's target
+  as attached, blank-line-separated or dangling. Both annotation application, in
+  `item_annotation_syntax`, and the dangling-annotation diagnostics read it. A blank line or an
+  interposed comment genuinely detaches the annotation. The checker previously applied silently
+  across a blank line, which contradicted the reference.
+- **Two classes gate differently, on purpose.** Past 160 levels of nesting the annotation shape is
+  refused and always reported. Past 128 the type is refused for checking, which is a typing-class
+  finding that disappears under `# typing: off`. The vector-element rule works the same way.
+  Lowering records every `[]` element with its range in `Annotation::vector_elements`, and a
+  diagnostics pass with the project vocabulary judges it: an alias expands, a nominal refuses, and
+  an undeclared name stays silent because the unknown-type error owns it. It reports in the typing
+  class at the use site. The vector finding does not strip the payload, because the judgment needs
+  vocabulary that lowering lacks, so the declared shape still serves hover and navigation. That is
+  an accepted and documented difference, visible only in exported schemes.
+- **A definition is top-level only.** A nested `@type` or `@alias` block errors and does not enter
+  the vocabulary, because `file_type_definitions` reads top-level children only.
 
-Question: where do annotation-shape validations live (directive ordering, duplicate/unknown type parameters, applied binders, `@new` payload shape, nesting caps, vector-element atomicity, attachment rules), and what happens to a violating block's typing payload?
+Correctness: the whole validation family closes, with fixtures pinning each shape and message.
+Simplicity: one errors vector and one attachment walk, instead of per-consumer validity checks.
+Incremental analysis: everything stays in per-file parse-pure passes except the vocabulary
+judgment, which joins the existing per-file semantic families.
 
-Chosen shape:
+# Decision record: a statement-level annotation attaches at any depth and applies where the expression infers
 
-- **One refusal semantics:** a block with any shape violation keeps only its errors — the whole typing payload (declared type, definitions, `@new`, `@strict`, nominal references) is dropped, so one mistake yields one error and no follow-on findings (`Annotation::errors` / `typing_errors`, stripped in `lower_annotation`). Consumers observe payload absence, not a validity flag; inlay hints gate on *surviving payload* (declared/`@new`/trusted), not annotation presence, so a refused binding hints its inferred type again.
-- **Attachment is single-sourced:** `top_level_annotations` computes each top-level block's target (attached / blank-line-separated / dangling); both annotation application (`item_annotation_syntax`) and the dangling-annotation diagnostics read it. A blank line or interposed comment now genuinely detaches the annotation — previously the rewrite silently applied across blank lines, unlike the oracle and the reference.
-- **Gating-faithful classes:** the two nesting caps mirror the oracle's split on purpose — past 160 levels the annotation shape is refused (always reported), past 128 the type is refused *for checking* (a typing-class finding that disappears under `# typing: off`). Same for the vector-element rule: lowering records every `[]` element with its range (`Annotation::vector_elements`), and a diagnostics pass with the project vocabulary judges it (aliases expand, nominals refuse, undeclared names stay silent — the unknown-type error owns those), reported in the typing class at the use site. The vector finding does NOT strip the payload (the judgment needs vocabulary lowering lacks), so the declared shape still serves hover/navigation — an accepted, documented difference from the oracle's whole-item abort, visible only in exported schemes.
-- **Definitions are top-level-only** and nested `@type`/`@alias` blocks error without entering the vocabulary (`file_type_definitions` reads top-level children only).
+An annotation below the item root used to be invisible to the checker, so the constructor idiom did
+nothing. Writing `#: @new Person` on a local assignment, or on a block-final expression inside a
+function body, was silently ignored.
 
-Impact: correctness — 14 legacy-corpus cases and the whole reported validation family close, with fixtures pinning each shape and message; simplicity — one errors vector and one attachment walk instead of per-consumer validity checks; incremental analysis — everything stays in per-file parse-pure passes except the vocabulary judgment, which joins the existing per-file semantic families.
+The shape keeps one source of truth per fact.
 
-# Decision record: statement-level annotations attach at any depth and apply where the expression infers
+- **Association.** `statement_annotations(parent)`, which is the existing adjacency walk, runs over
+  any statement sequence, whether the file root or a braced block. Top-level attachment,
+  expression-level attachment and the dangling-annotation diagnostics, which now cover a nested
+  block, therefore share one rule. `item_expression_annotations(db, item)` maps each attached block
+  inside an item to the annotated expression's HIR id by exact range. It is a plain function rather
+  than a tracked query, because `Annotation` carries text ranges with no memo plumbing, and its
+  callers are tracked queries whose dependencies already flow through `item_syntax` and `item_hir`.
+- **Application.** The checker owns one `apply_expression_annotation` seam. An assignment applies
+  it before the slot write, so the binding takes the annotated type. Every other expression applies
+  it where it infers. A non-assignment item root routes its own annotation through the same seam,
+  which closes the bare-expression checked-annotation gap. `@new` reuses `check_new_nominal`, which
+  checks the representation and mints the nominal. A checked declared type enforces the same
+  directional `compatible` contract as at the root, and `@trust` overrides unchecked. The loop-body
+  re-walk discards errors, which covers the new errors for free.
+- **IDE consequences.** Goto-type-definition and hover pick the nominal up from the recorded
+  expression types with no work on the feature side. An inlay hint skips an annotated nested
+  binding, because the annotation already names the type, which is symmetric with the root gate on
+  surviving payload.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Closes the largest legacy-corpus gap: annotations below the item root were invisible to the checker, so the constructor idiom (`#: @new Person` on a local assignment or block-final expression inside a function body) silently did nothing.
-
-Chosen shape, keeping one source of truth per fact:
-
-- **Association:** `statement_annotations(parent)` — the existing adjacency walk — runs over any statement sequence (the file root or a braced block), so top-level attachment, expression-level attachment, and the dangling-annotation diagnostics (now covering nested blocks) share one rule. `item_expression_annotations(db, item)` maps each attached block inside an item to the annotated expression's HIR id by exact range; it is a plain function, not a tracked query (`Annotation` carries `TextRange`s with no salsa-value plumbing, and its callers are tracked queries whose dependencies already flow through `item_syntax`/`item_hir`).
-- **Application:** the checker owns one `apply_expression_annotation` seam — assignments apply it before the slot write (the binding takes the annotated type), every other expression applies it where it infers, and a non-assignment item ROOT routes its own annotation through the same seam (closing the bare-expression checked-annotation gap). `@new` reuses `check_new_nominal` (representation check, nominal minted); a checked declared type enforces the same directional `compatible` contract as at the root; `@trust` overrides unchecked. Loop-body re-walk error discarding covers the new errors for free.
-- **IDE consequences:** goto-type-definition and hover pick the nominal up from the recorded expression types with no feature-side work; inlay hints skip annotated nested bindings (the annotation already names the type), symmetric with the root gate on surviving payload.
-
-Impact: correctness — eight corpus cases close (1515/1523 matching), with fixtures pinning the constructor idiom in both forms, the mismatch error at the value, trust, bare-expression checks, and nested blank-line detachment; simplicity — one association walk and one application seam instead of per-position special cases; incremental analysis — everything stays inside existing per-item queries.
+Correctness: fixtures pin the constructor idiom in both forms, the mismatch error at the value,
+trust, bare-expression checks and nested blank-line detachment. Simplicity: one association walk
+and one application seam, instead of per-position special cases. Incremental analysis: everything
+stays inside existing per-item queries.
 
 # Decision record: capture liveness is frame-scoped
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). Settles which writes a closure's captured read keeps alive for the unused check — the corpus differential showed the rewrite marking by NAME across all frames, so a shadowed outer binding never warned.
+This settles which writes a closure's captured read keeps alive for the unused check. The checker
+marked by name across all frames, so a shadowed outer binding never warned.
 
-Rule: a read from inside a nested function keeps every write of the name alive **in the frame the read resolves to** (sequential rebindings of one name in one frame are a single runtime variable, and the closure runs after the frame settled), and no other frame's — a same-named binding in an enclosing frame that the resolved binding shadows is not what the closure reads, so it stays reportably dead. This is exactly R's environment semantics and agrees with the oracle.
+A read from inside a nested function keeps every write of the name alive in the frame the read
+resolves to, and in no other frame. Sequential rebindings of one name in one frame are a single
+run-time variable, and the closure runs after the frame settled. A same-named binding in an
+enclosing frame that the resolved binding shadows is not what the closure reads, so it stays
+reportably dead. This is exactly R's environment semantics.
 
-Mechanics: frames carry a stable identity (`Scope::id`, minted per defining expression like binding ids so loop re-walks reuse it), each assignment write records its slot's owning frame, and the capture sweep filters on frame + name. Writes recorded after the read stay covered by the existing per-slot `captured_slots` marking at the write site. The typing reference documents the rule with both directions as examples.
+The mechanics are these. A frame carries a stable identity in `Scope::id`, minted per defining
+expression like a binding id, so a loop re-walk reuses it. Each assignment write records its slot's
+owning frame, and the capture sweep filters on frame and name. A write recorded after the read
+stays covered by the existing per-slot `captured_slots` marking at the write site. The typing
+reference documents the rule with an example in each direction.
 
-Impact: correctness — two corpus cases close and a false-negative class (dead shadowed bindings in closure-heavy code) is gone; simplicity — one id per scope instead of a second liveness structure; incremental analysis — naming stays a per-item pure function.
+Correctness: a false-negative class is gone, which is a dead shadowed binding in closure-heavy
+code. Simplicity: one id per scope, instead of a second liveness structure. Incremental analysis:
+naming stays a per-item pure function.
 
-# Decision record: the last three parity lifts — conditional-slot schemes, export-edge constraint generalization, missing-formal flow
+# Decision record: conditional slots type, export edges generalize, and `missing()` flows through the environment
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate). These closed the legacy-corpus differential to zero unexplained divergences, and the arm is now a default-suite gate.
+These three lifts closed the last gaps in cross-item typing.
 
-**Conditional top-level slots type.** A statement item's conditional write (`for (i in 1:3) total <- i`) already created the document's variable slot for naming; now it types: `ItemCheck::top_level_bindings` carries the settled, export-closed scheme of every name the item's top-level frame binds, `statement_binding_scheme(item, name)` projects it per binding (a value-eq firewall, with `global_scheme`-style cycle recovery — a statement item reading its own conditionally-written name routes back into its own check), and readers consult it after `package_definitions` (joined across multiple writers) and inside the script sequential search. The winner order is unchanged: an unconditional definition still shadows the slot.
+**A conditional top-level slot types.** A statement item's conditional write, such as
+`for (i in 1:3) total <- i`, already created the document's variable slot for naming. It now types.
+`ItemCheck::top_level_bindings` carries the settled, export-closed scheme of every name the item's
+top-level frame binds. `statement_binding_scheme(item, name)` projects it per binding, as a
+value-equality firewall with `global_scheme`-style cycle recovery, because a statement item reading
+its own conditionally written name routes back into its own check. Readers consult it after
+`package_definitions`, joined across multiple writers, and inside the script sequential search. The
+winner order is unchanged, so an unconditional definition still shadows the slot.
 
-**Export-edge closure generalizes constrained residuals.** `erase_residual_vars` erased every unbound variable to `Unknown`, destroying real information: `mixed_apply <- invoke(mirror)` lost its `numeric` bound and cross-item calls stopped checking. `close_scheme` now generalizes an unbound variable that CARRIES a constraint into a fresh scheme binder (synthetic names never display — the renderer canonicalizes rigids) and erases only unconstrained ones. Instantiation stays per reader, which matches R's call-by-call semantics for the immutable closures this shape produces.
+**The export edge generalizes a constrained residual.** `erase_residual_vars` erased every unbound
+variable to `Unknown`, which destroyed real information. `mixed_apply <- invoke(mirror)` lost its
+numeric bound, and cross-item calls stopped checking. `close_scheme` now generalizes an unbound
+variable that carries a constraint into a fresh scheme binder, and erases only an unconstrained
+one. The synthetic names never display, because the renderer canonicalizes rigids. Instantiation
+stays per reader, which matches R's call-by-call semantics for the immutable closures this shape
+produces.
 
-**`missing()` supplied-state flows through the environment.** A third entry kind (`EnvEntry::MissingFormal`) rides the existing branch mark/rollback/join discipline instead of a parallel liveness structure: the `missing(name)` guard's true edge marks a no-default formal's slot, a read of a marked slot errors ("would fail at run time"), any write supplies it back to an ordinary entry, and the marker is branch-local at joins (rejoined state means only "possibly missing", which reads as the supplied type — only definite runtime failures report, as the reference specifies).
+**`missing()` supplied state flows through the environment.** A third entry kind,
+`EnvEntry::MissingFormal`, rides the existing branch mark, rollback and join discipline instead of
+a parallel liveness structure. The true edge of a `missing(name)` guard marks the slot of a formal
+that has no default. A read of a marked slot errors, because it would fail at run time. Any write
+supplies it back to an ordinary entry. The marker is branch-local at a join, so a rejoined state
+means only possibly missing, which reads as the supplied type. Only a definite run-time failure
+reports, as the reference specifies.
 
-Impact: correctness — the corpus differential reaches 1,523/1,523 with one adjudicated acceptance and every new behavior pinned by fixtures in both directions; simplicity — each lift reuses an existing mechanism (per-item checks, the erase walk, the environment discipline) instead of adding a parallel structure; incremental analysis — two new tracked projections with value-eq firewalls, no new interface surfaces beyond them.
+Correctness: every new behavior is pinned by fixtures in both directions. Simplicity: each lift
+reuses an existing mechanism, which is the per-item check, the erase walk and the environment
+discipline, instead of adding a parallel structure. Incremental analysis: two new tracked
+projections with value-equality firewalls, and no new interface surfaces beyond them.
 
-# Decision record: NAMESPACE/DESCRIPTION metadata feeds resolution
+# Decision record: NAMESPACE and DESCRIPTION metadata feed resolution
 
-**Status:** decided and implemented (user ask: "importFrom should work"). Previously the NAMESPACE file was parsed only at the CLI/server layer for import-site problems (unknown-import, unused-import); resolution ignored what the package imports and DESCRIPTION was never read, so real packages saw two false-positive classes: bare reads of names imported from namespaces the stub corpus does not describe warned "could not resolve" (`importFrom(data.table, ':=')` code), and `pkg::` calls into any undescribed namespace warned "unknown package namespace" even for declared dependencies.
+The user asked for `importFrom` to work. The NAMESPACE file was parsed only at the CLI and server
+layer, for import-site problems such as an unknown import or an unused import. Resolution ignored
+what the package imports, and DESCRIPTION was never read. Real packages therefore saw two
+false-positive classes. A bare read of a name imported from a namespace the stub corpus does not
+describe warned that it could not resolve, which hits code using
+`importFrom(data.table, ':=')`. A `pkg::` call into any undescribed namespace warned about an
+unknown package namespace, even for a declared dependency.
 
-**Shape.** One new singleton salsa input, `metadata::PackageMetadata` — normalized (sorted, deduped) `(namespace, Option<name>)` import pairs plus the DESCRIPTION dependency name set — installed by hosts next to `StubSources` (CLI per target; the server at startup, refreshed on NAMESPACE buffer sync and NAMESPACE/DESCRIPTION watcher events, diffing the parsed facts so formatting edits do not invalidate). The NAMESPACE parser moved from the host crate into `semantics::metadata` (single source of truth; the host keeps problem rendering). Consumption is two predicates at the diagnostic edges: `imported_bare` joins the unresolved-check skip set, and `declared_dependency` quiets the unknown-namespace warning. Typing is untouched — imported-but-undescribed reads stay `Unknown` with the usual strict origin.
+One new singleton input, `metadata::PackageMetadata`, carries normalized import pairs of
+`(namespace, Option<name>)`, sorted and deduplicated, plus the DESCRIPTION dependency name set. A
+host installs it next to `StubSources`. The CLI installs it per target. The server installs it at
+startup and refreshes it on a NAMESPACE buffer sync and on NAMESPACE or DESCRIPTION watcher events,
+diffing the parsed facts so a formatting edit does not invalidate anything. The NAMESPACE parser
+moved from the host crate into `semantics::metadata`, which makes it the single source of truth,
+and the host keeps problem rendering.
 
-**The tolerance call.** `import(pkg)` of a namespace without stubs makes every otherwise-unresolved bare read in the package quiet: the export set is unknowable, and guessing would trade the zero-false-positive mandate for typo detection. Typo detection resumes when stubs describe `pkg` (then the export set gates exactly), and `importFrom` names are always exact. Bare resolution of stub names stays ungated (the earlier record) — metadata only ever widens the resolved universe, never narrows it.
+Consumption is two predicates at the diagnostic edges. `imported_bare` joins the unresolved-check
+skip set, and `declared_dependency` quiets the unknown-namespace warning. Typing is untouched, so
+an imported but undescribed read stays `Unknown` with the usual strict origin.
 
-**Impact.** Correctness: kills both false-positive classes on real packages; fixture suite `typing-imports` pins both directions (imported quiet, unimported still warns). Simplicity: two predicates over one input; no naming/inference changes. Performance/incremental: the predicates run only after every cheaper skip fails (genuinely unresolved names), and the input diffing confines invalidation to real metadata changes.
+One tolerance call matters. An `import(pkg)` of a namespace without stubs makes every otherwise
+unresolved bare read in the package quiet. The export set is unknowable, and guessing would trade
+the zero-false-positive mandate for typo detection. Typo detection resumes when stubs describe
+`pkg`, because the export set then gates exactly, and an `importFrom` name is always exact. Bare
+resolution of a stub name stays ungated, as the earlier record says. Metadata only ever widens the
+resolved universe, and never narrows it.
 
-# Decision record: data.table awareness — conditional stub namespace, result-shape classifier, typed-subject masking
+Correctness: both false-positive classes die on real packages, and the `typing-imports` fixture
+suite pins both directions, meaning an imported name is quiet and an unimported one still warns.
+Simplicity: two predicates over one input, with no naming or inference changes. Performance and
+incremental analysis: the predicates run only after every cheaper skip fails, which means on a
+genuinely unresolved name, and input diffing confines invalidation to a real metadata change.
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; graduates contributing/design/data-masking.md "idea 1", the first rung of the data-masking ladder in contributing/design/open-questions.md §7).
+# Decision record: data.table awareness
 
-**The gap.** The masked-bracket recognition was purely syntactic and its result was always `Unknown`: chains lost their class after one bracket, `DT[speed > 20]` (no marker) warned "could not resolve speed" on the most idiomatic data.table line there is, and no shipped stub could give a value the `data.table` class in the first place.
+The masked-bracket recognition was purely syntactic and its result was always `Unknown`. A chain
+lost its class after one bracket. `DT[speed > 20]`, which carries no marker, warned that it could
+not resolve `speed`, on the most idiomatic data.table line there is. No shipped stub could give a
+value the `data.table` class in the first place.
 
-**Shape — three pieces, one gate each.**
-- **Conditional stub namespace.** `types/data.table.Rtypes` ships (the `@type data.table` nominal + ~45 high-traffic declarations) but joins `stub_library`'s fold only when `metadata::namespace_active` says the project uses the package: a DESCRIPTION dependency, a NAMESPACE import source, or a `library()`/`require()`/`requireNamespace()`/`loadNamespace()` call with a literal package argument in any project file (`metadata::file_attached_namespaces`, a per-file syntax scan; hosts union it into the new `PackageMetadata.attached` field — the CLI/stats once after load, the server incrementally per synced file plus the idle prime, never a per-keystroke sweep). Gating at the ASSEMBLY means every consumer (bare resolution, `pkg::` validation, nominal vocabulary, completion, shadow lints, typo suggestions, masked verbs) inherits the same universe with no per-site checks; while inactive, data.table behaves exactly like any undescribed package, so its names cannot steal typo warnings. The stub-assembly cycle risk (naming → stubs → activation → naming) is broken by keying activation ONLY on inputs (metadata) — never on naming or item queries.
-- **Result-shape classifier.** In `infer_index`: a single bracket whose subject resolves to the `data.table` nominal (from the shipped stub or any project `@type`) classifies `[.data.table` by the bracket's own syntax — no/empty `j` (filters, joins), `:=` calls, `.()`/`list()` calls, and any grouped `j` (`by =`/`keyby =`) keep the subject's class; other `j` shapes stay sound-refusal `Unknown` with a strict origin. The class is a real type: it survives chains, checks against annotations, constrains calls. Column knowledge (element types, membership, `:=` evolution) is deliberately NOT modeled — the typing reference documents the result-class table as the contract.
-- **Typed-subject masking.** The same classification records every read under the bracket's index arguments (nested closures included — they are created in the data's frame) in `ItemCheck::masked_reads`; the unresolved-warning renderer skips them. This is checker-derived masking on top of naming's syntactic recognition, so `DT[speed > 20]` and `DT[, x]` go quiet exactly when the subject's class is KNOWN — the syntactic path and its legacy-mirroring `Unknown` stay untouched for unknown subjects.
+The shape has three pieces, each with one gate.
 
-**Differential terms.** The oracle has no conditional-stub or classifier concept, so all behavioral fixtures live in the differential-excluded `typing-imports` suite (same terms as the metadata record); the corpus/differential harnesses install no `PackageMetadata`, so both arms and the legacy-corpus gate are structurally unaffected. Real-code corpus files that `require(data.table)` inside functions WILL activate under the real hosts — that is the feature, not drift.
+- **The stub namespace is conditional.** `types/data.table.Rtypes` ships, carrying the
+  `@type data.table` nominal and about 45 high-traffic declarations. It joins `stub_library`'s fold
+  only when `metadata::namespace_active` says the project uses the package. That means a
+  DESCRIPTION dependency, a NAMESPACE import source, or a `library()`, `require()`,
+  `requireNamespace()` or `loadNamespace()` call with a literal package argument in any project
+  file. `metadata::file_attached_namespaces` is a per-file syntax scan, and hosts union it into the
+  `PackageMetadata.attached` field. The CLI does it once after load, and the server does it
+  incrementally per synced file plus the idle prime, so there is never a per-keystroke sweep.
+  Gating at assembly means every consumer inherits the same universe with no per-site check, which
+  covers bare resolution, `pkg::` validation, the nominal vocabulary, completion, shadow lints,
+  typo suggestions and masked verbs. While inactive, data.table behaves exactly like any
+  undescribed package, so its names cannot steal a typo warning. The assembly cycle risk, which
+  runs naming to stubs to activation to naming, is broken by keying activation only on inputs. It
+  never keys on a naming or item query.
+- **A result-shape classifier runs in `infer_index`.** A single bracket whose subject resolves to
+  the `data.table` nominal, from the shipped stub or from any project `@type`, classifies
+  `[.data.table` by the bracket's own syntax. A missing or empty `j`, which covers filters and
+  joins, a `:=` call, a `.()` or `list()` call, and any grouped `j` with `by =` or `keyby =` all
+  keep the subject's class. Another `j` shape stays a sound refusal, so `Unknown` with a strict
+  origin. The class is a real type, so it survives chains, checks against annotations and
+  constrains calls. Column knowledge is deliberately not modelled, which covers element types,
+  membership and `:=` evolution. The typing reference documents the result-class table as the
+  contract.
+- **Masking uses the typed subject.** The same classification records every read under the
+  bracket's index arguments in `ItemCheck::masked_reads`, nested closures included, because they
+  are created in the data's frame. The unresolved-warning renderer skips them. This is
+  checker-derived masking on top of naming's syntactic recognition, so `DT[speed > 20]` and
+  `DT[, x]` go quiet exactly when the subject's class is known. The syntactic path stays untouched
+  for an unknown subject.
 
-**Impact.** Correctness: kills the dominant data.table false-positive class (bare column reads in unmarked brackets) and gives chains/annotations a real class to check; sound-by-refusal is preserved everywhere column knowledge would be needed. Simplicity: one assembly gate, one classifier function, one diagnostics skip. Incremental: activation reads only inputs; a flip rebuilds the stub library (rare, worth the full refresh); per-keystroke cost is one memoized single-file scan on the edited document.
+Correctness: this kills the dominant data.table false-positive class, which is a bare column read
+in an unmarked bracket, and gives a chain or an annotation a real class to check. Sound-by-refusal
+is preserved everywhere column knowledge would be needed. Simplicity: one assembly gate, one
+classifier function and one diagnostics skip. Incremental analysis: activation reads only inputs. A
+flip rebuilds the stub library, which is rare and worth the full refresh, and the per-keystroke
+cost is one memoized single-file scan on the edited document.
 
 # Decision record: the native pipe desugars at lowering
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate; renegotiates the "mirror legacy's silence" term for `|>` specifically).
+`x |> f(y)` is not an operator in R at all. R's own parser rewrites it to `f(x, y)` before
+evaluation. Modelling it as an opaque binary operator, with quiet reads and a silent `Unknown`,
+threw away exact static knowledge on one of the most common constructs in modern R. Desugaring is
+not an approximation. It is R's definition.
 
-**Why.** `x |> f(y)` is not an operator in R at all — R's own parser rewrites it to `f(x, y)` before evaluation. Modeling it as an opaque binary operator (quiet reads, silent Unknown) threw away exact static knowledge on one of the most common constructs in modern R. Desugaring is not an approximation; it is R's definition.
+`hir::lower_pipe` intercepts `PIPE_GREATER` before binary lowering. A call on the right-hand side
+lowers as that call with the piped value inserted as the first positional argument. When a `_`
+placeholder sits as the whole value of exactly one named argument of that call, which `pipe_shape`
+determines by a syntax-level scan, the piped value is substituted as that argument's value instead.
+The `_` token never lowers, so nothing dangles in the arena. Everything R rejects keeps the old
+opaque-operator lowering, which is sound silence and never a guess. That covers a non-call
+right-hand side, a positional, repeated or nested `_`, and `_` as a tag.
 
-**Shape.** `hir::lower_pipe` intercepts `PIPE_GREATER` before binary lowering: a call right-hand side lowers as that call with the piped value inserted as the first positional argument, or — when a `_` placeholder sits as the whole value of exactly one named argument of that call (`pipe_shape`, a syntax-level scan) — substituted as that argument's value instead (the `_` token never lowers, so nothing dangles in the arena). Everything R rejects (non-call RHS, positional/repeated/nested `_`, `_` as a tag) keeps the old opaque-operator lowering — sound silence, never a guess. Naming, typing, overloads, arity checks, strict mode, and every IDE feature inherit the real call with zero changes; error blame on a bad piped value lands on the left-hand expression's own range.
+Naming, typing, overloads, arity checks, strict mode and every IDE feature inherit the real call
+with no changes. Error blame on a bad piped value lands on the left-hand expression's own range.
 
-**Differential terms.** The oracle never modeled pipes, so pipe cases where the rewrite reports real findings are oracle-deficit divergences: two `ACCEPTED_DIVERGENCES` entries (argument-mismatch through a pipe; the placeholder form's genuinely missing first argument). Two strict-suite cases that existed to pin "pipe is an unsupported-construct origin" were repurposed to a still-opaque construct (`%in%`); the scripts-suite pipe-liveness case now additionally shows the piped binding typing through. The magrittr `%>%` stays opaque (it is a real function with dot-substitution semantics, not parse-time sugar) — model it, if ever, as a separate decision.
+magrittr's `%>%` stays opaque. It is a real function with dot-substitution semantics rather than
+parse-time sugar, so modelling it would be a separate decision.
 
-**Impact.** Correctness: pipelines type end to end (`x |> length() |> sqrt()` is `double`), argument errors inside pipelines surface with precise blame, and R's placeholder pitfalls (missing first argument) are caught statically. Simplicity: one lowering seam, no checker/naming changes. Incremental: lowering-local; per-item firewalls unaffected.
+Correctness: a pipeline types end to end, so `x |> length() |> sqrt()` is `double`. An argument
+error inside a pipeline surfaces with precise blame, and R's placeholder pitfall of a missing first
+argument is caught statically. Simplicity: one lowering seam, with no checker or naming changes.
+Incremental analysis: the change is lowering-local, so per-item firewalls are unaffected.
 
-# Decision record: formal-aware @masked + the conditional dplyr namespace
+# Decision record: `@masked` is formal-aware, and dplyr is a conditional namespace
 
-**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+The contract was ahead of the implementation. The typing reference always said that a `@masked`
+argument matching a declared formal resolves normally, but naming hardcoded the first positional
+argument as the data. That breaks a zero-formal mask, where every argument is a column reference as
+in `join_by(x == y)`, and it breaks a named data argument.
 
-**The contract was ahead of the implementation.** The typing reference always said `@masked` arguments "matching the declared formals resolve normally" — but naming hardcoded first-positional-argument-is-data, which breaks zero-formal masks (`join_by(x == y)`: every argument is a column reference) and named data arguments. The stub loader now records each masked verb's formals declared before `...` (`StubLibrary::masked: name → leading formal names`, extracted from the lowered `FunctionType`), and the naming walk resolves an argument normally when it matches a leading formal by position or by name, masking everything the `...` absorbs — an empty formal list masks every argument. The base family (`with`/`within`, `subset`/`transform`) keeps its one data argument via its real formal names (`data`, `x`).
+The stub loader now records each masked verb's formals declared before `...`, as
+`StubLibrary::masked` mapping a name to its leading formal names, extracted from the lowered
+`FunctionType`. The naming walk resolves an argument normally when it matches a leading formal by
+position or by name, and masks everything the `...` absorbs. An empty formal list masks every
+argument. The base family of `with`, `within`, `subset` and `transform` keeps its one data argument
+through its real formal names, which are `data` and `x`.
 
-**dplyr rides the existing rails.** `dplyr.Rtypes` joins `CONDITIONAL_NAMESPACES` (the data.table record's activation semantics apply unchanged): the verb set is `@masked` and class-preserving (`<T> fn(.data: T, ...) -> T` — mutate on a data.frame is a data.frame, on the data.table nominal a data.table), joins preserve the left class, `join_by` is a zero-formal mask, and the tidy-select helpers plus verb vocabulary (`n()`, `row_number()`, `if_else`, ...) are declared so they resolve inside masks. Composed with the native-pipe desugar, a masked verb call in a pipeline is just a call: `df |> filter(cyl > 4) |> mutate(r = mpg / wt)` types class-preservingly with zero unresolved-column warnings. Where dplyr names collide with attached-stub names (`filter`, `lag` in stats), source order makes the dplyr declaration win exactly when dplyr is active — matching R's own attach shadowing.
+dplyr rides the existing rails. `dplyr.Rtypes` joins `CONDITIONAL_NAMESPACES`, so the data.table
+record's activation semantics apply unchanged. The verb set is `@masked` and class-preserving, as
+`<T> fn(.data: T, ...) -> T`, so `mutate` on a data.frame is a data.frame and on the data.table
+nominal is a data.table. A join preserves the left class. `join_by` is a zero-formal mask. The
+tidy-select helpers and the verb vocabulary, such as `n()`, `row_number()` and `if_else`, are
+declared so they resolve inside a mask. Composed with the native-pipe desugar, a masked verb call
+in a pipeline is just a call, so `df |> filter(cyl > 4) |> mutate(r = mpg / wt)` types
+class-preservingly with no unresolved-column warnings. Where a dplyr name collides with an attached
+stub name, such as `filter` or `lag` in stats, source order makes the dplyr declaration win exactly
+when dplyr is active, which matches R's own attach shadowing.
 
-**Impact.** Correctness: the documented masking contract is now the implemented one, and the dominant dplyr false-positive class (column reads in verbs, in projects without hand-written project stubs) disappears for declaring/attaching projects. Simplicity: no new mechanism — one map where a set was, one namespace entry. Incremental: unchanged (the masked map lives in the same set-once library).
+Correctness: the documented masking contract is now the implemented one, and the dominant dplyr
+false-positive class disappears for a project that declares or attaches dplyr. That class is a
+column read in a verb, in a project without hand-written project stubs. Simplicity: no new
+mechanism, just one map where a set was and one namespace entry. Incremental analysis: unchanged,
+because the masked map lives in the same set-once library.
 
 # Decision record: the shipping binary links no Apple frameworks
 
-**Status:** decided and implemented (user-directed criteria: fewer dependencies, no licensing exposure).
+The user set the criteria: fewer dependencies, and no licensing exposure.
 
-**Why it appeared.** Release macOS binaries are cross-linked on Linux by zig (cargo-zigbuild inside the nix build). Zig ships stubs for libSystem/libc/libm only — the pre-REPL binary linked nothing else, so the SDK-less link worked by accident. The REPL added the first Apple-framework edge: reedline → chrono(clock) → iana-time-zone → core-foundation-sys emits `-framework CoreFoundation`, which zig cannot resolve without a macOS SDK.
+A release macOS binary is cross-linked on Linux by zig, through cargo-zigbuild inside the nix
+build. Zig ships stubs for libSystem, libc and libm only. The binary linked nothing else before the
+REPL existed, so the SDK-less link worked by accident. The REPL added the first Apple-framework
+edge. reedline depends on chrono with the clock feature, which depends on iana-time-zone, which
+depends on core-foundation-sys, which emits `-framework CoreFoundation`. Zig cannot resolve that
+without a macOS SDK.
 
-**Shape.** `[patch.crates-io]` replaces iana-time-zone with `patches/iana-time-zone`, a version-matched stub whose `get_timezone()` always errors. Safe because chrono consults it only as a *fallback* after its primary timezone sources (`TZ`, `/etc/localtime`) and before its final UTC default — and the only local-time user in reedline is its default prompt's clock display, which the REPL does not use (it renders R's own prompt). The `release` justfile recipe preflights the aarch64-apple-darwin graph for known framework-linking crates so a regression fails in seconds with a named culprit instead of deep inside the nix zig link. The stub must stay version/feature-compatible with what chrono requests or cargo silently prefers the real crate — the preflight catches exactly that failure mode. One nix-specific trap: crane's dep-only builds compile dependencies against a *dummified* workspace copy (local `.rs` files emptied so the dependency cache survives source edits), which would empty the patch crate too and break chrono's compile — `flake.nix` restores `patches/` verbatim into the dummy source (crane's `extraDummyScript`), interpolating only that directory so the cache stays source-independent.
+`[patch.crates-io]` replaces iana-time-zone with `patches/iana-time-zone`, a version-matched stub
+whose `get_timezone()` always errors. That is safe because chrono consults it only as a fallback,
+after its primary timezone sources of `TZ` and `/etc/localtime` and before its final UTC default.
+The only local-time user in reedline is its default prompt's clock display, and the REPL does not
+use it, because it renders R's own prompt.
 
-**Alternative implemented first, then reverted:** fetching a macOS SDK (from the widely used third-party mirror of Apple's SDKs) and exporting `SDKROOT` for the darwin cross-build — mechanically verified (with the SDK the failing build links a valid arm64 Mach-O), most general, zero behavior delta. Reverted on user direction: it adds a large third-party artifact to the release closure and Apple's license on redistributed SDKs is gray. Vendoring the tarball is legally worse (you become the redistributor).
+The `release` recipe in the justfile preflights the aarch64-apple-darwin graph for known
+framework-linking crates, so a regression fails in seconds with a named culprit instead of deep
+inside the nix zig link. The stub must stay version-compatible and feature-compatible with what
+chrono requests, or cargo silently prefers the real crate, and the preflight catches exactly that.
 
-**Framework-free is sustainable for this product.** libR is dlopen'd at runtime (zero link-time deps), and a terminal REPL's plotting story is file output, terminal image protocols, or a browser — nothing on the roadmap needs `-framework` at link time. **Triggers to revisit:** a dependency that genuinely needs an Apple framework (native windows, clipboard integration), or signing/notarization pressure — at that point build the mac artifact on a real macOS runner (the only fully license-clean way to use Apple's SDK), which is also the natural home for running the REPL e2e suite against a real R in CI.
+One nix-specific trap applies. crane's dependency-only builds compile dependencies against a
+dummified workspace copy, where local `.rs` files are emptied so the dependency cache survives a
+source edit. That would empty the patch crate too and break chrono's compile, so `flake.nix`
+restores `patches/` verbatim into the dummy source through crane's `extraDummyScript`. It
+interpolates only that directory, so the cache stays source-independent.
 
-# Decision record: diagnostic rendering stays handrolled (miette rejected)
+One alternative was implemented first and then reverted. It fetched a macOS SDK from the widely
+used third-party mirror of Apple's SDKs and exported `SDKROOT` for the darwin cross-build. It was
+mechanically verified, because with the SDK the failing build links a valid arm64 Mach-O, and it is
+the most general option with no behavior change. The user directed reverting it. It adds a large
+third-party artifact to the release closure, and Apple's license on a redistributed SDK is gray.
+Vendoring the tarball is legally worse, because you become the redistributor.
 
-**Status:** decided and implemented (user delegated: "miette or similar, only if it doesn't add too much weight — otherwise handroll").
+Framework-free is sustainable for this product. libR is dlopen'd at run time, so it has no
+link-time dependency, and a terminal REPL's plotting story is file output, a terminal image
+protocol, or a browser. Nothing on the roadmap needs `-framework` at link time.
 
-**Why.** The CLI's human renderer already has the rustc shape (severity header, `-->` location, gutter, snippet, colored carets, related notes); adopting miette would mean rebuilding a working system around a new dependency tree (fancy feature: several transitive crates plus backtrace machinery) for visuals we largely have. The actual weaknesses were fixable in-place.
-
-**What changed.** The header now carries the diagnostic code (`warning[unused]:` — exactly what a `# roughly: allow(...)` suppression must spell, so the output teaches it); multi-line spans render their first line with the underline to end-of-line plus a dim "range continues for N more lines" note (previously every spanned line printed with one dangling caret); paths render relative to the working directory. Revisit miette only if requirements grow past this shape (multi-span labels, error chains with source causes).
+Two things would trigger a revisit: a dependency that genuinely needs an Apple framework, such as
+native windows or clipboard integration, or pressure to sign and notarize. At that point build the
+mac artifact on a real macOS runner, which is the only fully license-clean way to use Apple's SDK.
+That is also the natural home for running the REPL end-to-end suite against a real R in CI.
 
 # Decision record: the identity-parity program is retired
 
-**Status:** decided by the user, implemented.
+The user decided this.
 
-**What ended.** The differential suites that proved the rewrite equivalent to the frozen oracle — the typing/scripts/strict arms, the seeded fuzz differential, the legacy-corpus sweep, the real-file corpus arm, and the per-position IDE comparison, together with their adjudicated divergence ledgers — are deleted. The rewrite's own fixture suites are the semantics contract; improvements land on their own terms with no oracle renegotiation. The legacy ide fixture inputs worth keeping were ported first (81 cases; the port surfaced two real defects, recorded in the backlog).
+The differential suites that proved the rewrite equivalent to the frozen oracle are deleted. That
+covers the typing, scripts and strict arms, the seeded fuzz differential, the legacy-corpus sweep,
+the real-file corpus arm, and the per-position IDE comparison, together with their adjudicated
+divergence ledgers. The rewrite's own fixture suites are the semantics contract, and an improvement
+lands on its own terms with no oracle renegotiation. The legacy IDE fixture inputs worth keeping
+were ported first, which is 81 cases, and the port surfaced two real defects that the backlog
+records.
 
-**What remains.** `legacy/differential` is benchmark-only: `test_stats.rs` times and memory-measures the same corpus through both stacks. It — and the legacy crates it depends on — stay until the deletion sweep the user will call for; the perf witnesses migrate to a new-stack-only home as part of that sweep.
+`legacy/differential` is benchmark-only now. `test_stats.rs` times and memory-measures the same
+corpus through both stacks. It, and the legacy crates it depends on, stay until the deletion sweep
+the user will call for. The performance witnesses migrate to a home in the new stack as part of
+that sweep.
 
-**Impact.** Every future semantic improvement costs one fixture bless instead of a fixture bless plus per-arm adjudication entries; the battery loses its slowest suites; the deletion sweep's remaining prerequisite is only the witness migration.
+Every future semantic improvement now costs one fixture bless, instead of a fixture bless plus
+per-arm adjudication entries. The battery loses its slowest suites. The deletion sweep's only
+remaining prerequisite is the witness migration.
 
-# Decision record: vendored export manifests — the name-level truth beside the typed stubs
+# Decision record: a vendored export manifest carries the name-level truth beside the typed stubs
 
-**Status:** decided and implemented (closes the stub-completeness audit).
+The typed stub corpus, at about 530 declarations, was also the resolution universe. Any real
+standard-library export outside it warned that it could not resolve. `recover` and `traceback` were
+user-reported instances of a false-positive class of about 2,500 names, because base alone exports
+about 1,400. Chasing completeness with hand-written typed declarations does not scale, and it was
+never the corpus's job.
 
-**Problem.** The typed stub corpus (~530 declarations) was also the *resolution universe*: any real standard-library export outside it warned "could not resolve" (`recover`, `traceback` were user-reported instances of a ~2,500-name false-positive class — base alone exports ~1,400 names). Chasing completeness with hand-written typed declarations does not scale and was never the corpus's job.
+Every namespace R ships now pairs with a generated `types/<ns>.exports` manifest holding its
+complete export list from a live R session. `scripts/export-manifests.R` generates it, and the
+header records the R version. `datasets` uses the search-path listing, because its objects are lazy
+data rather than namespace exports.
 
-**Shape.** Every namespace R ships pairs with a generated `types/<ns>.exports` manifest — its complete export list from a live R session (`scripts/export-manifests.R`; header records the R version; currently R 4.6.1; `datasets` uses the search-path listing since its objects are lazy data, not namespace exports). The `StubSources` input carries `(sources, manifests)`; the loader unions manifest names into `exports_by_namespace` (so `pkg::name` validation and shadow lints see them) plus a flat `known_exports` set consulted by `package_scheme_exists` after schemes and nominals. A manifest name resolves everywhere a typed name does — bare, qualified, completion, typo-suggestion corpus — but types `Unknown`: precision stays the typed corpus's job; the manifest's job is silence about real names. Three tiers mirror R: default-attached namespaces (incl. the new `datasets`, whose famous frames are typed `data.frame` in `datasets.Rtypes`) are bare-visible unconditionally; R-shipped-but-unattached namespaces (`QUALIFIED_ONLY_NAMESPACES`: tools/parallel/compiler/grid/splines/stats4/tcltk) always validate `::` reads but gate bare visibility on attach/declare; conditional CRAN namespaces gate both, with their stubs.
+The `StubSources` input carries sources and manifests. The loader unions manifest names into
+`exports_by_namespace`, so `pkg::name` validation and shadow lints see them, and into a flat
+`known_exports` set that `package_scheme_exists` consults after schemes and nominals. A manifest
+name resolves everywhere a typed name does, which covers bare and qualified reads, completion and
+the typo-suggestion corpus, but it types `Unknown`. Precision stays the typed corpus's job, and the
+manifest's job is silence about a real name.
 
-**Audit teeth.** A unit test asserts every `.Rtypes` value declaration is a real export of its own namespace (`@type` nominals exempt — they name classes, not bindings; conditional namespaces may also override base names, e.g. data.table's class-preserving `merge`). Writing it immediately caught two misfiled declarations — `traceback` and `standardGeneric` are `base` exports, not `utils`/`methods` — both moved.
+Three tiers mirror R. A default-attached namespace is bare-visible unconditionally, which now
+includes `datasets`, whose famous frames are typed `data.frame` in `datasets.Rtypes`. A namespace R
+ships but does not attach always validates a `::` read but gates bare visibility on an attach or a
+declaration. Those are listed in `QUALIFIED_ONLY_NAMESPACES`: tools, parallel, compiler, grid,
+splines, stats4 and tcltk. A conditional CRAN namespace gates both, along with its stubs.
 
-**Aside discovered en route:** agent containers CAN have real R — `apt` + the CRAN repository installs current R in minutes (data.table/dplyr compile from source) — so R-dependent tooling (manifest regeneration, the REPL e2e suite) runs in-container after all; the long-standing "no agent container has R" assumption is dead.
+A unit test gives the corpus teeth. It asserts that every `.Rtypes` value declaration is a real
+export of its own namespace. A `@type` nominal is exempt, because it names a class rather than a
+binding, and a conditional namespace may override a base name, as data.table's class-preserving
+`merge` does. Writing the test immediately caught two misfiled declarations, because `traceback`
+and `standardGeneric` are base exports rather than utils and methods exports. Both moved.
 
-**Impact.** Kills the could-not-resolve false-positive class for the whole shipped standard library at zero check-time cost for unused names; completion and suggestions widen to the full export lists (non-syntactic names excluded from bare completion, backtick-quoted after `pkg::` — inserting them raw would change syntax); the not-exported warning for `pkg::name` becomes accurate instead of curated-subset-based.
+One thing was discovered on the way. An agent container can have real R. Installing it through
+`apt` and the CRAN repository takes minutes, and data.table and dplyr compile from source. R-dependent
+tooling therefore runs in-container after all, which covers manifest regeneration and the REPL
+end-to-end suite. The long-standing assumption that no agent container has R is dead.
+
+Correctness: the could-not-resolve false-positive class dies for the whole shipped standard
+library, at no check-time cost for an unused name. Completion and suggestions widen to the full
+export lists. A non-syntactic name is excluded from bare completion and is backtick-quoted after
+`pkg::`, because inserting it raw would change the syntax. The not-exported warning for `pkg::name`
+becomes accurate instead of based on a curated subset.
 
 # Decision record: the Zed extension versions on its own line
 
-**Status:** decided and implemented.
+Three shipped artifacts carry a version, and only two of them derive from the workspace
+`Cargo.toml`. The CLI is the source of truth. The VS Code extension bundles that binary, so its
+manifest carries the same number with the prerelease suffix stripped, because the marketplace
+rejects `X.Y.Z-alpha`. That is a mechanical derivation.
 
-**Problem.** Three shipped artifacts carry a version, and only two of them derive from the workspace `Cargo.toml`. The CLI is the source of truth; the VS Code extension bundles that binary, so its manifest carries the same number with the prerelease suffix stripped (the marketplace rejects `X.Y.Z-alpha`) — a mechanical derivation. The Zed extension bundles nothing: it locates a binary at run time (LSP settings path, then `PATH`, then the latest GitHub release), so its version describes the extension's own code and nothing about the CLI. That was settled once and still failed to hold — the release recipe stopped bumping it, and the number was then hand-realigned to the CLI's twice anyway, the second time with a test added to mandate the alignment. A version that must be manually resynchronized to a number it has no relationship with is the duplication, not the cure.
+The Zed extension bundles nothing. It locates a binary at run time, through the LSP settings path,
+then `PATH`, then the latest GitHub release. Its version therefore describes the extension's own
+code and says nothing about the CLI. That was settled once and still failed to hold. The release
+recipe stopped bumping it, the number was hand-realigned to the CLI's twice anyway, and the second
+time a test was added to mandate the alignment. A version that must be manually resynchronized to a
+number it has no relationship with is the duplication, not the cure.
 
-**Shape.** `editors/zed/extension.toml` is a plain-semver line of its own (`0.1.0`), restarted because the extension has never been published to Zed's registry and nothing constrains its history; the wasm crate's `Cargo.toml` version tracks that manifest rather than the workspace, and neither inherits `version.workspace`. It is bumped by hand when the extension changes. The release-metadata test asserts the VS Code derivation only, and its module doc states why the Zed manifest is absent — the test is the thing that would otherwise re-couple them. The prerelease suffix is dropped for good: `-alpha`/`-beta` name the CLI's release channel, which an extension that only locates a binary cannot be in.
+`editors/zed/extension.toml` is now a plain semver line of its own, at `0.1.0`. It restarted
+because the extension has never been published to Zed's registry and nothing constrains its
+history. The wasm crate's `Cargo.toml` version tracks that manifest rather than the workspace, and
+neither inherits `version.workspace`. It is bumped by hand when the extension changes. The
+release-metadata test asserts the VS Code derivation only, and its module documentation states why
+the Zed manifest is absent, because that test is what would otherwise re-couple them. The
+prerelease suffix is dropped for good, because `-alpha` and `-beta` name the CLI's release channel,
+and an extension that only locates a binary cannot be in one.
 
-**Impact.** One number per artifact with one owner each; a Zed release no longer implies a CLI release or vice versa. The recurring "align the stale zed extension version" commit has no reason to exist.
+Each artifact now has one number with one owner. A Zed release no longer implies a CLI release, or
+the reverse. The recurring commit that realigned the stale Zed extension version has no reason to
+exist.

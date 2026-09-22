@@ -81,7 +81,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-43..44 error[type-mismatch] this function has no parameter `z` — its named parameter is `x`
+43..44 error[type-mismatch] this function has no parameter `z`. Its named parameter is `x`
 
 #---- surplus_positional
 f <- function() {
@@ -99,7 +99,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-44..45 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+44..45 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
 
 #---- defaulted_formal_may_stay_unfilled
 f <- function() {
@@ -206,7 +206,7 @@ bad: <T: numeric> fn([x]: T) -> T
 label <- function(title = NULL) "x"
 #++++
 label: fn([title]: character) -> character
-65..69 error[type-mismatch] `title` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+65..69 error[type-mismatch] `title` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #==== union_commit
 #---- flexible_argument_commits_to_the_union_at_first_use
@@ -270,7 +270,7 @@ pick <- function(kind) {
 }
 #++++
 pick: Unknown
-82..84 error[type-mismatch] this may be `NULL` here, so calling it is not safe — its type is `(fn(x: Any) -> character) | NULL`. Guard it with `is.null()`, or give the `switch` a default branch
+82..84 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: Any) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch
 
 #---- a_default_branch_makes_the_switch_result_callable
 pick <- function(kind) {
@@ -578,7 +578,7 @@ f <- function() 2 |> scale_by(factor = _)
 #++++
 scale_by: <T: numeric> fn(value: T, factor: T) -> T
 f: Unknown
-72..80 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+72..80 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
 
 #---- pipe_into_a_namespaced_callee
 f <- function(x) x |> stats::sd()

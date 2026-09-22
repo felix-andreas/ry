@@ -1,14 +1,15 @@
 //! Line/column addressing over a document's text. Analysis speaks absolute
 //! byte offsets; the CLI renders 1-based line and **character**-column pairs,
 //! and the language server converts to the negotiated LSP encoding (UTF-16 code
-//! units or UTF-8 bytes) at the protocol edge — always against the target
+//! units or UTF-8 bytes) at the protocol edge, always against the target
 //! document's own text.
 //!
 //! A reported column is the one a person counts and an editor shows, so it
 //! counts characters: a byte column disagrees with both on any line containing
 //! non-ASCII text, which R source carries as soon as a string holds a name or a
-//! unit. Caret art is a separate question — a glyph can occupy two terminal
-//! cells — so the renderer pads by display width, not by either column unit.
+//! unit. Caret art is a separate question, because a glyph can occupy two
+//! terminal cells, so the renderer pads by display width rather than by either
+//! column unit.
 
 use syntax::TextSize;
 
@@ -77,8 +78,8 @@ impl LineIndex {
         }
     }
 
-    /// Zero-based line and **character** column of a byte offset — what the CLI
-    /// reports and what an editor's status bar shows.
+    /// Zero-based line and **character** column of a byte offset. This is what
+    /// the CLI reports and what an editor's status bar shows.
     pub fn line_column_chars(&self, offset: TextSize, text: &str) -> LineColumn {
         let position = self.line_column(offset);
         let start = self.line_starts[position.line as usize] as usize;

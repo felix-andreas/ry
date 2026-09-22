@@ -1,7 +1,7 @@
 //! The interned type representation.
 //!
 //! Types are salsa-interned: a `Ty` is a copyable id, equality is id
-//! comparison, and no deep clones exist anywhere in inference — the structural
+//! comparison, and no deep clone exists anywhere in inference. The structural
 //! churn that capped the legacy checker is designed out from the start.
 //! Inference variables are ordinary interned types (`TyKind::Var`), so there is
 //! exactly one type representation end to end.
@@ -35,7 +35,7 @@ pub enum TyKind<'db> {
     Unknown,
     Null,
     Scalar(Atomic),
-    /// `T[]` — an atomic vector with element type `T`.
+    /// `T[]`, which is an atomic vector with element type `T`.
     Vector(Ty<'db>),
     /// `T[named]`.
     NamedVector(Ty<'db>),
@@ -45,7 +45,7 @@ pub enum TyKind<'db> {
     NamedList(Ty<'db>),
     /// `list{A, B}`.
     Tuple(Vec<Ty<'db>>),
-    /// `list{a: A, b: B}` — fields keep declaration order.
+    /// `list{a: A, b: B}`. The fields keep declaration order.
     Record(Vec<RecordField<'db>>),
     Function(FunctionType<'db>),
     /// A normalized union; built only through `union_of`.
@@ -85,9 +85,9 @@ pub struct RecordField<'db> {
 /// Separate from [`RecordField`] because a parameter carries something a record
 /// field cannot: the type of its **default**. R evaluates the default in the
 /// function's own frame when the caller omits the argument, so that type is
-/// what the parameter holds on the omitted path — without it a call that leaves
-/// the argument out has nothing to instantiate the parameter with and the
-/// result degrades to `Any`, silencing everything downstream.
+/// what the parameter holds on the omitted path. Without it, a call that leaves
+/// the argument out has nothing to instantiate the parameter with, and the
+/// result degrades to `Any`, which silences everything downstream.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct Parameter<'db> {
     pub name: Name<'db>,
@@ -105,8 +105,8 @@ pub struct Parameter<'db> {
 impl<'db> Parameter<'db> {
     /// Every type this parameter carries. Traversals go through here so a
     /// variable hiding in a default cannot be missed by one walk and found by
-    /// another — an occurs check or a level adjustment that skipped it would be
-    /// unsound, not merely imprecise.
+    /// another. An occurs check or a level adjustment that skipped it would be
+    /// unsound rather than merely imprecise.
     pub fn types(&self) -> impl Iterator<Item = Ty<'db>> + '_ {
         std::iter::once(self.ty).chain(self.default)
     }
@@ -145,7 +145,7 @@ pub enum Constraint {
 impl Constraint {
     /// How this bound is written in a `#:` binder list, and read back out of
     /// one. Rendering and parsing share the table so a constraint the checker
-    /// prints is always a constraint a user can write — a finding's type is
+    /// prints is always a constraint a user can write. A finding's type is
     /// meant to be copyable straight into an annotation.
     pub const SPELLINGS: [(&'static str, Constraint); 3] = [
         ("numeric", Constraint::Numeric),
@@ -195,9 +195,9 @@ impl<'db> TypeScheme<'db> {
     }
 }
 
-/// Whether a type contains `Unknown` anywhere in its structure. Named types
-/// are opaque here — their representation is a separate declaration, not part
-/// of this value's structure.
+/// Whether a type contains `Unknown` anywhere in its structure. A named type is
+/// opaque here, because its representation is a separate declaration rather
+/// than part of this value's structure.
 pub fn contains_unknown(db: &dyn Db, ty: Ty<'_>) -> bool {
     match ty.kind(db) {
         TyKind::Unknown => true,
@@ -281,15 +281,16 @@ pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>
     }
 }
 
-/// Replace rigid variables per the substitution, leaving unmapped ones
-/// intact — how schemes instantiate and how type-definition parameters apply.
-/// How many nodes a type has **as a tree** — counting each path separately —
+/// Replace rigid variables per the substitution, leaving an unmapped one
+/// intact. This is how a scheme instantiates and how a type definition's
+/// parameters apply.
+/// How many nodes a type has **as a tree**, counting each path separately, and
 /// saturating at [`TYPE_SIZE_CEILING`].
 ///
-/// Tree size, not distinct-node count, is the number that matters: interning
-/// makes a type a DAG, so a self-referential record shares its subtrees and its
-/// distinct-node count stays small while the tree it denotes grows by a factor
-/// of the field count per level. Anything walking that type without a memo pays
+/// Tree size rather than distinct-node count is the number that matters.
+/// Interning makes a type a DAG, so a self-referential record shares its
+/// subtrees. Its distinct-node count stays small while the tree it denotes
+/// grows by a factor of the field count per level. Anything walking that type without a memo pays
 /// the tree size, which is why one R file could grow a captured binding through
 /// 877, 8823, 104655 and 1046623 nodes and never finish.
 ///
@@ -335,9 +336,9 @@ pub fn type_size<'db>(db: &'db dyn Db, ty: Ty<'db>) -> u64 {
 /// code produces and well below the sizes a self-referential value reaches.
 pub const TYPE_SIZE_CEILING: u64 = 100_000;
 
-/// Rebuild `ty` with `map` applied to every type it directly contains — the one
-/// place that knows which types a composite is made of, and the mapping
-/// counterpart of [`Parameter::types`].
+/// Rebuild `ty` with `map` applied to every type it directly contains. This is
+/// the one place that knows which types a composite is made of, and the
+/// mapping counterpart of [`Parameter::types`].
 ///
 /// Every transformation that rewrites types (resolution, substitution,
 /// generalization, variable erasure) goes through here, so a member a
@@ -347,9 +348,9 @@ pub const TYPE_SIZE_CEILING: u64 = 100_000;
 /// inference variable riding inside one crossed the item boundary into a table
 /// that could not resolve it.
 ///
-/// Leaves — and the variables and rigid binders a caller substitutes — come back
-/// unchanged, so a caller handles the kind it cares about and delegates the rest
-/// to this function.
+/// Leaves, including the variables and rigid binders a caller substitutes, come
+/// back unchanged, so a caller handles the kind it cares about and delegates the
+/// rest to this function.
 pub fn map_child_types<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
@@ -415,7 +416,7 @@ pub fn map_child_types<'db>(
     }
 }
 
-/// Visit every type `ty` directly contains — the reading counterpart of
+/// Visit every type `ty` directly contains: the reading counterpart of
 /// [`map_child_types`], for walks that inspect a type without rebuilding it.
 pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl FnMut(Ty<'db>)) {
     match ty.kind(db) {
@@ -449,9 +450,9 @@ pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl F
 }
 
 /// Whether an inference variable appears anywhere in `ty`. Variables are
-/// indices into ONE table, so a type that outlives the table that minted them —
-/// an exported scheme, a value cached across a table rollback — must carry
-/// none: read in a foreign table the index either dangles or, worse, names an
+/// indices into ONE table, so a type that outlives the table that minted them
+/// (an exported scheme, or a value cached across a table rollback) must carry
+/// none. Read in a foreign table, the index either dangles or, worse, names an
 /// unrelated variable.
 pub fn contains_inference_var<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
     if matches!(ty.kind(db), TyKind::Var(_)) {
@@ -472,12 +473,12 @@ pub fn substitute_rigid<'db>(
     substitute_rigid_memo(db, ty, substitution, &mut rustc_hash::FxHashMap::default())
 }
 
-/// A type is a DAG, not a tree: interning means one subtree is reached by every
-/// path that mentions it, and a record whose fields all return that record is
-/// reached once per field per level. Substituting without a memo re-walks each
-/// shared subtree once per path, which is exponential in depth — measured at 278
-/// million calls in 40 seconds on one R file, where the same walk memoised
-/// finishes. The memo is per top-level call because the substitution is fixed
+/// A type is a DAG rather than a tree. Interning means one subtree is reached
+/// by every path that mentions it, and a record whose fields all return that
+/// record is reached once per field per level. Substituting without a memo
+/// re-walks each shared subtree once per path, which is exponential in depth.
+/// It was measured at 278 million calls in 40 seconds on one R file, where the
+/// same walk finishes when it is memoized. The memo is per top-level call because the substitution is fixed
 /// for its duration, so a node's answer cannot depend on how it was reached.
 fn substitute_rigid_memo<'db>(
     db: &'db dyn Db,
@@ -523,10 +524,10 @@ mod size_tests {
     use super::*;
     use crate::RootDatabase;
 
-    /// The ceiling exists to stop a *shared* type whose tree is enormous, so the
-    /// count has to follow paths rather than distinct nodes — a record holding
-    /// one subtree twice costs twice. Counting the graph instead would report a
-    /// self-referential value as small and never fire.
+    /// The ceiling exists to stop a *shared* type whose tree is enormous, so
+    /// the count has to follow paths rather than distinct nodes. A record
+    /// holding one subtree twice costs twice. Counting the graph instead would
+    /// report a self-referential value as small and never fire.
     #[test]
     fn size_counts_the_tree_not_the_shared_graph() {
         let db = RootDatabase::default();

@@ -3,315 +3,22 @@ title: Testing
 description: The fixture-testing contract and suite structure
 ---
 
-This project prefers fixture tests for source-driven behavior. They are:
+Most of ry is tested with *fixtures*: plain-text files that pair a piece of R with the output ry
+should produce for it. A fixture reads well in a diff, a new case takes seconds to add, and it holds
+every change, including one an AI agent wrote, to an explicit text contract.
 
-- easy for a human to read in diffs
-- easy to extend into many cases quickly
-- a good fit for verifying AI-generated changes against an explicit text contract
+A fixture suite should describe the *desired* semantics as exhaustively as practical, so do not
+shape a suite around what the implementation already passes. While a suite is still catching up
+with the contract, record the missing coverage explicitly, either in `.agents/memory/backlog.md` or
+as a case pinned to the wrong-but-current output with a comment that says so. A gap you have not
+recorded looks intentional to the next reader.
 
-Fixture suites should describe the desired semantics as exhaustively as practical. Do not shape the
-matrix around what the current implementation already happens to pass. If the suite is still
-migrating toward the desired contract, record the missing coverage explicitly — in
-`.agents/memory/backlog.md`, or as a case pinned to the wrong-but-current output with a comment
-saying so — instead of treating current gaps as intentional.
-
-Use ordinary Rust tests only when the behavior is awkward to express as a rendered fixture.
-
-## The rewrite stack's suites
-
-The greenfield stack (`crates/syntax`, `crates/semantics`) has its own harness,
-`syntax::testing::run_fixture_suite`: a `.R.test` file holds `#==== group` / `#---- case`
-sections whose source is followed by a `#++++` expectation block; `RY_BLESS=1` rewrites
-expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
-
-- `crates/syntax/tests/syntax` — golden lossless trees plus syntax errors (`debug_dump`)
-- `crates/syntax/tests/tsr` — tree-sitter-r's parser corpus converted to the same format
-- `crates/syntax/tests/errors` — golden Elm-style error-message rendering, organized by
-  area (lexer, delimiters, control flow, functions/calls, `#:` type and directive grammar,
-  recovery locality). The coverage contract: every distinct error message the lexer or
-  parser can emit has at least one case here, valid-but-tricky shapes are pinned as
-  `no errors`, and recovery cases assert that one broken construct reports once and leaves
-  the rest of the file clean
-- `crates/semantics/tests/typing` — the typing suite: each case runs the full semantic
-  pipeline on one package file (shipped stubs installed) and renders every named top-level
-  definition's exported scheme (`name: <T: numeric> fn(x: T) -> T`) followed by the file's
-  diagnostics (`start..end severity[code] message`, byte offsets). Cases are grouped by feature,
-  except `programs.R.test`, which holds whole small programs written the way a real project is:
-  a case there earns its place by exercising several features at once, and a clean case with an
-  empty diagnostics block is a **zero-false-positive** contract for that style of code
-- `crates/semantics/tests/lowering` — the HIR each item lowers to, dumped as an indented
-  tree under the item's name (`# f`, or `# <statement>` for an unnamed one), with argument
-  tags rendered inline because argument matching is what a call's lowering has to get right.
-  This is the parse-tree dump one layer down: the `syntax` suite pins what the parser built,
-  this pins what lowering made of it. Its reason to exist is that a rewrite — the native
-  pipe becoming a call, a replacement form, `local` — is otherwise tested only through
-  whatever type falls out the far end, which cannot tell "lowered to the wrong shape but
-  coincidentally typed the same" from "lowered correctly". Cases whose comment says
-  `WRONG-BUT-CURRENT` pin a known defect together with the shape it should have, so a fix
-  turns them red; the open ones are listed in `.agents/memory/backlog.md`
-- `crates/semantics/tests/typing-scripts` — the same pipeline over script documents (one
-  sequential top-down scope)
-- `crates/semantics/tests/typing-strict` — the strict stream: the per-file typing mode and
-  the `strict`-code diagnostics appended after the ordinary rendering
-- `crates/semantics/tests/typing-imports` — package-metadata cases: leading `#namespace `
-  lines form the case's NAMESPACE source and `#description ` lines its DESCRIPTION source,
-  installed as the `PackageMetadata` input before rendering. The directive lines stay in the
-  analyzed text as ordinary comments, so expectation offsets are honest. Attach facts need no
-  directive: a `library(data.table)` statement in the case source activates the conditional
-  stub namespace through the same scan the hosts run. This suite is new-stack only — the
-  oracle had no package-metadata concept — and was deliberately absent from the retired differential
-  fixture arm
-- `crates/format/tests/format` — the formatter golden suite (ported from the legacy suite):
-  each case's source formats to the expected block, and the runner re-formats the output to
-  assert idempotence on every case; a case whose expectation is a refusal renders the
-  structured `FormatError`
-- `crates/ide/tests/ide` — IDE feature fixtures: the case source carries one `$0` cursor
-  marker (stripped before analysis) and the expectation renders each feature's result at
-  that position (hover line with its absolute range, definition target range, reference
-  ranges). A target inside the **stub corpus** renders the token its range covers
-  (`declared in stub source 0 at `print``) rather than a byte offset: an offset into the
-  shipped corpus shifts whenever an unrelated declaration is added, which forced a re-bless
-  on every corpus edit while proving nothing, and the token proves the range points where
-  it should
-
-### The retired identity differentials, and the benchmark harness
-
-The rewrite was verified against the frozen previous implementation by a family of
-differential suites (typing, scripts, strict, fuzz, the legacy-corpus sweep, the real-file
-corpus arm, and a per-position IDE comparison with adjudicated divergence ledgers). That
-program is **complete and retired**: the new stack no longer proves equivalence to the
-oracle — its own fixture suites are the semantics contract, and improvements land without
-oracle adjudication. What remains of the `differential` crate is the cross-stack
-**benchmark** harness (`legacy/differential/tests/test_stats.rs`): the same corpus timed
-and memory-measured through both stacks, kept until the legacy code is deleted.
-
-### The semantics fuzz harness
-
-Fuzzing is pipeline-wide and from each stage's first commit, not a parser-only concern.
-`crates/semantics/tests/test_fuzz.rs` runs generated programs (biased toward reference cycles,
-closures, annotations, and typing-mode directives), token soup, and two-file projects through
-the full semantic pipeline, checking on every input: never-panic (salsa fixpoints must
-converge), determinism across fresh databases, diagnostic-range geometry, and **incremental
-equivalence** — output after editing a file through the salsa setter equals a fresh database on
-the edited text, and editing back restores the original. `FUZZ_ITERS` scales the budgets; the
-bounded default runs in `cargo test -p semantics`, and `fuzz_deep` (ignored) carries long runs.
-On a panic the harness prints the generating inputs.
-
-### The formatter fuzz harness
-
-`crates/format/tests/test_fuzz.rs` holds the formatter's arm of the same doctrine. On every
-input — valid-program seeds, byte-level seed mutations, token soup, random bytes, every fixture
-case source in the repository, and real corpus files when fetched — it checks: never-panic
-(`format` either succeeds or refuses with a structured error), determinism, **preservation** of
-the code, and **idempotence**: whenever formatting succeeds, formatting the output again must
-succeed and reproduce it byte-for-byte. The refusal path is part of the
-property: a file with an R-grammar syntax error is refused, while errors raised by the `#:`
-annotation grammar (marked `in_annotation` by the parser) only send the affected block down
-the verbatim path.
-
-Preservation is the one invariant that can notice the formatter *changing* code — determinism,
-idempotence and "the output formats again" all hold for a formatter that silently drops a
-statement or misspells a token. It compares the non-trivia token **kind and spelling** sequence of
-input and output, with two allowances. Four kinds are excluded entirely — `{`, `}`, `;` and `#:` —
-because the formatter may introduce or move them: it braces a single-statement body, splits a `;`
-chain into lines, and re-lays-out an annotation block across markers. And a string is compared by
-its content rather than its text, because the formatter picks the quote character; a *raw* string
-it copies byte-for-byte, so that one keeps its full spelling.
-
-Comparing kinds alone is not enough, and the gap is a miscompile rather than a cosmetic one: R is
-case-sensitive, so a formatter emitting the wrong bytes for an identifier — what a stale or
-off-by-one source range produces — preserves every kind while renaming the user's variables.
-Measured against exactly that injected bug, the kind-only comparison passed all eight arms of this
-harness; the spelling comparison fails six of them, and costs nothing.
-
-The invariant battery itself is exported as
-`format::check_format_invariants` (with `syntax::testing::check_parse_invariants` for the
-parser and `semantics::testing::check_semantics_input` for the semantic pipeline — the
-latter folds every lint under an everything-on configuration into the rendering, so the
-lint layer inherits the never-panic, determinism, geometry, and incremental invariants) so
-the coverage-guided targets below share the exact same contracts. The `format` and `semantics`
-harnesses additionally carry a `fuzz_regressions_hold_invariants` battery pinning inputs those
-targets have broken; `syntax` and `ide` have no such battery yet.
-
-### The IDE fuzz harness
-
-`crates/ide/tests/test_fuzz.rs` sweeps every feature over a sample of byte offsets in each input:
-every token boundary plus a coarse stride, so off-boundary and mid-character positions stay
-covered. At each offset nothing may panic and every range handed to the editor must lie inside the
-text it indexes.
-
-Containment alone is a weak oracle — it says a range is *somewhere* in the file, not that it is on
-the right thing — so two further properties hold wherever the cursor sits on a name. **Name
-identity**: every rename edit, every reference, and the definition target must cover text spelling
-that same name (backtick quoting normalized, since `` `x` `` and `x` name one binding). **Round
-trip**: if the cursor navigates to a declaration, asking for references *from* that declaration
-must come back to the cursor's own token. Both were measured against an injected off-by-one at the
-single place item-relative ranges are re-anchored to absolute offsets: the containment-only battery
-passed, name identity failed on the first seed.
-
-Completion is sampled once per completion context — the kind of token the cursor sits in or after —
-rather than at every offset. It is three orders of magnitude more expensive per call than any other
-feature here, it asserts only that a label is non-empty, and what it offers is decided by syntactic
-context rather than by the exact byte, so a full sweep re-derives the same candidate list many times
-over. Sampling by context halves the harness's wall clock and keeps the assertion.
-
-### The mined legacy corpus
-
-`crates/syntax/tests/corpus-legacy/*.R.corpus` holds 1,967 distinct R programs extracted from the
-frozen stack's fixture suites, and `syntax::testing::legacy_corpus_sources` reads them. The `syntax`,
-`format` and `semantics` batteries each run the whole set.
-
-They are kept for their **inputs**, not their expectations. That stack's suites hold ~2,830 curated
-edge cases, but their expected output cannot be ported — the naming suite renders binding-resolution
-trees, and the type suites use an older notation (`fn(x: ?1) -> ?1` where the shipping crates render
-`<T> fn(x: T) -> T`) — so bulk-blessing them would encode today's behavior as the contract rather than
-check it. Case-name overlap with the current suites is 15 of 138 for ide and 1 across the whole
-typecheck suite, so the corpus was reimplemented rather than ported, and **nothing in the shipping
-crates ran a single one of those programs** until this arm existed: the harness that runs them drives
-them against the frozen oracle.
-
-The invariants need no expectations, which is what makes the inputs usable on their own: never panic,
-lossless reprint and tree geometry in `syntax`, the preservation oracle in `format`, and diagnostic
-ranges inside their file in `semantics`. The semantics arm shares **one** database across the whole
-corpus rather than using the per-input battery — a fresh database costs a stub re-parse each — so it
-asserts what a shared database can and leaves determinism and incremental equivalence to the generated
-arms. Each arm asserts the corpus is non-empty, so deleting it fails loudly instead of passing green
-on zero cases.
-
-Regenerating: the corpus is derived from `legacy/analysis-legacy/tests/**/*.test` by taking each
-case's source between its `#---- <id>` header and the `#++++` expectation, stripping the per-file
-headers multi-file cases use, and deduplicating. It is committed rather than derived at test time so
-it survives the eventual deletion of that directory.
-
-### The annotation round-trip oracle
-
-`crates/semantics/tests/test_roundtrip.rs` asserts that every type the checker prints is a type a
-user can write back. `#: TYPE` says the annotated value is compatible with `TYPE`, and the checker
-has just proved the value *has* the type it rendered — so re-declaring an inferred scheme above its
-own definition must add no finding.
-
-It is the only test that compares the renderer against the annotation grammar. Every other suite
-reads a rendering as a *string*, so a type that prints beautifully and parses back as something else
-is invisible to all of them. Two live bugs were found this way and are fixed: a record field name
-that is not a syntactic R name rendered unquoted, and `` list{`a,b`: integer} `` read back as a
-different type entirely rather than failing; and `scalar numeric`, a bound the checker renders, was
-not one the grammar accepted, making every scheme carrying it unwritable.
-
-It runs over every fixture case source, skipping any that does not already check clean (the oracle
-is "re-declaring adds no finding", which needs a baseline with none) and any definition that already
-carries a `#:` block (that is the user's text echoed back, not a rendering the checker chose). One
-database is re-pointed with the salsa setter rather than rebuilt per probe — a fresh database costs
-a re-parse of the whole stub corpus, which is 232 s against 4.5 s for the same 516 schemes.
-
-`KNOWN_UNWRITABLE` names the schemes that do not round-trip today. They are all one open defect — a
-parameter's default value is ignored when its type generalizes, so `function(x = 1) x` infers
-`<T> fn([x]: T) -> T` and writing that back fails with ``expected `T`, found `double` ``. They are
-listed by case id rather than skipped by shape, so a new unwritable rendering of any kind fails the
-test instead of blending into a category.
-
-### The tree-sitter acceptance differential
-
-`crates/syntax/tests/test_corpus.rs` compares our "this file has errors" verdict against
-`tree-sitter-r` as a second opinion, in both directions and over two input sets.
-
-`corpus_acceptance` runs over the fetched `corpus/` and gates **ours-only-error** — we reject what
-tree-sitter accepts, which means a grammar gap. `in_tree_acceptance` runs over inputs that are
-always present (the mined legacy corpus plus every fixture case source) and gates the other
-direction, **theirs-only-error**: we accept what tree-sitter rejects.
-
-That second direction is the only thing in the project that bounds the parse-error count from
-*below*. Every other parser invariant bounds it from above — the cascade guard caps how many errors
-we report, and nothing asserts that a broken file reports any at all — while the parser carries a
-lot of dedup and first-wins suppression, so over-suppression is the live regression risk. Measured
-against an injected `push_error` that drops zero-width ranges, all four `test_fuzz` binaries stayed
-green while 24 of 489 broken files went silently clean; this differential went from 2 divergences to
-23. It costs about 100 ms.
-
-Each direction is gated only where it is meaningful. Ours-only is noise on in-tree input, which is
-full of `#:` annotations tree-sitter reads as comments and of deliberately broken sources;
-theirs-only is gated there against
-`crates/syntax/tests/in-tree-acceptance-allowlist.txt`. An allowlist entry is adjudicated by running
-**R itself** and must say which of two things it is: tree-sitter being wrong, or a known gap in this
-parser. There is currently one of each.
-
-### Coverage-guided fuzzing
-
-`fuzz/` is a cargo-fuzz crate (its own workspace, excluded from the main one) with libFuzzer
-targets `parse`, `format`, and `semantics`, each a thin wrapper over the exported
-invariant batteries (the `semantics` target derives its document kind and incremental edit
-from the input bytes, so one byte stream drives the full battery including the splice
-cache). It
-needs nightly: `cargo install cargo-fuzz`, then from `fuzz/`:
-
-```sh
-cargo +nightly -Zscript ../scripts/seed-fuzz-corpus.rs   # seed corpus from all fixture case sources
-cargo +nightly fuzz run format -- -max_total_time=600 -print_final_stats=1
-cargo +nightly fuzz run parse  -- -max_total_time=600
-```
-
-The seeder extracts every fixture case's source across the repository into
-`fuzz/corpus/{parse,format,semantics}/` (content-addressed, so re-running only adds). Corpus and
-artifacts are gitignored — durable regressions belong in the `REGRESSIONS` battery or a
-fixture case, not in the corpus. On a find: `cargo +nightly fuzz tmin format <artifact>`
-minimizes it; fix the bug, replay the artifact, add the minimized input to `REGRESSIONS`
-(plus a golden fixture case when the shape deserves a pinned rendering). A coverage report
-for judging corpus quality needs the llvm-tools component:
-`cargo +nightly fuzz coverage format && cargo cov -- show` per the
-[cargo-fuzz coverage guide](https://rust-fuzz.github.io/book/cargo-fuzz/coverage.html).
-Deep runs are manual/scheduled work; the bounded in-tree batteries remain the default-suite
-gate.
-
-### The lint fixture suites
-
-`crates/semantics/tests/lints/` runs `lints::lint_file` under the default configuration and
-`tests/lints-style/` under `naming-style = "snake_case"` plus `unused-parameter = "warn"`
-(both off by default); each case renders every finding as `start..end severity[code] message`
-(or `clean`). Run with `cargo test -p semantics --test test_lint_fixtures`.
-
-### The CLI contract suite
-
-`crates/ry/tests/test_cli.rs` drives the real `ry` binary end to end: diagnostic
-rendering (1-based character positions, snippet windows, underlines), JSON Lines output, the documented exit-code
-contract (0 clean, 1 findings, 2 usage/configuration/IO errors), configuration discovery and
-failure, per-file `# typing:` directives, suppression comments, NAMESPACE validation, project
-stub overrides (including loader-problem reporting), data-masked evaluation, and the
-formatter's `--check`/`--diff`/in-place modes.
-
-### The LSP behavioral suite
-
-`crates/ry/tests/test_lsp.rs` spawns the real `ry server` process and drives it over
-LSP stdio with an async-lsp test client. Coverage: capability negotiation (position encodings,
-pull diagnostics, refresh, label offsets, snippets), document sync (incremental and full-text,
-untitled/non-`file:` buffers, close-time disk rereads), the two-wave push contract and its
-settled-superset invariant, burst settling under latest-edit-wins cancellation, pull
-diagnostics (result ids, unchanged reports, retryable cancellation, push suppression),
-diagnostic refresh on save and config change, the config matrix (live reload, ancestor
-configs, failure keeps the previous config, the config-file diagnostic), every feature
-endpoint including UTF-16/UTF-8 range correctness with BMP and non-BMP content and
-out-of-bounds safety, semantic tokens for `#:` bodies, and `.Rtypes`/NAMESPACE buffer serving.
-
-The cancelled-pull test is deterministic through a fault-injection seam: with the
-`RY_TEST_DELAY_PULL_MS` environment variable set, the server announces each diagnostics pull
-by creating the `RY_TEST_PULL_MARKER` file and then holds the pull (until the cancellation
-token flips, bounded by the delay) before computing. The test sends its `didChange` only after the
-marker appears, so the edit's flip provably lands while the pull is in flight — the retryable
-`SERVER_CANCELLED` response, and the successful retry after it, can be asserted without
-sleeping-and-hoping. The variables exist only for this test; production runs never set them.
-
-### The perf and memory witnesses
-
-`legacy/differential/tests/test_stats.rs` (ignored; needs the fetched corpus and a release
-build) carries the measurement instruments — one process per stack reporting wall, phase
-splits, and resident/peak memory into `target/stats-{new,legacy}.txt` — and `stats_witness`,
-the CI-checkable assertion form: cold-pass wall per line, resident bytes per line, and
-resolve steps per line (the resolve-memoization regression tripwire) against budgets set from
-the measured gate numbers with headroom.
+Reach for an ordinary Rust test only when the behavior is awkward to express as rendered output.
 
 ## Fixture format
 
-Every suite on the shipping stack runs through one harness, `syntax::testing::run_fixture_suite`
-(shared by the `syntax`, `semantics`, `format`, and `ide` crates). A `.test`
-file holds groups of cases:
+Every suite in the shipping crates runs through one harness, `syntax::testing::run_fixture_suite`,
+which `syntax`, `semantics`, `format`, and `ide` all share. A `.test` file holds groups of cases:
 
 ```text
 #==== group_name
@@ -321,19 +28,15 @@ file holds groups of cases:
 <expected rendered output>
 ```
 
-Rules:
+- `group__case` is the case's stable identity. It must be unique across the suite, and a duplicate is
+  rejected rather than allowed to shadow the other case silently.
+- What the expected output shows (schemes, diagnostics, a tree dump, hover text) is up to the suite's
+  runner. Behavior specific to one suite belongs in its runner, never in the fixture syntax.
+- The runner loads only `.test` files, so anything else in a suite directory is ignored.
 
-- `group__case` is the stable test identity; names must be unique across the suite — duplicates are
-  rejected rather than silently shadowing one another
-- what the expectation *shows* is the suite runner's contract (schemes, diagnostics, tree dumps,
-  hover output, …); suite-specific behavior belongs in the runner, not in fixture syntax
-- the runner only loads files with the `.test` extension, so a suite directory may hold notes
-  (a `README.md` describing its rendered-output contract, say) without the runner treating them
-  as cases
+### Running one case
 
-## Focused runs
-
-Run one focused fixture case with `FIXTURE_FILTER` and the suite's test target, for example:
+To run a single case, set `FIXTURE_FILTER` and pick the suite's test target:
 
 ```sh
 FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures -- --nocapture
@@ -341,54 +44,369 @@ FIXTURE_FILTER=group__case cargo test -p format --test test_format_fixtures -- -
 FIXTURE_FILTER=group__case cargo test -p ide --test test_ide_fixtures -- --nocapture
 ```
 
-A filter that names no case in any suite fails rather than passing, because one test target drives
-several suites: a suite that does not hold the case skips quietly, but an id no suite holds is a
-typo, and a run of zero cases would otherwise report a pass.
+One test target can drive several suites, so a suite that does not hold the case skips it quietly.
+But a filter that matches no case in *any* suite fails: that is almost certainly a typo, and a run of
+zero cases would otherwise report a pass.
 
-The default crate test command while iterating is `cargo test -p semantics` (analysis behavior);
-`just gate` runs the whole battery plus clippy and a formatting check before a change lands.
+While iterating, `cargo test -p semantics` is the default command, since it covers analysis
+behavior. Before a change lands, `just gate` runs the whole battery plus clippy and a formatting
+check.
 
-## Blessing expectations
+### Blessing expectations
 
-Set `RY_BLESS=1` to rewrite the `#++++` expectation blocks in the source `.test` files in
-place from the actual runner output instead of failing on a mismatch:
+With `RY_BLESS=1`, a mismatch does not fail. Instead, the harness rewrites the `#++++` blocks in the
+`.test` files in place from the runner's actual output:
 
 ```sh
 RY_BLESS=1 cargo test -p semantics --test test_typing_fixtures
 ```
 
-Behavior:
+Only the body of each `#++++` block is rewritten. Directive lines and the spacing around them are
+kept, so a blessed file is byte-identical to what a person would have written, and a second run
+without bless passes. `FIXTURE_FILTER` still applies, so you can bless a single case, and blessing a
+suite that is already correct changes no bytes.
 
-- only the content body of each `#++++` block is rewritten; directive lines and surrounding spacing
-  are preserved, so a blessed file is byte-identical to what a human would have written and
-  re-running without bless passes
-- `FIXTURE_FILTER` still applies, so you can bless a single case
-- blessing an already-correct suite changes no bytes
+Review every blessed change before you commit it. Bless records whatever the runner produces, so if
+the implementation is wrong, it faithfully records a wrong outcome. Fixtures are the contract for
+the semantics you want, not an archive of what the code once did, so accept a changed expectation
+only when the behavior or the wording improved on purpose.
 
-Review every blessed change before committing: bless captures whatever the runner currently
-produces, so it records an intentionally wrong outcome when the implementation is wrong.
-Fixtures are the desired-semantics contract, not a regression archive — accept a changed
-expectation only when the behavior or wording intentionally improved.
+## The fixture suites
 
-## The frozen legacy stack's harnesses
+- **`crates/syntax/tests/syntax`**: golden lossless trees and syntax errors, rendered by
+  `debug_dump`.
+- **`crates/syntax/tests/tsr`**: tree-sitter-r's parser corpus, converted to the same format.
+- **`crates/syntax/tests/errors`**: golden Elm-style error messages, organized by area (the lexer,
+  delimiters, control flow, functions and calls, the `#:` type and directive grammar, and recovery
+  locality). Its coverage contract has three parts: every distinct error message the lexer or parser
+  can emit has at least one case here, valid but tricky shapes are pinned as `no errors`, and
+  recovery cases assert that one broken construct reports once and leaves the rest of the file
+  clean.
+- **`crates/semantics/tests/naming`**: the name-resolution suite. It records which binding every name
+  in an item resolves to, rendered flat in source order. This is the only suite that tests naming
+  directly. Everywhere else naming is tested through its consequences, a type that comes out right
+  or a diagnostic that does or does not fire, and consequences cannot see a read that resolves to
+  the wrong binding while still producing the same type.
+- **`crates/semantics/tests/typing`**: the typing suite. Each case runs the full semantic pipeline on
+  one package file, with the shipped stubs installed, and renders the exported scheme of every named
+  top-level definition (`name: <T: numeric> fn(x: T) -> T`) followed by the file's diagnostics
+  (`start..end severity[code] message`, in byte offsets). Cases are grouped by feature, with one
+  exception: `programs.R.test` holds whole small programs written the way real projects are
+  written. A case earns its place there by exercising several features at once, and a clean case
+  with an empty diagnostics block is a promise of zero false positives for that style of code.
+- **`crates/semantics/tests/lowering`**: the HIR each item lowers to, dumped as an indented tree
+  under the item's name (or under `# <statement>` for an unnamed item). Argument tags are rendered
+  inline, because matching arguments is what a call's lowering has to get right. Think of it as the
+  parse-tree dump one layer down: the `syntax` suite pins what the parser built, and this suite pins
+  what lowering made of it. It exists because rewrites, such as the native pipe becoming a call, a
+  replacement form, or `local`, would otherwise be tested only through whatever type falls out at
+  the far end, which cannot tell "lowered correctly" from "lowered to the wrong shape but happened to
+  type the same". A case whose comment says `WRONG-BUT-CURRENT` pins a known defect next to the shape
+  it should have, so fixing the defect turns the case red. `.agents/memory/backlog.md` lists the open
+  ones.
+- **`crates/semantics/tests/typing-scripts`**: the same pipeline over script documents, which have
+  one sequential, top-down scope.
+- **`crates/semantics/tests/typing-strict`**: the strict stream. After the ordinary rendering, each
+  case appends the file's typing mode and its `strict` diagnostics.
+- **`crates/semantics/tests/typing-imports`**: package metadata. A leading `#namespace ` line supplies
+  the case's `NAMESPACE` source and a `#description ` line its `DESCRIPTION` source, and both are
+  installed as the `PackageMetadata` input before rendering. The directive lines stay in the analyzed
+  text as ordinary comments, so expected offsets are honest. Attaching a package needs no directive:
+  a `library(data.table)` statement in the source activates the conditional stub namespace through
+  the same scan the hosts run.
+- **`crates/semantics/tests/lints`** and **`lints-style`**: `lints::lint_file`, first under the
+  default configuration and then under `naming-style = "snake_case"`, `unused-parameter = "warn"`,
+  `shadows-builtin = "warn"`, and `shadows-namespace = "warn"`, all of which are off by default. Each
+  case renders every finding as `start..end severity[code] message`, or `clean`. Run both with
+  `cargo test -p semantics --test test_lint_fixtures`.
+- **`crates/format/tests/format`**: the formatter's golden suite. Each case's source must format to
+  the expected block, and the runner formats that output again to assert idempotence on every case.
+  When the expected result is a refusal, the case renders the structured `FormatError`.
+- **`crates/ide/tests/ide`**: the editor features. The source carries one `$0` cursor marker, which
+  is stripped before analysis, and the expectation renders each feature's answer at that position:
+  the hover line with its absolute range, the definition's target range, and the reference ranges.
+  A target inside the stub corpus renders the token its range covers, as in
+  ``declared in stub source 0 at `print` ``, rather than a byte offset. An offset into the shipped
+  corpus shifts whenever someone adds an unrelated declaration, which forced a re-bless on every
+  corpus edit and proved nothing, whereas the token proves the range points at the right thing.
 
-The previous implementation stays in-tree (`legacy/analysis-legacy`, `legacy/engine-legacy`,
-`legacy/ry-legacy`, with its own `legacy/fixtures` harness) as the cross-implementation oracle
-the differential compares against, and as the benchmark baseline. Its suites still run —
-`cargo test -p analysis-legacy` / `-p engine-legacy` / `-p ry-legacy`, and the workspace-wide
-battery covers them — but the stack is frozen: do not extend its fixtures or harnesses, and never
-share code between the two stacks. Its `fixtures` crate parses the same `Simple` shape plus a
-`MultiFile` shape (explicit file paths and grouped workspace edits) that its engine-era suites use.
-Beyond fixtures, the legacy engine carries its own differential regression net (engine output
-asserted equal to a from-scratch rebuild over adversarial edit streams, per-position IDE parity
-against a fresh-analysis oracle, exec-counter and memory witnesses); it documents the bar the
-rewrite's own harnesses were built to meet.
+## Fuzzing and property tests
 
-## Testing guidance
+Fixtures check the answers we thought to write down. The harnesses in this section check properties
+that must hold for *every* input, and then throw a great many inputs at them. Fuzzing covers the
+whole pipeline and starts with each stage's first commit; it is not a parser-only concern.
 
-- Prefer adding or tightening fixtures before writing parser-local or crate-local unit tests unless the behavior is genuinely awkward to express as a fixture.
-- When adding a new phase or module, add or extend a fixture suite for that phase before relying on ad hoc unit tests.
+The batteries of invariants are exported, so that the in-tree harnesses and the coverage-guided
+targets share exactly the same contracts: `syntax::testing::check_parse_invariants` for the parser,
+`format::check_format_invariants` for the formatter, and `semantics::testing::check_semantics_input`
+for the semantic pipeline. The last one folds every lint, under a configuration that turns them all
+on, into its rendering, so the lint layer inherits the same invariants. The `format` and `semantics`
+harnesses also carry a `fuzz_regressions_hold_invariants` battery that pins every input the
+coverage-guided targets have ever broken. `syntax` and `ide` have no such battery yet.
+
+### The semantic pipeline
+
+`crates/semantics/tests/test_fuzz.rs` runs generated programs, token soup, and two-file projects
+through the full semantic pipeline, with the generator biased toward reference cycles, closures,
+annotations, and typing-mode directives. On every input it checks four properties:
+
+- **Nothing panics**, which among other things means every salsa fixpoint converges.
+- **The output is deterministic** across fresh databases.
+- **Diagnostic ranges are well formed.**
+- **Incremental equals fresh.** Editing a file through the salsa setter gives the same output as a
+  fresh database on the edited text, and editing it back restores the original.
+
+`FUZZ_ITERS` scales the budgets. A bounded default runs inside `cargo test -p semantics`, the
+ignored `fuzz_deep` test carries the long runs, and on a panic the harness prints the inputs that
+produced it.
+
+### The formatter
+
+`crates/format/tests/test_fuzz.rs` feeds the formatter valid-program seeds, byte-level mutations of
+those seeds, token soup, random bytes, every fixture case source in the repository, and real corpus
+files once they are fetched. It checks four properties: nothing panics (the formatter either
+succeeds or refuses with a structured error), the output is deterministic, the code is preserved,
+and formatting is idempotent, meaning that formatting a successful output again succeeds and
+reproduces it byte for byte.
+
+The refusal path is part of the contract. A file with a syntax error in its R is refused, while an
+error in a `#:` annotation, which the parser marks `in_annotation`, only sends the affected block
+down the verbatim path.
+
+**Preservation** is the one property that can catch the formatter changing your code. Determinism,
+idempotence, and "the output formats again" all hold for a formatter that silently drops a
+statement or misspells a token. Preservation compares the sequence of non-trivia token kinds *and
+spellings* between input and output, with two allowances:
+
+- Four kinds are ignored entirely (`{`, `}`, `;`, and `#:`), because the formatter may add or move
+  them: it braces single-statement bodies, splits `;` chains onto separate lines, and re-lays out
+  annotation blocks.
+- A string is compared by its content rather than its text, because the formatter chooses the quote
+  character. Raw strings are copied byte for byte, so they keep their full spelling.
+
+Comparing kinds alone would not be enough, and the gap would be a miscompile, not a cosmetic slip.
+R is case-sensitive, so a formatter that emits the wrong bytes for an identifier renames your
+variables while preserving every kind, and a stale or off-by-one source range produces exactly
+that. When that bug was injected on purpose, a kind-only comparison passed every arm of the
+harness; comparing spellings fails most of them, at no extra cost.
+
+### The editor features
+
+`crates/ide/tests/test_fuzz.rs` sweeps every feature over a sample of byte offsets in each input:
+every token boundary plus a coarse stride, so positions off token boundaries and in the middle of
+multi-byte characters are covered too. At each offset nothing may panic, and every range handed to
+the editor must lie inside the text it indexes.
+
+Containment alone is a weak check, though: it says a range is somewhere in the file, not that it is
+on the right thing. Wherever the cursor sits on a name, two stronger properties hold as well:
+
+- **Name identity**: every rename edit, every reference, and the definition target cover text that
+  spells the same name (with backtick quoting normalized, since `` `x` `` and `x` are one binding).
+- **Round trip**: if the cursor navigates to a declaration, asking for references from that
+  declaration leads back to the cursor's own token.
+
+Both were tested against an off-by-one injected at the single place where item-relative ranges are
+converted back to absolute offsets. The containment-only battery passed; name identity failed on
+the first seed.
+
+Completion is sampled once per completion context (the kind of token the cursor sits in or after)
+rather than at every offset. It costs three orders of magnitude more per call than any other feature
+here, the harness only asserts that each label is non-empty, and what completion offers depends on
+the syntactic context rather than the exact byte, so a full sweep would compute the same list over
+and over. Sampling by context halves the harness's running time and keeps the assertion.
+
+### The mined legacy corpus
+
+`crates/syntax/tests/corpus-legacy/*.R.corpus` holds 1,967 distinct R programs extracted from the
+frozen stack's fixture suites, read through `syntax::testing::legacy_corpus_sources`. The `syntax`,
+`format`, and `semantics` batteries each run the whole set.
+
+The programs are kept for their inputs, not their expectations. The old suites hold about 2,830
+curated edge cases, but their expected output cannot be ported: the naming suite renders
+binding-resolution trees, and the type suites use an older notation, in which
+`fn(x: ?1) -> ?1` is what the shipping crates render as `<T> fn(x: T) -> T`. Bulk-blessing them
+would simply declare today's behavior correct instead of checking it. The suites were reimplemented
+rather than ported (only 15 of 138 case names overlap for the IDE, and just 1 across the whole
+typecheck suite), so until this corpus existed, nothing in the shipping crates ran a single one of
+those programs.
+
+What makes the inputs usable on their own is that the invariants need no expected output: nothing
+panics, `syntax` checks the lossless reprint and the tree geometry, `format` checks preservation,
+and `semantics` checks that every diagnostic range lies inside its file. The semantics arm shares
+one database across the whole corpus instead of using the per-input battery, because a fresh
+database re-parses the stubs every time. It therefore asserts only what a shared database can, and
+leaves determinism and incremental equivalence to the generated inputs. Every arm also asserts that
+the corpus is non-empty, so deleting it fails loudly instead of passing on zero cases.
+
+To regenerate the corpus from `legacy/analysis-legacy/tests/**/*.test`, take each case's source
+between its `#---- <id>` header and its `#++++` expectation, strip the per-file headers that
+multi-file cases use, and deduplicate. The result is committed rather than derived at test time, so
+it will survive the eventual deletion of that directory.
+
+### The annotation round trip
+
+`crates/semantics/tests/test_roundtrip.rs` asserts that every type the checker prints is a type you
+could write back. A `#: TYPE` annotation says the annotated value is compatible with `TYPE`, and the
+checker has just proved the value has the type it rendered, so pasting an inferred scheme above its
+own definition must add no finding.
+
+No other test compares the renderer with the annotation grammar. Every other suite reads a rendered
+type as a string, so a type that prints beautifully but parses back as something else is invisible
+to all of them. This test found two real bugs. A record field whose name is not a syntactic R name
+was rendered unquoted, so `` list{`a,b`: integer} `` read back as a different type entirely instead
+of failing. And `scalar numeric`, a bound the checker renders, was not one the grammar accepted,
+which made every scheme carrying it impossible to write down.
+
+The test runs over every fixture case source. It skips cases that do not already check clean,
+because "re-declaring adds no finding" needs a baseline with no findings, and it skips definitions
+that already carry a `#:` block, because those render the user's own text rather than a type the
+checker chose. It re-points one database with the salsa setter instead of building a new one per
+probe: a fresh database re-parses the whole stub corpus, which took 232 seconds against 4.5 seconds
+for the same 516 schemes.
+
+`KNOWN_UNWRITABLE` lists schemes that are allowed not to round-trip. It is empty, and worth keeping
+that way. Its entries name case ids rather than skipping by shape, so a new unwritable rendering of
+any kind fails the test instead of blending into a known category.
+
+### Tree-sitter as a second opinion
+
+`crates/syntax/tests/test_corpus.rs` compares our verdict on "does this file have errors?" with
+`tree-sitter-r`'s, in both directions and over two sets of inputs:
+
+- `corpus_acceptance` runs over the fetched `corpus/` and gates the direction where *we* reject what
+  tree-sitter accepts, which means a gap in our grammar.
+- `in_tree_acceptance` runs over inputs that are always present (the mined legacy corpus plus every
+  fixture case source) and gates the other direction, where we accept what tree-sitter rejects.
+
+That second direction is the only thing in the project that bounds the number of parse errors from
+below. Every other parser invariant bounds it from above: the cascade guard caps how many errors we
+report, but nothing else asserts that a broken file reports any at all. Since the parser does a lot
+of deduplication and first-one-wins suppression, over-suppression is the regression most likely to
+slip in. To measure this, a `push_error` that drops zero-width ranges was injected on purpose. All
+four `test_fuzz` binaries stayed green while 24 of 489 broken files went silently clean, and this
+differential jumped from 2 divergences to 23. It costs about 100 ms.
+
+Each direction is gated only where it means something. Rejecting what tree-sitter accepts is noise
+on in-tree input, which is full of `#:` annotations (comments, to tree-sitter) and of deliberately
+broken sources. Accepting what tree-sitter rejects is gated there against
+`crates/syntax/tests/in-tree-acceptance-allowlist.txt`. Each allowlist entry is adjudicated by
+running R itself, and must say which of two things it is: tree-sitter being wrong, or a known gap in
+this parser. There is currently one of each.
+
+### Coverage-guided fuzzing
+
+`fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. It holds the
+libFuzzer targets `parse`, `format`, and `semantics`, each a thin wrapper around the exported
+invariant batteries. The `semantics` target derives its document kind and an incremental edit from
+the input bytes, so a single byte stream drives the full battery, the splice cache included.
+
+It needs nightly. Run `cargo install cargo-fuzz`, then from `fuzz/`:
+
+```sh
+cargo +nightly -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
+cargo +nightly fuzz run format -- -max_total_time=600 -print_final_stats=1
+cargo +nightly fuzz run parse  -- -max_total_time=600
+```
+
+The seeder copies every fixture case's source in the repository into
+`fuzz/corpus/{parse,format,semantics}/`. Files are content-addressed, so running it again only adds.
+The corpus and the artifacts are gitignored, because a durable regression belongs in the
+`REGRESSIONS` battery or in a fixture case, not in the corpus.
+
+When the fuzzer finds something, minimize it with `cargo +nightly fuzz tmin format <artifact>`, fix
+the bug, replay the artifact, and add the minimized input to `REGRESSIONS`, plus a golden fixture
+case when the shape deserves a pinned rendering. To judge corpus quality, you can get a coverage
+report (it needs the llvm-tools component) with
+`cargo +nightly fuzz coverage format && cargo cov -- show`, as the
+[cargo-fuzz coverage guide](https://rust-fuzz.github.io/book/cargo-fuzz/coverage.html) describes.
+Deep runs are manual or scheduled work; the bounded in-tree batteries remain the gate in the default
+suite.
+
+## End-to-end suites
+
+### The CLI
+
+`crates/ry/tests/test_cli.rs` drives the real `ry` binary end to end. It covers:
+
+- diagnostic rendering, with 1-based character positions, snippet windows, and underlines;
+- JSON Lines output;
+- the exit-code contract: 0 for no findings, 1 for findings, and 2 for a usage, configuration, or IO
+  error;
+- finding the configuration, and failing to;
+- per-file `# typing:` directives and suppression comments;
+- `NAMESPACE` validation, and project stub overrides including their loader-problem reports;
+- data-masked evaluation;
+- the formatter's `--check`, `--diff`, and in-place modes.
+
+### The language server
+
+`crates/ry/tests/test_lsp.rs` spawns the real `ry server` process and drives it over stdio with an
+async-lsp test client. It covers:
+
+- capability negotiation: position encodings, pull diagnostics, refresh, label offsets, and
+  snippets;
+- document sync, both incremental and full-text, including untitled and non-`file:` buffers and
+  re-reading from disk on close;
+- the two-wave push contract, its settled-superset invariant, and how a burst of edits settles under
+  latest-edit-wins cancellation;
+- pull diagnostics: result ids, unchanged reports, retryable cancellation, and push suppression;
+- diagnostic refresh on save and on a configuration change;
+- configuration: live reload, a configuration in an ancestor directory, a broken configuration
+  keeping the previous one in force, and the diagnostic on the configuration file itself;
+- every feature endpoint, including correct UTF-16 and UTF-8 ranges over BMP and non-BMP text, and
+  safety for out-of-bounds positions;
+- semantic tokens for a `#:` body, and serving `.Rtypes` and `NAMESPACE` buffers.
+
+The cancelled-pull test is made deterministic by a fault-injection seam. When the
+`RY_TEST_DELAY_PULL_MS` environment variable is set, the server announces each diagnostics pull by
+creating the `RY_TEST_PULL_MARKER` file, then holds the pull (for at most the delay) until the
+cancellation token flips. The test sends its `didChange` only after the marker appears, so the
+cancellation provably lands while the pull is in flight, and the retryable `SERVER_CANCELLED`
+response and the successful retry after it can be asserted without sleeping and hoping. These
+variables exist only for this test; a production run never sets them.
+
+## Performance and memory
+
+`legacy/differential/tests/test_stats.rs` holds the measurement instruments. They are ignored by
+default because they need the fetched corpus and a release build. Each instrument runs one process
+per stack and writes wall time, a split by phase, and resident and peak memory into
+`target/stats-{new,legacy}.txt`.
+
+The same file carries `stats_witness`, the assertion form that CI can check. It asserts the
+cold-pass wall time per line, resident bytes per line, and resolve steps per line (the tripwire for a
+regression in resolve memoization), against budgets taken from measured numbers plus headroom.
+
+## The legacy stack
+
+The rewrite was verified against the frozen previous implementation by a family of differential
+suites covering typing, scripts, strict mode, fuzzing, the legacy corpus, a corpus of real files,
+and a per-position comparison of IDE answers, each with a ledger of adjudicated divergences. That
+program is complete and retired. The new stack no longer has to prove equivalence to the old one:
+its own fixture suites are the semantics contract, and an improvement lands without the old
+implementation having to agree. All that remains of the `differential` crate is the cross-stack
+benchmark in `legacy/differential/tests/test_stats.rs`, which runs the same corpus through both
+stacks and measures time and memory. It stays until the legacy code is deleted.
+
+The legacy stack itself (`legacy/analysis-legacy`, `legacy/engine-legacy`, and
+`legacy/roughly-legacy`, with its own `legacy/fixtures` harness) still has its suites, which run
+through `cargo test -p analysis-legacy`, `-p engine-legacy`, and `-p roughly-legacy` and are part of
+the workspace battery. It is frozen: do not extend its fixtures or harnesses, and never share code
+between the two stacks. Its `fixtures` crate reads the same simple shape as the shipping harness,
+plus a multi-file shape, with explicit file paths and grouped workspace edits, that its engine-era
+suites use.
+
+Beyond fixtures, the legacy engine carries its own differential safety net: engine output must
+equal a from-scratch rebuild over adversarial edit streams, IDE answers must match a fresh analysis
+at every position, and counters and memory witnesses bound the work. It documents the bar the new
+stack's harnesses were built to meet.
+
+## Guidelines
+
+- Add or tighten a fixture before writing a parser-local or crate-local unit test, unless the
+  behavior is genuinely awkward to express as a fixture.
+- When you add a new phase or module, add or extend a fixture suite for it before relying on ad hoc
+  unit tests.
 - Use the lightest fixture change that captures the failing shape.
-- Keep fixture expectation changes deliberate when output changes.
-- Prefer keeping typecheck coverage in fixtures unless the behavior is too low-level or too
-  mechanical to express clearly in rendered fixture output.
+- Change a fixture expectation deliberately, never as a side effect.
+- Keep type-checking coverage in fixtures, unless the behavior is too low-level or mechanical to
+  express clearly as rendered output.

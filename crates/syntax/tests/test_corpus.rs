@@ -4,8 +4,8 @@
 //! R base library and a set of CRAN packages. These tests run the hand-written
 //! parser over every `.R` file there:
 //!
-//!   * `corpus_round_trip` checks the lossless invariant — the tree must reprint
-//!     byte-for-byte to its input.
+//!   * `corpus_round_trip` checks the lossless invariant. The tree must
+//!     reprint byte-for-byte to its input.
 //!   * `corpus_acceptance` compares our "has errors" verdict against tree-sitter-r
 //!     as an oracle, bucketing agreement, and gates the ours-only-error bucket
 //!     (we reject what tree-sitter accepts) against an adjudicated allowlist.
@@ -14,8 +14,8 @@
 //! Read files with lossy UTF-8 decoding: some R sources are latin1, not UTF-8.
 //!
 //! `in_tree_acceptance` runs the same differential over sources that are always
-//! present, and gates the *other* direction — see its own comment for why that
-//! is the direction nothing else in the project can see.
+//! present, and gates the *other* direction. Its own comment says why that is
+//! the direction nothing else in the project can see.
 //!
 //! Run with `cargo test -p syntax --test test_corpus -- --nocapture`.
 
@@ -87,7 +87,8 @@ fn corpus_acceptance() {
         }
         let parse = syntax::parse(&text);
         let ours_error = !parse.errors().is_empty();
-        // A `None` tree means tree-sitter could not parse at all — treat as error.
+        // A `None` tree means tree-sitter could not parse at all, so treat it
+        // as an error.
         let ts_error = parser
             .parse(text.as_str(), None)
             .is_none_or(|tree| tree.root_node().has_error());
@@ -110,11 +111,11 @@ fn corpus_acceptance() {
     eprintln!("  both-clean:      {both_clean}");
     eprintln!("  both-error:      {both_error}");
     eprintln!(
-        "  ours-only-error: {}  (BAD — we reject what tree-sitter accepts)",
+        "  ours-only-error: {}  (BAD. We reject what tree-sitter accepts)",
         ours_only.len()
     );
     eprintln!(
-        "  ts-only-error:   {}  (interesting — tree-sitter rejects what we accept)",
+        "  ts-only-error:   {}  (interesting. tree-sitter rejects what we accept)",
         ts_only.len()
     );
 
@@ -154,7 +155,7 @@ fn corpus_acceptance() {
 /// The acceptance differential over in-tree sources, gating the direction the
 /// rest of the project cannot see: **we accept what tree-sitter rejects**.
 ///
-/// Every other parser invariant bounds errors from *above* — the cascade guard
+/// Every other parser invariant bounds errors from *above*. The cascade guard
 /// caps how many we report, and nothing at all asserts that a broken file
 /// reports anything. That matters because the parser carries a lot of dedup and
 /// first-wins suppression, so over-suppression is the live regression risk, and
@@ -281,9 +282,10 @@ fn corpus_parse_speed() {
 
 /// Incremental (per-keystroke) comparison: our full reparse per edit vs
 /// tree-sitter's true incremental reparse, over a typing simulation in large
-/// real files. Honest by construction — tree-sitter gets its old tree +
-/// InputEdit; we reparse from scratch (parse is a pure per-file query; sub-file
-/// incrementality lives one level down in per-item cutoffs). Run in release.
+/// real files. The comparison is honest by construction. tree-sitter gets its
+/// old tree plus an `InputEdit`, and we reparse from scratch, because `parse`
+/// is a pure per-file query and sub-file incrementality lives one level down in
+/// the per-item cutoffs. Run this in release.
 #[test]
 #[ignore = "perf measurement; run explicitly in release"]
 fn corpus_incremental_speed() {
@@ -409,7 +411,8 @@ fn corpus_incremental_speed() {
 }
 
 /// Committed, adjudicated divergences (one corpus-relative path suffix per
-/// line; `#` comments). Currently empty — the measured baseline is zero.
+/// line, with `#` starting a comment). It is currently empty, because the
+/// measured baseline is zero.
 fn allowlisted_paths() -> Vec<String> {
     read_allowlist("tests/acceptance-allowlist.txt").collect()
 }

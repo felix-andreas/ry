@@ -175,7 +175,7 @@ row_id <- function(row) row$identifier
 print(row_id(list(idenifier = 1L, label = "a")))
 #++++
 row_id: fn(row: list{identifier: integer, label: character}) -> integer
-245..278 error[type-mismatch] expected a field `identifier` here, and this list has `idenifier` instead — check the spelling
+245..278 error[type-mismatch] expected a field `identifier` here, and this list has `idenifier` instead. Check the spelling
 
 #---- a_missing_field_with_no_near_miss_says_so
 #: fn(row: list{id: integer, label: character}) -> integer
@@ -292,7 +292,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-37..40 error[type-mismatch] R's `$` operator is invalid on atomic vectors; this value is `integer[named]` — extract an element with `[[` instead.
+37..40 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[named]`. Extract an element with `[[` instead.
 
 #---- matrix_indexing_unsupported
 f <- function() {
@@ -301,7 +301,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-36..45 error[type-mismatch] indexing with 2 indexes is not supported yet — ry does not model matrix and data.frame subsetting
+36..45 error[type-mismatch] indexing with 2 indexes is not supported yet. ry does not model matrix and data.frame subsetting
 
 #==== replacement
 #---- known_field_write
@@ -402,5 +402,5 @@ g <- function() c(1L, 2L)[sum]
 #++++
 f: Unknown
 g: Unknown
-16..34 error[type-mismatch] a vector cannot be indexed by `list{double}` — expected a numeric, logical, or character index
-51..65 error[type-mismatch] a vector cannot be indexed by `fn(...: Any, [na.rm]: logical) -> Any` — expected a numeric, logical, or character index
+16..34 error[type-mismatch] a vector cannot be indexed by `list{double}`. Expected a numeric, logical, or character index
+51..65 error[type-mismatch] a vector cannot be indexed by `fn(...: Any, [na.rm]: logical) -> Any`. Expected a numeric, logical, or character index

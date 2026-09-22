@@ -1,12 +1,12 @@
 //! Lossless R syntax: a hand-written lexer and recursive-descent parser producing
 //! rowan green/red trees.
 //!
-//! Every byte of the input — including whitespace, comments, and `#:` type
-//! annotations — lives in the tree and reprints exactly (`syntax_node().text()`
-//! equals the input). Annotations are lexed as structured trivia and parsed into
-//! first-class nodes with real spans. Every parse yields a tree; malformed input
-//! produces `ERROR` nodes local to the break plus `SyntaxError`s with precise
-//! ranges.
+//! Every byte of the input lives in the tree and reprints exactly, so
+//! `syntax_node().text()` equals the input. That includes whitespace, comments,
+//! and `#:` type annotations. An annotation is lexed as structured trivia and
+//! parsed into first-class nodes with real spans. Every parse yields a tree.
+//! Malformed input produces `ERROR` nodes local to the break, plus
+//! `SyntaxError`s with precise ranges.
 
 pub mod ast;
 pub mod kind;
@@ -86,8 +86,9 @@ pub struct Parse {
 impl Parse {
     pub fn new(green: rowan::GreenNode, mut errors: Vec<SyntaxError>) -> Parse {
         // Canonical position order (stable: discovery order breaks ties), so
-        // error lists compare structurally regardless of which pipeline —
-        // lexer vs parser, from-scratch vs splice-reparse — produced them.
+        // error lists compare structurally whichever pipeline produced them.
+        // The lexer and the parser both produce errors, and so do a
+        // from-scratch parse and a splice reparse.
         errors.sort_by_key(|error| (error.range.start(), error.range.end()));
         Parse {
             green,

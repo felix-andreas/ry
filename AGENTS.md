@@ -1,150 +1,222 @@
 # Overview
 
-ry is a language tool for R, built as a language server plus CLI. It aims to be world class at three things: code analysis on the level of rust-analyzer — with a static type checker at its core — plus code formatting and linting.
+ry is a language tool for R, shipped as a language server and a command-line tool. It aims to be world class at three things: code analysis on the level of rust-analyzer, code formatting, and linting. A static type checker sits at the core of the analysis.
 
-The type checker is central: no static type checker exists for R, so ry defines its own typing semantics (the contract lives in the typing reference at `docs/src/content/docs/reference/type-system.md`). Because R itself has no type-annotation syntax, annotations are written in `#:` comments using a JSDoc-like notation, which keeps annotated code fully compatible with ordinary R tooling.
+No static type checker exists for R, so ry defines its own typing semantics, and the typing reference at `docs/src/content/docs/reference/type-system.md` is their contract. R has no syntax for type annotations either, so annotations live in `#:` comments written in a JSDoc-like notation. Annotated code therefore stays ordinary R that every other tool can read.
 
-Crates:
+The workspace has two crate directories:
 
-- `crates/` — the shipping product: `syntax` (lexer/parser, lossless rowan trees), `semantics` (the salsa-based analysis core and type checker), `format` (the formatter, syntax-only), `ide` (editor features as pure reads), `ry` (LSP server + CLI), and `repl` (the R console behind `ry repl` and `ry run` — runtime-loaded R, so the rest of the workspace stays R-less)
-- `legacy/` — the frozen previous implementation (`analysis-legacy`, `engine-legacy`, `ry-legacy`, its `fixtures` harness) and `differential`, now ONLY the cross-stack benchmark harness (the identity-parity program is complete and retired by user decision — the new stack's fixtures are the contract; no change needs oracle agreement); everything lives here because every dependency edge points at the oracle, so the eventual legacy deletion sweep is one directory removal (its new-stack-only perf witnesses migrate out first)
+- `crates/` is the shipping product.
+  - `syntax`: the lexer and parser, which build lossless rowan trees.
+  - `semantics`: the salsa-based analysis core and the type checker.
+  - `format`: the formatter, which reads syntax only.
+  - `ide`: editor features, implemented as pure reads.
+  - `ry`: the LSP server and the CLI.
+  - `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
+- `legacy/` is the frozen previous implementation: `analysis-legacy`, `engine-legacy`, `roughly-legacy`, and their `fixtures` harness. It also holds `differential`, which is now only the cross-stack benchmark. The identity-parity program that once compared the two stacks is complete and retired by user decision, so the new stack's fixtures are the contract and no change needs the old stack to agree. Everything legacy lives in one directory because every dependency edge points into it: deleting the old stack will be a single directory removal, once the performance witnesses that only measure the new stack have moved out.
 
-The project is built by AI agents driving development, with light human steering. Agents keep two written homes current: the docs site (`docs/`) holds the authoritative, user- and contributor-facing specs (they are contracts — mandatory to keep accurate), and `.agents/memory/MEMORY.md` is the agent knowledge base (engineering state, priorities, debt, and non-obvious design rationale, so they are not rediscovered). Update both in the same session as the work that changes them.
+AI agents drive development here, with light human steering. They keep two written homes current. The docs site in `docs/` holds the specs for users and contributors, and because those specs are contracts, keeping them accurate is mandatory. The knowledge base in `.agents/memory/MEMORY.md` holds engineering state, priorities, debt, and the non-obvious reasons behind designs, so that no agent has to rediscover them. Update both in the same session as the work that changes them.
 
 # Goals
 
-- Deliver high-quality diagnostics for R in the style of Rust and Elm: clear, precise, actionable wording; avoid overly internal or theory-heavy language when user-facing wording would be clearer; prefer precise source ranges over coarse fallback ranges.
-- Provide full editor tooling — hover, completion, goto-definition, references, rename, inlay hints — and preserve the semantic information those features need whenever practical.
+- Deliver diagnostics for R in the style of Rust and Elm: clear, precise, and actionable. Prefer plain user-facing wording to internal or theory-heavy language, and precise source ranges to coarse fallback ones.
+- Provide full editor tooling (hover, completion, goto-definition, references, rename, and inlay hints), and preserve the semantic information those features need whenever practical.
 - Provide first-class formatting and linting alongside analysis.
-- Scale to very large code bases, including more than 300,000 LoC; performance matters.
+- Scale to very large code bases, beyond 300,000 lines of code. Performance matters.
+
+# How to write
+
+Agents write this repository's documentation, code comments, commit messages, and pull request descriptions, and people read all of them. Write for those people. The aim is prose that is clear first and pleasant to read second, and the two rarely pull apart: text that is easy to follow is usually a pleasure to read.
+
+Clarity is also a correctness tool. A reviewer cannot check a claim they cannot parse, so dense prose hides wrong statements, and a pull request description nobody can follow gets approved without being understood.
+
+These rules apply to everything an agent writes.
+
+- **Start where the reader is.** Decide who is reading (a new user, someone looking up a rule, a contributor about to change the code) and open with what they need most: the answer, the rule, or what changed. Background comes after.
+- **Teach in order.** Introduce a concept before you use it, and finish one idea before starting the next. When a small example is easier to grasp than the general rule, show the example first.
+- **Write connected prose.** A sentence should carry one step of reasoning, not five, so split a sentence that chains several steps together. But do not overcorrect into a row of short, same-shaped sentences: that reads like a telegram and hides how the ideas relate. The small words that carry logic (because, so, but, unless, which means) are what make an explanation an explanation. Vary sentence length, and read the paragraph aloud. If three sentences in a row start with "It", rewrite them.
+- **Be concrete.** A real snippet and its real output beat a description of them. Get the output by running the tool (see "Run the tool before you claim what it does" below).
+- **Pick a natural subject, in the active voice.** In a specification, the construct is the subject: write "the pipe types as that call", not "ry types the pipe as that call". Name ry where the statement really is about the tool, such as a diagnostic, a default, or a deliberate limit. In guides, talk to the reader as "you".
+- **Say it literally first.** A metaphor must never stand in for the mechanism. Once the mechanism is stated plainly, a comparison may help it stick.
+- **Use one name for one thing.** Do not coin private terms: a name like "the literal courtesy" means nothing to a reader who has not seen the code that named it. Define a term of art before you rely on it, and use the same word for the same thing every time.
+- **Cut filler.** Drop throat-clearing openers, hedges that carry no information, and closing flourishes that state no fact. A sentence of motivation that makes the reader care is not filler.
+- **Punctuate for the reader.** Do not use em-dashes; a comma, a colon, a short parenthetical, or a new sentence does the job better. Use semicolons rarely. If an aside grows past a few words, give it its own sentence or cut it.
+- **Match the form to the content.** Use a list for items that are genuinely parallel, such as options, cases, or steps, and use prose for reasoning, because there the connectives are the point. Use a table when the reader compares items along the same columns. Do not introduce a list with a sentence that only counts it ("There are four cases.").
+- **Keep normative words exact in a specification.** "Must", "may", "is an error", and "is not supported" carry meaning, so do not soften them.
+- **In a commit message or pull request description, describe the change, not the text.** Say what changed and why it matters, then give the details a reviewer needs. Do not narrate a document ("The section states the goal. It then lists...").
+
+## Answers to the user
+
+- Make the answer self-contained. Assume the reader has not followed the conversation: give the context, then make your point.
+- Keep answers short. The user asks for details when they want them.
+- Cut everything from a recommendation that does not change the choice.
+- When two options seem to conflict, look for the third option that resolves the conflict, and name it instead of presenting a false choice.
+- Do not use the interactive multiple-choice picker. Ask with a numbered list instead.
+
+## Example
+
+Here is one idea written three ways. The first packs five facts into one sentence behind a colon:
+
+> `x |> f(y)` is syntax R's own parser rewrites to `f(x, y)` before evaluation, and it types as exactly that call: the piped value becomes the first positional argument, every call rule above applies (arity, argument compatibility, overload selection), chains compose left to right, and a type error on the piped value blames the left-hand expression.
+
+The second overcorrects. Every sentence is short, and none of them says how it relates to the one before:
+
+> R's parser rewrites `x |> f(y)` into `f(x, y)` before it evaluates the code. ry types the pipe as that call and nothing else. The piped value becomes the first positional argument. All call rules above apply to it: arity, argument compatibility, and overload selection. Chains compose from left to right. If the piped value has a type error, ry reports it on the left-hand expression.
+
+The third is the one to write:
+
+> R's parser rewrites `x |> f(y)` into `f(x, y)` before anything runs, so the pipe types exactly like that call. The piped value becomes the first positional argument, and every call rule applies to it: arity, argument compatibility, and overload selection. A chain composes from left to right, and a type error in the piped value is reported on the left-hand expression.
 
 # Ownership mandate
 
-The user has delegated full technical ownership to the agents: empty the backlog and bring the project to the best possible state — rust-analyzer quality. That explicitly covers code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for "safe, risk-free" minimal diffs; bring code to its intended shape, including large refactors, and take responsibility for the outcome. Design decisions that previously required a user check-in are now the agent's to make: decide, implement, and record the decision and rationale in `.agents/memory/decisions.md` (or the docs page it belongs to) in the same session. Two standing constraints: work directly on `main` (user directive), and do not open new pull requests.
+The user has delegated full technical ownership to the agents: empty the backlog and bring the project to the best possible state, which means rust-analyzer quality. That covers code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for a safe, minimal diff. Bring code to its intended shape, large refactors included, and take responsibility for the outcome.
+
+Design decisions that once needed a user check-in are now yours to make. Decide, implement, and record the decision and its rationale in `.agents/memory/decisions.md` (or in the docs page it belongs to) in the same session.
+
+Two constraints stand, both user directives: work directly on `main`, and do not open new pull requests.
 
 # Do not think like a human (user directive)
 
-Human engineering instincts — de-risking, staging, keeping diffs small and reviewable, avoiding "scary" rewrites — exist because a human's time is scarce and starting over is expensive for them. Neither is true for an agent, so those instincts pick the wrong strategy here:
+Human engineers de-risk work: they stage it, keep diffs small and reviewable, and shy away from rewrites that look scary. Those instincts exist because a human's time is scarce and starting over is expensive for them. Neither is true for an agent, so here those instincts pick the wrong strategy.
 
-- **Go directly to the intended end shape in one change**, however large and invasive. Break the whole codebase mid-change if the target design calls for it, then fix everything — compiler errors, warnings, tests — afterwards in one sweep. Do not sequence a redesign into small incremental steps to "manage risk"; that trades the right design for ceremony.
-- **Never propose or choose a watered-down variant of a design because the full version is a big change.** If the full version is right, implement the full version. Starting over after a failed attempt is cheap; shipping the wrong shape is not.
-- **File size is not a problem.** Do not split, reorganize, or flag a file merely for being large (the LSP server module is fine as one file). Split only when a genuine new logical component exists.
-- Correctness gates are unchanged: the fixture suites, witnesses, clippy, and fmt must be green before a change lands — the point is to reach green in one big pass, not to shrink the change.
+- **Go directly to the intended end shape in one change**, however large and invasive. If the target design calls for it, break the whole codebase mid-change and then fix everything (compiler errors, warnings, tests) in one sweep. Splitting a redesign into small steps to manage risk trades the right design for ceremony.
+- **Never choose a watered-down design because the full version is a big change.** If the full version is right, build the full version. Starting over after a failed attempt is cheap; shipping the wrong shape is not.
+- **File size is not a problem.** Do not split, reorganize, or flag a file just because it is large (the LSP server module is fine as one file). Split only when a genuinely new logical component appears.
+- **The correctness gates do not move.** The fixture suites, witnesses, clippy, and fmt must be green before a change lands. The point is to reach green in one big pass, not to shrink the change.
 
 # Incremental analysis
 
-Implemented: the `engine` crate is a red-green memoized query core with per-symbol interface firewalls, cooperative cancellation, and idle-time diagnostics scheduling; the architecture page (`docs/src/content/docs/contributing/architecture.md`) is the contract — read it before touching the engine or the server's scheduling, and keep it accurate. Known deferred levers live in `backlog.md` (sub-linear validation walk, durability tiers).
+The analysis core is incremental. `semantics` is a salsa database, so queries are memoized and an edit cooperatively cancels analysis that is still in flight. Per-item interface firewalls keep an edit inside one item from invalidating the rest of the project, and the LSP server publishes a fast diagnostics wave first and schedules the slower semantic wave for idle time.
+
+The architecture page at `docs/src/content/docs/contributing/architecture.md` is the contract. Read it before you touch the analysis core or the server's scheduling, and keep it accurate. Deferred performance work lives in `.agents/memory/backlog.md`.
 
 # Working autonomously
 
-When working autonomously on a larger goal — a workflow, a multi-step change, or any task that spans several logical units — commit and push after each logical step, instead of saving everything for one final commit. A single large invasive redesign is ONE logical step: commit it when it is green, not in fragments along the way.
+When you work autonomously toward a larger goal (a workflow, a multi-step change, anything that spans several logical units), commit and push after each logical step rather than saving everything for one final commit. A single large, invasive redesign counts as one step: commit it once it is green, not in fragments along the way.
 
-# Knowledge base and documentation (we can reduce repeition/duplication with MEMORY.md)
+# Knowledge base and documentation
 
-There are two written homes. Keep both current; spend the minimum that keeps them useful, and prefer bullet points.
+There are two written homes. Keep both current, spend the minimum effort that keeps them useful, and prefer bullet points.
 
-- **`.agents/memory/` — the agent knowledge base, kept IN THE REPOSITORY.** `MEMORY.md` is the **index**, and it MUST be organized into three horizons — keep these exact sections:
-  - **Short-term** — current focus and loose ends. Prune aggressively; delete each item once it is resolved or obvious from the tree.
-  - **Mid-term** — active priorities, open bugs, and technical debt. Lives across sessions until done.
-  - **Long-term** — durable, non-obvious design decisions and their rationale. Only things a future agent would otherwise rediscover. Keep terse and point at code or the docs.
+## `.agents/memory/`
 
-  `MEMORY.md` also names every other knowledge document. Keep a *separate* document in this folder only for genuinely larger-scope material — currently `backlog.md` (the prioritized work punch-list) and `decisions.md` (the settled architecture decision log) — and reference it from `MEMORY.md`; never spawn a new knowledge file for something small (inline it into the right horizon instead). **A design document is not a memory file**: unsettled design work — proposals, open questions, sketchpads — belongs in the docs site under `docs/src/content/docs/contributing/design/`, listed on that folder's index page and deliberately kept out of the sidebar. Write new ones there. One deliberate exception to both the timeless rule and the no-new-files rule: `worklog.md` is a chronological one-line-per-cycle record that a scheduled routine appends to. Do not prune it as a rules violation; durable facts still go in the files above. Keeping this current — **adding** what is durable **and pruning** what is resolved, stale, or duplicated, and **promoting/demoting** items across horizons as their status changes — is part of repository hygiene, not optional; do it in the same session as the work.
-  - **In-repo on purpose.** Memory lives in git so it is portable and shared: it travels with a `git clone` to any machine or cloud session, and every agent — including a fresh restart — reads the same source of truth, so nothing is lost when an agent or session is replaced. **Never** keep project knowledge in a private/local agent memory store (e.g. a per-tool `~/.claude/…` folder): other agents cannot read it and it does not travel. Because a reader may have zero project history, every entry must be **context-free and timeless** — no internal milestone/phase/gate names, no commit hashes, no "this session" (the same rule as code comments); state durable facts and point at the code or docs.
-- **`docs/` (the docs site)** — the authoritative, user- and contributor-facing specs. They are contracts; keeping them accurate is mandatory.
-  - Type checking: `type-checking/` (the tutorial) and `reference/type-system.md` (the semantics contract).
-  - Contributing: `contributing/{architecture,structure,testing,authoring-stubs}.md`, plus `contributing/design/` — the unsettled drafts, which are explicitly NOT contracts and are the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the index page lists them.
-  - Treat docs as a first-class deliverable: when behavior, design, or the fixture contract changes, update the relevant page in the same session and keep it in genuinely good shape — clear, accurate, no stale status. Do not rewrite a spec to paper over a temporary implementation gap; note the gap instead.
-  - **Run the tool before claiming what it does.** Any statement about actual behavior — in a docs page, a memory document, or a commit message — must be confirmed by executing it, not recalled or inferred from the code. Build a throwaway project (a `ry.toml` plus one `.R` file) and read the real output. This is cheap, and skipping it is the single most reliable way this project ships a false statement: writing prose does not feel like a task that needs a test, so plausible-sounding claims go in unchecked, and the ones that are wrong are indistinguishable from the ones that are right until a user hits them. If a claim cannot be verified cheaply, mark it as unverified instead of asserting it. Before calling a design document done, have an adversarial reviewer subagent check it against the implementation and the settled decisions.
+The agent knowledge base lives in the repository. Its index is `MEMORY.md`, which must keep these three sections under exactly these names:
+
+- **Short-term**: the current focus and loose ends. Prune it aggressively, deleting each item once it is resolved or obvious from the source tree.
+- **Mid-term**: active priorities, open bugs, and technical debt. Items live here across sessions until they are done.
+- **Long-term**: durable, non-obvious design decisions and why they were made. Record only what a future agent would otherwise have to rediscover, keep each entry terse, and point at the code or the docs.
+
+`MEMORY.md` also names every other knowledge document. Keep a separate document only for material of genuinely larger scope, and link it from `MEMORY.md`. There are three today: `backlog.md` is the prioritized punch-list of open work, `decisions.md` is the log of settled architecture decisions, and `test-user-reports.md` collects the closed findings from simulated-user testing (a finding moves there from the backlog once it is fixed). Never start a new knowledge file for something small; fold it into the right horizon instead.
+
+A design document is not a memory file. Unsettled design work (proposals, open questions, sketchpads) belongs in the docs site under `docs/src/content/docs/contributing/design/`. List each one on that folder's index page, and keep it out of the sidebar.
+
+`worklog.md` is a deliberate exception to both the timeless rule and the no-new-files rule. It is a chronological record, one line per cycle, that a scheduled routine appends to, so do not prune it as a rules violation. Durable facts still belong in the files above.
+
+Keeping memory current is part of repository hygiene, not an optional extra, and it happens in the same session as the work: add what is durable, prune what is resolved, stale, or duplicated, and move items between horizons as their status changes.
+
+Memory lives in git on purpose. It travels with every `git clone` to any machine or cloud session, so every agent, including one restarting from nothing, reads the same source of truth, and nothing is lost when an agent or session is replaced. Never keep project knowledge in a private agent memory store such as a per-tool `~/.claude/` folder: other agents cannot read it, and it does not travel. Since a reader may have no project history at all, every entry must be context-free and timeless. Do not name internal milestones, phases, or gates, do not cite commit hashes, and do not write "this session". State durable facts and point at the code or the docs, exactly as for code comments.
+
+## `docs/`
+
+The docs site holds the specs for users and contributors. They are contracts, so keeping them accurate is mandatory.
+
+- Type checking has two homes: `type-checking/` is the tutorial, and `reference/type-system.md` is the semantics contract.
+- The contributing pages are `contributing/architecture.md`, `contributing/structure.md`, `contributing/testing.md`, and `contributing/authoring-stubs.md`.
+- `contributing/design/` holds unsettled drafts. They are explicitly not contracts, which makes them the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the folder's index page lists them.
+- Treat the docs as a first-class deliverable. When behavior, design, or the fixture contract changes, update the relevant page in the same session, and leave it clear, accurate, and free of stale status. Never rewrite a spec to paper over a temporary gap in the implementation; note the gap instead.
+
+**Run the tool before you claim what it does.** Every statement about actual behavior, whether in a docs page, a memory document, or a commit message, must be confirmed by running the tool, not recalled or inferred from the code. Build a throwaway project (a `ry.toml` and one `.R` file) and read the real output.
+
+The check is cheap, and skipping it is the most reliable way this project ships a false statement. Writing prose does not feel like a task that needs a test, so plausible claims go in unchecked, and a wrong claim looks exactly like a right one until a user trips over it. If you cannot verify a claim cheaply, mark it as unverified instead of asserting it. Before calling a design document done, have an adversarial reviewer subagent check it against the implementation and the settled decisions.
 
 # Skills
 
 If the user says:
 
-- `get started`: read `.agents/memory/MEMORY.md` and the relevant docs pages, then continue with the next item in the mid-term priorities (assume fresh context).
-- `cleanup memory`: aggressively prune the short-term section of `.agents/memory/MEMORY.md`; keep the mid- and long-term continuity intact.
-- `code check`: review the relevant code for compliance with the coding guidelines. Report findings first and explicitly verify top-down module ordering plus the preferred `use` qualification style; types should usually be imported directly, and functions should usually have at least one module-level import instead of repeated fully qualified calls unless ambiguity requires qualification.
-- `authoritative check`: compare the docs specs against the fixture suites and report contradictions, stale wording, or missing documented coverage.
-- `implementation check`: compare the implementation against the docs specs and report contract or architecture mismatches.
-- `session check`: end-of-session closure pass. Verify that decisions, open questions, and newly discovered work are captured in `.agents/memory/MEMORY.md` or the docs (watch for side investigations that created uncaptured follow-up work), and that memory and the docs are consistent with the implementation; report anything still hanging.
+- `get started`: read `.agents/memory/MEMORY.md` and the relevant docs pages, then continue with the next mid-term priority. Assume you are starting with fresh context.
+- `cleanup memory`: prune the short-term section of `.agents/memory/MEMORY.md` aggressively, and keep the mid-term and long-term sections intact.
+- `code check`: review the relevant code against the coding guidelines and report the findings first. Explicitly verify top-down module ordering and the preferred `use` style: types are usually imported directly, and functions usually get at least one module-level import instead of repeated fully qualified calls, unless ambiguity forces qualification.
+- `authoritative check`: compare the docs specs against the fixture suites, and report contradictions, stale wording, and documented behavior that no fixture covers.
+- `implementation check`: compare the implementation against the docs specs, and report mismatches in the contract or the architecture.
+- `session check`: run an end-of-session closure pass. Verify that `.agents/memory/MEMORY.md` or the docs capture every decision, open question, and newly discovered piece of work (watch for side investigations that left follow-up work uncaptured), and that memory and the docs agree with the implementation. Report anything still hanging.
 
 # Rust coding guidelines
 
-* Do not write organizational comments or comments that summarize the code. Comments should only be written in order to explain "why" the code is written in some way in the case there is a reason that is tricky / non-obvious.
-* Comments must be **context-free**. Never reference internal milestones, phases, process history, ticket/PR names, or commit hashes (e.g. "R0", "M3", "Phase 4", "gate (c)", "3f", "the spike", "added in the cutover"). A reader with zero project history must understand every comment — explain the "why" in domain terms, not in terms of when or how the code came to be.
-* Prefer implementing functionality in existing files unless it is a new logical component. Avoid creating many small files.
-* Do not create a sub-directory eagerly for a single file. A directory should hold more than one file before it exists; until then keep the file alongside its siblings (`foo.md`, not `foo/foo.md`). Promote a file to a directory only when a second file genuinely belongs with it.
-* Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.
-* Be careful with operations like indexing which may panic if the indexes are out of bounds.
-* Never silently discard errors with `let _ =` on fallible operations.
-* Never create files with `mod.rs` paths - prefer `src/some_module.rs` instead of `src/some_module/mod.rs`.
-* When creating new crates, prefer specifying the library root path in `Cargo.toml` using `[lib] path = "...rs"` instead of the default `lib.rs`, to maintain consistent and descriptive naming (e.g., `gpui.rs` or `main.rs`).
-* Avoid creative additions unless explicitly requested.
-* Use full words for variable names (no abbreviations like "q" for "queue").
-* Prefer importing types directly. For functions, prefer at least one module-level import instead of fully qualifying every call; fully qualified paths are still fine when needed to avoid ambiguity.
-* Prefer procedural or functional code over OOP-style method organization when there is no clear stateful abstraction. Use free functions by default. Use `impl` blocks when a type genuinely owns stateful behavior or when constructor-style helpers materially improve clarity, but do not use methods just to namespace procedural code.
-* Organize modules top-down. Put core types and public functions first, order container types before the types they contain, and keep private types and helper functions after public items in the same caller-before-callee order.
-* Do not optimize for the smallest safe fix. When you touch an area, bring it to the intended shape for that change, remove dead paths or temporary seams, and pay down nearby technical debt needed to keep the code coherent. You are responsible for code quality, not just feature delivery.
-* Avoid helper-function indirection when logic is only used once and does not materially improve testability or readability. Prefer inlining small one-off solutions unless doing so would create large duplication.
+- Do not write comments that organize or summarize the code. A comment explains *why* the code is written the way it is, and only when that reason is tricky or non-obvious.
+- Keep comments context-free. Never refer to internal milestones, phases, process history, ticket or pull request names, or commit hashes ("R0", "M3", "Phase 4", "gate (c)", "the spike", "added in the cutover"). A reader with no project history must understand every comment, so explain the reason in domain terms, not in terms of when or how the code came to be.
+- Prefer adding functionality to an existing file unless it is a new logical component. Avoid creating many small files.
+- Do not create a directory for a single file. Keep the file beside its siblings (`foo.md`, not `foo/foo.md`) until a second file genuinely belongs with it.
+- Avoid functions that panic, such as `unwrap()`; propagate errors with `?` instead.
+- Be careful with operations that may panic, such as indexing that may go out of bounds.
+- Never silently discard an error with `let _ =` on a fallible operation.
+- Never create a `mod.rs` file: write `src/some_module.rs`, not `src/some_module/mod.rs`.
+- In a new crate, name the library root in `Cargo.toml` with `[lib] path = "...rs"` instead of using the default `lib.rs`, so that roots have descriptive names (such as `gpui.rs` or `main.rs`).
+- Avoid creative additions the user did not ask for.
+- Use full words for variable names: `queue`, not `q`.
+- Import types directly. For functions, prefer at least one module-level import to fully qualifying every call; a fully qualified path is still fine where it avoids ambiguity.
+- Prefer procedural or functional code to OOP-style method organization when there is no clear stateful abstraction. Use free functions by default, and an `impl` block when a type genuinely owns stateful behavior or when a constructor-style helper makes things materially clearer. Do not use methods merely to namespace procedural code.
+- Organize modules top-down. Core types and public functions come first, a container type comes before the types it contains, and private types and helpers follow the public items in the same caller-before-callee order.
+- Do not optimize for the smallest safe fix. Bring the area you touch to its intended shape: remove dead paths and temporary seams, and pay down the nearby debt the code needs to stay coherent. You are responsible for code quality, not only for delivering the feature.
+- Avoid helper-function indirection for logic that is used once and gains no testability or readability from the extraction. Inline a small one-off solution unless that would duplicate a lot of code.
 
 # Design bar
 
-- We require world-class implementation quality, not merely passing behavior.
+- Aim for world-class implementation quality, not merely passing behavior.
 - Use the simplest correct data model and implementation that can express the required semantics.
-- Do not introduce complicated abstractions unless they remove real complexity.
+- Do not introduce a complicated abstraction unless it removes real complexity.
 - Make illegal states unrepresentable whenever practical.
-- Maintain a single source of truth for each semantic fact whenever practical.
-- If a fact is cheaply and reliably derivable from an existing source of truth, do not store it separately unless there is a clear performance reason.
-- Do not introduce duplicated state, mirrored tables, or cached derived data that can drift out of sync without clear justification.
-- Use designs that minimize cloning, copying, and whole-structure rebuilding.
+- Keep a single source of truth for each semantic fact whenever practical.
+- If a fact can be derived cheaply and reliably from an existing source of truth, do not store it separately without a clear performance reason.
+- Do not introduce duplicated state, mirrored tables, or cached derived data that can drift out of sync, unless there is a clear justification.
+- Prefer designs that minimize cloning, copying, and rebuilding whole structures.
 - Optimize for very fast incremental analysis and low memory churn.
-- If you notice a structural design problem, you must surface it early and explicitly instead of working around it.
+- Surface a structural design problem early and explicitly instead of working around it.
 
 # Design review trigger
 
-If you see any of the following, do not work around it — stop, design the fix, and implement it (recording the decision in `decisions.md` when it settles an architectural question):
+If you see any of the following, do not work around it. Stop, design the fix, implement it, and record the decision in `decisions.md` when it settles an architectural question.
 
 - multiple sources of truth
 - duplicated metadata
-- derived state being persisted without clear justification
-- snapshot-local ids where stable indirection would suffice
-- repeated cloning or copying introduced only to maintain convenience state
+- derived state that is persisted without clear justification
+- snapshot-local ids where stable indirection would do
+- repeated cloning or copying that exists only to maintain convenience state
 - a design that feels more complicated than the semantics require
 
-The recorded decision must state: the previous source of truth, what was duplicated or structurally weak, the chosen target shape, and the expected impact on correctness, simplicity, performance, and incremental analysis.
+The recorded decision must state the previous source of truth, what was duplicated or structurally weak, the chosen target shape, and the expected impact on correctness, simplicity, performance, and incremental analysis.
 
 # Error handling
 
-- Do not swallow analysis, synchronization, or document-loading errors anywhere in the project.
-- If an operation is required to keep analysis state coherent, surface the failure immediately with `panic!` rather than logging and continuing with corrupted or stale state.
-- In particular, document-sync or analysis-sync failures in the LSP path are unrecoverable and should panic immediately rather than trying to keep the server alive in a bad state.
-- Example: if syncing an open document into analysis state fails during `did_open`, `did_change`, or `did_save`, do not fall back to stale state or best-effort logging; `panic!`.
+- Never swallow an analysis, synchronization, or document-loading error anywhere in the project.
+- If an operation is required to keep analysis state coherent and it fails, `panic!` immediately rather than logging and carrying on with corrupted or stale state.
+- In particular, a document-sync or analysis-sync failure in the LSP path is unrecoverable: panic instead of keeping the server alive in a bad state. If syncing an open document into analysis state fails during `did_open`, `did_change`, or `did_save`, do not fall back to stale state or settle for best-effort logging. Call `panic!`.
 
 # Testing strategy
 
-- Prefer fixtures: they are the primary way to validate analysis behavior, they are easy for humans to read in diffs, and they make it easy to create many tests quickly.
-- Fuzzing is pipeline-wide and from day one (user directive): every stage — parsing, lowering, naming, inference, diagnostics, incrementality, formatting, IDE — gets fuzz + property coverage the day it exists, never as a later add-on. A bounded pass belongs in the default test suite; see the fuzzing decision record in `decisions.md`.
-- Prefer adding or tightening fixtures before writing parser-local or engine-local unit tests unless the behavior is genuinely awkward to express as a fixture.
-- Favor fixture renderers that expose semantic facts rather than implementation detail.
-- When adding a new phase or module, add or extend a fixture suite for that phase before relying on ad hoc unit tests.
+- Prefer fixtures. They are the primary way to validate analysis behavior, they read well in a diff, and they make it cheap to write many tests quickly.
+- Fuzz the whole pipeline from day one (user directive). Every stage (parsing, lowering, naming, inference, diagnostics, incrementality, formatting, the IDE layer) gets fuzz and property coverage the day it exists, never as a later add-on, and a bounded pass belongs in the default test suite. The fuzzing decision record in `decisions.md` has the details.
+- Add or tighten a fixture before writing a parser-local or engine-local unit test, unless the behavior is genuinely awkward to express as a fixture.
+- Favor fixture renderers that expose semantic facts over ones that expose implementation detail.
+- When adding a new phase or module, add or extend a fixture suite for it before relying on ad hoc unit tests.
 - Use the lightest fixture change that captures the failing shape.
-- Read the testing page in the docs (`docs/src/content/docs/contributing/testing.md`) before changing the fixture harness or adding a new fixture suite.
-- Run focused fixture cases with `FIXTURE_FILTER=group__case cargo test -p analysis --test test_fixtures <suite> -- --nocapture`.
-- Prefer running focused crate tests while iterating; `cargo test -p analysis` is the default crate test command.
-- Keep fixture `group__case` names stable as the test identity, and reject duplicate names across the suite instead of silently shadowing one case with another.
-- Treat fixtures as the desired semantics contract, not as a regression suite for preserving known-wrong behavior. Review expectation changes deliberately and update expectations only when wording or behavior intentionally improves; never commit an intentionally wrong outcome just to keep the suite green.
-- Some fixture cases may be unreasonable or no longer worth preserving. If you encounter one, clean it up instead of treating it as authoritative by default.
-- Do not reintroduce end-to-end named-argument mismatch fixtures until function-parameter lowering can represent the needed semantics.
+- Read the testing page (`docs/src/content/docs/contributing/testing.md`) before you change the fixture harness or add a fixture suite.
+- Run a single fixture case with `FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures`. The other fixture targets are `test_naming_fixtures`, `test_lowering_fixtures`, and `test_lint_fixtures` in `semantics`; `test_syntax_fixtures` and `test_error_messages` in `syntax`; `test_ide_fixtures` in `ide`; and `test_format_fixtures` in `format`.
+- While iterating, prefer focused crate tests; `cargo test -p semantics` is the default crate test command.
+- A fixture's `group__case` name is its test identity, so keep it stable, and reject a duplicate name across the suite instead of letting one case silently shadow another.
+- Treat fixtures as the desired semantics contract, not as a regression suite that preserves known-wrong behavior. Review every expectation change deliberately, update an expectation only when wording or behavior improves on purpose, and never commit an intentionally wrong outcome just to keep the suite green.
+- Some fixture cases are unreasonable or no longer worth keeping. Clean such a case up rather than treating it as authoritative by default.
+- Do not reintroduce end-to-end named-argument mismatch fixtures until function-parameter lowering can represent the semantics they need.
 
 # Rules hygiene
 
-This `AGENTS.md` file is read by every agent session. Keep it extremely high-signal.
+Every agent session reads this file, so keep it extremely high-signal.
 
-Editing or clarifying existing rules is always welcome. New rules must meet **all three** criteria:
+Editing or clarifying an existing rule is always welcome. A new rule must meet all three of these criteria:
 
-1. **Non-obvious** — someone familiar with the codebase would still get it wrong without the rule.
-2. **Repeatedly encountered** — it came up more than once (multiple hits in one session counts).
-3. **Specific enough to act on** — a concrete instruction, not a vague principle.
+1. **Non-obvious**: someone familiar with the codebase would still get it wrong without the rule.
+2. **Repeatedly encountered**: it came up more than once (several hits in one session count).
+3. **Specific enough to act on**: a concrete instruction, not a vague principle.
 
-Rules that apply to a single crate belong in that crate's own `AGENTS.md` file, not the repo root.
+A rule that applies to a single crate belongs in that crate's own `AGENTS.md`, not here.
 
-Avoid architectural descriptions of a crate (module layout, data flow, key types) — these go stale fast and the agent can gather them by reading the code. Rules should be **traps to avoid**, not **maps to follow**.
+Avoid architectural descriptions of a crate, such as its module layout, data flow, or key types. They go stale fast, and an agent can gather them by reading the code. A rule should mark a trap to avoid, not draw a map to follow.

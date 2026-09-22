@@ -4,7 +4,7 @@ description: Every rule the formatter applies, with a before-and-after for each
 ---
 <!-- R CODE IN THIS FILE IS FORMATTED AND SAVED TO docs/src/content/docs/reference/formatting-rules.md -->
 
-ry includes a non-invasive R code formatter. It normalizes spacing, indentation and bracing, and preserves the structure you wrote.
+ry includes an R code formatter that changes as little as it can: it normalizes spacing, indentation, and bracing, and keeps the structure you wrote.
 
 ## Usage
 
@@ -17,24 +17,23 @@ ry fmt --check   # List files that would be reformatted, without writing
 ry fmt --diff    # Show a diff of formatting changes without applying them
 ```
 
-`--check` and `--diff` exit 1 when any file would change, which is what a CI job gates on. Errors
-(for example a file that cannot be parsed) exit 2 — see the full
-[exit-code table](/reference/cli#exit-codes).
+`--check` and `--diff` exit 1 when any file would change, which is what a CI job gates on, and an
+error, such as a file that cannot be parsed, exits 2. The [exit-code table](/reference/cli#exit-codes)
+has the details.
 
 ## Philosophy
 
-The formatter preserves existing line breaks and does not split expressions that are written on one line. Four principles follow from that:
+The formatter keeps your line breaks and never splits an expression you wrote on one line. Everything else follows from that idea:
 
 * **Single-line expressions remain single-line:** The formatter adds line breaks only where the expression is already multi-line, and never breaks a single-line expression into several (with [one exception](#loops)).
 * **Both nesting styles are preserved:** Compact ("hugged") and expanded forms for nested expressions are equally valid, and neither is rewritten into the other (see [hugging behavior](#hugging-behavior)).
 * **Braces are added only where they prevent a bug:** Auto-bracing applies where omitting braces changes what a later edit means (see [auto-bracing](#auto-bracing)).
-* **Two configuration keys:** Indent width and line endings, both documented under [configuration](/reference/configuration). There are no style options, because a reflowing formatter would rewrite line breaks the author chose.
 
 ## Formatting Rules
 
 The rules below describe the formatter's behavior for each kind of expression, including the edge cases that receive special handling.
 
-### Binary Operators
+### Binary operators
 
 **Assignment operators** always have spaces around them:
 
@@ -62,7 +61,7 @@ filter(condition) %>%
 select(value)
 ```
 
-### Unary Operators
+### Unary operators
 
 Unary operators receive appropriate spacing based on their type and context:
 
@@ -109,9 +108,9 @@ formula = ~x + y
 {  }
 ```
 
-### Parenthesized Expressions
+### Parenthesized expressions
 
-Single-line parenthesized expressions are always formatted in a "hugging" style—there is no extra space between the opening parenthesis and the enclosed expression:
+A single-line parenthesized expression is always hugged, with no space between the parentheses and the expression inside:
 
 ```r
 # parenthesized_expressions : compare
@@ -133,7 +132,7 @@ Multiline parenthesized expressions can be formatted in either hugged or expande
     other_part)
 ```
 
-### If Expressions
+### If expressions
 
 **Single-line if-else:** Single-line `if-else` expressions are allowed and preserved, since `if` is an expression in R and can be used as a ternary operator:
 
@@ -142,7 +141,7 @@ Multiline parenthesized expressions can be formatted in either hugged or expande
 x <-if (condition) consequence else alternative
 ```
 
-**Nested if-else:** Nested `if-else` chains are formatted so each `else if` and `else` starts on its own line, with all branches aligned at the same indentation level—no extra indentation for nested cases.
+**Nested if-else:** A nested `if-else` chain is formatted so that each `else if` and each `else` starts on its own line, with every branch at the same indentation level and no extra indentation for nested cases.
 
 ```r
 # conditional_statements_nested : format
@@ -214,7 +213,7 @@ for (
 ) {}
 ```
 
-### Function Calls
+### Function calls
 
 Function calls receive consistent formatting with proper spacing around argument separators and assignment operators.
 
@@ -232,7 +231,7 @@ call(
 )
 ```
 
-**Nested function calls** can use either a hugged style — where the inner call starts directly after the outer call's parenthesis — or an expanded style. The formatter preserves both.
+**Nested function calls** can use either a hugged style, where the inner call starts right after the outer call's parenthesis, or an expanded style. The formatter preserves both.
 
 ```r
 # hugging_nested_function_calls : format
@@ -259,7 +258,7 @@ call(a = x, b = y, c = inner(
 ))
 ```
 
-This applies to testing frameworks and S4 method definitions:
+Two common instances of this layout are a `test_that()` block and an S4 method definition:
 
 ```r
 # test_that_and_s4_example: format
@@ -272,11 +271,11 @@ setMethod("method", "Class", function(x) {
 }, sealed = TRUE)
 ```
 
-In the `setMethod` example: Even though `sealed = TRUE` is on a different line than the other arguments, only the function body is multiline, so the formatter preserves this layout.
+In the `setMethod` example, `sealed = TRUE` sits on a different line from the other arguments, but only the function body is multiline, so the formatter keeps the layout.
 
 **Note:** You can always opt in to the fully expanded multiline style: if you add a newline so that at least two arguments of a call are on different lines, the formatter treats it as multiline and will place every argument on its own line.
 
-### Function Definitions
+### Function definitions
 
 **Single-line functions:** Functions with a simple, single-expression body can be written on one line, with or without braces.
 
@@ -286,7 +285,7 @@ add <- function(x, y) x + y
 double <- function(x) { x * 2 }
 ```
 
-**Multiline functions:** If the function body spans multiple lines, braces are always added—even if the body starts on the same line as the function declaration.
+**Multiline functions:** If the body spans several lines, braces are always added, even when the body starts on the same line as the function declaration.
 
 ```r
 # function_definitions_multiline : compare
@@ -316,9 +315,9 @@ lapply(data, \(x) {
 })
 ```
 
-### Switch Statements
+### Switch calls
 
-Switch statements are formatted like ordinary function calls. For fallthrough cases (`case = ,`), an extra space is added after the `=` to mark the fallthrough.
+`switch()` calls are formatted like any other function call. For a fallthrough case (`case = ,`), an extra space after the `=` marks the fallthrough.
 
 ```r
 # switch_statements : format
@@ -341,7 +340,7 @@ data[ row,col ]
 data[[ "name" ]]
 ```
 
-### Extract & Namespace Operators
+### Extract and namespace operators
 
 **Extract and namespace operators** (`$`, `@`, `::`, `:::`) are formatted without spaces around them:
 
@@ -362,7 +361,7 @@ call(x)$
 call(x, y)
 ```
 
-### String Literals
+### String literals
 
 String literals are normalized to double quotes (`"`), unless the string contains unescaped double quotes:
 
@@ -383,7 +382,7 @@ Multi-line string literals always keep their original indentation and line break
 # }
 ```
 
-[Raw string literals](https://search.r-project.org/R/refmans/base/html/Quotes.html) (`r"(...)"`, `R"[...]"`, and their custom-dash variants) are preserved byte-for-byte. Quote normalization is never applied to them, since their whole purpose is to hold characters — including quotes and backslashes — that would otherwise need escaping.
+[Raw string literals](https://search.r-project.org/R/refmans/base/html/Quotes.html) (`r"(...)"`, `R"[...]"`, and their custom-dash variants) are preserved byte-for-byte. Quote normalization never applies to them, since their whole purpose is to hold characters, such as quotes and backslashes, that would otherwise need escaping.
 
 ```r
 # raw_strings : compare
@@ -391,7 +390,7 @@ path <- r"(C:\Users\me)"
 quoted <- r"(He said "hi")"
 ```
 
-### R6 Class Definitions
+### R6 class definitions
 
 Class definitions with empty lines between methods are preserved:
 
@@ -431,9 +430,9 @@ Additional exceptions to this rule are:
 - [Shebangs](https://en.wikipedia.org/wiki/Shebang_(Unix)), for example `#!/usr/bin/env Rscript`, remain unchanged.
 - [Quarto](https://quarto.org/docs/computations/execution-options.html) and knitr cell options, for example `#| echo: false`, are kept verbatim, since their `key: value` payload is read by machines.
 
-### Type Annotations
+### Type annotations
 
-ry's type annotations are written in `#:` comments. The formatter treats each block of consecutive `#:` lines as one unit: the block is parsed with the same annotation grammar the type checker uses, and — only when it parses — re-rendered with the canonical spacing used throughout the [typing reference](/reference/type-system): one space after `#:`, no space before `,` or `:` and one space after, spaces around `|` and `->`, and no padding inside `(`, `[`, `{`, or generic `<...>`. A leading type-parameter binder such as `<T>` is followed by a space.
+ry's type annotations are written in `#:` comments. The formatter treats each block of consecutive `#:` lines as one unit: the block is parsed with the same annotation grammar the type checker uses, and, only when it parses, re-rendered with the canonical spacing used throughout the [typing reference](/reference/type-system): one space after `#:`, no space before `,` or `:` and one space after, spaces around `|` and `->`, and no padding inside `(`, `[`, `{`, or generic `<...>`. A leading type-parameter binder such as `<T>` is followed by a space.
 
 ```r
 # type_annotations_compact : compare
@@ -445,7 +444,7 @@ weights <- list(a = 1.0)
 outcome <- NULL
 ```
 
-Anything that does not parse as an annotation — prose, a dotted type name, a `pkg::fun` reference, a malformed type — is left verbatim beyond ensuring the single space after `#:`, so the formatter never corrupts a comment it does not understand. Consecutive `#:` lines form one annotation block (exactly as the type checker groups them), so a block that is not a single valid annotation — for example two compact annotations with no blank line between them — is also left as written.
+Anything that does not parse as an annotation is left verbatim, beyond ensuring the single space after `#:`. Prose, a dotted type name, a `pkg::fun` reference, and a malformed type are all left alone, so the formatter never corrupts a comment it does not understand. Consecutive `#:` lines form one annotation block (exactly as the type checker groups them), so a block that is not a single valid annotation is also left as written. Two compact annotations with no blank line between them are one such block.
 
 The reformat is deliberately non-invasive: token order, identifier casing, and your line breaks are preserved. A single-line annotation stays on one line, an expanded annotation (one written with `@param` / `@return` lines) keeps one directive per line rather than being collapsed into a compact `fn(...)`, and content lines are never rejoined.
 
@@ -488,7 +487,7 @@ and mixed closer shapes normalize to the nearest consistent style:
 
 A blank line, a non-`#:` comment, or ordinary code ends an annotation block, so unrelated comments are never pulled into one. Trailing empty `#:` lines at the end of a block are dropped.
 
-### Line Spacing
+### Line spacing
 
 The formatter normalizes line spacing between expressions, allowing at most one empty line:
 
@@ -501,7 +500,7 @@ y <- 2
 z <- 3
 ```
 
-### Line Endings
+### Line endings
 
 The formatter automatically detects and preserves the line ending style (`LF` or `CRLF`) used in the original file.
 
@@ -535,7 +534,7 @@ matrix(c(1, 2,
          3, 4), nrow=2) # fmt: skip
 ```
 
-For a whole region, use `# fmt: off` and re-enable formatting with `# fmt: on`. The region between the directives is preserved byte-exactly — original indentation, columns, and blank lines. The directives work at the top level as well as inside functions and `{ ... }` blocks; a region left open runs to the end of its enclosing block.
+For a whole region, use `# fmt: off` and re-enable formatting with `# fmt: on`. The region between the directives is preserved byte-exactly, keeping its original indentation, columns, and blank lines. The directives work at the top level as well as inside functions and `{ ... }` blocks; a region left open runs to the end of its enclosing block.
 
 ```r
 # format_suppression_off_on : format
@@ -554,7 +553,7 @@ You can also skip formatting for an entire file by placing `# fmt: skip-file` at
 
 This section records the design decisions behind the rules above.
 
-### Auto-Bracing
+### Auto-bracing
 
 **Accidental bugs:** Omitting braces in loops, function definitions, or `if` expressions makes a later edit change what the code means. Adding a line after an unbraced `if` leaves only the first line under the condition:
 
@@ -579,7 +578,7 @@ if (condition)
   action()
 ```
 
-For control flow structures such as `for`, `while`, and `repeat` loops, the formatter always adds braces around the body—regardless of its length—since single-line loops are not allowed (see [Loops](#loops)).
+For a control flow structure such as a `for`, `while`, or `repeat` loop, the formatter always adds braces around the body, whatever its length, because a single-line loop is not allowed. See [Loops](#loops).
 
 ```r
 # auto_bracing_for : compare
@@ -587,7 +586,7 @@ for (item in sequence)
   action()
 ```
 
-### Hugging Behavior
+### Hugging behavior
 
 "Hugging" is the compact layout for a nested expression in a multiline context: the inner expression starts on the same line as the outer expression's opening delimiter. Both hugged and expanded forms are allowed, and the formatter preserves whichever was written.
 
@@ -622,4 +621,4 @@ result <- outer(
 )
 ```
 
-See [compact multiline calls](#function-calls) under Function Calls. This style is preserved, which is what keeps S4 methods and testing-framework calls intact.
+See [compact multiline calls](#function-calls) under Function calls.

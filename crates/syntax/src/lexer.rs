@@ -331,7 +331,7 @@ impl Lexer<'_> {
     /// End a quoted token that never closes at its first line break.
     ///
     /// R lets a string or a backtick-quoted name span lines, so the scan can
-    /// only give up at end of file — and a token that ran that far would
+    /// only give up at end of file, and a token that ran that far would
     /// otherwise swallow every statement below it, which is what a stray quote
     /// in a large file does while it is being typed: naming, diagnostics and
     /// every editor feature go dark from the quote to the end of the file for
@@ -460,7 +460,8 @@ impl Lexer<'_> {
     }
 }
 
-/// Whether `text` is a syntactic R name — usable bare, without backticks.
+/// Whether `text` is a syntactic R name, meaning it is usable bare, without
+/// backticks.
 /// A name starting with `.` followed by a digit (`.1`) lexes as a number,
 /// and the reserved words are not names.
 pub fn is_syntactic_name(text: &str) -> bool {
@@ -510,14 +511,15 @@ fn is_ident_continue(c: char) -> bool {
 
 /// What to say about a character R's grammar has no use for.
 ///
-/// Most of these arrive by paste — from a document, a chat window, an editor
-/// with smart quotes on — and the lexer knows exactly which ASCII character was
-/// meant, so it says so instead of naming the codepoint and stopping. The
-/// invisible ones are named rather than quoted: printing a zero-width space
-/// between backticks shows the reader an empty pair and a caret over nothing.
+/// Most of these arrive by paste, from a document, a chat window, or an editor
+/// with smart quotes on. The lexer knows exactly which ASCII character was
+/// meant, so it says so instead of naming the codepoint and stopping. An
+/// invisible character is named rather than quoted, because printing a
+/// zero-width space between backticks shows the reader an empty pair and a
+/// caret over nothing.
 fn unexpected_character_message(character: char) -> String {
     let ascii = |what: &str, instead: char| {
-        format!("`{character}` is {what}, not R syntax — use `{instead}` instead")
+        format!("`{character}` is {what}, not R syntax. Use `{instead}` instead")
     };
     match character {
         '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{00ab}' | '\u{00bb}' => {
@@ -539,7 +541,7 @@ fn unexpected_character_message(character: char) -> String {
         }
         '\u{3000}' => invisible("an ideographic space"),
         '\u{200b}' | '\u{feff}' => {
-            "there is an invisible character here (a zero-width space) — delete it".to_owned()
+            "there is an invisible character here, a zero-width space. Delete it".to_owned()
         }
         _ => format!("unexpected character `{character}`"),
     }
@@ -548,5 +550,5 @@ fn unexpected_character_message(character: char) -> String {
 /// Whitespace that is not whitespace to R. Quoting it would show the reader a
 /// blank between backticks.
 fn invisible(what: &str) -> String {
-    format!("this is {what}, not an ordinary space — R needs a plain space here")
+    format!("this is {what}, not an ordinary space. R needs a plain space here")
 }

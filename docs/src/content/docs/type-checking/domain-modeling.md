@@ -46,7 +46,7 @@ out of values the checker would have to execute to understand.
 ada <- list(name = "Ada", age = 36L)
 ```
 
-`@type` declares a nominal type — a name that is its own type, distinct from everything else, even
+`@type` declares a nominal type. The name is its own type, distinct from everything else, including
 things with an identical representation. `@new` is the one way a plain list becomes one, and it
 checks the list against the declared shape as it goes.
 
@@ -85,8 +85,8 @@ type-mismatch
 The `@new` is **inside** the constructor, so the constructor is the only way in: everything
 downstream receives a `Person`, and the checker enforces that statically.
 
-The two halves do different jobs. `@new` is an **analysis-time** check — it is not `setValidity()`,
-not an R6 `initialize()`, and it emits no runtime assertion. It cannot know that `age` is
+The two halves do different jobs. `@new` is an **analysis-time** check. It is not `setValidity()`,
+it is not an R6 `initialize()`, and it emits no runtime assertion. It cannot know that `age` is
 non-negative, and it cannot check a field whose type it could not determine. The `stop()` on the
 line above is what enforces the invariant when the code runs. The `stop()` guards values at run
 time, the `@new` guards shape at analysis time, and both sit in the one function every caller goes
@@ -115,17 +115,17 @@ type-mismatch
    |                              ^
 ```
 
-Both are `double` underneath, and neither is interchangeable with the other. Two `character` ids,
-two currencies, a validated email beside an unvalidated string — anywhere your domain has values
-that are the same shape but must not be mixed, this is how you say so.
+Both are `double` underneath, and neither is interchangeable with the other. Use this anywhere your domain has values that are
+the same shape but must not be mixed: two `character` ids, two currencies, or a validated email
+beside an unvalidated string.
 
 The representation still leaks **outward**: a `Celsius` is accepted anywhere a plain `double` is
-expected, so `t / 2` and `mean(temps)` keep working. The reverse does not hold — a bare `double`
-never becomes a `Celsius` on its own. That asymmetry is deliberate: arithmetic stays convenient,
-while the only way *into* the type is a `@new` you wrote.
+expected, so `t / 2` and `mean(temps)` keep working. The reverse does not hold, and a bare `double`
+never becomes a `Celsius` on its own. Arithmetic therefore stays convenient, while the only way into
+the type is a `@new` you wrote.
 
-If you want the opposite — a name that is pure shorthand and stays interchangeable with its body —
-that is [`@alias`](/type-checking/concepts#naming-your-own-types), not `@type`.
+For a name that is pure shorthand and stays interchangeable with its body, use
+[`@alias`](/type-checking/concepts#naming-your-own-types) rather than `@type`.
 
 ## Types with a parameter
 
@@ -144,7 +144,7 @@ Nominal types describe values. They do not give you:
   place is a thing this cannot express.
 - **Inheritance hierarchies.** There is no subtyping between nominal types.
 - **Dispatch.** If you need `print()` and `summary()` to do the right thing per class, that is S3.
-  Those go through `UseMethod`, which dispatches at run time — the checker types such calls as
+  Those go through `UseMethod`, which dispatches at run time, so the checker types such calls as
   `Unknown` and cannot follow them. (S3 *operator* dispatch, `+.Date` and friends, is resolved
   statically; method dispatch is not.)
 
@@ -157,6 +157,6 @@ converting.
 
 ## Next
 
-- [Concepts](/type-checking/concepts) — nominal versus structural, and the rest of the vocabulary
-- [Limitations](/type-checking/limitations) — the full picture on object systems
-- [Type system reference](/reference/type-system) — the exact rules for `@type`, `@new`, and `@alias`
+- [Concepts](/type-checking/concepts) covers nominal against structural, and the rest of the vocabulary
+- [Limitations](/type-checking/limitations) covers what is and is not supported in R's object systems
+- [Type system reference](/reference/type-system) has the exact rules for `@type`, `@new`, and `@alias`

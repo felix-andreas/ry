@@ -1,12 +1,13 @@
 //! The inference substrate: a dense union-find table over interned types.
 //!
-//! Unification stays syntactic — the invariant floor: a union unifies only
-//! with a structurally equal union (set equality after resolution), plus the
-//! single `T | NULL`-vs-`U | NULL` member-wise case; all directional
-//! member-wise logic lives in compatibility checking, never here. A union may
-//! be *bound to* a variable, but no union constraint is ever imposed on one
-//! (the HM-speed guardrail). Constraints ride on unbound entries and join
-//! through the lattice on redirect.
+//! Unification stays syntactic, which is the invariant floor. A union unifies
+//! only with a structurally equal union, meaning set equality after
+//! resolution, plus the single member-wise case of `T | NULL` against
+//! `U | NULL`. All directional member-wise logic lives in compatibility
+//! checking and never here. A union may be *bound to* a variable, but no union
+//! constraint is ever imposed on one, which is the guardrail that keeps
+//! Hindley-Milner fast. A constraint rides on an unbound entry, and constraints
+//! join through the lattice on redirect.
 //!
 //! Probes snapshot the table and roll back completely: the entry vector
 //! truncates to its snapshot length and mutated older entries revert through
@@ -53,8 +54,9 @@ pub struct InferenceTable<'db> {
     pub level: u32,
     /// The `@type` / `@alias` definitions visible here: aliases expand during
     /// resolution, nominals project to their representation in compatibility.
-    /// Borrowed from the memoized per-file table — see `GlobalEnv`. `None` when
-    /// the check runs with no globals at all, which reads as an empty table.
+    /// This is borrowed from the memoized per-file table, which `GlobalEnv`
+    /// describes. It is `None` when the check runs with no globals at all,
+    /// which reads as an empty table.
     pub definitions: Option<&'db FxHashMap<Name<'db>, NamedDefinition<'db>>>,
     /// Classes that declare an arithmetic operator method, from the standard
     /// library AND from the project's own sources. Operator dispatch resolves
@@ -67,7 +69,7 @@ pub struct InferenceTable<'db> {
     /// This lives with the solver rather than with the expression walker
     /// because admissibility is decided here: a rigid `T` is not a numeric
     /// atom, so without its declared bound every check that unifies it with a
-    /// constrained variable refuses it — which is how an annotation the checker
+    /// constrained variable refuses it. That is how an annotation the checker
     /// wrote itself could turn a clean file red on a self-recursive call.
     pub rigid_constraints: FxHashMap<Name<'db>, Constraint>,
     /// Per-node resolve memo over the interned type DAG: without it, shared
@@ -80,10 +82,10 @@ pub struct InferenceTable<'db> {
     epoch: std::cell::Cell<u64>,
 }
 
-/// Inner resolve steps since process start — a cheap standing instrument for
-/// the perf witnesses: the step count must stay near-linear in corpus size,
-/// so a blowup here flags a resolve-memoization regression before wall-clock
-/// does.
+/// Inner resolve steps since process start. This is a cheap standing
+/// instrument for the performance witnesses. The step count must stay
+/// near-linear in corpus size, so a blowup here flags a resolve-memoization
+/// regression before the wall clock does.
 pub static RESOLVE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How deep resolution expands alias applications before leaving one as
@@ -156,10 +158,10 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         match self.definitions.and_then(|table| table.get(name)) {
-            // A wrong argument count includes the bare use of a generic
-            // (`Box` for a one-parameter `Box<T>`) — `@new` is unaffected,
-            // its representation check infers arguments without the
-            // relations.
+            // A wrong argument count includes the bare use of a generic, such
+            // as `Box` for a one-parameter `Box<T>`. `@new` is unaffected,
+            // because its representation check infers the arguments without
+            // the relations.
             Some(definition) => definition.parameters.len() != arguments.len(),
             None => !crate::stubs::stubs(db)
                 .is_some_and(|library| library.nominals.contains(name.text(db))),
@@ -205,12 +207,12 @@ impl<'db> InferenceTable<'db> {
         self.resolve_rec(db, ty, &mut visiting).0
     }
 
-    /// One resolve step over the interned DAG. Returns the resolved type and
-    /// whether the subtree was CLEAN — no cycle cut beneath it — because only
-    /// clean results are position-independent enough to memoize (a node
-    /// containing a variable that is currently being expanded resolves
-    /// differently at top level). Expanding a variable that is already on the
-    /// expansion stack is an infinite type: it cuts to `Unknown`, matching
+    /// One resolve step over the interned DAG. It returns the resolved type
+    /// and whether the subtree was CLEAN, meaning no cycle was cut beneath it.
+    /// Only a clean result is position-independent enough to memoize, because a
+    /// node containing a variable that is currently being expanded resolves
+    /// differently at top level. Expanding a variable that is already on the
+    /// expansion stack is an infinite type. It cuts to `Unknown`, which matches
     /// the pin-to-Unknown semantics used everywhere self-reference grows.
     fn resolve_rec(
         &self,
@@ -468,10 +470,10 @@ impl<'db> InferenceTable<'db> {
             (TyKind::Any, _) | (_, TyKind::Any) | (TyKind::Unknown, _) | (_, TyKind::Unknown) => {
                 Ok(())
             }
-            // An undeclared nominal — a name neither the project's type
-            // table nor the stub corpus declares — already carries its own
-            // unknown-type annotation error; comparisons treat it like
-            // `Unknown` so the typo never cascades.
+            // An undeclared nominal already carries its own unknown-type
+            // annotation error. It is a name neither the project's type table
+            // nor the stub corpus declares. A comparison treats it like
+            // `Unknown`, so the typo never cascades.
             (TyKind::Named(..), _) | (_, TyKind::Named(..))
                 if self.undeclared_nominal(db, a) || self.undeclared_nominal(db, b) =>
             {
@@ -594,7 +596,8 @@ impl<'db> InferenceTable<'db> {
     /// already-bound one admits it).
     /// The constraint a still-unbound type carries, when it is a bare
     /// variable. `Unconstrained` means the program has demanded nothing of it
-    /// yet — the state that makes pinning it from elsewhere an invention.
+    /// yet. That is the state which makes pinning it from elsewhere an
+    /// invention.
     pub fn open_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let resolved = self.resolve(db, ty);
         let TyKind::Var(var) = resolved.kind(db) else {
@@ -639,11 +642,12 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
-    /// The directional argument-compatibility relation — the coercions that
-    /// apply where a value flows into an expected type (parameter positions,
-    /// checked annotations) but never inside unification: scalar-to-vector,
-    /// integer-to-double widening, names dropping into unnamed containers,
-    /// union membership, and contravariant function parameters.
+    /// The directional argument-compatibility relation. These are the
+    /// coercions that apply where a value flows into an expected type, such as
+    /// a parameter position or a checked annotation, and never inside
+    /// unification. They are scalar-to-vector, integer-to-double widening, a
+    /// name dropping into an unnamed container, union membership, and
+    /// contravariant function parameters.
     ///
     /// Runs as a probe: a `true` verdict keeps the variable bindings it made
     /// (binding against the two `Var` arms is how a generic parameter like
@@ -681,9 +685,9 @@ impl<'db> InferenceTable<'db> {
     ) -> bool {
         let actual = self.resolve(db, actual);
         let expected = self.resolve(db, expected);
-        // The tolerance floor, mirroring `unify`: `Any` is the sanctioned
-        // escape hatch and `Unknown` an absent fact — neither side of an
-        // unknown is a checkable claim, so it is compatible with everything.
+        // The tolerance floor, mirroring `unify`. `Any` is the sanctioned
+        // escape hatch and `Unknown` is an absent fact. Neither is a checkable
+        // claim, so each is compatible with everything.
         if matches!(actual.kind(db), TyKind::Any | TyKind::Unknown)
             || matches!(expected.kind(db), TyKind::Any | TyKind::Unknown)
         {
@@ -696,7 +700,7 @@ impl<'db> InferenceTable<'db> {
         {
             return self.unify(db, actual, expected).is_ok();
         }
-        // An undeclared nominal compares like `Unknown` — see `unify`.
+        // An undeclared nominal compares like `Unknown`, as `unify` explains.
         if self.undeclared_nominal(db, actual) || self.undeclared_nominal(db, expected) {
             return true;
         }
@@ -708,12 +712,12 @@ impl<'db> InferenceTable<'db> {
             (TyKind::Union(members), _) => members
                 .iter()
                 .all(|&member| self.compatible_probe(db, member, expected, depth + 1)),
-            // A value fits an expected union when it fits any member; concrete
-            // members are tried before unbound-variable members so a value
-            // that already fits a concrete member — `NULL` fitting the `NULL`
-            // in an instantiated `T | NULL` — matches it and binds nothing,
-            // rather than greedily pinning `T` and robbing a later argument of
-            // the chance to determine it.
+            // A value fits an expected union when it fits any member. A
+            // concrete member is tried before an unbound-variable member, so a
+            // value that already fits a concrete member matches it and binds
+            // nothing. `NULL` fitting the `NULL` in an instantiated `T | NULL`
+            // is such a value. The alternative greedily pins `T` and robs a
+            // later argument of the chance to determine it.
             (_, TyKind::Union(members)) => {
                 let (variables, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) =
                     members.iter().partition(|&&member| {
@@ -724,12 +728,13 @@ impl<'db> InferenceTable<'db> {
                     .chain(variables)
                     .any(|member| self.compatible_probe(db, actual, member, depth + 1))
             }
-            // Same-name nominals check each type argument in the direction
-            // its variance dictates: covariant for return/container/direct
-            // positions, contravariant for function-parameter positions,
-            // invariant (both directions) when a parameter occurs in
-            // conflicting positions or the definition is missing —
-            // conservative over-rejection, never an unsound widening.
+            // Two same-name nominals check each type argument in the
+            // direction its variance dictates. A return position, a container
+            // position, and a direct position are covariant. A
+            // function-parameter position is contravariant. A parameter that
+            // occurs in conflicting positions, and a missing definition, are
+            // invariant, which checks both directions. Invariance
+            // over-rejects conservatively and never widens unsoundly.
             (
                 TyKind::Named(actual_name, actual_arguments),
                 TyKind::Named(expected_name, expected_arguments),
@@ -779,8 +784,9 @@ impl<'db> InferenceTable<'db> {
                     })
             }
             // A nominal value is compatible with anything its representation
-            // is (the projection direction); the reverse — a structural value
-            // flowing INTO a nominal position — happens only through `@new`.
+            // is, which is the projection direction. The reverse, a structural
+            // value flowing INTO a nominal position, happens only through
+            // `@new`.
             (TyKind::Named(actual_name, actual_arguments), _) => {
                 match self.representation(db, actual_name, &actual_arguments) {
                     Some(representation) => {
@@ -801,12 +807,12 @@ impl<'db> InferenceTable<'db> {
             (TyKind::NamedVector(actual_element), TyKind::Vector(expected_element)) => {
                 self.compatible_probe(db, actual_element, expected_element, depth + 1)
             }
-            // The numeric ladder widens in compatibility (a directional check
-            // only — unification never widens): R freely promotes `logical`
-            // and `integer` in numeric contexts (`sum(flags)`,
-            // `mean(x > threshold)`, `(x > 0) * weight`), and without this
-            // every numeric parameter in the stub corpus would have to be
-            // `Any`.
+            // The numeric ladder widens in compatibility, which is a
+            // directional check only, because unification never widens. R
+            // freely promotes `logical` and `integer` in a numeric context,
+            // as `sum(flags)`, `mean(x > threshold)`, and `(x > 0) * weight`
+            // all do. Without this, every numeric parameter in the stub corpus
+            // would have to be `Any`.
             (TyKind::Scalar(actual_atomic), TyKind::Scalar(expected_atomic)) => {
                 numeric_ladder_rank(actual_atomic)
                     .zip(numeric_ladder_rank(expected_atomic))
@@ -837,13 +843,12 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            // A fixed-shape list flowing into `list[T]`: when `T` is still
-            // open, it takes the JOIN of the items rather than unifying with
-            // each in turn — otherwise the first item pins `T` and every later
-            // one is a mismatch, so `lapply(list(1L, "a"), f)` failed while
-            // `for` over the same list is documented to bind
-            // `integer | character`. A concrete `T` keeps the all-must-fit
-            // rule.
+            // A fixed-shape list flows into `list[T]`. When `T` is still open
+            // it takes the JOIN of the items rather than unifying with each in
+            // turn. Otherwise the first item pins `T` and every later one is a
+            // mismatch, so `lapply(list(1L, "a"), f)` failed while `for` over
+            // the same list is documented to bind `integer | character`. A
+            // concrete `T` keeps the all-must-fit rule.
             (TyKind::Tuple(items), TyKind::List(element))
                 if matches!(self.resolve(db, element).kind(db), TyKind::Var(_)) =>
             {
@@ -860,9 +865,9 @@ impl<'db> InferenceTable<'db> {
             (TyKind::Tuple(items), TyKind::List(element)) => items
                 .iter()
                 .all(|&item| self.compatible_probe(db, item, element, depth + 1)),
-            // `list()` is both the empty unnamed and the empty map-like list in
-            // R — it has no element whose name could be missing — so it
-            // satisfies a `list[named: T]` parameter. That is what makes
+            // `list()` is both the empty unnamed list and the empty map-like
+            // list in R, and it has no element whose name could be missing, so
+            // it satisfies a `list[named: T]` parameter. That is what makes
             // `= list()` a usable default for one.
             (TyKind::Tuple(items), TyKind::NamedList(_)) if items.is_empty() => true,
             (TyKind::Record(fields), TyKind::List(element))
@@ -910,11 +915,11 @@ impl<'db> InferenceTable<'db> {
     /// Why `actual` does not serve `expected`, for a caller about to report
     /// the failure. [`Self::compatible`] only answers yes or no, and two whole
     /// signatures printed side by side leave the reader to find the position
-    /// that failed — worse, a parameter's constraint does not survive into the
+    /// that failed. Worse, a parameter's constraint does not survive into the
     /// rendered type at all, so an acceptable and an unacceptable function can
-    /// print identically. Returns `None` when the shapes disagree rather than
-    /// one pairing (arity, optionality, the rest parameter), which the whole
-    /// signatures do show.
+    /// print identically. The result is `None` when the shapes disagree rather
+    /// than one pairing, because the whole signatures do show that. Arity,
+    /// optionality, and the rest parameter are such disagreements.
     pub fn explain_function_mismatch(
         &mut self,
         db: &'db dyn Db,
@@ -950,16 +955,17 @@ impl<'db> InferenceTable<'db> {
     /// near-identical strings the reader has to diff by eye, and a nested one
     /// never names the path at all.
     ///
-    /// Pairs fields by name — the rule [`Self::compatible`] uses, so the
-    /// explanation cannot disagree with the verdict — and recurses while both
-    /// sides are records, so the path reads outermost first. `None` when the
-    /// failure is not about one field, which leaves the whole types to say so.
+    /// Fields pair by name, which is the rule [`Self::compatible`] uses, so
+    /// the explanation cannot disagree with the verdict. It recurses while both
+    /// sides are records, so the path reads outermost first. The result is
+    /// `None` when the failure is not about one field, which leaves the whole
+    /// types to say so.
     ///
     /// Rolls the table back before returning. [`Self::compatible`] *keeps* the
-    /// bindings a `true` verdict made — that is how a generic parameter infers
-    /// its argument — so probing the fields that fit would otherwise leak those
-    /// bindings out of a reporting path and change a later verdict in the same
-    /// item. Explaining a failure must not alter what is being explained.
+    /// bindings a `true` verdict made, because that is how a generic parameter
+    /// infers its argument. Probing the fields that fit would otherwise leak
+    /// those bindings out of a reporting path and change a later verdict in the
+    /// same item. Explaining a failure must not alter what is being explained.
     pub fn explain_record_mismatch(
         &mut self,
         db: &'db dyn Db,
@@ -1132,7 +1138,7 @@ impl<'db> InferenceTable<'db> {
 /// The one position that keeps a function value from serving an expected
 /// function type, from [`InferenceTable::explain_function_mismatch`]. Each
 /// variant carries the constraint of its own side when that side is a
-/// constrained variable — the fact the rendered type drops.
+/// constrained variable. That is the fact the rendered type drops.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub enum FunctionMismatch<'db> {
     /// A parameter: the interface passes a value the function will not take.
@@ -1170,8 +1176,8 @@ pub enum RecordMismatch<'db> {
     /// A field the expected type declares that the value does not have.
     Missing {
         path: Vec<String>,
-        /// A field the value does have whose name is a near miss — which is
-        /// how a renamed field reads, since it goes missing and turns up
+        /// A field the value does have whose name is a near miss. That is how
+        /// a renamed field reads, because it goes missing and turns up
         /// misspelled at the same time.
         near: Option<String>,
     },
@@ -1194,10 +1200,12 @@ struct Pairing<'db> {
 
 struct ParameterPair<'db> {
     name: Option<Name<'db>>,
-    /// The expected interface's parameter type — what it may pass in.
+    /// The expected interface's parameter type, which is what it may pass
+    /// in.
     passed: Ty<'db>,
-    /// The function's own parameter type — what it accepts. Parameters are
-    /// contravariant, so `passed` must fit `accepts`, not the other way round.
+    /// The function's own parameter type, which is what it accepts. A
+    /// parameter is contravariant, so `passed` must fit `accepts` rather than
+    /// the other way round.
     accepts: Ty<'db>,
 }
 
@@ -1205,15 +1213,15 @@ struct ParameterPair<'db> {
 ///
 /// Arity is a range, not a number. An interface promises its callers every call
 /// shape from its required count up to everything it declares, and a function
-/// serves that interface when it accepts all of them. So it may declare MORE
-/// parameters than the interface ever passes, as long as the extras default —
-/// `mean(x, trim, na.rm)` serves a one-argument callback interface — and it may
-/// not require more than the interface supplies.
+/// serves that interface when it accepts all of them. It may therefore declare
+/// MORE parameters than the interface ever passes, as long as the extras
+/// default, which is how `mean(x, trim, na.rm)` serves a one-argument callback
+/// interface. It may not require more than the interface supplies.
 ///
-/// Variadic pairing is conservative: a variadic function pairs only with
+/// Variadic pairing is conservative. A variadic function pairs only with
 /// another variadic, and the rest parameters must sit at the same formal
-/// position — the position decides which parameters callers may fill
-/// positionally. This over-rejects some safe pairings but never admits an
+/// position, because the position decides which parameters a caller may fill
+/// positionally. This over-rejects some safe pairings, and it never admits an
 /// unsound one.
 fn pair_parameters<'db>(
     actual: &FunctionType<'db>,
@@ -1269,8 +1277,9 @@ fn pair_parameters<'db>(
         }
     }
     // An expected parameter with no slot left is one the interface may pass
-    // and the function cannot receive — unless the function is variadic, whose
-    // rest parameter absorbs it (contravariantly, like every other parameter).
+    // and the function cannot receive. A variadic function is the exception,
+    // because its rest parameter absorbs the parameter contravariantly, like
+    // every other parameter.
     for (expected_parameter, _) in positional_expected {
         let variadic = actual.variadic.as_ref()?;
         rest.push((expected_parameter, variadic.element));
@@ -1479,11 +1488,12 @@ fn record_occurrences<'db>(
     }
 }
 
-/// R's numeric promotion ladder — `logical` < `integer` < `double` <
-/// `complex` — as ranks, so a lower rank is accepted where a higher one is
-/// expected. `character` and `raw` are deliberately off the ladder: R reaches
-/// `character` only through an explicit coercion, and accepting it implicitly
-/// would hide the argument-order mistakes this check exists to catch.
+/// R's numeric promotion ladder as ranks, so a lower rank is accepted where a
+/// higher one is expected. The ladder is `logical` below `integer` below
+/// `double` below `complex`. `character` and `raw` are deliberately off the
+/// ladder. R reaches `character` only through an explicit coercion, and
+/// accepting it implicitly would hide the argument-order mistakes this check
+/// exists to catch.
 fn numeric_ladder_rank(atomic: Atomic) -> Option<u8> {
     match atomic {
         Atomic::Logical => Some(0),
@@ -1518,8 +1528,8 @@ fn nullable_single_member<'db>(db: &'db dyn Db, members: &[Ty<'db>]) -> Option<T
 /// A **rigid binder** is admitted when its own declared bound is at least as
 /// strong. `<T: numeric> fn(x: T) -> T` promises every instantiation of `T` is
 /// numeric, so `T` satisfies a numeric constraint even though it is not a
-/// numeric atom either — and a self-recursive call is where that matters, since
-/// it unifies the rigid `T` with the fresh constrained variable the recursive
+/// numeric atom either. A self-recursive call is where that matters, because it
+/// unifies the rigid `T` with the fresh constrained variable the recursive
 /// instantiation produced.
 fn constraint_rejects<'db>(
     db: &'db dyn Db,
@@ -1533,7 +1543,7 @@ fn constraint_rejects<'db>(
         arithmetic_classes.is_some_and(|classes| classes.contains(name.text(db)))
     };
     // A binder's declared bound implies the required one when joining the two
-    // does not strengthen it — the lattice order, so nothing here has to
+    // does not strengthen it. That is the lattice order, so nothing here has to
     // enumerate the pairs a second time.
     let binder_implies = |name: &Name<'db>| {
         table

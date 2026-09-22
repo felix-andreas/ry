@@ -128,7 +128,7 @@ gap: integer
 known <- 1L
 #++++
 known: Unknown
-32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
 
 #---- the_coerced_type_is_then_enforced
 frame <- data.frame(a = 1)
@@ -161,7 +161,7 @@ f: fn(x: integer) -> character
 f <- function(y) 1L
 #++++
 f: fn(y: Unknown) -> integer
-34..48 error[type-mismatch] this annotation names a parameter `x`, but the function does not define one — annotation parameter names must match the function's parameter names
+34..48 error[type-mismatch] this annotation names a parameter `x`, but the function does not define one. An annotation parameter name must match the function's parameter name
 
 #---- rigid_refuses_undeclared_bound
 #: <T> fn(x: T) -> T
@@ -256,7 +256,7 @@ f: fn(x: integer) -> character
 n <- 1L
 #++++
 n: integer
-0..50 error[annotation] `@type` and `@alias` declarations need their own `#:` block — separate them from other annotations with a blank line.
+0..50 error[annotation] `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.
 
 #---- definition_mixed_with_expanded_is_refused
 #: @type Person {list{name: character}}
@@ -265,7 +265,7 @@ n: integer
 make <- function(count) list(name = "a")
 #++++
 make: <T> fn(count: T) -> list{name: character}
-0..85 error[annotation] `@type` and `@alias` declarations need their own `#:` block — separate them from other annotations with a blank line.
+0..85 error[annotation] `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.
 
 #---- compact_mixed_with_expanded_is_refused
 #: fn(x: integer) -> integer
@@ -273,7 +273,7 @@ make: <T> fn(count: T) -> list{name: character}
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-0..49 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both — separate the two forms with a blank line.
+0..49 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
 
 #---- multiple_compact_annotations_are_refused
 #: integer
@@ -281,7 +281,7 @@ f: <T> fn(x: T) -> T
 n <- 1L
 #++++
 n: integer
-0..20 error[annotation] only one compact annotation fits in a `#:` block — separate the annotations with a blank line so each gets its own block.
+0..20 error[annotation] only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
 
 #---- declared_return_mismatch_blames_the_tail_expression
 #: fn(x: integer) -> character
@@ -302,8 +302,8 @@ f: fn(x: integer) -> character
 origin <- list(v = 1)
 #++++
 origin: list{v: double}
-3..32 error[annotation] the type name `Point` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
-37..59 error[annotation] the type name `Point` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+3..32 error[annotation] the type name `Point` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+37..59 error[annotation] the type name `Point` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
 
 #==== form
 #---- param_after_return_is_refused
@@ -408,7 +408,7 @@ value <- 1L
 #: integer
 #++++
 value: integer
-12..22 error[annotation] A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block.
+12..22 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
 
 #---- blank_line_breaks_the_annotation
 #: integer
@@ -424,7 +424,7 @@ value: character
 value <- 1L
 #++++
 value: integer
-0..10 error[annotation] A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block.
+0..10 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
 
 #---- expanded_annotation_separated_by_blank_line_is_refused
 #: @param count {integer}
@@ -468,14 +468,14 @@ h: double
 f <- function(x) NULL
 #++++
 f: fn(x: Person[]) -> NULL
-51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person` — for a list of these, write `list[Person]`
+51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
 
 #---- structural_vector_element_is_refused
 #: fn(x: list{name: character}[]) -> NULL
 f <- function(x) NULL
 #++++
 f: fn(x: list{name: character}[]) -> NULL
-9..32 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `list{name: character}` — for a list of these, write `list[list{name: character}]`
+9..32 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `list{name: character}`. For a list of these, write `list[list{name: character}]`
 
 #---- atomic_alias_and_binder_vector_elements_are_fine
 #: @alias Id {integer}
@@ -534,7 +534,7 @@ b <- f(2L)
 f: fn(x: integer) -> integer
 a: integer
 b: integer
-306..324 error[type-mismatch] this annotation names a parameter `missing_one`, but the function does not define one — annotation parameter names must match the function's parameter names
+306..324 error[type-mismatch] this annotation names a parameter `missing_one`, but the function does not define one. An annotation parameter name must match the function's parameter name
 
 #---- annotating_one_parameter_of_several_is_a_partial_form
 # The unannotated formal keeps the type its uses give it, and the call is
@@ -716,7 +716,7 @@ f: fn(b: character, a: integer) -> character
 f <- function(n) n
 #++++
 f: fn(n: integer) -> integer
-38..51 error[type-mismatch] this annotation names a parameter `count`, but the function does not define one — annotation parameter names must match the function's parameter names
+38..51 error[type-mismatch] this annotation names a parameter `count`, but the function does not define one. An annotation parameter name must match the function's parameter name
 
 #---- callback_parameter_contravariance
 #: fn(callback: fn(x: integer) -> integer) -> integer
@@ -763,7 +763,7 @@ use <- function() label(1.0)
 #++++
 label: fn(amount: double, [currency]: character) -> character
 use: fn() -> character
-300..359 error[type-mismatch] this annotation declares `currency` as required, but the function gives it a default — write `[currency]` to declare it optional, or drop the default
+300..359 error[type-mismatch] this annotation declares `currency` as required, but the function gives it a default. Write `[currency]` to declare it optional, or drop the default
 
 #==== null_defaults
 #---- a_null_default_must_fit_the_declared_type
@@ -774,7 +774,7 @@ use: fn() -> character
 label <- function(title = NULL) "x"
 #++++
 label: fn([title]: character) -> character
-303..307 error[type-mismatch] `title` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+303..307 error[type-mismatch] `title` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #---- a_nullable_declared_type_admits_the_null_default
 #: fn([title]: character | NULL) -> character

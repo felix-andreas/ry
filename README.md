@@ -8,20 +8,20 @@
 
 [**Docs**](https://ry-lang.org) ·
 [**Releases**](https://github.com/felix-andreas/ry/releases) ·
-[**VS Code**](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly) ·
+[**VS Code**](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) ·
 [**Zed**](https://github.com/felix-andreas/ry/tree/main/editors/zed)
 
 </div>
 
 ry is four tools in one binary:
 
-1. **A language server** — hover, completion, go-to-definition, references, rename, and inlay hints,
-   in any editor that supports LSP.
-2. **A formatter** — a single consistent style, with almost no configuration.
-3. **An R console** — a REPL with project-aware completion.
-4. **A type checker** — optional; its inferred types also power the editor features.
+1. **A language server**, with hover, completion, go-to-definition, references, rename, and inlay
+   hints in any editor that speaks LSP.
+2. **A formatter**, with one consistent style and almost no configuration.
+3. **An R console**, with project-aware completion.
+4. **A type checker**, which is optional, and whose inferred types also power the editor features.
 
-It requires no changes to your code, and the same binary runs in your editor and in CI.
+Your code needs no changes, and the same binary runs in your editor and in CI.
 
 ## Why ry
 
@@ -30,8 +30,8 @@ codebases. Originally called *"The R(oughly good enough) language server"*, it b
 fast language server that supported only go-to-definition using regex-based indexing.
 
 The second iteration replaced the regex index with tree-sitter and performed proper analysis on
-syntax trees. Go-to-definition became reliable, formatting and linting were added, and the "good
-enough" part was dropped from the name — the project became *Roughly*.
+syntax trees. Go-to-definition became reliable, formatting and linting arrived, and the "good
+enough" part was dropped from the name, leaving *Roughly*.
 
 The third iteration uses its own R parser and its own static analysis. That is what makes good error
 messages possible:
@@ -50,19 +50,18 @@ For comparison, R reports the same mistake as:
 Error: unexpected string constant in "planets <- c("Mercury", "Venus" "Earth""
 ```
 
-Tree-sitter also recovers from broken input, but a dedicated parser can report precisely what is
-wrong, and its syntax tree integrates directly with the static analysis, so one mistake does not hide
-the lints and type errors in the rest of the file. The trend has continued: the better the tool
-became, the shorter its name — first *Roughly*, now *ry*.
+Tree-sitter also recovers from broken input, but a dedicated parser can say precisely what is wrong,
+and its syntax tree plugs straight into the static analysis, so one mistake does not hide the lints
+and type errors in the rest of the file. And the trend has held: the better the tool became, the
+shorter its name. First *Roughly*, now *ry*.
 
 ## Getting started
 
-- **VS Code** — the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly)
-  bundles the binary, so there is nothing else to set up. It is still published under the project's
-  previous name.
-- **A binary** — from [Releases](https://github.com/felix-andreas/ry/releases), for CI or any other
+- **VS Code.** The [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
+  bundles the binary, so there is nothing else to set up.
+- **A binary** from [Releases](https://github.com/felix-andreas/ry/releases), for CI or any other
   editor.
-- **Cargo** — `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
+- **Cargo.** Run `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 
 Then, in a project directory:
 
@@ -72,7 +71,7 @@ ry fmt          # format it (--check and --diff for CI)
 ry server       # the language server; your editor starts this for you
 ```
 
-No configuration is needed. Type errors are opt-in via a `ry.toml`:
+No configuration is needed. Type errors are opt-in, through a `ry.toml`:
 
 ```toml
 [check]
@@ -81,25 +80,25 @@ typing = true
 
 ## Type system
 
-ry includes the first static type checker for R. It is novel and experimental: R has no established
+ry includes the first static type checker for R. It is new and experimental: R has no established
 typing semantics, so ry defines its own. The
-[tutorial](https://ry-lang.org/type-checking/tutorial/) introduces it on real code; the
+[tutorial](https://ry-lang.org/type-checking/tutorial/) introduces it on real code, and the
 [type system reference](https://ry-lang.org/reference/type-system/) specifies the full semantics.
 
 Most type errors in R are found by running the code. ry finds the ones that can be determined from
-the source alone, before anything runs. Types are inferred by default; explicit annotations are
-written in `#:` comments, so annotated files remain ordinary R code.
+the source alone, before anything runs. Types are inferred by default, and the annotations you do
+write go in `#:` comments, so annotated files remain ordinary R code.
 
-The static analysis is useful even with type errors disabled: completion, signature help, hover,
-inlay hints, and rename are all based on it. The `typing = true` setting only controls whether type
-mismatches are reported.
+The analysis is useful even with type errors switched off, because completion, signature help,
+hover, inlay hints, and rename are all built on it. The `typing = true` setting only controls whether
+type mismatches are reported.
 
 Checking all of R is not the goal. R is a highly dynamic language, and no static checker can
-describe everything it can do. ry therefore aims for two properties instead of coverage: soundness —
-what it claims must be true — and high performance, even on large codebases. This is why inference
-is Hindley–Milner and why some concepts are deliberately not supported. Code with a describable
-shape is checked; everything else becomes `Unknown`, which is compatible with everything, so a gap
-means a check was skipped rather than a wrong answer produced.
+describe everything it can do. Instead of coverage, ry aims for two properties: soundness (whatever
+it claims must be true) and speed, even on a large codebase. That is why inference is
+Hindley–Milner, and why some concepts are deliberately left out. Code with a describable shape is
+checked, and everything else becomes `Unknown`, which is compatible with everything. A gap therefore
+means a check was skipped, rather than a wrong answer produced.
 [Concepts](https://ry-lang.org/type-checking/concepts/) introduces the type system, and
 [Limitations](https://ry-lang.org/type-checking/limitations/) documents the limits of the static
 analysis.

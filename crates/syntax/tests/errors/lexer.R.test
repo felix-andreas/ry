@@ -75,11 +75,11 @@ error: unexpected character `§`
 # the lexer knows exactly which character was meant.
 greeting <- “hello”
 #++++
-error: `“` is a typographic quote, not R syntax — use `"` instead
+error: `“` is a typographic quote, not R syntax. Use `"` instead
  --> 3:13
   | greeting <- “hello”
   |             ^
-error: `”` is a typographic quote, not R syntax — use `"` instead
+error: `”` is a typographic quote, not R syntax. Use `"` instead
  --> 3:19
   | greeting <- “hello”
   |                   ^
@@ -87,7 +87,7 @@ error: `”` is a typographic quote, not R syntax — use `"` instead
 #---- an_en_dash_names_the_minus_it_replaces
 n <- 5 – 1
 #++++
-error: `–` is an en dash, not R syntax — use `-` instead
+error: `–` is an en dash, not R syntax. Use `-` instead
  --> 1:8
   | n <- 5 – 1
   |        ^
@@ -96,7 +96,7 @@ error: `–` is an en dash, not R syntax — use `-` instead
 # Quoting it would print an empty pair of backticks and a caret over nothing.
 n <- 5 + 1
 #++++
-error: this is a non-breaking space, not an ordinary space — R needs a plain space here
+error: this is a non-breaking space, not an ordinary space. R needs a plain space here
  --> 2:7
   | n <- 5 + 1
   |       ^
@@ -104,7 +104,7 @@ error: this is a non-breaking space, not an ordinary space — R needs a plain s
 #---- a_zero_width_character_says_to_delete_it
 x <- 1​
 #++++
-error: there is an invisible character here (a zero-width space) — delete it
+error: there is an invisible character here, a zero-width space. Delete it
  --> 1:7
   | x <- 1​
   |       ^

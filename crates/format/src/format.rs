@@ -1,15 +1,15 @@
 //! The ry formatter: a preserving formatter over the lossless syntax
 //! tree.
 //!
-//! The user's layout intent survives — single-line constructs stay single
-//! line, multiline constructs keep their line structure ("hug" detection
-//! reads the intent off the original bracket placement) — while spacing,
-//! indentation, quoting, comment shape, and `#:` annotation blocks
-//! normalize. `# fmt: skip` exempts one node byte-exactly, `# fmt: off` /
-//! `# fmt: on` toggle whole regions, and `# fmt: skip-file` at the head
-//! leaves the file untouched. A file with syntax errors refuses to format
-//! (errors inside `#:` annotations do not refuse the file — the affected
-//! block is preserved verbatim instead).
+//! The user's layout intent survives. A single-line construct stays single
+//! line, and a multiline construct keeps its line structure, because hug
+//! detection reads the intent off the original bracket placement. Spacing,
+//! indentation, quoting, comment shape, and `#:` annotation blocks normalize.
+//! `# fmt: skip` exempts one node byte-exactly, `# fmt: off` and `# fmt: on`
+//! toggle a whole region, and `# fmt: skip-file` at the head leaves the file
+//! untouched. A file with a syntax error refuses to format. An error inside a
+//! `#:` annotation does not refuse the file, and the affected block is
+//! preserved verbatim instead.
 
 use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
@@ -79,13 +79,13 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
         }
     }
 
-    // A `#:` region opened mid-line with the statement CONTINUING past it
-    // (`f <-#: T ...` — the region swallows the rest of the line while the
-    // expression resumes below) has no meaningful layout, so line-based join
-    // decisions cannot be stable. Refuse it like an R-grammar error. A
-    // statement's leading annotation and a TRAILING annotation after a
-    // complete statement (nothing significant follows within the statement)
-    // are unaffected.
+    // A `#:` region opened mid-line, with the statement CONTINUING past it,
+    // has no meaningful layout, so a line-based join decision cannot be
+    // stable. `f <-#: T ...` is such a region: it swallows the rest of the
+    // line while the expression resumes below. Refuse it like an R-grammar
+    // error. A statement's leading annotation is unaffected, and so is a
+    // TRAILING annotation after a complete statement, where nothing
+    // significant follows within the statement.
     for node in root.descendants() {
         if node.kind() != syntax::SyntaxKind::ANNOTATION {
             continue;
@@ -126,7 +126,7 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
         if continues {
             return Err(FormatError {
                 message:
-                    "a `#:` annotation cannot interrupt an expression — move it to its own line"
+                    "a `#:` annotation cannot interrupt an expression. Move it to its own line"
                         .to_owned(),
                 line,
                 column: offset - line_starts[line],
@@ -175,9 +175,9 @@ enum Directive {
     Off,
 }
 
-/// A node or token child, with trivia (whitespace and newlines) dropped —
-/// the walk re-derives all layout. Comments, annotations, and semicolons
-/// stay: containers place them.
+/// A node or token child, with trivia dropped, which is the whitespace and the
+/// newlines. The walk re-derives all layout. A comment, an annotation, and a
+/// semicolon stay, because a container places them.
 type Element = SyntaxElement;
 
 struct Formatter<'a> {
@@ -467,10 +467,10 @@ impl Formatter<'_> {
     }
 
     fn element(&mut self, element: &Element, level: usize, make_multiline: bool) {
-        // Nothing may follow a comment on its line — it would become comment
-        // text. Walks normally break the line themselves; this guard covers
-        // the joins that do not know a comment interposed (an operand
-        // continuing an operator across a commented line break).
+        // Nothing may follow a comment on its line, because it would become
+        // comment text. A walk normally breaks the line itself. This guard
+        // covers the joins that do not know a comment interposed, such as an
+        // operand continuing an operator across a commented line break.
         if let Some(comment_end) = self.comment_end.take()
             && element.kind() != SyntaxKind::COMMENT
             && !self.out[comment_end..].contains('\n')
@@ -531,7 +531,7 @@ impl Formatter<'_> {
             SyntaxKind::ANNOTATION => {
                 self.annotation(node, level);
                 // Like a comment, nothing may follow an annotation on its
-                // line — it would become annotation text.
+                // line, because it would become annotation text.
                 self.comment_end = Some(self.out.len());
             }
             _ => {
@@ -734,7 +734,7 @@ impl Formatter<'_> {
                     } else if trailing {
                         // An own-line comment after the last operand belongs
                         // to the construct around this expression, at its
-                        // level — not to the continuation.
+                        // level, rather than to the continuation.
                         self.newline(level);
                         self.element(element, level, false);
                     } else {
@@ -986,10 +986,10 @@ impl Formatter<'_> {
             .filter(|element| !matches!(element.kind(), SyntaxKind::L_BRACE | SyntaxKind::R_BRACE))
             .cloned()
             .collect();
-        // Stray semicolons render nothing on their own, so a body of only
-        // semicolons is an empty block — emitting its (dropped) lines would
-        // leave a bare blank interior line that a second pass collapses,
-        // breaking idempotence.
+        // A stray semicolon renders nothing on its own, so a body of only
+        // semicolons is an empty block. Emitting its dropped lines would leave
+        // a bare blank interior line that a second pass collapses, which breaks
+        // idempotence.
         let body_elements: Vec<Element> = if body_elements
             .iter()
             .all(|element| element.kind() == SyntaxKind::SEMICOLON)
@@ -1141,7 +1141,8 @@ impl Formatter<'_> {
             .is_none_or(|token| token.kind() == SyntaxKind::COMMA);
         // Hugged layout: some argument begins on the open line and ends on
         // the closer's line, chaining the lines together. Parameter lists
-        // never hug — a multiline signature always expands one per line.
+        // never hug, because a multiline signature always expands one per
+        // line.
         let hug = node.kind() != SyntaxKind::PARAMETER_LIST
             && close_previous_token.as_ref().is_none_or(|close_previous| {
                 close_previous.kind() != SyntaxKind::COMMENT
@@ -1170,9 +1171,10 @@ impl Formatter<'_> {
                             // Also with only empty arguments: `alist(, )`
                             // keeps the space after its comma. This applies
                             // whenever the closer shares its line with the
-                            // comma — including a multiline list that
-                            // collapsed (hugged or all-empty), which must
-                            // match what its single-line output reformats to.
+                            // comma. That includes a multiline list that
+                            // collapsed, whether hugged or all-empty, which
+                            // must match what its single-line output reformats
+                            // to.
                             self.space();
                         }
                         seen_close = true;
@@ -1352,9 +1354,9 @@ impl Formatter<'_> {
 
     fn if_expression(&mut self, node: &SyntaxNode, level: usize, make_multiline: bool) {
         let elements = Self::elements(node);
-        // The node may swallow trailing trivia (an if as the last argument
-        // keeps the newline before the closing paren) — the single/multiline
-        // choice must not see it.
+        // The node may swallow trailing trivia. An `if` as the last argument
+        // keeps the newline before the closing paren. The choice between
+        // single-line and multiline must not see it.
         let range = self.significant_range(&SyntaxElement::Node(node.clone()));
         let is_multiline = make_multiline
             || self.line(range.start()) != self.line(range.end())
@@ -2073,10 +2075,10 @@ fn annotation_space_between(
     use AnnotationTokenKind::*;
     match current {
         Comma | Colon | CloseParen | CloseBracket | CloseBrace | CloseAngle => return false,
-        // `(` hugs only what it APPLIES to — `fn(`, `Box<T>(`. After a `:`,
-        // `|` or `->` it opens a grouped type, and the surrounding-space rule
-        // for that neighbour governs: `x: (integer | character)`, not
-        // `x:(integer | character)`.
+        // `(` hugs only what it APPLIES to, as in `fn(` and `Box<T>(`. After
+        // a `:`, a `|`, or a `->` it opens a grouped type, and the
+        // surrounding-space rule for that neighbour governs. That gives
+        // `x: (integer | character)` rather than `x:(integer | character)`.
         OpenParen
             if matches!(
                 previous,
@@ -2129,21 +2131,21 @@ pub fn check_format_invariants(input: &str) {
 }
 
 /// The tokens formatting must preserve exactly, in order, as `(kind, spelling)`.
-/// This is the only invariant that can notice the formatter *changing* the code
-/// — determinism, idempotence and "the output formats again" all hold for a
-/// formatter that silently drops a statement or misspells a token.
+/// This is the only invariant that can notice the formatter *changing* the
+/// code. Determinism, idempotence, and "the output formats again" all hold for
+/// a formatter that silently drops a statement or misspells a token.
 ///
 /// Comparing kinds alone is not enough, and the gap is a miscompile rather than
-/// a cosmetic one: R is case-sensitive, so a formatter that emits the wrong
-/// bytes for an identifier — what a stale or off-by-one source range produces —
-/// preserves every kind while renaming the user's variables.
+/// a cosmetic problem. R is case-sensitive, so a formatter that emits the wrong
+/// bytes for an identifier preserves every kind while renaming the user's
+/// variables. A stale or off-by-one source range produces exactly that.
 ///
 /// Two allowances make the spelling comparable. Four kinds are dropped entirely
-/// because the formatter may introduce or move them: it braces a
-/// single-statement body, splits a `;` chain into lines, and re-lays-out a `#:`
-/// block across markers. And a string is compared by its content rather than its
-/// text, because the formatter chooses the quote character — but a *raw* string
-/// it copies byte-for-byte, so that one keeps its full spelling.
+/// because the formatter may introduce or move them. It braces a
+/// single-statement body, splits a `;` chain into lines, and re-lays out a `#:`
+/// block across markers. A string is compared by its content rather than by its
+/// text, because the formatter chooses the quote character. A *raw* string is
+/// copied byte for byte, so that one keeps its full spelling.
 fn significant_tokens(text: &str) -> Vec<(SyntaxKind, &str)> {
     let mut tokens = Vec::new();
     let mut start = 0usize;

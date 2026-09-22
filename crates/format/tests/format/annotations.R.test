@@ -556,4 +556,4 @@ foo(bar) #: list[integer]
 x <- #: integer
 1L
 #++++
-ERROR: Syntax error: a `#:` annotation cannot interrupt an expression — move it to its own line at line 1, column 6
+ERROR: Syntax error: a `#:` annotation cannot interrupt an expression. Move it to its own line at line 1, column 6

@@ -9,12 +9,12 @@ running it.
 
 ## What ships
 
-Only a small kernel is built in — the operators, plus `c()` and `list()`. Everything else comes from
-the shipped corpus:
+Only a small kernel is built in: the operators, plus `c()` and `list()`. Everything else comes from
+the shipped corpus.
 
 | | Namespaces |
 | --- | --- |
-| **Fully typed** | `base`, `stats`, `utils`, `methods`, `graphics`, `grDevices`, `datasets` — attached by default |
+| **Fully typed** | `base`, `stats`, `utils`, `methods`, `graphics`, `grDevices`, `datasets`, all attached by default |
 | **Typed when your project uses them** | `data.table`, `dplyr`, `ggplot2`, `testthat` |
 | **Export lists only** | the tidyverse (and `library(tidyverse)` itself), `knitr`, `rlang`, `glue`, `magrittr`, `scales`, `jsonlite`, `R6`, and every namespace R ships |
 
@@ -29,8 +29,8 @@ Attaching a package ry has never heard of weakens the `unresolved` check across 
 bare name *could* be one of that package's exports, so unresolved names are tolerated rather than
 reported.
 
-Two things limit the damage. A near miss of a name your **own** project binds is still reported —
-`library(shiny)` cannot explain `repositry` sitting next to a `repository` parameter. And
+Two things limit the damage. A near miss of a name your **own** project binds is still reported,
+because `library(shiny)` cannot explain `repositry` sitting next to a `repository` parameter. And
 [strict mode](/reference/type-system#strict-mode) reports every tolerated read, so you can see
 exactly how much the attachment switched off instead of reading a clean run as a clean bill of
 health.
@@ -49,8 +49,8 @@ A couple of lines are enough to restore full checking for the names you actually
 connect: fn(host: character) -> Session
 ```
 
-Stub declarations are bare — no `#:` prefix, and `@type` in a stub names an opaque type rather than
-giving it a representation. That is usually what you want for a package's own objects: what matters
+Stub declarations are bare. They take no `#:` prefix, and `@type` in a stub names an opaque type
+rather than giving it a representation. That is usually what you want for a package's own objects: what matters
 is that `connect()` returns a `Session` and that a `Session` is not a `character`, not what is
 inside it.
 
@@ -68,11 +68,11 @@ for your version of a package, you can fix it locally without waiting for a rele
 Overriding a name does not remove it from its own namespace: `stats::sd` stays valid under an `sd`
 override.
 
-Nothing here fails silently. `ry check` reports every declaration it had to drop — a line that does
-not parse, or one naming a type that does not exist — as an error on that stub line, and your editor
-shows the same while the `.Rtypes` file is open.
+Nothing here fails silently. `ry check` reports every declaration it had to drop as an error on that
+stub line, whether the line did not parse or it named a type that does not exist. Your editor shows
+the same while the `.Rtypes` file is open.
 
 ## Next
 
-- [Authoring stubs](/contributing/authoring-stubs) — the full declaration format, overload sets, and export manifests
-- [Limitations](/type-checking/limitations) — what stubs cannot fix
+- [Authoring stubs](/contributing/authoring-stubs) has the full declaration format, overload sets, and export manifests
+- [Limitations](/type-checking/limitations) covers what stubs cannot fix

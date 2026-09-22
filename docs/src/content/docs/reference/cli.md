@@ -3,7 +3,8 @@ title: CLI
 description: Every ry command, flag, exit code, and JSON field
 ---
 
-The complete command-line surface of the `ry` binary.
+This page lists everything the `ry` binary accepts on the command line, what it prints, and how it
+exits.
 
 ## Commands
 
@@ -17,8 +18,8 @@ The complete command-line surface of the `ry` binary.
 | `help` | Prints help for the binary or for one command |
 | `debug` | **Not stable.** Development commands: `debug ast` dumps a syntax tree, `debug analysis-stats` reports where analysis time and memory go. Output shape can change at any time |
 
-`check`, `fmt`, and `server` need no R installation. `repl` and `run` locate and load the R on your
-machine; their walkthrough lives in [ry at the R console](/guides/r-console).
+`check`, `fmt`, and `server` need no R installation. `repl` and `run` find and load the R on your
+machine, and [ry at the R console](/guides/r-console) walks through them.
 
 Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 
@@ -26,10 +27,14 @@ Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
-| `-V`, `--version` | — | — | Prints `ry 0.3.0-alpha` and exits 0 |
-| `-h`, `--help` | — | — | Prints help and exits 0. Available on every command |
-| `--stdio` | — | — | Accepted and ignored. It exists so VS Code's default launch arguments do not error |
-| `--experimental-features` | `FEATURES` | none | Space-separated feature names, or `all`. Only `range_formatting` exists today, and only the language server reads it — the flag does nothing for `check`, `fmt`, `repl`, or `run`. An unknown name prints a warning on stderr and is ignored, not a usage error |
+| `-V`, `--version` | n/a | n/a | Prints the version and exits 0 |
+| `-h`, `--help` | n/a | n/a | Prints help and exits 0. Available on every command |
+| `--stdio` | n/a | n/a | Accepted and ignored. It exists so VS Code's default launch arguments do not error |
+| `--experimental-features` | `FEATURES` | none | Space-separated feature names, or `all` |
+
+The only feature today is `range_formatting`, which only the language server reads, so the flag does
+nothing for `check`, `fmt`, `repl`, or `run`. An unknown feature name prints a warning on stderr and is
+ignored rather than treated as a usage error.
 
 ## check
 
@@ -47,17 +52,16 @@ ry check --min-severity error  # only errors report and gate
 | `--output` | `human` \| `json` | `human` | `human` renders diagnostics with source snippets on **stderr** and one summary line on **stdout**. `json` writes [JSON Lines](#json-output) on **stdout** and prints no summary |
 | `--min-severity` | `warning` \| `error` | `warning` | Findings below the floor are neither reported nor counted toward the [exit code](#exit-codes) |
 
-Analysis always covers the whole project a named path belongs to — the nearest ancestor holding
-`ry.toml` or `DESCRIPTION`, otherwise the target's own directory — so cross-file names resolve
-identically however you spell the paths. Only reporting is scoped to what you named.
+Analysis always covers the whole project a named path belongs to: the nearest ancestor directory
+holding `ry.toml` or `DESCRIPTION`, or else the target's own directory. Cross-file names therefore
+resolve the same way however you spell the paths, and only the reporting is limited to what you named.
 
-Type errors are opt-in through `[check] typing` in
-[`ry.toml`](/reference/configuration); the codes themselves are listed in
-[Diagnostic codes](/reference/diagnostic-codes).
+Type errors are opt-in through `[check] typing` in [`ry.toml`](/reference/configuration), and every
+code is listed in [Diagnostic codes](/reference/diagnostic-codes).
 
-Each finding is headed by its [diagnostic code](/reference/diagnostic-codes), then the message, then
-the source it was found in. A companion location — the sibling binding an overwrite warning points at
-— is drawn nested under the finding, from its own file.
+Each finding starts with its [diagnostic code](/reference/diagnostic-codes), followed by the message
+and the source it was found in. A companion location, such as the other binding an overwrite warning
+points at, is drawn nested under the finding, from its own file.
 
 ```console
 $ ry check
@@ -97,11 +101,11 @@ unresolved
  3 | result <- undefined_thing(3)
    |           ^^^^^^^^^^^^^^^
 
-3 problems in 2 files
+3 problems in 1 file
 ```
 
-Colour and rules follow the destination: a terminal gets unicode and colour (`NO_COLOR` turns the
-colour off), a pipe or a file gets the plain ASCII shown above.
+In a terminal the output uses Unicode box drawing and colour, and `NO_COLOR` turns the colour off.
+A pipe or a file gets the plain ASCII shown above.
 
 ## fmt
 
@@ -113,13 +117,13 @@ ry fmt --diff     # show the change without writing, exit 1
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
-| positional | `FILES...` | `.` | Files and directories to format. Literate documents are walked but deliberately skipped — the formatter rewrites whole-file layout and must not touch prose. `[check] exclude` does not apply here |
-| `--check` | — | off | Writes nothing. Prints `Would reformat: <path>` per file that would change |
-| `--diff` | — | off | Writes nothing. Prints a coloured unified diff per changed file. Takes precedence over `--check` |
-| `-v`, `--verbose` | — | off | Adds a throughput line after the summary |
+| positional | `FILES...` | `.` | Files and directories to format. A literate document is walked but deliberately skipped, because the formatter rewrites whole-file layout and must not touch prose. `[check] exclude` does not apply here |
+| `--check` | n/a | off | Writes nothing. Prints `Would reformat: <path>` per file that would change |
+| `--diff` | n/a | off | Writes nothing. Prints a coloured unified diff per changed file. Takes precedence over `--check` |
+| `-v`, `--verbose` | n/a | off | Adds a throughput line after the summary |
 
-All `fmt` output — diffs, `Would reformat:` lines, and the summary — goes to **stderr**. The rules it
-applies are documented in [Formatting rules](/reference/formatting-rules).
+All `fmt` output, including the diffs, the `Would reformat:` lines, and the summary, goes to
+**stderr**. The rules it applies are documented in [Formatting rules](/reference/formatting-rules).
 
 ```console
 $ ry fmt --diff
@@ -134,13 +138,13 @@ Diff in ./messy.R:
 
 ## server
 
-Speaks the Language Server Protocol over stdio; editors start it for you.
+Runs the Language Server Protocol over stdio. Your editor starts it for you.
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
-| `--debug` | — | off | Adds internal analysis facts to hover — a developer aid for working on ry itself. `RY_DEBUG=1` is the environment equivalent; the flag wins |
-| `--stdio` | — | — | Accepted and ignored (VS Code compatibility) |
-| `-v`, `--verbose` | — | off | Declared but not wired to anything yet |
+| `--debug` | n/a | off | Adds internal analysis facts to hover, as a developer aid for working on ry itself. `RY_DEBUG=1` turns on the same thing |
+| `--stdio` | n/a | n/a | Accepted and ignored, for VS Code compatibility |
+| `-v`, `--verbose` | n/a | off | Declared but not wired to anything yet |
 
 ## repl
 
@@ -154,22 +158,22 @@ completion. See [ry at the R console](/guides/r-console).
 
 ```console
 $ ry repl
-ry R console — R at <the R_HOME it found> (q() or Ctrl-D quits)
+ry R console, R at <the R_HOME it found>. Type q() or Ctrl-D to quit.
 ```
 
 ## run
 
-Runs one R file through the same embedded R and exits. The file argument is required.
+Runs one R file through the same embedded R, then exits. The file argument is required.
 
 | Argument | Required | Effect |
 | -------- | -------- | ------ |
 | `FILE` | yes | The R file to execute. A top-level error stops the script and exits 1, the way `Rscript` behaves |
 
-`run` prints R's own startup banner; it is not a quiet runner.
+`run` prints R's own startup banner, so it is not a silent runner.
 
 ## Exit codes
 
-`check` and `fmt` share one scheme, which is what CI gates on.
+`check` and `fmt` share one scheme, which is what CI gates on:
 
 | Code | `check` | `fmt` |
 | ---- | ------- | ----- |
@@ -181,13 +185,13 @@ The other commands:
 
 | Command | `0` | `1` | `2` |
 | ------- | --- | --- | --- |
-| `server` | Always, once the server loop returns | — | — |
+| `server` | Always, once the server loop returns | n/a | n/a |
 | `run` | The script ran to completion | An uncaught top-level R error | R could not be found or loaded, or the file could not be read |
-| `repl` | Session ended normally | — | R could not be found or loaded, or a `--file` script could not be read |
-| `debug ast` | The tree was printed. Parse errors are listed but do not change the code | — | The file could not be read |
+| `repl` | Session ended normally | n/a | R could not be found or loaded, or a `--file` script could not be read |
+| `debug ast` | The tree was printed. Parse errors are listed but do not change the code | n/a | The file could not be read |
 
-Any usage error — an unknown flag, a missing required argument, an invalid enum value, or `ry`
-with no command at all — exits `2`.
+Any usage error exits `2`: an unknown flag, a missing required argument, an invalid choice for a
+flag, or `ry` with no command at all.
 
 ## JSON output
 
@@ -202,17 +206,18 @@ wrapping array, no summary object, nothing else on the stream. Keys are alphabet
 | ----- | ---- | ------- |
 | `path` | string | Absolute path of the file the finding is in |
 | `line` | integer | 1-based start line |
-| `column` | integer | 1-based start column, counted in characters — the same number the rendered output and your editor show |
+| `column` | integer | The 1-based start column, counted in characters. It is the same number the rendered output and your editor show |
 | `endLine` | integer | 1-based end line |
 | `endColumn` | integer | 1-based end column, exclusive, in characters |
 | `severity` | `"warning"` \| `"error"` | The only two levels the CLI emits |
-| `code` | string | The [diagnostic code](/reference/diagnostic-codes) — exactly what a `# ry: allow(...)` comment spells |
+| `code` | string | The [diagnostic code](/reference/diagnostic-codes), which is exactly what a `# ry: allow(...)` comment spells |
 | `message` | string | The rendered message |
 | `related` | array | Companion locations, `[]` when there are none. Each entry has `path`, `line`, `column`, `endLine`, `endColumn`, and `message`. A `duplicate` finding names both sites |
 
 A related location is dropped when its file is outside the files this run analyzed, rather than
-reported with an unusable path. Warnings the CLI itself emits — unknown config keys, unreadable files
-— stay on stderr as human text and never appear as JSON.
+reported with a path you could not use. Warnings the CLI emits about its own run, such as an unknown
+configuration key or an unreadable file, stay on stderr as human-readable text and never appear as
+JSON.
 
-These field names are a contract; see [Continuous integration](/guides/continuous-integration) for a
+These field names are a contract. [Continuous integration](/guides/continuous-integration) shows a
 job that consumes them.

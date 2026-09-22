@@ -27,8 +27,9 @@ pub struct FixtureFile {
 }
 
 /// Parse every `.test` fixture file under `suite_dir` (recursively), without
-/// running anything — for callers that want the corpus rather than a verdict,
-/// such as deciding whether a focused-run filter names a real case.
+/// running anything. This serves a caller that wants the corpus rather than a
+/// verdict, such as one deciding whether a focused-run filter names a real
+/// case.
 pub fn parse_fixture_files(suite_dir: &Path) -> Vec<FixtureFile> {
     let mut paths = Vec::new();
     collect_fixture_files(suite_dir, &mut paths);
@@ -45,10 +46,10 @@ pub fn parse_fixture_files(suite_dir: &Path) -> Vec<FixtureFile> {
 
 /// Every fixture case source in the workspace, as `(case id, source)`.
 ///
-/// The hand-written fixture sources are the highest-quality R in the repository
-/// — each one was written to exercise something — so the invariant batteries and
-/// the differential oracles want all of them, not the subset one crate happens
-/// to know about. Listing the suites here rather than in each harness is what
+/// The hand-written fixture sources are the highest-quality R in the
+/// repository, because each one was written to exercise something. The
+/// invariant batteries and the differential oracles therefore want all of them,
+/// rather than the subset one crate happens to know about. Listing the suites here rather than in each harness is what
 /// keeps a newly added suite from being silently invisible to every battery.
 pub fn fixture_case_sources() -> Vec<(String, String)> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -88,10 +89,10 @@ const FIXTURE_SUITES: [&str; 13] = [
 /// expectations.
 ///
 /// The frozen stack's suites hold ~2,000 curated R edge cases whose expected
-/// output cannot be ported — it renders binding-resolution trees and a different
-/// type notation — but the programs themselves are the richest hand-written
-/// corpus in the repository, and nothing in the shipping crates ran a single one
-/// of them. They are wired into the invariant batteries instead, where no
+/// output cannot be ported, because it renders binding-resolution trees and a
+/// different type notation. The programs themselves are the richest
+/// hand-written corpus in the repository, and nothing in the shipping crates
+/// ran a single one of them. They are wired into the invariant batteries instead, where no
 /// expectation is needed: never panic, stay deterministic, keep ranges in
 /// bounds, and do not lose code when formatting.
 ///
@@ -220,7 +221,7 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     if let Some(filter) = &filter {
         assert!(
             matched > 0 || sibling_suite_holds(suite_dir, filter),
-            "FIXTURE_FILTER=`{filter}` names no fixture case in any suite — check the id.\n\
+            "FIXTURE_FILTER=`{filter}` names no fixture case in any suite. Check the id.\n\
              A filter that matches nothing would otherwise run zero cases and report a pass."
         );
     }
@@ -235,7 +236,7 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
 
 /// Whether a suite next to `suite_dir` holds `id`. One test binary drives
 /// several suites, so a focused run naming one case leaves every other suite
-/// matching nothing — and "this case lives next door" is the only thing that
+/// matching nothing. "This case lives next door" is the only thing that
 /// distinguishes that ordinary skip from a mistyped id, which is otherwise
 /// indistinguishable from a passing run.
 fn sibling_suite_holds(suite_dir: &Path, id: &str) -> bool {
@@ -403,8 +404,8 @@ pub fn check_parse_invariants(input: &str) {
 
     // Error-report quality: every diagnostic is renderable (non-empty
     // message, in-bounds range), and the report count stays linear in the
-    // input — a cascade that fans one mistake into a storm is a bug even
-    // when every individual message is well-formed.
+    // input. A cascade that fans one mistake into a storm is a bug even when
+    // every individual message is well-formed.
     assert!(
         parse.errors().len() <= 2 * tokens.len() + 16,
         "error cascade: {} errors from {} tokens for input {input:?}",
