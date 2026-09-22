@@ -4,7 +4,7 @@ description: The precise static-typing semantics contract for ry's R type checke
 ---
 
 This page is the specification of ry's type system: the contract the type checker implements, rule
-by rule. It is written to be looked things up in rather than read front to back. If you are new to
+by rule. It is meant for looking things up rather than for reading front to back. If you are new to
 the checker, start with the [tutorial](/type-checking/tutorial) and [concepts](/type-checking/concepts),
 which introduce the same ideas through examples, and come back here when you need the exact rule.
 
@@ -15,14 +15,14 @@ handled, and what strict mode adds.
 
 Two ideas run through everything. First, the checker prefers skipping a check to giving a wrong
 answer: a construct it cannot describe becomes `Unknown`, which is compatible with everything, so a
-gap never produces a false error. Second, [strict mode](#strict-mode) is how you see those gaps.
+gap means a skipped check rather than a false error. Second, [strict mode](#strict-mode) is how you see those gaps.
 
 ## Typing comment syntax
 
 Annotations live in `#:` comments, directly above the binding or expression they describe.
 Consecutive `#:` lines with no blank line between them form one *annotation block*.
 
-There are four annotation forms:
+Each annotation takes one of these forms:
 
 | Form | Meaning |
 | --- | --- |
@@ -31,7 +31,7 @@ There are four annotation forms:
 | `#: @if-unknown TYPE` | an [unknown-only coercion](#unknown-only-coercions) |
 | `#: @new NOMINAL_TYPE` | a [nominal introduction](#nominal-introduction) |
 
-A block holds exactly one of these: a single line in one of those forms, one
+A block holds exactly one annotation: a single line in one of those forms, an
 [expanded function annotation](#expanded-function-annotations) written as `@param` and `@return`
 lines, or one or more `@type` and `@alias` lines. The three kinds cannot be mixed in one block.
 
