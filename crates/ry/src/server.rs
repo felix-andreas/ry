@@ -845,31 +845,38 @@ impl Worker {
         lsp_types::Position::new(column.line, column.column)
     }
 
-    /// The file behind a formatting request, or `None` when the document is
-    /// not one this server tracks.
-    fn formattable(&mut self, uri: &lsp_types::Url) -> Option<SourceFile> {
-        let path = self.document_path(uri)?;
-        self.files.get(&path).copied()
-    }
-
-    /// The edits that format `selection`, as the protocol spells them.
+    /// The edits that format `range` of the document at `uri` — the whole
+    /// document when there is no range — as the protocol spells them.
     ///
-    /// Whole-document formatting is the same call over the whole file, so the
-    /// two requests can never disagree about what a line should look like. The
-    /// edits are the minimal ones either way, which is what lets an editor keep
-    /// the cursor, the folds and the scroll position where they were.
+    /// Both formatting requests come through here, so they can never disagree
+    /// about what a line should look like, and both answer with the minimal
+    /// edits, which is what lets an editor keep the cursor, the folds and the
+    /// scroll position where they were.
     ///
     /// A refusal (the file does not parse) surfaces as "no edits": there is no
     /// layout to offer for a file whose structure is unknown, and a protocol
     /// error would put a message in the user's face for a file they are in the
     /// middle of typing.
-    fn format_edits(
-        &self,
-        index: &LineIndex,
-        text: &str,
-        selection: TextRange,
+    fn format_document(
+        &mut self,
+        uri: &lsp_types::Url,
+        range: Option<lsp_types::Range>,
     ) -> Option<Vec<lsp_types::TextEdit>> {
-        let edits = match format::format_range(text, self.config.format, selection) {
+        let path = self.document_path(uri)?;
+        let file = *self.files.get(&path)?;
+        let text = self.text(file);
+        let index = LineIndex::new(&text);
+        let selection = match range {
+            None => TextRange::up_to(TextSize::of(text.as_str())),
+            // A client is not obliged to send the two ends in order, and an
+            // inverted range would be a panic rather than a bad edit.
+            Some(range) => {
+                let first = self.to_offset_with(&index, &text, range.start);
+                let second = self.to_offset_with(&index, &text, range.end);
+                TextRange::new(first.min(second), first.max(second))
+            }
+        };
+        let edits = match format::format_range(&text, self.config.format, selection) {
             Ok(edits) => edits,
             Err(error) => {
                 tracing::error!("formatting failed: {error:?}");
@@ -881,8 +888,8 @@ impl Worker {
                 .into_iter()
                 .map(|edit| lsp_types::TextEdit {
                     range: lsp_types::Range {
-                        start: self.to_position_with(index, text, edit.range.start()),
-                        end: self.to_position_with(index, text, edit.range.end()),
+                        start: self.to_position_with(&index, &text, edit.range.start()),
+                        end: self.to_position_with(&index, &text, edit.range.end()),
                     },
                     new_text: edit.new_text,
                 })
@@ -2192,15 +2199,7 @@ impl LanguageServer for ServerState {
         &mut self,
         params: lsp_types::DocumentFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
-        self.read(move |worker| {
-            let Some(file) = worker.formattable(&params.text_document.uri) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let index = LineIndex::new(&text);
-            let whole_file = TextRange::up_to(TextSize::of(text.as_str()));
-            Ok(worker.format_edits(&index, &text, whole_file))
-        })
+        self.read(move |worker| Ok(worker.format_document(&params.text_document.uri, None)))
     }
 
     fn range_formatting(
@@ -2208,17 +2207,7 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentRangeFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some(file) = worker.formattable(&params.text_document.uri) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let index = LineIndex::new(&text);
-            // A client is not obliged to send the two ends in order, and an
-            // inverted range would be a panic rather than a bad edit.
-            let first = worker.to_offset_with(&index, &text, params.range.start);
-            let second = worker.to_offset_with(&index, &text, params.range.end);
-            let selection = TextRange::new(first.min(second), first.max(second));
-            Ok(worker.format_edits(&index, &text, selection))
+            Ok(worker.format_document(&params.text_document.uri, Some(params.range)))
         })
     }
 
