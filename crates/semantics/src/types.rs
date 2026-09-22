@@ -336,9 +336,9 @@ pub fn type_size<'db>(db: &'db dyn Db, ty: Ty<'db>) -> u64 {
 /// code produces and well below the sizes a self-referential value reaches.
 pub const TYPE_SIZE_CEILING: u64 = 100_000;
 
-/// Rebuild `ty` with `map` applied to every type it directly contains — the one
-/// place that knows which types a composite is made of, and the mapping
-/// counterpart of [`Parameter::types`].
+/// Rebuild `ty` with `map` applied to every type it directly contains. This is
+/// the one place that knows which types a composite is made of, and the
+/// mapping counterpart of [`Parameter::types`].
 ///
 /// Every transformation that rewrites types (resolution, substitution,
 /// generalization, variable erasure) goes through here, so a member a
@@ -348,9 +348,9 @@ pub const TYPE_SIZE_CEILING: u64 = 100_000;
 /// inference variable riding inside one crossed the item boundary into a table
 /// that could not resolve it.
 ///
-/// Leaves — and the variables and rigid binders a caller substitutes — come back
-/// unchanged, so a caller handles the kind it cares about and delegates the rest
-/// to this function.
+/// Leaves, including the variables and rigid binders a caller substitutes, come
+/// back unchanged, so a caller handles the kind it cares about and delegates the
+/// rest to this function.
 pub fn map_child_types<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
@@ -416,7 +416,7 @@ pub fn map_child_types<'db>(
     }
 }
 
-/// Visit every type `ty` directly contains — the reading counterpart of
+/// Visit every type `ty` directly contains: the reading counterpart of
 /// [`map_child_types`], for walks that inspect a type without rebuilding it.
 pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl FnMut(Ty<'db>)) {
     match ty.kind(db) {
@@ -450,9 +450,9 @@ pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl F
 }
 
 /// Whether an inference variable appears anywhere in `ty`. Variables are
-/// indices into ONE table, so a type that outlives the table that minted them —
-/// an exported scheme, a value cached across a table rollback — must carry
-/// none: read in a foreign table the index either dangles or, worse, names an
+/// indices into ONE table, so a type that outlives the table that minted them
+/// (an exported scheme, or a value cached across a table rollback) must carry
+/// none. Read in a foreign table, the index either dangles or, worse, names an
 /// unrelated variable.
 pub fn contains_inference_var<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
     if matches!(ty.kind(db), TyKind::Var(_)) {

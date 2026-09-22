@@ -1,5 +1,5 @@
 //! Embeds `ry.exe.manifest` into Windows binaries so the process runs
-//! with UTF-8 as its active code page — embedded R takes its native
+//! with UTF-8 as its active code page, because embedded R takes its native
 //! encoding from the host process's code page (the manifest explains the
 //! full why). Done through MSVC linker flags to avoid a build dependency;
 //! the GNU Windows target is only ever compile-checked, and `cargo check`

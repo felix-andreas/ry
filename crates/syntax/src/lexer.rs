@@ -331,7 +331,7 @@ impl Lexer<'_> {
     /// End a quoted token that never closes at its first line break.
     ///
     /// R lets a string or a backtick-quoted name span lines, so the scan can
-    /// only give up at end of file — and a token that ran that far would
+    /// only give up at end of file, and a token that ran that far would
     /// otherwise swallow every statement below it, which is what a stray quote
     /// in a large file does while it is being typed: naming, diagnostics and
     /// every editor feature go dark from the quote to the end of the file for

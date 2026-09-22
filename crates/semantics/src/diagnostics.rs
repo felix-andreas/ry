@@ -1680,10 +1680,10 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         "strict mode: could not determine the type of `{name}`; it has no known type"
                     ),
                     StrictOriginKind::LoopWidened(name) => format!(
-                        "strict mode: could not determine the type of `{name}`. Its type does not stabilize across loop iterations. Add a type annotation"
+                        "strict mode: could not determine the type of `{name}`, because it does not stabilize across loop iterations. Add a type annotation"
                     ),
                     StrictOriginKind::RecursiveUnknown(name) => format!(
-                        "strict mode: could not determine the full type of `{name}`. It is defined recursively. Add a type annotation"
+                        "strict mode: could not determine the full type of `{name}`, because it is defined recursively. Add a type annotation"
                     ),
                 }
             };
@@ -1780,7 +1780,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             }
         }
         TypeErrorKind::MaybeNullCallee { found } => format!(
-            "this may be `NULL` here, so calling it is not safe. Its type is `{}`. Guard it with `is.null()`, or give the `switch` a default branch",
+            "this may be `NULL` here (its type is `{}`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch",
             renderer.render(db, *found)
         ),
         TypeErrorKind::KnownTypeUnderIfUnknown { found } => format!(

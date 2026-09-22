@@ -9,9 +9,9 @@
 //! constraint; comparisons and logic produce logicals; `if` joins branches by
 //! unify-else-union exactly like the legacy contract.
 //!
-//! This is the foundation walk. Parameter-position coercions, overload sets,
-//! `#:` annotation enforcement, strict origins, and cross-item schemes layer
-//! on next, each a separate slice over this structure.
+//! This is the foundation walk: parameter-position coercions, overload sets,
+//! `#:` annotation enforcement, strict origins, and cross-item schemes each
+//! layer on top of it as a separate slice.
 
 use crate::Db;
 use crate::hir::{
@@ -41,10 +41,10 @@ pub enum TypeErrorKind<'db> {
         expected: Ty<'db>,
         found: Ty<'db>,
     },
-    /// Two record types that differ in one field. This is its own variant
-    /// rather than a mismatch between the two whole types. Two whole records
-    /// print as long, near-identical strings the reader has to diff by eye,
-    /// and a nested difference is never attributed to a path at all.
+    /// Two record types that differ in one field. It is a variant of its own,
+    /// rather than a mismatch between the two whole types, because two whole
+    /// records print as long, near-identical strings the reader has to diff
+    /// by eye, and a nested difference is never attributed to a path at all.
     RecordShape {
         mismatch: Box<RecordMismatch<'db>>,
     },
@@ -72,8 +72,8 @@ pub enum TypeErrorKind<'db> {
         suggestion: Option<String>,
         expected_parameters: Vec<String>,
     },
-    /// A callee that may be `NULL`. It is callable on every other path, so
-    /// the finding is the nullability rather than "not a function".
+    /// A callee that may be `NULL`. It is callable on every other path, so the
+    /// finding is about the nullability, not "not a function".
     MaybeNullCallee {
         found: Ty<'db>,
     },
@@ -109,12 +109,12 @@ pub enum TypeErrorKind<'db> {
         found: Ty<'db>,
     },
     /// A function value does not fit an expected function type, and the reason
-    /// is one position in its signature. This is its own variant rather than a
-    /// mismatch between the two whole signatures. Two whole signatures say
-    /// nothing about which position failed. A constraint also does not survive
-    /// into the rendered type, so `fn(s: U) -> U` prints the same whether `U`
-    /// accepts anything or only numbers, which made the plain mismatch read as
-    /// a call that should have fit.
+    /// is one position in its signature. It is a variant of its own, rather
+    /// than a mismatch between the two whole signatures, because those say
+    /// nothing about which position failed. Worse, a constraint does not
+    /// survive into the rendered type, so `fn(s: U) -> U` prints the same
+    /// whether `U` accepts anything or only numbers, which made the plain
+    /// mismatch read as a call that should have fit.
     CallbackShape {
         mismatch: Box<FunctionMismatch<'db>>,
     },
@@ -294,9 +294,8 @@ pub fn check_item<'db>(db: &'db dyn Db, module: &Module, naming: &ItemNaming) ->
     check_item_with_annotation(db, module, naming, None, &[], None)
 }
 
-/// Full-check executions since process start. This is a plain instrument for
-/// the performance witnesses. A fixpoint re-run makes executions exceed the
-/// item count.
+/// Full-check executions since process start, a plain instrument for the
+/// performance witnesses. Fixpoint re-runs make it exceed the item count.
 pub static CHECK_EXECUTIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -751,9 +750,9 @@ struct Checker<'db, 'a> {
     /// Formal-parameter slots with no default: a `missing(name)` guard on
     /// one marks its true edge read-erroring.
     no_default_formals: rustc_hash::FxHashSet<BindingId>,
-    /// Slots standing for names this item reads but does not bind. One is a
+    /// Slots standing for names this item reads but does not bind, such as a
     /// top-level variable another statement assigned, which naming records as
-    /// a non-local because a scope is per-item. A guard needs somewhere to put
+    /// a non-local because scopes are per item. A guard needs somewhere to put
     /// its refinement, and flow state for a name belongs in the environment
     /// like any other slot's, so the name gets a slot here rather than a
     /// second place to look. Identity only: the type itself lives in the
@@ -921,8 +920,8 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
 enum ArgumentTarget {
     /// A fixed positional parameter, by index into `positional`.
     Positional(usize),
-    /// A named formal, by index into `named`. This covers both a formal
-    /// claimed by name and one filled positionally.
+    /// A named formal, by index into `named`, whether it was claimed by name or
+    /// filled positionally.
     Named(usize),
     /// Absorbed by the rest parameter.
     Rest,

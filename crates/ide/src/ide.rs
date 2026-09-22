@@ -2913,9 +2913,9 @@ fn target_at<'db>(
     // The cursor sits on a declared name that the expression walk could not
     // answer for: a parameter or for-loop variable, which is a declaration
     // with no expression of its own, or a name whose neighbour won the
-    // end-inclusive ranking — where two siblings abut, the expression ENDING
-    // at the cursor is ranked ahead of the declaration STARTING there, and for
-    // an unresolved neighbour it has nothing to offer. Reaching a declaration
+    // end-inclusive ranking. Where two siblings abut, the expression ENDING at
+    // the cursor is ranked ahead of the declaration STARTING there, and for an
+    // unresolved neighbour it has nothing to offer. Reaching a declaration
     // from its own first character is what keeps goto-definition reciprocal
     // with references: a jump lands exactly there.
     //
@@ -3184,7 +3184,7 @@ fn position_in_item(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<P
 /// Naming owns which token that is, and asking it is the whole point: a syntax
 /// scan for the item's first `NAME` node reads `name <- value` correctly and
 /// every other shape wrong. A right assignment declares its name LAST, so
-/// `compute(1) -> total` sent every jump to `total` into `compute` instead —
+/// `compute(1) -> total` sent every jump to `total` into `compute` instead:
 /// valid R, and the wrong file position. Items naming binds nothing for (an
 /// S4 registration call) still fall back to the scan.
 fn declared_name_range(

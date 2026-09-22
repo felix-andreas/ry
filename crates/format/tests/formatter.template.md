@@ -4,7 +4,7 @@ description: Every rule the formatter applies, with a before-and-after for each
 ---
 <!-- R CODE IN THIS FILE IS FORMATTED AND SAVED TO docs/src/content/docs/reference/formatting-rules.md -->
 
-ry includes an R code formatter that stays out of your way: it normalizes spacing, indentation, and bracing, and keeps the structure you wrote.
+ry includes an R code formatter that changes as little as it can: it normalizes spacing, indentation, and bracing, and keeps the structure you wrote.
 
 ## Usage
 

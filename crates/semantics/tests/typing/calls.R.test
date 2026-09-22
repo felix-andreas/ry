@@ -270,7 +270,7 @@ pick <- function(kind) {
 }
 #++++
 pick: Unknown
-82..84 error[type-mismatch] this may be `NULL` here, so calling it is not safe. Its type is `(fn(x: Any) -> character) | NULL`. Guard it with `is.null()`, or give the `switch` a default branch
+82..84 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: Any) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch
 
 #---- a_default_branch_makes_the_switch_result_callable
 pick <- function(kind) {

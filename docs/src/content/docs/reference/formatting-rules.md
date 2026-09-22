@@ -4,7 +4,7 @@ description: Every rule the formatter applies, with a before-and-after for each
 ---
 <!-- THIS FILE IS GENERATED AUTOMATICALLY. MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD -->
 
-ry includes an R code formatter that stays out of your way: it normalizes spacing, indentation, and bracing, and keeps the structure you wrote.
+ry includes an R code formatter that changes as little as it can: it normalizes spacing, indentation, and bracing, and keeps the structure you wrote.
 
 ## Usage
 
