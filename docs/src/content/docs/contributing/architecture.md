@@ -74,6 +74,16 @@ Analysis is incremental at item granularity, on salsa.
   model with reaching-write flow. The inference walk, `item_check`, produces
   the expression types, the type errors, the strict origins, and the exported
   scheme.
+- An inference variable is an index into one item's table, so nothing that
+  outlives that table may carry one. An exported scheme closes at the item
+  boundary in `close_scheme`, and a value cached across a table rollback is
+  variable-erased first. A leaked id is worse than a crash: in a reader's
+  table it either dangles or silently names an unrelated variable of the
+  reader's own. Every transformation that rewrites a type (resolution,
+  substitution, generalization, erasure) goes through one structural map,
+  `map_child_types`, so no walk can honor a member such as a parameter's
+  default while another skips it. The reading counterparts are
+  `for_each_child_type` and `Parameter::types`.
 - The package interface resolves a cyclic definition group through one
   canonical fixpoint. The result does not depend on which member is queried
   first. `interface_sccs` condenses the static graph of references from an

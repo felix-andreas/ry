@@ -163,6 +163,28 @@ from_pair <- pair(1L)
 pair: <T, U> fn(x: T, [y]: U) -> U
 from_pair: integer
 
+#---- a_default_closes_at_the_item_boundary_like_the_parameter_it_belongs_to
+# A default's type is part of the exported signature, and while the item is
+# being checked it may be an inference variable of THAT item's table. Reaching
+# a reader unclosed, the id either points past the end of the reader's own
+# table or names an unrelated variable of it — here every parameter but `i` is
+# pinned by its use, so the reader's table is smaller than the id the default
+# carried.
+choose <- function(a, b, c, d, e, g, h, i, j = i) {
+  if (a) 1L
+  if (b) 1L
+  if (c) 1L
+  if (d) 1L
+  if (e) 1L
+  if (g) 1L
+  if (h) 1L
+  j
+}
+picked <- choose(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, 1L)
+#++++
+choose: <T, U> fn(a: logical, b: logical, c: logical, d: logical, e: logical, g: logical, h: logical, i: T, [j]: U) -> U
+picked: integer
+
 #---- a_declared_binder_admits_its_own_default
 # The scheme the checker infers for this shape is writable as an annotation:
 # a binder is the caller's choice, and omitting the argument is the one call

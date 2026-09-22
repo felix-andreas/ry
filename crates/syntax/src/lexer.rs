@@ -328,10 +328,27 @@ impl Lexer<'_> {
         }
     }
 
+    /// End a quoted token that never closes at its first line break.
+    ///
+    /// R lets a string or a backtick-quoted name span lines, so the scan can
+    /// only give up at end of file — and a token that ran that far would
+    /// otherwise swallow every statement below it, which is what a stray quote
+    /// in a large file does while it is being typed: naming, diagnostics and
+    /// every editor feature go dark from the quote to the end of the file for
+    /// one missing character. Cutting the token at the line break confines the
+    /// damage to the line that is actually wrong, and costs nothing on input
+    /// that closes, which never reaches here.
+    fn end_unterminated_at_line_break(&mut self, start: usize) {
+        if let Some(offset) = self.text[start..self.pos].find(['\n', '\r']) {
+            self.pos = start + offset;
+        }
+    }
+
     fn string(&mut self, start: usize, quote: char) -> SyntaxKind {
         loop {
             match self.bump() {
                 None => {
+                    self.end_unterminated_at_line_break(start);
                     self.error("unterminated string; expected a closing quote", start);
                     break;
                 }
@@ -380,6 +397,7 @@ impl Lexer<'_> {
             }
             None => {
                 self.pos = self.text.len();
+                self.end_unterminated_at_line_break(start);
                 self.error(
                     format!("unterminated raw string; expected `{closer}`"),
                     start,
@@ -393,6 +411,7 @@ impl Lexer<'_> {
         loop {
             match self.bump() {
                 None => {
+                    self.end_unterminated_at_line_break(start);
                     self.error(
                         "unterminated backtick name; expected a closing `` ` ``",
                         start,
@@ -406,6 +425,7 @@ impl Lexer<'_> {
                 // of the line into a cascade of parse errors.
                 Some('\\') => {
                     if self.bump().is_none() {
+                        self.end_unterminated_at_line_break(start);
                         self.error(
                             "unterminated backtick name; expected a closing `` ` ``",
                             start,

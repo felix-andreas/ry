@@ -103,6 +103,8 @@ A finding names the grammar the source broke, not the stage that found it. Broke
 
 One mistake produces one finding. A `#:` region reports once, plus at most one unclosed opener. An unterminated argument or parameter list ends at the next statement rather than adopting it.
 
+A mistake stays on its own line. R lets a string or a backtick-quoted name span lines, so an unclosed one could swallow every statement below it, which is exactly what a stray quote does while you are still typing it. An unterminated one therefore ends at its line break. The quote is reported where it opens, and the rest of the file keeps its diagnostics, definitions, and completions.
+
 A statement that fails to parse as R suppresses every name-resolution and typing finding that overlaps it. A broken annotation suppresses nothing outside its own block, and inside it the refusal is the only finding.
 
 ### Name resolution

@@ -77,6 +77,33 @@ print(1L)
 # <statement>
   0..5 print -> non-local
 
+#---- an_unterminated_string_does_not_swallow_the_statements_below_it
+# A quote that never closes can only be discovered at end of file, and a token
+# that ran that far took every later statement with it — one missing character
+# turned the rest of the file into nothing the tools could see. The token ends
+# at the line break instead, so `after` is still a binding here.
+label <- "unclosed
+after <- 1L
+#++++
+# label
+  b0 label top-level 0..5
+  0..5 label <- b0
+# after
+  b0 after top-level 0..5
+  0..5 after <- b0
+
+#---- an_unterminated_backtick_name_does_not_swallow_them_either
+label <- `unclosed
+after <- 1L
+#++++
+# label
+  b0 label top-level 0..5
+  0..5 label <- b0
+  9..18 `unclosed -> non-local
+# after
+  b0 after top-level 0..5
+  0..5 after <- b0
+
 #---- a_rebinding_at_the_top_level_is_a_second_item_with_its_own_slot
 x <- 1L
 x <- "ok"

@@ -319,6 +319,69 @@ house style. A type is imported directly, and a function gets at least one modul
 unless ambiguity forces qualification. The change is mechanical, so do it as its own pass to keep
 the diff readable.
 
+## Open: oracles, or what the fuzzers never ask
+
+The next section measures what the fuzzers *feed* the code. This one is about what they *ask* of it.
+A crash class shipped past every battery: an inference variable escaping the item whose table
+created it. The output stayed well formed (ranges in bounds, output deterministic, incremental equal
+to fresh), so all four batteries were green while every package in the pinned CRAN manifest leaked
+such a variable and a quarter of them crashed `ry check`. An oracle that only asks "is this answer
+well formed?" cannot see a wrong answer. These are the concrete follow-ups.
+
+### Assert invariants in the code, not only properties in the harness
+
+A `debug_assert` at a seam turns every input of every suite, fixtures included, into a test of that
+invariant, at no release cost. The export-edge assertion (a closed scheme carries no inference
+variable) landed with the fix. Candidates for the next ones:
+
+- Every expression type an item records resolves in the table that produced it. This is the same
+  defect seen from the other end.
+- An item's declared-name range lies inside the item and spells the item's name. The fuzzer needed
+  1,200 iterations to stumble on a jump that landed on the wrong token. This assertion would catch it
+  on the first fixture that uses `->`.
+- HIR expression ranges and naming binding ranges lie inside their item's range.
+- The occurrences returned by references and rename are all spelled alike. The IDE battery checks
+  this locally. Promote it so that every caller is covered.
+
+### Add more relational oracles
+
+The round trip from a definition to its references and back to the cursor is the only relational
+oracle in the tree, and it found a wrong jump in ordinary R. Each of these costs one extra call and
+needs no expected output:
+
+- rename edits equal the references;
+- hover at the definition target names the same symbol as hover at the cursor;
+- completion at a name's first character offers that name;
+- goto-definition is idempotent.
+
+### Run the pinned CRAN corpus as a test, one project per package
+
+`scripts/corpus-manifest.txt` pins 69 packages, but `corpus/` is gitignored and nothing fetches it.
+The review in the next section found two arms silently contributing zero inputs for that reason.
+Twenty packages found five distinct crashes in ten minutes of wall clock. Two details decide whether
+the arm is worth running:
+
+- Each package must be its own project, with one `ry.toml` and its own `R/`. The defects live on the
+  interface between items, which a per-file arm cannot see. One shared database over every file
+  distorts the diagnostics instead: `duplicate` explodes, as measured below.
+- Typing and strict mode must be on, or most of the checker never runs.
+
+### Make a corpus finding reproducible before minimizing it
+
+The same package panicked on one run and not on the next. Item checks run across threads, and the
+order in which items are visited decides whether a dangling id lands out of range. A delta-debugging
+pass over a non-deterministic reproducer wastes an hour and can conclude the opposite of the truth.
+The corpus arm should force a single thread, and a minimizer (file level first, then statement level)
+belongs in `scripts/` instead of being rewritten for each crash.
+
+### Mutate for the shape that found these, and keep the default budget cheap
+
+The IDE round trip needs about 1,200 iterations to surface this class, and the default 300 never
+does. Raising the default is the wrong lever, because that battery already costs 216 s. Every
+failing input had the same shape: two tokens abutting with no separator, as in `"s"broken <- ...`.
+The seed-mutation arm produces that shape by accident, and a grammar generator almost never does.
+Add "delete a separator" as an explicit mutation, and run the high budget nightly.
+
 ## Open: what the fuzzers actually feed the code
 
 An independent review measured the generators rather than reading them. Every number came from a

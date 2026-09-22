@@ -115,6 +115,31 @@ completion (27): helper, help, help.request, help.search, help.start, contr.helm
 hint @6: <T> fn(x: T) -> T
 hint @30: fn() -> double
 
+#---- right_assignment_names_the_target_not_the_value
+# `->` declares its name LAST, so a jump that took the item's first name node
+# landed inside the assigned value — on `compute` here, which is valid R and
+# the wrong position.
+compute <- function() 1
+compute() -> total
+use <- tot$0al
+#++++
+hover 229..234: total: double
+hover-definition: global 216..221
+definition 216..221
+references: 216..221*, 229..234
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `use`
+  edit 222..222 -> "#: double\n"
+action: Add inferred type annotations for the whole file
+  edit 179..179 -> "#: fn() -> double\n"
+  edit 203..203 -> "#: double\n"
+  edit 222..222 -> "#: double\n"
+completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+hint @186: fn() -> double
+hint @221: double
+hint @225: double
+
 #==== references
 #---- slot_reads_and_writes
 f <- function() {
