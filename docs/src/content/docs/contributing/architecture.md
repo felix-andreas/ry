@@ -52,7 +52,7 @@ of a file, such as a function definition, a value binding, or a bare call.
 The database has four inputs:
 
 - `SourceFile` carries one file's text and document kind.
-- `ProjectFiles` is a singleton listing the project's files: package documents first, then in
+- `ProjectFiles` is a singleton listing the project's files, package documents first, each group in
   workspace-relative path order. The last-writer-wins symbol index and the CLI both rely on that
   order.
 - `PackageMetadata` is a singleton carrying the imports from `NAMESPACE` and the dependency universe
@@ -86,8 +86,9 @@ strict-mode origins, and the scheme the item exports.
 **An inference variable must never leave the item that created it.** A variable is an index into one
 item's inference table, so nothing that outlives that table may hold one. An exported scheme is
 closed at the item boundary by `close_scheme`, and a value cached across a rollback of the table has
-its variables erased first. A leaked id is worse than a crash. In a reader's table it either points
-past the end, or it silently names some unrelated variable of the reader's own.
+its variables erased first. A leaked id is not merely a crash risk: in a reader's table it either
+points past the end, which panics, or it silently names some unrelated variable of the reader's own,
+which is worse.
 
 To keep that from happening by accident, every transformation that rebuilds a type (resolution,
 substitution, generalization, erasure) goes through one structural map, `map_child_types`. That way
@@ -185,5 +186,5 @@ implementation to agree.
 What remains in `legacy/differential` is the benchmark harness. Its performance and memory
 witnesses, in `test_stats`, assert measured budgets for wall time, resident memory, and the
 linearity of resolve steps against a corpus of real files, so a regression in any of the three
-fails a test instead of being noticed months later. The corpus is fetched on demand, so these tests
+fails a test instead of being noticed later. The corpus is fetched on demand, so these tests
 run locally rather than in CI.

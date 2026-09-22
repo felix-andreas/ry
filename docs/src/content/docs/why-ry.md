@@ -5,8 +5,8 @@ description: Why R needs one fast toolchain with a type checker at its core, and
 
 R has good tools, but they are separate tools. Linting, formatting, style checks, analysis, and
 running the code are five programs, and each one parses your source and builds its own partial
-picture of it. None of them shares what it learned with the others, so every one of them starts from
-scratch. ry does these jobs in one tool, and every one of them reads your code the same way.
+picture of it. None of them shares what it learned with the others, so each one starts from
+scratch. ry does all of these jobs in one tool, and they all read your code the same way.
 
 ## Answers without running your code
 
