@@ -978,7 +978,7 @@ scalar condition admits:
 - A condition whose type is still undetermined becomes `logical`. That is the useful default for an
   unannotated predicate, so `function(flag) if (flag) 1L` infers `flag: logical`.
 
-`!` coerces its operand the same way, so `!0` is `TRUE` and `!5` is `FALSE`; see [unary `!`](#unary-)
+`!` coerces its operand the same way, so `!0` is `TRUE` and `!5` is `FALSE`; see [unary `!`](#unary)
 for the result.
 
 ### Indexing
@@ -1120,7 +1120,7 @@ A map-like vector takes part through its compatibility with an array-like vector
 not preserve map-likeness.
 
 An operand whose shape is still unknown, such as an unannotated parameter, counts as scalar-like, both
-here and in the comparison rules, by the same scalar claim that [`[` on vectors](#-on-vectors)
+here and in the comparison rules, by the same scalar claim that [`[` on vectors](#-on-vectors-1)
 makes. The cost is that a function taking a vector and returning a vector does not track that shape.
 A generic vector written `T[]` is the exception, and its operator results really are vectors.
 
