@@ -258,7 +258,7 @@ call(a = x, b = y, c = inner(
 ))
 ```
 
-This is the layout `test_that()` blocks and S4 method definitions rely on:
+Two common instances of this layout are a `test_that()` block and an S4 method definition:
 
 ```r
 # test_that_and_s4_example: format
