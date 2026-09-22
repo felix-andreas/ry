@@ -3,8 +3,8 @@ title: Adopting an existing codebase
 description: How to turn type checking on for a project that has never had it, without being buried in findings
 ---
 
-Turning `typing = true` on a codebase that has never been type-checked will report findings, possibly
-many. Turn it on in stages instead.
+Setting `typing = true` on a codebase that has never been type-checked will report findings,
+possibly a lot of them. Turn it on in stages instead.
 
 ## 1. Start with no configuration at all
 
@@ -12,7 +12,8 @@ Code analysis needs no opt-in. Run `ry check` with no `ry.toml` and read what co
 Unresolved names, unused bindings, and duplicate definitions find real mistakes on day one, and none
 of them require you to understand the type system.
 
-Fix those first. It is a short list on most projects, and it clears the noise before you add more.
+Fix those first. It is a short list on most projects, and it clears away the noise before you add
+more.
 
 ## 2. Turn typing on
 
@@ -45,12 +46,11 @@ overrides the project setting, in any direction:
 # typing: strict   # hold this module to the stronger standard
 ```
 
-The last directive in the file wins, and any other value is an error.
+If a file has more than one, the last directive wins, and any other value is an error.
 
 So you can leave `typing = false` project-wide and opt in the modules you are actively working on,
-or turn it on project-wide and exempt the files you are not ready for.
-
-Turn typing on first in the files you change most often.
+or turn it on project-wide and exempt the files you are not ready for. Either way, start with the
+files you change most often.
 
 ## 4. Strict mode
 
@@ -60,11 +60,10 @@ typing = true
 strict = true
 ```
 
-Strict mode is a stronger claim than `typing = true`. It reports every place a value became
-`Unknown`, meaning every point where the checker gave up rather than concluded something.
-
-It also raises `unresolved` from a warning to an error, so `--min-severity error` no longer filters
-those out of a CI run.
+Strict mode makes a stronger claim than `typing = true`. It reports every place a value became
+`Unknown`, meaning every point where the checker gave up instead of concluding something. It also
+raises `unresolved` from a warning to an error, so `--min-severity error` no longer filters those
+out of a CI run.
 
 That is what you want on a module you intend to rely on, and not what you want across a whole legacy
 codebase on day one. A clean ordinary run means the checker found no contradictions. A clean strict

@@ -46,8 +46,8 @@ Asset names follow the Rust target triple, as in `ry-aarch64-apple-darwin.tar.gz
 The default is strict: **warnings fail the job**. A run with nothing but `unused` warnings still
 exits `1`.
 
-That is usually right for a project that starts clean, and wrong for one adopting ry on an existing
-codebase. To gate on errors only while you work through a backlog:
+That is usually right for a project that starts out clean, and wrong for one adopting ry on an
+existing codebase. To gate on errors only while you work through the backlog:
 
 ```bash
 ry check --min-severity error
@@ -65,9 +65,9 @@ the exit code. A run whose only findings are warnings prints `1 file checked, no
 | To see the diff CI would apply | `ry fmt --diff` |
 
 Exit code `2` means the run could not be completed: an unparseable `ry.toml`, a path that does not
-exist, or an unreadable file. It is a different failure from `1`, not a worse one. A job that
-treats any non-zero status as "findings" will report a broken config as a code problem. The full
-table is in the [CLI reference](/reference/cli#exit-codes).
+exist, or an unreadable file. That is a different failure from `1`, not a worse one, and a job that
+treats every non-zero status as "findings" will report a broken configuration as a code problem.
+The full table is in the [CLI reference](/reference/cli#exit-codes).
 
 ## JSON output
 
@@ -76,8 +76,8 @@ ry check --output json
 ```
 
 writes JSON Lines to stdout: one object per finding, nothing else on the stream, and no summary
-line. In JSON mode no diagnostic is rendered to stderr. Configuration warnings and the exit-2 failures
-below still go there, so stderr is not always empty.
+line. No diagnostic is rendered to stderr in JSON mode, but configuration warnings and the exit-2
+failures described above still go there, so stderr is not always empty.
 
 ```json
 {"code":"type-mismatch","column":21,"endColumn":27,"endLine":4,"line":4,"message":"expected `integer`, found `character`","path":"/home/you/demo/main.R","related":[],"severity":"error"}
@@ -86,7 +86,7 @@ below still go there, so stderr is not always empty.
 Every field is documented in the [CLI reference](/reference/cli#json-output), and the field names
 are a contract.
 
-Counting errors for a summary line, without jq:
+To count errors for a summary line without jq:
 
 ```bash
 ry check --output json | grep -c '"severity":"error"'
