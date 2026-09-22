@@ -4,7 +4,7 @@ description: Every rule the formatter applies, with a before-and-after for each
 ---
 <!-- THIS FILE IS GENERATED AUTOMATICALLY. MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD -->
 
-ry includes a non-invasive R code formatter. It normalizes spacing, indentation and bracing, and preserves the structure you wrote.
+ry includes an R code formatter that stays out of your way: it normalizes spacing, indentation, and bracing, and keeps the structure you wrote.
 
 ## Usage
 
@@ -17,13 +17,13 @@ ry fmt --check   # List files that would be reformatted, without writing
 ry fmt --diff    # Show a diff of formatting changes without applying them
 ```
 
-`--check` and `--diff` exit 1 when any file would change, which is what a CI job gates on. Errors
-(for example a file that cannot be parsed) exit 2. See the full
-[exit-code table](/reference/cli#exit-codes).
+`--check` and `--diff` exit 1 when any file would change, which is what a CI job gates on, and an
+error, such as a file that cannot be parsed, exits 2. The [exit-code table](/reference/cli#exit-codes)
+has the details.
 
 ## Philosophy
 
-The formatter preserves existing line breaks and does not split expressions that are written on one line. Three principles follow from that:
+The formatter keeps your line breaks and never splits an expression you wrote on one line. Everything else follows from that idea:
 
 * **Single-line expressions remain single-line:** The formatter adds line breaks only where the expression is already multi-line, and never breaks a single-line expression into several (with [one exception](#loops)).
 * **Both nesting styles are preserved:** Compact ("hugged") and expanded forms for nested expressions are equally valid, and neither is rewritten into the other (see [hugging behavior](#hugging-behavior)).
@@ -147,7 +147,7 @@ formula = ~ x + y
 
 ### Parenthesized expressions
 
-A single-line parenthesized expression is always formatted in a hugging style. There is no extra space between the opening parenthesis and the enclosed expression.
+A single-line parenthesized expression is always hugged, with no space between the parentheses and the expression inside:
 
 ```r
 # Before formatting
@@ -179,7 +179,7 @@ Multiline parenthesized expressions can be formatted in either hugged or expande
 x <- if (condition) consequence else alternative
 ```
 
-**Nested if-else.** A nested `if-else` chain is formatted so that each `else if` and each `else` starts on its own line. All branches align at the same indentation level, and a nested case gets no extra indentation.
+**Nested if-else:** A nested `if-else` chain is formatted so that each `else if` and each `else` starts on its own line, with every branch at the same indentation level and no extra indentation for nested cases.
 
 ```r
 if (a) {
@@ -306,7 +306,7 @@ call(
 )
 ```
 
-**A nested function call** uses either a hugged style or an expanded style. In the hugged style the inner call starts directly after the outer call's parenthesis. The formatter preserves both.
+**Nested function calls** can use either a hugged style, where the inner call starts right after the outer call's parenthesis, or an expanded style. The formatter preserves both.
 
 ```r
 # Hugged format - both functions start on the same line
@@ -331,6 +331,7 @@ call(a = x, b = y, c = inner(
 ))
 ```
 
+This is the layout `test_that()` blocks and S4 method definitions rely on:
 
 ```r
 test_that("description", {
@@ -342,7 +343,7 @@ setMethod("method", "Class", function(x) {
 }, sealed = TRUE)
 ```
 
-In the `setMethod` example: Even though `sealed = TRUE` is on a different line than the other arguments, only the function body is multiline, so the formatter preserves this layout.
+In the `setMethod` example, `sealed = TRUE` sits on a different line from the other arguments, but only the function body is multiline, so the formatter keeps the layout.
 
 **Note:** You can always opt in to the fully expanded multiline style: if you add a newline so that at least two arguments of a call are on different lines, the formatter treats it as multiline and will place every argument on its own line.
 
@@ -355,7 +356,7 @@ add <- function(x, y) x + y
 double <- function(x) { x * 2 }
 ```
 
-**Multiline functions.** If the function body spans several lines, braces are always added, even when the body starts on the same line as the function declaration.
+**Multiline functions:** If the body spans several lines, braces are always added, even when the body starts on the same line as the function declaration.
 
 ```r
 # Before formatting
@@ -390,7 +391,7 @@ lapply(data, \(x) {
 
 ### Switch calls
 
-Switch statements are formatted like ordinary function calls. For fallthrough cases (`case = ,`), an extra space is added after the `=` to mark the fallthrough.
+`switch()` calls are formatted like any other function call. For a fallthrough case (`case = ,`), an extra space after the `=` marks the fallthrough.
 
 ```r
 result <- switch(
@@ -480,7 +481,7 @@ x <- "This is a multi-line string.
 # }
 ```
 
-[Raw string literals](https://search.r-project.org/R/refmans/base/html/Quotes.html) (`r"(...)"`, `R"[...]"`, and their custom-dash variants) are preserved byte-for-byte. Quote normalization is never applied to them. Their whole purpose is to hold characters that would otherwise need escaping, including a quote and a backslash.
+[Raw string literals](https://search.r-project.org/R/refmans/base/html/Quotes.html) (`r"(...)"`, `R"[...]"`, and their custom-dash variants) are preserved byte-for-byte. Quote normalization never applies to them, since their whole purpose is to hold characters, such as quotes and backslashes, that would otherwise need escaping.
 
 ```r
 # Before formatting
