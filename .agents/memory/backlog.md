@@ -176,14 +176,6 @@ nominal distinctness, and no cascades outside the `@param` case. The gap is not 
 **diagnostics render the artifact unification left behind rather than the fact that failed**, and that
 the nominal story protects construction but nothing after it.
 
-- **A script's `setGeneric("area", …)` is invisible to navigation from a call.** Hover's definition
-  line reaches the name string, but goto-definition, references and rename on `area(1)` answer nothing:
-  `target_at` accepts a non-local only when some item declares it as a top-level *slot*
-  (`global_declaration_exists`), and naming mints no slot for a string-named generic.
-- **Top-level `x := 1` is an item named `x`, yet R binds nothing.** Item classification treats `:=` as a
-  left-binding spelling while the HIR lowers it to a call of `:=` (data.table/rlang), so the script
-  unused check reports "`x` is assigned but never used" on a statement that assigns nothing.
-
 ## FIXED — goto-definition landed on the wrong token, and a stray quote blanked the rest of a file
 
 Opened by the IDE fuzz battery at a raised budget (`FUZZ_ITERS=1200 cargo test -p ide --test
@@ -1755,12 +1747,6 @@ re-bless.
   `pair: list{a: integer, b: character}`, `pair[[2L]]` resolves `character` while `pair[[0x2L]]`
   falls back to `integer | character`. `integer_literal_position` and `is_whole_number_double` both
   need a radix-aware parse.
-- **`:=` publishes a definition the HIR does not make.** `classify_top_level` lists `COLON_EQ` among
-  the assignment spellings, so `x := 1L` names its item `x` and a later `y <- x` resolves — but
-  lowering (correctly) makes it a call to a function `:=` that binds nothing, and R binds nothing
-  either. Two sources of truth for what an item defines, and the item tree is the wrong one. Pinned
-  by `assignment__a_walrus_lowers_to_a_call_because_it_binds_nothing`, whose header shows the
-  disagreement.
 
 ## Open — naming fidelity (found by testing name resolution directly, in `crates/semantics/tests/naming/`)
 

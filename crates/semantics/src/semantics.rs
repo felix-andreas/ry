@@ -1662,7 +1662,8 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
 }
 
 /// Kind + name of one top-level statement, mirroring R assignment spellings:
-/// `<-`, `=`, `<<-`, `:=` bind on the left, `->`, `->>` on the right.
+/// `<-`, `=`, `<<-` bind on the left, `->`, `->>` on the right. `:=` binds
+/// nothing — R calls a function of that name (data.table, rlang).
 fn classify_top_level(node: &syntax::SyntaxNode) -> (ItemKind, Option<String>) {
     match top_level_definition(node) {
         Some(definition) => (definition.kind, Some(definition.name)),
@@ -1703,10 +1704,9 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
     let binary = syntax::ast::BinaryExpr::cast(node.clone())?;
     let operator = binary.operator()?;
     let (target, value) = match operator.kind() {
-        SyntaxKind::LESS_MINUS
-        | SyntaxKind::EQ
-        | SyntaxKind::LESS2_MINUS
-        | SyntaxKind::COLON_EQ => (binary.lhs(), binary.rhs()),
+        SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => {
+            (binary.lhs(), binary.rhs())
+        }
         SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (binary.rhs(), binary.lhs()),
         _ => return None,
     };
@@ -1739,7 +1739,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
 /// registration call that creates a bare-name binding in the global
 /// environment (`setClass`/`setMethod` register class metadata under
 /// internal names, referenced through strings, so they bind nothing). Paired
-/// with the range of the string spelling it.
+/// with the range of the name inside its string.
 fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::TextRange)> {
     use syntax::SyntaxKind;
     if node.kind() != SyntaxKind::CALL_EXPR {
@@ -1795,7 +1795,13 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
         return None;
     }
     let name = text[1..text.len() - 1].to_owned();
-    (!name.is_empty()).then(|| (name, string.text_range()))
+    // The name without its quotes: that is the span a rename rewrites.
+    let range = string.text_range();
+    let content = syntax::TextRange::new(
+        range.start() + syntax::TextSize::from(1),
+        range.end() - syntax::TextSize::from(1),
+    );
+    (!name.is_empty()).then_some((name, content))
 }
 
 #[cfg(test)]

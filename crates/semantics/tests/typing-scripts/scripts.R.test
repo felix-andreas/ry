@@ -85,7 +85,13 @@ counter: integer
 #---- unused_generic_marks_the_name_string
 setGeneric("area", function(shape) standardGeneric("area"))
 #++++
-11..17 warning[unused] `area` is assigned but never used.
+12..16 warning[unused] `area` is assigned but never used.
+
+#---- a_walrus_statement_defines_nothing
+x := 1
+#++++
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+2..4 warning[unresolved] I could not resolve ``:=`` in this package, its imports, or builtins.
 
 #---- a_declared_contract_survives_a_failing_body
 #: fn(spec: character) -> integer

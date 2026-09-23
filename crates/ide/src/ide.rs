@@ -1725,6 +1725,14 @@ fn s4_occurrences_in(db: &dyn Db, file: SourceFile) -> Vec<S4Occurrence> {
                 true,
                 &mut occurrences,
             ),
+            // The generic's body dispatches by name; a rename that skipped
+            // it would leave the generic calling a generic that is gone.
+            "standardGeneric" => push_s4_string(
+                s4_argument(&arguments, "f", 0),
+                S4Kind::Generic,
+                false,
+                &mut occurrences,
+            ),
             "setMethod" => {
                 push_s4_string(
                     s4_argument(&arguments, "f", 0),
@@ -2893,10 +2901,18 @@ fn target_at<'db>(
     }
 
     // S4 class/generic names live in string literals, invisible to naming.
+    // A generic the project defines is also an ordinary global function —
+    // `setGeneric` binds its name and every call reads it — so its strings
+    // and its calls are one symbol.
     if let Some(occurrence) = s4_occurrences_in(db, file)
         .into_iter()
         .find(|occurrence| occurrence.range.start() <= offset && offset <= occurrence.range.end())
     {
+        if occurrence.kind == S4Kind::Generic
+            && global_declaration_exists(db, files, &occurrence.name)
+        {
+            return Some(Target::Global(occurrence.name));
+        }
         return Some(Target::S4 {
             name: occurrence.name,
             kind: occurrence.kind,
@@ -2937,12 +2953,16 @@ fn target_at<'db>(
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
     files.files(db).iter().any(|file| {
         item_tree(db, *file).iter().copied().any(|item| {
-            item_naming(db, item).as_ref().is_some_and(|naming| {
-                naming
-                    .bindings
-                    .values()
-                    .any(|info| info.kind == BindingKind::TopLevel && info.name == name)
-            })
+            // A named definition declares its name even where naming mints no
+            // slot for it: `setGeneric("name", …)` binds through a string.
+            (matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
+                && item.name(db).as_deref() == Some(name))
+                || item_naming(db, item).as_ref().is_some_and(|naming| {
+                    naming
+                        .bindings
+                        .values()
+                        .any(|info| info.kind == BindingKind::TopLevel && info.name == name)
+                })
         })
     })
 }
@@ -2986,6 +3006,17 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         }
         Target::Global(name) => {
             for &file in files.files(db) {
+                // A generic's name strings: `setGeneric` declares the global,
+                // `setMethod` refers to it.
+                for occurrence in s4_occurrences_in(db, file) {
+                    if occurrence.kind == S4Kind::Generic && occurrence.name == *name {
+                        result.push(Occurrence {
+                            file,
+                            range: occurrence.range,
+                            is_declaration: occurrence.is_declaration,
+                        });
+                    }
+                }
                 for &item in item_tree(db, file) {
                     let Some(node) = item_node(db, item) else {
                         continue;
