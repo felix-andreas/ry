@@ -650,8 +650,32 @@ setMethod("ar$0ea", "Square", function(shape) 1)
 #++++
 hover 70..76: character
 definition 12..16
-references: 12..16*, 71..75
-rename: 2 edit(s)
+references: 12..16*, 52..56, 71..75
+rename: 3 edit(s)
+signature: none
+completion: none
+
+#---- call_of_a_script_generic_navigates_to_its_declaration
+setGeneric("area", function(shape) standardGeneric("area"))
+setMethod("area", "Square", function(shape) 1)
+ar$0ea(1)
+#++++
+hover 107..111: area: Unknown
+hover-definition: global 12..16
+definition 12..16
+references: 12..16*, 52..56, 71..75, 107..111
+rename: 4 edit(s)
+signature: none
+completion (23): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, Arg
+
+#---- declaring_string_of_a_generic_reaches_its_calls
+setGeneric("ar$0ea", function(shape) standardGeneric("area"))
+area(1)
+#++++
+hover 11..17: character
+definition 12..16
+references: 12..16*, 52..56, 60..64
+rename: 3 edit(s)
 signature: none
 completion: none
 

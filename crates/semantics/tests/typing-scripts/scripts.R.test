@@ -76,6 +76,23 @@ helper <- function(count) {
 helper: <T: numeric> fn(count: T) -> T
 0..6 warning[unused] `helper` is assigned but never used.
 
+#---- unused_super_assignment_marks_the_name
+counter <<- 0L
+#++++
+counter: integer
+0..7 warning[unused] `counter` is assigned but never used.
+
+#---- unused_generic_marks_the_name_string
+setGeneric("area", function(shape) standardGeneric("area"))
+#++++
+12..16 warning[unused] `area` is assigned but never used.
+
+#---- a_walrus_statement_defines_nothing
+x := 1
+#++++
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+2..4 warning[unresolved] I could not resolve ``:=`` in this package, its imports, or builtins.
+
 #---- a_declared_contract_survives_a_failing_body
 #: fn(spec: character) -> integer
 steps_for <- function(spec) "not an integer"

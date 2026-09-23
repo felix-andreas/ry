@@ -18,7 +18,7 @@ use semantics::naming::{BindingId, BindingKind};
 use semantics::types::{FunctionType, Ty, TyKind, TypeScheme};
 use semantics::{
     Db, Item, ItemKind, ProjectFiles, SourceFile, item_annotation_syntax, item_check, item_hir,
-    item_naming, item_node, item_tree, package_definitions,
+    item_name_range, item_naming, item_node, item_tree, package_definitions,
 };
 use syntax::{TextRange, TextSize};
 
@@ -237,7 +237,7 @@ fn global_hover_definition(
         })
         .or(own_item)?;
     let node = item_node(db, declaring)?;
-    let range = declared_name_range(db, declaring, &node).unwrap_or_else(|| node.text_range());
+    let range = item_name_range(db, declaring).unwrap_or_else(|| node.text_range());
     Some(HoverDefinition::Global {
         target: NavigationTarget {
             file: *declaring.file(db),
@@ -362,8 +362,7 @@ pub fn definition(
         Target::Global(name) => {
             if let Some(winner) = package_definitions(db, files).get(&name) {
                 let node = item_node(db, *winner)?;
-                let range =
-                    declared_name_range(db, *winner, &node).unwrap_or_else(|| node.text_range());
+                let range = item_name_range(db, *winner).unwrap_or_else(|| node.text_range());
                 return Some(DefinitionTarget::Project(NavigationTarget {
                     file: *winner.file(db),
                     range,
@@ -1294,7 +1293,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                     });
                     continue;
                 }
-                let selection = declared_name_range(db, item, &node).unwrap_or(range);
+                let selection = item_name_range(db, item).unwrap_or(range);
                 // An assigned S4/R6 construction (the call is the assigned
                 // value, a direct child of the assignment) keeps the assigned
                 // name but takes the construct's kind, detail, and members.
@@ -1724,6 +1723,14 @@ fn s4_occurrences_in(db: &dyn Db, file: SourceFile) -> Vec<S4Occurrence> {
                 s4_argument(&arguments, "name", 0),
                 S4Kind::Generic,
                 true,
+                &mut occurrences,
+            ),
+            // The generic's body dispatches by name; a rename that skipped
+            // it would leave the generic calling a generic that is gone.
+            "standardGeneric" => push_s4_string(
+                s4_argument(&arguments, "f", 0),
+                S4Kind::Generic,
+                false,
                 &mut occurrences,
             ),
             "setMethod" => {
@@ -2894,10 +2901,18 @@ fn target_at<'db>(
     }
 
     // S4 class/generic names live in string literals, invisible to naming.
+    // A generic the project defines is also an ordinary global function —
+    // `setGeneric` binds its name and every call reads it — so its strings
+    // and its calls are one symbol.
     if let Some(occurrence) = s4_occurrences_in(db, file)
         .into_iter()
         .find(|occurrence| occurrence.range.start() <= offset && offset <= occurrence.range.end())
     {
+        if occurrence.kind == S4Kind::Generic
+            && global_declaration_exists(db, files, &occurrence.name)
+        {
+            return Some(Target::Global(occurrence.name));
+        }
         return Some(Target::S4 {
             name: occurrence.name,
             kind: occurrence.kind,
@@ -2938,12 +2953,16 @@ fn target_at<'db>(
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
     files.files(db).iter().any(|file| {
         item_tree(db, *file).iter().copied().any(|item| {
-            item_naming(db, item).as_ref().is_some_and(|naming| {
-                naming
-                    .bindings
-                    .values()
-                    .any(|info| info.kind == BindingKind::TopLevel && info.name == name)
-            })
+            // A named definition declares its name even where naming mints no
+            // slot for it: `setGeneric("name", …)` binds through a string.
+            (matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
+                && item.name(db).as_deref() == Some(name))
+                || item_naming(db, item).as_ref().is_some_and(|naming| {
+                    naming
+                        .bindings
+                        .values()
+                        .any(|info| info.kind == BindingKind::TopLevel && info.name == name)
+                })
         })
     })
 }
@@ -2987,6 +3006,17 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         }
         Target::Global(name) => {
             for &file in files.files(db) {
+                // A generic's name strings: `setGeneric` declares the global,
+                // `setMethod` refers to it.
+                for occurrence in s4_occurrences_in(db, file) {
+                    if occurrence.kind == S4Kind::Generic && occurrence.name == *name {
+                        result.push(Occurrence {
+                            file,
+                            range: occurrence.range,
+                            is_declaration: occurrence.is_declaration,
+                        });
+                    }
+                }
                 for &item in item_tree(db, file) {
                     let Some(node) = item_node(db, item) else {
                         continue;
@@ -3168,38 +3198,4 @@ fn position_in_item(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<P
         }
     }
     touching
-}
-
-/// The range of the name an item declares, for goto targets and outline
-/// selections that land on the name rather than on the whole statement.
-///
-/// Naming owns which token that is, and asking it is the whole point: a syntax
-/// scan for the item's first `NAME` node reads `name <- value` correctly and
-/// every other shape wrong. A right assignment declares its name LAST, so
-/// `compute(1) -> total` sent every jump to `total` into `compute` instead —
-/// valid R, and the wrong file position. Items naming binds nothing for (an
-/// S4 registration call) still fall back to the scan.
-fn declared_name_range(
-    db: &dyn Db,
-    item: Item<'_>,
-    node: &syntax::SyntaxNode,
-) -> Option<TextRange> {
-    let declared = item.name(db).as_deref();
-    let bound = item_naming(db, item).as_ref().and_then(|naming| {
-        naming
-            .bindings
-            .values()
-            .filter(|info| {
-                info.kind == BindingKind::TopLevel && Some(info.name.as_str()) == declared
-            })
-            .map(|info| info.range)
-            .min_by_key(|range| (range.start(), range.len()))
-    });
-    match bound {
-        Some(range) => Some(range + node.text_range().start()),
-        None => node
-            .descendants()
-            .find(|descendant| descendant.kind() == syntax::SyntaxKind::NAME)
-            .map(|name| name.text_range()),
-    }
 }
