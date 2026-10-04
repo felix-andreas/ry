@@ -8,7 +8,7 @@ Cross-session knowledge base for the agents building ry. Three horizons:
 
 Four companion documents live in this folder, kept separate only because they are larger in scope. `worklog.md` holds one line per autonomous work cycle. It is the *only* deliberately chronological file here, and a three-hourly routine appends to it. `backlog.md` is the prioritized work punch-list, and it holds **open work only**. `test-user-reports.md` holds the simulated-user findings that are closed. A finding moves out of the backlog and into it when it is fixed, so the punch-list stays the work that is left while the reports survive. `decisions.md` is the settled architecture decision log.
 
-The authoritative user-facing and contributor-facing specs live in the docs site, under `docs/src/content/docs/`. They are `reference/type-system.md`, which is the typing contract, `type-checking/tutorial.md`, and the four pages under `contributing/`, which are `architecture.md`, `structure.md`, `testing.md`, and `authoring-stubs.md`. Point at them rather than duplicating them.
+The authoritative user-facing and contributor-facing specs live in the docs site, under `docs/src/content/docs/`. They are `reference/type-system.md`, which is the typing contract, `tour.md`, and the four pages under `contributing/`, which are `architecture.md`, `structure.md`, `testing.md`, and `authoring-stubs.md`. Point at them rather than duplicating them.
 
 **Unsettled design work is docs too, under `contributing/design/`.** That folder holds an index page plus the drafts. `open-questions.md` holds the undecided type-system questions, `data-masking.md` is the non-standard-evaluation sketchpad, `inline-type-syntax.md` is the compiled-dialect proposal whose own recommendation is not to build it, and `repl.md` covers the runtime-loaded-R console. Those pages are deliberately absent from the sidebar and reachable only from their index, because they are proposals rather than contracts. A draft either graduates into the reference pages or stays as the record of why it was declined. A new design document goes there rather than here.
 
@@ -69,8 +69,11 @@ Do not spawn a new knowledge file for something small. Inline it into a horizon 
 ### Documentation
 
 - **The docs site is organized by purpose rather than by component**, in five sidebar groups.
-  Introduction holds getting-started, why-ry, and features. Type checking holds tutorial, concepts,
-  domain-modeling, stubs, and limitations. Guides holds adopting, continuous-integration, and
+  Introduction holds getting-started, tour, why-ry, and features. Type checking holds concepts,
+  domain-modeling, stubs, and limitations. The tour replaced a step-by-step tutorial (owner
+  directive): one short example per feature, each followed by a few sentences of fact, for a reader
+  who knows R but not ry. Keep it that short; a new feature gets a section only if it is one of the
+  important ones. Guides holds adopting, continuous-integration, and
   r-console. Reference holds configuration, cli, diagnostic-codes, formatting-rules, and
   type-system. Contributing is the fifth. The installation page is deliberately absent from the
   sidebar, because getting-started closes with the extension links and a one-line install, and the

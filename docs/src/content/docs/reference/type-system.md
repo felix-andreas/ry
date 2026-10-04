@@ -5,7 +5,7 @@ description: The precise static-typing semantics contract for ry's R type checke
 
 This page is the specification of ry's type system: the contract the type checker implements, rule
 by rule. It is meant for looking things up rather than for reading front to back. If you are new to
-the checker, start with the [tutorial](/type-checking/tutorial) and [concepts](/type-checking/concepts),
+the checker, start with the [tour](/tour) and [concepts](/type-checking/concepts),
 which introduce the same ideas through examples, and come back here when you need the exact rule.
 
 The page moves from the notation outward. It starts with how annotations are written and what the
@@ -638,15 +638,16 @@ annotation that parses cleanly but has the wrong shape. The possible disagreemen
 - a declared parameter name that is not one of the formals, meaning the annotation describes a
   parameter the function does not have;
 - more declared parameter types than there are formals left to receive them;
-- a declared optional `[name]` over a formal with no default. Declaring a parameter optional tells
-  callers they may omit it, so the formal must have a default. The reverse is fine: a formal with a
-  default that the annotation declares as required is not a disagreement;
+- a declared optional `[name]` over a formal with no default, because declaring a parameter
+  optional tells callers they may omit it, so the formal must have a default;
+- a parameter declared as required over a formal that has a default. R lets callers omit it, so the
+  annotation must say `[name]`;
 - a rest parameter at a different position in the annotation than in the formals. The rest parameter
   must also exist on both sides or on neither, so a fixed annotation on a variadic function and a
   variadic annotation on a fixed function are both rejected.
 
-The first case names the parameter, and the other three are reported as a mismatch of the whole
-signature. In every case, the body is still checked under whatever parameter types the annotation
+The first case, and a required declaration over a formal with a default, name the parameter. The
+others are reported as a mismatch of the whole signature. In every case, the body is still checked under whatever parameter types the annotation
 does pin down, so hover and navigation keep their facts.
 
 ### Elided return types

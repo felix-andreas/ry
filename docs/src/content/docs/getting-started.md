@@ -88,5 +88,5 @@ not you turn the errors on.
 ## Next
 
 - [Features](/features) lists everything you get before configuring anything
-- [Tutorial](/type-checking/tutorial) puts the type checker on real code
+- [Tour](/tour) shows every feature in one short example each
 - [Why ry](/why-ry) explains why this exists, and how far along it is

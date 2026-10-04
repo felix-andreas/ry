@@ -164,6 +164,6 @@ Type checking a whole project stays affordable because the analysis is increment
 re-checks only what that edit could have affected, not the whole project. ry is tested against
 roughly 970,000 lines of real R: 69 CRAN packages plus R's base library.
 
-- [Tutorial](/type-checking/tutorial) puts it on real code
+- [Tour](/tour) shows every feature in one short example each
 - [Concepts](/type-checking/concepts) explains how it works out what it knows
 - [Adopting an existing codebase](/guides/adopting) turns it on a piece at a time

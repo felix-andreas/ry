@@ -88,4 +88,4 @@ clean run.
 ## Next
 
 - [Features](/features) lists what you get before you turn anything on
-- [Tutorial](/type-checking/tutorial) puts the type checker on real code
+- [Tour](/tour) shows every feature in one short example each

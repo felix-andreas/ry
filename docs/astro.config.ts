@@ -15,8 +15,9 @@ export default defineConfig({
 		'/language-server': '/features',
 		'/limitations': '/type-checking/limitations',
 		'/stdlib-stubs': '/type-checking/stubs',
-		'/typing': '/type-checking/tutorial',
-		'/typing/guide': '/type-checking/tutorial',
+		'/typing': '/tour',
+		'/typing/guide': '/tour',
+		'/type-checking/tutorial': '/tour',
 		'/typing/reference': '/reference/type-system',
 		'/typing-reference': '/reference/type-system',
 		'/development': '/contributing/development',
@@ -44,6 +45,7 @@ export default defineConfig({
 					label: 'Introduction',
 					items: [
 						{ slug: 'getting-started' },
+						{ slug: 'tour' },
 						{ slug: 'why-ry' },
 						{ slug: 'features' },
 					],
@@ -51,7 +53,6 @@ export default defineConfig({
 				{
 					label: 'Type checking',
 					items: [
-						{ slug: 'type-checking/tutorial' },
 						{ slug: 'type-checking/concepts' },
 						{ slug: 'type-checking/domain-modeling' },
 						{ slug: 'type-checking/stubs' },

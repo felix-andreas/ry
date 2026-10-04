@@ -328,7 +328,7 @@ The file always wins, which is what lets you adopt this one module at a time.
 
 ## Next
 
-- [Tutorial](/type-checking/tutorial) applies the same ideas to real code
+- [Tour](/tour) shows every feature in one short example each
 - [Domain modeling](/type-checking/domain-modeling) covers nominal types instead of S4, R6, or S7
 - [Limitations](/type-checking/limitations) covers what the checker cannot do
 - [Type system reference](/reference/type-system) has the exact contract

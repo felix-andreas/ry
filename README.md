@@ -82,7 +82,7 @@ typing = true
 
 ry includes the first static type checker for R. It is new and experimental: R has no established
 typing semantics, so ry defines its own. The
-[tutorial](https://ry-lang.org/type-checking/tutorial/) introduces it on real code, and the
+[tour](https://ry-lang.org/tour/) introduces it in short examples, and the
 [type system reference](https://ry-lang.org/reference/type-system/) specifies the full semantics.
 
 Most type errors in R are found by running the code. ry finds the ones that can be determined from
