@@ -192,8 +192,9 @@ serious one.
 2. **Goto-definition took the item's FIRST `NAME` node.** That reads `name <- value` correctly and
    every other shape wrong: a right assignment declares its name last, so every jump to `total` in
    `compute(1) -> total` landed inside `compute`. Valid R, wrong position, and it was reached by
-   hover, goto and the document outline alike. Naming already knows which token declares the item, so
-   `declared_name_range` asks it and keeps the syntax scan only for shapes naming binds nothing for.
+   hover, goto and the document outline alike. The item's name site is now `item_name_range`, read
+   from the same statement classification that gives the item its name (so `setGeneric("area", …)`
+   lands on the string, not on `setGeneric`).
 3. **A declaration was unreachable from its own first character.** Expressions are ranked
    end-inclusively so a cursor just past a name still means that name; where two siblings abut
    (`"s"broken <- …` in recovered source) that handed the cursor the expression it had just left, and
@@ -1746,12 +1747,6 @@ re-bless.
   `pair: list{a: integer, b: character}`, `pair[[2L]]` resolves `character` while `pair[[0x2L]]`
   falls back to `integer | character`. `integer_literal_position` and `is_whole_number_double` both
   need a radix-aware parse.
-- **`:=` publishes a definition the HIR does not make.** `classify_top_level` lists `COLON_EQ` among
-  the assignment spellings, so `x := 1L` names its item `x` and a later `y <- x` resolves — but
-  lowering (correctly) makes it a call to a function `:=` that binds nothing, and R binds nothing
-  either. Two sources of truth for what an item defines, and the item tree is the wrong one. Pinned
-  by `assignment__a_walrus_lowers_to_a_call_because_it_binds_nothing`, whose header shows the
-  disagreement.
 
 ## Open — naming fidelity (found by testing name resolution directly, in `crates/semantics/tests/naming/`)
 
