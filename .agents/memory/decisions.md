@@ -908,3 +908,13 @@ Impact: correctness — the corpus differential reaches 1,523/1,523 with one adj
 **Shape.** `editors/zed/extension.toml` is a plain-semver line of its own (`0.1.0`), restarted because the extension has never been published to Zed's registry and nothing constrains its history; the wasm crate's `Cargo.toml` version tracks that manifest rather than the workspace, and neither inherits `version.workspace`. It is bumped by hand when the extension changes. The release-metadata test asserts the VS Code derivation only, and its module doc states why the Zed manifest is absent — the test is the thing that would otherwise re-couple them. The prerelease suffix is dropped for good: `-alpha`/`-beta` name the CLI's release channel, which an extension that only locates a binary cannot be in.
 
 **Impact.** One number per artifact with one owner each; a Zed release no longer implies a CLI release or vice versa. The recurring "align the stale zed extension version" commit has no reason to exist.
+
+# Decision record: one source of truth for where an item spells its name
+
+**Status:** decided and implemented.
+
+**Problem.** Three consumers located a top-level item's declared name independently: the IDE (`declared_name_range`: naming's top-level binding, else the first `NAME` node — which is `setGeneric` itself for an S4 generic), the duplicate-definition sites (the first `NAME` node whose text equals the name — no answer for a string target), and the script unused check (naming's binding, else the whole statement). Where naming mints no top-level binding — `x <<- 1` at top level, `setGeneric("name", …)` — the unused warning highlighted the entire statement instead of the name. The classification also read `:=` as an assignment spelling, publishing a definition that R and the HIR (a call to `:=`) never make.
+
+**Shape.** `classify_top_level` now delegates to `top_level_definition`, which returns the item's kind, name, and the range of the syntax spelling that name (the assignment target, or the `setGeneric` name inside its quotes); `:=` is no longer a binding spelling. In the IDE a project-defined generic is one global symbol: its `setGeneric`/`setMethod`/`standardGeneric` strings and its calls navigate, reference and rename together. `semantics::item_name_range(db, item)` re-reads it off `item_node` at the rendering edge (item identity stays position-free). All three consumers read it; the heuristics are deleted.
+
+**Impact.** Item identity and the name site cannot disagree about which name a statement binds. Unused warnings, goto, hover and the outline land on the name for every definition shape. No new query or stored state: the lookup is a hash probe plus a descent into one statement.
