@@ -1362,12 +1362,6 @@ shape, so fixing one turns its case red and forces a deliberate re-bless.
   observable: with `pair: list{a: integer, b: character}`, `pair[[2L]]` resolves `character` while
   `pair[[0x2L]]` falls back to `integer | character`. Both `integer_literal_position` and
   `is_whole_number_double` need a radix-aware parse.
-- **`:=` publishes a definition the HIR does not make.** `classify_top_level` lists `COLON_EQ` among
-  the assignment spellings, so `x := 1L` names its item `x` and a later `y <- x` resolves. Lowering
-  correctly makes it a call to a function `:=` that binds nothing, and R binds nothing either. That
-  is two sources of truth for what an item defines, and the item tree is the wrong one. The case is
-  `assignment__a_walrus_lowers_to_a_call_because_it_binds_nothing`, whose header shows the
-  disagreement.
 
 ## Open: naming fidelity
 

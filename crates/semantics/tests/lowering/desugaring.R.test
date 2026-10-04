@@ -289,13 +289,11 @@ x <- y <- 1L
 #---- a_walrus_lowers_to_a_call_because_it_binds_nothing
 # `:=` is not assignment anywhere in R — it is a call to a function of that
 # name (data.table defines one for its brackets, rlang for quoting). The
-# callee sits on the operator token so an unresolved `:=` reports there.
-# The `# x` header is the ITEM TREE's classification, which still reads `:=`
-# as an assignment spelling and so publishes a definition of `x` the HIR does
-# not make — the two disagree, and the item tree is the one that is wrong.
+# callee sits on the operator token so an unresolved `:=` reports there. The
+# item tree agrees: the statement defines no name, so it carries no header.
 x := y
 #++++
-# x
+# <statement>
   Call
     NameRef :=
     NameRef x

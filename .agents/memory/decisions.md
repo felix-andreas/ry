@@ -1964,3 +1964,28 @@ and an extension that only locates a binary cannot be in one.
 Each artifact now has one number with one owner. A Zed release no longer implies a CLI release, or
 the reverse. The recurring commit that realigned the stale Zed extension version has no reason to
 exist.
+
+# Decision record: one source of truth for where an item spells its name
+
+**Status:** decided and implemented.
+
+**Problem.** Three consumers located a top-level item's declared name independently. The IDE asked
+naming for the top-level binding and otherwise took the first `NAME` node, which for an S4 generic is
+`setGeneric` itself. The duplicate-definition sites took the first `NAME` node whose text equals the
+name, which has no answer for a string target. The script unused check asked naming and otherwise
+fell back to the whole statement. Where naming mints no top-level binding (`x <<- 1` at top level,
+`setGeneric("name", …)`), the unused warning therefore highlighted the entire statement instead of
+the name. The classification also read `:=` as an assignment spelling, publishing a definition that
+neither R nor the HIR (a call to `:=`) makes.
+
+**Shape.** `classify_top_level` now delegates to `top_level_definition`, which returns the item's
+kind, its name, and the range of the syntax that spells the name: the assignment target, or the
+`setGeneric` name inside its quotes. `:=` is no longer a binding spelling. In the IDE, a
+project-defined generic is one global symbol, so its `setGeneric`, `setMethod`, and `standardGeneric`
+strings and its calls navigate, reference, and rename together. `semantics::item_name_range(db, item)`
+re-reads the range off `item_node` at the rendering edge, so item identity stays free of positions.
+All three consumers read it, and the heuristics are deleted.
+
+**Impact.** Item identity and the name site cannot disagree about which name a statement binds.
+Unused warnings, goto, hover, and the outline land on the name for every definition shape. Nothing
+new is stored and no query is added: the lookup is a hash probe plus a descent into one statement.
