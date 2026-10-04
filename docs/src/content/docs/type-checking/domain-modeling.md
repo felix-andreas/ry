@@ -35,13 +35,9 @@ attribute and no dispatch.
 ## Nominal types over scalars
 
 `@type UserId {character}` and `@type Email {character}` are both strings at run time, and the
-checker keeps them apart. This is the main reason to use `@type` on scalars: IDs, units, currencies,
-and validated-versus-raw input are exactly the values that get mixed up, and nothing else in R can
-catch it.
-
-The representation still flows outward. A `UserId` is accepted wherever a `character` is, so
-`paste()`, `nchar()`, and arithmetic on a numeric type keep working. Only the reverse is blocked: a
-bare string never becomes a `UserId` by itself.
+checker keeps them apart. IDs, units, currencies, and validated-versus-raw input are the values that
+get mixed up most, and nothing else in R can catch it. A `UserId` is still accepted where a
+`character` is, so string functions keep working on it.
 
 ## Operators and generic types
 

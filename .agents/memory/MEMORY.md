@@ -69,8 +69,10 @@ Do not spawn a new knowledge file for something small. Inline it into a horizon 
 ### Documentation
 
 - **The docs site is organized by purpose rather than by component**, in five sidebar groups.
-  Introduction holds getting-started, tour, why-ry, and features. Type checking holds concepts,
-  domain-modeling, stubs, and limitations. The tour replaced a step-by-step tutorial (owner
+  Introduction holds getting-started, tour, and why-ry. Type checking holds domain-modeling, stubs,
+  and limitations. The tour absorbed the former Features and Concepts pages (both redirect to it),
+  so a feature or a type-system idea is introduced there once, with its reason, and the other pages go
+  deeper rather than repeating it. The tour replaced a step-by-step tutorial (owner
   directive): one short example per feature, each followed by a few sentences of fact, for a reader
   who knows R but not ry. Keep it that short; a new feature gets a section only if it is one of the
   important ones. Guides holds adopting, continuous-integration, and
@@ -85,6 +87,7 @@ Do not spawn a new knowledge file for something small. Inline it into a horizon 
   say what you forgot"). Every sentence must carry information a reader did not have; if a sentence
   only sets up the next one, delete it. This is a hard rule across the whole site, and reviewers check
   it.
+- **Density and motivation over coverage (owner directive).** Write only what a reader needs, and state every rule or design choice with its reason, because an unmotivated rule reads as arbitrary and boring information is worse than none. Cut meta-commentary about the page itself ("every output comes from a real run"). Every rewritten page goes through an adversarial reviewer subagent that runs the binary and attacks false claims, padding, and missing reasons before it lands.
 - **The register is neutral and precise: plain declarative sentences (user directive).** The README's
   "Why ry" and "Type system" sections are the style reference. No punchy fragments or sales lines
   ("no options to argue about", "built for exactly this job", "One more thing"), no rhetorical
