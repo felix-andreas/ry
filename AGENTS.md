@@ -37,6 +37,8 @@ Implemented: the `engine` crate is a red-green memoized query core with per-symb
 
 # Working autonomously
 
+Never use the interactive question tool (`AskUserQuestion`); ask questions as plain text in your reply (user directive).
+
 When working autonomously on a larger goal — a workflow, a multi-step change, or any task that spans several logical units — commit and push after each logical step, instead of saving everything for one final commit. A single large invasive redesign is ONE logical step: commit it when it is green, not in fragments along the way.
 
 # Knowledge base and documentation (we can reduce repeition/duplication with MEMORY.md)
