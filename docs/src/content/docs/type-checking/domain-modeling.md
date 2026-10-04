@@ -6,7 +6,8 @@ description: Checked types for your own data with @type, and when S4, R6, or S7 
 S4, R6, and S7 build classes at run time from values a static checker would have to execute to
 understand, so ry cannot see inside them: an S4 slot or an R6 field is `Unknown`, and passing it to the
 wrong function goes unreported. When what you want is for the checker to know what a value is, declare
-it with `@type` instead.
+it as a nominal type with `@type` instead (the [tour](/tour#structural-and-nominal-types) explains
+nominal versus structural types).
 
 ## A record type with a constructor
 
@@ -26,12 +27,12 @@ constructor every value has passed its checks. The two halves divide the work: `
 shape when ry analyzes the code, and `stop()` checks the values when the code runs. `@new` emits no
 run-time check of its own.
 
-A plain list with the right fields is still not a `Money`: matching the shape is not enough, the value
-has to come from the constructor. Reads and writes are checked against the declared fields, so
+A plain list with the right fields is still not a `Money`: the type is nominal, so matching the shape
+is not enough, and the value has to come from the constructor. Reads and writes are checked against the declared fields, so
 `total$amount <- "x"` is an error. At run time a `Money` is an ordinary named list, with no class
 attribute and no dispatch.
 
-## Distinct types with the same representation
+## Nominal types over scalars
 
 `@type UserId {character}` and `@type Email {character}` are both strings at run time, and the
 checker keeps them apart. This is the main reason to use `@type` on scalars: IDs, units, currencies,
@@ -61,8 +62,8 @@ read a field.
 
 ## `@alias`
 
-`@alias Row {list{id: integer, label: character}}` names a type without making it distinct, so any
-list of that shape is a `Row`. Use it to avoid repeating a long type, and `@type` when confusing a
+`@alias Row {list{id: integer, label: character}}` names a structural type, so any list of that shape
+is a `Row`. Use it to avoid repeating a long type, and `@type` when confusing a
 value with its representation is the mistake you want caught.
 
 ## When to use R6 or S4 anyway
@@ -71,7 +72,7 @@ value with its representation is the mistake you want caught.
 
 - **Shared mutable state.** An R6 object that several callers modify in place has identity, and a
   value type cannot express that.
-- **Inheritance.** There is no subtyping between named types.
+- **Inheritance.** There is no subtyping between nominal types.
 - **Method dispatch.** `print()` and `summary()` per class are S3 or S4. `UseMethod` dispatches at
   run time, so those calls are `Unknown`. Operator methods, as above, are the exception.
 

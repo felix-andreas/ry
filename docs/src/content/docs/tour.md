@@ -183,11 +183,17 @@ shapes, use a union such as `integer | character`. Allowing several signatures p
 each call a search over candidates instead of a single inference step, which is what keeps checking
 fast enough to run on every keystroke.
 
-## Named types
+## Structural and nominal types
 
-A `double` cannot tell Celsius from Fahrenheit, and a `character` cannot tell a user ID from an
-email address. `@type` declares a type that is distinct even from types with the same
-representation, and `@new` is the only way to create a value of it:
+Every type so far is *structural*: two types are the same if they have the same shape. Any
+`list(name = "Ada")`, wherever it was built, is a `list{name: character}`, and every `double` is
+interchangeable with every other. That is the right default for R, where values are plain data, and
+it is why inference needs no declarations.
+
+It is also what lets the wrong value through. A `double` cannot tell Celsius from Fahrenheit, and a
+`character` cannot tell a user ID from an email address. A *nominal* type is distinct by name, even
+from a type with the same representation. `@type` declares one, and `@new` is the only way to create
+a value of it:
 
 ```r
 #: @type Celsius {double}
@@ -200,14 +206,17 @@ celsius <- function(value) {
 }
 ```
 
-Passing a plain `double` or a `Fahrenheit` where a `Celsius` is expected is an error. Because `@new`
-can only appear where you write it, putting it in one constructor means every `Celsius` in the
-program passed that constructor's checks. At run time the value is still a plain number: arithmetic
-works and nothing is wrapped. `@alias` is the opposite: a shorthand that stays interchangeable with
-the type it names.
+Passing a plain `double`, or a `Fahrenheit` declared the same way, where a `Celsius` is expected is an
+error. Because `@new` appears only where you write it, putting it in one constructor means every
+`Celsius` in the program passed that constructor's checks. The representation still flows outward:
+a `Celsius` is accepted where a `double` is, so arithmetic works, and at run time the value is a plain
+number with nothing wrapped around it.
 
-[Domain modeling](/type-checking/domain-modeling) covers records, generic types, and when R6 is still
-the better tool.
+`@alias` names a type without making it nominal: `@alias Row {list{id: integer}}` is just a shorter
+way to write the shape, and any list of that shape is a `Row`.
+
+[Domain modeling](/type-checking/domain-modeling) covers nominal records, generic types, and when R6 is
+still the better tool.
 
 ## `Unknown` and strict mode
 

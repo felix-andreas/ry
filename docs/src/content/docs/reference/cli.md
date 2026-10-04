@@ -3,9 +3,6 @@ title: CLI
 description: Every ry command, flag, exit code, and JSON field
 ---
 
-This page lists everything the `ry` binary accepts on the command line, what it prints, and how it
-exits.
-
 ## Commands
 
 | Command | What it does |

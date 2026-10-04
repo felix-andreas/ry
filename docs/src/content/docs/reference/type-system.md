@@ -3,19 +3,15 @@ title: Type system
 description: The precise static-typing semantics contract for ry's R type checker
 ---
 
-This page is the specification of ry's type system: the contract the type checker implements, rule
-by rule. It is meant for looking things up rather than for reading front to back. If you are new to
-the checker, start with the [tour](/tour),
-which introduces the same ideas through examples, and come back here when you need the exact rule.
+This is the specification of ry's type system: every rule the checker implements. The
+[tour](/tour) introduces the same ideas through examples.
 
-The page moves from the notation outward. It starts with how annotations are written and what the
-types are, then covers functions and annotations, then how each operator, call, and control-flow
-construct is typed, and finally how names resolve, how data frames and R's object systems are
-handled, and what strict mode adds.
-
-Two ideas run through everything. First, the checker prefers skipping a check to giving a wrong
-answer: a construct it cannot describe becomes `Unknown`, which is compatible with everything, so a
-gap means a skipped check rather than a false error. Second, [strict mode](#strict-mode) is how you see those gaps.
+Two principles explain most of the rules. First, the checker prefers skipping a check to giving a
+wrong answer: a construct it cannot describe becomes `Unknown`, which is compatible with everything,
+so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode) shows where
+the gaps are. Second, every rule must be decidable fast enough to run on every keystroke, which is why
+inference is Hindley–Milner, why your own functions cannot be overloaded, and why there is no
+subtyping between nominal types.
 
 ## Typing comment syntax
 

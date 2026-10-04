@@ -50,7 +50,7 @@ Three choices keep the checker fast and its answers trustworthy:
 - **No overloading of your own functions.** A name with several signatures turns each call into a
   search over candidates. Use a union type, or two functions.
 - **No class hierarchies.** Subtyping between classes makes inference expensive and its results hard
-  to predict. Named types in `#:` comments give you distinct types without inheritance.
+  to predict. Nominal types, declared in `#:` comments, give you distinct types without inheritance.
 - **`Unknown` instead of guesses.** What cannot be described statically (S4 dispatch, R6 objects,
   data frame columns, `eval`) becomes `Unknown`, which is compatible with everything. A gap means a
   check was skipped, never a false error, and [strict mode](/reference/type-system#strict-mode) shows

@@ -3,8 +3,8 @@ title: Diagnostic codes
 description: Every code ry can emit, what triggers it, and how to silence it
 ---
 
-Every finding ry reports carries a stable code, and this page lists them all, along with what
-triggers each one and how to silence it.
+Every finding carries a stable code: the name you use to suppress it, to configure it, and to match
+it in JSON output. Codes do not change when message wording does.
 
 ## How to read a finding
 

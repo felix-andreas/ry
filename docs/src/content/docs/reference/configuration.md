@@ -3,7 +3,7 @@ title: Configuration
 description: Every ry.toml key, discovery rule, and editor setting in one place
 ---
 
-Everything you can change about ry's behavior lives in one file, `ry.toml`. Editor settings only say where the binary is.
+Everything that changes what ry reports lives in `ry.toml`, so the editor, the CLI, and CI always agree. Editor settings only say where the binary is.
 
 ## Project discovery
 
