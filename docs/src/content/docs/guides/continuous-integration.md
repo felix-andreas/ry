@@ -1,12 +1,9 @@
 ---
 title: Continuous integration
-description: A working CI job for R, and how to decide what should fail the build
+description: A working CI job for ry, and how to decide what fails the build
 ---
 
-ry is one binary with no R dependency, so a CI job is a download and two commands. Nothing to
-install, no package cache, no matrix over R versions.
-
-## A working job
+ry is a single binary that needs no R installation, so a CI job is a download and two commands:
 
 ```yaml
 # .github/workflows/ry.yml
@@ -25,75 +22,42 @@ jobs:
           curl -sSL "https://github.com/felix-andreas/ry/releases/download/${RY_VERSION}/ry-x86_64-unknown-linux-gnu.tar.gz" \
             | tar xz
           sudo mv ry /usr/local/bin/
-      - name: Check
-        run: ry check
-      - name: Format
-        run: ry fmt --check
+      - run: ry check
+      - run: ry fmt --check
 ```
 
-Both commands exit `1` on findings, which is what fails the job. Neither needs R installed.
+**Pin the version.** A newer release can report findings an older one did not, and an unpinned job
+then fails on code nobody changed. Pinning is also required in practice: every release is marked a
+pre-release, so GitHub's `releases/latest` still points at an old build.
 
-**Pin the version.** Every release since `0.1.1` is marked a pre-release, so
-`releases/latest/download/…` resolves back to `0.1.1` rather than to the newest build. The type
-system is also still gaining capability, so a newer version can report findings an older one did
-not. Name the tag explicitly, as above. See [project status](/why-ry#project-status).
+## What fails the build
 
-Asset names follow the Rust target triple, as in `ry-aarch64-apple-darwin.tar.gz` and
-`ry-x86_64-pc-windows-gnu.zip`. Each archive contains the single `ry` binary.
+| Exit code | Meaning |
+| --- | --- |
+| `0` | no findings |
+| `1` | findings: by default, warnings count too |
+| `2` | ry could not run: invalid `ry.toml`, a missing path, an unreadable file |
 
-## Deciding what should fail the build
+Treat `2` separately from `1` if your CI reports results: it means the configuration is broken, not
+the code.
 
-The default is strict: **warnings fail the job**. A run with nothing but `unused` warnings still
-exits `1`.
+Warnings fail the build so that a clean project stays clean. While a project still has a backlog of
+warnings, gate on errors only:
 
-That is usually right for a project that starts out clean, and wrong for one adopting ry on an
-existing codebase. To gate on errors only while you work through the backlog:
-
-```bash
+```sh
 ry check --min-severity error
 ```
 
-The filter applies before anything is reported, so warnings are neither printed nor counted toward
-the exit code. A run whose only findings are warnings prints `1 file checked, no problems` and exits
-`0`.
-
-| You want | Command |
-| --- | --- |
-| Everything to matter | `ry check` |
-| Only errors to block the build | `ry check --min-severity error` |
-| Formatting enforced | `ry fmt --check` |
-| To see the diff CI would apply | `ry fmt --diff` |
-
-Exit code `2` means the run could not be completed: an unparseable `ry.toml`, a path that does not
-exist, or an unreadable file. That is a different failure from `1`, not a worse one, and a job that
-treats every non-zero status as "findings" will report a broken configuration as a code problem.
-The full table is in the [CLI reference](/reference/cli#exit-codes).
+Warnings below the floor are neither printed nor counted. Under [strict mode](/reference/type-system#strict-mode),
+`unresolved` becomes an error and starts counting again.
 
 ## JSON output
 
-```bash
-ry check --output json
-```
-
-writes JSON Lines to stdout: one object per finding, nothing else on the stream, and no summary
-line. No diagnostic is rendered to stderr in JSON mode, but configuration warnings and the exit-2
-failures described above still go there, so stderr is not always empty.
+`ry check --output json` writes one JSON object per finding to stdout and nothing else, for tools
+that annotate pull requests:
 
 ```json
 {"code":"type-mismatch","column":21,"endColumn":27,"endLine":4,"line":4,"message":"expected `integer`, found `character`","path":"/home/you/demo/main.R","related":[],"severity":"error"}
 ```
 
-Every field is documented in the [CLI reference](/reference/cli#json-output), and the field names
-are a contract.
-
-To count errors for a summary line without jq:
-
-```bash
-ry check --output json | grep -c '"severity":"error"'
-```
-
-## Adopting on an existing project
-
-Do not start by putting `ry check` in front of a merge gate on a codebase that has never run it.
-Land the tool first, gate second. [Adopting an existing codebase](/guides/adopting) walks through
-the order that works.
+The field names are a stable contract, documented in the [CLI reference](/reference/cli#json-output).

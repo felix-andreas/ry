@@ -3,9 +3,6 @@ title: Installation
 description: Every way to install ry, including the cases the quick path does not cover
 ---
 
-The quick paths are in the install section of [getting started](/getting-started#install). This
-page covers everything else.
-
 ## VS Code
 
 The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
@@ -54,8 +51,8 @@ curl -sSL https://github.com/felix-andreas/ry/releases/download/0.3.1-beta/ry-x8
 sudo mv ry /usr/local/bin/
 ```
 
-Name the tag explicitly. Every release since `0.1.1` is marked a pre-release, so `releases/latest/`
-still resolves to `0.1.1` rather than to the newest build.
+Name the tag explicitly: every release since `0.1.1` is marked a pre-release, so `releases/latest/`
+still points at `0.1.1`.
 
 **From source**, if you have a [Rust toolchain](https://www.rust-lang.org/tools/install):
 
@@ -63,8 +60,8 @@ still resolves to `0.1.1` rather than to the newest build.
 cargo install --git https://github.com/felix-andreas/ry ry-lang
 ```
 
-The crate is called `ry-lang`, and the command it installs is `ry`. This is also the way to go on an
-architecture with no prebuilt binary.
+The crate is `ry-lang`, and the command it installs is `ry`. This also works on platforms without a
+prebuilt binary.
 
 ## RStudio
 
@@ -75,13 +72,5 @@ RStudio has no language-server integration, but it can use ry as its external fo
 2. For format-on-save, open **Tools → Global Options → Code → Saving** and tick **Reformat documents
    on save**.
 
-Type checking and code analysis are not available inside RStudio, so run `ry check` in a terminal
-or in [CI](/guides/continuous-integration) instead.
-
-## Verifying
-
-```bash
-ry --version
-```
-
-Then run it on a project. [Getting started](/getting-started) shows what a first run looks like.
+Diagnostics do not show up inside RStudio; run `ry check` in a terminal or in
+[CI](/guides/continuous-integration).

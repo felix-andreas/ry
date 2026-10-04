@@ -5,8 +5,8 @@ description: The precise static-typing semantics contract for ry's R type checke
 
 This page is the specification of ry's type system: the contract the type checker implements, rule
 by rule. It is meant for looking things up rather than for reading front to back. If you are new to
-the checker, start with the [tour](/tour) and [concepts](/type-checking/concepts),
-which introduce the same ideas through examples, and come back here when you need the exact rule.
+the checker, start with the [tour](/tour),
+which introduces the same ideas through examples, and come back here when you need the exact rule.
 
 The page moves from the notation outward. It starts with how annotations are written and what the
 types are, then covers functions and annotations, then how each operator, call, and control-flow

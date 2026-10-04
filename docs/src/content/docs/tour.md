@@ -1,48 +1,61 @@
 ---
 title: Tour
-description: Every important ry feature, one short example each
+description: What ry checks, how its type system works, and why it works that way
 ---
 
-This page walks through what ry does, one example at a time. It assumes you know R and nothing about
-ry. Every output below comes from a real run.
-
-## Commands
+ry is a language server, checker, and formatter for R. It reads source text and never runs it, so
+it gives the same answers in your editor, in CI, and on code that has never been executed.
 
 ```sh
-ry check      # report problems in the project
-ry fmt        # format the project in place
-ry server     # the language server; your editor starts it
+ry check    # report problems
+ry fmt      # format files in place
+ry server   # the language server; your editor starts it
 ```
 
-None of these runs your code or needs R installed. [Installation](/installation) lists the ways to
-get the binary.
+## Syntax errors
 
-## Names
-
-With no configuration, `ry check` reports names that resolve nowhere:
+R's parser is built to run code, so it stops at the first error and names the token it choked on.
+ry's parser is built for tooling: it names what is missing and keeps analyzing the rest of the file.
 
 ```r
-apply_discount <- function(price, rate) {
-  price * ratee
-}
+config <- list(
+  title = "Revenue"
+  subtitle = "by quarter"
+)
 ```
 
 ```text
-unresolved
+R:   Error: unexpected symbol in: "  title = "Revenue"
+     subtitle"
 
-  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
-   --[R/demo.R:2:11]
- 1 | apply_discount <- function(price, rate) {
- 2 |   price * ratee
-   |           ^^^^^
+ry:  x missing `,` between these arguments
+      --[R/config.R:2:20]
+    2 |   title = "Revenue"
+      |                    ^
 ```
 
-It also reports unused assignments and names defined twice across a package's files. Every finding
-has a [diagnostic code](/reference/diagnostic-codes).
+## Names
 
-## Type checking
+With no configuration, ry resolves every name the way R would at run time. A typo in R surfaces only
+when execution reaches it, possibly at the end of a long job. ry reports it immediately:
 
-Type errors are opt-in:
+```r
+apply_discount <- function(price, rate) price * ratee
+```
+
+```text
+! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
+```
+
+Resolution follows R's rules: files in a package's `R/` share one namespace, a script is read top to
+bottom, and `library()` calls and `NAMESPACE` imports bring names into scope. The same analysis
+reports assignments nothing reads, and top-level names defined twice in a package, where R would
+silently keep whichever file is sourced last.
+
+## Types
+
+Type errors are opt-in, because an existing codebase can have many and you should choose when to
+face them:
 
 ```toml
 # ry.toml
@@ -50,83 +63,64 @@ Type errors are opt-in:
 typing = true
 ```
 
-Types are inferred from how values are used. Nothing here is annotated:
+You do not have to annotate anything. ry infers types from how values are used:
 
 ```r
 apply_discount <- function(price, rate) price * rate
-
 apply_discount(100, "0.2")
 ```
 
 ```text
-type-mismatch
-
-  x expected `double`, found `character`
-   --[R/demo.R:3:21]
- 3 | apply_discount(100, "0.2")
-   |                     ^^^^^
+x expected `double`, found `character`
 ```
 
-`*` is arithmetic, so both parameters are numbers. Inference runs whether or not type errors are
-reported, because hover, completion, and inlay hints use it.
+`*` is arithmetic, so both parameters must be numbers. Inference runs even with type errors off,
+because hover, completion, and inlay hints are built on it.
 
 ## Annotations
 
-An annotation is a `#:` comment above the definition, so annotated code is still ordinary R:
+R has no syntax for types, so annotations are `#:` comments. The file stays valid R that every other
+tool can read, and removing ry changes nothing at run time.
 
 ```r
-#: fn(price: double, rate: double) -> character
+#: fn(price: double, rate: double) -> double
 apply_discount <- function(price, rate) price * rate
 ```
 
-```text
-type-mismatch
+An annotation is checked against the body and against every call. Inference already covers the
+inside of a function, so annotate where code meets other code: exported functions, values read from
+files, and anything whose contract you want enforced.
 
-  x expected `character`, found `double`
-   --[R/demo.R:2:41]
- 2 | apply_discount <- function(price, rate) price * rate
-   |                                         ^^^^^^^^^^^^
-```
+## Scalars and vectors
 
-The annotation is checked against the body and against every call. Annotate where code meets other
-code: exported functions, values read from files, and anything you want held to a contract.
+R has no scalars: `1L` is an integer vector of length one. But an `if` condition, an operand of
+`&&`, and an endpoint of `:` must have exactly one element, and passing a longer vector there is a bug
+R reports late or not at all. So ry tracks the length-one case separately:
 
-The same signature can be written one directive per line:
+| Type | Meaning |
+| --- | --- |
+| `integer` | length one, such as `1L` |
+| `integer[]` | any length, such as `c(1L, 2L)` |
+| `integer[named]` | any length, with names |
 
-```r
-#: @param price {double}
-#: @param rate {double}
-#: @return {double}
-apply_discount <- function(price, rate) price * rate
-```
-
-## Vectors
-
-Types use R's names: `logical`, `integer`, `double`, `complex`, `character`, `raw`, `NULL`. A
-suffix gives the shape:
-
-| Type | Meaning | Example |
-| --- | --- | --- |
-| `integer` | length one | `1L` |
-| `integer[]` | any length | `c(1L, 2L)` |
-| `integer[named]` | any length, with names | `c(a = 1L, b = 2L)` |
-
-Literals are length one. A scalar is accepted where a vector is expected, but not the reverse.
-Values widen along `logical` < `integer` < `double` < `complex`, so an `integer` is accepted as a
-`double`. `character` is never reached implicitly.
+A scalar is accepted where a vector is expected, but not the reverse, because a vector of unknown
+length may be empty. Numbers widen along `logical` < `integer` < `double` < `complex`, as in R. A
+number is never accepted where `character` is expected: R would convert it, and when that happens
+silently it is usually a bug, so ry asks for an explicit `as.character()`.
 
 ## Lists
 
-`list()` is typed by how it is built:
+R uses `list()` for four different jobs, and ry types each one differently:
 
 | Type | Built by |
 | --- | --- |
 | `list{name: character, age: integer}` | `list(name = "Ada", age = 36L)` |
 | `list{integer, character}` | `list(1L, "ok")` |
-| `list[integer \| character]` | `list(1L, b = "x")`, or an annotation |
-| `list[named: integer]` | an annotation |
+| `list[integer]` | annotation, or `list(...)` with mixed names |
+| `list[named: integer]` | annotation, or writes with computed keys |
 
-Fields of a record are checked:
+The first two have a fixed shape, so ry knows which fields exist. That makes `$` checkable, which
+matters because R answers a misspelled field with a silent `NULL` that fails somewhere else:
 
 ```r
 person <- list(name = "Ada", age = 36L)
@@ -134,29 +128,13 @@ person$nmae
 ```
 
 ```text
-type-mismatch
-
-  x field `nmae` does not exist in `list{name: character, age: integer}`. Did you mean `name`?
+x field `nmae` does not exist in `list{name: character, age: integer}`. Did you mean `name`?
 ```
 
-## `NULL` and narrowing
+## `NULL`
 
-`|` writes a union. A value that may be `NULL` must be checked before use:
-
-```r
-#: fn(config: list{retries: integer} | NULL) -> integer
-retries <- function(config) {
-  config$retries
-}
-```
-
-```text
-type-mismatch
-
-  x expected a list, found `list{retries: integer} | NULL`
-```
-
-An `is.null()` guard narrows the type, so this version is clean:
+Many R functions return `NULL` for "nothing", and code that forgets the case fails far from where the
+`NULL` came from. A value that may be `NULL` has a union type, and must be checked before use:
 
 ```r
 #: fn(config: list{retries: integer} | NULL) -> integer
@@ -166,106 +144,71 @@ retries <- function(config) {
 }
 ```
 
-`is.character()`, `is.numeric()`, `is.list()`, and the other `is.*` tests narrow the same way.
-Narrowing applies to a plain variable in an `if` condition, not to `x$field` or a condition joined
-with `&&`.
+Without the `if`, `config$retries` is an error. The guard narrows `config` to the list for the rest
+of the function. `is.character()`, `is.numeric()`, `is.list()`, and the other `is.*` tests narrow the
+same way. Narrowing applies to variables only, so to test a field, copy it into a variable first:
+`r <- config$retries; if (is.null(r)) ...`.
 
 ## Functions
 
 ```r
-#: fn(name: character, [greeting]: character) -> character
-greet <- function(name, greeting = "hello") paste(greeting, name)
-
-#: fn(...: character) -> character
-shout <- function(...) toupper(paste(...))
+#: fn(name: character, [greeting]: character, ...: character) -> character
+greet <- function(name, greeting = "hello", ...) paste(greeting, name, ...)
 ```
 
-`[greeting]` is optional, and a parameter with a default must be declared optional. `...: T` checks
-every extra argument against `T`. Calls are checked for argument types, names, and count:
-
-```r
-greet("Ada", greeting = 1L)  # expected `character`, found `integer`
-greet()                      # the function requires 1 argument, and this call supplies 0
-shout("a", "b", 3L)          # expected `character`, found `integer`
-```
+`[greeting]` marks a parameter callers may omit, and it must match a default in the definition,
+since that is what lets R omit it. `...: character` checks every extra argument. Parameter names are
+part of the type, because R matches arguments by name as often as by position. Calls are checked for
+types, names, and count.
 
 ## Generics
 
-A function whose parameters nothing constrains is generic, and an operation can bound it. These are
-the types hover shows for unannotated code:
+A function is as general as its body allows. Hover shows the inferred types:
 
 ```r
 identity2 <- function(x) x           # <T> fn(x: T) -> T
 increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
 ```
 
-`increment("a")` is an error. Written by hand, the binder goes first:
-
-```r
-#: <T> fn(items: list[T]) -> T
-pick <- function(items) items[[1L]]
-```
-
-`pick(list(1L, 2L))` is `integer`. The two constraints are `numeric` and `atomic`.
+`increment("a")` is an error. Your own functions have exactly one signature; to accept several
+shapes, use a union such as `integer | character`. Allowing several signatures per name would make
+each call a search over candidates instead of a single inference step, which is what keeps checking
+fast enough to run on every keystroke.
 
 ## Named types
 
-`@type` declares a type that is distinct from everything else, even from types with the same
-representation. `@new` is the only way to create a value of it:
+A `double` cannot tell Celsius from Fahrenheit, and a `character` cannot tell a user ID from an
+email address. `@type` declares a type that is distinct even from types with the same
+representation, and `@new` is the only way to create a value of it:
 
 ```r
 #: @type Celsius {double}
 
-#: @type Fahrenheit {double}
-
-#: fn(temp: Celsius) -> Fahrenheit
-to_fahrenheit <- function(temp) {
-  #: @new Fahrenheit
-  temp * 9 / 5 + 32
+#: fn(value: double) -> Celsius
+celsius <- function(value) {
+  if (value < -273.15) stop("below absolute zero")
+  #: @new Celsius
+  value
 }
-
-#: @new Celsius
-freezing <- 0
-
-to_fahrenheit(32)
-to_fahrenheit(to_fahrenheit(freezing))
 ```
 
-```text
-x expected `Celsius`, found `double`
-x expected `Celsius`, found `Fahrenheit`
-```
+Passing a plain `double` or a `Fahrenheit` where a `Celsius` is expected is an error. Because `@new`
+can only appear where you write it, putting it in one constructor means every `Celsius` in the
+program passed that constructor's checks. At run time the value is still a plain number: arithmetic
+works and nothing is wrapped. `@alias` is the opposite: a shorthand that stays interchangeable with
+the type it names.
 
-At run time both are plain numbers, and arithmetic on them still works. A record type works the same
-way, as `@type Person {list{name: character}}`, and takes parameters, as `@type Box<T> {list{value: T}}`.
+[Domain modeling](/type-checking/domain-modeling) covers records, generic types, and when R6 is still
+the better tool.
 
-`@alias` names a type without making it distinct, so a value of the underlying type is accepted:
+## `Unknown` and strict mode
 
-```r
-#: @alias Row {list{id: integer, label: character}}
-```
+R has constructs no static checker can follow: `UseMethod` dispatch, S4 and R6 objects, data frame
+columns. Their values are `Unknown`, which is compatible with everything. ry would rather skip a
+check than report something false, so one unmodeled construct never causes a cascade of errors.
 
-## `Any` and `Unknown`
-
-Both are compatible with every type. `Unknown` means the checker could not work a type out, as for
-an S4 slot or a data frame column. `Any` means a declaration chose not to check, as the shipped
-declaration of `readRDS()` does. A gap in what the checker knows therefore skips a check rather than
-producing a false error.
-
-Two annotations override inference:
-
-```r
-#: @trust integer
-count <- readRDS("count.rds")        # take my word for it
-
-#: @if-unknown integer
-n <- some_unmodelled_value           # only where the type is Unknown
-```
-
-## Strict mode
-
-A clean run says no contradictions were found, not that everything was checked. Strict mode reports
-each place a type could not be determined:
+The cost is that a clean run does not say how much was checked. Strict mode reports every place a
+value became `Unknown`:
 
 ```toml
 [check]
@@ -279,29 +222,29 @@ total <- function(df) sum(df$amount)
 ```
 
 ```text
-strict
-
-  x strict mode: this expression has an undetermined type (`Unknown`)
-   --[R/demo.R:2:27]
- 2 | total <- function(df) sum(df$amount)
-   |                           ^^^^^^^^^
+x strict mode: this expression has an undetermined type (`Unknown`)
 ```
 
-A comment at the top of a file overrides the project setting for that file:
+`Any` is also compatible with everything, but it is a deliberate choice, made by an annotation or a
+package declaration, so strict mode ignores it. Two annotations override inference: `#: @trust TYPE`
+asserts a type the checker cannot verify, and `#: @if-unknown TYPE` fills in a type only where
+inference found none.
+
+A comment at the top of a file overrides the project setting, so you can adopt typing one file at a
+time:
 
 ```r
-# typing: off      # or: on, strict
+# typing: strict    # or: on, off
 ```
 
-## Data frames and data masking
+## Data frames
 
-A `data.frame` is a type of its own, but its columns are not typed: `df$amount` is `Unknown`, so it is
-neither checked nor reported. Inside a data-masking call, a bare name is a column, not a variable:
+Columns are not typed yet, so `df$amount` is `Unknown`. Inside data-masking functions, a bare name
+refers to a column, so ry does not report it as unresolved:
 
 ```r
 library(dplyr)
 
-#: fn(sales: data.frame) -> data.frame
 by_region <- function(sales) {
   sales |>
     filter(amount > 0) |>
@@ -309,13 +252,19 @@ by_region <- function(sales) {
 }
 ```
 
-This checks clean. `dplyr`, `data.table`, `ggplot2`, and `testthat` ship with typed declarations,
-and `with()`, `subset()`, and `transform()` are recognized too.
+dplyr's verbs, `data.table`'s `[`, and base `with()`, `subset()`, and `transform()` are recognized.
+A package's declarations switch on once the project uses it, through `library()`, `DESCRIPTION`, or
+`NAMESPACE`, so that names like `filter` stay unresolved in projects that never load dplyr.
 
 ## Packages
 
-ry knows base R, the default packages, and the export lists of common CRAN packages. For anything
-else, add a declaration file under `stubs/`, named after the package:
+ry does not load R, so it cannot ask a package what it exports. Declarations ship for base R, the
+default packages, and dplyr, data.table, ggplot2, and testthat, and export lists ship for the rest
+of the tidyverse and other common packages.
+
+This matters beyond types. Once you attach a package ry knows nothing about, any bare name might come
+from it, so ry stops reporting unresolved names across the project. A two-line declaration file turns
+the check back on:
 
 ```
 # stubs/dbclient.Rtypes
@@ -323,55 +272,38 @@ else, add a declaration file under `stubs/`, named after the package:
 connect : fn(host: character) -> Session
 ```
 
+## Formatting
+
+`ry fmt` fixes spacing, indentation, and braces, and leaves line breaks where you put them:
+
 ```r
-session <- dbclient::connect("localhost")
-dbclient::conect("localhost")
+x<-c(1,2,3)                # becomes  x <- c(1, 2, 3)
+if(x>1){y<-2}              # becomes  if (x > 1) { y <- 2 }
 ```
 
-```text
-! `conect` is not exported by `dbclient`.
-```
+A formatter that reflows code to a column limit rewrites lines you did not touch, so every diff
+shows layout churn instead of your change. ry keeps a one-line call on one line and a multi-line
+call multi-line, and only adds braces where leaving them out would change what a later edit means.
+The only settings are indent width and line endings.
 
-The same file can override a shipped declaration. In a package, ry reads `DESCRIPTION` and
-`NAMESPACE`, and reports an `importFrom()` of a name a known package does not export.
+## Editors
+
+`ry server` provides hover with inferred types, completion (including record fields), go-to
+definition, references, rename, signature help, and inlay hints in any LSP editor. Rename edits the
+binding you picked and nothing else: a local `total`, a global `total`, and the word "total" in a
+string are three different things.
 
 ## Suppressing a finding
 
 ```r
 total = 2L  # ry: allow(assignment-operator)
-
-# ry: allow(unused)
-scratch <- 1L
 ```
 
-The comment covers its own line, or the line below it.
-
-## Formatting
-
-`ry fmt` fixes spacing, indentation, and braces, and keeps your line breaks:
-
-```r
-x<-c(1,2,3)
-if(x>1){y<-2}
-```
-
-```r
-x <- c(1, 2, 3)
-if (x > 1) { y <- 2 }
-```
-
-A call you wrote on one line stays on one line, and a call you spread over several stays that way.
-`# fmt: skip` leaves one expression alone. `ry fmt --check` reports without writing, for CI.
-
-## Editors
-
-`ry server` gives any LSP editor hover with inferred types, completion (including record fields),
-go-to-definition, references, rename, signature help, and inlay hints. These work with type errors
-switched off. The [VS Code extension](/installation#vs-code) bundles the binary.
+A suppression covers only its own line, or the line below it. A file-wide switch would also hide
+mistakes added later.
 
 ## Next
 
-- [Type system reference](/reference/type-system): every rule
-- [Limitations](/type-checking/limitations): what is not checked
-- [Adopting an existing codebase](/guides/adopting): turning type checking on gradually
-- [Configuration](/reference/configuration): every `ry.toml` key
+- [Getting started](/getting-started): installation and the first run
+- [Limitations](/type-checking/limitations): what is not checked, and how much that matters
+- [Type system](/reference/type-system): every rule, precisely

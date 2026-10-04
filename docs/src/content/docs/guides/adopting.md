@@ -1,80 +1,57 @@
 ---
 title: Adopting an existing codebase
-description: How to turn type checking on for a project that has never had it, without being buried in findings
+description: The order that turns ry on for an existing R project without burying you in findings
 ---
 
-Setting `typing = true` on a codebase that has never been type-checked will report findings,
-possibly a lot of them. Turn it on in stages instead.
+Turning everything on at once on a project that has never been checked produces a long list, and a
+long list gets ignored. This order keeps each step small enough to finish.
 
-## 1. Start with no configuration at all
+## 1. Names first
 
-Code analysis needs no opt-in. Run `ry check` with no `ry.toml` and read what comes back.
-Unresolved names, unused bindings, and duplicate definitions find real mistakes on day one, and none
-of them require you to understand the type system.
+Run `ry check` with no `ry.toml`. Unresolved names, unused assignments, and duplicate definitions
+need no understanding of the type system, are almost always real, and are usually a short list. Fix
+them, then gate CI on them with `ry check` so they stay fixed.
 
-Fix those first. It is a short list on most projects, and it clears away the noise before you add
-more.
-
-## 2. Turn typing on
+## 2. Turn on types, and read before fixing
 
 ```toml
-# ry.toml
 [check]
 typing = true
 ```
 
-Do not fix anything on the first pass. Read the whole list instead. On real code it collapses into a
-handful of shapes, and recognizing the shape is worth more than fixing the first instance:
+Read the whole list before fixing anything. On real code most findings fall into a few shapes, and
+recognizing the shape is worth more than fixing the first instance:
 
-| Shape | What it usually means |
+| Finding | Usually means |
 | --- | --- |
-| A value that may be `NULL` used without a guard | Genuine. Either the guard is missing, or the value can never actually be `NULL` and the checker cannot see why |
-| A field read that no assignment created | `x$never_set` after only `x$a <- 1L`. The message names the record the checker built from the assignments it saw |
-| A value inferred as something other than a function, being called | Usually a name that shadows a function, or a dynamic construction the checker cannot follow |
+| A value that may be `NULL`, used unguarded | A missing `is.null()` check, or a value that is never `NULL` for a reason ry cannot see. Either guard it or annotate the source |
+| A field that does not exist | A typo, or a field added by code ry did not follow. The message shows the fields ry did see |
+| Calling something that is not a function | A variable that shadows a function name |
 
-None of these mean your code is wrong. They mean the checker could not establish that it is right,
-which is a different claim.
+Type mismatches are errors, so committing `typing = true` with findings left would fail CI. Run it
+locally until the list is short, or turn typing on file by file instead.
 
-## 3. Move file by file
+## 3. Go file by file
 
-You do not have to fix the whole project to benefit from any of it. A directive at the top of a file
-overrides the project setting, in any direction:
+A comment at the top of a file overrides the project setting in either direction:
 
 ```r
-# typing: on       # check this file even if the project has typing off
-# typing: off      # skip this one while you work through the rest
-# typing: strict   # hold this module to the stronger standard
+# typing: on       # check this file while the project default is off
+# typing: off      # skip this file for now
 ```
 
-If a file has more than one, the last directive wins, and any other value is an error.
+Start with the files you change most, because that is where a type error costs most. Leave typing
+off project-wide and opt files in, or turn it on and opt the hard ones out.
 
-So you can leave `typing = false` project-wide and opt in the modules you are actively working on,
-or turn it on project-wide and exempt the files you are not ready for. Either way, start with the
-files you change most often.
+## 4. Strict mode where it counts
 
-## 4. Strict mode
+A clean run with `typing = true` means no contradictions were found. It does not mean the file was
+checked: a data-frame-heavy file can pass while barely being checked at all, because column reads
+are `Unknown`. Strict mode reports every such place, and it raises `unresolved` to an error. Use it
+on the modules you rely on most (`# typing: strict` at the top), not across a legacy codebase.
 
-```toml
-[check]
-typing = true
-strict = true
-```
+## Where annotations pay off
 
-Strict mode makes a stronger claim than `typing = true`. It reports every place a value became
-`Unknown`, meaning every point where the checker gave up instead of concluding something. It also
-raises `unresolved` from a warning to an error, so `--min-severity error` no longer filters those
-out of a CI run.
-
-That is what you want on a module you intend to rely on, and not what you want across a whole legacy
-codebase on day one. A clean ordinary run means the checker found no contradictions. A clean strict
-run means it understood everything. Only the second is a guarantee.
-
-Strict mode is also how you find out how much of a file is really being checked. Because `Unknown`
-is compatible with everything, a data-frame-heavy file can pass cleanly while barely being checked
-at all. See [limitations](/type-checking/limitations).
-
-## Where the annotations go
-
-Most code needs none. When you do need one, annotate at the **boundaries**: the exported function,
-the constructor, and the code that reads from outside. Let inference cover the rest.
-See [domain modeling](/type-checking/domain-modeling) for giving your own types names.
+Inference covers function bodies. Annotate the boundaries: exported functions, constructors, and
+values read from outside the program, such as `readRDS()` results, which are `Any` until you say what
+they contain.
