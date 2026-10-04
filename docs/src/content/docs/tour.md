@@ -110,17 +110,20 @@ silently it is usually a bug, so ry asks for an explicit `as.character()`.
 
 ## Lists
 
-R uses `list()` for four different jobs, and ry types each one differently:
+R has one list type, but programs use it in four different roles, and each role has its own
+mistakes. ry gives each role its own type:
 
-| Type | Built by |
-| --- | --- |
-| `list{name: character, age: integer}` | `list(name = "Ada", age = 36L)` |
-| `list{integer, character}` | `list(1L, "ok")` |
-| `list[integer]` | annotation, or `list(...)` with mixed names |
-| `list[named: integer]` | annotation, or writes with computed keys |
+| Role | Names | Elements | Length | Type | Example |
+| --- | --- | --- | --- | --- | --- |
+| tuple-like | none | heterogeneous | fixed | `list{integer, character}` | `list(1L, "ok")` |
+| list-like | none | homogeneous | dynamic | `list[integer]` | results appended in a loop |
+| record-like | named | heterogeneous | fixed | `list{name: character, age: integer}` | `list(name = "Ada", age = 36L)` |
+| dict-like | named | homogeneous | dynamic | `list[named: integer]` | counts keyed by category |
 
-The first two have a fixed shape, so ry knows which fields exist. That makes `$` checkable, which
-matters because R answers a misspelled field with a silent `NULL` that fails somewhere else:
+At run time all four are the same R list, so nothing changes in your code. The difference is what
+can be checked. A tuple-like or record-like list has a fixed shape, so ry knows which positions and fields exist and
+what type each one has. That makes `$` checkable, which matters because R answers a misspelled field
+with a silent `NULL` that fails somewhere else:
 
 ```r
 person <- list(name = "Ada", age = 36L)
@@ -130,6 +133,11 @@ person$nmae
 ```text
 x field `nmae` does not exist in `list{name: character, age: integer}`. Did you mean `name`?
 ```
+
+A list-like or dict-like list can grow, so ry knows only the element type, and reading a key from a
+dict-like list gives `T | NULL`, because the key may be missing. ry infers the fixed shapes from
+`list(...)` literals; the growing ones come from annotations, or from code that adds elements with
+computed keys.
 
 ## `NULL`
 

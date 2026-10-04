@@ -128,39 +128,39 @@ Whether a coercion changes the type of a result depends on the construct that us
 
 ### List shapes
 
-R uses `list(...)` for several quite different kinds of collection, and the type system tells them
-apart. There are four list shapes:
+R has one list type, but programs use it in four different roles, and the type system gives each
+role its own type, because each role allows different checks:
 
-| Shape | Written | Fixed size | Homogeneous | Meaningful in the type |
+| Shape | Written | Names | Elements | Length |
 | --- | --- | --- | --- | --- |
-| tuple-like | `list{T1, T2, ...}` | yes | no | positions |
-| record-like | `list{name: T, ...}` | yes | no | names |
-| array-like | `list[T]` | no | yes | nothing |
-| map-like | `list[named: T]` | no | yes | nothing |
+| tuple-like | `list{T1, T2, ...}` | none | heterogeneous | fixed |
+| list-like | `list[T]` | none | homogeneous | dynamic |
+| record-like | `list{name: T, ...}` | named | heterogeneous | fixed |
+| dict-like | `list[named: T]` | named | homogeneous | dynamic |
 
 The tuple-like and record-like shapes have a *fixed shape*: their positions or field names are part
-of the type. The array-like and map-like shapes are homogeneous collections: every element has the
+of the type. The list-like and dict-like shapes are homogeneous collections: every element has the
 same type, and no particular position or name is part of the type.
 
 A `list(...)` expression infers a fixed shape whenever its elements carry enough information:
 
 - When all elements are unnamed, it is tuple-like.
 - When all elements are named, it is record-like.
-- When named and unnamed elements are mixed, the names are dropped and it is array-like, so
+- When named and unnamed elements are mixed, the names are dropped and it is list-like, so
   `list(1L, bar = "foo")` is `list[integer | character]`.
 
 A fixed shape wins wherever the elements allow one. `list(1L, 2L, 3L)` is
 `list{integer, integer, integer}`, not `list[integer]`, and `list(foo = 1L, bar = 2L)` is
-`list{foo: integer, bar: integer}`, not `list[named: integer]`. Array-like and map-like types mostly
+`list{foo: integer, bar: integer}`, not `list[named: integer]`. List-like and dict-like types mostly
 come from annotations, and from coercing a fixed-shape list.
 
 #### List coercions
 
-- Any list coerces to an array-like `list[T]` when every element is compatible with `T`.
-- A record-like or map-like list coerces to a map-like `list[named: T]` when every value is
+- Any list coerces to a list-like `list[T]` when every element is compatible with `T`.
+- A record-like or dict-like list coerces to a dict-like `list[named: T]` when every value is
   compatible with `T`.
 - The reverse is never allowed: a `list[T]` does not coerce back into a tuple-like, record-like, or
-  map-like list, and a `list[named: T]` does not coerce back into a record-like one.
+  dict-like list, and a `list[named: T]` does not coerce back into a record-like one.
 
 #### Tuple-like lists
 
@@ -191,9 +191,9 @@ field the expected type declares that the value lacks, or a field the value has 
 type does not declare. For a nested record, the finding names the path, outermost field first, as
 in `retry.count`.
 
-#### Array-like lists
+#### List-like lists
 
-An array-like list `list[T]` is a list whose elements all share the type `T`, with no fixed
+A list-like `list[T]` is a list whose elements all share the type `T`, with no fixed
 positions and no requirement that element names be known. Such types usually come from an
 annotation, or from coercing a fixed-shape list whose values are all compatible with `T`.
 
@@ -201,9 +201,9 @@ A fixed-shape list coerces into `list[T]` with `T` being the union of its elemen
 `lapply(list(1L, "a"), f)` passes `integer | character`. Coercion into `list[named: T]` works the
 same way. Where `T` is already concrete, every element must fit it.
 
-#### Map-like lists
+#### Dict-like lists
 
-A map-like list `list[named: T]` is a name-keyed collection whose values all share the type `T`,
+A dict-like `list[named: T]` is a name-keyed collection whose values all share the type `T`,
 without requiring the set of names to be known. Such types usually come from an annotation, or from
 coercing a list whose element names are not statically available.
 
@@ -1015,8 +1015,8 @@ program is prepared for. The "did you mean" suggestion draws on every field that
 
 #### `[[` on lists
 
-- An array-like `list[T]` returns `T`.
-- A map-like `list[named: T]` returns `T | NULL` for a name index, and `T` for a positional or
+- A list-like `list[T]` returns `T`.
+- A dict-like `list[named: T]` returns `T | NULL` for a name index, and `T` for a positional or
   computed one.
 - A tuple-like list returns the element at a literal position. A position that does not exist is an
   error, and a computed position returns the union of the item types.
@@ -1065,8 +1065,8 @@ subject would flag legal programs.
 
 `[` slices a list, so a fixed shape does not survive into the result:
 
-- An array-like `list[T]` returns `list[T]`.
-- A map-like `list[named: T]` returns `list[named: T]`.
+- A list-like `list[T]` returns `list[T]`.
+- A dict-like `list[named: T]` returns `list[named: T]`.
 - A tuple-like list returns `list[T]`, where `T` is the union of the item types, so
   `list(1L, "foo")[1L]` is `list[integer | character]`.
 - A record-like list returns `list[named: T]`, where `T` is the union of the field types.
@@ -1262,7 +1262,7 @@ turn out to be a `double`.
   accumulator that starts out as `NULL` therefore combines cleanly: with `acc` of type
   `double[] | NULL`, `c(acc, 1.0)` is `double[]`.
 - When any argument is a list, `c` concatenates into a list instead of an atomic vector, since
-  `c(list_a, list_b)` is R's standard way to append to a list. The result is an array-like `list[T]`
+  `c(list_a, list_b)` is R's standard way to append to a list. The result is a list-like `list[T]`
   whose element type is the join of every argument's elements, with an atomic argument contributing
   its own type, so `c(list(1L), "a")` is `list[integer | character]`. The atomic coercion rules below
   apply only when no argument is a list.
@@ -1678,7 +1678,7 @@ That selection cannot be modelled statically, but the call is still checked in f
 `for (name in value) body` needs an iterable source, and binds `name` to its element type:
 
 - A vector of any shape iterates with its scalar element type.
-- An array-like `list[T]` and a map-like `list[named: T]` iterate with `T`.
+- A list-like `list[T]` and a dict-like `list[named: T]` iterate with `T`.
 - A tuple-like or record-like list iterates with the union of its item types, which collapses to a
   single type for a homogeneous list. A heterogeneous fixed-shape list is therefore iterable:
   `for (item in list(a = 1L, b = "two")) ...` binds `item` as `integer | character`.
@@ -1889,9 +1889,9 @@ slot, so the slot's type reflects the update:
   matching its representation.
 - A write with a computed key, `x[[key]] <- v` where `key` is not a literal, cannot name a field
   statically, so it refines the container's element type instead:
-  - an empty `list()` becomes a map-like `list[named: V]`;
-  - a map-like `list[named: T]` becomes `list[named: T | V]`;
-  - an array-like `list[T]` becomes `list[T | V]`, and stays array-like, because its reads are not
+  - an empty `list()` becomes a dict-like `list[named: V]`;
+  - a dict-like `list[named: T]` becomes `list[named: T | V]`;
+  - a list-like `list[T]` becomes `list[T | V]`, and stays list-like, because its reads are not
     nullable;
   - a record-like or tuple-like container is left unchanged. A dynamic write does not statically
     change a shape whose fields are individually known, and widening such a shape would throw away
@@ -1900,7 +1900,7 @@ slot, so the slot's type reflects the update:
   A replacement whose accessor chain has no variable at its root, such as `f(x)$a <- v`, is refused as
   an unsupported construct: it types as `Unknown` and is a strict-mode origin.
 
-Reading a name from a map-like list gives `T | NULL`, because the key may be absent (see
+Reading a name from a dict-like list gives `T | NULL`, because the key may be absent (see
 [`[[` on lists](#-on-lists)). Building a map with computed-key writes and then reading a key back
 therefore gives `V | NULL`, so guard the read with `is.null` before a use that needs a `V`.
 

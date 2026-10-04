@@ -4049,7 +4049,7 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// `list(...)` builds the fixed shapes: all-unnamed → tuple-like,
-    /// all-named → record-like, partially named → an array-like list.
+    /// all-named → record-like, partially named → a list-like list.
     /// `structure(value, ...)` returns `value` with attributes attached, and
     /// an attribute is not part of a type here. A `class` attribute is data,
     /// which is why S3 dispatch is not modeled. The call therefore has the type
@@ -4097,7 +4097,7 @@ impl<'db> Checker<'db, '_> {
             // A partially named list is ordinary R, and
             // `do.call(f, list(x, n = 1))` is the standard spelling. Neither
             // the tuple shape nor the record shape can express it, so the names
-            // are dropped and the value types join into an array-like list.
+            // are dropped and the value types join into a list-like list.
             // That is less precise than either shape, and it is never a false
             // rejection of legal code.
             let mut items = Vec::with_capacity(arguments.len());
