@@ -174,6 +174,14 @@ const REGRESSIONS: &[&str] = &[
     "f <-#: Pers function(x, y) y\non\nx\n",
     "1L --- fn(ier\n#:dL\n----a, bar)\n\n!\n L\n",
     "f <- fn(x, y \n## banner\n= 2) | + y\n",
+    "\n\nr\"(x)\"# fmt: off\r\r\n\n#'@param x}",
+    ";\r\n\r",
+    "f(a=1,\nb=2)::\n\n#:\t\n\rf  ",
+    "x:::# c\ny\n",
+    "#:#fmt:skip\n;#:",
+    "#: a\n;#: b\n",
+    "x <- 1 #: a\n;#: b\n",
+    "x <- 1;#: b\ny <- 2\n",
 ];
 
 fn iterations() -> usize {

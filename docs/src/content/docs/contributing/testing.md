@@ -280,11 +280,21 @@ formatting refuses; edits ordered, disjoint, whole lines and in bounds; that app
 every token; that the applied document still formats to what the original formats to; that every
 edit is one whole-file formatting would have made; that selecting the whole file reproduces
 whole-file formatting byte for byte; and that the region the edits produced is already laid out,
-so a second pass over it is a no-op.
+so a second pass over it is a no-op. On inputs of at most 24 lines it then asserts two
+whole-input properties: **additivity** — every span of whole lines makes exactly the union of the
+edits its lines make one at a time — and **composition** — formatting one line at a time, top to
+bottom and swept until a sweep changes nothing, reaches whole-file formatting with every
+intermediate document still formatting to it. `test_format_range.rs` also checks every byte-pair
+selection of a few short sources (mid-character, CRLF, lone `\r`, past the end) against an oracle
+that finds the touched lines itself.
 
-The last two are the load-bearing ones and are worth keeping that way: they are what caught a
-span cut where two lines merely looked alike (an annotation block lost its closing `#: }`) and a
-span that flipped a call's hug decision by splicing one formatted argument into it.
+Convergence and restriction are the load-bearing per-selection checks: they caught a span cut
+where two lines merely looked alike (an annotation block lost its closing `#: }`) and a span that
+flipped a call's hug decision by splicing one formatted argument into it. Composition is the
+sharpest whole-file check the formatter has, because each step re-formats a document the
+formatter itself produced partway: it surfaced auto line-ending detection that read the leading
+blank lines formatting deletes, comments glued onto `::`, and two `#:` blocks merged when the `;`
+between them was dropped — all whole-file idempotence bugs no fixture had reached.
 
 ### The lint fixture suites
 

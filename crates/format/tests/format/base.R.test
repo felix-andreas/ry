@@ -1621,6 +1621,34 @@ x ::: y
 x::y
 x:::y
 
+#---- line_break_after_operator_joined
+x::
+y
+#++++
+x::y
+
+#---- comment_after_operator_keeps_break
+x::
+# c
+y
+x:::# c
+y
+#++++
+x::
+  # c
+  y
+x::: # c
+  y
+
+#---- annotation_after_operator_keeps_its_own_line
+x::
+#: c
+y
+#++++
+x::
+  #: c
+  y
+
 #==== parenthesized
 #---- basic
 (x)

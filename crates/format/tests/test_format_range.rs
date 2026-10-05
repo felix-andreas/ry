@@ -1,6 +1,7 @@
 //! Range-formatting property tests: the invariant battery over every R source
-//! in the repository, plus the texts the fixture format cannot spell — one
-//! without a trailing newline, one with CRLF endings, and the empty file.
+//! in the repository, every byte selection of a few short sources against an
+//! independent line oracle, plus the texts the fixture format cannot spell —
+//! ones without a trailing newline, with CRLF endings, and the empty file.
 
 use format::check_range_format_invariants as check_invariants;
 use format::{Config, TextEdit, apply_edits, format, format_range};
@@ -114,4 +115,80 @@ fn selecting_everything_reproduces_whole_file_formatting() {
         apply_edits(source, &edits),
         format(source, Config::default()).expect("the source formats")
     );
+}
+
+#[test]
+fn auto_line_endings_ignore_the_blank_lines_formatting_removes() {
+    // Deciding from the leading blank lines would pick LF here, and the second
+    // pass, which no longer sees them, CRLF: the same file would format two
+    // ways depending on how much of it was formatted before.
+    let source = "\n\nx<-1\r\ny<-2\r\n";
+    let formatted = format(source, Config::default()).expect("the source formats");
+    assert_eq!(formatted, "x <- 1\r\ny <- 2\r\n");
+    assert_eq!(format(&formatted, Config::default()), Ok(formatted.clone()));
+    assert_eq!(
+        edits_at(source, 8),
+        [TextEdit {
+            range: TextRange::new(TextSize::new(8), TextSize::new(14)),
+            new_text: "y <- 2\r\n".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn auto_line_endings_of_a_file_without_code_come_from_its_first_line_break() {
+    for source in ["\r\n", ";\r\n", "\r\n\r\nx"] {
+        let formatted = format(source, Config::default()).expect("the source formats");
+        assert!(
+            formatted.ends_with("\r\n"),
+            "{source:?} formatted to {formatted:?}"
+        );
+        assert_eq!(format(&formatted, Config::default()), Ok(formatted));
+    }
+}
+
+/// Every selection, including ones that start or end mid-character and ones
+/// past the end, makes exactly the edits of the lines it touches — checked
+/// against an oracle that finds those lines by scanning for `\n` itself.
+#[test]
+fn every_byte_selection_takes_exactly_the_lines_it_touches() {
+    let sources = [
+        "x<-1\ny<-2",
+        "x<-1\r\n\r\ny<-2\r\n",
+        "f(a,\n  b)\n\n# c\nz<-'é🙂'\n",
+        "{\nx<-1\n}\n\n\nw<-2\r",
+    ];
+    for source in sources {
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+            .filter(|&start| start == 0 || start < source.len())
+            .collect();
+        let line_of = |offset: usize| {
+            starts
+                .iter()
+                .rposition(|&start| start <= offset.min(source.len()))
+                .unwrap_or(0)
+        };
+        let per_line: Vec<Vec<TextEdit>> = starts
+            .iter()
+            .map(|&start| edits_at(source, start))
+            .collect();
+        for start in 0..=source.len() + 2 {
+            for end in start..=source.len() + 2 {
+                let first = line_of(start);
+                // An end at a line start selects nothing of that line.
+                let last = if end > start { line_of(end - 1) } else { first }.max(first);
+                let mut expected: Vec<TextEdit> = per_line[first..=last].concat();
+                expected.sort_by_key(|edit| (edit.range.start(), edit.range.end()));
+                expected.dedup();
+                let selection =
+                    TextRange::new(TextSize::new(start as u32), TextSize::new(end as u32));
+                assert_eq!(
+                    format_range(source, Config::default(), selection),
+                    Ok(expected),
+                    "bytes {start}..{end} of {source:?} (lines {first}..={last})"
+                );
+            }
+        }
+    }
 }

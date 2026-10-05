@@ -372,13 +372,22 @@ pkg :: process
 pkg ::: filter
 ```
 
-When an extract or namespace chain spans several lines, each subsequent line is indented one step:
+When an extract chain continues on the next line after `$` or `@`, each subsequent line is indented one step. Outside brackets R ends an expression at a line break after `::` or `:::`, so a namespace access is joined onto one line — unless a comment sits after the operator, in which case the break stays and the name is indented like an extract chain's:
 
 ```r
 # extract_operator_chained : compare
 object$
 call(x)$
 call(x, y)
+```
+
+```r
+# namespace_operator_comment : compare
+pkg::
+process
+pkg::
+# kept apart by the comment
+filter
 ```
 
 ### String Literals
@@ -505,7 +514,7 @@ and mixed closer shapes normalize to the nearest consistent style:
 #: }}
 ```
 
-A blank line, a non-`#:` comment, or ordinary code ends an annotation block, so unrelated comments are never pulled into one. Trailing empty `#:` lines at the end of a block are dropped.
+A blank line, a non-`#:` comment, or ordinary code ends an annotation block, so unrelated comments are never pulled into one. Trailing empty `#:` lines at the end of a block are dropped. A `;` separating two blocks becomes a blank line rather than disappearing, since removing it would merge them into one; and an annotation after a `;` moves to its own line rather than joining the statement before it, which it does not annotate.
 
 ### Line Spacing
 
@@ -522,7 +531,7 @@ z <- 3
 
 ### Line Endings
 
-The formatter automatically detects and preserves the line ending style (`LF` or `CRLF`) used in the original file.
+With the default `line-ending = "auto"`, the formatter keeps the file's line ending style (`LF` or `CRLF`), taken from the first line break after the file's first code or comment. Leading blank lines do not count, because formatting removes them; a file with no line break after its first code or comment uses its first line break.
 
 ## Format Suppression
 

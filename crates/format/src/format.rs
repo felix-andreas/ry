@@ -136,10 +136,16 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
 
     let line_ending = match config.line_ending {
         LineEnding::Auto => {
-            if source
+            // Decide from the first line break after content formatting keeps:
+            // leading blank lines and empty statements are deleted, so deciding
+            // from them would let a second pass see a different first break.
+            // A file with no break after its content falls back to its first.
+            let content = source.trim_start_matches([' ', '\t', '\u{c}', '\r', '\n', ';']);
+            let first_line = content
                 .find('\n')
-                .is_some_and(|at| source[..at].ends_with('\r'))
-            {
+                .map(|at| &content[..at])
+                .or_else(|| source.find('\n').map(|at| &source[..at]));
+            if first_line.is_some_and(|line| line.ends_with('\r')) {
                 "\r\n"
             } else {
                 "\n"
@@ -204,11 +210,14 @@ pub fn format_range(
     let selected = selected_lines(source, selection);
     Ok(changed_spans(source, &formatted)
         .into_iter()
-        // A span that only inserts covers no source text, so it counts as
-        // touching the line it lands on rather than as an empty stretch.
-        .filter(|(in_source, _)| {
-            in_source.start() < selected.end()
-                && in_source.end().max(in_source.start() + TextSize::new(1)) > selected.start()
+        // A span that only inserts covers no source text, so it touches the
+        // selection when it lands inside it or on either edge. Counting the
+        // far edge is what lets an insertion at the very end of the file be
+        // reached at all — no line starts there — so selecting the whole file
+        // always carries every edit whole-file formatting makes.
+        .filter(|(in_source, _)| match in_source.is_empty() {
+            true => selected.start() <= in_source.start() && in_source.start() <= selected.end(),
+            false => in_source.start() < selected.end() && in_source.end() > selected.start(),
         })
         .map(|(in_source, in_formatted)| TextEdit {
             range: in_source,
@@ -819,11 +828,8 @@ impl Formatter<'_> {
             }
             SyntaxKind::ARGUMENT_LIST => self.argument_list(node, level, false),
             SyntaxKind::PARAMETER_LIST => self.argument_list(node, level, false),
-            SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR => self.field_access(node, level),
-            SyntaxKind::NAMESPACE_EXPR => {
-                for element in Self::elements(node) {
-                    self.element(&element, level, false);
-                }
+            SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR | SyntaxKind::NAMESPACE_EXPR => {
+                self.field_access(node, level)
             }
             SyntaxKind::FUNCTION_DEF => self.function_definition(node, level),
             SyntaxKind::IF_EXPR => self.if_expression(node, level, make_multiline),
@@ -882,6 +888,7 @@ impl Formatter<'_> {
         let mut pending_directive = None;
         let mut previous: Option<&Element> = None;
         let mut first = true;
+        let mut after_semicolon = false;
 
         for element in elements {
             match pending_directive {
@@ -892,8 +899,10 @@ impl Formatter<'_> {
             pending_directive = self.directive(element);
 
             if element.kind() == SyntaxKind::SEMICOLON {
+                after_semicolon = true;
                 continue;
             }
+            let follows_semicolon = std::mem::take(&mut after_semicolon);
 
             if !enabled {
                 // A `# fmt: off` region is preserved byte-exactly; only the
@@ -915,11 +924,17 @@ impl Formatter<'_> {
                 continue;
             }
 
-            let trailing_comment =
-                matches!(element.kind(), SyntaxKind::COMMENT | SyntaxKind::ANNOTATION)
-                    && previous.is_some_and(|previous| {
-                        self.same_line(previous.text_range(), element.text_range())
-                    });
+            // The semicolon a standalone annotation follows is what keeps it
+            // standalone: joined onto the statement before, it would annotate
+            // that statement instead.
+            let is_annotation = element.kind() == SyntaxKind::ANNOTATION;
+            let trailing_comment = match element.kind() {
+                SyntaxKind::COMMENT => true,
+                SyntaxKind::ANNOTATION => !follows_semicolon,
+                _ => false,
+            } && previous.is_some_and(|previous| {
+                self.same_line(previous.text_range(), element.text_range())
+            });
             if trailing_comment {
                 self.space();
             } else if first {
@@ -927,6 +942,17 @@ impl Formatter<'_> {
                     self.out.push_str(&self.indent);
                 }
             } else {
+                // `#:` lines on adjacent lines stitch into one annotation, so
+                // two annotations a deleted semicolon kept apart need a blank
+                // line between them to stay two.
+                if let Some(previous) = previous
+                    && is_annotation
+                    && Self::ends_in_annotation(previous)
+                    && self.line(self.significant_range(element).start())
+                        < self.line(self.significant_range(previous).end()) + 2
+                {
+                    self.out.push_str(self.line_ending);
+                }
                 self.newlines_between(previous, element, level);
             }
 
@@ -934,6 +960,20 @@ impl Formatter<'_> {
             previous = Some(element);
             first = false;
         }
+    }
+
+    fn ends_in_annotation(element: &Element) -> bool {
+        let last = match element {
+            SyntaxElement::Node(node) => node.last_token(),
+            SyntaxElement::Token(token) => Some(token.clone()),
+        };
+        std::iter::successors(last, SyntaxToken::prev_token)
+            .find(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE))
+            .is_some_and(|token| {
+                token
+                    .parent_ancestors()
+                    .any(|ancestor| ancestor.kind() == SyntaxKind::ANNOTATION)
+            })
     }
 
     // ---- comments and strings ----
@@ -1139,14 +1179,30 @@ impl Formatter<'_> {
         }
     }
 
+    /// `x$name`, `x@name`, and `pkg::name`. A field name may sit on the next
+    /// line, but outside brackets R ends the expression at a line break after
+    /// `::`, so a namespace is joined unless a comment after the operator
+    /// forces the break.
     fn field_access(&mut self, node: &SyntaxNode, level: usize) {
         let elements = Self::elements(node);
+        let is_operator = |kind| {
+            matches!(
+                kind,
+                SyntaxKind::DOLLAR | SyntaxKind::AT | SyntaxKind::COLON2 | SyntaxKind::COLON3
+            )
+        };
         let operator = elements
             .iter()
-            .position(|element| matches!(element.kind(), SyntaxKind::DOLLAR | SyntaxKind::AT));
+            .position(|element| is_operator(element.kind()));
+        let is_namespace = node.kind() == SyntaxKind::NAMESPACE_EXPR;
         // The multiline probe must skip comments trailing the operator: the
         // field name is the element whose line placement matters.
         let is_multiline = operator.is_some_and(|operator_index| {
+            if is_namespace {
+                return elements[operator_index + 1..].iter().any(|element| {
+                    matches!(element.kind(), SyntaxKind::COMMENT | SyntaxKind::ANNOTATION)
+                });
+            }
             elements
                 .get(operator_index + 1..)
                 .and_then(|rest| {
@@ -1181,7 +1237,7 @@ impl Formatter<'_> {
                     }
                     self.element(element, level, false);
                 }
-                SyntaxKind::DOLLAR | SyntaxKind::AT => {
+                kind if is_operator(kind) => {
                     self.element(element, level, false);
                     seen_operator = true;
                 }
@@ -2435,7 +2491,16 @@ fn is_closer(kind: AnnotationTokenKind) -> bool {
 ///  6. completeness — selecting the whole file reproduces whole-file
 ///     formatting byte for byte;
 ///  7. stability — the region the edits produced is already laid out, so
-///     formatting the same selection again is a no-op.
+///     formatting the same selection again is a no-op;
+///  8. additivity — a selection of whole lines makes exactly the edits its
+///     lines make one at a time, so the result never depends on how a region
+///     was selected;
+///  9. composition — formatting one line at a time, top to bottom and swept
+///     until a sweep changes nothing, reaches whole-file formatting, and
+///     every step on the way still formats to it.
+///
+/// Additivity and composition re-run range formatting per line, so they are
+/// checked on small inputs only, which is all a fuzzer generates.
 pub fn check_range_format_invariants(input: &str) {
     let config = Config::default();
     let whole_file = format(input, config);
@@ -2539,6 +2604,69 @@ pub fn check_range_format_invariants(input: &str) {
             "range formatting {selection:?} of {input:?} left {touched:?} of {result:?} unformatted"
         );
     }
+
+    let Ok(formatted) = &whole_file else {
+        return;
+    };
+    let starts = line_starts_of(input);
+    if starts.len() > 24 {
+        return;
+    }
+    let caret_edits = |text: &str, start: TextSize| {
+        format_range(text, config, TextRange::empty(start))
+            .expect("a file that formats never refuses a selection")
+    };
+    let per_line: Vec<Vec<TextEdit>> = starts
+        .iter()
+        .map(|&start| caret_edits(input, start))
+        .collect();
+    for first in 0..starts.len() {
+        for last in first..starts.len() {
+            let end = starts.get(last + 1).copied().unwrap_or(length);
+            let selection = TextRange::new(starts[first], end);
+            let mut union: Vec<TextEdit> = per_line[first..=last].concat();
+            union.sort_by_key(|edit| (edit.range.start(), edit.range.end()));
+            union.dedup();
+            assert_eq!(
+                format_range(input, config, selection),
+                Ok(union),
+                "selecting lines {first}..={last} of {input:?} is not the union of formatting each"
+            );
+        }
+    }
+
+    let mut document = input.to_owned();
+    for _ in 0..=starts.len() {
+        let before = document.clone();
+        let mut line = 0;
+        while let Some(&start) = line_starts_of(&document).get(line) {
+            document = apply_edits(&document, &caret_edits(&document, start));
+            assert_eq!(
+                format(&document, config).as_ref(),
+                Ok(formatted),
+                "formatting {input:?} line by line changed what it formats to at {document:?}"
+            );
+            line += 1;
+        }
+        if document == before {
+            break;
+        }
+    }
+    assert_eq!(
+        &document, formatted,
+        "formatting {input:?} line by line did not reach whole-file formatting"
+    );
+}
+
+/// Where each line of `text` starts; a final line break opens no line.
+fn line_starts_of(text: &str) -> Vec<TextSize> {
+    std::iter::once(TextSize::new(0))
+        .chain(
+            text.match_indices('\n')
+                .map(|(at, _)| TextSize::new(at as u32 + 1))
+                .filter(|&start| start < TextSize::of(text)),
+        )
+        .collect()
 }
 
 /// Whether `offset` is the first byte of a line (or the end of the text).
@@ -2560,15 +2688,10 @@ fn probe_selections(text: &str) -> Vec<TextRange> {
         TextRange::empty(length),
         TextRange::new(length, length + TextSize::new(7)),
     ];
-    let starts: Vec<TextSize> = std::iter::once(TextSize::new(0))
-        .chain(
-            text.match_indices('\n')
-                .map(|(at, _)| TextSize::new(at as u32 + 1)),
-        )
-        .collect();
+    let starts = line_starts_of(text);
     let step = (starts.len() / 8).max(1);
     for (index, &start) in starts.iter().enumerate().step_by(step).take(12) {
-        let end = starts.get(index + 1).copied().unwrap_or(length).min(length);
+        let end = starts.get(index + 1).copied().unwrap_or(length);
         selections.push(TextRange::new(start, end));
         selections.push(TextRange::empty(start));
         // A caret in the middle of the line, and a span that starts and ends
@@ -2577,9 +2700,8 @@ fn probe_selections(text: &str) -> Vec<TextRange> {
         let middle = start + TextSize::new(u32::from(end - start) / 2);
         selections.push(TextRange::empty(middle));
         selections.push(TextRange::new(middle, end));
-        if let Some(&next) = starts.get(index + 2) {
-            selections.push(TextRange::new(middle, next.min(length)));
-        }
+        let next = starts.get(index + 2).copied().unwrap_or(length);
+        selections.push(TextRange::new(middle, next));
     }
     selections
 }
@@ -2599,6 +2721,11 @@ pub fn check_format_invariants(input: &str) {
             significant_tokens(&output),
             "formatting changed the code for input {input:?} (output {output:?})"
         );
+        assert_eq!(
+            annotation_shape(input),
+            annotation_shape(&output),
+            "formatting regrouped or reattached an annotation for input {input:?} (output {output:?})"
+        );
         match format(&output, Config::default()) {
             Ok(second) => assert_eq!(second, output, "format not idempotent for input {input:?}"),
             Err(error) => panic!(
@@ -2606,6 +2733,26 @@ pub fn check_format_invariants(input: &str) {
             ),
         }
     }
+}
+
+/// Each annotation in order, as whether it stands alone in a statement
+/// sequence. The token comparison drops `#:` markers, since the formatter
+/// re-lays-out an annotation's lines, so this is what notices two annotations
+/// stitched into one, or a standalone annotation turned into a trailing one.
+fn annotation_shape(text: &str) -> Vec<bool> {
+    syntax::parse(text)
+        .syntax_node()
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
+        .map(|node| {
+            node.parent().is_some_and(|parent| {
+                matches!(
+                    parent.kind(),
+                    SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
+                )
+            })
+        })
+        .collect()
 }
 
 /// The tokens formatting must preserve exactly, in order, as `(kind, spelling)`.
