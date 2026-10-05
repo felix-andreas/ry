@@ -31,7 +31,7 @@ in JSON.
 
 ## Suppressing a finding
 
-A `# ry: allow(...)` comment silences findings whose range starts on **its own line** (as a trailing comment) or on **the line directly below it**. There is no block or file scope.
+A `# ry: allow(...)` comment silences findings whose range starts on **its own line** or on **the line directly below it**, so a trailing comment covers two lines. There is no block or file scope, because a suppression marks one reviewed exception and should not hide findings in code written later.
 
 | Comment | Silences |
 | --- | --- |
@@ -50,8 +50,8 @@ flag <- T  ## ry: allow(all)
 
 The marker is found by scanning the line rather than parsing it: the scan takes the first `#` on the
 line, strips every leading `#`, and then looks for the literal `ry:` and `allow(` up to the first `)`.
-So `## ry: allow(x)` and `#ry:allow(x)` both work, and a `#` inside a string earlier on the line moves
-where the scan starts.
+So `## ry: allow(x)` and `#ry:allow(x)` both work, the former name's `# roughly: allow(x)` still
+works, and a `#` inside a string earlier on the line hides a trailing suppression on that line.
 
 Some findings cannot be suppressed this way, because they are not reported against an R source
 file: `stub` (reported on `.Rtypes` files), `config`, and the `unresolved` and `unused-import` findings
@@ -141,10 +141,10 @@ block the refusal is the only finding.
 | `unresolved` | warning | yes | `pkg::name` where `pkg` is neither a stub namespace nor a declared `DESCRIPTION` dependency: "unknown package namespace `notapackage`" |
 | `unresolved` | **error** | yes | In `NAMESPACE`: `importFrom(pkg, name)` where `pkg` has stubs and does not export `name`. An error rather than a warning because R refuses to load the package |
 | `unresolved` | **error** | yes (`check` only) | In `NAMESPACE`: `export(name)` naming something the package defines nowhere at top level, which is `R CMD check`'s "undefined exports". Not reported by the language server |
-| `maybe-undefined` | as configured | yes | A read some path reaches with no prior write. The name is introduced only in conditionally executed code, and R raises `object 'x' not found` on the other path. The read still resolves, so this is not `unresolved`. Off by default: the flow analysis treats two conditions that always agree at run time as independent branches, so a guard pattern like `if (ok) v <- …` followed by `if (ok) use(v)` reports even though it is safe |
+| `maybe-undefined` | warning | no | A read some path reaches with no prior write. The name is introduced only in conditionally executed code, and R raises `object 'x' not found` on the other path. The read still resolves, so this is not `unresolved`. Off by default: the flow analysis treats two conditions that always agree at run time as independent branches, so a guard pattern like `if (ok) v <- …` followed by `if (ok) use(v)` reports even though it is safe |
 | `unused` | warning | yes | A write inside a function body that no read ever reaches, including a store overwritten before every read. A write in a frame some inner scope super-assigns with `<<-` is exempt: the write is what makes `<<-` find that slot, so deleting it would send the assignment to the global environment instead |
 | `unused` | warning | yes | In a script, a top-level binding nothing later reads. Package files are exempt, because any file may use them. S3 method names are exempt: dispatch is not a read |
-| `duplicate` | warning | yes | A top-level name defined more than once across a package's files. Both sites report, each with a `note` pointing at the other. Scripts are exempt, because rebinding in a sequential script is ordinary |
+| `duplicate` | warning | yes | A top-level name defined more than once across a package's files. Both sites report, each with a related location pointing at the other. Scripts are exempt, because rebinding in a sequential script is ordinary |
 
 ### Typing
 
@@ -193,7 +193,7 @@ build.
 | `naming-style` | warning | no | An assignment target or a function parameter that does not match the configured casing. `SCREAMING_SNAKE_CASE` conforms under either style. Always a warning: the `"warn"`/`"error"` levels do not apply to this lint, which is configured by style value instead |
 | `unused-parameter` | as configured | no | A formal no read resolves to. `...` is exempt, and an S3 generic and its methods are exempt entirely, because the generic dictates their formals |
 | `unused-import` | as configured | no | An `importFrom(pkg, name)` in `NAMESPACE` whose `name` appears in no token of any checked source. Whole-namespace `import(pkg)` is never checked. Reported by `check` only, not by the language server |
-| `shadows-builtin` | as configured | no | A top-level binding whose name `base` exports. Requires stubs to be installed |
+| `shadows-builtin` | as configured | no | A top-level binding whose name `base` exports |
 | `shadows-namespace` | as configured | no | A top-level binding whose name a non-`base` stub namespace declares and that resolves bare (`stats::filter`, `utils::head`) |
 
 `missing-comma` is retired and never emitted, because the parser now rejects `f(1 2)` as a syntax

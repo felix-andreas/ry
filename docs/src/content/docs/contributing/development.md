@@ -3,33 +3,13 @@ title: Development
 description: How to contribute to ry
 ---
 
-This page takes you from a fresh clone to a passing test run, and then explains a few corners of the
-codebase that the source alone does not make obvious.
-
 ## Project layout
 
-ry is a Rust workspace, and the tool it ships is six crates:
-
-- `crates/syntax`: the hand-written lexer and recursive-descent parser, producing lossless
-  [rowan](https://crates.io/crates/rowan) syntax trees. A `#:` type annotation is part of the
-  grammar, not comment text.
-- `crates/semantics`: the analysis core, built on [salsa](https://crates.io/crates/salsa). It holds
-  the item tree, HIR lowering, naming, the Hindley-Milner type checker, stubs, lints, and
-  diagnostics.
-- `crates/format`: the formatter, which depends on `syntax` alone.
-- `crates/ide`: the editor features (hover, navigation, rename, completion, signature help, inlay
-  hints, symbols, and code actions), all implemented as pure reads over `semantics`.
-- `crates/ry`: the product binary, with the CLI (`check`, `fmt`, `server`, `repl`, and `run`) and the
-  LSP server.
-- `crates/repl`: the interactive R console behind `ry repl` and `ry run`, which finds the system's R
-  and loads it at runtime.
-
-The workspace also contains the frozen legacy stack: the previous implementation
-(`legacy/analysis-legacy`, `legacy/engine-legacy`, `legacy/roughly-legacy`, and the
-`legacy/fixtures` harness), kept only as the benchmark baseline for `legacy/differential`. The
-parity program that once ran every fixture through both stacks is complete and retired. Do not
-extend the legacy stack, and never share or abstract code between the two stacks, although
-duplicating a data file between them is fine.
+ry is a Rust workspace of six product crates, described file by file in
+[Structure](/contributing/structure) and as a system in [Architecture](/contributing/architecture).
+`legacy/` holds the frozen previous implementation, kept only as a benchmark baseline. Do not extend
+it, and never share or abstract code between the two stacks, although duplicating a data file between
+them is fine.
 
 The console embeds R without linking against it at build time. It finds R's shared library through
 `R_HOME` (or by asking `R RHOME` on the `PATH`) and loads it at runtime, so the whole workspace
@@ -110,7 +90,7 @@ absolute numbers matter; a debug build still gives honest ratios.
 
 ## Working on this site
 
-Run `just docs` for a live preview, and `cd docs && npm run build` for a full build.
+Run `just docs` for a live preview, and `cd docs && bun run build` for a full build.
 
 The formatter reference at `docs/src/content/docs/reference/formatting-rules.md` is generated, so
 do not edit it by hand. Edit `crates/format/tests/formatter.template.md` instead, and regenerate the
@@ -127,12 +107,6 @@ page with `just format-docs`.
 6. In the
    [Extension Development Host](https://code.visualstudio.com/api/get-started/your-first-extension#:~:text=Then%2C%20inside%20the%20editor%2C%20press%20F5.%20This%20will%20compile%20and%20run%20the%20extension%20in%20a%20new%20Extension%20Development%20Host%20window.)
    window that opens, open any `.R` file.
-
-### If the language server never starts
-
-`launch.json` sets `"autoAttachChildProcesses": true`, and some debugger extensions then intercept
-the child process so that the server never starts. `CodeLLDB` installed from `nixpkgs` is a known
-culprit. Disable that extension, or turn the setting off.
 
 ## Why the formatter code is imperative
 

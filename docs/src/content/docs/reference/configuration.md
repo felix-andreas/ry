@@ -18,7 +18,6 @@ Everything that changes what ry reports lives in `ry.toml`, so the editor, the C
 | Rule | Behavior |
 | --- | --- |
 | Search | walk up from the starting directory; the first `ry.toml` wins. None found: built-in defaults. |
-| Merging | None. One file supplies every key. |
 | Reload | the language server watches `ry.toml` and re-discovers on every change, so deleting it falls back to an ancestor or to the defaults. |
 | Several CLI targets | discovery runs once per argument, so two arguments can resolve two different files. |
 | `..` in a path | cancelled textually before the search, so `project/ry.toml` does **not** govern `project/../outside.R`. |
@@ -48,6 +47,8 @@ The project root is a separate question from which configuration applies. It set
 | Otherwise, the target sits directly under an `R/` directory | the parent of `R/` |
 | Otherwise | the file's own directory |
 
+In the editor, the root is the first workspace folder.
+
 ## `[format]`
 
 | Key | Type | Default | Effect |
@@ -66,7 +67,7 @@ Every key except `naming-style` takes a level: `"off"`, `"warn"`, `"error"`, or 
 | `boolean-shorthand` | level | `"warn"` | `T` or `F` written instead of `TRUE` or `FALSE`. |
 | `trailing-comma` | level | `"error"` | A comma after the last argument of a call. |
 | `unused-parameter` | level | `"off"` | Function formals never read. S3 methods and your project's own generics are exempt. |
-| `unused-import` | level | `"off"` | An `importFrom(pkg, name)` in `NAMESPACE` whose name appears nowhere in your sources. Whole-namespace `import(pkg)` is never checked, and `ry check` raises this finding, while the editor does not. |
+| `unused-import` | level | `"off"` | An `importFrom(pkg, name)` in `NAMESPACE` whose name appears nowhere in your sources. Whole-namespace `import(pkg)` is never checked. Reported by `ry check` only. |
 | `shadows-builtin` | level | `"off"` | A top-level binding with the same name as a `base` export. |
 | `shadows-namespace` | level | `"off"` | A top-level binding with the same name as an export of another namespace, such as `stats::filter`. |
 
@@ -79,12 +80,12 @@ Type inference always runs, so hover, inlay hints, and signature help work whate
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `unused` | boolean | `true` | Report `unused`, which is a binding whose value is never read. |
-| `typing` | boolean | `false` | Report `type-mismatch`. See the [tour](/tour#type-checking). |
+| `typing` | boolean | `false` | Report `type-mismatch`. See the [tour](/tour#types). |
 | `maybe-undefined` | boolean | `false` | Report `maybe-undefined`, which is a read some path reaches with no prior write. Off by default because correlated guards read as independent branches; see [diagnostic codes](/reference/diagnostic-codes). |
 | `strict` | boolean | `false` | Report each site with a genuinely undetermined type, **and** raise every `unresolved` finding from warning to error. See [strict mode](/reference/type-system#strict-mode). |
 | `exclude` | array of strings | `[]` | Gitignore-style patterns the directory walk of `ry check` skips. |
 
-A `# typing: off`, `# typing: on`, or `# typing: strict` line at the top of a file replaces both `typing` and `strict` for that file. See [the per-file directive](/reference/type-system#per-file-directive).
+A top-level `# typing: off`, `# typing: on`, or `# typing: strict` comment replaces both `typing` and `strict` for that file. See [the per-file directive](/reference/type-system#per-file-directive).
 
 The `exclude` patterns work like this:
 
@@ -119,7 +120,6 @@ An unknown key is never fatal, so a config written for a newer ry still starts a
 | Wrong type on a known key | Hard error. |
 | Malformed TOML | Hard error. |
 | Invalid `[check] exclude` pattern | Hard error. |
-| The file disappears between discovery and reading | Silently falls back to the defaults. |
 | Any other read error | Hard error. |
 
 ```console
@@ -170,6 +170,7 @@ Where that lands depends on how ry runs:
 | --- | --- | --- |
 | `case` (top level) | `lint.naming-style` | Still parses, and wins when both are set. |
 | `spaces` (top level) | `format.indent-width` | Still parses, and wins when both are set. |
+| `roughly.toml` (file) | `ry.toml` | Still discovered; `ry.toml` wins in the same directory. |
 | `lint.missing-comma` | none | Accepted so old files keep loading, and does nothing: a missing argument comma is now a parse error. |
 
 ## Editor settings

@@ -604,8 +604,10 @@ pub fn item_expression_annotations<'db>(
     attachments
 }
 
-/// The ordered project file set, package files first, in path order. That
-/// order decides the last-writer-wins winners. It is a singleton input the host
+/// The ordered project file set: package files first, in `DESCRIPTION`
+/// `Collate` order when declared and path order otherwise, then the rest in
+/// path order. That order decides the last-writer-wins winners, as R's
+/// collation does. It is a singleton input the host
 /// keeps current.
 #[salsa::input(singleton, debug)]
 pub struct ProjectFiles {

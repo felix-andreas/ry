@@ -93,13 +93,6 @@ The extension `.Rtypes` echoes R's own `.Rd` convention without colliding with `
 `.Rda`, or `.RData`. A JSON or TOML format was rejected because it would need a second type
 notation; reusing the `#:` grammar keeps one source of truth for type syntax, inline and in stubs.
 
-Other ecosystems split along the same line. Statically typed hosts that publish types for foreign
-code use separate declaration files (TypeScript's `.d.ts`, Python's `.pyi`, Sorbet's `.rbi`), while
-dynamically typed hosts that retrofit types onto their own source put them inline, as Elixir and
-Erlang do with `@spec`. R does both. Inline `#:` comments are the primary form for a project's own
-code, and `.Rtypes` files cover packages that cannot be annotated at the source, such as base R or a
-CRAN package. Since both use the same grammar, they are one notation in two carriers.
-
 ### Data-masking functions
 
 A declaration may put the `@masked` attribute in front of its function type:
@@ -148,7 +141,7 @@ when the list helps most. Hover on the name shows the committed candidate's sign
 name is not being called, the last declaration's) plus a `(+N overloads)` note, and
 go-to-definition jumps to the first declaration.
 
-Four rules shape the current corpus:
+These rules shape the current corpus:
 
 - **A genuinely parametric function gets a real generic.** A higher-order helper whose result
   depends on the *type* of its argument, such as `lapply`, `Reduce`, `print`, `invisible`,
@@ -180,9 +173,9 @@ Four rules shape the current corpus:
 A project overrides or extends the shipped stubs with its own `.Rtypes` files under
 `<project>/stubs/`. The loader folds the project's files over the shipped corpus in sorted path
 order, so a project declaration replaces the shipped declaration of the same name. That is how a
-project corrects a return type or adds a name the corpus lacks. A missing directory, an unreadable
-file, or a malformed line is skipped, because overrides are optional and one bad line must never
-block analysis.
+project corrects a return type or adds a name the corpus lacks. A missing directory is ignored, and a
+malformed line is dropped (and reported, see below), because overrides are optional and one bad line
+must never block analysis.
 
 A project stub file's name declares its namespace. `stubs/dplyr.Rtypes` declares the namespace
 `dplyr`, so its declarations type bare reads and also validate qualified ones: `dplyr::mutate` is a
@@ -282,32 +275,23 @@ is a deliberate exception, not an oversight.
 
 ### What the stub grammar cannot say yet
 
-Two extensions that a faithful corpus needed have landed:
-
-| Extension | Example | Form |
-|-----------|---------|------|
-| Variadics | `paste`, `sum`, `cat` | a trailing `...: TYPE` rest parameter, as in `fn(...: Any) -> character` |
-| Dotted parameter names | `na.rm`, `length.out` | an interior `.` is allowed in parameter and field names |
-
-The gaps below remain, and each one limits how precise the affected declarations can be:
+A rest parameter is written `...: TYPE`, as in `fn(...: Any) -> character`, and parameter and field
+names may contain an interior `.`, as in `na.rm`. Each gap below limits how precise the affected
+declarations can be:
 
 | Gap | Example | Extension needed |
 |-----|---------|------------------|
 | A trailing dot in a parameter name | `stop(call. =)`, `warning(immediate. =)` | parameter names currently allow only an interior dot |
-| Absorbing a named argument into the rest parameter | `data.frame(x = 1)`, `Sys.setenv(VAR = "v")`, `par(mfrow = ...)` | the checker never routes a named argument into `...`, so a sink for arbitrary named arguments has to stay an `Any` value |
 | An empty type for a function that never returns | `stop`, `q` | without one, a `NULL` return would poison the join in `x <- if (ok) v else stop(...)`, so these stay `Any` |
 | A return that mirrors the argument's shape | `rev(opts)$timeout` on a fixed-shape `opts` | a declaration cannot say "the same record back", so selection and reordering return a name-keyed `list[named: T]`, and a field read off it is `T \| NULL` rather than the field's own type |
 | A nullable result under a member-wise operator | `names`, `dim`, `nrow` | a `T \| NULL` return would false-positive on `1:nrow(df)` and `for (nm in names(x))` until flow narrowing or NULL-tolerant joins exist, so these return `Any` |
 
-Three rows have already left this table. Type-preserving reductions declare
-[overload sets](#overloads-and-generics). Element-preserving functions declare generic `T[]`
-signatures, where the `T[]` suffix carries the atomic-element bound specified under
-[type parameters](/reference/type-system#type-parameters-and-generic-application). And function
-compatibility no longer demands a matching parameter count: a function can serve a callback
-interface whenever it accepts every call shape the interface promises, so a spare optional formal is
-fine and a callback-style stub can declare its real signature. `lapply(words, nchar)` works with all
-of `nchar`'s formals declared. What remains a scalar claim is a function whose result's atomic type
-differs from its input's while its shape follows the input, such as `nchar` or `toupper`.
+Type-preserving reductions declare [overload sets](#overloads-and-generics), and element-preserving
+functions declare generic `T[]` signatures. A function serves a callback interface whenever it
+accepts every call shape the interface promises, so a callback-style stub can declare its real
+signature, spare optional formals included. What remains a scalar claim is a function whose result's
+atomic type differs from its input's while its shape follows the input, such as `nchar` or
+`toupper`.
 
 ## Loading and namespacing
 
@@ -400,20 +384,20 @@ The check needs no interner, because it reads a string-keyed export table built 
 corpus. That is what lets an open `NAMESPACE` buffer be validated live without touching the
 engine's shared interner, the same isolation the `.Rtypes` buffer path keeps.
 
-Three parts of namespacing are not built:
+Not built:
 
 - A separate name-to-scheme table per namespace, instead of one flat fold. Today two shipped
   packages cannot declare the same name with different types.
-- `library(pkg)` attaching a namespace on demand.
+- `library(pkg)` attaching a namespace on demand for a package outside the shipped set.
 - Gating bare third-party names on `NAMESPACE` imports. That would be R-correct, and whether to do it
   is a deliberate strictness decision; today's flat fold is intentionally permissive.
 
 ### Incremental hygiene
 
-In the [query engine](/contributing/architecture#the-semantics-database), the stub library is a
-set-once input. Its revision never advances, so it can never invalidate a query that reads it. That
-is the entire isolation property, and it holds automatically: a stub never triggers recomputation
-because it never changes, not because some separate check prevents it.
+In the [query engine](/contributing/architecture#the-semantics-database), the `StubSources` input
+is set once, and the library derived from it changes only when a conditional namespace switches on or
+off. An ordinary edit therefore never invalidates a query that reads the stubs, and no separate check
+is needed to make that so.
 
 A package binding that shadows a stub name is an ordinary structural edit. It changes which
 definition wins that name in the package symbol index, and that change flows through the per-symbol
@@ -474,11 +458,6 @@ the header of `base.Rtypes` and referred to by name in individual entries:
   with `...: Any`, as for `read.csv`'s pass-through to `read.table` and `lm`'s fitting controls.
   Declaring a formal buys a typed check; leaving it out buys pass-through.
 
-The corpus also borrows a two-tier dynamic marker from typeshed. A real `Any`, for a return that
-genuinely cannot be typed, is kept distinct from a greppable marker for a declaration that is merely
-incomplete, mirroring typeshed's split between `Any` and `Incomplete`. That makes a partial stub
-first-class and improvable, and lets tooling find what still needs work.
-
 ## Worked example
 
 Here is a fragment of the base stubs:
@@ -527,21 +506,17 @@ paste : fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]:
 Where the rest parameter sits among the named ones is part of the signature, because it decides
 which parameters a positional argument can still fill.
 
-One gap remains, and it degrades a return to the scalar claim: a function like `nchar`, whose
-result has a different atomic type from its input but should follow the input vector's shape,
-cannot say so. Element preservation in the style of `rev` is covered by the generic `T[]` suffix.
-
 ## Per-edit cost
 
-Because the stub library is a [set-once input](#incremental-hygiene), merely having it loaded adds
-nothing to the cost of an edit: an edit never invalidates it, and rechecking a body still touches
+Because an edit never invalidates the [stub library](#incremental-hygiene), merely having it loaded
+adds nothing to the cost of an edit, and rechecking a body still touches
 only the edited document and whatever refers to it. A document pays inference time only for the
 base names it actually uses, which is the feature doing its job rather than bookkeeping overhead,
 and a document that uses no base name pays nothing at all.
 
 ## What is not built yet
 
-Two extensions are designed but not built, and their absence shows:
+These extensions are designed but not built, and their absence shows:
 
 - **Third-party packages beyond the shipped set.** The corpus covers the namespaces R itself ships,
   plus conditional stubs for `data.table`, `dplyr`, `ggplot2`, and `testthat`. Any other CRAN

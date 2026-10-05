@@ -3,10 +3,9 @@ title: Architecture
 description: How ry builds its analysis stack, from the hand-written parser to the salsa semantics database and the language server
 ---
 
-This page describes how ry is built, and it is the contract for the implementation: the crate
-boundaries, the analysis database, and the language server's scheduling. What the type checker
-*means* is specified separately, by the [typing reference](/reference/type-system); this page covers
-the machinery that delivers it.
+The crate boundaries, the analysis database, and the language server's scheduling described here
+are the contract for the implementation. What the type checker *means* is specified separately, by
+the [typing reference](/reference/type-system).
 
 ## Crate graph
 
@@ -34,8 +33,10 @@ illegal dependency unrepresentable.
   Anything to do with the editor protocol lives in the server, never here.
 - **`format`** is the formatter. It depends on `syntax` alone, and because the compiler enforces
   that, it can never come to depend on an analysis result.
-- **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, and `debug`
-  commands. It owns configuration, conversion between position encodings, assembling and publishing
+- **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, which is why
+  every other crate builds without R installed.
+- **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
+  `run`, and `debug` commands. It owns configuration, conversion between position encodings, assembling and publishing
   diagnostics, and suppression comments.
 
 The `*-legacy` crates (`roughly-legacy`, `analysis-legacy`, and `engine-legacy`) are the previous
@@ -52,8 +53,8 @@ of a file, such as a function definition, a value binding, or a bare call.
 The database has four inputs:
 
 - `SourceFile` carries one file's text and document kind.
-- `ProjectFiles` is a singleton listing the project's files, package documents first, each group in
-  workspace-relative path order. The last-writer-wins symbol index and the CLI both rely on that
+- `ProjectFiles` is a singleton listing the project's files: package documents first, in the
+  `DESCRIPTION` `Collate` order when one is declared and by path otherwise, then the rest by path. The last-writer-wins symbol index and the CLI both rely on that
   order.
 - `PackageMetadata` is a singleton carrying the imports from `NAMESPACE` and the dependency universe
   from `DESCRIPTION`.

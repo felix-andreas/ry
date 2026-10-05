@@ -70,7 +70,7 @@ value with its representation is the mistake you want caught.
   value type cannot express that.
 - **Inheritance.** There is no subtyping between nominal types.
 - **Method dispatch.** `print()` and `summary()` per class are S3 or S4. `UseMethod` dispatches at
-  run time, so those calls are `Unknown`. Operator methods, as above, are the exception.
+  run time, so those calls return `Any`. Operator methods, as above, are the exception.
 
 Much R code uses R6 or S4 for things that are really values: a configuration, a result, a parsed
 record. Those are worth converting. To keep an S4 or R6 class but still check its users, wrap its

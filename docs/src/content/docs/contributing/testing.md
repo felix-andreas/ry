@@ -221,14 +221,9 @@ and over. Sampling by context halves the harness's running time and keeps the as
 frozen stack's fixture suites, read through `syntax::testing::legacy_corpus_sources`. The `syntax`,
 `format`, and `semantics` batteries each run the whole set.
 
-The programs are kept for their inputs, not their expectations. The old suites hold about 2,830
-curated edge cases, but their expected output cannot be ported: the naming suite renders
-binding-resolution trees, and the type suites use an older notation, in which
-`fn(x: ?1) -> ?1` is what the shipping crates render as `<T> fn(x: T) -> T`. Bulk-blessing them
-would simply declare today's behavior correct instead of checking it. The suites were reimplemented
-rather than ported (only 15 of 138 case names overlap for the IDE, and just 1 across the whole
-typecheck suite), so until this corpus existed, nothing in the shipping crates ran a single one of
-those programs.
+The programs are kept for their inputs only. Their expected output uses an older notation and
+cannot be ported, and bulk-blessing it would declare today's behavior correct instead of checking
+it.
 
 What makes the inputs usable on their own is that the invariants need no expected output: nothing
 panics, `syntax` checks the lossless reprint and the tree geometry, `format` checks preservation,
@@ -372,33 +367,18 @@ default because they need the fetched corpus and a release build. Each instrumen
 per stack and writes wall time, a split by phase, and resident and peak memory into
 `target/stats-{new,legacy}.txt`.
 
-The same file carries `stats_witness`, the assertion form that CI can check. It asserts the
+The same file carries `stats_witness`, the assertion form, which runs locally wherever the corpus
+has been fetched (CI does not fetch it). It asserts the
 cold-pass wall time per line, resident bytes per line, and resolve steps per line (the tripwire for a
 regression in resolve memoization), against budgets taken from measured numbers plus headroom.
 
 ## The legacy stack
 
-The rewrite was verified against the frozen previous implementation by a family of differential
-suites covering typing, scripts, strict mode, fuzzing, the legacy corpus, a corpus of real files,
-and a per-position comparison of IDE answers, each with a ledger of adjudicated divergences. That
-program is complete and retired. The new stack no longer has to prove equivalence to the old one:
-its own fixture suites are the semantics contract, and an improvement lands without the old
-implementation having to agree. All that remains of the `differential` crate is the cross-stack
-benchmark in `legacy/differential/tests/test_stats.rs`, which runs the same corpus through both
-stacks and measures time and memory. It stays until the legacy code is deleted.
-
-The legacy stack itself (`legacy/analysis-legacy`, `legacy/engine-legacy`, and
-`legacy/roughly-legacy`, with its own `legacy/fixtures` harness) still has its suites, which run
-through `cargo test -p analysis-legacy`, `-p engine-legacy`, and `-p roughly-legacy` and are part of
-the workspace battery. It is frozen: do not extend its fixtures or harnesses, and never share code
-between the two stacks. Its `fixtures` crate reads the same simple shape as the shipping harness,
-plus a multi-file shape, with explicit file paths and grouped workspace edits, that its engine-era
-suites use.
-
-Beyond fixtures, the legacy engine carries its own differential safety net: engine output must
-equal a from-scratch rebuild over adversarial edit streams, IDE answers must match a fresh analysis
-at every position, and counters and memory witnesses bound the work. It documents the bar the new
-stack's harnesses were built to meet.
+`legacy/` holds the frozen previous implementation. Its suites still run in the workspace battery
+(`cargo test -p analysis-legacy`, `-p engine-legacy`, `-p roughly-legacy`), and
+`legacy/differential/tests/test_stats.rs` benchmarks both stacks on the same corpus until the legacy
+code is deleted. Never extend its fixtures or harnesses, and never share code between the two
+stacks: the new stack's own fixtures are the contract.
 
 ## Guidelines
 

@@ -3,7 +3,7 @@ title: Getting started
 description: Install ry and run it on a project
 ---
 
-ry is a language server, checker, formatter, and R console for R, in one binary written in Rust.
+ry is a language server, checker, formatter, and console for R, in one binary written in Rust.
 It works on the code you already have: nothing needs to be annotated or configured first.
 
 ## Install

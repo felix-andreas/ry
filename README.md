@@ -13,9 +13,10 @@
 
 </div>
 
-ry is a language server, checker, formatter, and R console for R. It analyzes source code without
+ry is a language server, checker, formatter, and console for R. It analyzes source code without
 running it, so the same binary gives the same answers in your editor and in CI, and needs no R
-installation except for the console.
+installation except for the console. It was previously called Roughly, which is why old release
+assets are named `roughly-*`.
 
 Its parser is written for tooling: it says what is missing and keeps analyzing the rest of the file.
 
@@ -33,13 +34,15 @@ R reports the same mistake as `Error: unexpected string constant in "planets <- 
 
 - **VS Code:** the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
   bundles the binary.
-- **Binary:** download a [release](https://github.com/felix-andreas/ry/releases).
+- **Binary:** download a [release](https://github.com/felix-andreas/ry/releases). Name the tag:
+  every release since 0.1.1 is a pre-release, so GitHub's "latest" is an old build.
 - **Cargo:** `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 
 ```sh
 ry check    # report problems
 ry fmt      # format in place (--check for CI)
 ry server   # the language server; your editor starts it
+ry repl     # an R console with typed completion (needs R)
 ```
 
 ## Type checking
@@ -54,11 +57,9 @@ typing = true
 ```
 
 R is too dynamic to check completely, so ry checks what can be described statically and treats the
-rest as `Unknown`, which never causes a false error. The [tour](https://ry-lang.org/tour/) shows the
+rest as `Unknown`, which never causes an error by itself. The [tour](https://ry-lang.org/tour/) shows the
 type system in short examples, and [limitations](https://ry-lang.org/type-checking/limitations/) says
 what it cannot check.
-
-ry was previously called Roughly.
 
 ## Development
 

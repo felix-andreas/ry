@@ -20,20 +20,18 @@ session cannot: is this name defined anywhere, does this call match its function
 
 A check slow enough to interrupt you stops being run. ry is written in Rust, and its analysis is
 incremental: an edit re-checks only what it could have affected, so a keystroke in a large project
-costs milliseconds rather than a full pass. It is tested against roughly 970,000 lines of real R from
-69 CRAN packages and R's base library.
+costs milliseconds rather than a full pass. Its latency budgets are measured on a corpus of about
+965,000 lines of R from 81 CRAN packages.
 
 Speed also shapes the type system. Every rule has to be decidable quickly enough to run on every
 keystroke, which is the reason for the trade-offs below.
 
 ## Types without annotations
 
-Python, JavaScript, and Ruby all added optional type checkers once their codebases grew past what
-running the program could verify. R code relies on types just as much (a function that multiplies its
-argument needs a number), but nothing checks that until the line runs.
-
-Requiring annotations everywhere would make that check useless for existing R. So ry infers types
-from how values are used, with Hindley–Milner inference, the same family as OCaml and Haskell:
+R code relies on types as much as any language (a function that multiplies its argument needs a
+number), but nothing checks them until the line runs. Requiring annotations everywhere would make a
+checker useless for existing R, so ry infers types from how values are used, with Hindley–Milner
+inference, the same family as OCaml and Haskell:
 
 ```r
 scale <- function(x, factor) x * factor
@@ -49,12 +47,13 @@ Three choices keep the checker fast and its answers trustworthy:
 
 - **No overloading of your own functions.** A name with several signatures turns each call into a
   search over candidates. Use a union type, or two functions.
-- **No class hierarchies.** Subtyping between classes makes inference expensive and its results hard
-  to predict. Nominal types, declared in `#:` comments, give you distinct types without inheritance.
+- **No inheritance.** Subtyping between user-declared types makes inference expensive and its
+  results hard to predict. Nominal types, declared in `#:` comments, give you distinct types without
+  it.
 - **`Unknown` instead of guesses.** What cannot be described statically (S4 dispatch, R6 objects,
-  data frame columns, `eval`) becomes `Unknown`, which is compatible with everything. A gap means a
-  check was skipped, never a false error, and [strict mode](/reference/type-system#strict-mode) shows
-  where the gaps are.
+  data frame columns, `eval`) becomes `Unknown`, which is compatible with everything, so it never
+  causes an error by itself. [Strict mode](/reference/type-system#strict-mode) shows where these gaps
+  are.
 
 The consequence is that a clean run proves less on code heavy in data frames or R6 than on code built
 from functions and lists. [Limitations](/type-checking/limitations) says exactly where.

@@ -9,18 +9,19 @@ ry never loads R, so it cannot ask `nchar()` what it returns or a package what i
 
 ## What ships
 
-| | Packages |
-| --- | --- |
-| **Typed** | `base`, `stats`, `utils`, `methods`, `graphics`, `grDevices`, `datasets` |
-| **Typed once your project uses them** | `data.table`, `dplyr`, `ggplot2`, `testthat` |
-| **Export lists only** | the tidyverse, `knitr`, `rlang`, `glue`, `magrittr`, `scales`, `jsonlite`, `R6`, and every package R ships |
+| | Always available | Once your project uses them |
+| --- | --- | --- |
+| **Typed** | `base`, `stats`, `utils`, `methods`, `graphics`, `grDevices`, `datasets` | `data.table`, `dplyr`, `ggplot2`, `testthat` |
+| **Export lists only** | the rest of R's own packages: `tools`, `grid`, `parallel`, `splines`, `stats4`, `tcltk`, `compiler` | the tidyverse, `knitr`, `rlang`, `glue`, `magrittr`, `scales`, `jsonlite`, `R6` |
 
 A typed package gives calls real types. An export list gives no types, but it tells ry which names
 exist, which is what keeps unresolved-name detection working next to it.
 
-"Once your project uses them" means a `library()` or `require()` call, a `DESCRIPTION` dependency, or
-a `NAMESPACE` import. Before that, `mutate` and `fread` are unresolved, as they would be in R,
-instead of hiding typos in projects that never load these packages.
+A project uses a package through a `library()` or `require()` call, a `DESCRIPTION` dependency, or a
+`NAMESPACE` import. Before that, `mutate` and `fread` are unresolved, as they would be in R, instead of
+hiding typos in projects that never load these packages. A `pkg::name` call does not count as use, so
+`dplyr::mutate()` in a script with no `library(dplyr)` and no `DESCRIPTION` reports `dplyr` as an
+unknown namespace.
 
 ## Unknown packages switch checks off
 
@@ -43,8 +44,8 @@ query   : fn(session: Session, sql: character) -> Any
 
 That restores unresolved-name checking, types `connect()`, validates `dbclient::conect` as a name the
 package does not export, and makes `Session` a type you can use in annotations. `@type` in a stub
-declares an opaque type: callers can pass it around but not look inside, which is usually what you
-want for a package's own objects.
+declares an opaque type: callers can pass it around, and reading a field from it gives `Unknown`.
+That is usually what you want for a package's own objects, whose insides are its business.
 
 Declare only what you call. A name you leave out of a stub is reported as not exported when you use
 it qualified, which tells you what to add next.

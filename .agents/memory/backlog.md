@@ -19,6 +19,52 @@ The quality bar is four things.
   `legacy/differential/tests/test_stats.rs`.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: false reports and gaps found by the documentation review
+
+An adversarial review of every docs page ran each claim against the binary. The docs now state the
+behavior below truthfully, most of it under "Where correct code is reported" in
+`type-checking/limitations.md`, so fixing an item means updating that page too.
+
+False reports on correct R, worst first:
+
+- **Inferred numeric parameters share one type.** `function(price, rate) price * rate` infers
+  `<T: numeric> fn(price: T, rate: T) -> T`, so `f(1L, 0.5)` reports `expected integer, found
+  double` and `f(TRUE, 0.5)` rejects the logical. Annotated `double` parameters widen correctly.
+  Widening has to apply where a type variable meets two numeric arguments.
+- **`pkg::name` does not activate a conditional namespace.** `dplyr::mutate()` or
+  `jsonlite::fromJSON()` in a script without `library()` or `DESCRIPTION` reports an unknown
+  namespace. The read names its package, so it should activate the namespace (or at least validate
+  against the shipped manifest). `metadata::namespace_active` and `diagnostics::namespace_read_message`.
+- **Positional append on `list()` infers dict-like.** `res <- list(); for (i in ...) res[[i]] <- x;
+  res[[1]]` reports `position 1 does not exist in list{} | list[named: integer]`. An integer index
+  write should infer list-like.
+- **A non-function binding in call position.** After `mean <- 3`, `mean(x)` reports calling a
+  `double`, but R's function lookup skips non-function bindings.
+- **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
+  c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
+- **A vector operand pins its partner to a scalar.** On `function(x) x + c(1L, 2L)`, the call
+  `f(c(1, 2))` reports `expected double, found double[]`.
+- **Strict mode ignores `@trust` and `@if-unknown` on a binding.** `#: @trust double` above
+  `amount <- df$amount` still reports the origin and tells the user to "add a type annotation".
+
+Smaller gaps:
+
+- After a `for` loop, the loop variable reads as `Unknown` (R keeps its last value), with no strict
+  finding.
+- An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
+- Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
+  coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
+- `# typing: off  # reason` is rejected as an unknown directive. Accepting a trailing comment is the
+  friendlier contract.
+- `greet(nme = "Ada")` on a function with `...` reports "passes 1 positional argument, but the
+  function only takes 1". After an invalid field write, a later field typo on the same record goes
+  unreported. Hover on `m2` in `m2$amount <- 5` shows `double` instead of the nominal type.
+- Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
+  fields.
+- The Zed extension's binary download asks for the latest non-pre-release, which is `0.1.1` with
+  `roughly-*` assets, so it fails; `editors/zed/src/lib.rs`. The install page tells users to put
+  `ry` on `PATH` meanwhile.
+
 ## Open: where findings point, and what the type system still refuses
 
 Three simulated users probed the type checker itself rather than package coverage, working from the
@@ -107,9 +153,9 @@ type-level function the annotation language does not have.
 
 ### Smaller open items
 
-- `@new` is unrestricted project-wide, so `domain-modeling.md` saying it is "the only door in" and
-  `concepts.md` saying a value "provably came from there" both overstate it. Either add an
-  encapsulation modifier or soften both sentences to say "by convention".
+- `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
+  tour and `domain-modeling.md` now say so conditionally ("put `@new` in one constructor"). An
+  encapsulation modifier would make it a guarantee.
 - A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
   writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
   diagnostic should say it.

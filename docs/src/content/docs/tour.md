@@ -3,14 +3,17 @@ title: Tour
 description: What ry checks, how its type system works, and why it works that way
 ---
 
-ry is a language server, checker, and formatter for R. It reads source text and never runs it, so
-it gives the same answers in your editor, in CI, and on code that has never been executed.
+ry is a language server, checker, formatter, and console for R. Everything except the console works
+from the source text and never runs it, so it needs no R installation.
 
 ```sh
 ry check    # report problems
 ry fmt      # format files in place
 ry server   # the language server; your editor starts it
+ry repl     # an R console with typed completion
 ```
+
+`ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents.
 
 ## Syntax errors
 
@@ -36,8 +39,8 @@ ry:  x missing `,` between these arguments
 
 ## Names
 
-With no configuration, ry resolves every name the way R would at run time. A typo in R surfaces only
-when execution reaches it, possibly at the end of a long job. ry reports it immediately:
+With no configuration, ry resolves every name by R's scoping rules. In R, a typo surfaces only when
+execution reaches it, possibly at the end of a long job. ry reports it immediately:
 
 ```r
 apply_discount <- function(price, rate) price * ratee
@@ -47,10 +50,11 @@ apply_discount <- function(price, rate) price * ratee
 ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
 ```
 
-Resolution follows R's rules: files in a package's `R/` share one namespace, a script is read top to
-bottom, and `library()` calls and `NAMESPACE` imports bring names into scope. The same analysis
-reports assignments nothing reads, and top-level names defined twice in a package, where R would
-silently keep whichever file is sourced last.
+Files in a package's `R/` share one namespace, a script is read top to bottom, and `library()` calls
+and `NAMESPACE` imports bring names into scope. The same analysis reports assignments nothing reads,
+a top-level name defined twice in a package (R silently keeps one of them), `pkg::name` where the
+package does not export `name`, and a `NAMESPACE` that imports or exports a name that does not exist,
+which would stop the package from loading.
 
 ## Types
 
@@ -104,9 +108,10 @@ R reports late or not at all. So ry tracks the length-one case separately:
 | `integer[named]` | any length, with names |
 
 A scalar is accepted where a vector is expected, but not the reverse, because a vector of unknown
-length may be empty. Numbers widen along `logical` < `integer` < `double` < `complex`, as in R. A
-number is never accepted where `character` is expected: R would convert it, and when that happens
-silently it is usually a bug, so ry asks for an explicit `as.character()`.
+length may not have exactly one element. A declared `double` accepts an `integer` or a `logical`,
+which R converts without loss. A number is never accepted where `character` is expected: R would
+convert it too, but a silent number-to-string conversion is usually a bug, so ry asks for an explicit
+`as.character()`.
 
 ## Lists
 
@@ -116,14 +121,14 @@ mistakes. ry gives each role its own type:
 | Role | Names | Elements | Length | Type | Example |
 | --- | --- | --- | --- | --- | --- |
 | tuple-like | none | heterogeneous | fixed | `list{integer, character}` | `list(1L, "ok")` |
-| list-like | none | homogeneous | dynamic | `list[integer]` | results appended in a loop |
+| list-like | none | homogeneous | dynamic | `list[integer]` | `lapply(ids, nchar)` |
 | record-like | named | heterogeneous | fixed | `list{name: character, age: integer}` | `list(name = "Ada", age = 36L)` |
 | dict-like | named | homogeneous | dynamic | `list[named: integer]` | counts keyed by category |
 
 At run time all four are the same R list, so nothing changes in your code. The difference is what
-can be checked. A tuple-like or record-like list has a fixed shape, so ry knows which positions and fields exist and
-what type each one has. That makes `$` checkable, which matters because R answers a misspelled field
-with a silent `NULL` that fails somewhere else:
+can be checked. A tuple-like or record-like list has a fixed shape, so ry knows which positions and
+fields exist and what type each one has. That makes `$` checkable, which matters because R answers a
+misspelled field with a silent `NULL` that fails somewhere else:
 
 ```r
 person <- list(name = "Ada", age = 36L)
@@ -134,10 +139,18 @@ person$nmae
 x field `nmae` does not exist in `list{name: character, age: integer}`. Did you mean `name`?
 ```
 
+A fixed shape is exact: passing a list with an extra field where a record is expected is an error,
+because an unexpected field is usually a misspelled one.
+
 A list-like or dict-like list can grow, so ry knows only the element type, and reading a key from a
-dict-like list gives `T | NULL`, because the key may be missing. ry infers the fixed shapes from
-`list(...)` literals; the growing ones come from annotations, or from code that adds elements with
-computed keys.
+dict-like list gives `T | NULL`, because the key may be missing. `list(...)` literals infer as fixed
+shapes and `lapply()` returns a list-like list. A list you build up element by element needs an
+annotation, because the empty `list()` it starts from does not say which role it will play:
+
+```r
+#: list[integer]
+lengths <- list()
+```
 
 ## `NULL`
 
@@ -164,10 +177,15 @@ same way. Narrowing applies to variables only, so to test a field, copy it into 
 greet <- function(name, greeting = "hello", ...) paste(greeting, name, ...)
 ```
 
-`[greeting]` marks a parameter callers may omit, and it must match a default in the definition,
-since that is what lets R omit it. `...: character` checks every extra argument. Parameter names are
-part of the type, because R matches arguments by name as often as by position. Calls are checked for
-types, names, and count.
+`[greeting]` marks a parameter callers may omit. ry requires a default in the definition to match it,
+so that an omitted argument always has a value. `...: character` checks every extra argument.
+Parameter names are part of the type, because R matches arguments by name as often as by position.
+Calls are checked for types, names, and count.
+
+Your own functions have exactly one signature; to accept several shapes, use a union such as
+`integer | character`. Allowing several signatures per name would make each call a search over
+candidates instead of a single inference step, and that single step is what keeps checking fast
+enough to run on every keystroke.
 
 ## Generics
 
@@ -178,10 +196,8 @@ identity2 <- function(x) x           # <T> fn(x: T) -> T
 increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
 ```
 
-`increment("a")` is an error. Your own functions have exactly one signature; to accept several
-shapes, use a union such as `integer | character`. Allowing several signatures per name would make
-each call a search over candidates instead of a single inference step, which is what keeps checking
-fast enough to run on every keystroke.
+`T` stands for any type, and `T: numeric` for `integer` or `double`, so `increment(2.5)` is a
+`double` and `increment("a")` is an error.
 
 ## Structural and nominal types
 
@@ -208,21 +224,22 @@ celsius <- function(value) {
 
 Passing a plain `double`, or a `Fahrenheit` declared the same way, where a `Celsius` is expected is an
 error. Because `@new` appears only where you write it, putting it in one constructor means every
-`Celsius` in the program passed that constructor's checks. The representation still flows outward:
-a `Celsius` is accepted where a `double` is, so arithmetic works, and at run time the value is a plain
-number with nothing wrapped around it.
+`Celsius` in the program passed that constructor's checks. At run time the value is a plain number
+with nothing wrapped around it.
+
+A `Celsius` is still accepted where a `double` is, so `sqrt()` and `round()` work on it. Arithmetic
+therefore returns a plain `double`: ry cannot assume that adding two temperatures gives a
+temperature. [Declare `+.Celsius`](/type-checking/domain-modeling#operators-and-generic-types) where it
+does.
 
 `@alias` names a type without making it nominal: `@alias Row {list{id: integer}}` is just a shorter
 way to write the shape, and any list of that shape is a `Row`.
 
-[Domain modeling](/type-checking/domain-modeling) covers nominal records, generic types, and when R6 is
-still the better tool.
-
 ## `Unknown` and strict mode
 
-R has constructs no static checker can follow: `UseMethod` dispatch, S4 and R6 objects, data frame
-columns. Their values are `Unknown`, which is compatible with everything. ry would rather skip a
-check than report something false, so one unmodeled construct never causes a cascade of errors.
+R has constructs no static checker can follow: S4 and R6 objects, data frame columns, `eval()`. Their
+values are `Unknown`, which is compatible with everything. ry would rather skip a check than report
+something false, so one unmodeled construct never causes a cascade of errors.
 
 The cost is that a clean run does not say how much was checked. Strict mode reports every place a
 value became `Unknown`:
@@ -243,20 +260,19 @@ x strict mode: this expression has an undetermined type (`Unknown`)
 ```
 
 `Any` is also compatible with everything, but it is a deliberate choice, made by an annotation or a
-package declaration, so strict mode ignores it. Two annotations override inference: `#: @trust TYPE`
-asserts a type the checker cannot verify, and `#: @if-unknown TYPE` fills in a type only where
-inference found none.
+package declaration, so strict mode ignores it. S3 generics that dispatch through `UseMethod()`
+return `Any`, so strict mode does not report their calls either.
 
-A comment at the top of a file overrides the project setting, so you can adopt typing one file at a
-time:
+Two annotations let you supply a type the checker cannot infer. `#: @if-unknown TYPE` applies only
+where inference found nothing, and is an error anywhere else, so it can never override a type ry
+knows. `#: @trust TYPE` overrides unconditionally, for the cases where you know better.
 
-```r
-# typing: strict    # or: on, off
-```
+A `# typing: strict`, `# typing: on`, or `# typing: off` comment in a file overrides the project
+setting, so you can adopt type checking one file at a time.
 
 ## Data frames
 
-Columns are not typed yet, so `df$amount` is `Unknown`. Inside data-masking functions, a bare name
+Columns are not typed, so `df$amount` is `Unknown`. Inside data-masking functions, a bare name
 refers to a column, so ry does not report it as unresolved:
 
 ```r
@@ -271,7 +287,7 @@ by_region <- function(sales) {
 
 dplyr's verbs, `data.table`'s `[`, and base `with()`, `subset()`, and `transform()` are recognized.
 A package's declarations switch on once the project uses it, through `library()`, `DESCRIPTION`, or
-`NAMESPACE`, so that names like `filter` stay unresolved in projects that never load dplyr.
+`NAMESPACE`. Until then, `mutate` is an unresolved name, which is what R would say too.
 
 ## Packages
 
@@ -280,8 +296,8 @@ default packages, and dplyr, data.table, ggplot2, and testthat, and export lists
 of the tidyverse and other common packages.
 
 This matters beyond types. Once you attach a package ry knows nothing about, any bare name might come
-from it, so ry stops reporting unresolved names across the project. A two-line declaration file turns
-the check back on:
+from it, so ry stops reporting unresolved names across the project. A two-line
+[declaration file](/type-checking/stubs) turns the check back on:
 
 ```
 # stubs/dbclient.Rtypes
@@ -291,17 +307,18 @@ connect : fn(host: character) -> Session
 
 ## Formatting
 
-`ry fmt` fixes spacing, indentation, and braces, and leaves line breaks where you put them:
+`ry fmt` normalizes spacing, indentation, and braces:
 
 ```r
-x<-c(1,2,3)                # becomes  x <- c(1, 2, 3)
-if(x>1){y<-2}              # becomes  if (x > 1) { y <- 2 }
+x<-c(1,2,3)                 # becomes  x <- c(1, 2, 3)
+if(x>1){y<-2}               # becomes  if (x > 1) { y <- 2 }
 ```
 
-A formatter that reflows code to a column limit rewrites lines you did not touch, so every diff
-shows layout churn instead of your change. ry keeps a one-line call on one line and a multi-line
-call multi-line, and only adds braces where leaving them out would change what a later edit means.
-The only settings are indent width and line endings.
+It never reflows code to a column limit, because a formatter that does rewrites lines you did not
+touch and buries your change in layout churn. Your line breaks decide the layout instead: a call
+written on one line stays on one line, and a call broken across lines gets one argument per line.
+Every loop body, and every `if` or function body that spans lines, gets braces, so a line added later
+cannot fall outside the block it belongs to. The only settings are indent width and line endings.
 
 ## Editors
 
@@ -310,14 +327,36 @@ definition, references, rename, signature help, and inlay hints in any LSP edito
 binding you picked and nothing else: a local `total`, a global `total`, and the word "total" in a
 string are three different things.
 
-## Suppressing a finding
+## The console
+
+`ry repl` runs the R installed on your machine, unchanged, behind a line editor whose Tab completion
+comes from the type checker. Completing `account$` lists the record's fields with their types, before
+any code has run. `ry run script.R` runs a script on the same session. These are the only commands
+that need R. See [Working in the R console](/guides/r-console).
+
+## Findings and suppressions
+
+Every finding carries a code above its message, such as `unresolved`, `type-mismatch`, or
+`assignment-operator`:
+
+```text
+assignment-operator
+
+  ! Use <-, not =, for assignment
+```
+
+Codes are what you configure in `ry.toml` and what you name to silence one finding:
 
 ```r
 total = 2L  # ry: allow(assignment-operator)
 ```
 
-A suppression covers only its own line, or the line below it. A file-wide switch would also hide
-mistakes added later.
+A suppression covers its own line and the line below, and nothing else. It marks one exception you
+have reviewed, so it should not hide findings in code written later. To turn a lint off everywhere,
+set it in [`[lint]`](/reference/configuration#lint).
+
+In CI, `ry check` exits with status 1 when it finds anything and `ry fmt --check` when a file is not
+formatted. [Continuous integration](/guides/continuous-integration) has a ready workflow.
 
 ## Next
 

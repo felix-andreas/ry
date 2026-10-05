@@ -3,10 +3,9 @@ title: Structure
 description: What each source file holds in the syntax, semantics, ide, format, ry, and repl crates
 ---
 
-This page is a map: for every source file in the product crates, what it is responsible for. How the
-crates depend on each other, and where one phase hands over to the next, is the subject of
-[Architecture](/contributing/architecture). The frozen `*-legacy` crates keep their own layout and
-are not covered here.
+What each source file in the product crates is responsible for. How the crates depend on each
+other, and where one phase hands over to the next, is in [Architecture](/contributing/architecture).
+The frozen `*-legacy` crates are not covered.
 
 ## `syntax`
 
@@ -36,7 +35,7 @@ The crate root is `src/semantics.rs`.
 - **`semantics.rs`**: the salsa database. It declares two of the four database inputs, `SourceFile`
   and `ProjectFiles` (the other two, `PackageMetadata` and `StubSources`, live with the modules that
   own them). It also holds the item tree and its insertion-stable identities, the anchoring of each
-  item to its syntax, the package interface computed by the `global_scheme` fixpoint, and the
+  item to its syntax, the package interface computed by the `scc_schemes` fixpoint, and the
   item-span queries.
 - **`hir.rs`**: lowering from the syntax tree to the per-item HIR, whose expression ranges are
   relative to their item.

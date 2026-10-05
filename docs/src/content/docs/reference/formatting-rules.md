@@ -8,8 +8,6 @@ ry includes an R code formatter that changes as little as it can: it normalizes 
 
 ## Usage
 
-Format your R files using the command line:
-
 ```sh
 ry fmt           # Format all files in the current directory
 ry fmt <path>    # Format all files in <path>
@@ -27,11 +25,9 @@ The formatter keeps your line breaks and never splits an expression you wrote on
 
 * **Single-line expressions remain single-line:** The formatter adds line breaks only where the expression is already multi-line, and never breaks a single-line expression into several (with [one exception](#loops)).
 * **Both nesting styles are preserved:** Compact ("hugged") and expanded forms for nested expressions are equally valid, and neither is rewritten into the other (see [hugging behavior](#hugging-behavior)).
-* **Braces are added only where they prevent a bug:** Auto-bracing applies where omitting braces changes what a later edit means (see [auto-bracing](#auto-bracing)).
+* **Braces are added where omitting them invites a bug, and around every loop body:** a multi-line `if` or function body gets braces so that a line added later cannot fall outside it (see [auto-bracing](#auto-bracing)), and loops are always braced (see [loops](#loops)).
 
 ## Formatting Rules
-
-The rules below describe the formatter's behavior for each kind of expression, including the edge cases that receive special handling.
 
 ### Binary operators
 
@@ -61,7 +57,7 @@ power = base^exponent
 sequence = 1:10
 ```
 
-**Pipeline operators** maintain proper indentation when expressions span multiple lines:
+**Pipeline operators:** continuation lines of a multi-line pipeline are indented one step:
 
 ```r
 # Before formatting
@@ -77,7 +73,7 @@ data %>%
 
 ### Unary operators
 
-Unary operators receive appropriate spacing based on their type and context:
+`!` and unary `-` hug their operand:
 
 ```r
 # Before formatting
@@ -91,7 +87,7 @@ value = -42
 formula = ~ x + y
 ```
 
-**Special spacing rule:** The `~` (formula) operator gets a space when followed by complex expressions, but not when followed by simple identifiers.
+`~` is spaced when its operand is more than one identifier: `~x`, but `~ x + y`.
 
 ### Blocks
 
@@ -110,7 +106,7 @@ formula = ~ x + y
 }
 ```
 
-**Single-line blocks** are allowed, including those with semicolons. The formatter adds a space after `{` and before `}` for readability:
+**Single-line blocks** are allowed, including those with semicolons. The formatter adds a space after `{` and before `}`:
 
 ```r
 # Before formatting
@@ -120,7 +116,7 @@ formula = ~ x + y
 { x <- 1; print(x) }
 ```
 
-**Semicolons in multiline blocks** are split into separate lines for clarity:
+**Semicolons in multiline blocks** are split into separate lines, so that each statement gets its own line in a diff and its own breakpoint:
 
 ```r
 # Before formatting
@@ -191,7 +187,7 @@ if (a) {
 }
 ```
 
-**Auto-bracing for multiline if-else:** Whenever an `if-else` spans multiple lines, all branches are always wrapped in braces for clarity and consistency:
+**Auto-bracing for multiline if-else:** Whenever an `if-else` spans multiple lines, all branches are wrapped in braces, so a statement added to one branch cannot end up outside it:
 
 ```r
 # Before formatting
@@ -229,7 +225,7 @@ Loops are the only expressions that are **not allowed** on a single line.
 
 `for`, `while`, and `repeat` loops are evaluated for their side effects and return no meaningful value, so the formatter writes them across multiple lines with explicit braces (see [auto-bracing](#auto-bracing)). This keeps side-effecting code visually distinct from expressions that produce a value.
 
-**For loops** always enforce braced blocks for the body, ensuring consistency:
+**For loops** always get a braced body:
 
 ```r
 # Before formatting
@@ -289,7 +285,7 @@ call(a,b=1,...)
 # After formatting
 call(a, b = 1, ...)
 ```
-**Multiline function calls:** Once two arguments appear on different lines, the call is treated as multiline, and each argument is formatted on its own line for clarity.
+**Multiline function calls:** Once two arguments appear on different lines, the call is treated as multiline, and each argument goes on its own line, so adding or removing one changes one line of the diff.
 
 ```r
 # Before formatting
@@ -345,8 +341,6 @@ setMethod("method", "Class", function(x) {
 
 In the `setMethod` example, `sealed = TRUE` sits on a different line from the other arguments, but only the function body is multiline, so the formatter keeps the layout.
 
-**Note:** You can always opt in to the fully expanded multiline style: if you add a newline so that at least two arguments of a call are on different lines, the formatter treats it as multiline and will place every argument on its own line.
-
 ### Function definitions
 
 **Single-line functions:** Functions with a simple, single-expression body can be written on one line, with or without braces.
@@ -391,7 +385,7 @@ lapply(data, \(x) {
 
 ### Switch calls
 
-`switch()` calls are formatted like any other function call. For a fallthrough case (`case = ,`), an extra space after the `=` marks the fallthrough.
+`switch()` calls are formatted like any other function call. A fallthrough case keeps a spaced `=` with nothing after it: `"b" = ,`.
 
 ```r
 result <- switch(
@@ -463,7 +457,7 @@ message <- "Hello world"
 quoted_content <- 'Say "hello"'
 ```
 
-Multi-line string literals always keep their original indentation and line breaks, no matter where they appear. Even if surrounding code is refactored or deleted, the formatter never changes the internal content of multi-line strings.
+The inside of a multi-line string is never re-indented, because its whitespace is part of the value.
 
 ```r
 # Before formatting
@@ -638,7 +632,7 @@ z <- 3
 
 ### Line endings
 
-The formatter automatically detects and preserves the line ending style (`LF` or `CRLF`) used in the original file.
+The line ending follows `[format] line-ending`, whose default `"auto"` keeps the file's own (`LF` or `CRLF`). The indent is `[format] indent-width` spaces, 2 by default.
 
 ## Format Suppression
 
@@ -681,7 +675,7 @@ f <- function() {
 }
 ```
 
-You can also skip formatting for an entire file by placing `# fmt: skip-file` at the top of the file. This directive must be placed at the very beginning of the file to take effect.
+`# fmt: skip-file` before any other code or comment (a shebang included) leaves the whole file untouched. Blank lines before it are allowed.
 
 ## Rationale
 

@@ -45,13 +45,13 @@ ry check --min-severity error  # only errors report and gate
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
-| positional | `FILES...` | `.` | Files and directories to report on. Directories are walked for `.R`, `.r`, and literate extensions; `renv`, `packrat`, `revdep`, `.Rproj.user`, and `.Rcheck` are skipped, and `.gitignore` is honored even outside a git checkout. A file you name explicitly is always checked, even when `[check] exclude` matches it |
+| positional | `FILES...` | `.` | Files and directories to report on. Directories are walked for `.R`, `.r`, and literate extensions, skipping [vendored and excluded paths](/reference/configuration#check) |
 | `--output` | `human` \| `json` | `human` | `human` renders diagnostics with source snippets on **stderr** and one summary line on **stdout**. `json` writes [JSON Lines](#json-output) on **stdout** and prints no summary |
 | `--min-severity` | `warning` \| `error` | `warning` | Findings below the floor are neither reported nor counted toward the [exit code](#exit-codes) |
 
-Analysis always covers the whole project a named path belongs to: the nearest ancestor directory
-holding `ry.toml` or `DESCRIPTION`, or else the target's own directory. Cross-file names therefore
-resolve the same way however you spell the paths, and only the reporting is limited to what you named.
+Analysis always covers the whole [project](/reference/configuration#project-root) a named path
+belongs to, so cross-file names resolve the same way however you spell the paths, and only the
+reporting is limited to what you named.
 
 Type errors are opt-in through `[check] typing` in [`ry.toml`](/reference/configuration), and every
 code is listed in [Diagnostic codes](/reference/diagnostic-codes).
@@ -114,9 +114,9 @@ ry fmt --diff     # show the change without writing, exit 1
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
-| positional | `FILES...` | `.` | Files and directories to format. A literate document is walked but deliberately skipped, because the formatter rewrites whole-file layout and must not touch prose. `[check] exclude` does not apply here |
+| positional | `FILES...` | `.` | Files and directories to format. `.Rmd`, `.qmd`, and `.Rnw` files are skipped, because the formatter rewrites whole-file layout and must not touch prose. `[check] exclude` does not apply here |
 | `--check` | n/a | off | Writes nothing. Prints `Would reformat: <path>` per file that would change |
-| `--diff` | n/a | off | Writes nothing. Prints a coloured unified diff per changed file. Takes precedence over `--check` |
+| `--diff` | n/a | off | Writes nothing. Prints a line-numbered diff per changed file. Takes precedence over `--check` |
 | `-v`, `--verbose` | n/a | off | Adds a throughput line after the summary |
 
 All `fmt` output, including the diffs, the `Would reformat:` lines, and the summary, goes to
@@ -141,7 +141,7 @@ Runs the Language Server Protocol over stdio. Your editor starts it for you.
 | ---- | -------- | ------- | ------ |
 | `--debug` | n/a | off | Adds internal analysis facts to hover, as a developer aid for working on ry itself. `RY_DEBUG=1` turns on the same thing |
 | `--stdio` | n/a | n/a | Accepted and ignored, for VS Code compatibility |
-| `-v`, `--verbose` | n/a | off | Declared but not wired to anything yet |
+| `-v`, `--verbose` | n/a | off | Accepted; has no effect |
 
 ## repl
 
@@ -182,7 +182,7 @@ The other commands:
 
 | Command | `0` | `1` | `2` |
 | ------- | --- | --- | --- |
-| `server` | Always, once the server loop returns | n/a | n/a |
+| `server` | The client shut the server down | An analysis panic terminated it | n/a |
 | `run` | The script ran to completion | An uncaught top-level R error | R could not be found or loaded, or the file could not be read |
 | `repl` | Session ended normally | n/a | R could not be found or loaded, or a `--file` script could not be read |
 | `debug ast` | The tree was printed. Parse errors are listed but do not change the code | n/a | The file could not be read |

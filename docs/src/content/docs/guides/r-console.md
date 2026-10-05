@@ -28,14 +28,16 @@ holder   character
 | --- | --- |
 | a name | your session's bindings, base R functions with signatures, keywords |
 | `stats::rnor` | that namespace's exports, attached or not |
-| `account$`, `x[["` | the fields of the record ry inferred |
+| `account$` | the fields of the record ry inferred |
 | `#: chara` | type names |
 
 The trade-off is that completion never inspects the live session. It cannot see:
 
+- data frame columns: `df$` completes nothing, because ry does not type columns;
 - objects created by `source()` or by a script passed to `-f`, because ry never saw them typed;
 - your project's files, `ry.toml`, or `stubs/`, because the console analyzes only the session;
-- third-party packages: `library(dplyr)` attaches dplyr in R, but its declarations are not loaded.
+- packages outside the [shipped declarations](/type-checking/stubs#what-ships). `library(dplyr)`
+  makes dplyr's verbs complete, but `library(shiny)` adds nothing.
 
 For typed work on project files, use the [language server](/tour#editors).
 
@@ -53,27 +55,29 @@ it asks with its own `+` prompt and nothing is lost.
 | Ctrl-C | clear the line, or interrupt evaluation |
 | Ctrl-D | quit |
 
-`ry repl --keybindings vi` switches to vi keys. History is ry's own file, separate from
-`.Rhistory`. Sessions start clean and save nothing: no `.RData` is restored or written.
+`ry repl --keybindings vi` switches to vi keys. History is ry's own file (`~/.local/share/ry/history.txt`
+on Linux), separate from `.Rhistory`. Sessions start clean and save nothing: no `.RData` is restored or
+written.
 
 ## `ry run`
 
-`ry run script.R` feeds a file to R and exits. A top-level error stops the script with exit status 1,
-like `Rscript`, and `q(status = 7)` passes its status through. Three differences matter if you use it
-in place of `Rscript`:
+`ry run script.R` feeds a file to the same console, line by line as if you had typed it, and exits at
+its end. A top-level error stops the script with exit status 1, and `q(status = 7)` passes its status
+through. It replays console input exactly, which is what it is for; for scripts in production,
+`Rscript` is the better tool, because `ry run`:
 
-- **It does no analysis.** Run `ry check` separately.
-- **`interactive()` is `TRUE`,** because the embedded session is always interactive. Code that
-  branches on it takes the interactive path.
-- **Setting `options(error = ...)` in the script replaces the handler that makes errors exit 1**, so
-  a failing script may then exit 0.
+- does no analysis (run `ry check` separately);
+- takes no script arguments and no `-e`;
+- reports `interactive()` as `TRUE`, so code that branches on it takes the interactive path;
+- prints R's startup banner to stdout, so `ry run x.R > out` captures it;
+- exits 0 after an error if the script sets its own `options(error = ...)`, which replaces the
+  handler that exits 1.
 
-R's startup banner prints, and `.Rprofile` is sourced. `ry repl -f setup.R` runs a script the same
-way and then keeps the prompt open.
+`ry repl -f setup.R` feeds a script the same way and then keeps the prompt open.
 
 ## Which R it uses
 
 ry uses `R_HOME` if it is set, and otherwise asks `R RHOME` on your `PATH`, so `R_HOME=/opt/R/4.5.1/lib/R ry repl`
 pins a version. R must be 4.2 or newer and built as a shared library (`--enable-R-shlib`), which
-every CRAN binary is. If no suitable R is found, the command fails with exit status 2 and says what
+every CRAN binary is. Only Windows checks the version up front; elsewhere an older R fails to load. If no suitable R is found, the command fails with exit status 2 and says what
 it looked for.
