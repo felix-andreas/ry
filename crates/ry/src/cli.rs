@@ -1341,6 +1341,29 @@ pub fn server(debug: bool) {
     crate::server::run(debug);
 }
 
+/// Names features had while they were experimental. They are always on now,
+/// but editor configurations still pass them.
+const GRADUATED_EXPERIMENTAL_FEATURES: &[&str] = &["range_formatting"];
+
+/// Checks `--experimental-features` names (space-separated, or `all`). No
+/// feature is experimental right now, so every name is ignored. A name is a
+/// warning and never a usage error: an editor launches the language server
+/// with the names its configuration lists, and refusing one would keep the
+/// server from starting at all.
+pub fn check_experimental_features(flags: &[String]) {
+    for name in flags.iter().flat_map(|flag| flag.split(' ')) {
+        match name {
+            "" | "all" => {}
+            name if GRADUATED_EXPERIMENTAL_FEATURES.contains(&name) => warn(&format!(
+                "ignoring experimental feature '{name}': it is no longer experimental and is always on"
+            )),
+            name => warn(&format!(
+                "unknown experimental feature: '{name}' (no feature is experimental right now)"
+            )),
+        }
+    }
+}
+
 pub fn ast(path: &Path) -> Result<(), CommandError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,

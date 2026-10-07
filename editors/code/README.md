@@ -54,6 +54,9 @@ You can customize the ry extension in VS Code through the following settings:
   "ry.path": "/path/to/ry",
   // Pass custom arguments; defaults to ["server"]
   "ry.args": ["server", "--verbose"],
+  // Enable experimental features (none is experimental right now; a name
+  // that is not one is ignored with a warning)
+  "ry.experimentalFeatures": [],
 }
 ```
 

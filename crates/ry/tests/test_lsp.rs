@@ -364,6 +364,27 @@ async fn initialize_reports_capabilities() {
     context.shutdown().await;
 }
 
+/// Editor configurations written while range formatting was experimental
+/// launch the server with the flag; it must still start and offer the feature.
+#[tokio::test]
+async fn the_retired_range_formatting_flag_still_starts_the_server() {
+    let context = setup_test_with_env_and_args(
+        true,
+        &[],
+        ClientCapabilities::default(),
+        &[],
+        &["--experimental-features", "range_formatting"],
+    )
+    .await;
+    assert_eq!(
+        context
+            .init_result
+            .capabilities
+            .document_range_formatting_provider,
+        Some(OneOf::Left(true))
+    );
+}
+
 #[tokio::test]
 async fn initialize_negotiates_utf16_by_default() {
     let context = setup_test(&[]).await;

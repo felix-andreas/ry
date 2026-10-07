@@ -138,6 +138,18 @@
 					},
 					"markdownDescription": "Arguments passed to the `ry` executable.",
 					"default": null
+				},
+				"ry.experimentalFeatures": {
+					"scope": "resource",
+					"type": [
+						"null",
+						"array"
+					],
+					"items": {
+						"type": "string"
+					},
+					"markdownDescription": "Enable experimental features.",
+					"default": null
 				}
 			}
 		}

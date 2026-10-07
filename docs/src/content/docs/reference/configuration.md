@@ -180,8 +180,9 @@ These say where the binary is and how to launch it; none of them changes analysi
 | --- | --- | --- |
 | `ry.path` | `null` | Location of the `ry` executable. |
 | `ry.args` | `null`, meaning `["server"]` | Arguments passed to the executable. |
+| `ry.experimentalFeatures` | `null` | Feature names forwarded as `--experimental-features`. No feature is experimental right now — range formatting is always on — so a listed name is ignored with a warning in the server log. |
 
-Changing either prompts you to restart the server; it takes effect only then. The extension finds the binary in this order: the `SERVER_PATH` environment variable, `ry.path`, its own bundled copy, then `ry` on your `PATH`.
+Changing any of the three prompts you to restart the server; it takes effect only then. The extension finds the binary in this order: the `SERVER_PATH` environment variable, `ry.path`, its own bundled copy, then `ry` on your `PATH`.
 
 | Command | Does |
 | --- | --- |

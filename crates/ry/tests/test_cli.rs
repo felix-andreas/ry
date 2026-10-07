@@ -1172,6 +1172,73 @@ fn usage_error_exits_two() {
     assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
 }
 
+// Editor configurations launch the server with `--experimental-features`
+// (VS Code forwards `ry.experimentalFeatures` as one space-separated value), so
+// a name the flag no longer knows must warn and carry on, never stop the run.
+#[test]
+fn a_graduated_experimental_feature_is_ignored_with_a_warning() {
+    let directory = project(&[("clean.R", "x <- 1\nprint(x)\n")]);
+    for arguments in [
+        &[
+            "--experimental-features",
+            "range_formatting",
+            "check",
+            "clean.R",
+        ][..],
+        &[
+            "check",
+            "--experimental-features",
+            "range_formatting",
+            "clean.R",
+        ],
+    ] {
+        let output = ry(directory.path(), arguments);
+        assert_eq!(exit_code(&output), 0, "{arguments:?}: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains(
+                "ignoring experimental feature 'range_formatting': it is no longer experimental and is always on"
+            ),
+            "{arguments:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn an_unknown_experimental_feature_is_ignored_with_a_warning() {
+    let directory = project(&[("clean.R", "x <- 1\nprint(x)\n")]);
+    let output = ry(
+        directory.path(),
+        &[
+            "--experimental-features",
+            "range_formatting rename",
+            "check",
+            "clean.R",
+        ],
+    );
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("unknown experimental feature: 'rename'"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn all_experimental_features_is_accepted_silently() {
+    let directory = project(&[("clean.R", "x <- 1\nprint(x)\n")]);
+    let output = ry(
+        directory.path(),
+        &["--experimental-features", "all", "check", "clean.R"],
+    );
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    assert!(
+        !stderr(&output).contains("experimental"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 //
 // PER-FILE TYPING DIRECTIVES
 //

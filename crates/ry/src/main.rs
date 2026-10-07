@@ -16,6 +16,7 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
+    cli::check_experimental_features(cli.experimental_features.as_deref().unwrap_or_default());
 
     // Embedded R must run on the MAIN thread: it assumes it owns the thread
     // it initializes on (stack checking, signal expectations).
@@ -105,14 +106,25 @@ fn exit_code(result: Result<Outcome, CommandError>) -> ExitCode {
 // `name` is set explicitly: clap defaults to the Cargo package name, which is
 // `ry-lang` because the registry name `ry` was taken — but the command the user
 // typed, and the one every diagnostic and doc page names, is `ry`.
-#[command(name = "ry", version)]
+#[command(name = "ry", version, after_help = EXPERIMENTAL_FEATURES_HELP)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
     /// Ignored ... here only to please VS Code
     #[clap(long, default_value_t = true)]
     stdio: bool,
+    // Accepted anywhere but documented only in the root help's trailing
+    // section (a clap global cannot be hidden from subcommand help
+    // selectively, and repeating it under every subcommand is noise).
+    #[clap(long, global = true, hide = true)]
+    experimental_features: Option<Vec<String>>,
 }
+
+const EXPERIMENTAL_FEATURES_HELP: &str = "Global options:
+      --experimental-features <FEATURES>
+          Enable experimental features (space-separated, or \"all\" for every one).
+          No feature is experimental right now: range_formatting is always on.
+          A name that is not an experimental feature is ignored with a warning.";
 
 #[derive(Debug, Subcommand)]
 enum Command {

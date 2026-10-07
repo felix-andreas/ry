@@ -952,10 +952,13 @@ dependency. Performance: one extra format plus one extra parse per request, both
 interactive action the user asked for. Incrementality: unaffected — the formatter is syntax-only and
 holds no analysis state.
 
-**The experimental-features machinery is gone with it.** `range_formatting` was its only entry, so
-the flag, the registry, the CLI help section, and the VS Code `ry.experimentalFeatures` setting were
-an empty frame once the feature graduated. A future experimental feature rebuilds it; carrying a
-registry with nothing in it would have meant a flag that accepts no name and prints an empty list.
+**The `--experimental-features` flag stays, and `range_formatting` stays a name it accepts.** Editor
+configurations pass the flag (VS Code forwards `ry.experimentalFeatures`; other editors put it in
+the server's arguments), so removing it is a clap usage error and the language server does not
+start. A graduated name is ignored with a warning saying the feature is always on; an unknown name
+is ignored with a warning, as before; neither is ever an error. Only the server-side gating went:
+no feature is experimental, so no feature set is threaded into the server — the next experimental
+feature adds that back with its first reader.
 
 # Decision record: one source of truth for where an item spells its name
 
