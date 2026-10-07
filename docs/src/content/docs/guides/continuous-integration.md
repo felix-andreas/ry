@@ -3,7 +3,7 @@ title: Continuous integration
 description: A working CI job for ry, and how to decide what fails the build
 ---
 
-ry is a single binary that needs no R installation, so a CI job is a download and two commands:
+ry needs no R installation, so a CI job is a download and two commands:
 
 ```yaml
 # .github/workflows/ry.yml

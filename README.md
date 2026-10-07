@@ -14,7 +14,7 @@
 </div>
 
 ry is a language server, checker, formatter, and console for R. It analyzes source code without
-running it, so the same binary gives the same answers in your editor and in CI, and needs no R
+running it, so it gives the same answers in your editor and in CI, and needs no R
 installation except for the console. It was previously called Roughly, which is why old release
 assets are named `roughly-*`.
 

@@ -291,7 +291,7 @@ const year = new Date().getFullYear();
         </title>
         <meta
             name="description"
-            content="ry is a toolchain for R, written in Rust: a language server, a linter, a type checker, and a formatter in one binary."
+            content="ry is a toolchain for R, written in Rust: a language server, a linter, a type checker, and a formatter."
         />
         <link rel="icon" href="/favicon.svg" />
         <script is:inline>
@@ -349,11 +349,11 @@ const year = new Date().getFullYear();
                     <div class="hero-vignette" aria-hidden="true"></div>
                     <div class="hero-copy">
                         <h1 class="hero-heading">
-                            A toolchain for R.
+                            A toolchain<br />for R.
                         </h1>
                         <p class="subhead">
-                            Language server, type checker, and formatter in one
-                            binary, written in Rust.
+                            A language server, a type checker, and a formatter,
+                            written in Rust.
                         </p>
                         <div class="cta-cluster">
                             <a class="cta cta-lg" href="/getting-started"
@@ -945,10 +945,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             ) as HTMLElement | null;
 
             // As you scroll, the particles resolve through two text shapes: first the
-            // "ry" wordmark, then the headline (wrapped to two lines so the particle
-            // text roughly matches the hidden <h1>).
+            // "ry" wordmark, then the headline. The headline's lines and font size are
+            // read from the hidden <h1> in relayout(), so the particle text fills
+            // exactly the box the <h1> reserves and never runs into the subhead.
             const WORDMARK_LINES = ["ry"];
-            const HEADING_LINES = ["A toolchain", "for R."];
 
             function initHero() {
                 if (!heroCanvas || !heroEl) return;
@@ -1154,6 +1154,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     lines: string[],
                     widthFrac = 0.7,
                     widthCap = 660,
+                    fixedFontPx?: number,
                 ): Target[] {
                     const SS = 2;
                     const fontFamily = `'Geist Sans', system-ui, sans-serif`;
@@ -1171,6 +1172,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     const maxFont = Math.min(cssW * 0.086, cssH * 0.142);
                     if (fontPx > maxFont) fontPx = maxFont;
                     if (fontPx < 12) fontPx = 12;
+                    if (fixedFontPx) fontPx = fixedFontPx;
                     const leading = fontPx * 1.04;
                     const blockW =
                         Math.ceil((maxW * fontPx) / basePx) + Math.ceil(fontPx);
@@ -1321,10 +1323,19 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     const headline = heroEl!.querySelector(
                         ".hero-copy h1",
                     ) as HTMLElement | null;
+                    let headingLines = ["A toolchain", "for R."];
+                    let headingFontPx: number | undefined;
                     if (headline) {
                         const hr = headline.getBoundingClientRect();
                         centroidX = hr.left - r.left + hr.width / 2;
                         centroidY = hr.top - r.top + hr.height / 2;
+                        headingLines = headline.innerText
+                            .split("\n")
+                            .map((line) => line.trim())
+                            .filter((line) => line.length > 0);
+                        headingFontPx = parseFloat(
+                            getComputedStyle(headline).fontSize,
+                        );
                     } else {
                         centroidX = cssW / 2;
                         centroidY = cssH * 0.44;
@@ -1337,7 +1348,12 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         0.34,
                         400,
                     );
-                    headingTargets = buildTextTarget(HEADING_LINES);
+                    headingTargets = buildTextTarget(
+                        headingLines,
+                        0.7,
+                        660,
+                        headingFontPx,
+                    );
                     spawnParticles();
                     pairTargets();
                 }
@@ -2787,8 +2803,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .hero-copy h1 {
                 margin: 0;
                 font-weight: 600;
-                font-size: clamp(2.4rem, 7vw, 4rem);
-                line-height: 1;
+                font-size: clamp(2.6rem, 8vw, 5.5rem);
+                /* matches the particle headline's leading in buildTextTarget */
+                line-height: 1.04;
                 letter-spacing: -0.04em;
             }
             .hero-copy .subhead {
