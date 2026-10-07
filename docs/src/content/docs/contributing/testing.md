@@ -222,7 +222,7 @@ frozen stack's fixture suites, read through `syntax::testing::legacy_corpus_sour
 `format`, and `semantics` batteries each run the whole set.
 
 The programs are kept for their inputs only. Their expected output uses an older notation and
-cannot be ported, and bulk-blessing it would declare today's behavior correct instead of checking
+cannot be ported, and regenerating it from today's output would declare current behavior correct instead of checking
 it.
 
 What makes the inputs usable on their own is that the invariants need no expected output: nothing

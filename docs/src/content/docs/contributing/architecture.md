@@ -33,8 +33,8 @@ illegal dependency unrepresentable.
   Anything to do with the editor protocol lives in the server, never here.
 - **`format`** is the formatter. It depends on `syntax` alone, and because the compiler enforces
   that, it can never come to depend on an analysis result.
-- **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, which is why
-  every other crate builds without R installed.
+- **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
+  `repl` included, needs R to build.
 - **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
   `run`, and `debug` commands. It owns configuration, conversion between position encodings, assembling and publishing
   diagnostics, and suppression comments.

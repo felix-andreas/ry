@@ -3,13 +3,12 @@ title: Type system
 description: The precise static-typing semantics contract for ry's R type checker
 ---
 
-Two principles explain most of the rules on this page, and the [tour](/tour) introduces the same
-ideas through examples. First, the checker prefers skipping a check to giving a
-wrong answer: a construct it cannot describe becomes `Unknown`, which is compatible with everything,
+Two principles explain most of the rules on this page. First, the checker prefers skipping a check
+to giving a wrong answer: a construct it cannot describe becomes `Unknown`, which is compatible with everything,
 so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode) shows where
-the gaps are. Second, every rule must be decidable fast enough to run on every keystroke, which is why
+the gaps are. Second, every rule must be cheap enough to check on every keystroke, which is why
 inference is Hindley–Milner, why your own functions cannot be overloaded, and why there is no
-subtyping between nominal types.
+subtyping between nominal types. The [tour](/tour) introduces the same ideas through examples.
 
 ## Typing comment syntax
 
@@ -75,9 +74,10 @@ neither does a `@strict` toggle, so the adjacency rules do not apply to them.
 A block is refused as a whole when it mixes forms, orders its directives wrongly, declares a
 duplicate or unknown type parameter, or gives `@new` a payload that is not nominal. A refused block
 reports its error and carries no typing payload, so a broken annotation does not cause follow-on
-findings. Two known exceptions still do: a vector of an alias of a record (`Rec[]`), and a bare
-optional positional parameter (`fn(integer, [character])`). A block the annotation grammar could not even read is refused silently, because the parse
-error has already said what was wrong.
+findings. Two known exceptions still do: a `[]` vector whose element type is not atomic or is not
+declared (`Rec[]`), and a bare optional positional parameter (`fn(integer, [character])`). A block
+the annotation grammar could not even read is refused silently, because the parse error has already
+said what was wrong.
 
 ## Types
 
@@ -878,8 +878,8 @@ This is an error, because the checker already knows the type.
 `TYPE` without requiring the usual compatibility at that site. It has the same effect as coercing the
 value to `Any` and then to `TYPE`, and exists as a shorter way to write that.
 
-Neither coercion yet silences [strict mode](#strict-mode): an `Unknown` value under `@trust` or
-`@if-unknown` is still reported at its origin. This is a known gap.
+No annotation silences [strict mode](#strict-mode) yet: an `Unknown` value under a plain `#:`,
+`@trust`, or `@if-unknown` is still reported at its origin. This is a known gap.
 
 ```r
 #: @trust integer
@@ -1093,7 +1093,7 @@ arithmetic [operator method](#operator-methods-on-a-class).
 - `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
 
 When the other operand is a vector or a union, an unannotated operand is pinned to a scalar
-`double`, which matches how R treats bare numbers: `function(x) x + c(1L, 2L)` is
+`double`, which matches how R treats bare numbers: `f <- function(x) x + c(1L, 2L)` is
 `fn(x: double) -> double[]`.
 
 ### Arithmetic operators
@@ -1111,8 +1111,8 @@ not preserve map-likeness.
 
 An operand whose shape is still unknown, such as an unannotated parameter, counts as scalar-like, both
 here and in the comparison rules, by the same scalar claim that [`[` on vectors](#-on-vectors-1)
-makes. The cost is a false error when the other operand is a vector: the operand is pinned to a
-scalar, so on `function(x) x + c(1L, 2L)`, the call `f(c(1, 2))` is reported.
+makes. The cost is a false error when the other operand is a vector: for the `f` above, `f(c(1, 2))`
+is reported, because `x` was pinned to a scalar.
 A generic vector written `T[]` is the exception, and its operator results really are vectors.
 
 #### Result shapes
@@ -1187,8 +1187,8 @@ two families:
 - the **character** family, which holds `character`.
 
 Both operands must belong to the same family, and comparing across families is a type error.
-`complex` and `raw` operands are not supported, because R orders neither family the way the
-others are ordered (complex numbers have no order, and raw bytes compare only with raw). A map-like vector takes part through its
+`complex` and `raw` operands are not supported: complex numbers have no order, and comparing raw
+bytes is rare enough not to model. A map-like vector takes part through its
 compatibility with an array-like vector.
 
 An unannotated operand is required to be numeric when the other operand is concretely numeric, and
@@ -1258,9 +1258,11 @@ turn out to be a `double`.
   its own type, so `c(list(1L), "a")` is `list[integer | character]`. The atomic coercion rules below
   apply only when no argument is a list.
 - An argument whose element type is not known statically, such as `Any`, `Unknown`, or an unannotated
-  parameter (as in `function(x) c(x, 1L)`), is tolerated rather than rejected. The combined element
-  type is then indeterminate, so the whole result is `Unknown`, and a strict-mode origin. This keeps `c` from reporting a false "expected `integer`,
-  found `T`" in a generic wrapper, and from cascading on a value that is already `Unknown`. Claiming a
+  parameter (as in `function(x) c(x, 1L)`), is tolerated rather than rejected, and the whole result is
+  `Unknown`. Under strict mode, an unannotated parameter makes the `c()` call the origin, an `Unknown`
+  argument was already reported where it arose, and an `Any` argument is never reported. This keeps
+  `c` from reporting a false "expected `integer`, found `T`" in a generic wrapper, and from cascading
+  on a value that is already `Unknown`. Claiming a
   concrete element type would be unsound, because a later argument could widen it.
 - Mixed atomic arguments coerce to the widest type in R's order,
   `logical < integer < double < complex < character`. `raw` is not part of the order and combines
@@ -1679,8 +1681,9 @@ That selection cannot be modelled statically, but the call is still checked in f
 The source is evaluated once, before the first iteration, and the loop does not change its type
 outside the loop. Inside the body, the loop variable has the element type, and is re-initialized from
 the source on every iteration, so an assignment to it in the body does not carry over into the next
-iteration. After the loop, a read of the loop variable is `Unknown`, although R keeps its last
-value.
+iteration. After the loop, R keeps the variable's last value, but ry does not: inside a function a
+read of it is `Unknown` and not reported even in strict mode, and at the top level of a file it is
+reported as unresolved. Both are known gaps.
 
 ### `while`
 
@@ -1790,8 +1793,7 @@ scoping.
 - Exports are tracked per declaration. A project stub that overrides a shipped name's type does not
   remove the name from its shipped namespace, so `stats::sd` stays valid under an `sd` override.
 - A qualified read that could not be validated types as `Unknown`, and is a strict-mode origin.
-- `::` and `:::` are not distinguished: the split between exported and internal names is not
-  modelled.
+- `:::` reads an internal name, so a name the namespace does not export is not reported there.
 
 ### Package imports (`NAMESPACE` and `DESCRIPTION`)
 
@@ -2224,7 +2226,8 @@ in both directions:
   [strict mode](#strict-mode) for the file.
 - The comment must hold nothing but the directive: `# typing: off  # reason` is reported as an
   unknown directive.
-- A directive counts anywhere at the top level of the file, but not inside a function.
+- A directive must be a comment between top-level expressions. Inside any expression, such as a
+  function body or an `if` block, it is ignored.
 - The older `#: @strict` form is still supported: `#: @strict` means `# typing: strict`, and
   `#: @strict off` means `# typing: on`, which type-checks the file but not strictly.
 - If a file has several directives, the last one wins. A `typing:` comment with any other value is

@@ -50,7 +50,7 @@ flag <- T  ## ry: allow(all)
 
 The marker is found by scanning the line rather than parsing it: the scan takes the first `#` on the
 line, strips every leading `#`, and then looks for the literal `ry:` and `allow(` up to the first `)`.
-So `## ry: allow(x)` and `#ry:allow(x)` both work, the former name's `# roughly: allow(x)` still
+So `## ry: allow(x)` and `#ry:allow(x)` both work, the pre-rename spelling `# roughly: allow(x)` still
 works, and a `#` inside a string earlier on the line hides a trailing suppression on that line.
 
 Some findings cannot be suppressed this way, because they are not reported against an R source
@@ -154,7 +154,7 @@ opt-in, and the [type system reference](/reference/type-system) has the semantic
 | Code | Severity | On by default | Triggered by |
 | --- | --- | --- | --- |
 | `annotation` | error | yes | A type name that is not a builtin, a declared `@type`/`@alias`, or a stub class. Adds `Did you mean` |
-| `annotation` | error | yes | A malformed block: `@forall` after `@param`, `@param` after `@return`, more than one `@return`, a duplicate type-parameter name, `@new` with no nominal, or an unknown constraint (only `numeric` and `atomic` exist) |
+| `annotation` | error | yes | A malformed block: `@forall` after `@param`, `@param` after `@return`, more than one `@return`, a duplicate type-parameter name, `@new` with no nominal, or an unknown constraint (only `numeric`, `atomic`, and `scalar numeric` exist) |
 | `annotation` | error | yes | A type expression the annotation grammar cannot read, or a form it refuses on purpose, which is a `<T>` binder anywhere but the outermost level of the block |
 | `annotation` | error | yes | A dangling `#:`, with no expression on the next line, a blank line in between, or no type expression at all |
 | `annotation` | error | yes | A `#:` inside a call's argument list, where an argument is not a statement and nothing can be annotated |

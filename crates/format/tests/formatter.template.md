@@ -25,7 +25,7 @@ The formatter keeps your line breaks and never splits an expression you wrote on
 
 * **Single-line expressions remain single-line:** The formatter adds line breaks only where the expression is already multi-line, and never breaks a single-line expression into several (with [one exception](#loops)).
 * **Both nesting styles are preserved:** Compact ("hugged") and expanded forms for nested expressions are equally valid, and neither is rewritten into the other (see [hugging behavior](#hugging-behavior)).
-* **Braces are added where omitting them invites a bug, and around every loop body:** a multi-line `if` or function body gets braces so that a line added later cannot fall outside it (see [auto-bracing](#auto-bracing)), and loops are always braced (see [loops](#loops)).
+* **Braces are added where omitting them invites a bug:** a multi-line `if` or function body gets braces so that a line added later cannot fall outside it (see [auto-bracing](#auto-bracing)), and every loop body is braced (see [loops](#loops)).
 
 ## Formatting Rules
 
@@ -59,7 +59,7 @@ select(value)
 
 ### Unary operators
 
-`!` and unary `-` hug their operand:
+`!`, unary `-`, and unary `+` hug their operand:
 
 ```r
 # unary_operators : compare
@@ -68,7 +68,7 @@ value = - 42
 formula = ~x + y
 ```
 
-`~` is spaced when its operand is more than one identifier: `~x`, but `~ x + y`.
+`~` hugs a lone name (`~x`, `~.`) and is spaced before anything else (`~ x + y`, `~ log(x)`, `~ 1`).
 
 ### Blocks
 
@@ -477,7 +477,7 @@ PersonClass <- R6Class(
 )
 ```
 
-### Line endings
+### Line endings and indentation
 
 The line ending follows `[format] line-ending`, whose default `"auto"` keeps the file's own (`LF` or `CRLF`). The indent is `[format] indent-width` spaces, 2 by default.
 

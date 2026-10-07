@@ -9,9 +9,10 @@ It works on the code you already have: nothing needs to be annotated or configur
 ## Install
 
 - **VS Code:** install the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry).
-  It bundles the binary for Linux x86_64, macOS on Apple silicon, and Windows x86_64.
+  It bundles the binary for Linux x86_64, macOS on Apple silicon, and Windows x86_64, but the Linux
+  build of 0.3.1-beta [does not start](/installation#command-line) on most distributions.
 - **Command line:** download a [release](https://github.com/felix-andreas/ry/releases) by its tag,
-  because every release is a pre-release and GitHub's "latest" is an old build. Or build it with
+  because every release since 0.1.1 is a pre-release and GitHub's "latest" is an old build. Or build it with
   `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 - **Zed, RStudio, other platforms:** see [installation](/installation).
 

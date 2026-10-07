@@ -52,7 +52,8 @@ ry check --min-severity error  # only errors report and gate
 
 Analysis always covers the whole [project](/reference/configuration#project-root) a named path
 belongs to, so cross-file names resolve the same way however you spell the paths, and only the
-reporting is limited to what you named.
+reporting is limited to what you named. The exception is a file matched by `[check] exclude`, which
+is analyzed only when you name it.
 
 Type errors are opt-in through `[check] typing` in [`ry.toml`](/reference/configuration), and every
 code is listed in [Diagnostic codes](/reference/diagnostic-codes).

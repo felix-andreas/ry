@@ -10,9 +10,10 @@ binary for **Linux x86_64, macOS aarch64, and Windows x86_64**. On any other pla
 [command-line binary](#command-line): the extension falls back to `ry` on your `PATH`, or to the
 path in the `ry.path` setting.
 
-Positron and VSCodium install extensions from Open VSX, where ry is not published. Download the
-`.vsix` for your platform from [Releases](https://github.com/felix-andreas/ry/releases) and run
-**Extensions: Install from VSIX...** instead.
+Positron and VSCodium install extensions from Open VSX, where ry is not published (an unrelated
+extension there is also called "ry"). Download the `.vsix` for your platform from
+[Releases](https://github.com/felix-andreas/ry/releases) and run **Extensions: Install from VSIX...**
+instead.
 
 Every extension setting is listed under [editor settings](/reference/configuration#editor-settings).
 
@@ -27,7 +28,8 @@ The Zed extension is not in Zed's registry yet, so install it from the repositor
 
 Zed has no built-in R support, so install the [R extension](https://zed.dev/extensions/r) first. Put
 the [command-line binary](#command-line) on your `PATH` too: the extension's automatic download
-looks only at non-pre-release versions, and every current release is a pre-release.
+looks only at releases not marked pre-release, and the newest of those is 0.1.1, from before the
+rename, so the download fails.
 
 ## Command line
 
@@ -48,6 +50,11 @@ ry --version
 
 Name the tag explicitly: every release since `0.1.1` is marked a pre-release, so `releases/latest/`
 still points at `0.1.1`.
+
+**On Linux, the 0.3.1-beta binary does not start** on most distributions ("cannot execute: required
+file not found"), because it was linked against the build machine's own copy of glibc. Until the next
+release, build from source as below. The Linux VS Code extension bundles the same binary, so set
+`ry.path` to the one you built.
 
 **From source**, if you have a [Rust toolchain](https://www.rust-lang.org/tools/install):
 

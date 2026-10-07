@@ -174,7 +174,7 @@ A project overrides or extends the shipped stubs with its own `.Rtypes` files un
 `<project>/stubs/`. The loader folds the project's files over the shipped corpus in sorted path
 order, so a project declaration replaces the shipped declaration of the same name. That is how a
 project corrects a return type or adds a name the corpus lacks. A missing directory is ignored, and a
-malformed line is dropped (and reported, see below), because overrides are optional and one bad line
+malformed line is dropped, because overrides are optional and one bad line
 must never block analysis.
 
 A project stub file's name declares its namespace. `stubs/dplyr.Rtypes` declares the namespace
@@ -186,7 +186,7 @@ per winning declaration, so overriding a shipped name's type does not remove the
 shipped namespace, and `stats::sd` stays valid under an `sd` override. Hover shows a name's origin as
 the namespace of its winning declaration.
 
-Skipped never means silent, though. `ry check` reports every dropped override declaration as an
+`ry check` reports every dropped override declaration as an
 error on its own stub line: a line that fails to parse, a declaration naming a type that does not
 resolve, and a `@type` line whose name is not an identifier. An unreadable override file is an IO
 failure. While a `.Rtypes` file is open, the editor shows the same problems as diagnostics.
@@ -508,7 +508,7 @@ which parameters a positional argument can still fill.
 
 ## Per-edit cost
 
-Because an edit never invalidates the [stub library](#incremental-hygiene), merely having it loaded
+Because an ordinary edit never invalidates the [stub library](#incremental-hygiene), merely having it loaded
 adds nothing to the cost of an edit, and rechecking a body still touches
 only the edited document and whatever refers to it. A document pays inference time only for the
 base names it actually uses, which is the feature doing its job rather than bookkeeping overhead,

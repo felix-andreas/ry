@@ -62,6 +62,8 @@ These are known bugs, not design decisions:
   to have length one, so `g(c(1, 2))` is reported. Annotate `x` as `double[]`.
 - **A list filled by position.** `res <- list(); res[[i]] <- x` in a loop infers a dict-like list, and
   a later `res[[1]]` is reported. Annotate the empty list as `#: list[T]`.
+- **The loop variable after a loop.** At the top level of a file, reading `i` after
+  `for (i in xs) {}` is reported as unresolved, although R keeps its last value.
 - **A variable named like a function.** After `mean <- 3`, the call `mean(x)` is reported as calling a
   number, although R skips non-function bindings when it looks up a function.
 - **Column names in tidyselect and masking functions of untyped packages.** Only packages with typed
@@ -72,5 +74,4 @@ These are known bugs, not design decisions:
   unknown namespace for packages outside R's own. In a package, the same report for a package missing
   from `DESCRIPTION` is correct, because R CMD check warns about it too.
 - **Strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an undetermined type.
-  `#: @trust`, `#: @if-unknown`, and a plain `#:` annotation on a binding do not clear a strict
-  finding; `# ry: allow(strict)` does.
+  No annotation on a binding clears a strict finding yet; `# ry: allow(strict)` does.

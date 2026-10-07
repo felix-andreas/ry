@@ -90,7 +90,7 @@ A top-level `# typing: off`, `# typing: on`, or `# typing: strict` comment repla
 The `exclude` patterns work like this:
 
 - Patterns are anchored at the directory holding `ry.toml`, and follow gitignore rules: `scripts/` excludes that whole subtree, `**/generated` matches at any depth, `!` re-includes.
-- Excluded directories are pruned without being walked, so exclusion cuts checking time, not just output.
+- Excluded directories are pruned without being walked, so exclusion cuts checking time, not just output. It also removes the files from analysis, so names they define are unresolved everywhere else: exclude only code nothing else calls into.
 - A file named on the command line is always checked, files open in the editor are always analyzed, and `ry fmt` ignores the key entirely.
 - Some paths are skipped with no configuration at all, because they hold vendored dependencies rather than your code: `renv/`, `packrat/`, `revdep/`, `.Rproj.user/`, `.Rcheck/`. `.gitignore` is honored too, git checkout or not.
 
