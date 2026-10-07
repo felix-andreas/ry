@@ -222,8 +222,8 @@ frozen stack's fixture suites, read through `syntax::testing::legacy_corpus_sour
 `format`, and `semantics` batteries each run the whole set.
 
 The programs are kept for their inputs only. Their expected output uses an older notation and
-cannot be ported, and regenerating it from today's output would declare current behavior correct instead of checking
-it.
+cannot be ported, and regenerating it from today's output would declare current behavior correct
+instead of checking it.
 
 What makes the inputs usable on their own is that the invariants need no expected output: nothing
 panics, `syntax` checks the lossless reprint and the tree geometry, `format` checks preservation,
@@ -367,9 +367,9 @@ per stack and writes wall time, a split by phase, and resident and peak memory i
 `target/stats-{new,legacy}.txt`.
 
 The same file carries `stats_witness`, the assertion form, which runs locally wherever the corpus
-has been fetched (CI does not fetch it). It asserts the
-cold-pass wall time per line, resident bytes per line, and resolve steps per line (the tripwire for a
-regression in resolve memoization), against budgets taken from measured numbers plus headroom.
+has been fetched (CI does not fetch it). It asserts the cold-pass wall time per line, resident bytes
+per line, and resolve steps per line (the tripwire for a regression in resolve memoization), against
+budgets taken from measured numbers plus headroom.
 
 ## The legacy stack
 
