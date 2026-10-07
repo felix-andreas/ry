@@ -279,12 +279,16 @@ A rest parameter is written `...: TYPE`, as in `fn(...: Any) -> character`, and 
 names may contain an interior `.`, as in `na.rm`. Each gap below limits how precise the affected
 declarations can be:
 
-| Gap | Example | Extension needed |
-|-----|---------|------------------|
-| A trailing dot in a parameter name | `stop(call. =)`, `warning(immediate. =)` | parameter names currently allow only an interior dot |
-| An empty type for a function that never returns | `stop`, `q` | without one, a `NULL` return would poison the join in `x <- if (ok) v else stop(...)`, so these stay `Any` |
-| A return that mirrors the argument's shape | `rev(opts)$timeout` on a fixed-shape `opts` | a declaration cannot say "the same record back", so selection and reordering return a name-keyed `list[named: T]`, and a field read off it is `T \| NULL` rather than the field's own type |
-| A nullable result under a member-wise operator | `names`, `dim`, `nrow` | a `T \| NULL` return would false-positive on `1:nrow(df)` and `for (nm in names(x))` until flow narrowing or NULL-tolerant joins exist, so these return `Any` |
+- **A trailing dot in a parameter name**, as in `stop(call. =)`: parameter names allow only an
+  interior dot.
+- **An empty type for a function that never returns**, such as `stop` and `q`: without one, a `NULL`
+  return would poison the join in `x <- if (ok) v else stop(...)`, so these stay `Any`.
+- **A return that mirrors the argument's shape**, as in `rev(opts)$timeout` on a fixed-shape `opts`:
+  a declaration cannot say "the same record back", so selection and reordering return a name-keyed
+  `list[named: T]`, and a field read off it is `T | NULL` rather than the field's own type.
+- **A nullable result under a member-wise operator**, as for `names`, `dim`, and `nrow`: a
+  `T | NULL` return would be a false report on `1:nrow(df)` and `for (nm in names(x))` until flow
+  narrowing or NULL-tolerant joins exist, so these return `Any`.
 
 Type-preserving reductions declare [overload sets](#overloads-and-generics), and element-preserving
 functions declare generic `T[]` signatures. A function serves a callback interface whenever it
@@ -471,15 +475,7 @@ nchar : fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> 
 seq_len : fn(length.out: Any) -> integer[]
 ```
 
-Each line produces one scheme, which the checker renders back in the same notation:
-
-| Binding | Scheme |
-|---------|--------|
-| `T`, `F` | `logical` |
-| `pi` | `double` |
-| `length` | `fn(x: Any) -> integer` |
-| `nchar` | `fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer` |
-| `seq_len` | `fn(length.out: Any) -> integer[]` |
+Each line produces one scheme, which hover renders back in the same notation.
 
 `nchar`'s subject and `seq_len`'s count are Any-params (see the
 [compromise vocabulary](#corpus-compromise-vocabulary)), so `nchar(42)` and `seq_len(10)` check
@@ -488,9 +484,9 @@ clean while the return types stay precise.
 This R type-checks against those stubs plus the built-in kernel:
 
 ```r
-n    <- length(c(1L, 2L, 3L))  #: integer  (stub scheme)
-half <- pi / 2                 #: double   (operator kernel on a double scalar)
-flag <- T                      #: logical  (stub value binding)
+n    <- length(c(1L, 2L, 3L))  # integer, from the stub scheme
+half <- pi / 2                 # double, from the operator kernel
+flag <- T                      # logical, from the stub value binding
 ```
 
 The stubs and the kernel work together here: `length`'s scheme types `n`, the operator kernel
