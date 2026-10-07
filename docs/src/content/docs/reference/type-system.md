@@ -8,7 +8,7 @@ to giving a wrong answer: a construct it cannot describe becomes `Unknown`, whic
 so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode) shows where
 the gaps are. Second, every rule must be cheap enough to check on every keystroke, which is why
 inference is Hindley–Milner, why your own functions cannot be overloaded, and why there is no
-subtyping between nominal types. The [tour](/tour) introduces the same ideas through examples.
+subtyping between nominal types. The [tour](/type-checking/tour) introduces the same ideas through examples.
 
 ## Typing comment syntax
 
@@ -1460,7 +1460,7 @@ make one name accept several shapes, give the parameter a [union type](#union-ty
 shapes into separate functions.
 
 A local or package binding that shadows a stub name switches its overload set off, and the binding is
-used everywhere, calls included. A project [override stub](/type-checking/stubs#overriding-a-shipped-declaration)
+used everywhere, calls included. A project [override stub](/type-checking/stubs#what-ships)
 may declare overload sets, because a `.Rtypes` file is a declaration file for foreign code wherever
 it lives.
 

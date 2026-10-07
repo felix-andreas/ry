@@ -45,6 +45,6 @@ typing = true
 
 ## Next
 
-- [Tour](/tour): every feature, and why it works the way it does
+- [Tour](/type-checking/tour): every feature, and why it works the way it does
 - [Limitations](/type-checking/limitations): what is not checked, and the known false reports
 - [Configuration](/reference/configuration): every `ry.toml` key

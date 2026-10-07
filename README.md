@@ -57,7 +57,7 @@ typing = true
 ```
 
 R is too dynamic to check completely, so ry checks what can be described statically and treats the
-rest as `Unknown`, which never causes an error by itself. The [tour](https://ry-lang.org/tour/) shows the
+rest as `Unknown`, which never causes an error by itself. The [tour](https://ry-lang.org/type-checking/tour/) shows the
 type system in short examples, and [limitations](https://ry-lang.org/type-checking/limitations/) says
 what it cannot check.
 

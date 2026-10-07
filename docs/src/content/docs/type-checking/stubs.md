@@ -1,39 +1,11 @@
 ---
 title: Stubs
-description: How ry knows about base R and packages without running R, and how to teach it about one it does not know
+description: How ry knows about packages without running R, and how to describe one it does not know
 ---
 
 ry never loads R, so it cannot ask `nchar()` what it returns or a package what it exports. It reads
-*stubs* instead: declaration files that describe a package's names and types, the way TypeScript reads
-`.d.ts` files.
-
-## What ships
-
-| | Always available | Once your project uses them |
-| --- | --- | --- |
-| **Typed** | `base`, `stats`, `utils`, `methods`, `graphics`, `grDevices`, `datasets` | `data.table`, `dplyr`, `ggplot2`, `testthat` |
-| **Export lists only** | the rest of R's own packages: `tools`, `grid`, `parallel`, `splines`, `stats4`, `tcltk`, `compiler` | the tidyverse, `knitr`, `rlang`, `glue`, `magrittr`, `scales`, `jsonlite`, `R6` |
-
-A typed package gives calls real types. An export list gives no types, but it tells ry which names
-exist, which is what keeps unresolved-name detection working next to it.
-
-A project uses a package through a `library()` or `require()` call, a `DESCRIPTION` dependency, or a
-`NAMESPACE` import. Before that, `mutate` and `fread` are unresolved, as they would be in R, instead of
-hiding typos in projects that never load these packages. A `pkg::name` call does not count as use, so
-`dplyr::mutate()` in a script with no `library(dplyr)` and no `DESCRIPTION` reports `dplyr` as an
-unknown namespace.
-
-## Unknown packages switch checks off
-
-Attaching a package ry has no stub for means any bare name in the project might be one of its
-exports. ry cannot tell a typo from an export it has never heard of, so it stops reporting unresolved
-names project-wide. Two kinds of finding survive: a near miss of a name your own project defines
-(`repositry` next to a `repository` parameter), and, under [strict mode](/reference/type-system#strict-mode),
-every name the tolerance let through.
-
-## Writing a stub
-
-Put a `.Rtypes` file under `stubs/`. The file name is the package name:
+*stubs* instead: declaration files that list a package's names and their types, the way TypeScript
+reads `.d.ts` files. A stub for a package you use looks like this:
 
 ```
 # stubs/dbclient.Rtypes
@@ -42,19 +14,37 @@ connect : fn(host: character) -> Session
 query   : fn(session: Session, sql: character) -> Any
 ```
 
-That restores unresolved-name checking, types `connect()`, validates `dbclient::conect` as a name the
-package does not export, and makes `Session` a type you can use in annotations. `@type` in a stub
-declares an opaque type: callers can pass it around, and reading a field from it gives `Unknown`.
-That is usually what you want for a package's own objects, whose insides are its business.
+Put it under `stubs/` in your project, named after the package. ry now types `connect()`, reports
+`dbclient::conect` as a name the package does not export, and accepts `Session` in annotations.
+A `@type` in a stub has no shape, so callers can pass a `Session` around, and reading a field from
+it gives `Unknown`: a package's objects are its own business. Declare only what you call, because a
+name you leave out is reported wherever you use it, which tells you what to add next.
 
-Declare only what you call. A name you leave out is reported wherever you use it, which tells you
-what to add next.
+## Why an unknown package matters
 
-## Overriding a shipped declaration
+Without a stub, attaching a package with `library()` means that any bare name in the project might be
+one of its exports. ry cannot tell a typo from an export it has never heard of, so it stops reporting
+unresolved names across the whole project. Only a near miss of a name your own project defines
+(`repositry` next to a `repository` parameter) is still reported, and
+[strict mode](/reference/type-system#strict-mode) lists every name that got through. A stub, even
+the two lines above, turns the check back on.
 
-A declaration under `stubs/` replaces the shipped one of the same name, so a wrong return type or a
-name missing for your package version can be fixed in your project without waiting for a release.
+## What ships
+
+Base R and its default packages (`stats`, `utils`, `methods`, `graphics`, `grDevices`, and
+`datasets`) are typed, and so are `data.table`, `dplyr`, `ggplot2`, and `testthat`. For the rest of
+R's own packages, the tidyverse, and `knitr`, `rlang`, `glue`, `magrittr`, `scales`, `jsonlite`, and
+`R6`, ry ships export lists: the names without their types, which is enough to keep unresolved-name
+checks working next to them.
+
+R's own packages are always available. The others count only once your project uses them, through a
+`library()` call, a `DESCRIPTION` dependency, or a `NAMESPACE` import. Until then `mutate` is
+unresolved, as it would be in R, so a typo is not hidden by a package the project never loads. A
+`pkg::name` call does not count as use, so in a script without `library(dplyr)`, `dplyr::mutate()`
+reports `dplyr` as an unknown package.
+
+A declaration under `stubs/` replaces a shipped one with the same name, so you can fix a wrong
+return type, or add a function your version of the package has, without waiting for a release.
 `ry check` reports every line it could not load, so a broken stub never fails silently.
-
-[Authoring stubs](/contributing/authoring-stubs) has the full format, including overload sets and
+[Authoring stubs](/contributing/authoring-stubs) has the full format, including overloads and
 data-masking functions.

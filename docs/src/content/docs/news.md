@@ -14,7 +14,7 @@ engine, and a static type checker, the first one for R.
   configuration file is `ry.toml`, and a suppression comment reads
   `# ry: allow(...)`. The crate is published as `ry-lang`.
 - **R gets a static type checker**, new and experimental: Hindley-Milner inference with numeric
-  constraints and generics, guided by [`#:` annotation comments](/tour#annotations). Type
+  constraints and generics, guided by [`#:` annotation comments](/type-checking/tour#annotations). Type
   errors are opt-in through `[check] typing`, but hover, completion, signature help, and inlay hints
   use the inferred types either way.
 - **The R parser is hand-written.** It builds lossless syntax trees, recovers from broken input, and

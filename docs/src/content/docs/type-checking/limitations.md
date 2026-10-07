@@ -29,8 +29,8 @@ S4 and R6 objects are `Unknown`, and calls to an S3 generic that dispatches thro
 return `Any`, because their behavior is decided at run time from class attributes. Strict mode
 reports S4 objects, but not R6 objects or S3 calls. What is checked: operator methods such as
 `+.Date`, directly called methods, and `structure(x, class = "dog")`, which keeps `x`'s type because
-a class attribute is data. [Domain modeling](/type-checking/domain-modeling) shows how to give your
-own classes checked types.
+a class attribute is data. The [tour](/type-checking/tour#structural-and-nominal-types) shows how to
+give your own classes checked types.
 
 ## Packages
 

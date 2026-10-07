@@ -1,66 +1,55 @@
 ---
 title: Why ry
-description: The case for a static, fast, type-checking toolchain for R, and the trade-offs it makes
+description: What ry checks that other R tools cannot, and the trade-offs it makes
 ---
 
-## Answers without running code
+## Checking code before it runs
 
-R's existing editor support learns what your values are by asking a live R session. That is how
-RStudio can complete the columns of a data frame you loaded a minute ago. It is also the limit: a
-session only knows code that has already run, in whatever state it is in. It cannot tell you about
-the branch you have not taken, the function nobody has called yet, or the file in someone else's pull
-request.
+RStudio completes the columns of a data frame by looking at the object in your R session, so it
+knows only about code that has already run. ry reads the source instead. It can check code that has
+never run, it gives the same answers in your editor and in CI, and it needs no R installation.
 
-ry works from the source alone. Its answers are the same in your editor, in CI, and on code that has
-never run, and it needs no R installation to give them. The questions it answers are the ones a
-session cannot: is this name defined anywhere, does this call match its function, can this value be
-`NULL` here.
+What it checks is what you would otherwise learn only when the code runs: whether a name is defined,
+whether a call matches the function it calls, and whether a value can be `NULL` where it is used.
 
 ## Speed
 
-A check slow enough to interrupt you stops being run. ry is written in Rust, and its analysis is
-incremental: an edit re-checks only what it could have affected, so a keystroke in a large project
-costs milliseconds rather than a full pass. The target is a re-check within 30 ms of a keystroke at
-the median and 100 ms at the 95th percentile, measured on the largest package of a 965,000-line
-corpus of CRAN code.
-
-Speed also shapes the type system. Every rule has to be cheap enough to check on every
-keystroke, which is the reason for the trade-offs below.
+ry is written in Rust, and its analysis is incremental: after an edit, it re-checks only what the
+edit could affect. The target is a re-check within 30 ms of a keystroke for half of all edits, and
+within 100 ms for 95 percent of them, measured on the largest package in a 965,000-line corpus of
+CRAN code. Every rule in the type system has to be cheap enough to run on every keystroke, which is
+the reason for the trade-offs below.
 
 ## Types without annotations
 
-R code relies on types as much as any language (a function that multiplies its argument needs a
-number), but nothing checks them until the line runs. Requiring annotations everywhere would make a
-checker useless for existing R, so ry infers types from how values are used, with Hindley–Milner
-inference, the same family as OCaml and Haskell:
+A function that multiplies its argument needs a number, but R finds out only when the line runs.
+Requiring an annotation on every function would rule out existing code, so ry infers types from how
+values are used, with Hindley–Milner inference, the approach OCaml and Haskell take:
 
 ```r
 discount <- function(price, rate) price * (1 - rate)
 discount("a", 0.2)   # error: `*` needs a number
 ```
 
-Nothing was declared. The annotations you do write go in `#:` comments, so the file stays plain R for
-every other tool, and type errors are opt-in per project or per file.
+Nothing in this example is declared. The annotations you do write are `#:` comments, so the file
+stays plain R, and type errors are reported only in projects or files that turn them on.
 
-## What it deliberately leaves out
+## What it leaves out
 
-Three choices keep the checker fast and its answers trustworthy:
+- **Overloading your own functions.** Several signatures per name would make every call a search over
+  candidates. A union type or two functions cover the same cases.
+- **Inheritance.** Subtyping between declared types makes inference slow and its results hard to
+  predict. [Nominal types](/type-checking/tour#structural-and-nominal-types) keep values apart
+  without it.
+- **Guessing.** What ry cannot describe, such as S4 and R6 objects, data frame columns, and `eval()`,
+  becomes `Unknown`, which is compatible with everything and so never causes an error by itself.
+  [Strict mode](/reference/type-system#strict-mode) lists these places.
 
-- **No overloading of your own functions.** A name with several signatures turns each call into a
-  search over candidates. Use a union type, or two functions.
-- **No inheritance.** Subtyping between user-declared types makes inference expensive and its
-  results hard to predict. Nominal types, declared in `#:` comments, give you distinct types without
-  it.
-- **`Unknown` instead of guesses.** What cannot be described statically (S4 dispatch, R6 objects,
-  data frame columns, `eval`) becomes `Unknown`, which is compatible with everything, so it never
-  causes an error by itself. [Strict mode](/reference/type-system#strict-mode) shows where these gaps
-  are.
-
-The consequence is that a clean run proves less on code heavy in data frames or R6 than on code built
-from functions and lists. [Limitations](/type-checking/limitations) says exactly where.
+So a clean run says less about code built on data frames or R6 than about code built from functions
+and lists. [Limitations](/type-checking/limitations) lists what is not checked.
 
 ## Status
 
-ry is beta software. Diagnostic codes, `ry.toml` keys, and the JSON output are stable, so CI built on
-them keeps working. The type system still grows, so a new release can report findings an older one
-did not: pin the version in CI.
+ry is in beta. Diagnostic codes, `ry.toml` keys, and the JSON output are stable, so CI built on them
+keeps working. The type system is still growing, so a new release can report findings an older one
+did not, which is why CI should pin the version.

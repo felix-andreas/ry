@@ -216,32 +216,54 @@ it is why inference needs no declarations.
 
 It is also what lets the wrong value through. A `double` cannot tell Celsius from Fahrenheit, and a
 `character` cannot tell a user ID from an email address. A *nominal* type is distinct by name, even
-from a type with the same representation. `@type` declares one, and `@new` is the only way to create
-a value of it:
+from a type with the same representation. `@type` declares one, and `@new` creates a value of it:
 
 ```r
-#: @type Celsius {double}
+#: @type Money {list{amount: double, currency: character}}
 
-#: fn(value: double) -> Celsius
-celsius <- function(value) {
-  if (value < -273.15) stop("below absolute zero")
-  #: @new Celsius
-  value
+#: fn(amount: double, currency: character) -> Money
+money <- function(amount, currency) {
+  if (amount < 0) stop("negative amount")
+  #: @new Money
+  structure(list(amount = amount, currency = currency), class = "Money")
 }
 ```
 
-Passing a plain `double`, or a `Fahrenheit` declared the same way, where a `Celsius` is expected is an
-error. Because `@new` appears only where you write it, putting it in one constructor means every
-`Celsius` in the program passed that constructor's checks. At run time the value is a plain number
-with nothing wrapped around it.
+A list with the right fields is still not a `Money`, so passing one where a `Money` is expected is an
+error. Put `@new` in one constructor and nowhere else, and every `Money` in the program has passed
+its checks: `@new` checks the shape when ry analyzes the code, and `stop()` checks the values when
+it runs. Scalars work the same way: with `@type UserId {character}` and `@type Email {character}`,
+passing an `Email` where a `UserId` is expected is an error, although both are strings at run time.
 
-A `Celsius` is still accepted where a `double` is, so `sqrt()` and `round()` work on it. Arithmetic
-therefore returns a plain `double`: ry cannot assume that adding two temperatures gives a
-temperature. [Declare `+.Celsius`](/type-checking/domain-modeling#operators-and-generic-types) where it
-does, and give the value a class attribute, which R needs to find that method.
+A nominal value is still accepted where its representation is, so `nchar()` works on a `UserId`.
+Arithmetic therefore returns the representation, because ry cannot assume that adding two amounts
+gives an amount. Declare the operator where it does:
 
-`@alias` names a type without making it nominal: `@alias Row {list{id: integer}}` is just a shorter
-way to write the shape, and any list of that shape is a `Row`.
+```r
+#: fn(a: Money, b: Money) -> Money
+`+.Money` <- function(a, b) money(a$amount + b$amount, a$currency)
+```
+
+Now `money(1, "EUR") + money(2, "EUR")` is a `Money`. R finds `+.Money` through the class attribute,
+which is why the constructor sets one; ry itself needs no class to check the type.
+
+A type can take parameters: with `@type Page<T> {list{items: list[T], total: integer}}`, reading
+`items` from a `Page<integer>` gives a `list[integer]`. `@alias` names a type without making it
+nominal, so `@alias Row {list{id: integer}}` is just a shorter way to write the shape.
+
+Nominal types describe values. For shared mutable state, inheritance, or method dispatch, R6 and S4
+are still the tools, and their objects are `Unknown`. To check who receives one, give it a nominal
+type over `Any` and wrap its constructor, so that passing anything else is an error:
+
+```r
+#: @type Account {Any}
+
+#: fn() -> Account
+new_account <- function() {
+  #: @new Account
+  AccountClass$new()
+}
+```
 
 ## `Unknown` and strict mode
 

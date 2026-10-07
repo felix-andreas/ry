@@ -120,7 +120,7 @@ Memory lives in git on purpose. It travels with every `git clone` to any machine
 
 The docs site holds the specs for users and contributors. They are contracts, so keeping them accurate is mandatory.
 
-- `tour.md` introduces every feature in one short example each, `type-checking/` goes deeper on domain modeling, stubs, and limitations, and `reference/type-system.md` is the semantics contract.
+- `type-checking/tour.md` introduces every feature in one short example each, `type-checking/` also holds the stubs and limitations pages, and `reference/type-system.md` is the semantics contract.
 - The contributing pages are `contributing/architecture.md`, `contributing/structure.md`, `contributing/testing.md`, and `contributing/authoring-stubs.md`.
 - `contributing/design/` holds unsettled drafts. They are explicitly not contracts, which makes them the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the folder's index page lists them.
 - Treat the docs as a first-class deliverable. When behavior, design, or the fixture contract changes, update the relevant page in the same session, and leave it clear, accurate, and free of stale status. Never rewrite a spec to paper over a temporary gap in the implementation; note the gap instead.
