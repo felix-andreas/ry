@@ -69,16 +69,19 @@ Do not spawn a new knowledge file for something small. Inline it into a horizon 
 
 ### Documentation
 
-- **The docs site is organized by purpose rather than by component**, in five sidebar groups.
+- **The docs site is organized by purpose rather than by component**, in four sidebar groups.
   Introduction holds getting-started, tour, and why-ry. Type checking holds domain-modeling, stubs,
   and limitations. The tour absorbed the former Features and Concepts pages (both redirect to it),
   so a feature or a type-system idea is introduced there once, with its reason, and the other pages go
   deeper rather than repeating it. The tour replaced a step-by-step tutorial (owner
   directive): one short example per feature, each followed by a few sentences of fact, for a reader
   who knows R but not ry. Keep it that short; a new feature gets a section only if it is one of the
-  important ones. Guides holds adopting, continuous-integration, and
-  r-console. Reference holds configuration, cli, diagnostic-codes, formatting-rules, and
-  type-system. Contributing is the fifth. The installation page is deliberately absent from the
+  important ones. The tour shows code with the type in a comment rather than tables, in the style of
+  the vx language tour the owner pointed to. Reference holds configuration, cli, diagnostic-codes,
+  formatting-rules, and type-system. Contributing is the fourth. There are no how-to guides: the
+  adopting, CI, and console guides were removed as not worth reading (owner decision), and their
+  URLs redirect to getting-started and the CLI reference. Do not add a guide back without a reason a
+  reader would agree with. The installation page is deliberately absent from the
   sidebar, because getting-started closes with the extension links and a one-line install, and the
   page itself only covers the awkward cases. An introduction page lives at the site root, and every
   other page nests under its group.

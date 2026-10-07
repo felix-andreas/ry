@@ -101,11 +101,11 @@ R has no scalars: `1L` is an integer vector of length one. But an `if` condition
 `&&`, and an endpoint of `:` must have exactly one element, and passing a longer vector there is a bug
 R reports late or not at all. So ry tracks the length-one case separately:
 
-| Type | Meaning |
-| --- | --- |
-| `integer` | length one, such as `1L` |
-| `integer[]` | any length, such as `c(1L, 2L)` |
-| `integer[named]` | any length, with names |
+```r
+n    <- 1L                     # integer: exactly one element
+ids  <- c(1L, 2L)              # integer[]: any length
+ages <- c(ada = 36L, bo = 4L)  # integer[named]: any length, with names
+```
 
 A scalar is accepted where a vector is expected, but not the reverse, because a vector of unknown
 length may not have exactly one element. A declared `double` accepts an `integer` or a `logical`,
@@ -115,23 +115,30 @@ convert it too, but a silent number-to-string conversion is usually a bug, so ry
 
 ## Lists
 
-R has one list type, but programs use it in four different roles, and each role has its own
-mistakes. ry gives each role its own type:
-
-| Role | Names | Elements | Length | Type | Example |
-| --- | --- | --- | --- | --- | --- |
-| tuple-like | none | heterogeneous | fixed | `list{integer, character}` | `list(1L, "ok")` |
-| list-like | none | homogeneous | dynamic | `list[integer]` | `lapply(ids, nchar)` |
-| record-like | named | heterogeneous | fixed | `list{name: character, age: integer}` | `list(name = "Ada", age = 36L)` |
-| dict-like | named | homogeneous | dynamic | `list[named: integer]` | counts keyed by category |
-
-At run time all four are the same R list, so nothing changes in your code. The difference is what
-can be checked. A tuple-like or record-like list has a fixed shape, so ry knows which positions and
-fields exist and what type each one has. That makes `$` checkable, which matters because R answers a
-misspelled field with a silent `NULL` that fails somewhere else:
+R uses one list type for four different jobs, and each job has its own mistakes, so ry gives each
+its own type:
 
 ```r
+# tuple-like: list{integer, character}
+pair <- list(1L, "ok")
+
+# record-like: list{name: character, age: integer}
 person <- list(name = "Ada", age = 36L)
+
+# list-like: list[integer]
+sizes <- lapply(words, nchar)
+
+# dict-like: declared, because a literal infers as a record
+#: list[named: integer]
+counts <- list(apples = 3L)
+```
+
+At run time all four are the same R list, so nothing changes in your code. The difference is what
+can be checked. A tuple-like or record-like list has a fixed shape, so ry knows each position and
+field and its type. That makes `$` checkable, which matters because R answers a misspelled field with
+a silent `NULL` that fails somewhere else:
+
+```r
 person$nmae
 ```
 
@@ -139,18 +146,18 @@ person$nmae
 x field `nmae` does not exist in `list{name: character, age: integer}`. Did you mean `name`?
 ```
 
-A fixed shape is exact: passing a list with an extra field where a record is expected is an error,
-because an unexpected field is usually a misspelled one.
+A fixed shape is also exact, so passing a list with an extra field where a record is expected is an
+error: an unexpected field is usually a misspelled one.
 
-A list-like or dict-like list can grow, so ry knows only the element type, and reading a key from a
-dict-like list gives `T | NULL`, because the key may be missing. `list(...)` literals infer as fixed
-shapes and `lapply()` returns a list-like list. A list you build up element by element needs an
-annotation, because the empty `list()` it starts from does not say which role it will play:
+A list-like or dict-like list can have any length, so ry knows only its element type. Reading a key
+gives `T | NULL`, because the key may be missing:
 
 ```r
-#: list[integer]
-lengths <- list()
+counts[["pears"]]                        # integer | NULL
 ```
+
+`list(...)` literals infer as fixed shapes, so a list you grow element by element needs an
+annotation, as `counts` does.
 
 ## `NULL`
 
@@ -330,9 +337,9 @@ string are three different things.
 ## The console
 
 `ry repl` runs the R installed on your machine, unchanged, behind a line editor whose Tab completion
-comes from the type checker. Completing `account$` lists the record's fields with their types, before
-any code has run. `ry run script.R` runs a script on the same session. These are the only commands
-that need R. See [Working in the R console](/guides/r-console).
+comes from the type checker. Completing `account$` lists the record's fields with their types, worked
+out from the code you typed rather than from the live session. `ry run script.R` runs a script on the same session. These are the only commands
+that need R.
 
 ## Findings and suppressions
 
@@ -355,8 +362,8 @@ A suppression covers its own line and the line below, and nothing else. It marks
 have reviewed, so it should not hide findings in code written later. To turn a lint off everywhere,
 set it in [`[lint]`](/reference/configuration#lint).
 
-In CI, `ry check` exits with status 1 when it finds anything and `ry fmt --check` when a file is not
-formatted. [Continuous integration](/guides/continuous-integration) has a ready workflow.
+In CI, `ry check` exits with status 1 when it finds anything, and `ry fmt --check` does when a file
+is not formatted, so a CI job needs nothing more than those two commands.
 
 ## Next
 

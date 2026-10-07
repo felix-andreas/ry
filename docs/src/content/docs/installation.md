@@ -67,5 +67,4 @@ RStudio has no language-server integration, but it can use ry as its external fo
 2. For format-on-save, open **Tools → Global Options → Code → Saving** and tick **Reformat documents
    on save**.
 
-Diagnostics do not show up inside RStudio; run `ry check` in a terminal or in
-[CI](/guides/continuous-integration).
+Diagnostics do not show up inside RStudio; run `ry check` in a terminal or in CI.

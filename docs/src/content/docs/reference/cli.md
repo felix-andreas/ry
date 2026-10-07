@@ -15,8 +15,9 @@ description: Every ry command, flag, exit code, and JSON field
 | `help` | Prints help for the binary or for one command |
 | `debug` | **Not stable.** Development commands: `debug ast` dumps a syntax tree, `debug analysis-stats` reports where analysis time and memory go. Output shape can change at any time |
 
-`check`, `fmt`, and `server` need no R installation. `repl` and `run` find and load the R on your
-machine, and [ry at the R console](/guides/r-console) walks through them.
+`check`, `fmt`, and `server` need no R installation. `repl` and `run` load the R on your machine:
+the one in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be
+R 4.2 or newer, built as a shared library, which every CRAN build is.
 
 Two aliases exist: `format` for `fmt`, and `lsp` for `server`.
 
@@ -146,7 +147,9 @@ Runs the Language Server Protocol over stdio. Your editor starts it for you.
 ## repl
 
 Starts an interactive R console backed by the R installed on your machine, with analysis-backed
-completion. See [ry at the R console](/guides/r-console).
+completion. Completing `account$` lists the record's fields with their types, because completion comes
+from type-checking what you have typed, not from inspecting the live session. So it cannot see data
+frame columns or objects created by `source()`.
 
 | Flag | Argument | Default | Effect |
 | ---- | -------- | ------- | ------ |
@@ -216,5 +219,4 @@ reported with a path you could not use. Warnings the CLI emits about its own run
 configuration key or an unreadable file, stay on stderr as human-readable text and never appear as
 JSON.
 
-These field names are a contract. [Continuous integration](/guides/continuous-integration) shows a
-job that consumes them.
+These field names are a contract, so tools built on them keep working across releases.

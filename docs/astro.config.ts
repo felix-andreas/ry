@@ -26,6 +26,9 @@ export default defineConfig({
 		'/architecture': '/contributing/architecture',
 		'/structure': '/contributing/structure',
 		'/testing': '/contributing/testing',
+		'/guides/adopting': '/getting-started',
+		'/guides/continuous-integration': '/reference/cli#exit-codes',
+		'/guides/r-console': '/reference/cli#repl',
 	},
 	integrations: [
 		starlight({
@@ -35,8 +38,15 @@ export default defineConfig({
 				replacesTitle: true,
 			},
 			favicon: '/favicon.svg',
+			// Diagnostic output is shown in `text` blocks, and a cut-off message is
+			// unreadable, so those wrap; code keeps its lines.
+			expressiveCode: {
+				defaultProps: {
+					overridesByLang: { text: { wrap: true } },
+				},
+			},
 			social: [
-				{ label: "Visual Studio Marketplace", icon: "vscode", href: 'https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly' },
+				{ label: "Visual Studio Marketplace", icon: "vscode", href: 'https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry' },
 				{ label: "GitHub", icon: "github", href: 'https://github.com/felix-andreas/ry' },
 			],
 			// The installation page is deliberately absent: getting started closes with
@@ -57,14 +67,6 @@ export default defineConfig({
 						{ slug: 'type-checking/domain-modeling' },
 						{ slug: 'type-checking/stubs' },
 						{ slug: 'type-checking/limitations' },
-					],
-				},
-				{
-					label: 'Guides',
-					items: [
-						{ slug: 'guides/adopting' },
-						{ slug: 'guides/continuous-integration' },
-						{ slug: 'guides/r-console' },
 					],
 				},
 				{

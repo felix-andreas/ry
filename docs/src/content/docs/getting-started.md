@@ -44,6 +44,5 @@ typing = true
 ## Next
 
 - [Tour](/tour): every feature, and why it works the way it does
-- [Continuous integration](/guides/continuous-integration): a working CI job
-- [Adopting an existing codebase](/guides/adopting): turning type checking on without drowning in
-  findings
+- [Limitations](/type-checking/limitations): what is not checked, and the known false reports
+- [Configuration](/reference/configuration): every `ry.toml` key

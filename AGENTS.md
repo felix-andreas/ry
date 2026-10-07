@@ -36,7 +36,7 @@ These rules apply to everything an agent writes.
 - **Teach in order.** Introduce a concept before you use it, and finish one idea before starting the next. When a small example is easier to grasp than the general rule, show the example first.
 - **Write connected prose.** A sentence should carry one step of reasoning, not five, so split a sentence that chains several steps together. But do not overcorrect into a row of short, same-shaped sentences: that reads like a telegram and hides how the ideas relate. The small words that carry logic (because, so, but, unless, which means) are what make an explanation an explanation. Vary sentence length, and read the paragraph aloud. If three sentences in a row start with "It", rewrite them.
 - **Be concrete.** A real snippet and its real output beat a description of them. Get the output by running the tool (see "Run the tool before you claim what it does" below).
-- **Pick a natural subject, in the active voice.** In a specification, the construct is the subject: write "the pipe types as that call", not "ry types the pipe as that call". Name ry where the statement really is about the tool, such as a diagnostic, a default, or a deliberate limit. In guides, talk to the reader as "you".
+- **Pick a natural subject, in the active voice.** In a specification, the construct is the subject: write "the pipe types as that call", not "ry types the pipe as that call". Name ry where the statement really is about the tool, such as a diagnostic, a default, or a deliberate limit. In the tour and other pages written for users, talk to the reader as "you".
 - **Say it literally first.** A metaphor must never stand in for the mechanism. Once the mechanism is stated plainly, a comparison may help it stick.
 - **Use one name for one thing.** Do not coin private terms: a name like "the literal courtesy" means nothing to a reader who has not seen the code that named it. Define a term of art before you rely on it, and use the same word for the same thing every time.
 - **Cut filler.** Drop throat-clearing openers, hedges that carry no information, and closing flourishes that state no fact. A sentence of motivation that makes the reader care is not filler.
@@ -120,7 +120,7 @@ Memory lives in git on purpose. It travels with every `git clone` to any machine
 
 The docs site holds the specs for users and contributors. They are contracts, so keeping them accurate is mandatory.
 
-- `tour.md` introduces every feature in one short example each, `type-checking/` holds the guides, and `reference/type-system.md` is the semantics contract.
+- `tour.md` introduces every feature in one short example each, `type-checking/` goes deeper on domain modeling, stubs, and limitations, and `reference/type-system.md` is the semantics contract.
 - The contributing pages are `contributing/architecture.md`, `contributing/structure.md`, `contributing/testing.md`, and `contributing/authoring-stubs.md`.
 - `contributing/design/` holds unsettled drafts. They are explicitly not contracts, which makes them the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the folder's index page lists them.
 - Treat the docs as a first-class deliverable. When behavior, design, or the fixture contract changes, update the relevant page in the same session, and leave it clear, accurate, and free of stale status. Never rewrite a spec to paper over a temporary gap in the implementation; note the gap instead.
