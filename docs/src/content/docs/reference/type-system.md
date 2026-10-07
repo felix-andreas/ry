@@ -17,12 +17,10 @@ Consecutive `#:` lines with no blank line between them form one *annotation bloc
 
 Each annotation takes one of these forms:
 
-| Form | Meaning |
-| --- | --- |
-| `#: TYPE` | a [checked annotation](#checked-annotations) |
-| `#: @trust TYPE` | a [trusted coercion](#trusted-coercions) |
-| `#: @if-unknown TYPE` | an [unknown-only coercion](#unknown-only-coercions) |
-| `#: @new NOMINAL_TYPE` | a [nominal introduction](#nominal-introduction) |
+- `#: TYPE` is a [checked annotation](#checked-annotations).
+- `#: @trust TYPE` is a [trusted coercion](#trusted-coercions).
+- `#: @if-unknown TYPE` is an [unknown-only coercion](#unknown-only-coercions).
+- `#: @new NOMINAL_TYPE` is a [nominal introduction](#nominal-introduction).
 
 A block is one of three kinds, which cannot be mixed: a single line in one of those forms, an
 [expanded function annotation](#expanded-function-annotations) written as `@param` and `@return`
@@ -101,11 +99,11 @@ R's reserved constants have fixed scalar types:
 
 Every atomic vector type comes in three shapes, written with a suffix on the atomic name:
 
-| Shape | Written | Means | Examples |
-| --- | --- | --- | --- |
-| scalar-like | `T` | a vector of length one | `character`, `integer`, `double` |
-| array-like | `T[]` | a vector of unknown length | `character[]`, `integer[]`, `double[]` |
-| map-like | `T[named]` | a vector of unknown length, keyed by names | `character[named]`, `integer[named]` |
+```r
+1L                  # integer: scalar-like, a vector of length one
+c(1L, 2L)           # integer[]: array-like, a vector of unknown length
+c(a = 1L, b = 2L)   # integer[named]: map-like, keyed by names
+```
 
 #### Vector coercions
 
@@ -124,12 +122,10 @@ Every atomic vector type comes in three shapes, written with a suffix on the ato
 R has one list type, but programs use it in four different roles, and the type system gives each
 role its own type, because each role allows different checks:
 
-| Shape | Written | Names | Elements | Length |
-| --- | --- | --- | --- | --- |
-| tuple-like | `list{T1, T2, ...}` | none | heterogeneous | fixed |
-| list-like | `list[T]` | none | homogeneous | dynamic |
-| record-like | `list{name: T, ...}` | named | heterogeneous | fixed |
-| dict-like | `list[named: T]` | named | homogeneous | dynamic |
+- **tuple-like**, `list{T1, T2, ...}`: no names, a fixed number of positions, each with its own type.
+- **list-like**, `list[T]`: no names, any length, one element type.
+- **record-like**, `list{name: T, ...}`: named fields, a fixed set of them, each with its own type.
+- **dict-like**, `list[named: T]`: names, any length, one element type.
 
 The tuple-like and record-like shapes have a *fixed shape*: their positions or field names are part
 of the type. The list-like and dict-like shapes are homogeneous collections: every element has the
@@ -1036,13 +1032,8 @@ index shapes are:
 - A `complex` or `raw` index is a type error, as is a list, a function, or any other index that is not
   a vector.
 
-With `E` as the element type, the results are:
-
-| Subject | Scalar numeric or character index | Any other index |
-| --- | --- | --- |
-| scalar-like `E` | `E` | `E[]` |
-| array-like `E[]` | `E` | `E[]` |
-| map-like `E[named]` | `E` | `E[named]`, because `[` keeps names |
+With `E` as the element type, a scalar numeric or character index gives `E` on every shape. Any
+other index gives `E[]` on `E` and `E[]`, and `E[named]` on `E[named]`, because `[` keeps names.
 
 A character index is allowed on every vector shape, not only a map-like one. R returns `NA` rather
 than failing when the subject has no names, and most operations erase names, so requiring a map-like
@@ -1122,11 +1113,10 @@ scalar-like, and array-like otherwise. A map-like operand therefore gives an arr
 Unary `-` keeps a scalar-like or array-like operand's shape. Only the atomic type of the result
 differs between operators:
 
-| Operator | Atomic result |
-| --- | --- |
-| `+`, `-`, `*`, `%%`, `%/%` | `integer` when both operands are `integer`, otherwise `double` |
-| `/`, `^`, `**` | always `double` (`**` is R's parser alias for `^`) |
-| unary `-` | the operand's own atomic type |
+- `+`, `-`, `*`, `%%`, and `%/%` give `integer` when both operands are `integer`, and `double`
+  otherwise.
+- `/`, `^`, and `**` (R's parser alias for `^`) always give `double`.
+- Unary `-` keeps its operand's atomic type.
 
 - `integer + integer` is `integer`.
 - `integer - double` is `double`.
@@ -1534,13 +1524,12 @@ type along each edge of the `if`. Inside each branch, the variable keeps the ref
 write in the branch replaces it, and the refinements merge back at the join exactly as branch writes
 do. The recognized guards are these, where `x` is a local variable (a parameter counts):
 
-| Condition | True edge | False edge |
-|---|---|---|
-| `is.null(x)` | `x : NULL` | the `NULL` member is removed from the union of `x` |
-| `is.character(x)` | members outside the `character` family are removed | `character`-family members are removed |
-| `is.logical(x)`, `is.integer(x)`, `is.double(x)`, `is.function(x)`, `is.list(x)` | as above, for that family | as above |
-| `is.numeric(x)` | as above, where the family is `integer` or `double` | as above |
-| `!cond` | the two edges swap | |
+- `is.null(x)` makes `x` a `NULL` in the true branch, and removes `NULL` from its union in the false
+  branch.
+- `is.character(x)`, `is.logical(x)`, `is.integer(x)`, `is.double(x)`, `is.function(x)`, and
+  `is.list(x)` keep only the members of that family in the true branch, and remove them in the false
+  branch. `is.numeric(x)` does the same for the `integer` and `double` family.
+- `!cond` swaps the two branches.
 
 Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists
 after the `if`, which is the idiomatic early-exit guard:
@@ -2073,16 +2062,19 @@ a closure created in `j` is created inside the data's frame.
 
 A bracket with a data.table signature but an unknown subject types as `Unknown`, because base
 indexing rules cannot judge `[.data.table`. When the subject *is* the `data.table` nominal, the class
-of the result follows from the bracket's syntax, even though the columns are unknown. In this table,
-`j` is the second positional slot or a `j =` argument:
+of the result follows from the bracket's syntax, even though the columns are unknown. Here `j` is the
+second positional slot or a `j =` argument:
 
-| Bracket shape | Result |
-| --- | --- |
-| no `j`, or an empty `j` slot, as in `DT[i]` and `DT[on = …]` | the subject's class, because a row filter and a join both return tables |
-| `j` is a `:=` call, as in `DT[, x := …]` and `` DT[, `:=`(a = …) ] `` | the subject's class, returned invisibly |
-| `j` is a `.()` or `list()` call, as in `DT[, .(m = mean(x))]` | the subject's class |
-| any `j` with a `by =` or `keyby =` argument, as in `DT[, sum(x), by = g]` | the subject's class, because a grouped result is always assembled into a table |
-| anything else, such as a bare column `DT[, x]`, an ungrouped computed `j`, or a `with =` form | `Unknown`, and a strict-mode origin, because the shape would need column knowledge |
+```r
+DT[i]                        # data.table: a row filter or a join returns a table
+DT[, x := 1]                 # data.table, returned invisibly
+DT[, .(m = mean(x))]         # data.table: `.()` and `list()` build a table
+DT[, sum(x), by = g]         # data.table: a grouped result is always a table
+DT[, x]                      # Unknown: the shape would need column knowledge
+```
+
+Anything not covered above, such as an ungrouped computed `j` or a `with =` form, is `Unknown` and a
+strict-mode origin.
 
 The class is a real type. It flows through chains, so `DT[a > 1][, .(m = mean(b)), by = g]` stays a
 `data.table` from end to end; it satisfies or violates annotations; and it constrains call
@@ -2136,16 +2128,18 @@ stub error.
 The checker covers the parts of R's object systems that are written down as declarations, and stays
 out of the parts decided at run time from a value's class attribute:
 
-| Construct | What the checker does |
-| --- | --- |
-| An operator on a nominal (`+.Class`, `Arith.Class`, `Ops.Class`) | Dispatches statically; see [operator methods on a class](#operator-methods-on-a-class) |
-| A directly called S3 method (`speak.dog(x)`) | Treats it as an ordinary call, checked against that function's own signature |
-| `UseMethod("speak")`, and any call to an S3 generic | Gives `Any`, with no strict-mode finding |
-| `structure(list(...), class = "dog")` | Keeps the argument's type, because a `class` attribute is data, not a type, so the record's fields stay checkable. A `dim` attribute is the exception: it makes the value an array, whose shape is not tracked, so such values stay `Unknown` |
-| `setClass`, `setGeneric`, `setMethod`, `new` | Does not model them; `new(...)` is `Unknown` |
-| `x@slot` read or write | Lowers it fully and types it as `Unknown`; see below |
-| `R6Class(...)`, `$new(...)`, fields, methods | Does not model them; they are `Unknown` |
-| `self`, `private`, `super` inside an R6 method | Resolves them as names, typed as `Unknown` |
+- An operator on a nominal type (`+.Class`, `Arith.Class`, `Ops.Class`) dispatches statically; see
+  [operator methods on a class](#operator-methods-on-a-class).
+- A directly called S3 method, such as `speak.dog(x)`, is an ordinary call, checked against that
+  function's own signature.
+- `UseMethod("speak")`, and any call to an S3 generic, gives `Any`, with no strict-mode finding.
+- `structure(list(...), class = "dog")` keeps the argument's type, because a `class` attribute is
+  data, not a type, so the record's fields stay checkable. A `dim` attribute is the exception: it
+  makes the value an array, whose shape is not tracked, so such a value is `Unknown`.
+- `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled, so `new(...)` is `Unknown`.
+- `x@slot`, read or written, is lowered fully and typed as `Unknown`; see below.
+- `R6Class(...)`, `$new(...)`, and R6 fields and methods are not modeled and are `Unknown`. Inside an
+  R6 method, `self`, `private`, and `super` resolve as names typed `Unknown`.
 
 `x@slot` reads an S4 slot and `x@slot <- v` writes one. The slot's type is unknown, but the construct
 is still analyzed: a slot read types as `Unknown` and is a strict-mode origin; the subject expression

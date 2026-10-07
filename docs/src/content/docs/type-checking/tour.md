@@ -78,8 +78,8 @@ apply_discount(100, "0.2")
 x expected a numeric value (`integer` or `double`), found `character`
 ```
 
-`-` and `*` are arithmetic, so both parameters must be numbers. Inference runs even with type errors off,
-because hover, completion, and inlay hints are built on it.
+`-` and `*` are arithmetic, so both parameters must be numbers. Inference runs even with type errors
+off, because hover, completion, and inlay hints are built on it.
 
 ## Annotations
 
@@ -235,9 +235,10 @@ its checks: `@new` checks the shape when ry analyzes the code, and `stop()` chec
 it runs. Scalars work the same way: with `@type UserId {character}` and `@type Email {character}`,
 passing an `Email` where a `UserId` is expected is an error, although both are strings at run time.
 
-A nominal value is still accepted where its representation is, so `nchar()` works on a `UserId`.
-Arithmetic therefore returns the representation, because ry cannot assume that adding two amounts
-gives an amount. Declare the operator where it does:
+A nominal value is still accepted where its representation is, so `nchar()` works on a `UserId`, and
+adding two values of `@type Celsius {double}` gives a plain `double`: ry cannot assume that the sum
+of two temperatures is a temperature. `Money` is a list, so `+` on it is an error until you declare
+the operator:
 
 ```r
 #: fn(a: Money, b: Money) -> Money
@@ -364,8 +365,8 @@ string are three different things.
 
 `ry repl` runs the R installed on your machine, unchanged, behind a line editor whose Tab completion
 comes from the type checker. Completing `account$` lists the record's fields with their types, worked
-out from the code you typed rather than from the live session. `ry run script.R` runs a script through the same embedded R and exits. These are the only commands
-that need R.
+out from the code you typed rather than from the live session. `ry run script.R` runs a script
+through the same embedded R and exits. These are the only commands that need R.
 
 ## Findings and suppressions
 
@@ -390,10 +391,10 @@ Codes are what you configure in `ry.toml` and what you name to silence one findi
 total = 2L  # ry: allow(assignment-operator)
 ```
 
-A suppression covers its own line and the line below, so it can sit at the end of a line or on the
-line above, and nothing else. It marks one exception you have reviewed, so it should not hide
-findings in code written later. To turn a lint off everywhere,
-set it in [`ry.toml`](/reference/configuration).
+A suppression covers its own line and the line below, so it can sit at the end of the line or above
+it. It covers nothing else, because it marks one exception you have reviewed and should not hide
+findings in code written later. To turn a lint off everywhere, set it in
+[`ry.toml`](/reference/configuration).
 
 In CI, `ry check` exits with status 1 when it finds anything, and `ry fmt --check` does when a file
 is not formatted, so a CI job needs nothing more than those two commands.

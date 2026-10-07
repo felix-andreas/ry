@@ -33,28 +33,17 @@ rename, so the download fails.
 
 ## Command line
 
-**Prebuilt binary.** Download one from [Releases](https://github.com/felix-andreas/ry/releases).
-Each asset is named after its Rust target triple, and each archive holds a single `ry` binary:
-
-| Platform | Asset |
-| --- | --- |
-| Linux x86_64 | `ry-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS aarch64 | `ry-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `ry-x86_64-pc-windows-gnu.zip` |
+**Prebuilt binary.** Each [release](https://github.com/felix-andreas/ry/releases) has an archive per
+platform, named after its Rust target, and holding a single `ry` binary:
+`ry-x86_64-unknown-linux-gnu.tar.gz`, `ry-aarch64-apple-darwin.tar.gz`, and
+`ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL, because every release since 0.1.1 is marked
+a pre-release, so GitHub's `releases/latest` still points at 0.1.1:
 
 ```bash
 curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.3.1-beta/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv ry /usr/local/bin/
 ry --version
 ```
-
-Name the tag explicitly: every release since `0.1.1` is marked a pre-release, so `releases/latest/`
-still points at `0.1.1`.
-
-**On Linux, the 0.3.1-beta binary does not start** on most distributions ("cannot execute: required
-file not found"), because it was linked against the build machine's own copy of glibc. Until the next
-release, build from source as below. The Linux VS Code extension bundles the same binary, so set
-`ry.path` to the one you built.
 
 **From source**, if you have a [Rust toolchain](https://www.rust-lang.org/tools/install):
 

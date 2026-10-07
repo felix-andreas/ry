@@ -19,19 +19,6 @@ The quality bar is four things.
   `legacy/differential/tests/test_stats.rs`.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
-## Open: the Linux release binary does not start (fix before the next release)
-
-`ry-x86_64-unknown-linux-gnu.tar.gz` for 0.3.1-beta asks for the loader
-`/nix/store/…-glibc-2.42/lib/ld-linux-x86-64.so.2` and needs `GLIBC_2.39`, so it fails with "cannot
-execute: required file not found" on Ubuntu and every other non-Nix distribution, and the Linux
-`.vsix` bundles the same file. The cause is `flake.nix`: `ry-linux-x86_64` is the native crane build
-(`packageLinux`), which links against Nix's glibc, while macOS and Windows go through
-`buildCrossPackage` with cargo-zigbuild. Patching the interpreter is not enough, because the symbol
-versions still demand glibc 2.39. Build Linux through cargo-zigbuild as well, pinned to an old glibc
-(`x86_64-unknown-linux-gnu.2.17`), and add a release check that runs the packaged binary in a plain
-Ubuntu container. `installation.md` and `getting-started.md` carry a warning to remove once a fixed
-release ships.
-
 ## Open: false reports and gaps found by the documentation review
 
 An adversarial review of every docs page ran each claim against the binary. The docs now state the
