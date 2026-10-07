@@ -44,8 +44,13 @@ False reports on correct R, worst first:
   c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
 - **A vector operand pins its partner to a scalar.** On `function(x) x + c(1L, 2L)`, the call
   `f(c(1, 2))` reports `expected double, found double[]`.
-- **Strict mode ignores `@trust` and `@if-unknown` on a binding.** `#: @trust double` above
-  `amount <- df$amount` still reports the origin and tells the user to "add a type annotation".
+- **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
+  above `amount <- df$amount` still reports the origin and tells the user to "add a type
+  annotation"; only `# ry: allow(strict)` clears it.
+- **Strict mode reports `if (x < 0) stop("negative")`.** The `stop()` call in an `if` without `else`
+  is reported as an undetermined type, which puts a strict finding on the most common guard in R.
+- **Strict mode misses two `Unknown` sources.** R6 objects (`Acc$new()`) and values from packages
+  known only by an export list (`library(purrr); map(...)`) are `Unknown` and never reported.
 
 Smaller gaps:
 
@@ -57,7 +62,8 @@ Smaller gaps:
 - `# typing: off  # reason` is rejected as an unknown directive. Accepting a trailing comment is the
   friendlier contract.
 - `greet(nme = "Ada")` on a function with `...` reports "passes 1 positional argument, but the
-  function only takes 1". After an invalid field write, a later field typo on the same record goes
+  function only takes 1". `greet(nam = "Ada")` gets the same message, although R partially matches
+  `nam` to `name`. After an invalid field write, a later field typo on the same record goes
   unreported. Hover on `m2` in `m2$amount <- 5` shows `double` instead of the nominal type.
 - Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
   fields.

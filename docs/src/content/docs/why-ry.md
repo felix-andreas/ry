@@ -20,10 +20,11 @@ session cannot: is this name defined anywhere, does this call match its function
 
 A check slow enough to interrupt you stops being run. ry is written in Rust, and its analysis is
 incremental: an edit re-checks only what it could have affected, so a keystroke in a large project
-costs milliseconds rather than a full pass. Its latency budgets are measured on a corpus of about
-965,000 lines of R from 81 CRAN packages.
+costs milliseconds rather than a full pass. The target is a re-check within 30 ms of a keystroke at
+the median and 100 ms at the 95th percentile, measured on the largest package of a 965,000-line
+corpus of CRAN code.
 
-Speed also shapes the type system. Every rule has to be decidable quickly enough to run on every
+Speed also shapes the type system. Every rule has to be cheap enough to check on every
 keystroke, which is the reason for the trade-offs below.
 
 ## Types without annotations
@@ -34,8 +35,8 @@ checker useless for existing R, so ry infers types from how values are used, wit
 inference, the same family as OCaml and Haskell:
 
 ```r
-scale <- function(x, factor) x * factor
-scale("a", 2)       # error: `*` needs a number
+discount <- function(price, rate) price * (1 - rate)
+discount("a", 0.2)   # error: `*` needs a number
 ```
 
 Nothing was declared. The annotations you do write go in `#:` comments, so the file stays plain R for
@@ -63,6 +64,3 @@ from functions and lists. [Limitations](/type-checking/limitations) says exactly
 ry is beta software. Diagnostic codes, `ry.toml` keys, and the JSON output are stable, so CI built on
 them keeps working. The type system still grows, so a new release can report findings an older one
 did not: pin the version in CI.
-
-`ry check` also reads the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents. The language server does
-not handle those yet.

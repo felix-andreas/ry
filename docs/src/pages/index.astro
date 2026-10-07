@@ -61,7 +61,7 @@ const analysisTabs = [
         file: "R/sales.R",
         config: "no configuration",
         note:
-            "No configuration needed.",
+            "Unresolved names and lints, with no setup.",
     },
     {
         key: "types",
@@ -89,7 +89,7 @@ const formatterTabs = [
         label: "Spacing",
         file: "totals.R",
         meta: "operators, commas, quotes",
-        note: "1 file would be reformatted, 0 files already formatted",
+        note: "Spaces around operators and after commas, double quotes.",
     },
     {
         key: "braces",
@@ -800,9 +800,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         </div>
                     </div>
                     <p class="band-note">
-                        See <a class="inline-link" href="/reference/configuration"
-                            >configuration</a
-                        >.
+                        No Rust toolchain? Download a
+                        <a class="inline-link" href="https://github.com/felix-andreas/ry/releases"
+                            >prebuilt release</a
+                        >, or install the VS Code extension, which bundles one.
                     </p>
                     <div class="cta-cluster">
                         <a class="cta cta-lg" href="/getting-started"

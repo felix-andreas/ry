@@ -15,8 +15,7 @@
 
 ry is a language server, checker, formatter, and console for R. It analyzes source code without
 running it, so it gives the same answers in your editor and in CI, and needs no R
-installation except for the console. It was previously called Roughly, which is why old release
-assets are named `roughly-*`.
+installation except for the console.
 
 Its parser is written for tooling: it says what is missing and keeps analyzing the rest of the file.
 
@@ -35,7 +34,8 @@ R reports the same mistake as `Error: unexpected string constant in "planets <- 
 - **VS Code:** the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
   bundles the binary.
 - **Binary:** download a [release](https://github.com/felix-andreas/ry/releases). Name the tag:
-  every release since 0.1.1 is a pre-release, so GitHub's "latest" is an old build.
+  every release since 0.1.1 is a pre-release, so GitHub's "latest" is an old build from when ry was
+  called Roughly, with `roughly-*` assets.
 - **Cargo:** `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 
 ```sh

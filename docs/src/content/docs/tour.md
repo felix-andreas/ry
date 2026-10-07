@@ -43,7 +43,7 @@ With no configuration, ry resolves every name by R's scoping rules. In R, a typo
 execution reaches it, possibly at the end of a long job. ry reports it immediately:
 
 ```r
-apply_discount <- function(price, rate) price * ratee
+apply_discount <- function(price, rate) price * (1 - ratee)
 ```
 
 ```text
@@ -70,15 +70,15 @@ typing = true
 You do not have to annotate anything. ry infers types from how values are used:
 
 ```r
-apply_discount <- function(price, rate) price * rate
+apply_discount <- function(price, rate) price * (1 - rate)
 apply_discount(100, "0.2")
 ```
 
 ```text
-x expected `double`, found `character`
+x expected a numeric value (`integer` or `double`), found `character`
 ```
 
-`*` is arithmetic, so both parameters must be numbers. Inference runs even with type errors off,
+`-` and `*` are arithmetic, so both parameters must be numbers. Inference runs even with type errors off,
 because hover, completion, and inlay hints are built on it.
 
 ## Annotations
@@ -88,7 +88,7 @@ tool can read, and removing ry changes nothing at run time.
 
 ```r
 #: fn(price: double, rate: double) -> double
-apply_discount <- function(price, rate) price * rate
+apply_discount <- function(price, rate) price * (1 - rate)
 ```
 
 An annotation is checked against the body and against every call. Inference already covers the
@@ -190,9 +190,10 @@ Parameter names are part of the type, because R matches arguments by name as oft
 Calls are checked for types, names, and count.
 
 Your own functions have exactly one signature; to accept several shapes, use a union such as
-`integer | character`. Allowing several signatures per name would make each call a search over
-candidates instead of a single inference step, and that single step is what keeps checking fast
-enough to run on every keystroke.
+`integer | character`. Several signatures per name would make every call a search over candidates
+instead of a single inference step, and would leave the function without one type to pass around as
+a value. The shipped declarations do overload a few base functions such as `sum`, where the
+candidates are written out and the search stays small.
 
 ## Generics
 
@@ -237,7 +238,7 @@ with nothing wrapped around it.
 A `Celsius` is still accepted where a `double` is, so `sqrt()` and `round()` work on it. Arithmetic
 therefore returns a plain `double`: ry cannot assume that adding two temperatures gives a
 temperature. [Declare `+.Celsius`](/type-checking/domain-modeling#operators-and-generic-types) where it
-does.
+does, and give the value a class attribute, which R needs to find that method.
 
 `@alias` names a type without making it nominal: `@alias Row {list{id: integer}}` is just a shorter
 way to write the shape, and any list of that shape is a `Row`.
@@ -248,8 +249,8 @@ R has constructs no static checker can follow: S4 and R6 objects, data frame col
 values are `Unknown`, which is compatible with everything. ry would rather skip a check than report
 something false, so one unmodeled construct never causes a cascade of errors.
 
-The cost is that a clean run does not say how much was checked. Strict mode reports every place a
-value became `Unknown`:
+The cost is that a clean run does not say how much was checked. Strict mode reports the places
+where a value became `Unknown`:
 
 ```toml
 [check]
@@ -268,11 +269,14 @@ x strict mode: this expression has an undetermined type (`Unknown`)
 
 `Any` is also compatible with everything, but it is a deliberate choice, made by an annotation or a
 package declaration, so strict mode ignores it. S3 generics that dispatch through `UseMethod()`
-return `Any`, so strict mode does not report their calls either.
+return `Any`, so strict mode does not report their calls either. Two gaps are not reported yet: R6
+objects, and values from packages ry knows only by name.
 
-Two annotations let you supply a type the checker cannot infer. `#: @if-unknown TYPE` applies only
-where inference found nothing, and is an error anywhere else, so it can never override a type ry
-knows. `#: @trust TYPE` overrides unconditionally, for the cases where you know better.
+A plain `#:` annotation gives an `Unknown` value a type, and every later use is checked against it.
+`#: @if-unknown TYPE` does the same, but becomes an error once ry can infer the value's type, so it
+cannot go stale. `#: @trust TYPE` overrides a type ry did infer, for the cases where you know
+better. In strict mode none of them clears the finding yet, which is a known bug;
+`# ry: allow(strict)` on the line does.
 
 A `# typing: strict`, `# typing: on`, or `# typing: off` comment in a file overrides the project
 setting, so you can adopt type checking one file at a time.
@@ -338,7 +342,7 @@ string are three different things.
 
 `ry repl` runs the R installed on your machine, unchanged, behind a line editor whose Tab completion
 comes from the type checker. Completing `account$` lists the record's fields with their types, worked
-out from the code you typed rather than from the live session. `ry run script.R` runs a script on the same session. These are the only commands
+out from the code you typed rather than from the live session. `ry run script.R` runs a script through the same embedded R and exits. These are the only commands
 that need R.
 
 ## Findings and suppressions
@@ -352,14 +356,21 @@ assignment-operator
   ! Use <-, not =, for assignment
 ```
 
+Besides names and types, three lints are on by default. `=` for assignment is a warning, because
+`<-` says unambiguously that a line assigns rather than passes an argument. `T` and `F` are warnings,
+because they are ordinary variables that any code can reassign, unlike `TRUE` and `FALSE`. A trailing
+comma in a call is an error, because R reads it as an empty argument, and `c(1, 2, )` fails when it
+runs.
+
 Codes are what you configure in `ry.toml` and what you name to silence one finding:
 
 ```r
 total = 2L  # ry: allow(assignment-operator)
 ```
 
-A suppression covers its own line and the line below, and nothing else. It marks one exception you
-have reviewed, so it should not hide findings in code written later. To turn a lint off everywhere,
+A suppression covers its own line and the line below, so it can sit at the end of a line or on the
+line above, and nothing else. It marks one exception you have reviewed, so it should not hide
+findings in code written later. To turn a lint off everywhere,
 set it in [`[lint]`](/reference/configuration#lint).
 
 In CI, `ry check` exits with status 1 when it finds anything, and `ry fmt --check` does when a file

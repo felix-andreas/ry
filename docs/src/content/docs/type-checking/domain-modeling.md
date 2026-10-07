@@ -18,31 +18,33 @@ nominal versus structural types).
 money <- function(amount, currency) {
   if (amount < 0) stop("negative amount")
   #: @new Money
-  list(amount = amount, currency = currency)
+  structure(list(amount = amount, currency = currency), class = "Money")
 }
 ```
 
 Every `Money` in the program comes from an `@new`, and `@new` is only where you write it, so with one
 constructor every value has passed its checks. The two halves divide the work: `@new` checks the
-shape when ry analyzes the code, and `stop()` checks the values when the code runs. `@new` emits no
-run-time check of its own.
+shape when ry analyzes the code, and `stop()` checks the values when the code runs.
 
 A plain list with the right fields is still not a `Money`: the type is nominal, so matching the shape
-is not enough, and the value has to come from the constructor. Reads and writes are checked against the declared fields, so
-`total$amount <- "x"` is an error. At run time a `Money` is an ordinary named list, with no class
-attribute and no dispatch.
+is not enough, and the value has to come from the constructor. Reads and writes are checked against
+the declared fields, so after `m <- money(1, "EUR")`, the write `m$amount <- "x"` is an error.
+
+The class attribute is for R, not for ry: `structure()` keeps its argument's type, so the
+constructor would check the same without it. R needs it to dispatch the operator method below.
 
 ## Nominal types over scalars
 
 `@type UserId {character}` and `@type Email {character}` are both strings at run time, and the
 checker keeps them apart. IDs, units, currencies, and validated-versus-raw input are the values that
-get mixed up most, and nothing else in R can catch it. A `UserId` is still accepted where a
+get mixed up most, and nothing else in R catches the mix-up before the code runs. A `UserId` is still accepted where a
 `character` is, so string functions keep working on it.
 
 ## Operators and generic types
 
 Arithmetic and comparison on your type dispatch to the method R would call, so a method declared in
-your code is checked like a stub:
+your code is checked like a stub. R finds the method through the value's class attribute, which is
+why the constructor above sets one:
 
 ```r
 #: fn(a: Money, b: Money) -> Money
@@ -73,6 +75,16 @@ value with its representation is the mistake you want caught.
   run time, so those calls return `Any`. Operator methods, as above, are the exception.
 
 Much R code uses R6 or S4 for things that are really values: a configuration, a result, a parsed
-record. Those are worth converting. To keep an S4 or R6 class but still check its users, wrap its
-constructor and declare the result as a `@type`; the class definition stays opaque, and everything
-that receives the value is checked.
+record. Those are worth converting. To keep an R6 or S4 class but still check who receives it, give
+it a nominal type over `Any` and wrap its constructor. The class stays opaque, but passing something
+else where an `Account` is expected becomes an error:
+
+```r
+#: @type Account {Any}
+
+#: fn() -> Account
+new_account <- function() {
+  #: @new Account
+  AccountClass$new()
+}
+```

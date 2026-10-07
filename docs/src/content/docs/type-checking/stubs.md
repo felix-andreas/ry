@@ -47,8 +47,8 @@ package does not export, and makes `Session` a type you can use in annotations. 
 declares an opaque type: callers can pass it around, and reading a field from it gives `Unknown`.
 That is usually what you want for a package's own objects, whose insides are its business.
 
-Declare only what you call. A name you leave out of a stub is reported as not exported when you use
-it qualified, which tells you what to add next.
+Declare only what you call. A name you leave out is reported wherever you use it, which tells you
+what to add next.
 
 ## Overriding a shipped declaration
 
