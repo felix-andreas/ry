@@ -16,8 +16,8 @@ ry fmt --diff    # Show a diff of formatting changes without applying them
 ```
 
 `--check` and `--diff` exit 1 when any file would change, which is what a CI job gates on, and an
-error, such as a file that cannot be parsed, exits 2. The [exit-code table](/reference/cli#exit-codes)
-has the details.
+error, such as a file that cannot be parsed, exits 2. The [exit codes](/reference/cli#exit-codes)
+have the details.
 
 ## Philosophy
 

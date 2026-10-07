@@ -1,12 +1,7 @@
 ---
 title: Diagnostic codes
-description: Every code ry can emit, what triggers it, and how to silence it
+description: What each finding means, why it is reported, and how to silence it
 ---
-
-Every finding carries a stable code: the name you use to suppress it, to configure it, and to match
-it in JSON output. Codes do not change when message wording does.
-
-## How to read a finding
 
 ```text
 unresolved
@@ -18,191 +13,103 @@ unresolved
    |                      ^^^^^^^^^^^
 ```
 
-| Part | Meaning |
-| --- | --- |
-| `unresolved` | The diagnostic code, heading the finding. Stable across message rewordings: it is what you name in a suppression comment, in `ry.toml`, and what `--output json` reports as `code` |
-| `!` | The severity. `!` is a warning and `x` is an error. `--min-severity error` reports only errors and exits on them alone |
-| `R/a.R:2:22` | File, line, and character column of where the finding starts |
-| `^^^^` | The exact source range the finding is about. That is the name, the token, or the expression, not the whole statement |
-
-Some findings add a related location, drawn nested under the finding from its own file; `duplicate`
-uses one to point at the other definition. [The CLI reference](/reference/cli) shows how these appear
-in JSON.
+Every finding starts with its code, here `unresolved`. The code stays the same when the wording of
+a message changes, so it is what you name in a suppression, in `ry.toml`, and in the JSON output.
+`!` marks a warning and `x` an error. The carets underline exactly what the finding is about, such
+as one name, not the whole statement.
 
 ## Suppressing a finding
 
-A `# ry: allow(...)` comment silences findings whose range starts on **its own line** or on **the line directly below it**, so a trailing comment covers two lines. There is no block or file scope, because a suppression marks one reviewed exception and should not hide findings in code written later.
-
-| Comment | Silences |
-| --- | --- |
-| `# ry: allow(unused)` | The one named code |
-| `# ry: allow(unused, naming-style)` | Every listed code |
-| `# ry: allow(all)` | Every code |
-
 ```r
-# ry: allow(unused)
-scratch <- 1L
-
 total = 1L  # ry: allow(assignment-operator)
 
-flag <- T  ## ry: allow(all)
+# ry: allow(unused, naming-style)
+scratchValue <- 1L
 ```
 
-The marker is found by scanning the line rather than parsing it: the scan takes the first `#` on the
-line, strips every leading `#`, and then looks for the literal `ry:` and `allow(` up to the first `)`.
-So `## ry: allow(x)` and `#ry:allow(x)` both work, the pre-rename spelling `# roughly: allow(x)` still
-works, and a `#` inside a string earlier on the line hides a trailing suppression on that line.
+A suppression covers its own line and the line below, so it works at the end of a line or on the line
+above. `allow(all)` covers every code. There is no block or file scope, because a suppression marks
+one exception you have reviewed and should not hide findings in code written later. To turn a code
+off everywhere, use [`ry.toml`](/reference/configuration), and to turn type checking off for one
+file, put `# typing: off` in it.
 
-Some findings cannot be suppressed this way, because they are not reported against an R source
-file: `stub` (reported on `.Rtypes` files), `config`, and the `unresolved` and `unused-import` findings
-reported on `NAMESPACE`.
+The marker is found by scanning the line for its first `#`, so `#ry:allow(x)` and
+`# roughly: allow(x)` work too, but a `#` inside a string earlier on the line hides it. Findings on
+`NAMESPACE`, `ry.toml`, and stub files cannot be suppressed, because they have no R line to carry the
+comment.
 
-### Silencing a whole class
+Some R idioms silence findings on their own:
 
-| Directive | Effect | Scope |
-| --- | --- | --- |
-| `# typing: off` | Turns type checking off for this file, overriding `[check] typing` | File; must be a top-level comment |
-| `# typing: on` | Turns type checking on for this file | File |
-| `# typing: strict` or `#: @strict` | Turns on type checking and strict mode for this file | File |
+- `utils::globalVariables(c("a", "b"))` at the top level stops `a` and `b` from being reported as
+  unresolved, as it does for `R CMD check`.
+- In a file that calls `R6Class()`, `self`, `private`, and `super` resolve.
+- A name created with `<<-` anywhere in a file resolves in that file.
+- A name that starts with `.` or `_` is never reported as unused.
 
-`# typing: off` does **not** silence `annotation` findings: a malformed `#:` comment is reported
-whether or not the file is type-checked. An unrecognized value such as `# typing: onn` is itself
-reported as an `annotation` error.
+## On by default
 
-Several R idioms are recognized directly, with no comment needed:
+**`syntax-error`** (error): code R would refuse to parse, or an assignment target R would refuse to
+run, such as `1 + a <- 2`. The error names what is missing, stays on the line that caused it, and
+hides every other finding in the broken statement, because ry draws no conclusions from code it
+could not read.
 
-| Construct | Effect |
-| --- | --- |
-| `globalVariables(c("a", "b"))` at top level | Those names never report `unresolved`, project-wide |
-| A file that calls `R6Class` | `self`, `private` and `super` resolve in it |
-| A name created by `<<-` anywhere in the file | Resolves |
-| A name starting with `.` or `_` | Never reports `unused` |
-| `library(pkg)` for a package with no shipped stub | `unresolved` is suppressed project-wide, except for near misses of names your own project binds |
+**`annotation`** (error): a `#:` comment that is malformed, names a type that does not exist, or
+annotates nothing, and an unknown `# typing:` value. It is reported even in files with type checking
+off, because a broken annotation is a mistake either way.
 
-Formatting has its own suppression comments, `# fmt: skip`, `# fmt: off` with `# fmt: on`, and
-`# fmt: skip-file`, described in [formatting rules](/reference/formatting-rules).
+**`unresolved`** (warning): a name that is defined nowhere ry can see, with a suggestion for a near
+miss. It also covers `pkg::name` where `pkg` does not export `name`, and an unknown package.
+`pkg:::name` is exempt, because it reaches internal names on purpose. In `NAMESPACE`, an
+`importFrom` of a name the package does not export and an `export` of a name you never define are
+errors, because R refuses to load such a package. Attaching a package ry knows nothing about turns
+off this check for bare names, as [stubs](/type-checking/stubs) explains.
 
-## The codes
+**`unused`** (warning): an assignment nothing reads. In a package, top-level definitions are exempt,
+because another file may use them.
 
-Most codes are on by default. These are the opt-ins, all configured in [`ry.toml`](/reference/configuration):
+**`duplicate`** (warning): a top-level name defined in more than one place in a package, where R
+silently keeps whichever is collated last. Both definitions are reported.
 
-| Code | Turn on with |
-| --- | --- |
-| `type-mismatch` | `[check] typing = true`, or `# typing: on` in the file |
-| `strict` | `[check] strict = true`, or `# typing: strict` in the file |
-| `naming-style` | `[lint] naming-style = "snake_case"` or `"camelCase"` |
-| `maybe-undefined` | `[check] maybe-undefined = true` |
-| `unused-parameter` | `[lint] unused-parameter = "warn"` or `"error"` |
-| `unused-import` | `[lint] unused-import = "warn"` or `"error"` |
-| `shadows-builtin` | `[lint] shadows-builtin = "warn"` or `"error"` |
-| `shadows-namespace` | `[lint] shadows-namespace = "warn"` or `"error"` |
+**`assignment-operator`** (warning): `=` used for assignment, where `<-` says unambiguously that the
+line assigns rather than passes an argument.
 
-To go the other way, set `[check] unused = false`, or set any `[lint]` code to `"off"`.
+**`boolean-shorthand`** (warning): `T` or `F`, which are ordinary variables that any code can
+reassign, unlike `TRUE` and `FALSE`.
 
-### Syntax
+**`trailing-comma`** (error): a comma after a call's last argument. R reads it as an empty argument,
+so `c(1, 2, )` fails when it runs.
 
-| Code | Severity | On by default | Triggered by |
-| --- | --- | --- | --- |
-| `syntax-error` | error | yes | Anything the R parser rejects. The message varies with the failure ("unclosed `(`; expected `)` to close the parameter list"); the code does not |
-| `syntax-error` | error | yes | An assignment target R refuses: a computed value or a number where a name belongs, as in `1 + a <- 2` |
+**`stub`** (error): a line in your `stubs/*.Rtypes` files that ry could not load, so a broken
+declaration is never dropped in silence.
 
-R parses an assignment to something that is not a name and only fails when it runs, so the parse
-looks clean even though the mistake is real. The most common cause is a line that ends in an
-operator and so pulls the next line in as its right-hand side; when that is what happened, the message
-says so. A target headed by `!` is exempt: `!` binds tighter than `<-`, so `expr(!!name <- value)` has
-the same shape but builds an assignment instead of performing one.
+**`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`.
 
-A few principles govern how syntax errors are reported:
+## Opt-in
 
-**The code names whose grammar was broken, not which stage noticed.** Broken R reports as
-`syntax-error`, and a broken `#:` comment as `annotation`. So a type expression that does not parse,
-and a form the annotation grammar deliberately refuses, such as a nested `<T>` binder, both report as
-`annotation`.
+**`type-mismatch`** (error), with `[check] typing = true` or `# typing: on`: a value of the wrong
+type, a call with the wrong arguments, a field that does not exist, and every other rule in the
+[type system](/reference/type-system).
 
-**One mistake produces one finding.** A `#:` region reports once, plus at most one unclosed opener,
-and an unterminated argument or parameter list ends at the next statement instead of swallowing it.
+**`strict`** (error), with `[check] strict = true` or `# typing: strict`: each place where a value's
+type could not be determined, and each name that resolves only because an unknown package was
+attached. It also raises `unresolved` from a warning to an error, so a gate on
+`--min-severity error` counts it.
 
-**A mistake stays on its own line.** R lets a string or a backtick-quoted name span lines, so an
-unclosed one could swallow every statement below it, which is exactly what a stray quote does while
-you are still typing it. An unterminated one therefore ends at its line break: the quote is reported
-where it opens, and the rest of the file keeps its diagnostics, definitions, and completions.
+**`maybe-undefined`** (warning), with `[check] maybe-undefined = true`: a read that some path reaches
+before any write, which R reports as `object 'v' not found` on that path. It is off because it treats
+conditions that always agree as independent, so `if (ok) v <- 1` followed by `if (ok) print(v)` is
+reported although it is safe.
 
-**Broken code hides nothing else.** A statement that fails to parse as R suppresses every
-name-resolution and typing finding that overlaps it, because the checker draws no conclusions from
-source it could not read. A broken annotation suppresses nothing outside its own block, and inside the
-block the refusal is the only finding.
+**`naming-style`** (warning), with `[lint] naming-style = "snake_case"` or `"camelCase"`: a variable
+or parameter in the other style. `SCREAMING_SNAKE_CASE` always conforms.
 
-### Name resolution
+**`unused-parameter`**: a parameter the body never reads. S3 generics and methods are exempt,
+because the generic dictates their parameters.
 
-| Code | Severity | On by default | Triggered by |
-| --- | --- | --- | --- |
-| `unresolved` | warning | yes | A bare name read that resolves nowhere: not a local, not a top-level definition in this package, not a `NAMESPACE` import, not a builtin or stub export. Adds `Did you mean` for a near miss |
-| `unresolved` | warning | yes | `pkg::name` where the stub corpus knows `pkg` but `pkg` does not export `name`. `pkg:::name` is exempt, because it legitimately reaches an unexported name |
-| `unresolved` | warning | yes | `pkg::name` where `pkg` is neither a stub namespace nor a declared `DESCRIPTION` dependency: "unknown package namespace `notapackage`" |
-| `unresolved` | **error** | yes | In `NAMESPACE`: `importFrom(pkg, name)` where `pkg` has stubs and does not export `name`. An error rather than a warning because R refuses to load the package |
-| `unresolved` | **error** | yes (`check` only) | In `NAMESPACE`: `export(name)` naming something the package defines nowhere at top level, which is `R CMD check`'s "undefined exports". Not reported by the language server |
-| `maybe-undefined` | warning | no | A read some path reaches with no prior write. The name is introduced only in conditionally executed code, and R raises `object 'x' not found` on the other path. The read still resolves, so this is not `unresolved`. Off by default: the flow analysis treats two conditions that always agree at run time as independent branches, so a guard pattern like `if (ok) v <- …` followed by `if (ok) use(v)` reports even though it is safe |
-| `unused` | warning | yes | A write inside a function body that no read ever reaches, including a store overwritten before every read. A write in a frame some inner scope super-assigns with `<<-` is exempt: the write is what makes `<<-` find that slot, so deleting it would send the assignment to the global environment instead |
-| `unused` | warning | yes | In a script, a top-level binding nothing later reads. Package files are exempt, because any file may use them. S3 method names are exempt: dispatch is not a read |
-| `duplicate` | warning | yes | A top-level name defined more than once across a package's files. Both sites report, each with a related location pointing at the other. Scripts are exempt, because rebinding in a sequential script is ordinary |
+**`unused-import`**: an `importFrom` in `NAMESPACE` whose name your code never mentions. Only
+`ry check` reports it.
 
-### Typing
+**`shadows-builtin`** and **`shadows-namespace`**: a top-level name that hides a function from
+`base`, or from another package, such as defining your own `filter` while `stats::filter` exists.
 
-`annotation` covers malformed `#:` comments and is always on. `type-mismatch` and `strict` are
-opt-in, and the [type system reference](/reference/type-system) has the semantics behind them.
-
-| Code | Severity | On by default | Triggered by |
-| --- | --- | --- | --- |
-| `annotation` | error | yes | A type name that is not a builtin, a declared `@type`/`@alias`, or a stub class. Adds `Did you mean` |
-| `annotation` | error | yes | A malformed block: `@forall` after `@param`, `@param` after `@return`, more than one `@return`, a duplicate type-parameter name, `@new` with no nominal, or an unknown constraint (only `numeric`, `atomic`, and `scalar numeric` exist) |
-| `annotation` | error | yes | A type expression the annotation grammar cannot read, or a form it refuses on purpose, which is a `<T>` binder anywhere but the outermost level of the block |
-| `annotation` | error | yes | A dangling `#:`, with no expression on the next line, a blank line in between, or no type expression at all |
-| `annotation` | error | yes | A `#:` inside a call's argument list, where an argument is not a statement and nothing can be annotated |
-| `annotation` | error | yes | Type-argument arity: arguments applied to a non-generic, the wrong number of them, or a bare reference to a generic that needs them |
-| `annotation` | error | yes | A `@type`/`@alias` block that is not at file top level; `@new` naming an `@alias` rather than a `@type`; the same type name declared twice in one namespace, either across package files, which share a project-wide one, or twice inside one script, whose declarations reach only their own file (`@type` and `@alias` share the namespace either way) |
-| `annotation` | error | yes | An unrecognized `# typing:` directive value |
-| `type-mismatch` | error | no | An argument, or a returned value, whose type does not match the declared one |
-| `type-mismatch` | error | no | Calling something that is not a function, or a callee that may be `NULL` |
-| `type-mismatch` | error | no | Too many positional arguments, or a required argument missing |
-| `type-mismatch` | error | no | An argument name the function has no parameter for, or supplied twice. Names the parameter list and suggests the nearest match |
-| `type-mismatch` | error | no | No overload of an overloaded function matches the call |
-| `type-mismatch` | error | no | `$` or `[[` naming a field or position that does not exist (with a suggestion), or `$` on an atomic vector |
-| `type-mismatch` | error | no | `[[` on something that is not a list, an index that is not valid for the vector, or an index shape that is not modeled, which is `x[]`, a named index, or a multi-index, meaning matrix and data-frame subsetting |
-| `type-mismatch` | error | no | An operator applied to an operand, or a pair of operands, it is not defined for |
-| `type-mismatch` | error | no | `for` over something that is not a sequence |
-| `type-mismatch` | error | no | A constraint violated: `numeric`, `atomic`, or a scalar numeric |
-| `type-mismatch` | error | no | An alias cycle, or an infinite type (the occurs check) |
-| `type-mismatch` | error | no | Annotation rules: `@if-unknown` where the type is already known, an annotated parameter that also has a default, annotation parameters that do not match the function's formals, or a `[]`/`[named]` element type that is not atomic |
-| `strict` | error | no | An expression whose type is undetermined |
-| `strict` | error | no | A reference with no known type |
-| `strict` | error | no | A binding whose type does not stabilize across loop iterations |
-| `strict` | error | no | A binding defined recursively |
-| `strict` | error | no | A name that resolves only because an attached package's export set is unknown. Declare the package with a `.Rtypes` stub to check it |
-
-Enabling `strict` also raises every `unresolved` finding in the file from a warning to an error.
-The count does not change, but the severity does, which matters if `--min-severity error` gates your
-build.
-
-### Lint
-
-| Code | Severity | On by default | Triggered by |
-| --- | --- | --- | --- |
-| `assignment-operator` | warning | yes | `=` used as assignment. The range is the `=` token alone |
-| `boolean-shorthand` | warning | yes | An identifier that is exactly `T` or `F`. Identifiers inside `#:` annotations are exempt, so a type variable named `T` is fine |
-| `trailing-comma` | **error** | yes | A comma after a call's last argument. In R this supplies a missing argument rather than being ignored, so it is an error, unlike the other default-on lints |
-| `naming-style` | warning | no | An assignment target or a function parameter that does not match the configured casing. `SCREAMING_SNAKE_CASE` conforms under either style. Always a warning: the `"warn"`/`"error"` levels do not apply to this lint, which is configured by style value instead |
-| `unused-parameter` | as configured | no | A formal no read resolves to. `...` is exempt, and an S3 generic and its methods are exempt entirely, because the generic dictates their formals |
-| `unused-import` | as configured | no | An `importFrom(pkg, name)` in `NAMESPACE` whose `name` appears in no token of any checked source. Whole-namespace `import(pkg)` is never checked. Reported by `check` only, not by the language server |
-| `shadows-builtin` | as configured | no | A top-level binding whose name `base` exports |
-| `shadows-namespace` | as configured | no | A top-level binding whose name a non-`base` stub namespace declares and that resolves bare (`stats::filter`, `utils::head`) |
-
-`missing-comma` is retired and never emitted, because the parser now rejects `f(1 2)` as a syntax
-error, exactly as R does. The configuration key still parses, so old configurations keep loading, and
-is ignored.
-
-### Tooling
-
-| Code | Severity | On by default | Triggered by |
-| --- | --- | --- | --- |
-| `stub` | error | yes | A declaration in a project's `stubs/*.Rtypes` file that would otherwise be dropped in silence: a line that is not a `name : TYPE` declaration, an invalid declaration name, an invalid name after `@type`, a missing or invalid type, an unknown type name, or `@masked` on a non-variadic function type. The range covers the whole line |
-| `config` | error | yes | A malformed `ry.toml`, meaning a TOML parse failure or the wrong type of value on a known key. `check` prints it on stderr under this code and exits 2. The language server publishes it as a finding on the config file instead. |
+The last four take a level in `[lint]`, such as `"warn"` or `"error"`.

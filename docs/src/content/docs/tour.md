@@ -371,7 +371,7 @@ total = 2L  # ry: allow(assignment-operator)
 A suppression covers its own line and the line below, so it can sit at the end of a line or on the
 line above, and nothing else. It marks one exception you have reviewed, so it should not hide
 findings in code written later. To turn a lint off everywhere,
-set it in [`[lint]`](/reference/configuration#lint).
+set it in [`ry.toml`](/reference/configuration).
 
 In CI, `ry check` exits with status 1 when it finds anything, and `ry fmt --check` does when a file
 is not formatted, so a CI job needs nothing more than those two commands.

@@ -28,7 +28,7 @@ export default defineConfig({
 		'/testing': '/contributing/testing',
 		'/guides/adopting': '/getting-started',
 		'/guides/continuous-integration': '/reference/cli#exit-codes',
-		'/guides/r-console': '/reference/cli#repl',
+		'/guides/r-console': '/reference/cli#server-repl-and-run',
 	},
 	integrations: [
 		starlight({

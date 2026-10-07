@@ -1292,8 +1292,9 @@ rules on this page.
   All three forms create the same slot, and a later `x` resolves to it. For a string target, the
   range of any finding is the literal, quotes included, because that is what was written.
 - A target that is not a name, such as a computed value or a number, is reported as a
-  `syntax-error`. R parses these and refuses them at run time; see
-  [diagnostic codes](/reference/diagnostic-codes#syntax) for the exact shapes and the one exemption.
+  `syntax-error`. R parses these and refuses them at run time. A target headed by `!` is exempt,
+  because `!` binds tighter than `<-`, so rlang's `expr(!!name <- value)` builds an assignment
+  instead of performing one.
 - A later assignment in the same scope writes the same variable. On a straight-line path the new
   write replaces the old type, and writes that arrive from different control-flow paths are joined
   (see [control-flow joins](#control-flow-joins)).
