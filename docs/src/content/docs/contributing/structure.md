@@ -77,8 +77,7 @@ preserves your line breaks, together with its configuration types.
 
 The library root is `src/ry.rs`, and the binary root is `src/main.rs`.
 
-- **`main.rs`**: the CLI surface and the exit-code contract. Exit code 0 means no findings, 1 means
-  findings, and 2 means a usage, configuration, or IO error.
+- **`main.rs`**: the CLI surface and the [exit-code contract](/reference/cli#exit-codes).
 - **`cli.rs`**: the implementations of `check`, `fmt`, and `ry debug ast`. `check` assembles the
   project, renders the output, and reports `NAMESPACE` problems and stub overrides.
 - **`server.rs`**: the LSP server, all of it: the frontend and worker threads, document sync, push

@@ -325,8 +325,7 @@ suite.
 
 - diagnostic rendering, with 1-based character positions, snippet windows, and underlines;
 - JSON Lines output;
-- the exit-code contract: 0 for no findings, 1 for findings, and 2 for a usage, configuration, or IO
-  error;
+- the [exit-code contract](/reference/cli#exit-codes);
 - finding the configuration, and failing to;
 - per-file `# typing:` directives and suppression comments;
 - `NAMESPACE` validation, and project stub overrides including their loader-problem reports;

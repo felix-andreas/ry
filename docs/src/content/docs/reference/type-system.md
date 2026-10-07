@@ -822,13 +822,9 @@ value the function will not take, or the function's return, which the interface 
 
 ### Higher-order function types
 
-A function type may appear inside another function type. Polymorphism is rank-1 only, so a binder
-cannot appear inside a nested type:
-
-- `fn(transform: fn(integer) -> character) -> character` is valid.
-- `fn(fn(integer) -> character, integer) -> character` is valid.
-- `fn(transform: <T> fn(T) -> T, integer) -> integer` is not.
-- `fn(fn(value: <T> list[T]) -> integer) -> integer` is not.
+A function type may appear inside another function type, as in
+`fn(transform: fn(integer) -> character) -> character`. A nested function type cannot carry its own
+binder, because [binders are rank-1](#type-parameters-aliases-and-nominal-types).
 
 The expanded form can use a function type directly:
 
@@ -2274,9 +2270,3 @@ and nothing else, because the checker draws no conclusions from source it could 
 - A checked annotation on such a broken definition binds its declared type without checking it, so
   the definition keeps its contract for callers until the value parses again, and is then checked
   against the annotation as usual.
-
-## Unsupported constructs
-
-A syntactically valid construct that the type system does not describe may infer as `Unknown`, which
-lets checking carry on even where the checker cannot model the construct precisely. Whether such a
-construct also produces a diagnostic is decided construct by construct.

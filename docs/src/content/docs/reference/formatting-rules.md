@@ -302,21 +302,7 @@ call(
 )
 ```
 
-**Nested function calls** can use either a hugged style, where the inner call starts right after the outer call's parenthesis, or an expanded style. The formatter preserves both.
-
-```r
-# Hugged format - both functions start on the same line
-result <- outer(inner(
-  arg
-))
-
-# Expanded format - also valid
-result <- outer(
-  inner(
-    arg
-  )
-)
-```
+**Nested function calls** keep whichever of the hugged and expanded styles you wrote (see [hugging behavior](#hugging-behavior)).
 
 **Compact multiline calls:** When a call spans multiple lines solely because a single argument (often the final one) is itself multiline, the formatter keeps the other arguments on the original line rather than placing every argument on its own line, preserving a concise, compact layout:
 
@@ -487,25 +473,6 @@ path <- r"(C:\Users\me)"
 quoted <- r"(He said "hi")"
 ```
 
-### R6 class definitions
-
-Class definitions with empty lines between methods are preserved:
-
-```r
-PersonClass <- R6Class(
-  "Person",
-  public = list(
-    initialize = function(name) {
-      private$name <- name
-    },
-
-    get_name = function() {
-      return(private$name)
-    }
-  )
-)
-```
-
 ### Comments
 
 The formatter ensures that a space is inserted after the `#` for standard comments. For special comment types like Roxygen (`#'`) and plumber (`#*`) comments, the space is placed after the initial two characters:
@@ -630,6 +597,23 @@ y <- 2
 z <- 3
 ```
 
+A single blank line inside a call is kept too, so an R6 class keeps the blank lines between its methods:
+
+```r
+PersonClass <- R6Class(
+  "Person",
+  public = list(
+    initialize = function(name) {
+      private$name <- name
+    },
+
+    get_name = function() {
+      return(private$name)
+    }
+  )
+)
+```
+
 ### Line endings
 
 The line ending follows `[format] line-ending`, whose default `"auto"` keeps the file's own (`LF` or `CRLF`). The indent is `[format] indent-width` spaces, 2 by default.
@@ -678,8 +662,6 @@ f <- function() {
 `# fmt: skip-file` before any other code or comment (a shebang included) leaves the whole file untouched. Blank lines before it are allowed.
 
 ## Rationale
-
-This section records the design decisions behind the rules above.
 
 ### Auto-bracing
 
