@@ -24,11 +24,21 @@ ry fmt --diff    # Show a diff of formatting changes without applying them
 ### Formatting a selection
 
 In an editor, "Format Document" lays out the whole file and "Format Selection" lays out only what
-you selected. The selected lines come out exactly as formatting the whole file would have left
-them, and every other line of the file stays byte for byte as it was — so you can tidy the function
-you are working on without a diff that touches the rest of the file.
+you selected. The selected lines come out exactly as formatting the whole file would lay them out
+at the indentation the file already uses, and every other line of the file stays byte for byte as
+it was — so you can tidy the function you are working on without a diff that touches the rest of
+the file.
 
-Three things follow from that:
+Four things follow from that:
+
+* **The selection keeps the file's indentation.** In a file indented by four spaces or by tabs, the
+  selected lines are indented the same way — statements at the depth of the lines around them, and
+  the arguments of a call broken across lines by the same step — rather than by `indent-width`,
+  which would leave them at a different depth from their unselected neighbours. The step is read
+  from the statements the file already indents: each one nested `n` levels deep and indented by
+  `n` copies of the same text votes for that text, and the most common step wins. A file with no
+  indented statement uses `indent-width`. Re-indenting a file to `indent-width` is what
+  "Format Document" and `ry fmt` are for.
 
 * **The selection widens to whole lines.** Selecting half of a line selects the line; putting the
   cursor on a line with nothing selected selects that line.
@@ -47,7 +57,7 @@ The formatter preserves existing line breaks and does not split expressions that
 * **Single-line expressions remain single-line:** The formatter adds line breaks only where the expression is already multi-line, and never breaks a single-line expression into several (with [one exception](#loops)).
 * **Both nesting styles are preserved:** Compact ("hugged") and expanded forms for nested expressions are equally valid, and neither is rewritten into the other (see [hugging behavior](#hugging-behavior)).
 * **Braces are added only where they prevent a bug:** Auto-bracing applies where omitting braces changes what a later edit means (see [auto-bracing](#auto-bracing)).
-* **Two configuration keys:** Indent width and line endings, both documented under [configuration](/reference/configuration). There are no style options, because a reflowing formatter would rewrite line breaks the author chose.
+* **Two configuration keys:** Indent width and line endings, both documented under [configuration](/reference/configuration). Formatting a selection keeps the indentation the file already uses instead (see [formatting a selection](#formatting-a-selection)). There are no style options, because a reflowing formatter would rewrite line breaks the author chose.
 
 ## Formatting Rules
 

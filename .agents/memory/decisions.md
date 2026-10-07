@@ -923,9 +923,26 @@ feature shipped behind an experimental flag and had two tests.
 
 **Chosen shape.** `format::format_range(source, config, selection)` formats the **whole file** and
 returns the edits that carry the selected lines to what that run produced, leaving every other line
-byte for byte as it was. Whole-document formatting is the same call over the whole file, so the two
-requests cannot disagree about what a line should look like, and both return minimal edits (an
-editor keeps the cursor, the folds and the scroll position).
+byte for byte as it was. Whole-document formatting (`format_edits`) cuts its edits out of the same
+kind of run by the same pairing, so both requests return minimal edits (an editor keeps the cursor,
+the folds and the scroll position). The two runs differ in one input only: the indentation step.
+
+**A selection is formatted at the file's own indentation step, not at `indent-width`.** Cut out of a
+run at the configured width, a selected line in a file indented by four spaces or tabs came out at a
+different depth from the unselected lines beside it — the one thing a selection must never do. The
+step is inferred, and the inference has to survive the selection being applied, or formatting part
+of a file would change how the rest of it formats (the battery's composition check). It is read
+from where the formatter *places* statements: `Layout::statement_levels` records each statement's
+level, a statement at level `n` indented by `n` copies of one string votes for that string, and the
+commonest wins; a file with no vote gets `indent-width`. Levels come from structure alone, so a
+range edit can only re-indent statements to the winner. Reading the step off blocks whose `{` opens
+on a statement's first line was tried first and failed composition: formatting can move that `{` to
+its own line, and the vote disappears. Considered and rejected: rebasing each cut span onto its
+neighbours' indentation (Prettier/clang-format style). Inner lines then follow `indent-width` while
+statement starts follow the file, so a four-space file grows two-space call arguments, and every
+verbatim line (string contents, `# fmt: off`, `# fmt: skip` columns) would need separate tracking
+so it is never moved; formatting at the inferred step gets all of that from the formatter itself.
+Whole-document formatting and `ry fmt` keep `indent-width`: re-indenting a file is what they are for.
 
 **Which lines may be swapped comes from pairing the two parse trees, never from diffing their
 lines.** A line diff answers "which lines look different", which is the wrong question: it pairs
@@ -949,8 +966,9 @@ rewriting the call.
 **Impact.** Correctness: the contract is satisfied by construction rather than by agreement between
 two formatters. Simplicity: no second formatting path, no indentation reconstruction, no diff
 dependency. Performance: one extra format plus one extra parse per request, both linear, against an
-interactive action the user asked for. Incrementality: unaffected — the formatter is syntax-only and
-holds no analysis state.
+interactive action the user asked for (a second format when the file's step differs from
+`indent-width`). Incrementality: unaffected — the formatter is syntax-only and holds no analysis
+state.
 
 **The `--experimental-features` flag stays, and `range_formatting` stays a name it accepts.** Editor
 configurations pass the flag (VS Code forwards `ry.experimentalFeatures`; other editors put it in

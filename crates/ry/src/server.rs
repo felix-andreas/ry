@@ -866,17 +866,21 @@ impl Worker {
         let file = *self.files.get(&path)?;
         let text = self.text(file);
         let index = LineIndex::new(&text);
-        let selection = match range {
-            None => TextRange::up_to(TextSize::of(text.as_str())),
+        // The whole document is laid out at the configured indentation; a
+        // selection keeps the indentation the file already has, so it fits
+        // the unselected code around it.
+        let edits = match range {
+            None => format::format_edits(&text, self.config.format),
             // A client is not obliged to send the two ends in order, and an
             // inverted range would be a panic rather than a bad edit.
             Some(range) => {
                 let first = self.to_offset_with(&index, &text, range.start);
                 let second = self.to_offset_with(&index, &text, range.end);
-                TextRange::new(first.min(second), first.max(second))
+                let selection = TextRange::new(first.min(second), first.max(second));
+                format::format_range(&text, self.config.format, selection)
             }
         };
-        let edits = match format::format_range(&text, self.config.format, selection) {
+        let edits = match edits {
             Ok(edits) => edits,
             Err(error) => {
                 tracing::error!("formatting failed: {error:?}");

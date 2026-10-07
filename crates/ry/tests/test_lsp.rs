@@ -900,6 +900,52 @@ async fn range_formatting_keeps_the_documents_line_endings() {
     context.shutdown().await;
 }
 
+/// A selection is tidied where it sits: in a file indented by four spaces it
+/// keeps four, rather than moving to the configured width while the
+/// unselected lines beside it stay put.
+#[tokio::test]
+async fn range_formatting_keeps_the_documents_indentation() {
+    let mut context = setup_test(&[]).await;
+    let uri = context
+        .open("R/four.R", "f <- function(x) {\n    a<-1\n    b <- 2\n}\n")
+        .await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = range_edits(
+        &mut context,
+        &uri,
+        Range::new(Position::new(1, 6), Position::new(1, 6)),
+    )
+    .await
+    .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "    a <- 1\n");
+    context.shutdown().await;
+}
+
+/// Formatting the whole document is what re-indents a file to the
+/// configured width.
+#[tokio::test]
+async fn formatting_reindents_the_document_to_the_configured_width() {
+    let mut context = setup_test(&[]).await;
+    let uri = context
+        .open("R/four.R", "f <- function(x) {\n    a <- 1\n}\n")
+        .await;
+    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let edits = context
+        .server
+        .formatting(DocumentFormattingParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            options: FormattingOptions::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect("formatting failed")
+        .expect("expected formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "  a <- 1\n");
+    context.shutdown().await;
+}
+
 #[tokio::test]
 async fn formatting_only_replaces_the_lines_that_change() {
     let mut context = setup_test(&[]).await;

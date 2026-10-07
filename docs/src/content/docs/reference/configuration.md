@@ -52,7 +52,7 @@ The project root is a separate decision: it sets the analysis scope — which fi
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `indent-width` | integer | `2` | Spaces per indentation level, for `ry fmt` and for formatting in the editor. |
+| `indent-width` | integer | `2` | Spaces per indentation level, for `ry fmt` and for formatting a whole document in the editor. Formatting a selection keeps the indentation the file already uses, and falls back to this only for a file with no indented statement — see [formatting a selection](/reference/formatting-rules#formatting-a-selection). |
 | `line-ending` | `"auto"`, `"lf"`, `"cr-lf"` | `"auto"` | Line ending the formatter writes. `"auto"` keeps whatever the file already uses. |
 
 ## `[lint]`

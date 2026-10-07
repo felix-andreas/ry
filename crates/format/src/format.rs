@@ -60,6 +60,21 @@ impl std::fmt::Display for FormatError {
 impl std::error::Error for FormatError {}
 
 pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
+    layout(source, config, &" ".repeat(config.indent_width)).map(|layout| layout.text)
+}
+
+/// A formatted text, and where it placed each statement it laid out itself.
+struct Layout {
+    text: String,
+    /// Each statement and standalone comment that starts a line in the source
+    /// and that the formatter placed (not one inside a `# fmt: off` region or
+    /// exempted by `# fmt: skip`), as its source offset and the indentation
+    /// level it was placed at.
+    statement_levels: Vec<(TextSize, usize)>,
+}
+
+/// `source` formatted with `indent` as one level of indentation.
+fn layout(source: &str, config: Config, indent: &str) -> Result<Layout, FormatError> {
     let parse = syntax::parse(source);
     let root = parse.syntax_node();
     let line_starts = line_starts(source);
@@ -164,13 +179,17 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
             .filter(|error| error.in_annotation)
             .map(|error| error.range)
             .collect(),
-        indent: " ".repeat(config.indent_width),
+        indent: indent.to_owned(),
         line_ending,
         out: String::with_capacity(source.len() * 3 / 2),
         comment_end: None,
+        statement_levels: Vec::new(),
     };
     formatter.source_file(&root);
-    Ok(formatter.out)
+    Ok(Layout {
+        text: formatter.out,
+        statement_levels: formatter.statement_levels,
+    })
 }
 
 /// One replacement in a source text: the byte range to overwrite, and what to
@@ -181,9 +200,23 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
-/// The edits that lay out the lines `selection` touches exactly as whole-file
-/// formatting lays them out, leaving every other line of the file byte for
-/// byte as it was.
+/// The edits that carry `source` to its formatted form, each as small as the
+/// statements it changes allow — what an editor's "Format Document" applies,
+/// so that untouched lines keep their place rather than being rewritten.
+pub fn format_edits(source: &str, config: Config) -> Result<Vec<TextEdit>, FormatError> {
+    let formatted = format(source, config)?;
+    Ok(changed_spans(source, &formatted)
+        .into_iter()
+        .map(|(in_source, in_formatted)| TextEdit {
+            range: in_source,
+            new_text: formatted[in_formatted].to_owned(),
+        })
+        .collect())
+}
+
+/// The edits that lay out the lines `selection` touches exactly as formatting
+/// the whole file lays them out at the file's own indentation, leaving every
+/// other line of the file byte for byte as it was.
 ///
 /// The text put in is *cut out of* the whole file's formatted form rather than
 /// produced by formatting the selected text on its own, and that is what makes
@@ -191,6 +224,13 @@ pub struct TextEdit {
 /// about the slice's surroundings that decides its layout: the indentation
 /// depth it sits at, a `# fmt: off` region opened above it, a
 /// `# fmt: skip-file` header, and the line endings the rest of the file uses.
+///
+/// That whole-file form is indented by the step the file already uses
+/// ([`format_in_place`]), not by `indent-width`. A selection is a request to
+/// tidy some code where it sits: laid out at the configured width inside a
+/// file indented by four spaces or tabs, the selected lines would come out at
+/// a different depth from the unselected lines beside them. Re-indenting the
+/// file is what formatting the whole file is for.
 ///
 /// The selection widens to whole lines, and a statement is laid out as one
 /// unit, so a line just outside the selection can still change when it belongs
@@ -206,7 +246,7 @@ pub fn format_range(
     config: Config,
     selection: TextRange,
 ) -> Result<Vec<TextEdit>, FormatError> {
-    let formatted = format(source, config)?;
+    let formatted = format_in_place(source, config)?;
     let selected = selected_lines(source, selection);
     Ok(changed_spans(source, &formatted)
         .into_iter()
@@ -224,6 +264,51 @@ pub fn format_range(
             new_text: formatted[in_formatted].to_owned(),
         })
         .collect())
+}
+
+/// `source` formatted as a whole, but with one level of indentation being
+/// the step the file already uses rather than `indent-width` — what a
+/// formatted selection is cut from.
+///
+/// The step is read off the statements the formatter places: a statement it
+/// puts at level `n` and that the source indents by `n` copies of one string
+/// is a vote for that string, and the commonest wins (the first seen on a
+/// tie). Levels come from the file's structure, never from its indentation,
+/// so formatting part of the file cannot move a statement to another level;
+/// it can only re-indent statements by the winning step, which adds to its
+/// lead. That is what keeps formatting a selection from changing the step
+/// the rest of the file is then formatted with. A file with no indented
+/// statement to read has no step of its own and gets `indent-width`.
+fn format_in_place(source: &str, config: Config) -> Result<String, FormatError> {
+    let configured = " ".repeat(config.indent_width);
+    let configured_layout = layout(source, config, &configured)?;
+    let mut votes: Vec<(&str, usize)> = Vec::new();
+    for &(offset, level) in &configured_layout.statement_levels {
+        let Some(line_start) = indented_line_start(source, offset) else {
+            continue;
+        };
+        let indent = &source[usize::from(line_start)..usize::from(offset)];
+        if level == 0 || indent.is_empty() || !indent.len().is_multiple_of(level) {
+            continue;
+        }
+        let step = &indent[..indent.len() / level];
+        if step.repeat(level) != indent {
+            continue;
+        }
+        match votes.iter_mut().find(|(seen, _)| *seen == step) {
+            Some((_, count)) => *count += 1,
+            None => votes.push((step, 1)),
+        }
+    }
+    match votes
+        .into_iter()
+        .min_by_key(|&(_, count)| std::cmp::Reverse(count))
+    {
+        Some((step, _)) if step != configured => {
+            layout(source, config, step).map(|layout| layout.text)
+        }
+        _ => Ok(configured_layout.text),
+    }
 }
 
 /// `source` with `edits` applied — the document the editor ends up with.
@@ -492,6 +577,8 @@ struct Formatter<'a> {
     /// on the same line after a comment would become comment text, so the
     /// element walk forces a line break first (see `element`).
     comment_end: Option<usize>,
+    /// See [`Layout::statement_levels`].
+    statement_levels: Vec<(TextSize, usize)>,
 }
 
 impl Formatter<'_> {
@@ -956,6 +1043,10 @@ impl Formatter<'_> {
                 self.newlines_between(previous, element, level);
             }
 
+            if !trailing_comment && element.as_node().is_none_or(|node| !self.skip_exempt(node)) {
+                self.statement_levels
+                    .push((element.text_range().start(), level));
+            }
             self.element(element, level, false);
             previous = Some(element);
             first = false;
@@ -2477,18 +2568,22 @@ fn is_closer(kind: AnnotationTokenKind) -> bool {
 }
 
 /// The fuzz invariant battery for range formatting over one input, swept
-/// across a bounded, deterministic set of selections. The contract every
-/// selection must hold:
+/// across a bounded, deterministic set of selections. "In place" below is the
+/// whole file formatted at the indentation it already uses, which is what a
+/// selection is cut from. The contract every selection must hold:
 ///
 ///  1. determinism, and refusal exactly when whole-file formatting refuses;
 ///  2. geometry — edits are ordered, disjoint, whole lines, and in bounds;
 ///  3. preservation — applying them keeps every token, so no code is lost;
 ///  4. convergence — the applied document still formats to what the original
-///     formats to, which is the property that makes formatting a selection
-///     safe to do repeatedly and in any order;
-///  5. restriction — every edit is one the whole file's formatting would have
-///     made, so a selection can only ever do less, never something else;
-///  6. completeness — selecting the whole file reproduces whole-file
+///     formats to, both as a whole file and in place, which is the property
+///     that makes formatting a selection safe to do repeatedly and in any
+///     order;
+///  5. restriction — every edit is one formatting the whole file in place
+///     would have made, so a selection can only ever do less, never something
+///     else;
+///  6. completeness — selecting the whole file reproduces formatting it in
+///     place byte for byte, and the whole-document edits reproduce whole-file
 ///     formatting byte for byte;
 ///  7. stability — the region the edits produced is already laid out, so
 ///     formatting the same selection again is a no-op;
@@ -2496,14 +2591,23 @@ fn is_closer(kind: AnnotationTokenKind) -> bool {
 ///     lines make one at a time, so the result never depends on how a region
 ///     was selected;
 ///  9. composition — formatting one line at a time, top to bottom and swept
-///     until a sweep changes nothing, reaches whole-file formatting, and
-///     every step on the way still formats to it.
+///     until a sweep changes nothing, reaches formatting in place, and every
+///     step on the way still formats to it.
 ///
 /// Additivity and composition re-run range formatting per line, so they are
 /// checked on small inputs only, which is all a fuzzer generates.
 pub fn check_range_format_invariants(input: &str) {
     let config = Config::default();
     let whole_file = format(input, config);
+    let in_place = format_in_place(input, config);
+    if let Ok(formatted) = &whole_file {
+        let document = format_edits(input, config).expect("the file formats");
+        assert_eq!(
+            &apply_edits(input, &document),
+            formatted,
+            "the whole-document edits do not reproduce whole-file formatting for {input:?}"
+        );
+    }
     let length = TextSize::of(input);
     let everything = format_range(input, config, TextRange::up_to(length));
     for selection in probe_selections(input) {
@@ -2530,6 +2634,9 @@ pub fn check_range_format_invariants(input: &str) {
             (Ok(edits), Ok(_)) => edits,
         };
         let formatted = whole_file.as_ref().expect("checked above");
+        let in_place = in_place
+            .as_ref()
+            .expect("refuses exactly when formatting does");
         let everything = everything.as_ref().expect("checked above");
 
         for edit in &edits {
@@ -2541,7 +2648,7 @@ pub fn check_range_format_invariants(input: &str) {
             );
             assert!(
                 everything.contains(edit),
-                "edit {edit:?} is not one whole-file formatting would make in {input:?}"
+                "edit {edit:?} is not one formatting {input:?} in place would make"
             );
         }
         for pair in edits.windows(2) {
@@ -2570,10 +2677,15 @@ pub fn check_range_format_invariants(input: &str) {
             Ok(formatted),
             "range formatting {selection:?} changed what {input:?} formats to (result {result:?})"
         );
+        assert_eq!(
+            format_in_place(&result, config).as_ref(),
+            Ok(in_place),
+            "range formatting {selection:?} changed what {input:?} formats to in place (result {result:?})"
+        );
         if selection.start() == TextSize::new(0) && selection.end() >= length {
             assert_eq!(
-                &result, formatted,
-                "selecting the whole file did not reproduce whole-file formatting for {input:?}"
+                &result, in_place,
+                "selecting the whole file did not reproduce formatting {input:?} in place"
             );
         }
 
@@ -2605,7 +2717,7 @@ pub fn check_range_format_invariants(input: &str) {
         );
     }
 
-    let Ok(formatted) = &whole_file else {
+    let Ok(in_place) = &in_place else {
         return;
     };
     let starts = line_starts_of(input);
@@ -2642,9 +2754,9 @@ pub fn check_range_format_invariants(input: &str) {
         while let Some(&start) = line_starts_of(&document).get(line) {
             document = apply_edits(&document, &caret_edits(&document, start));
             assert_eq!(
-                format(&document, config).as_ref(),
-                Ok(formatted),
-                "formatting {input:?} line by line changed what it formats to at {document:?}"
+                format_in_place(&document, config).as_ref(),
+                Ok(in_place),
+                "formatting {input:?} line by line changed what it formats to in place at {document:?}"
             );
             line += 1;
         }
@@ -2653,8 +2765,8 @@ pub fn check_range_format_invariants(input: &str) {
         }
     }
     assert_eq!(
-        &document, formatted,
-        "formatting {input:?} line by line did not reach whole-file formatting"
+        &document, in_place,
+        "formatting {input:?} line by line did not reach formatting it in place"
     );
 }
 

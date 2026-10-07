@@ -275,18 +275,25 @@ gate.
 over one input — the whole file, bare carets, whole lines, several lines, part-line spans, and
 a range past the end — and is run from `crates/format/tests/test_format_range.rs` over every
 fixture case source in the repository and the mined legacy corpus, and from every generator arm
-of `test_fuzz.rs`. Per selection it asserts: determinism, and refusal exactly when whole-file
-formatting refuses; edits ordered, disjoint, whole lines and in bounds; that applying them keeps
-every token; that the applied document still formats to what the original formats to; that every
-edit is one whole-file formatting would have made; that selecting the whole file reproduces
-whole-file formatting byte for byte; and that the region the edits produced is already laid out,
-so a second pass over it is a no-op. On inputs of at most 24 lines it then asserts two
+of `test_fuzz.rs`. Its reference is the file formatted **in place** — as a whole, but at the
+indentation step the file already uses, which is what a selection is cut from. Per selection it
+asserts: determinism, and refusal exactly when whole-file formatting refuses; edits ordered,
+disjoint, whole lines and in bounds; that applying them keeps every token; that the applied document
+still formats to what the original formats to, both as a whole file and in place; that every edit
+is one formatting in place would have made; that selecting the whole file reproduces formatting in
+place byte for byte; and that the region the edits produced is already laid out, so a second pass
+over it is a no-op. Once per input it checks that the whole-document edits (`format_edits`)
+reproduce `ry fmt`'s output byte for byte. On inputs of at most 24 lines it then asserts two
 whole-input properties: **additivity** — every span of whole lines makes exactly the union of the
 edits its lines make one at a time — and **composition** — formatting one line at a time, top to
-bottom and swept until a sweep changes nothing, reaches whole-file formatting with every
-intermediate document still formatting to it. `test_format_range.rs` also checks every byte-pair
-selection of a few short sources (mid-character, CRLF, lone `\r`, past the end) against an oracle
-that finds the touched lines itself.
+bottom and swept until a sweep changes nothing, reaches formatting in place with every
+intermediate document still formatting to it. Composition is also what proves the indentation step
+is stable: formatting part of a file must never change the step the rest of it is formatted with.
+`test_format_range.rs` also checks every byte-pair selection of a few short sources (mid-character,
+CRLF, lone `\r`, past the end) against an oracle that finds the touched lines itself, and runs the
+battery over a sample of the indented fixture sources re-indented by four spaces, by tabs, and by a
+mix of steps — the fixtures are written at the default step, so on their own they never exercise
+any other.
 
 Convergence and restriction are the load-bearing per-selection checks: they caught a span cut
 where two lines merely looked alike (an annotation block lost its closing `#: }`) and a span that
@@ -294,7 +301,10 @@ flipped a call's hug decision by splicing one formatted argument into it. Compos
 sharpest whole-file check the formatter has, because each step re-formats a document the
 formatter itself produced partway: it surfaced auto line-ending detection that read the leading
 blank lines formatting deletes, comments glued onto `::`, and two `#:` blocks merged when the `;`
-between them was dropped — all whole-file idempotence bugs no fixture had reached.
+between them was dropped — all whole-file idempotence bugs no fixture had reached. It also
+rejected the first way the indentation step was read (from blocks whose `{` opens on a statement's
+first line): formatting can move such a `{` to a line of its own, and the step then changed
+halfway through a file.
 
 ### The lint fixture suites
 
@@ -324,13 +334,13 @@ diagnostic refresh on save and config change, the config matrix (live reload, an
 configs, failure keeps the previous config, the config-file diagnostic), every feature
 endpoint including UTF-16/UTF-8 range correctness with BMP and non-BMP content and
 out-of-bounds safety, semantic tokens for `#:` bodies, and `.Rtypes`/NAMESPACE buffer serving.
-Formatting is covered on both requests, because they are one code path over different ranges:
-whole-document formatting replacing only the lines that change and making no edits at all on an
-already formatted file, and range formatting over a statement, a bare caret, a whole-line
-selection that stops at the next line's first column, a range sent end first, a statement nested
-inside a function, a `# fmt: off` region inside the selection, lines already laid out, a file
-that does not parse, a range past the end of the document, UTF-16 columns over non-BMP text, and
-a CRLF document.
+Formatting is covered on both requests: whole-document formatting replacing only the lines that
+change, making no edits at all on an already formatted file, and re-indenting a four-space file to
+the configured width; and range formatting over a statement, a bare caret, a whole-line selection
+that stops at the next line's first column, a range sent end first, a statement nested inside a
+function, a `# fmt: off` region inside the selection, lines already laid out, a file that does not
+parse, a range past the end of the document, UTF-16 columns over non-BMP text, a CRLF document,
+and a four-space document whose indentation it keeps.
 
 The cancelled-pull test is deterministic through a fault-injection seam: with the
 `RY_TEST_DELAY_PULL_MS` environment variable set, the server announces each diagnostics pull

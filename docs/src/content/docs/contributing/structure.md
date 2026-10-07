@@ -65,7 +65,8 @@ actions, document/workspace symbols, annotation-type and S4 navigation.
 
 The preserving formatter over the syntax tree, plus its configuration types and
 `format_range`, which turns a selection into the edits that lay out its lines
-the way formatting the whole file would.
+the way formatting the whole file would at the file's own indentation, and
+`format_edits`, the minimal edits for formatting the whole document.
 
 ## `ry` crate (`src/ry.rs` is the root)
 

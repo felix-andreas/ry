@@ -29,6 +29,43 @@ fn legacy_corpus_holds_range_invariants() {
     }
 }
 
+/// The same sources re-indented the ways real files are — four spaces, tabs,
+/// and a mix of steps that leaves the commonest one to decide — because a
+/// selection is laid out at the step the file already uses, and the battery's
+/// convergence and composition checks are what prove that step stays put
+/// while a file is formatted piece by piece. The fixtures are written at the
+/// default step, so on their own they never exercise any other.
+#[test]
+fn reindented_sources_hold_range_invariants() {
+    let reindent = |source: &str, step: &dyn Fn(usize) -> &'static str| -> String {
+        source
+            .split_inclusive('\n')
+            .enumerate()
+            .map(|(index, line)| {
+                let content = line.trim_start_matches(' ');
+                let levels = (line.len() - content.len()) / 2;
+                format!("{}{content}", step(index).repeat(levels))
+            })
+            .collect()
+    };
+    let steps: [&dyn Fn(usize) -> &'static str; 3] = [&|_| "    ", &|_| "\t", &|index| {
+        if index % 3 == 0 { "  " } else { "   " }
+    }];
+    let indented = syntax::testing::fixture_case_sources()
+        .into_iter()
+        .filter(|(_, source)| source.lines().any(|line| line.starts_with("  ")));
+    for (id, source) in indented.step_by(5) {
+        for step in steps {
+            let variant = reindent(&source, step);
+            std::panic::catch_unwind(|| check_invariants(&variant)).unwrap_or_else(|_| {
+                panic!(
+                    "fixture case `{id}` re-indented as {variant:?} broke a range-format invariant"
+                )
+            });
+        }
+    }
+}
+
 /// The edits for the line `caret` sits on.
 fn edits_at(source: &str, caret: usize) -> Vec<TextEdit> {
     format_range(

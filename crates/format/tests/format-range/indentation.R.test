@@ -1,0 +1,194 @@
+#==== indentation
+#---- a_line_keeps_the_four_space_depth_of_its_neighbours
+f <- function(x) {
+    a<-1$0
+    b <- 2
+}
+#++++
+edit 2:1-3:1
+----
+f <- function(x) {
+«    a <- 1»
+    b <- 2
+}
+
+#---- an_already_formatted_line_needs_no_edit
+f <- function(x) {
+    a <- 1
+    b <- 2$0
+}
+#++++
+no edits
+
+#---- a_nested_block_keeps_its_depth
+f <- function(x) {
+    if (x) {
+        y<-1$0
+        z <- 2
+    }
+}
+#++++
+edit 3:1-4:1
+----
+f <- function(x) {
+    if (x) {
+«        y <- 1»
+        z <- 2
+    }
+}
+
+#---- call_arguments_are_indented_by_the_files_step
+f <- function(x) {
+    g(a,$0
+      b)
+    h(1)
+}
+#++++
+edit 2:1-4:1
+----
+f <- function(x) {
+«    g(
+        a,
+        b
+    )»
+    h(1)
+}
+
+#---- a_whole_body_selection_keeps_its_depth
+f <- function(x) {
+$0    a<-1
+    b<-2
+$0}
+#++++
+edit 2:1-3:1
+edit 3:1-4:1
+----
+f <- function(x) {
+«    a <- 1»
+«    b <- 2»
+}
+
+#---- a_tab_indented_call_is_laid_out_with_tabs
+f <- function(x) {
+	if (x) {
+		g(a,$0
+		  b)
+	}
+}
+#++++
+edit 3:1-5:1
+----
+f <- function(x) {
+	if (x) {
+«		g(
+			a,
+			b
+		)»
+	}
+}
+
+#---- a_misindented_line_moves_to_the_files_depth
+f <- function(x) {
+    a <- 1
+b<-2$0
+    c <- 3
+}
+#++++
+edit 3:1-4:1
+----
+f <- function(x) {
+    a <- 1
+«    b <- 2»
+    c <- 3
+}
+
+#---- a_top_level_call_uses_the_files_step
+f <- function(x) {
+    x
+}
+foo(a,$0
+b)
+#++++
+edit 4:1-6:1
+----
+f <- function(x) {
+    x
+}
+«foo(
+    a,
+    b
+)»
+
+#---- a_file_with_no_indented_statement_uses_indent_width
+foo(a,$0
+b)
+#++++
+edit 1:1-3:1
+----
+«foo(
+  a,
+  b
+)»
+
+#---- the_commonest_step_wins
+f <- function(x) {
+    a <- 1
+    b <- 2
+}
+g <- function(x) {
+  c<-3$0
+}
+#++++
+edit 6:1-7:1
+----
+f <- function(x) {
+    a <- 1
+    b <- 2
+}
+g <- function(x) {
+«    c <- 3»
+}
+
+#---- a_fmt_off_region_does_not_vote
+# fmt: off
+f <- function(x) {
+  a <- 1
+  b <- 2
+  c <- 3
+}
+# fmt: on
+g <- function(x) {
+    d<-4$0
+}
+#++++
+edit 9:1-10:1
+----
+# fmt: off
+f <- function(x) {
+  a <- 1
+  b <- 2
+  c <- 3
+}
+# fmt: on
+g <- function(x) {
+«    d <- 4»
+}
+
+#---- selecting_the_whole_file_keeps_its_indentation
+f<-function(x){
+    a<-1
+    if (a) {
+        b<-2
+    }
+}
+#++++
+edit 1:1-2:1
+edit 2:1-3:1
+edit 4:1-5:1
+----
+«f <- function(x) {»
+«    a <- 1»
+    if (a) {
+«        b <- 2»
+    }
+}

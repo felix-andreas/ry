@@ -101,7 +101,7 @@ after<-1
 #++++
 no edits
 
-#---- tab_indentation
+#---- tab_indentation_is_kept
 f<-function(){
 	a<-1
 	b$0<-2
@@ -111,7 +111,7 @@ edit 3:1-4:1
 ----
 f<-function(){
 	a<-1
-«  b <- 2»
+«	b <- 2»
 }
 
 #---- a_deeply_nested_chain
