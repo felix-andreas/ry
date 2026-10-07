@@ -11,7 +11,7 @@ ry aims to support the following language server features (some are experimental
 
 - **Formatting**
   - Format entire document
-  - Format selected code range *(🧪 experimental)*
+  - Format selected code range
 
 - **Navigation**
   - Index global variables, S4 and R6 classes/methods
@@ -54,8 +54,9 @@ You can customize the ry extension in VS Code through the following settings:
   "ry.path": "/path/to/ry",
   // Pass custom arguments; defaults to ["server"]
   "ry.args": ["server", "--verbose"],
-  // Enable experimental features
-  "ry.experimentalFeatures": ["rename", "range_formatting"],
+  // Enable experimental features (none is experimental right now; a name
+  // that is not one is ignored with a warning)
+  "ry.experimentalFeatures": [],
 }
 ```
 

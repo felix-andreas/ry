@@ -52,7 +52,7 @@ The project root is a separate decision: it sets the analysis scope — which fi
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `indent-width` | integer | `2` | Spaces per indentation level, for `ry fmt` and for formatting in the editor. |
+| `indent-width` | integer | `2` | Spaces per indentation level, for `ry fmt` and for formatting a whole document in the editor. Formatting a selection keeps the indentation the file already uses, and falls back to this only for a file with no indented statement — see [formatting a selection](/reference/formatting-rules#formatting-a-selection). |
 | `line-ending` | `"auto"`, `"lf"`, `"cr-lf"` | `"auto"` | Line ending the formatter writes. `"auto"` keeps whatever the file already uses. |
 
 ## `[lint]`
@@ -180,7 +180,7 @@ These say where the binary is and how to launch it; none of them changes analysi
 | --- | --- | --- |
 | `ry.path` | `null` | Location of the `ry` executable. |
 | `ry.args` | `null`, meaning `["server"]` | Arguments passed to the executable. |
-| `ry.experimentalFeatures` | `null` | Feature names forwarded as `--experimental-features`. Currently only `range_formatting` — format the selected range instead of the whole file. |
+| `ry.experimentalFeatures` | `null` | Feature names forwarded as `--experimental-features`. No feature is experimental right now — range formatting is always on — so a listed name is ignored with a warning in the server log. |
 
 Changing any of the three prompts you to restart the server; it takes effect only then. The extension finds the binary in this order: the `SERVER_PATH` environment variable, `ry.path`, its own bundled copy, then `ry` on your `PATH`.
 

@@ -22,7 +22,8 @@ use salsa::Setter as _;
 use semantics::diagnostics::TypeRenderer;
 use semantics::diagnostics::file_diagnostics;
 use semantics::{
-    DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_spans,
+    DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, item_annotation_syntax,
+    item_check, item_spans,
 };
 use std::fmt::Write as _;
 
@@ -117,25 +118,16 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
         };
         // An item already carrying an annotation is not a rendering the checker
         // chose — it is the user's text echoed back — and inserting a second
-        // block above it stacks two annotations on one definition.
-        let start = usize::from(span.range.start());
-        let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
-        if already_annotated(text, line_start) {
+        // block above it stacks two annotations on one definition. Asked of the
+        // checker's own attachment rule, because an attached annotation need
+        // not sit on the comment lines above (it can follow a `;`).
+        if item_annotation_syntax(db, item).is_some() {
             continue;
         }
+        let start = usize::from(span.range.start());
+        let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
         let mut renderer = TypeRenderer::default();
         schemes.push((name, renderer.render_scheme(db, &scheme), line_start));
     }
     schemes
-}
-
-/// Whether the run of comment lines immediately above `line_start` holds a `#:`
-/// block. A block may be several lines (`@forall` / `@param` / `@return`), and
-/// ordinary comments may be interleaved, so the whole contiguous run counts.
-fn already_annotated(text: &str, line_start: usize) -> bool {
-    text[..line_start]
-        .lines()
-        .rev()
-        .take_while(|line| line.trim_start().starts_with('#'))
-        .any(|line| line.trim_start().starts_with("#:"))
 }

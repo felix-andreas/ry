@@ -67,8 +67,9 @@ pub fn fixture_case_sources() -> Vec<(String, String)> {
 
 /// Every fixture suite in the workspace, workspace-relative under `crates/`.
 /// A suite missing from this list runs its own expectations and nothing else.
-const FIXTURE_SUITES: [&str; 13] = [
+const FIXTURE_SUITES: [&str; 14] = [
     "format/tests/format",
+    "format/tests/format-range",
     "ide/tests/ide",
     "semantics/tests/lints",
     "semantics/tests/lints-style",

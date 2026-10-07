@@ -156,3 +156,46 @@ error: expected `]` after the optional parameter name
  --> 1:9
   | #: fn([x: integer) -> integer
   |         ^
+
+#---- string_crossing_the_annotations_line_break
+#: lc("ab
+x <- 1
+#++++
+error: unclosed `(` in this type; expected a matching `)`
+ --> 1:6
+  | #: lc("ab
+  |      ^
+error: unterminated string; expected a closing quote
+ --> 1:7
+  | #: lc("ab
+  |       ^^^
+error: expected a type, found string
+ --> 1:7
+  | #: lc("ab
+  |       ^^^
+
+#---- raw_string_crossing_the_annotations_line_break
+#: lc(r"(ab
+x <- 1
+#++++
+error: unclosed `(` in this type; expected a matching `)`
+ --> 1:6
+  | #: lc(r"(ab
+  |      ^
+error: unterminated raw string; expected `)"`
+ --> 1:7
+  | #: lc(r"(ab
+  |       ^^^^^
+error: expected a type, found raw string
+ --> 1:7
+  | #: lc(r"(ab
+  |       ^^^^^
+
+#---- backtick_name_crossing_the_annotations_line_break
+#: `ab
+x <- 1
+#++++
+error: unterminated backtick name; expected a closing `` ` ``
+ --> 1:4
+  | #: `ab
+  |    ^^^

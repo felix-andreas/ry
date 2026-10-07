@@ -909,6 +909,75 @@ Impact: correctness — the corpus differential reaches 1,523/1,523 with one adj
 
 **Impact.** One number per artifact with one owner each; a Zed release no longer implies a CLI release or vice versa. The recurring "align the stale zed extension version" commit has no reason to exist.
 
+# Decision record: range formatting is cut out of the whole file's formatted form
+
+**Status:** decided and implemented (agent-owned decision under the delegated ownership mandate).
+
+**Previous shape.** The language server formatted a *slice* of the document: it snapped the
+selection outwards to whole top-level statements, cut that text out, and ran the formatter on it
+alone. Four facts live outside a slice and decide its layout, so all four were lost — the
+indentation depth it sits at, a `# fmt: off` region opened above it, a `# fmt: skip-file` header,
+and the line endings the rest of the file uses. There was no second source of truth to disagree
+with, because nothing checked the slice against what the whole file would have produced; the
+feature shipped behind an experimental flag and had two tests.
+
+**Chosen shape.** `format::format_range(source, config, selection)` formats the **whole file** and
+returns the edits that carry the selected lines to what that run produced, leaving every other line
+byte for byte as it was. Whole-document formatting (`format_edits`) cuts its edits out of the same
+kind of run by the same pairing, so both requests return minimal edits (an editor keeps the cursor,
+the folds and the scroll position). The two runs differ in one input only: the indentation step.
+
+**A selection is formatted at the file's own indentation step, not at `indent-width`.** Cut out of a
+run at the configured width, a selected line in a file indented by four spaces or tabs came out at a
+different depth from the unselected lines beside it — the one thing a selection must never do. The
+step is inferred, and the inference has to survive the selection being applied, or formatting part
+of a file would change how the rest of it formats (the battery's composition check). It is read
+from where the formatter *places* statements: `Layout::statement_levels` records each statement's
+level, a statement at level `n` indented by `n` copies of one string votes for that string, and the
+commonest wins; a file with no vote gets `indent-width`. Levels come from structure alone, so a
+range edit can only re-indent statements to the winner. Reading the step off blocks whose `{` opens
+on a statement's first line was tried first and failed composition: formatting can move that `{` to
+its own line, and the vote disappears. Considered and rejected: rebasing each cut span onto its
+neighbours' indentation (Prettier/clang-format style). Inner lines then follow `indent-width` while
+statement starts follow the file, so a four-space file grows two-space call arguments, and every
+verbatim line (string contents, `# fmt: off`, `# fmt: skip` columns) would need separate tracking
+so it is never moved; formatting at the inferred step gets all of that from the formatter itself.
+Whole-document formatting and `ry fmt` keep `indent-width`: re-indenting a file is what they are for.
+
+**Which lines may be swapped comes from pairing the two parse trees, never from diffing their
+lines.** A line diff answers "which lines look different", which is the wrong question: it pairs
+lines that merely read alike, and a span cut that way can be text the formatter would never produce
+for any input — the first implementation deleted an annotation block's closing `#: }` because an
+identical `#: }` sat a line above. The walk descends the two trees together and stops wherever their
+shapes diverge, so a span always holds whole constructs on both sides; a structural rewrite (bracing
+a bare `if` body wraps it in a node the source has no counterpart for) stops the walk at the `if`,
+and the difference belongs to the `if` as a whole, which is the only way to describe it.
+
+**Statements are the unit, and that is forced, not chosen.** This formatter decides how to break a
+call from that call's *own* line structure, so swapping a formatted argument into a half-formatted
+call can flip the decision for the whole call and produce a third text. Statements have no such
+coupling — each starts its own line at a fixed indent and nothing above it decides how it breaks —
+which is the same property the feature rests on. They nest, so selecting one line of a long function
+still rewrites only that line's statement, and a comment standing between statements is a unit of
+its own. Within one span, leading and trailing lines that are already identical are trimmed off,
+which is exact (the same swap, narrower) and is what keeps a one-space fix inside a long call from
+rewriting the call.
+
+**Impact.** Correctness: the contract is satisfied by construction rather than by agreement between
+two formatters. Simplicity: no second formatting path, no indentation reconstruction, no diff
+dependency. Performance: one extra format plus one extra parse per request, both linear, against an
+interactive action the user asked for (a second format when the file's step differs from
+`indent-width`). Incrementality: unaffected — the formatter is syntax-only and holds no analysis
+state.
+
+**The `--experimental-features` flag stays, and `range_formatting` stays a name it accepts.** Editor
+configurations pass the flag (VS Code forwards `ry.experimentalFeatures`; other editors put it in
+the server's arguments), so removing it is a clap usage error and the language server does not
+start. A graduated name is ignored with a warning saying the feature is always on; an unknown name
+is ignored with a warning, as before; neither is ever an error. Only the server-side gating went:
+no feature is experimental, so no feature set is threaded into the server — the next experimental
+feature adds that back with its first reader.
+
 # Decision record: one source of truth for where an item spells its name
 
 **Status:** decided and implemented.
