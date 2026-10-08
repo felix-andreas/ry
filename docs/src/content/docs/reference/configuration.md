@@ -38,7 +38,8 @@ that file, and `# typing: strict` does imply type errors.
 
 ry walks up from the file you check, or from the editor's workspace folder, and uses the first
 `ry.toml` it finds. Nothing is merged, and there is no home-directory file or environment variable.
-The language server reloads the file when it changes. A `roughly.toml` from before the rename is still read.
+The language server reloads the file when it changes. A `roughly.toml` from before the rename is
+still read.
 
 The project root is a separate question: it decides which files see each other's definitions. It is
 the nearest directory with a `ry.toml` or a `DESCRIPTION`. Without one, it is the directory you

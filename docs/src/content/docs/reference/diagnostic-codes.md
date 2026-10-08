@@ -103,13 +103,14 @@ reported although it is safe.
 **`naming-style`** (warning), with `[lint] naming-style = "snake_case"` or `"camelCase"`: a variable
 or parameter in the other style. `SCREAMING_SNAKE_CASE` always conforms.
 
-**`unused-parameter`** (off by default): a parameter the body never reads. S3 generics and methods are exempt,
-because the generic dictates their parameters.
+**`unused-parameter`** (off by default): a parameter the body never reads. S3 generics and methods
+are exempt, because the generic dictates their parameters.
 
-**`unused-import`** (off by default): an `importFrom` in `NAMESPACE` whose name your code never mentions. Only
-`ry check` reports it.
+**`unused-import`** (off by default): an `importFrom` in `NAMESPACE` whose name your code never
+mentions. Only `ry check` reports it.
 
-**`shadows-builtin`** and **`shadows-namespace`** (off by default): a top-level name that hides a function from
-`base`, or from another package, such as defining your own `filter` while `stats::filter` exists.
+**`shadows-builtin`** and **`shadows-namespace`** (off by default): a top-level name that hides a
+function from `base`, or from another package, such as defining your own `filter` while
+`stats::filter` exists.
 
 These four take a level in `[lint]`, such as `"warn"` or `"error"`.

@@ -15,18 +15,18 @@ query   : fn(session: Session, sql: character) -> Any
 ```
 
 Put it under `stubs/` in your project, named after the package. ry now types `connect()`, reports
-`dbclient::conect` as a name the package does not export, and accepts `Session` in annotations.
-A `@type` in a stub has no shape, so callers can pass a `Session` around, and reading a field from
-it gives `Unknown`, because the stub says nothing about its structure. Declare only what you call, because a
-name you leave out is reported wherever you use it, which tells you what to add next.
+`dbclient::conect` as a name the package does not export, and accepts `Session` in annotations. A
+`@type` in a stub has no shape, so callers can pass a `Session` around, and reading a field from it
+gives `Unknown`, because the stub says nothing about its structure. Declare only what you call,
+because a name you leave out is reported wherever you use it, which tells you what to add next.
 
 ## Why an unknown package matters
 
-Without a stub, attaching a package with `library()` means that any bare name in the project might be
-one of its exports. ry cannot tell a typo from an export it has never heard of, so it stops reporting
-unresolved names across the whole project. Only a near miss of a name your own project defines
-(`repositry` next to a `repository` parameter) is still reported, and
-[strict mode](/type-checking/tour#unknown-and-strict-mode) lists every name that got through. Any stub for
+Without a stub, attaching a package with `library()` means that any bare name in the project might
+be one of its exports. ry cannot tell a typo from an export it has never heard of, so it stops
+reporting unresolved names across the whole project. Only a near miss of a name your own project
+defines (`repositry` next to a `repository` parameter) is still reported, and [strict
+mode](/type-checking/tour#unknown-and-strict-mode) lists every name that got through. Any stub for
 the package, even an empty file, turns the check back on.
 
 ## What ships

@@ -298,11 +298,11 @@ x strict mode: this expression has an undetermined type (`Unknown`)
 ```
 
 `Any` is also compatible with everything, but a value declared `Any`, such as the result of a
-function declared `-> Any`, is a deliberate choice, so strict mode ignores it. (A call that falls back
-to a stub's catch-all `Any` overload, such as `sum(x)` on an unannotated `x`, is still reported.) Calls to S3 generics
-that dispatch through `UseMethod()` return `Any` and are not reported either. Strict mode does not
-yet report R6 objects or bare names from packages ry knows only by name, and it wrongly reports a
-`stop()` guard such as the one in `money()` above.
+function declared `-> Any`, is a deliberate choice, so strict mode ignores it. (A call that falls
+back to a stub's catch-all `Any` overload, such as `sum(x)` on an unannotated `x`, is still
+reported.) Calls to S3 generics that dispatch through `UseMethod()` return `Any` and are not
+reported either. Strict mode does not yet report R6 objects or bare names from packages ry knows
+only by name, and it wrongly reports a `stop()` guard such as the one in `money()` above.
 
 A plain `#:` annotation gives an `Unknown` value a type, and every later use is checked against it.
 `#: @if-unknown TYPE` does the same, but becomes an error once ry can infer the value's type, so it
@@ -366,9 +366,9 @@ cannot fall outside the block it belongs to. The only settings are indent width 
 ## Editors
 
 `ry server` provides hover with inferred types, completion (including record fields), go-to
-definition, references, rename, signature help, inlay hints, and formatting in any LSP editor. Rename edits the
-binding you picked and nothing else: a local `total`, a global `total`, and the word "total" in a
-string are three different things.
+definition, references, rename, signature help, inlay hints, and formatting in any LSP editor.
+Rename edits the binding you picked and nothing else: a local `total`, a global `total`, and the
+word "total" in a string are three different things.
 
 ## The console
 
