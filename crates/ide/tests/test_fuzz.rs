@@ -1,16 +1,16 @@
 //! IDE fuzz harness, per the pipeline-wide doctrine. On every input each
-//! feature runs at a sample of byte offsets — every token boundary plus a
-//! coarse stride, so off-boundary and mid-character positions are still
-//! covered — and at each one must not panic and must keep every range it
-//! produces inside the text that range indexes. Hover is additionally checked
+//! feature runs at a sample of byte offsets, which is every token boundary
+//! plus a coarse stride, so an off-boundary position and a mid-character
+//! position stay covered. At each offset a feature must not panic, and it must
+//! keep every range it produces inside the text that range indexes. Hover is additionally checked
 //! for determinism within one database.
 //!
 //! None of these features is memoized, so a second call for its own sake costs
 //! as much as the first; the budget goes on offsets and inputs instead, and the
 //! range checks are free once a result is in hand.
 //!
-//! `FUZZ_ITERS` scales the mutation budget (default 300 — every iteration
-//! sweeps a whole input, so inputs stay small).
+//! `FUZZ_ITERS` scales the mutation budget, and the default is 300. Every
+//! iteration sweeps a whole input, so the inputs stay small.
 
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use syntax::TextSize;
@@ -152,9 +152,10 @@ fn sweep(source: &str) {
             }
         }
 
-        // Completion costs about 80% of this harness on its own — three orders
-        // of magnitude more per call than any other feature here — and asserts
-        // the least of any of them: that a label is not empty. What it offers
+        // Completion costs about 80% of this harness on its own, which is
+        // three orders of magnitude more per call than any other feature here.
+        // It also asserts the least of any of them, namely that a label is not
+        // empty. What it offers
         // is decided by the syntactic context (after a `$`, inside an
         // identifier, at the start of a statement), not by the exact byte, so
         // sweeping every offset re-derives the same candidate set over and
@@ -202,9 +203,9 @@ fn sweep(source: &str) {
 /// Token boundaries plus a coarse stride over the rest. The boundaries are where
 /// the interesting position decisions happen (end-inclusive containment, the
 /// item-end touch) and the stride keeps the off-boundary and mid-character cases
-/// that have found real panics — while not paying for every byte, which is what
-/// made this the most expensive test in the repository: the per-call work is over
-/// the shipped stub corpus, so it barely varies with file size.
+/// that have found real panics. It does not pay for every byte, which is what
+/// made this the most expensive test in the repository. The per-call work is
+/// over the shipped stub corpus, so it barely varies with file size.
 fn sample_offsets(source: &str) -> Vec<usize> {
     const STRIDE: usize = 7;
     let mut offsets: Vec<usize> = token_boundaries(source)
@@ -219,8 +220,8 @@ fn sample_offsets(source: &str) -> Vec<usize> {
     offsets
 }
 
-/// The start of the file and the end of every token — the positions where what
-/// a feature should answer actually changes.
+/// The start of the file and the end of every token. These are the positions
+/// where what a feature should answer actually changes.
 fn token_boundaries(source: &str) -> std::collections::BTreeSet<TextSize> {
     let mut offsets = std::collections::BTreeSet::from([TextSize::from(0)]);
     let mut at = 0usize;
@@ -232,9 +233,9 @@ fn token_boundaries(source: &str) -> std::collections::BTreeSet<TextSize> {
 }
 
 /// One offset per completion context, where the context is the kind of token
-/// the cursor sits in or after — the thing that decides what may be offered
-/// (a field after `$`, an export after `::`, a binding at the head of a
-/// statement). Completing after the `$` of `a$b` and after the `$` of `c$d`
+/// the cursor sits in or after. The context is what decides what may be
+/// offered: a field after `$`, an export after `::`, or a binding at the head
+/// of a statement. Completing after the `$` of `a$b` and after the `$` of `c$d`
 /// asks the same question of the same file, so the second call only pays to
 /// re-derive a candidate list the first already checked. The two structural
 /// edges are always kept.
@@ -271,8 +272,8 @@ fn name_at(source: &str, offset: TextSize) -> Option<&str> {
 
 /// Containment says a range is *somewhere* in the file; this says it is on the
 /// right thing. Every edit a rename hands the editor, and every range navigation
-/// points at, must spell the name the cursor was on — a set of ranges shifted
-/// by one byte is in bounds, self-consistent, and silently destroys code.
+/// points at, must spell the name the cursor was on. A set of ranges shifted by
+/// one byte is in bounds, is self-consistent, and silently destroys code.
 ///
 /// Backtick spelling is normalized because `` `x` `` and `x` name the same
 /// binding and a feature may report either form.
@@ -316,7 +317,7 @@ fn definition_range(
 }
 
 /// Every range a feature returns goes straight to the editor, so it must lie
-/// inside the file it names — a stale or out-of-bounds range is a client-side
+/// inside the file it names. A stale or out-of-bounds range is a client-side
 /// error at best and a lost edit at worst.
 fn check_range(db: &RootDatabase, file: SourceFile, range: syntax::TextRange, what: &str) {
     let length = file.text(db).len();

@@ -1,9 +1,9 @@
 //! The VS Code extension ships the CLI binary, so its manifest version is
-//! derived from the workspace `Cargo.toml` — verbatim except for the prerelease
-//! suffix, which is stripped because that manifest's version has to be a plain
-//! `major.minor.patch`. The derivation is mechanical, so a mismatch is always a
-//! stale file rather than a judgement call — and the failure message says what
-//! to write.
+//! derived from the workspace `Cargo.toml`. It is verbatim except for the
+//! prerelease suffix, which is stripped because that manifest's version has to
+//! be a plain `major.minor.patch`. The derivation is mechanical, so a mismatch
+//! is always a stale file rather than a judgement call, and the failure message
+//! says what to write.
 //!
 //! The Zed manifest is deliberately absent here: that extension only locates an
 //! already-installed binary, so it versions on its own changes, not on releases.

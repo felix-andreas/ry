@@ -1,92 +1,50 @@
 ---
 title: Getting started
-description: What ry is, what it finds on your first run, and where to install it
+description: Install ry and run it on a project
 ---
 
-ry is a toolchain for R, written in Rust. It is four tools in one binary:
-
-1. **A language server** — hover, completion, go-to-definition, references, rename, and inlay hints,
-   in any editor that supports LSP.
-2. **A formatter** — a single consistent style; no configuration beyond indent width and line
-   endings.
-3. **An R console** — a REPL with project-aware completion.
-4. **A type checker** — optional; its inferred types also power the editor features.
-
-It requires no changes to your code, and the same binary runs in your editor and in CI.
+ry is a language server, checker, formatter, and console for R, written in Rust. It works on the code
+you already have, with nothing to annotate or configure first.
 
 ## Install
 
-Roughly can be used either as a standalone command-line tool or as an extension in supported editors like VS Code:
+- **VS Code:** install the
+  [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry), which bundles
+  the binary for Linux x86_64, macOS on Apple silicon, and Windows x86_64.
+- **Command line:** download
+  [0.3.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.1-beta), or build it with
+  `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
+- **Zed, RStudio, other platforms:** see [installation](/installation).
 
-- **CLI:** Download a [prebuilt binary](https://github.com/felix-andreas/ry/releases)
-- **VS Code Extension:** Install from [marketplace](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly)
-- **Zed Extension**: Install manually [from here](https://github.com/felix-andreas/ry/tree/main/editors/zed)
+## Run it
 
-For detailed instructions or other installation methods (e.g. for RStudio or building from source) see the [installation page](/installation).
+In a project directory:
 
-## Your first run
-
-No configuration, no annotations:
-
-```bash
+```sh
 ry check
-```
-
-```r
-apply_discount <- function(price, rate) {
-  price * ratee
-}
-
-apply_discount(100, 0.2)
 ```
 
 ```text
 unresolved
 
   ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
-   --[discount.R:2:11]
+   --[R/discount.R:2:11]
  1 | apply_discount <- function(price, rate) {
  2 |   price * ratee
    |           ^^^^^
- 3 | }
-
-1 problem in 1 file
 ```
 
-One transposed letter, found without running anything. R reports the same mistake only when
-execution reaches that line.
-
-## Now turn on the type checker
-
-Fix the typo and make a different mistake — one no linter can catch, because catching it requires
-knowing what a value *is*:
+Files under `R/` are read as a package and share one namespace, as R loads them. Every other file is
+a script, read from top to bottom, that can use the package's functions. To also report type errors,
+add a `ry.toml`:
 
 ```toml
-# ry.toml
 [check]
 typing = true
 ```
 
-```r
-apply_discount(100, "0.2")
-```
-
-```text
-type-mismatch
-
-  x expected `double`, found `character`
-   --[discount.R:5:21]
- 4 | 
- 5 | apply_discount(100, "0.2")
-   |                     ^^^^^
-```
-
-Nothing was annotated. ry worked out that `rate` is a number because you multiply by it, and that
-same knowledge is what hover, completion, and the console's tab completion read. It runs whether or
-not you turn the errors on.
-
 ## Next
 
-- [Features](/features) — everything you get before configuring anything
-- [Tutorial](/type-checking/tutorial) — the type checker on real code
-- [Why ry](/why-ry) — why this exists, and how far along it is
+- [Tour](/type-checking/tour): every feature, and why it works the way it does
+- [Limitations](/type-checking/limitations): what is not checked, and the known false reports
+- [Configuration](/reference/configuration): every `ry.toml` key

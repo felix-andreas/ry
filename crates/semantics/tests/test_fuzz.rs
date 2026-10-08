@@ -1,19 +1,20 @@
 //! Fuzz + property harness for the semantic pipeline, run against every
-//! stage from its first commit — fuzzing is pipeline-wide, never a
+//! stage from its first commit. Fuzzing is pipeline-wide and never a
 //! parser-only afterthought.
 //!
 //! Invariants, checked on every input:
-//!   1. never panic — parse, item tree, HIR, naming, inference, diagnostics,
-//!      and the strict stream all run to completion (salsa fixpoint cycles
-//!      must converge, never hit the iteration cap);
-//!   2. determinism — a fresh database on the same text produces the
-//!      identical rendering (schemes + diagnostics + every lint under an
-//!      everything-on configuration);
-//!   3. geometry — every diagnostic and lint range lies inside the file
-//!      with start <= end;
-//!   4. incremental equivalence — after editing the file through the salsa
-//!      setter, the re-checked output equals a fresh database built on the
-//!      edited text, and editing back restores the original output.
+//!   1. Nothing panics. The parse, the item tree, the HIR, naming, inference,
+//!      diagnostics, and the strict stream all run to completion, and every
+//!      salsa fixpoint cycle converges without hitting the iteration cap.
+//!   2. The output is deterministic. A fresh database on the same text
+//!      produces an identical rendering, covering the schemes, the
+//!      diagnostics, and every lint under an everything-on configuration.
+//!   3. The geometry holds. Every diagnostic and lint range lies inside the
+//!      file, with start no greater than end.
+//!   4. The analysis is incrementally equivalent. After editing the file
+//!      through the salsa setter, the re-checked output equals a fresh
+//!      database built on the edited text, and editing back restores the
+//!      original output.
 //!
 //! The generator biases toward semantically live shapes: small programs
 //! assembled from templates over a tiny name pool, so definitions, uses,
@@ -52,7 +53,7 @@ impl SplitMix64 {
 const NAMES: &[&str] = &["a", "b", "f", "g", "x", "helper"];
 
 /// Item templates; `{n}` is the defined name, `{m}` an arbitrary (often
-/// different) name from the pool — the collisions are the point.
+/// different) name from the pool. The collisions are the point.
 const TEMPLATES: &[&str] = &[
     "{n} <- {m}",
     "{n} <- {n} + 1L",
@@ -138,7 +139,7 @@ fn generate_soup(rng: &mut SplitMix64) -> String {
 
 /// The canonical rendering of one file's full pipeline output; running it is
 /// the never-panic check, its string is the determinism/equivalence witness.
-/// Attaches the failing inputs to any panic escaping the pipeline — a bare
+/// It attaches the failing inputs to any panic escaping the pipeline. A bare
 /// salsa or checker panic names no source, which makes a fuzz find useless.
 fn check_pipeline_reporting(rng: &mut SplitMix64, source: &str) {
     let kind = if rng.chance(1, 4) {
@@ -232,8 +233,9 @@ const REGRESSIONS: &[&str] = &["foo$\n", "f)\nla<- function()"];
 /// The mined legacy corpus through the full pipeline. One shared database over
 /// all of it rather than the per-input battery: the corpus is ~2,000 cases and a
 /// fresh database costs a stub re-parse each, so this arm asserts what a shared
-/// db can — never panic, diagnostic ranges inside their file — and leaves
-/// determinism and incremental equivalence to the generated arms.
+/// database can, which is that nothing panics and that a diagnostic range lies
+/// inside its file. It leaves determinism and incremental equivalence to the
+/// generated arms.
 #[test]
 fn legacy_corpus_holds_invariants() {
     use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};

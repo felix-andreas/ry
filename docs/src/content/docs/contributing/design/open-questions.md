@@ -3,127 +3,171 @@ title: Open type-system questions
 description: "Type-system design questions that are not yet decided, with the options on the table"
 ---
 
-Forward-looking design space for ry's type system: questions that are **not yet decided** and the options on the table, with the current stopgap and why. This is distinct from `decisions.md` (the log of what has been *settled*) — entries here are live deliberations. When one is resolved, move the decision + rationale to `decisions.md` and delete it here. The settled contract is always `docs/src/content/docs/reference/type-system.md`; nothing here is contract until it lands there.
+This page collects the type-system questions that are still open. For each one it states the
+question, the options on the table, and the stopgap ry uses in the meantime.
 
-*(Resolved and moved to `decisions.md` §Beta-semantics: generic vector element types → atomic-element constraint on the existing constraint mechanism; ad-hoc overloading → ordered overload sets with probe-then-rollback, confined to declaration files, traits declined; multi-member unions → join/annotation-only, never bound into unification variables; R variable model → mutable slots with union-at-join reads.)*
+It is not the decision log. `.agents/memory/decisions.md` records what has been settled, while an
+entry here is a live deliberation. When a question is resolved, move the decision and its rationale
+into `decisions.md` and delete the entry here. Nothing on this page is contract until it lands in the
+[type system reference](/reference/type-system/).
 
-## 1. Tags / discriminated unions via a ry stdlib
+Four questions have already made that journey:
 
-**Question.** How to provide Roc-style tags (OCaml polymorphic variants) for R: a compiler-known ry library exposing tag **constructors** and a **`match`** function with exhaustive-pattern checking.
+- Generic vector element types became an atomic-element constraint on the existing constraint
+  mechanism.
+- Ad-hoc overloading became ordered overload sets with probe-then-rollback, confined to declaration
+  files.
+- Multi-member unions are join-only and annotation-only, and never bind into a unification variable.
+- R's variable model is mutable slots, with a union wherever a read sees several writes.
 
-**Direction (user):** provide them through a stdlib the checker knows specially, not through new R syntax — annotated R stays ordinary R. Post-beta.
+## 1. Tags and discriminated unions through a ry standard library
 
-**Unresolved tension:** [Inline type syntax](/contributing/design/inline-type-syntax/) proposes the opposite route — real syntax in a compiled dialect — for the same capability. Both reach exhaustive case analysis; they differ in whether the checker blesses particular call shapes or owns a grammar, and in whether a build step is acceptable. Building both is waste, so settle the fork (it is §3 of that document) before either is implemented, and delete the losing half.
+**The question.** How should ry provide Roc-style tags, the same idea as OCaml's polymorphic
+variants? The shape under discussion is a library the checker knows about specially, exposing tag
+constructors and a `match` function with exhaustiveness checking.
 
-**Design space to work out before building:**
-- representation: a tagged value is presumably `list(tag = "Name", value = ...)` at runtime — does the type system model it as `union` of nominal-ish tag types, or as a new core form?
-- exhaustiveness: `match(x, Some = fn, None = fn)` — checking that the named arguments cover the union members needs literal argument-name awareness at one blessed callee; how special is that call form allowed to be?
-- do general unions (already decided) + literal discriminant fields suffice, or do tags need their own type former?
-- interaction with strict mode and with narrowing (a `match` arm should see the narrowed member type).
+**The maintainer's direction.** Provide them through that specially known library, not through new
+R syntax, so that annotated R stays ordinary R. This comes after the beta.
+
+**An unresolved tension.** [Inline type syntax](/contributing/design/inline-type-syntax/) proposes
+the opposite route to the same capability: real syntax, in a compiled dialect. Both routes reach
+exhaustive case analysis. They differ in whether the checker blesses particular call shapes or owns a
+grammar, and in whether a build step is acceptable. Building both would be waste, so settle the fork
+(section 3 of that page) before implementing either, and delete the losing half.
+
+**What to work out before building:**
+
+- **Representation.** At run time a tagged value is presumably `list(tag = "Name", value = ...)`.
+  Does the type system model it as a union of nominal-like tag types, or as a new core form?
+- **Exhaustiveness.** Checking that the named arguments of `match(x, Some = fn, None = fn)` cover the
+  union's members requires the checker to know argument names at one blessed callee. How special is
+  that call form allowed to be?
+- **A separate type former?** Perhaps the general unions already decided, plus a literal
+  discriminant field, are enough, and tags need nothing of their own.
+- **Interaction with strict mode and narrowing.** A `match` arm should see the narrowed member type.
 
 ## 2. S3 dispatch
 
-**Question.** How to type S3 generics (`print`, `summary`, `plot`, `format`, `predict`, …) where the result depends on the class of the first argument.
+**The question.** How should ry type an S3 generic such as `print`, `summary`, `plot`, `format`, or
+`predict`, whose result depends on the class of its first argument?
 
-**Options.** Per-class overload sets on the generic's stub (`print : fn(x: data.frame) -> data.frame`
-etc.) — available now, and the sanctioned form since it lives in a declaration file; or a class-
-hierarchy model with `UseMethod` awareness (heavier, and the only thing that reaches user-defined S3
-classes). Traits are no longer an option (§4).
+**The options.** One is a per-class overload set on the generic's stub, such as
+`print : fn(x: data.frame) -> data.frame`. That is available today, and it is the sanctioned form,
+because it lives in a declaration file. The other is a model of the class hierarchy that understands
+`UseMethod`. That is heavier, but it is the only option that reaches user-defined S3 classes. Traits
+are no longer an option, for the reasons in section 4.
 
-**Current stopgap:** S3 generics are `Any`/missing in the corpus. The operator method tables that DO
-ship (`+.Date`, `Arith.difftime`) show the shape a per-class answer takes.
+**The stopgap.** S3 generics are `Any` in the corpus, or missing from it. The operator method tables
+that do ship, such as `+.Date` and `Arith.difftime`, show what a per-class answer looks like.
 
-## 3. data.frame / matrix modeling
+## 3. Modeling data frames and matrices
 
-**Question.** Column-level typing for `data.frame` (`df$col`, `df[, "col"]`) and dimensionality for matrices.
+**The question.** How should ry type a data frame down to its columns, so that `df$col` and
+`df[, "col"]` have useful types, and how should it carry a matrix's dimensions?
 
-**Notes.** Beta ships `data.frame` as an opaque nominal (via `@type` in `.Rtypes`) — honest but shallow. Column typing likely wants row-polymorphic records over an opaque carrier; matrix wants an element type without dimension tracking first. Both interact with `[`/`[[` semantics and with the `x[i, j]` lowering. Design after the beta semantics settle.
+**Notes.** ry ships `data.frame` as an opaque nominal, declared with `@type` in a `.Rtypes` file,
+which is honest but shallow. Column typing probably wants row-polymorphic records over an opaque
+carrier, while a matrix wants an element type first, with no dimension tracking. Both interact with
+the semantics of `[` and `[[`, and with how `x[i, j]` lowers. Design this after the beta semantics
+settle.
 
-## 4. Traits / typeclasses — CLOSED, declined
+## 4. Traits and typeclasses: closed, and declined
 
-**Question (settled).** A general capability mechanism (numeric, atomic-element, comparable,
-`+`-overloadable/S3) that could subsume the ad-hoc constraint kinds and overload sets.
+**The question, now settled.** Should ry have a general capability mechanism (numeric, atomic
+element, comparable, overloadable with `+`, S3) that subsumes the ad-hoc constraint kinds and the
+overload sets?
 
-**Answer: no, and the tripwire is disarmed** — the type system admits only what is fast to check,
-which means Hindley-Milner, and declaration files carry the one sanctioned exception (the record is
-in `decisions.md`, §"The type system is Hindley-Milner, and stays fast to check"). Traits are the
-textbook *correct* way to put ad-hoc polymorphism into HM — that is exactly what type classes were
-invented for, and it is why overloading is not HM — but correct is not the bar here; checkable at
-editor speed, with no vocabulary for a user to learn, is. Do not reopen this because a third
-constraint kind appears: add the constraint, or accept the imprecision.
+**The answer is no.** The type system admits only what is fast to check, which means Hindley-Milner,
+with declaration files carrying the one sanctioned exception; `decisions.md` records this under "The
+type system is Hindley-Milner, and stays fast to check". Traits are the textbook-correct way to add
+ad-hoc polymorphism to Hindley-Milner. That is exactly what type classes were invented for, and why
+overloading is not Hindley-Milner. But correctness in the textbook sense is not the bar here. The bar
+is checking at editor speed, with no new vocabulary for users to learn. Do not reopen this because a
+third constraint kind turns up: add the constraint, or accept the imprecision.
 
-Historical note, so the reasoning is not lost: three pressures were examined against the old
-tripwire and none of them tripped it — a "comparable" kind for two-flexible comparisons (nearly
-vacuous, since R compares across atomic families), intersection constraints for union-commitment
-conflicts (first-use commitment plus an annotation is the spec), and the `T[]` element type (which
-became the atomic-element constraint on the existing mechanism). The pattern across all three is the
-useful one: what looked like it needed traits was better served by one more constraint on machinery
-that already existed.
+Three pressures were examined, and none changed the answer:
 
-## 5. Variadic inference bridging
+- A "comparable" kind for two flexible operands is nearly vacuous, because R compares across atomic
+  families.
+- An intersection constraint for a conflict between union commitments is unnecessary, because
+  committing at first use, plus an annotation, is the specification.
+- The `T[]` element type became the atomic-element constraint on the existing mechanism.
 
-**Question.** `function(x, ...)` bodies: inference now needs to lower a trailing `...` as a rest parameter (decided direction in `backlog.md` Phase 1) — but what type does `...` have *inside* the body (`list(...)`, `..1`, forwarding to another variadic)?
+The pattern across all three is the useful lesson: what looked as if it needed traits was better
+served by one more constraint on machinery that already existed.
 
-**Current stopgap:** `...` uses inside a body stay `Unknown`; only the signature-level rest parameter is bridged. Full `...` semantics (forwarding compat, `..N` access) is open.
+## 5. Bridging variadic inference
 
-## 6. NAMESPACE / import model
+**The question.** What type does `...` have inside the body of a `function(x, ...)`? That covers
+`list(...)`, `..1`, and forwarding to another variadic function. Inference first needs to lower a
+trailing `...` as a rest parameter, and `backlog.md` records that decided direction.
 
-**Question.** How library scoping should work: `library(pkg)` attaches, `importFrom` in NAMESPACE, search-path order, masking warnings.
+**The stopgap.** A use of `...` inside a body stays `Unknown`; only the rest parameter in the
+signature is bridged. The full semantics of `...`, including compatibility when forwarding and
+`..N` access, is open.
 
-**Notes.** Beta ships `pkg::name` resolution against namespace-partitioned stubs. The attach/import model (what `library(dplyr)` makes visible, masking diagnostics) is undesigned; it determines when an unresolved name is *really* unresolved, so it directly feeds strict mode's usefulness on real projects.
+## 6. The NAMESPACE and import model
 
-## 7. Non-standard evaluation (data masking: dplyr, data.table, EDSLs like ompr)
+**The question.** How should library scoping work: what `library(pkg)` attaches, what `importFrom`
+in a `NAMESPACE` file imports, the order of the search path, and masking warnings?
 
-**Question.** How far can masked expressions — names resolving against a *data* context the
-callee constructs at run time (`mutate(df, y = x * 2)`, `DT[x > 3, .(m = mean(y)), by = z]`,
-`add_variable(model, x[i], i = 1:10)`) — be statically checked, and what machinery does each
-step need?
+**Notes.** ry ships `pkg::name` resolution against namespace-partitioned stubs, but the attach and
+import model is not designed yet. It decides when an unresolved name is really unresolved, so it
+directly decides how useful strict mode is on a real project.
 
-**Current state (implemented, sound-by-refusal).** Three mechanisms: `quiet_reads` in naming
-(masked-context reads are never "unresolved" but still keep definers alive), `masked_subsets`
-(brackets the naming walk recognizes as data.table syntax evaluate indexes in the data's frame;
-the whole bracket types `Unknown`), and the stub corpus's `masked` set (variadic callees whose
-`...` is data-masked, `with()`-family). Zero false positives; zero checking inside the mask.
+## 7. Non-standard evaluation
 
-**The design ladder (each step is independently shippable):**
+**The question.** How far can a *masked* expression be checked statically, and what machinery does
+each step need? A masked expression is one whose names resolve against a data context the callee
+builds at run time, such as `mutate(df, y = x * 2)`,
+`DT[x > 3, .(m = mean(y)), by = z]`, or `add_variable(model, x[i], i = 1:10)`.
 
-1. **Masking contracts in the stub language.** Extend `.Rtypes` so a signature can declare
-   which argument supplies the data context and which arguments are masked by it
-   (`mutate : fn(.data: data.frame, ...: masked(.data)) -> data.frame`). Pure metadata — it
-   moves the currently hardcoded masked-callee knowledge into the corpus, per-package and
-   overridable, without new type theory.
-2. **Column vocabulary, not types.** Once data.frame carries column-level structure (design
-   question 3), a masked name can be checked for *membership* in the data argument's column
-   set plus the lexical environment — catching column typos, the most common NSE bug — while
-   masked expressions still type `Unknown`. `.data$x` / `.env$x` pronouns resolve exactly.
-3. **Typed masked expressions.** Check the masked expression in an environment extended with
-   the columns' types. The gate is the *result* type: `mutate` extends the row type, so the
-   return needs record-extension (sequential, in argument order); grouped operations
-   (`summarise`, data.table `by=`) change the frame's shape. Tidy-eval injection (`!!`,
-   `{{ var }}`) needs a column-reference kind in the type system — the expensive tail, likely
-   permanently behind explicit annotations.
-4. **EDSLs (ompr).** No data context exists — names are declared by prior builder calls
-   (`add_variable`) and live only in the model object. Generic checking is unrealistic;
-   the honest options are quiet-read suppression (today) or package-specific extensions.
+**What ships today.** ry recognizes masking and refuses to check inside it, which means no false
+positives and no checking inside the mask. [Data masking](/contributing/design/data-masking/)
+describes the mechanisms in detail.
 
-**Precedent.**
+**The design ladder.** Each step can ship on its own:
 
-- **R itself:** `R CMD check`'s "no visible binding for global variable" NOTE is the oldest
-  static-checker-vs-NSE collision; the ecosystem's answers — `utils::globalVariables()`
-  suppression and the `.data` pronoun — validate both the suppression baseline (step 0) and
-  explicit pronouns as the bridge to checkability.
-- **TypeScript query builders** (Prisma, Kysely, Drizzle): column sets encoded as object
-  types, masked names checked via `keyof`/mapped types — the direct analogue of step 2/3,
-  and proof the "membership first, expression types second" ladder works at ecosystem scale.
-- **F# type providers** (FSharp.Data): schemas imported at compile time generate typed
-  accessors — the strongest form of step 2's "know the columns", at the cost of a
-  compile-time data dependency.
-- **Python:** mypy/pyright deliberately do NOT type pandas columns (pandas-stubs types
-  operations, columns stay stringly); schema checking lives in runtime validators (pandera).
-  The mainstream punt marks how far the cost curve bends — and where ry can
-  differentiate, since steps 1-2 fit its architecture (stub contracts + structural records)
-  without new inference machinery.
+1. **Masking contracts in the stub language.** A signature declares that its `...` is data-masked,
+   and which of its formals resolve normally. The `@masked` attribute in `.Rtypes` does this today,
+   so this step is mostly built. What remains is moving the base masking family (`with`, `within`,
+   `subset`, and `transform`) out of the naming walk and into the corpus, and declaring the
+   data.table bracket semantics the same way.
+2. **A column vocabulary, not column types.** Once a data frame carries column-level structure
+   (question 3), a masked name can be checked for membership in the data argument's columns and the
+   lexical environment. That catches a misspelled column, the most common bug in non-standard
+   evaluation, while a masked expression still types as `Unknown`. The `.data$x` and `.env$x`
+   pronouns resolve exactly.
+3. **Typed masked expressions.** Check the masked expression in an environment extended with the
+   columns' types. The hard part is the result type. `mutate` extends the row type, so its return
+   needs record extension, applied in argument order. A grouped operation, such as `summarise` or a
+   data.table `by=`, changes the frame's shape. And tidy-eval injection (`!!` and `{{ var }}`) needs
+   a column-reference kind in the type system. That is the expensive tail, and it will probably stay
+   behind an explicit annotation for good.
+4. **Builder EDSLs, such as ompr.** Here there is no data context at all: a name is declared by an
+   earlier builder call, such as `add_variable`, and lives only in the model object. Generic checking
+   is unrealistic, and the honest options are the quiet-read suppression ry does today or a
+   package-specific extension.
 
-**Recommendation.** Steps 1-2 after data.frame columns land (question 3 gates this); step 3
-only for the pronoun/explicit forms; step 4 stays suppressed. Never regress the zero-false-
-positive property: every step must keep unknown masking constructs silent rather than guessed.
+**Precedent:**
+
+- **R itself.** `R CMD check`'s "no visible binding for global variable" note is the oldest collision
+  between a static checker and non-standard evaluation. The ecosystem answered it with
+  `utils::globalVariables()` and the `.data` pronoun, which validates both the suppression baseline
+  and explicit pronouns as the bridge to checkability.
+- **TypeScript query builders**, such as Prisma, Kysely, and Drizzle, encode a column set as an
+  object type and check masked names through `keyof` and mapped types. They are the direct analogue
+  of steps 2 and 3, and proof that the ladder works at ecosystem scale.
+- **F# type providers**, such as FSharp.Data, import a schema at compile time and generate typed
+  accessors. That is the strongest form of "know the columns", at the cost of a compile-time
+  dependency on the data.
+- **Python.** mypy and pyright deliberately do not type pandas columns: pandas-stubs types the
+  operations, columns stay stringly typed, and schema checking lives in runtime validators such as
+  pandera. This mainstream punt shows how steeply the cost curve bends. It is also where ry can stand
+  out, because steps 1 and 2 fit its existing architecture of stub contracts and structural records
+  with no new inference machinery.
+
+**The recommendation.** Do steps 1 and 2 once data frame columns land, which question 3 gates. Do
+step 3 only for the pronoun forms and the explicit forms, and leave step 4 suppressed. Never give up
+the zero-false-positive property: at every step, an unknown masking construct must stay silent
+rather than guessed at.

@@ -133,18 +133,18 @@ for (i in seq_along(xs)) {
     Literal Integer("1L")
     Literal Integer("2L")
 
-#---- a_trailing_semicolon_is_recorded_because_it_changes_the_blocks_value
-# `{1L;}` evaluates to NULL, `{1L}` to 1L. The flag is the only thing that
-# tells the two apart once the tokens are gone.
+#---- a_trailing_semicolon_adds_no_statement
+# In R's grammar a trailing `;` ends the list without adding an expression, so
+# `{1L;}` evaluates to 1L, exactly like `{1L}`.
 {
   1L;
 }
 #++++
 # <statement>
-  Block trailing-semicolon
+  Block
     Literal Integer("1L")
 
-#---- semicolons_between_statements_do_not_set_the_flag
+#---- semicolons_between_statements_separate_them
 { 1L; 2L }
 #++++
 # <statement>

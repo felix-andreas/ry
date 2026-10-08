@@ -56,7 +56,7 @@ pub enum Keybindings {
 /// implementation lives in the host crate, keeping this crate's dependency
 /// set syntax-only.
 pub trait SessionCompleter: Send {
-    /// One accepted input line — extends the completion context.
+    /// One accepted input line, which extends the completion context.
     fn accept(&mut self, line: &str);
     /// Completions for `line` with the cursor at byte `position`.
     fn complete(&mut self, line: &str, position: usize) -> Vec<reedline::Suggestion>;
@@ -79,7 +79,7 @@ pub struct RunOptions {
 
 /// Starts the session on the CALLING thread and only returns when R ends
 /// (`q()`, EOF, or the end of a batch script). R assumes it owns the thread
-/// it initializes on — run this from `main` without spawning.
+/// it initializes on, so run this from `main` without spawning.
 pub fn run(options: RunOptions) -> Result<(), ReplError> {
     let api = libr::load()?;
     console::run(api, options)

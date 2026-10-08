@@ -162,7 +162,7 @@ b: Box<integer, double>
 m <- 1.0
 #++++
 m: Meters<integer>
-29..35 error[annotation] `Meters` is not a generic type — it takes no type arguments.
+29..35 error[annotation] `Meters` is not a generic type. It takes no type arguments.
 
 #---- bare_generic_reference_must_be_applied
 #: @type Box<T> {list{value: T}}
@@ -187,7 +187,7 @@ g <- f(x = 1L, x = 2L)
 #++++
 f: <T> fn(x: T) -> T
 g: Unknown
-34..35 error[type-mismatch] this call gives `x` more than once — R matches each named parameter at most once
+34..35 error[type-mismatch] this call gives `x` more than once. R matches each named parameter at most once
 
 #==== s4
 #---- set_generic_defines_the_name

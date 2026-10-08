@@ -125,7 +125,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-36..45 error[type-mismatch] indexing with 2 indexes is not supported yet — ry does not model matrix and data.frame subsetting
+36..45 error[type-mismatch] indexing with 2 indexes is not supported yet. ry does not model matrix and data.frame subsetting
 
 #==== recursion
 #---- self_recursion_is_attributed
@@ -150,13 +150,13 @@ fact: fn(n: integer) -> integer
 x <- list(v = 1, w = x)
 #++++
 x: Unknown
-0..23 error[strict] strict mode: could not determine the full type of `x`; it is defined recursively — add a type annotation
+0..23 error[strict] strict mode: could not determine the full type of `x`, because it is defined recursively. Add a type annotation
 
 #---- pure_self_call_is_attributed
 f <- function() f()
 #++++
 f: fn() -> Unknown
-0..19 error[strict] strict mode: could not determine the full type of `f`; it is defined recursively — add a type annotation
+0..19 error[strict] strict mode: could not determine the full type of `f`, because it is defined recursively. Add a type annotation
 
 #---- an_any_returning_overload_is_a_strict_origin
 # The corpus ends an overload set with an `Any` fallback for the calls it cannot

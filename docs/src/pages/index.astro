@@ -10,27 +10,6 @@ const navLinks = [
     { label: "News", href: "/news" },
 ];
 
-const capabilities = [
-    {
-        title: "Language server",
-        accent: "cyan",
-        blurb: "Completion, hover, go-to-definition, references, rename, and inlay hints — live in your editor.",
-        link: { label: "Language server", href: "/features" },
-    },
-    {
-        title: "Code analyzer",
-        accent: "violet",
-        blurb: "Lint diagnostics on by default — plus the first static type checker for R, opt-in.",
-        link: { label: "Type checker", href: "/type-checking/tutorial" },
-    },
-    {
-        title: "Formatter",
-        accent: "emerald",
-        blurb: "ry fmt rewrites your whole project to one consistent style, with a --diff mode for CI.",
-        link: { label: "Formatter", href: "/reference/formatting-rules" },
-    },
-];
-
 // Every editor mock, diagnostic and diff on this page is captured from the
 // real binary: hovers, completions and inlay hints from `ry server` over
 // LSP, diagnostics from `ry check`, diffs from `ry fmt --diff`.
@@ -39,37 +18,37 @@ const lspFeatures = [
     {
         key: "completion",
         label: "Completion",
-        note: "The fields of a record type, each with its inferred type.",
+        note: "Record fields, with their inferred types.",
         method: "textDocument/completion",
     },
     {
         key: "hover",
         label: "Hover",
-        note: "The inferred type, and where the name is bound.",
+        note: "Inferred type and definition site.",
         method: "textDocument/hover",
     },
     {
         key: "definition",
         label: "Go to definition",
-        note: "Jump to the binding — in this file, another file, or a stdlib stub.",
+        note: "In this file, another file, or a stub.",
         method: "textDocument/definition",
     },
     {
         key: "references",
         label: "Find references",
-        note: "Every read and write of the name, across the whole workspace.",
+        note: "Every read and write, across the workspace.",
         method: "textDocument/references",
     },
     {
         key: "rename",
         label: "Rename",
-        note: "One rename, applied everywhere the name is bound.",
+        note: "Every occurrence of the binding.",
         method: "textDocument/rename",
     },
     {
         key: "inlay",
         label: "Inlay hints",
-        note: "Inferred types shown inline. Nothing was annotated here.",
+        note: "Inferred types. Nothing here is annotated.",
         method: "textDocument/inlayHint",
     },
 ];
@@ -82,8 +61,7 @@ const analysisTabs = [
         file: "R/sales.R",
         config: "no configuration",
         note:
-            "Lints and unresolved names need no setup. Each diagnostic names the code you would put in a " +
-            "<code># ry: allow(...)</code> comment.",
+            "Unresolved names and lints, with no setup.",
     },
     {
         key: "types",
@@ -92,8 +70,7 @@ const analysisTabs = [
         file: "R/pricing.R",
         config: "ry.toml · [check] typing = true",
         note:
-            "<code>fee_rate</code> wants the region, not the amount. Annotations live in <code>#:</code> " +
-            "comments — ordinary comments to R and to every other tool you run.",
+            "Annotations are <code>#:</code> comments.",
     },
     {
         key: "inference",
@@ -102,8 +79,7 @@ const analysisTabs = [
         file: "R/booking.R",
         config: "ry.toml · [check] typing = true",
         note:
-            "Not one annotation in this file. Inference recovers the signatures — the grey text is what " +
-            "your editor shows — and the <code>numeric</code> bound alone rejects the string.",
+            "No annotations. Inferred signatures shown in grey.",
     },
 ];
 
@@ -113,21 +89,21 @@ const formatterTabs = [
         label: "Spacing",
         file: "totals.R",
         meta: "operators, commas, quotes",
-        note: "1 file would be reformatted, 0 files already formatted",
+        note: "Spaces around operators and after commas, double quotes.",
     },
     {
         key: "braces",
         label: "Braces & loops",
         file: "regions.R",
         meta: "loop and if bodies",
-        note: "Braces go in wherever leaving them out could change what runs.",
+        note: "Loop bodies, and if bodies that span lines, always get braces.",
     },
     {
         key: "indent",
         label: "Indentation",
         file: "options.R",
         meta: "multi-line call arguments",
-        note: "Every argument snaps to one indent step. Your line breaks are kept.",
+        note: "One indent step per level. Line breaks are kept.",
     },
     {
         key: "annotations",
@@ -135,8 +111,7 @@ const formatterTabs = [
         file: "pricing.R",
         meta: "#: type annotations",
         note:
-            "Annotations are re-rendered with the type checker's own grammar. Anything it cannot parse is " +
-            "left byte-for-byte alone.",
+            "Valid annotations are normalized. Others are left as written.",
     },
 ];
 
@@ -312,11 +287,11 @@ const year = new Date().getFullYear();
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>
-            ry — the first type checker for R, and the tooling to match
+            ry: a language server, type checker, and formatter for R
         </title>
         <meta
             name="description"
-            content="ry is a fast Rust toolchain for R: the first static type checker, a full language server, and a project formatter in one tool. Catch type errors before you run — without changing your existing code."
+            content="ry is a toolchain for R, written in Rust: a language server, a linter, a type checker, and a formatter."
         />
         <link rel="icon" href="/favicon.svg" />
         <script is:inline>
@@ -374,12 +349,11 @@ const year = new Date().getFullYear();
                     <div class="hero-vignette" aria-hidden="true"></div>
                     <div class="hero-copy">
                         <h1 class="hero-heading">
-                            Modern developer tooling for R.
+                            A toolchain<br />for R.
                         </h1>
                         <p class="subhead">
-                            Type checker, language server, and formatter in one
-                            binary. Catch errors before you run the code —
-                            without changing the R you already write.
+                            A language server, a type checker, and a formatter,
+                            written in Rust.
                         </p>
                         <div class="cta-cluster">
                             <a class="cta cta-lg" href="/getting-started"
@@ -387,7 +361,7 @@ const year = new Date().getFullYear();
                             >
                             <a
                                 class="btn-vscode"
-                                href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly"
+                                href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry"
                                 target="_blank"
                                 rel="noopener"
                             >
@@ -466,124 +440,13 @@ const year = new Date().getFullYear();
                 </div>
             </section>
 
-            <!-- ---------- capabilities triad ---------- -->
-            <section id="capabilities" class="band dotted">
-                <div class="col">
-                    <p class="eyebrow">three tools, one binary</p>
-                    <h2>Three tools, one binary.</h2>
-                    <p class="lede">
-                        Built for R users who have outgrown RStudio: editor
-                        smarts, problem-catching analysis, and one consistent
-                        style from a single binary. R has world-class statistics
-                        — ry brings the IDE-grade tooling other ecosystems
-                        already take for granted, fast enough to scale past 300k
-                        lines.
-                    </p>
-                </div>
-                <div class="col show-col">
-                    <div class="cap-grid">
-                        {
-                            capabilities.map((c) => (
-                                <article class={`cap accent-${c.accent}`}>
-                                    <span class="cap-badge" aria-hidden="true">
-                                        {c.accent === "cyan" && (
-                                            <svg
-                                                class="cap-icon"
-                                                xmlns="http://www.w3.org/2000/svg"
-                                                width="30"
-                                                height="30"
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                stroke-linecap="round"
-                                                stroke-linejoin="round"
-                                                stroke-width="2"
-                                                aria-hidden="true"
-                                            >
-                                                <path d="m10 9l-3 3l3 3m4 0l3-3l-3-3" />
-                                                <rect
-                                                    width="18"
-                                                    height="18"
-                                                    x="3"
-                                                    y="3"
-                                                    rx="2"
-                                                />
-                                            </svg>
-                                        )}
-                                        {c.accent === "violet" && (
-                                            <svg
-                                                class="cap-icon"
-                                                xmlns="http://www.w3.org/2000/svg"
-                                                width="30"
-                                                height="30"
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                stroke-linecap="round"
-                                                stroke-linejoin="round"
-                                                stroke-width="2"
-                                                aria-hidden="true"
-                                            >
-                                                <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
-                                                <path d="m9 12l2 2l4-4" />
-                                            </svg>
-                                        )}
-                                        {c.accent === "emerald" && (
-                                            <svg
-                                                class="cap-icon"
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                aria-hidden="true"
-                                            >
-                                                <path class="rag" d="M5 8h9" />
-                                                <path class="rag" d="M5 12h6" />
-                                                <path
-                                                    class="rag"
-                                                    d="M5 16h11"
-                                                />
-                                                <path
-                                                    class="guide"
-                                                    d="M19 6v12"
-                                                />
-                                                <path
-                                                    class="tick tick-1"
-                                                    d="M14 8h5"
-                                                />
-                                                <path
-                                                    class="tick tick-2"
-                                                    d="M11 12h8"
-                                                />
-                                            </svg>
-                                        )}
-                                    </span>
-                                    <h3>{c.title}</h3>
-                                    <p>{c.blurb}</p>
-                                    <a class="doclink" href={c.link.href}>
-                                        {c.link.label}{" "}
-                                        <span aria-hidden="true">→</span>
-                                    </a>
-                                </article>
-                            ))
-                        }
-                    </div>
-                </div>
-            </section>
-
             <!-- ---------- language server ---------- -->
             <section id="language-server" class="band showband accent-cyan">
                 <div class="band-inner">
                     <header class="band-head">
-                        <p class="eyebrow">
-                            <span class="eyebrow-mark" aria-hidden="true"
-                            ></span>write
-                        </p>
-                        <h2>Your editor, fluent in R.</h2>
+                        <h2>Language server</h2>
                         <p class="lede">
-                            One server behind every editor feature — complete a
-                            record's fields, hover a name for its inferred
-                            signature, jump to where it is bound, rename it
-                            everywhere at once. Extensions for VS Code and Zed,
-                            plain LSP for the rest.
+                            Works in any editor that supports LSP.
                         </p>
                     </header>
 
@@ -706,8 +569,8 @@ const year = new Date().getFullYear();
                     </div>
 
                     <p class="band-foot">
-                        <a class="doclink" href="/features"
-                            >Language server docs <span aria-hidden="true"
+                        <a class="doclink" href="/type-checking/tour#editors"
+                            >Editor features <span aria-hidden="true"
                                 >→</span
                             ></a
                         >
@@ -722,16 +585,10 @@ const year = new Date().getFullYear();
             >
                 <div class="band-inner">
                     <header class="band-head">
-                        <p class="eyebrow">
-                            <span class="eyebrow-mark" aria-hidden="true"
-                            ></span>check
-                        </p>
-                        <h2>Catch it before you run it.</h2>
+                        <h2>Checker</h2>
                         <p class="lede">
-                            <code>ry check</code> lints out of the box. Switch the
-                            type checker on and it reads your code the way a compiler
-                            would — and since inference runs whether or not you annotate
-                            anything, it catches the mistake either way.
+                            Lints out of the box. Type checking with
+                            <code>[check] typing = true</code>.
                         </p>
                     </header>
 
@@ -810,12 +667,11 @@ const year = new Date().getFullYear();
                     </div>
 
                     <p class="band-foot">
-                        <a class="doclink" href="/type-checking/tutorial"
-                            >Type checker guide <span aria-hidden="true">→</span
-                            ></a
+                        <a class="doclink" href="/type-checking/tour"
+                            >Tour <span aria-hidden="true">→</span></a
                         >
                         <a class="doclink" href="/reference/diagnostic-codes"
-                            >Linter rules <span aria-hidden="true">→</span></a
+                            >Diagnostic codes <span aria-hidden="true">→</span></a
                         >
                     </p>
                 </div>
@@ -825,16 +681,10 @@ const year = new Date().getFullYear();
             <section id="formatter" class="band showband accent-emerald dotted">
                 <div class="band-inner">
                     <header class="band-head">
-                        <p class="eyebrow">
-                            <span class="eyebrow-mark" aria-hidden="true"
-                            ></span>ship
-                        </p>
-                        <h2>One consistent style, in place.</h2>
+                        <h2>Formatter</h2>
                         <p class="lede">
-                            <code>ry fmt</code> is deliberately non-invasive. It fixes
-                            spacing, braces and indentation, and it never splits a
-                            line you chose to keep on one line. Run it across the
-                            project, or use <code>--diff</code> in CI.
+                            Normalizes spacing, indentation, and braces. Keeps
+                            your line breaks.
                         </p>
                     </header>
 
@@ -933,13 +783,7 @@ const year = new Date().getFullYear();
                 <canvas id="closer-canvas" aria-hidden="true"></canvas>
                 <div class="closer-scrim" aria-hidden="true"></div>
                 <div class="col closer-col">
-                    <p class="eyebrow">adopt</p>
-                    <h2>Drop it onto your R project.</h2>
-                    <p class="lede">
-                        Nothing about your existing R has to change. Install the
-                        VS Code extension in one click — no toolchain required —
-                        or grab the CLI and point ry at your project.
-                    </p>
+                    <h2>Install</h2>
                     <div class="steps">
                         <div class="step">
                             <p class="step-label">1 &middot; Install</p>
@@ -956,16 +800,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         </div>
                     </div>
                     <p class="band-note">
-                        Grab the <a
-                            class="inline-link"
-                            href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly"
-                            target="_blank"
-                            rel="noopener">VS Code extension</a
-                        >
-                        from the Marketplace, then tune behavior in <a
-                            class="inline-link"
-                            href="/reference/configuration">configuration</a
-                        >.
+                        No Rust toolchain? Download a
+                        <a class="inline-link" href="https://github.com/felix-andreas/ry/releases"
+                            >prebuilt release</a
+                        >, or install the VS Code extension, which bundles one.
                     </p>
                     <div class="cta-cluster">
                         <a class="cta cta-lg" href="/getting-started"
@@ -973,7 +811,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         >
                         <a
                             class="btn-vscode"
-                            href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly"
+                            href="https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry"
                             target="_blank"
                             rel="noopener"
                         >
@@ -1073,9 +911,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             // leaving soft light trails. Stirring the gathered shape with the pointer
             // charges it — it shivers, then seethes — until it detonates into the
             // swarm and re-gathers as the other shape (logo <-> "ry"). As you then scroll
-            // the hero, the same particles are constrained into the headline "Modern
-            // developer tooling for R." — the letters are drawn by the particles
-            // themselves; there is no separate DOM heading laid on top.
+            // the hero, the same particles are constrained into the headline "A
+            // toolchain for R.": the letters are drawn by the particles themselves,
+            // and there is no separate DOM heading laid on top.
             // ======================================================================
             type Particle = {
                 x: number;
@@ -1108,10 +946,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             ) as HTMLElement | null;
 
             // As you scroll, the particles resolve through two text shapes: first the
-            // "ry" wordmark, then the headline (wrapped to two lines so the particle
-            // text roughly matches the hidden <h1>).
+            // "ry" wordmark, then the headline. The headline's lines and font size are
+            // read from the hidden <h1> in relayout(), so the particle text fills
+            // exactly the box the <h1> reserves and never runs into the subhead.
             const WORDMARK_LINES = ["ry"];
-            const HEADING_LINES = ["Modern developer", "tooling for R."];
 
             function initHero() {
                 if (!heroCanvas || !heroEl) return;
@@ -1317,6 +1155,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     lines: string[],
                     widthFrac = 0.7,
                     widthCap = 660,
+                    fixedFontPx?: number,
                 ): Target[] {
                     const SS = 2;
                     const fontFamily = `'Geist Sans', system-ui, sans-serif`;
@@ -1334,6 +1173,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     const maxFont = Math.min(cssW * 0.086, cssH * 0.142);
                     if (fontPx > maxFont) fontPx = maxFont;
                     if (fontPx < 12) fontPx = 12;
+                    if (fixedFontPx) fontPx = fixedFontPx;
                     const leading = fontPx * 1.04;
                     const blockW =
                         Math.ceil((maxW * fontPx) / basePx) + Math.ceil(fontPx);
@@ -1484,10 +1324,19 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     const headline = heroEl!.querySelector(
                         ".hero-copy h1",
                     ) as HTMLElement | null;
+                    let headingLines = ["A toolchain", "for R."];
+                    let headingFontPx: number | undefined;
                     if (headline) {
                         const hr = headline.getBoundingClientRect();
                         centroidX = hr.left - r.left + hr.width / 2;
                         centroidY = hr.top - r.top + hr.height / 2;
+                        headingLines = headline.innerText
+                            .split("\n")
+                            .map((line) => line.trim())
+                            .filter((line) => line.length > 0);
+                        headingFontPx = parseFloat(
+                            getComputedStyle(headline).fontSize,
+                        );
                     } else {
                         centroidX = cssW / 2;
                         centroidY = cssH * 0.44;
@@ -1500,7 +1349,12 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         0.34,
                         400,
                     );
-                    headingTargets = buildTextTarget(HEADING_LINES);
+                    headingTargets = buildTextTarget(
+                        headingLines,
+                        0.7,
+                        660,
+                        headingFontPx,
+                    );
                     spawnParticles();
                     pairTargets();
                 }
@@ -2950,8 +2804,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .hero-copy h1 {
                 margin: 0;
                 font-weight: 600;
-                font-size: clamp(2.4rem, 7vw, 4rem);
-                line-height: 1;
+                font-size: clamp(2.6rem, 8vw, 5.5rem);
+                /* matches the particle headline's leading in buildTextTarget */
+                line-height: 1.04;
                 letter-spacing: -0.04em;
             }
             .hero-copy .subhead {
@@ -2966,26 +2821,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 flex-wrap: wrap;
                 margin-top: 0.6rem;
                 align-items: center;
-            }
-
-            /* ---------- shared eyebrow ---------- */
-            .eyebrow {
-                display: flex;
-                align-items: center;
-                gap: 0.6rem;
-                margin: 0;
-                font-family: "Geist Mono", monospace;
-                font-size: 0.76rem;
-                letter-spacing: 0.04em;
-                color: var(--muted);
-                text-transform: lowercase;
-            }
-            .eyebrow-mark {
-                flex: none;
-                width: 6px;
-                height: 6px;
-                border-radius: 1.5px;
-                background: var(--cap, var(--muted));
             }
 
             /* ---------- buttons (all SOLID) ---------- */
@@ -3217,85 +3052,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             }
             .inline-link:hover {
                 border-bottom-color: var(--foreground);
-            }
-
-            /* ---------- capabilities triad ---------- */
-            #capabilities .col,
-            #capabilities .show-col {
-                max-width: var(--stage-frame);
-            }
-            #capabilities {
-                padding-inline: clamp(1.1rem, 4vw, 2.5rem);
-            }
-            .cap-grid {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 1px;
-                background: var(--border);
-                border: 1px solid var(--border);
-                border-radius: var(--radius);
-                overflow: hidden;
-            }
-            .cap {
-                background: var(--background);
-                padding: 1.7rem 1.6rem 1.8rem;
-                display: flex;
-                flex-direction: column;
-                gap: 0.7rem;
-            }
-            .cap-badge {
-                display: inline-flex;
-                align-items: center;
-                justify-content: flex-start;
-                margin-bottom: 0.35rem;
-            }
-            .cap-icon {
-                width: 30px;
-                height: 30px;
-            }
-            .cap-icon path,
-            .cap-icon circle,
-            .cap-icon rect {
-                stroke: var(--cap);
-                stroke-width: 1.75;
-                fill: none;
-                stroke-linecap: round;
-                stroke-linejoin: round;
-            }
-            .cap-icon .guide {
-                opacity: 0.55;
-            }
-            .cap-icon .tick {
-                opacity: 0.5;
-                transition: transform 0.2s ease;
-                transform-origin: left;
-            }
-            .cap:hover .cap-icon .tick-1 {
-                transform: translateX(1.5px);
-            }
-            .cap:hover .cap-icon .tick-2 {
-                transform: translateX(1.5px);
-            }
-            .cap h3 {
-                margin: 0;
-                font-weight: 600;
-                font-size: 1.1rem;
-                letter-spacing: -0.02em;
-            }
-            .cap p {
-                margin: 0;
-                flex: 1;
-                font-size: 0.9rem;
-                color: oklch(0.8 0 0);
-            }
-            .cap .doclink {
-                margin-top: 0.4rem;
-                font-size: 0.78rem;
-            }
-            @media (max-width: 760px) {
-                .cap-grid {
-                    grid-template-columns: 1fr;
-                }
             }
 
             /* ---------- code blocks ---------- */
@@ -4292,8 +4048,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 html {
                     scroll-behavior: auto;
                 }
-                .doclink span,
-                .cap-icon .tick {
+                .doclink span {
                     transition: none;
                 }
                 .caretbar,

@@ -88,7 +88,7 @@ fn spawn_server(server_cwd: &Path, envs: &[(&str, &str)], args: &[&str]) -> toki
 
 /// The push channel plus a stash: deferred semantic publishes for different
 /// documents interleave in idle order, so a wait targeted at one URI must
-/// keep — not drop — the publishes it skips for other URIs.
+/// keep the publishes it skips for other URIs, rather than dropping them.
 struct DiagnosticsChannel {
     receiver: mpsc::UnboundedReceiver<PublishDiagnosticsParams>,
     stash: Vec<PublishDiagnosticsParams>,
@@ -2110,7 +2110,7 @@ async fn breaking_one_file_leaves_its_dependents_untouched() {
     );
 
     // Saving while broken refreshes every open document; the consumer must
-    // still be clean — `shared_helper` never stopped resolving.
+    // still be clean, because `shared_helper` never stopped resolving.
     context.save_file(&consumer_uri);
     let after_break =
         recv_diagnostics(&mut context.diagnostics_receiver, &consumer_uri, TIMEOUT).await;
@@ -2655,10 +2655,10 @@ async fn document_symbols_nest_s4_and_r6_declarations() {
 
 /// The cancelled-pull contract, made deterministic by the server's
 /// fault-injection seam: the pull announces itself through the marker file
-/// and holds, the edit is sent only after the marker appears — so its
-/// cancellation flip provably lands while the pull is in flight — and the
-/// response must be the retryable SERVER_CANCELLED error, with an immediate
-/// re-pull succeeding on the edited content.
+/// and holds, and the edit is sent only after the marker appears, so its
+/// cancellation flip provably lands while the pull is in flight. The response
+/// must then be the retryable SERVER_CANCELLED error, with an immediate re-pull
+/// succeeding on the edited content.
 #[tokio::test]
 async fn cancelled_pull_is_retryable_and_recovers() {
     let capabilities = ClientCapabilities {

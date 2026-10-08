@@ -1,92 +1,54 @@
 ---
 title: Why ry
-description: Why R needs one fast toolchain with a type checker at its core — and how far along this one is
+description: What ry checks that other R tools cannot, and the trade-offs it makes
 ---
 
-R has good tools, but they are separate tools. Linting, formatting, style, analysis and running the
-code are five programs that each parse your source and each build their own partial picture of it.
-None of them shares what it learned with the others, so each one starts over.
+## Checking code before it runs
 
-## Static, not a live session
+R reports an undefined name, a call that does not match its function, or a `NULL` where a value is
+needed only when that line runs, possibly hours into a job. ry reads the source instead, so it
+reports these as you type. It needs no R installation, and your editor and CI read the same
+`ry.toml`, so they check by the same rules.
 
-R's language servers know what your values are because they ask a live R session. That is what makes
-completion on a fitted model work in RStudio.
+## Speed
 
-It is also the limit: a session knows only code that has already run, in the state it happens to be
-in. It cannot describe the branch you have not taken, the function nobody called, or the file you
-just opened. ry answers from the source alone, so the answers exist in a pull request, in CI, and
-in a file you have never run:
+ry is written in Rust, and its analysis is incremental: after an edit, it re-checks only what the
+edit could affect. The target is a re-check within 30 ms of a keystroke for half of all edits, and
+within 100 ms for 95 percent of them, measured on the largest package in a 965,000-line corpus of
+CRAN code. Every rule in the type system has to be cheap enough to run on every keystroke, which is
+the reason for the trade-offs below.
 
-- a typo in a variable name
-- an argument in the wrong position, or a call missing a required one
-- a value that is sometimes `NULL`, used as though it never is
-- a name you deleted in another file
+## Types without annotations
 
-All of these come from **one** understanding: formatting, analysis, editor features and type
-checking are views onto the same knowledge.
-
-## Speed on large codebases
-
-Latency matters most on large R projects, where a check slow enough to interrupt your work stops
-being run at all.
-
-ry is written in Rust, and analysis is incremental: an edit re-checks only what that edit could
-have affected, not the project. It is tested against roughly 970,000 lines of real R — 69 CRAN
-packages plus R's own base library — and the check that an edit does not trigger more work than it
-should runs on every change.
-
-`check` and `fmt` never load R and never execute your code, which is what makes them safe in CI and
-fast in an editor. The one exception is the [R console](/guides/r-console), which runs R by
-definition.
-
-## Types in dynamic languages
-
-Python has type hints, JavaScript got TypeScript, Ruby has RBS, Elixir is adding set-theoretic types.
-Each stayed dynamic, kept types optional, and adopted them because finding type errors by running the
-program stops scaling long before the codebase does.
-
-R code is full of implicit type expectations, and nothing checks them until the code runs.
-
-ry's approach rests on **inference**: the checker works out types from how values are used,
-instead of requiring you to declare them.
+A function that multiplies its argument needs a number, but R finds out only when the line runs.
+Requiring an annotation on every function would rule out existing code, so ry infers types from how
+values are used, with Hindley–Milner inference, the approach OCaml and Haskell take:
 
 ```r
-scale <- function(x, factor) x * factor
+discount <- function(price, rate) price * (1 - rate)
+discount("a", 0.2)   # expected a numeric value (`integer` or `double`), found `character`
 ```
 
-`*` is arithmetic, so both parameters are numbers. Nothing was declared, and `scale("a", 2)` is
-already an error. This is why most R needs no annotations at all. The ones you do write live in
-`#:` comments, so the file stays ordinary R that every other tool reads, and type checking is
-opt-in, so you can adopt it one file at a time.
+The annotations you do write are `#:` comments, so the file stays plain R, and type errors are
+reported only in projects or files that turn them on.
 
-The inference is Hindley–Milner, which is sound and close to linear on real code. That choice
-excludes two features R programmers might expect — class hierarchies and overloading in your own
-functions — because a type system that admits them can spend an unbounded amount of time on a
-single expression, which an editor cannot afford. R is dynamic enough that some constructs cannot be
-described statically at all; those become `Unknown`, which is compatible with everything, so a gap
-means a check was skipped rather than a wrong answer produced.
+## What it leaves out
 
-## Project status
+- **Overloading your own functions.** Several signatures per name would make every call a search
+  over candidates; the [tour](/type-checking/tour#functions) shows what to use instead.
+- **Inheritance.** Subtyping between declared types makes inference slow and its results hard to
+  predict. [Nominal types](/type-checking/tour#structural-and-nominal-types) keep values apart
+  without it.
+- **Unmodeled constructs.** What ry cannot describe, such as S4 and R6 objects, data frame columns,
+  and `eval()`, becomes `Unknown`, which is compatible with everything and so never causes an error
+  by itself. [Strict mode](/type-checking/tour#unknown-and-strict-mode) lists most of these places,
+  though not R6 objects.
 
-The project has alpha level quality.
+So a clean run says less about code built on data frames or R6 than about code built from functions
+and lists. [Limitations](/type-checking/limitations) lists what is not checked.
 
-**The interfaces are stable.** The diagnostics, the `ry.toml` keys, the diagnostic codes, and the
-JSON output are covered by tests that fail when they change, so CI built on them will not break
-silently.
+## Status
 
-**The type system is still gaining capability.** A new release may report findings an older one did
-not, so pin a version if you gate a build on a clean run.
-
-**Where it runs.** `ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw`
-documents. The editor integration does not cover literate documents yet — you get them in `check`
-and in CI, but not as you type. The formatter skips them, since most of an `.Rmd` is prose the
-formatter should not rewrite.
-
-**What it does not cover yet.** The largest gaps are data frames, S4, and R6 — see
-[limitations](/type-checking/limitations) for the full account before deciding how far to trust a
-clean run.
-
-## Next
-
-- [Features](/features) — what you get, before you turn anything on
-- [Tutorial](/type-checking/tutorial) — the type checker on real code
+ry is in beta. Diagnostic codes, `ry.toml` keys, and the JSON output are stable, so CI built on them
+keeps working. The type system is still growing, so a new release can report findings an older one
+did not, which is why CI should pin the version.

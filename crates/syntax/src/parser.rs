@@ -6,9 +6,9 @@
 //! complete statement. `else` may follow a newline only when some group or brace
 //! encloses the `if` (exactly R's rule).
 //!
-//! Every parse produces a lossless tree: all tokens — including trivia and the
-//! tokens of malformed regions — are emitted in order; recovery wraps unparsable
-//! stretches in `ERROR` nodes local to the break.
+//! Every parse produces a lossless tree. Every token is emitted in order,
+//! including trivia and the tokens of a malformed region. Recovery wraps an
+//! unparsable stretch in an `ERROR` node local to the break.
 
 use crate::kind::SyntaxKind;
 use crate::lexer::{Token, lex};
@@ -64,15 +64,15 @@ struct Parser<'a> {
     /// Whether errors are currently raised by the `#:` annotation grammar.
     in_annotation: bool,
     /// Whether the `#:` region being parsed has already reported. The type
-    /// grammar cannot resynchronize the way the statement loop can — a region
-    /// is one expression, with no boundary inside it to restart at — so it
-    /// reported every token it could not use: nine findings for a single
-    /// mistyped optional parameter, all on one line. The first is the mistake;
-    /// the rest are its consequences.
+    /// grammar cannot resynchronize the way the statement loop can, because a
+    /// region is one expression with no boundary inside it to restart at. It
+    /// therefore reported every token it could not use, which was nine findings
+    /// for a single mistyped optional parameter, all on one line. The first is
+    /// the mistake, and the rest are its consequences.
     annotation_reported: bool,
     /// Whether the `#:` region has already reported an unclosed opener. Those
     /// are discovered at the END of the construct they name, so the suppression
-    /// above would drop the outermost truth in favour of an inner consequence —
+    /// above would drop the outermost truth in favour of an inner consequence.
     /// `@type Point {list{x: double` would say only "expected `,` or `}` in
     /// this list type" and never that the `@type` brace is open. One such
     /// structural report gets through regardless.
@@ -83,10 +83,10 @@ struct Parser<'a> {
     statement_had_lexer_error: bool,
     /// Whether the statement being parsed left an argument or parameter list
     /// open. Its unclosed-opener error is the whole story, and the newline that
-    /// would have ended the statement was consumed inside the list as trivia —
-    /// so the boundary check neither reports again nor recovers, and the next
-    /// line is parsed as the statement it is instead of being swallowed with
-    /// its definitions.
+    /// would have ended the statement was consumed inside the list as trivia.
+    /// The boundary check therefore neither reports again nor recovers, and the
+    /// next line is parsed as the statement it is instead of being swallowed
+    /// with its definitions.
     statement_left_group_open: bool,
 }
 
@@ -231,10 +231,10 @@ impl Parser<'_> {
         self.push_error(range, message);
     }
 
-    /// An unclosed opener inside a `#:` region: a structural fact about the
-    /// construct it names, so it reports even after the region's first finding
-    /// — see `annotation_unclosed_reported`. Outside a region this is an
-    /// ordinary error.
+    /// An unclosed opener inside a `#:` region. It is a structural fact about
+    /// the construct it names, so it reports even after the region's first
+    /// finding, as `annotation_unclosed_reported` describes. Outside a region
+    /// this is an ordinary error.
     fn error_unclosed(&mut self, range: TextRange, message: impl Into<String>) {
         if self.in_annotation {
             if self.annotation_unclosed_reported {
@@ -255,10 +255,11 @@ impl Parser<'_> {
     }
 
     /// A blame range never crosses a line break. An error reported *at* the
-    /// current token blames that token, and at the end of a line — the end of a
-    /// `#:` region, most often — the current token is the newline itself, whose
-    /// span runs from the end of one line to the start of the next. An editor
-    /// draws that as a squiggle across the break, pointing at neither line.
+    /// current token blames that token. At the end of a line, which is most
+    /// often the end of a `#:` region, the current token is the newline itself,
+    /// whose span runs from the end of one line to the start of the next. An
+    /// editor draws that as a squiggle across the break, pointing at neither
+    /// line.
     ///
     /// Such a range collapses onto the last character of code on its own line,
     /// which is where the reader has to look anyway. Trailing whitespace is
@@ -279,9 +280,9 @@ impl Parser<'_> {
         TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32))
     }
 
-    /// The empty range just past the last significant token before the
-    /// current position — where a missing separator belongs. Anchoring there
-    /// keeps the report on the line of the element it follows instead of on
+    /// The empty range just past the last significant token before the current
+    /// position, which is where a missing separator belongs. Anchoring there
+    /// keeps the report on the line of the element it follows, instead of on
     /// whatever line the next element starts.
     fn separator_gap(&self) -> TextRange {
         let end = (0..self.pos)
@@ -313,14 +314,15 @@ impl Parser<'_> {
     ///
     /// This is what separates an unclosed opener from a forgotten separator
     /// when a list runs onto the next line. A genuine continuation reads as a
-    /// fragment — `beta)`, `y) x` — while a line that *assigns* is the next
-    /// statement, and adopting it into the list swallows its definition along
-    /// with every line after.
+    /// fragment, such as `beta)` or `y) x`. A line that *assigns* is the next
+    /// statement instead, and adopting it into the list swallows its definition
+    /// along with every line after.
     ///
     /// `=` is deliberately not an assignment here. Inside an argument or
     /// parameter list `name = value` is a named argument, which is what a line
-    /// missing its comma looks like — the far likelier reading, and the one R
-    /// itself takes, since it keeps consuming until the opener closes.
+    /// missing its comma looks like. That is the far likelier reading, and it
+    /// is the one R itself takes, because R keeps consuming until the opener
+    /// closes.
     fn starts_new_statement(&self) -> bool {
         match self.current() {
             Some(
@@ -425,7 +427,7 @@ impl Parser<'_> {
     }
 
     /// True when the token at `pos` starts exactly where the previous one ended
-    /// (no interleaving trivia) — used to join multi-token directive names.
+    /// with no interleaving trivia. This joins a multi-token directive name.
     fn adjacent(&self, pos: usize) -> bool {
         pos > 0
             && pos < self.tokens.len()
@@ -496,6 +498,12 @@ impl Parser<'_> {
                             self.error_here("expected `]` after the optional parameter name");
                         }
                     }
+                    // JSDoc writes the type first. This directive writes the
+                    // name first, so say which form to use instead of only
+                    // reporting the missing name.
+                    Some(SyntaxKind::L_BRACE) if self.pos < end => self.error_here(
+                        "expected a parameter name after `@param`. The name comes before the type, as `@param name {TYPE}`",
+                    ),
                     _ => self.error_here("expected a parameter name after `@param`"),
                 }
                 self.ann_trivia(end);
@@ -640,9 +648,9 @@ impl Parser<'_> {
                 // A constraint may be spelled in more than one word (`scalar
                 // numeric`), so take the whole run. Naming the constraints is
                 // the lowering's job; the grammar only has to deliver them.
-                // Trivia is consumed only *between* words — taking it after the
-                // last one would pull the block's `#:` continuation marker into
-                // the binder.
+                // Trivia is consumed only *between* words. Taking it after
+                // the last word would pull the block's `#:` continuation
+                // marker into the binder.
                 while self.ann_next_significant(end) == Some(SyntaxKind::IDENT) {
                     self.wrap_name();
                     self.ann_trivia(end);
@@ -703,8 +711,9 @@ impl Parser<'_> {
                 // type that follows and the one real finding arrives buried
                 // under three consequences of it. The refused binder keeps an
                 // `ERROR` wrapper so lowering can tell that this block was
-                // refused — its names bind nothing, and reporting each as an
-                // unknown type would blame the author twice for one mistake.
+                // refused. Its names bind nothing, and reporting each as an
+                // unknown type would blame the author twice for one
+                // mistake.
                 self.start(SyntaxKind::ERROR);
                 self.ann_binder_list(end);
                 self.finish();
@@ -1123,8 +1132,9 @@ impl Parser<'_> {
     }
 
     /// Whether the statement whose tokens began at `start` ENDS in the bare
-    /// name `return` — the classic missing-parentheses mistake (`return x`,
-    /// `f <- function() return TRUE`). It earns a targeted message because
+    /// name `return`, which is the classic missing-parentheses mistake.
+    /// `return x` and `f <- function() return TRUE` are such statements. It
+    /// earns a targeted message because
     /// `return` reads like a keyword but is a function in R. A `return`
     /// reached through an access operator (`x$return`, `pkg::return`) is an
     /// ordinary field or export, not the builtin, and keeps the generic
@@ -1173,9 +1183,9 @@ impl Parser<'_> {
 
     // ---- expressions ----
 
-    /// Pratt loop. Returns false — emitting nothing and consuming nothing — when
-    /// the current token cannot start an expression; callers report the
-    /// context-specific error.
+    /// Pratt loop. It returns false, emitting nothing and consuming nothing,
+    /// when the current token cannot start an expression. The caller reports
+    /// the context-specific error.
     fn expression(&mut self, min_bp: u8) -> bool {
         if self.depth >= MAX_DEPTH {
             self.error_here("expression nesting is too deep");
@@ -1275,9 +1285,9 @@ impl Parser<'_> {
 
     /// Prefix operators and primary expressions. Quiet on failure: consumes and
     /// emits nothing, returns false.
-    /// Whether `kind` can begin an expression — kept in lockstep with the
-    /// entry set of `primary` (plus the sign/not/formula prefixes it
-    /// dispatches to `unary`).
+    /// Whether `kind` can begin an expression. This is kept in lockstep with
+    /// the entry set of `primary`, plus the sign, not, and formula prefixes
+    /// that `primary` dispatches to `unary`.
     fn starts_expression(kind: SyntaxKind) -> bool {
         matches!(
             kind,
@@ -1576,8 +1586,8 @@ impl Parser<'_> {
             // body stopped: a header running to end of file left this on the
             // blank line past the last statement, zero characters wide,
             // underlining nothing and pointing away from the construct that is
-            // incomplete. And a parameter list that never closed is the whole
-            // story — a missing body is only its consequence.
+            // incomplete. A parameter list that never closed is also the whole
+            // story, because a missing body is only its consequence.
             self.error_at(keyword_range, "expected a function body");
         }
         self.finish();
@@ -1695,10 +1705,10 @@ impl Parser<'_> {
                             // A new statement on a later line is not a
                             // forgotten comma: the opener was never closed, and
                             // reading on adopts that statement and every one
-                            // after it as further arguments — one missing `)`
+                            // after it as further arguments. One missing `)`
                             // put a confident "missing `,`" on every following
-                            // line, scaling with the file, and cost the adopted
-                            // lines their definitions.
+                            // line, scaling with the file, and it cost the
+                            // adopted lines their definitions.
                             if self.crossed_line() && self.starts_new_statement() {
                                 break;
                             }
@@ -1751,8 +1761,8 @@ impl Parser<'_> {
     fn argument(&mut self, closer: SyntaxKind) {
         self.start(SyntaxKind::ARGUMENT);
         // Tagged argument: `name = value`, `"name" = value`, `... = value`,
-        // and `NULL = value` (R's grammar admits NULL_CONST as a tag — the
-        // `switch(x, NULL = , …)` idiom).
+        // and `NULL = value`. R's grammar admits NULL_CONST as a tag, which is
+        // the `switch(x, NULL = , …)` idiom.
         let tagged = matches!(
             self.current(),
             Some(

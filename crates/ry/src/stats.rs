@@ -1,9 +1,9 @@
 //! `ry debug analysis-stats`: a workspace performance diagnosis. Runs
 //! the full analysis pipeline over a workspace through the same queries the
-//! language server uses and prints where the time goes — per-phase totals,
-//! the slowest files, and an incremental typing probe — plus where the memory
-//! goes (per-phase resident-set growth), so a slow or memory-hungry
-//! workspace can be diagnosed (and reported) with one command instead of
+//! language server uses. It prints where the time goes, as per-phase totals,
+//! the slowest files, and an incremental typing probe. It also prints where the
+//! memory goes, as per-phase resident-set growth. A slow or memory-hungry
+//! workspace can then be diagnosed, and reported, with one command instead of
 //! guesswork.
 
 use crate::cli::CommandError;
@@ -68,9 +68,10 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         .map(|(rank, name)| (name.as_str(), rank))
         .collect();
 
-    // Discover and order files exactly as the CLI and server do: package
-    // files first — Collate order when declared, then root-relative path —
-    // then scripts. The `[check] exclude` scope applies identically.
+    // Discover and order files exactly as the CLI and the server do. Package
+    // files come first, in Collate order when it is declared, then by
+    // root-relative path. Scripts follow. The `[check] exclude` scope applies
+    // identically.
     let exclude = crate::cli::exclude_matcher(&config, &target)?;
     let r_path = root.join("R");
     let mut entries: Vec<(bool, bool, usize, String, PathBuf)> = Vec::new();
@@ -157,9 +158,9 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     ProjectFiles::new(&db, records.iter().map(|record| record.file).collect());
     let rss_after_load = resident_set_bytes();
 
-    // Phases 2-5: staged fetches. Memoization makes the attribution honest —
-    // each stage reuses everything the stages before it computed, so its
-    // wall time is its own marginal cost. Package-wide folds and per-symbol
+    // The remaining phases are staged fetches. Memoization makes the
+    // attribution honest, because each stage reuses everything the stages
+    // before it computed, so its wall time is its own marginal cost. Package-wide folds and per-symbol
     // interface schemes have no line of their own: they run on demand inside
     // the first stage that needs them, which is exactly where an editor pays
     // for them.
@@ -445,8 +446,8 @@ const MEBIBYTE: f64 = 1024.0 * 1024.0;
 // The current resident set, so each phase's growth attributes the retained
 // memory (memoized values dominate; the resident set also keeps
 // allocator-held freed pages, so a phase with heavy transient allocation
-// reads slightly high). `None` where the kernel does not expose it — the
-// memory column is then simply omitted.
+// reads slightly high). It is `None` where the kernel does not expose it, and
+// the memory column is then simply omitted.
 fn resident_set_bytes() -> Option<u64> {
     proc_status_field("VmRSS:")
 }

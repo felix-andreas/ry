@@ -114,8 +114,8 @@ fn exit_code(result: Result<Outcome, CommandError>) -> ExitCode {
 
 #[derive(Parser)]
 // `name` is set explicitly: clap defaults to the Cargo package name, which is
-// `ry-lang` because the registry name `ry` was taken — but the command the user
-// typed, and the one every diagnostic and doc page names, is `ry`.
+// `ry-lang` because the registry name `ry` was taken. The command the user
+// typed, and the one every diagnostic and docs page names, is `ry`.
 #[command(name = "ry", version, after_help = experimental_features_help())]
 struct Cli {
     #[command(subcommand)]
@@ -133,7 +133,7 @@ struct Cli {
 fn experimental_features_help() -> String {
     let features = ry::config::ExperimentalFeatures::KNOWN
         .iter()
-        .map(|feature| format!("            {} — {}", feature.name, feature.description))
+        .map(|feature| format!("            {}: {}", feature.name, feature.description))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -146,10 +146,11 @@ fn experimental_features_help() -> String {
 enum Command {
     /// Lint and type-check the given files or directories
     ///
-    /// Analysis covers the whole project the paths belong to — the directory
-    /// holding `ry.toml` or `DESCRIPTION` — so cross-file names resolve
-    /// the same however the paths are named; only reporting is scoped to what
-    /// was named. Exit status: 0 clean, 1 findings, 2 usage or I/O failure.
+    /// Analysis covers the whole project the paths belong to, which is the
+    /// directory holding `ry.toml` or `DESCRIPTION`. Cross-file names therefore
+    /// resolve the same however the paths are named, and only reporting is
+    /// scoped to what was named. The exit status is 0 for no findings, 1 for
+    /// findings, and 2 for a usage or IO failure.
     /// Type errors are opt-in via `[check] typing` in `ry.toml`.
     Check {
         /// R files to check
@@ -186,9 +187,9 @@ enum Command {
         /// Enable verbose logging (ignored for now)
         #[clap(short, long, default_value_t = false)]
         verbose: bool,
-        /// Surface internal analysis facts (hover debug sections) — a
-        /// developer aid for working on ry itself. `RY_DEBUG=1`
-        /// is the environment equivalent; the flag takes precedence.
+        /// Surface internal analysis facts in hover debug sections. This is a
+        /// developer aid for working on ry itself. Setting `RY_DEBUG=1` in the
+        /// environment turns on the same thing.
         #[clap(long, default_value_t = false)]
         debug: bool,
     },

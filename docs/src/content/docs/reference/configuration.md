@@ -1,217 +1,101 @@
 ---
 title: Configuration
-description: Every ry.toml key, discovery rule, and editor setting in one place
+description: Every ry.toml key, which file applies, and the editor settings
 ---
 
-Everything you can change about ry's behavior lives in one file, `ry.toml`. Editor settings only say where the binary is.
+Everything that changes what ry reports lives in one `ry.toml`, so the editor, the command line, and
+CI always agree. This is every key, with its default:
 
-## Project discovery
-
-`ry.toml` is the only configuration file. There is no home-directory config, no environment variable naming one, and no merging — the nearest file replaces the built-in defaults wholesale.
-
-| Where ry runs | Search starts at |
-| --- | --- |
-| `ry check R/utils.R` | the file's own directory |
-| `ry check .` | that directory |
-| The language server | the workspace folder your editor announces; failing that, the process working directory |
-
-| Rule | Behavior |
-| --- | --- |
-| Search | walk up from the starting directory; the first `ry.toml` wins. None found: built-in defaults. |
-| Merging | none — one file supplies every key. |
-| Reload | the language server watches `ry.toml` and re-discovers on every change, so deleting it falls back to an ancestor or to the defaults. |
-| Several CLI targets | discovery runs once per argument, so two arguments can resolve two different files. |
-| `..` in a path | cancelled textually before the search, so `project/ry.toml` does **not** govern `project/../outside.R`. |
-
-```console
-$ cat project/ry.toml
-spaces = 8
-$ ry fmt --diff project/inside.R
-Diff in project/inside.R:
-1   1    | f <- function(x) {
-2        |-  x
-    2    |+        x
-3   3    | }
-1 file would be reformatted, 0 files already formatted
-$ ry fmt --diff project/../outside.R
-0 files would be reformatted, 1 file already formatted
-```
-
-### Project root
-
-The project root is a separate decision: it sets the analysis scope — which files see each other's definitions — not which config is loaded.
-
-| Situation | Root |
-| --- | --- |
-| An ancestor holds `ry.toml` or `DESCRIPTION` | the nearest such directory |
-| Otherwise, the target is a directory | that directory |
-| Otherwise, the target sits directly under an `R/` directory | the parent of `R/` |
-| Otherwise | the file's own directory |
-
-## `[format]`
-
-| Key | Type | Default | Effect |
-| --- | --- | --- | --- |
-| `indent-width` | integer | `2` | Spaces per indentation level, for `ry fmt` and for formatting in the editor. |
-| `line-ending` | `"auto"`, `"lf"`, `"cr-lf"` | `"auto"` | Line ending the formatter writes. `"auto"` keeps whatever the file already uses. |
-
-## `[lint]`
-
-Every key except `naming-style` takes a level: `"off"`, `"warn"`, `"error"`, or `"default"` — which means the built-in severity, exactly as if you omitted the key.
-
-| Key | Type | Default | Effect |
-| --- | --- | --- | --- |
-| `naming-style` | `"snake_case"`, `"camelCase"` | unset — check off | Reports `naming-style` for variables and function parameters that do not match. `SCREAMING_SNAKE_CASE` always conforms. Always a warning; the value is a style, not a level. |
-| `assignment-operator` | level | `"warn"` | `=` used for assignment. |
-| `boolean-shorthand` | level | `"warn"` | `T` or `F` written instead of `TRUE` or `FALSE`. |
-| `trailing-comma` | level | `"error"` | A comma after the last argument of a call. |
-| `unused-parameter` | level | `"off"` | Function formals never read. S3 methods and your project's own generics are exempt. |
-| `unused-import` | level | `"off"` | An `importFrom(pkg, name)` in `NAMESPACE` whose name appears nowhere in your sources. Whole-namespace `import(pkg)` is never checked, and this finding is raised by `ry check` only — not in the editor. |
-| `shadows-builtin` | level | `"off"` | A top-level binding with the same name as a `base` export. |
-| `shadows-namespace` | level | `"off"` | A top-level binding with the same name as an export of another namespace, such as `stats::filter`. |
-
-For a single exception, prefer a [suppression comment](/reference/diagnostic-codes#suppressing-a-finding) over turning a lint off across the whole project.
-
-## `[check]`
-
-Type inference always runs — hover, inlay hints, and signature help work regardless of these keys. `[check]` only decides which findings are reported.
-
-| Key | Type | Default | Effect |
-| --- | --- | --- | --- |
-| `unused` | boolean | `true` | Report `unused` — bindings whose value is never read. |
-| `typing` | boolean | `false` | Report `type-mismatch`. See the [tutorial](/type-checking/tutorial). |
-| `maybe-undefined` | boolean | `false` | Report `maybe-undefined` — a read some path reaches with no prior write. Off by default because correlated guards read as independent branches; see [diagnostic codes](/reference/diagnostic-codes). |
-| `strict` | boolean | `false` | Report each site with a genuinely undetermined type, **and** raise every `unresolved` finding from warning to error. See [strict mode](/reference/type-system#strict-mode). |
-| `exclude` | array of strings | `[]` | Gitignore-style patterns the directory walk of `ry check` skips. |
-
-A `# typing: off`, `# typing: on`, or `# typing: strict` line at the top of a file replaces both `typing` and `strict` for that file — see [the per-file directive](/reference/type-system#per-file-directive).
-
-Four rules govern `exclude`:
-
-- Patterns are anchored at the directory holding `ry.toml`, and follow gitignore rules: `scripts/` excludes that whole subtree, `**/generated` matches at any depth, `!` re-includes.
-- Excluded directories are pruned without being walked, so exclusion cuts checking time, not just output.
-- A file named on the command line is always checked, files open in the editor are always analyzed, and `ry fmt` ignores the key entirely.
-- Some paths are skipped with no configuration at all, because they hold vendored dependencies rather than your code: `renv/`, `packrat/`, `revdep/`, `.Rproj.user/`, `.Rcheck/`. `.gitignore` is honored too, git checkout or not.
-
-```console
-$ cat ry.toml
+```toml
 [check]
-exclude = ["scripts/"]
-$ ry check .
-warning[unused]: `v` is assigned but never used.
- --> R/a.R:1:19
-1 | f <- function() { v <- 1; 2 }
-                      ^
+typing = false           # report type errors
+strict = false           # report unknown types (needs typing for type errors)
+unused = true            # report values that are never read
+maybe-undefined = false  # report reads some path reaches before a write
+exclude = []             # gitignore-style patterns that ry check skips
 
-1 problem in 1 file
-```
-
-## Invalid and unknown keys
-
-An unknown key is never fatal, so a config written for a newer ry still starts an older one.
-
-| Situation | Result |
-| --- | --- |
-| Unknown key | Ignored, with one warning naming it. Known keys beside it still load, and the exit code is unaffected. |
-| Known key at the wrong level | Ignored, with a warning naming the table it belongs under. A `typing = true` written outside `[check]` sets nothing. |
-| Wrong type on a known key | Hard error. |
-| Malformed TOML | Hard error. |
-| Invalid `[check] exclude` pattern | Hard error. |
-| The file disappears between discovery and reading | Silently falls back to the defaults. |
-| Any other read error | Hard error. |
-
-```console
-$ cat ry.toml
-strict = true
-
-[check]
-stric = true
-typing = true
+[lint]                   # each takes "off", "warn", "error", or "default"
+assignment-operator = "warn"  # `=` used for assignment
+boolean-shorthand = "warn"    # T or F instead of TRUE or FALSE
+trailing-comma = "error"      # a comma after a call's last argument
+unused-parameter = "off"      # a parameter the body never reads
+unused-import = "off"         # a NAMESPACE importFrom nothing uses
+shadows-builtin = "off"       # a top-level name that hides a base function
+shadows-namespace = "off"     # a top-level name that hides another export
+# naming-style = "snake_case" # or "camelCase"; unset means not checked
 
 [format]
-indent = 4
-$ ry check .
-  ! ignoring config key `strict` — it belongs under `[check]`, and nothing outside a table sets it
-  ! ignoring unknown config key `check.stric` — check the spelling, or update ry
-  ! ignoring unknown config key `format.indent` — check the spelling, or update ry
-1 file checked, no problems
+indent-width = 2
+line-ending = "auto"     # keep the file's own; or "lf", "cr-lf"
 ```
 
-A hard error shows the offending line, so you do not have to count columns:
+The [diagnostic codes](/reference/diagnostic-codes) page explains each finding. `strict` also raises
+unresolved names to errors, but it does not turn on type errors: set `typing` as well. A
+`# typing: off`, `on`, or `strict` comment in a file overrides both keys for that file, and
+`# typing: strict` does imply type errors.
 
-```console
-$ cat ry.toml
-[check]
-typing = "yes"
-$ ry check .
-config
+## Which file applies
 
-  x invalid config for `check.typing`: invalid type: string "yes", expected a boolean
-   --[/home/you/project/ry.toml:2:10]
- 1 | [check]
- 2 | typing = "yes"
-   |          ^^^^^
-$ echo $?
-2
+ry walks up from the file you check, or from the editor's workspace folder, and uses the first
+`ry.toml` it finds. Nothing is merged, and there is no home-directory file or environment variable.
+The language server reloads the file when it changes. A `roughly.toml` from before the rename is
+still read.
+
+The project root is a separate question: it decides which files see each other's definitions. It is
+the nearest directory with a `ry.toml` or a `DESCRIPTION`. Without one, it is the directory you
+named, or the parent of `R/` for a file directly inside `R/`, or else the file's own directory. In
+the editor it is the first workspace folder.
+
+## `exclude`
+
+Patterns follow gitignore rules and are anchored at the directory holding `ry.toml`, so
+`exclude = ["scripts/", "**/generated"]` skips that subtree and any `generated` directory.
+
+- Excluded files drop out of analysis, not just out of the report, so names they define become
+  unresolved everywhere else. Exclude only code nothing else calls into.
+- A file you name on the command line, or open in the editor, is still analyzed.
+- `ry fmt` ignores the key.
+- `renv/`, `packrat/`, `revdep/`, `.Rproj.user/`, `.Rcheck/`, and whatever `.gitignore` lists are
+  always skipped, because they hold dependencies and build output rather than your code.
+
+## Mistakes in `ry.toml`
+
+An unknown or misplaced key is a warning, and the rest of the file still loads, so a configuration
+written for a newer ry still works with an older one. The cost is that a typo does not fail CI: with
+`typng = true`, `ry check` leaves type checking off, exits 0 on clean code, and only prints this:
+
+```text
+! ignoring unknown config key `check.typng`. Check the spelling, or update ry
 ```
 
-Where that lands depends on how ry runs:
+Invalid TOML, a value of the wrong type, or an invalid `exclude` pattern is an error: `ry check`
+exits with status 2, and the language server keeps the last good configuration and marks the line
+in `ry.toml`.
 
-| | Behavior |
-| --- | --- |
-| CLI | The message goes to stderr and the command exits 2 — see the [exit codes](/reference/cli#exit-codes). |
-| The language server | Never crashes. At startup it falls back to the defaults; on a live edit it keeps the previous configuration. Either way it shows the message and publishes a `config` finding on `ry.toml` at the offending line, cleared once the file loads again. |
-
-## Legacy keys
-
-| Old key | Modern key | Note |
-| --- | --- | --- |
-| `case` (top level) | `lint.naming-style` | Still parses, and wins when both are set. |
-| `spaces` (top level) | `format.indent-width` | Still parses, and wins when both are set. |
-| `lint.missing-comma` | none | Accepted so old files keep loading, and does nothing: a missing argument comma is now a parse error. |
+The older top-level keys `case` and `spaces` still work, as `naming-style` and `indent-width`.
 
 ## Editor settings
 
-These say where the binary is and how to launch it; none of them changes analysis. The language server ignores LSP workspace configuration outright, so every behavioural key must live in `ry.toml`.
+Editor settings only say how to start the server. The server ignores any configuration the editor
+sends.
 
-### VS Code
+In VS Code, the extension uses, in order, the `SERVER_PATH` environment variable, `ry.path`, its
+bundled binary, and `ry` on your `PATH`. A change takes effect after **ry: Restart Server**.
 
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `ry.path` | `null` | Location of the `ry` executable. |
-| `ry.args` | `null`, meaning `["server"]` | Arguments passed to the executable. |
-| `ry.experimentalFeatures` | `null` | Feature names forwarded as `--experimental-features`. Currently only `range_formatting` — format the selected range instead of the whole file. |
-
-Changing any of the three prompts you to restart the server; it takes effect only then. The extension finds the binary in this order: the `SERVER_PATH` environment variable, `ry.path`, its own bundled copy, then `ry` on your `PATH`.
-
-| Command | Does |
-| --- | --- |
-| ry: Restart Server | Restarts the language server |
-| ry: Start Server | Same as restart |
-| ry: Stop Server | Shuts the language server down |
-| ry: Open Logs | Opens the server's output channel |
-
-### Zed
-
-The extension contributes no settings of its own, so use Zed's generic `lsp.ry` block.
-
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `lsp.ry.binary.path` | unset | Absolute path to the binary. Setting it skips the `PATH` lookup and the release download. |
-| `lsp.ry.binary.arguments` | unset, meaning `["server", "--stdio"]` | Arguments passed to the binary, however it was found. |
-| `lsp.ry.settings` | unset | Forwarded to the server, which ignores it. Put configuration in `ry.toml`. |
-
-Zed highlights R with tree-sitter, which sees a `#:` annotation as an ordinary comment. The colors come from the server as semantic tokens, which Zed leaves off by default:
-
-```json
-// settings.json
+```jsonc
 {
-  "languages": {
-    "R": {
-      "semantic_tokens": "combined"
-    }
-  }
+  "ry.path": "/usr/local/bin/ry",
+  "ry.args": ["server"],
+  "ry.experimentalFeatures": ["range_formatting"]  // format a selection
 }
 ```
 
-Without a path or a binary on your `PATH`, the Zed extension downloads a release itself and reuses it afterwards.
+In Zed, set the path under `lsp.ry`. Zed highlights R with tree-sitter, which treats a `#:`
+annotation as a plain comment, so turn on semantic tokens to color annotations:
+
+```jsonc
+{
+  "lsp": { "ry": { "binary": { "path": "/usr/local/bin/ry" } } },
+  "languages": { "R": { "semantic_tokens": "combined" } }
+}
+```

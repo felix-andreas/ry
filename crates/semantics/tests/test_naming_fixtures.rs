@@ -1,17 +1,18 @@
 //! Name-resolution fixtures: which binding every name in an item resolves to.
 //!
 //! This is the only suite that tests naming *directly*. Everywhere else naming
-//! is tested through its consequences — a type that comes out right, a
-//! diagnostic that does or does not fire — which cannot see a read that
-//! resolves to the **wrong** binding while still producing the same type. That
-//! failure is silent in every other suite, and it is a real one: the rule for
-//! which writer an immediate read sees (the nearest earlier one, not the first
-//! and not the last) is invisible unless the bindings differ in type.
+//! is tested through its consequences, which are a type that comes out right
+//! and a diagnostic that does or does not fire. Those consequences cannot see a
+//! read that resolves to the **wrong** binding while still producing the same
+//! type. That failure is silent in every other suite, and it is a real one. The
+//! rule for which writer an immediate read sees is the nearest earlier one,
+//! rather than the first or the last, and it is invisible unless the bindings
+//! differ in type.
 //!
 //! The rendering is flat and source-ordered rather than a tree of the HIR. The
 //! fact under test is the resolution, not the shape, and a tree renderer would
-//! restate the lowering — churning this suite on every HIR change while adding
-//! nothing about names. Sections appear only when they have content, so an
+//! restate the lowering, which would churn this suite on every HIR change
+//! while adding nothing about names. Sections appear only when they have content, so an
 //! ordinary case stays short.
 //!
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.

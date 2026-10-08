@@ -2,9 +2,10 @@
 //!
 //! Lowering is where R's surface syntax becomes the shape the checker reasons
 //! about, and several of those steps are real rewrites rather than a change of
-//! representation — a native pipe becomes a call with the left side spliced in
+//! representation. A native pipe becomes a call with the left side spliced in
 //! as the first argument, a replacement form becomes a read of the base
-//! followed by a write back to it, `local({…})` becomes its own construct. Every
+//! followed by a write back to it, and `local({…})` becomes its own
+//! construct. Every
 //! one of those is currently tested only through whatever type falls out the far
 //! end, which cannot distinguish "lowered to the wrong shape but coincidentally
 //! typed the same" from "lowered correctly".
@@ -177,19 +178,8 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
             let _ = writeln!(output, "{indent}Local");
             render_expression(output, module, *body, depth + 1);
         }
-        ExpressionKind::Block {
-            statements,
-            trailing_semicolon,
-        } => {
-            let _ = writeln!(
-                output,
-                "{indent}Block{}",
-                if *trailing_semicolon {
-                    " trailing-semicolon"
-                } else {
-                    ""
-                }
-            );
+        ExpressionKind::Block { statements } => {
+            let _ = writeln!(output, "{indent}Block");
             for &statement in statements {
                 render_expression(output, module, statement, depth + 1);
             }

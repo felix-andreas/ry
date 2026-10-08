@@ -2,12 +2,14 @@
 //! from its first commit.
 //!
 //! Invariants, checked on every input:
-//!   1. never panic — `format` either produces output or refuses with a
-//!      structured error;
-//!   2. idempotence — when `format` succeeds, formatting the output again
-//!      succeeds and reproduces it byte-for-byte;
-//!   3. determinism — the same input formats to the same result;
-//!   4. preservation — the token kinds survive, so lost code is caught.
+//!   1. Nothing panics. `format` either produces output or refuses with a
+//!      structured error.
+//!   2. Formatting is idempotent. When `format` succeeds, formatting the
+//!      output again succeeds and reproduces it byte-for-byte.
+//!   3. Formatting is deterministic. The same input formats to the same
+//!      result.
+//!   4. The code is preserved. The token kinds survive, so lost code is
+//!      caught.
 //!
 //! Generators mirror the syntax-crate harness: valid-program seeds, byte-level
 //! seed mutations, token soup from an R-shaped alphabet, random bytes, every
@@ -145,9 +147,9 @@ const ALPHABET: &[&str] = &[
 
 /// Inputs found by the coverage-guided `fuzz/` targets, each of which once
 /// broke an invariant (idempotence, or output that no longer parses).
-/// Unlike `SEEDS` these may legitimately refuse — only the invariants must
-/// hold. Kept verbatim so the failures stay pinned without depending on the
-/// gitignored fuzz corpus.
+/// Unlike `SEEDS`, these may legitimately refuse, and only the invariants must
+/// hold. They are kept verbatim so the failures stay pinned without depending
+/// on the gitignored fuzz corpus.
 const REGRESSIONS: &[&str] = &[
     "{\n  ;\n}\n",
     "{#:\n}\n",
@@ -199,8 +201,8 @@ fn fuzz_regressions_hold_invariants() {
 
 /// Every fixture case source in the repository, run through the battery. The
 /// fixture suites are the richest R corpus here and they grow with every slice,
-/// unlike the hand-written seed list — and they are in-tree, so this arm never
-/// skips the way the fetched-corpus arm does.
+/// unlike the hand-written seed list. They are also in the tree, so this arm
+/// never skips the way the fetched-corpus arm does.
 #[test]
 fn fixture_sources_hold_invariants() {
     let sources = syntax::testing::fixture_case_sources();

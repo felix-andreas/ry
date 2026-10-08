@@ -1,13 +1,13 @@
 //! Loading declaration-only `.Rtypes` stub files onto interned types.
 //!
-//! Each line is `name : <type-expr>` — the type half reuses the `#:`
-//! annotation grammar (parsed by wrapping it as an annotation and running the
-//! ordinary pipeline, so there is no second type parser). `@type NAME`
-//! declares an opaque stub nominal; repeating a name within one source
-//! appends an ordered overload candidate; a later source replaces a name's
-//! whole set. The assembled library is derived from a set-once singleton
-//! input plus the package-metadata input (which activates the conditional
-//! namespaces), so stub text never participates in per-edit invalidation.
+//! Each line is `name : <type-expr>`. The type half reuses the `#:` annotation
+//! grammar. The loader wraps it as an annotation and runs the ordinary
+//! pipeline, so there is no second type parser. `@type NAME` declares an opaque
+//! stub nominal. Repeating a name within one source appends an ordered overload
+//! candidate, and a later source replaces a name's whole set. The assembled
+//! library is derived from a set-once singleton input plus the
+//! package-metadata input, which activates the conditional namespaces, so stub
+//! text never participates in per-edit invalidation.
 
 use crate::Db;
 use crate::annotations::lower_annotation;
@@ -18,7 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// sources replace earlier declarations of the same name wholesale), plus the
 /// export manifests: `(namespace, text)` pairs listing every name the
 /// namespace exports, one per line (`#` starts a comment). Manifest names
-/// resolve even without a typed declaration — a real export the typed corpus
+/// resolve even without a typed declaration, so a real export the typed corpus
 /// does not describe reads as `Unknown` instead of warning.
 #[salsa::input(singleton, debug)]
 pub struct StubSources {
@@ -44,7 +44,7 @@ pub struct StubLibrary<'db> {
     /// later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
     pub exports_by_namespace: FxHashMap<String, FxHashSet<String>>,
-    /// The winning declaration site per name — hover and goto-definition jump
+    /// The winning declaration site per name. Hover and goto-definition jump
     /// here. For an overload set this is the first candidate's line.
     pub declarations: FxHashMap<String, StubDeclaration>,
     /// Every manifest-listed export of the active namespaces, typed or not.
@@ -53,9 +53,9 @@ pub struct StubLibrary<'db> {
     pub known_exports: FxHashSet<String>,
 }
 
-/// Where a stub name is declared: which installed source (an index into the
-/// `StubSources` order the host fed in — the host knows each index's file)
-/// and the name token's range within that source's text.
+/// Where a stub name is declared. It carries which installed source, as an
+/// index into the `StubSources` order the host fed in, and the name token's
+/// range within that source's text. The host knows each index's file.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct StubDeclaration {
     pub source_index: usize,
@@ -67,8 +67,8 @@ pub fn stub_declaration<'db>(db: &'db dyn Db, name: &str) -> Option<&'db StubDec
     stubs(db)?.declarations.get(name)
 }
 
-/// Whether the stub corpus knows `package` as a namespace. `None` when no
-/// corpus is installed — callers skip validation entirely then.
+/// Whether the stub corpus knows `package` as a namespace. It is `None` when
+/// no corpus is installed, and a caller then skips validation entirely.
 pub fn namespace_known(db: &dyn Db, package: &str) -> Option<bool> {
     stubs(db).map(|library| library.exports_by_namespace.contains_key(package))
 }
@@ -101,11 +101,12 @@ pub fn namespace_exports(db: &dyn Db, package: &str, name: &str) -> bool {
 
 /// The shipped stdlib corpus (base + default-attached packages, plus the
 /// conditional namespaces), embedded from the repository's top-level
-/// `types/` directory — top-level so the R type declarations are the first
-/// thing a repository visitor finds (the typeshed precedent). NOT `stubs/`:
-/// that name is the project-override convention, and a workspace-root
-/// `stubs/` in this repo would be loaded as overrides when ry analyzes
-/// its own sources.
+/// `types/` directory. It sits at the top level so the R type declarations are
+/// the first thing a repository visitor finds, which follows the typeshed
+/// precedent. It is deliberately not `stubs/`. That name is the
+/// project-override convention, and a workspace-root `stubs/` in this
+/// repository would be loaded as overrides when ry analyzes its own
+/// sources.
 pub fn shipped_stub_sources() -> Vec<(String, String)> {
     [
         ("base", include_str!("../../../types/base.Rtypes")),
@@ -158,9 +159,10 @@ pub fn shipped_export_manifests() -> Vec<(String, String)> {
         ("dplyr", include_str!("../../../types/dplyr.exports")),
         ("ggplot2", include_str!("../../../types/ggplot2.exports")),
         ("testthat", include_str!("../../../types/testthat.exports")),
-        // Manifest-only: no typed declarations, so every name is `Unknown` —
-        // what they buy is a knowable export set, which is what keeps
-        // unresolved-name detection alive in a project that attaches them.
+        // These are manifest-only, with no typed declaration, so every name
+        // is `Unknown`. What they buy is a knowable export set, which is what
+        // keeps unresolved-name detection alive in a project that attaches
+        // them.
         ("tibble", include_str!("../../../types/tibble.exports")),
         ("tidyr", include_str!("../../../types/tidyr.exports")),
         ("readr", include_str!("../../../types/readr.exports")),
@@ -190,16 +192,16 @@ pub fn shipped_export_manifests() -> Vec<(String, String)> {
 
 /// Shipped namespaces R does not attach by default: their declarations join
 /// the library only when the project declares or attaches the package
-/// (`metadata::namespace_active`), so `fread` and `mutate` never resolve —
-/// and never steal a typo warning — in a project that does not use them.
+/// (`metadata::namespace_active`), so `fread` and `mutate` never resolve in a
+/// project that does not use them, and never steal a typo warning there.
 ///
 /// Most of these carry only an [export manifest](`shipped_export_manifests`),
 /// no typed declarations. That is deliberate and it is the point: attaching a
 /// package whose export set the checker cannot see disables unresolved-name
 /// detection for the whole project (the export set is unknowable, so guessing
 /// would cost false positives), and a manifest makes the set knowable. Every
-/// name from a manifest-only namespace types as `Unknown` — no precision
-/// claimed — while a typo beside it is a typo again.
+/// name from a manifest-only namespace types as `Unknown`, which claims no
+/// precision, while a typo beside it is a typo again.
 pub const CONDITIONAL_NAMESPACES: &[&str] = &[
     "data.table",
     "dplyr",
@@ -224,9 +226,9 @@ pub const CONDITIONAL_NAMESPACES: &[&str] = &[
 
 /// A meta-package and the packages it ATTACHES rather than re-exports.
 /// `library(tidyverse)` puts `mutate` and `read_csv` within bare reach without
-/// exporting either, so activating the members alongside it is what matches R
-/// — and it hands such a project the members' *typed* declarations (dplyr's,
-/// ggplot2's) instead of a manifest's `Unknown`. `scripts/export-manifests.R`
+/// exporting either, so activating the members alongside it is what matches R.
+/// It also hands such a project the members' *typed* declarations, from dplyr
+/// and ggplot2, instead of a manifest's `Unknown`. `scripts/export-manifests.R`
 /// prints the membership a live session reports, so this list is checkable.
 pub const META_PACKAGE_MEMBERS: &[(&str, &[&str])] = &[(
     "tidyverse",
@@ -253,10 +255,10 @@ pub const QUALIFIED_ONLY_NAMESPACES: &[&str] = &[
 /// Parse and lower every stub source into the interned library.
 #[salsa::tracked(returns(ref))]
 pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'db> {
-    // A namespace declared by more than one source carries a PROJECT
-    // override on top of the shipped file — and writing `stubs/dplyr.Rtypes`
-    // is itself the clearest declaration that the project uses the package,
-    // so it activates the conditional namespace like metadata would.
+    // A namespace declared by more than one source carries a PROJECT override
+    // on top of the shipped file. Writing `stubs/dplyr.Rtypes` is itself the
+    // clearest declaration that the project uses the package, so it activates
+    // the conditional namespace as metadata would.
     let mut seen_namespaces: FxHashSet<&str> = FxHashSet::default();
     let mut project_overridden: FxHashSet<&str> = FxHashSet::default();
     for (namespace, _) in sources.sources(db) {
@@ -298,7 +300,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             };
             if let Some(rest) = content.strip_prefix("@type") {
                 let name = rest.trim();
-                if !name.is_empty() {
+                if is_nominal_name(name) {
                     library.nominals.insert(name.to_owned());
                     namespace_exports.insert(name.to_owned());
                     if let Some(range) = name_range(name) {
@@ -357,9 +359,9 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             continue;
         }
         // R-shipped but unattached namespaces are reachable through `::` in
-        // every session, so their manifests always validate qualified reads —
-        // but their names become bare-visible (`known_exports`) only once the
-        // project attaches or declares the package, exactly as in R.
+        // every session, so their manifests always validate a qualified read.
+        // Their names become bare-visible, through `known_exports`, only once
+        // the project attaches or declares the package, exactly as in R.
         let bare_visible = !QUALIFIED_ONLY_NAMESPACES.contains(&namespace.as_str()) || active;
         let namespace_exports = library
             .exports_by_namespace
@@ -387,10 +389,10 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
 }
 
 /// The names of a masked declaration's formals before its `...`, in
-/// declaration order — the arguments that resolve normally at a masked call
-/// (the data arguments). `None` when the scheme is not a variadic function
-/// (the declaration-level error `stub_source_problems` reports; the loader
-/// simply skips the mask).
+/// declaration order. These are the data arguments, and they resolve normally
+/// at a masked call. The result is `None` when the scheme is not a variadic
+/// function. That is the declaration-level error `stub_source_problems`
+/// reports, and the loader simply skips the mask.
 fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<String>> {
     let crate::types::TyKind::Function(function) = scheme.body.kind(db) else {
         return None;
@@ -422,7 +424,7 @@ pub struct StubProblem {
 
 /// Everything the loader would drop from one stub source, ordered by line.
 /// The nominal vocabulary is the installed corpus's plus this source's own
-/// `@type` declarations — the source may be an unsaved editor buffer whose
+/// `@type` declarations. The source may be an unsaved editor buffer whose
 /// declarations are not installed yet.
 pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     let mut known_nominals: FxHashSet<String> = stubs(db)
@@ -432,7 +434,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         let content = strip_comment(raw_line).trim();
         if let Some(rest) = content.strip_prefix("@type") {
             let name = rest.trim();
-            if !name.is_empty() {
+            if is_nominal_name(name) {
                 known_nominals.insert(name.to_owned());
             }
         }
@@ -445,10 +447,16 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             continue;
         }
         if let Some(rest) = content.strip_prefix("@type") {
-            if rest.trim().is_empty() {
+            let name = rest.trim();
+            if name.is_empty() {
                 problems.push(StubProblem {
                     line,
                     message: "expected a type name after `@type`.".to_owned(),
+                });
+            } else if !is_nominal_name(name) {
+                problems.push(StubProblem {
+                    line,
+                    message: format!("`{name}` is not a valid type name."),
                 });
             }
             continue;
@@ -499,7 +507,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             problems.push(StubProblem {
                 line,
                 message: format!(
-                    "`@masked` on `{name}` requires a variadic function type — the mask covers \
+                    "`@masked` on `{name}` requires a variadic function type. The mask covers \
                      the arguments the `...` rest parameter absorbs."
                 ),
             });
@@ -578,8 +586,8 @@ fn collect_unknown_nominals<'db>(
     }
 }
 
-/// Parse one type expression by routing it through the annotation pipeline —
-/// the single type grammar in the system.
+/// Parse one type expression by routing it through the annotation pipeline,
+/// which is the single type grammar in the system.
 fn lower_type_text<'db>(db: &'db dyn Db, type_text: &str) -> Option<TypeScheme<'db>> {
     let parse = syntax::parse(&format!("#: {type_text}"));
     if !parse.errors().is_empty() {
@@ -618,19 +626,11 @@ fn top_level_colon(content: &str) -> Option<usize> {
 
 /// A declarable name: an R identifier (letters, digits, `.`, `_`, not starting
 /// with a digit), an infix operator (`%in%`, a user `%||%`), or an S3 operator
-/// method (`+.Date`) — the spelling R itself uses to give a class arithmetic
-/// or comparison, and the only way a stub can say a nominal supports `+`.
+/// method such as `+.Date`. That last spelling is the one R itself uses to
+/// give a class arithmetic or comparison, and it is the only way a stub can say
+/// a nominal supports `+`.
 fn is_stub_name(name: &str) -> bool {
-    let identifier = |name: &str| {
-        let mut characters = name.chars();
-        characters
-            .next()
-            .is_some_and(|first| !first.is_ascii_digit())
-            && name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
-    };
-    if identifier(name) {
+    if is_nominal_name(name) {
         return true;
     }
     if let Some(body) = name
@@ -642,7 +642,18 @@ fn is_stub_name(name: &str) -> bool {
     OPERATOR_METHOD_PREFIXES
         .iter()
         .filter_map(|operator| name.strip_prefix(operator))
-        .any(|suffix| suffix.strip_prefix('.').is_some_and(identifier))
+        .any(|suffix| suffix.strip_prefix('.').is_some_and(is_nominal_name))
+}
+
+/// A nominal's name is a plain R identifier. The operator spellings a method
+/// declaration may carry are names for values, never for types.
+fn is_nominal_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|first| !first.is_ascii_digit())
+        && name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
 }
 
 /// The operator spellings an S3 method name may carry, longest first so
@@ -681,9 +692,28 @@ mod tests {
         assert_eq!(library.schemes["length"].len(), 1);
     }
 
+    #[test]
+    fn a_type_name_must_be_an_identifier() {
+        let db = RootDatabase::default();
+        install_shipped_stubs(&db);
+        let problems = stub_source_problems(
+            &db,
+            "@type structural { a: integer }\nmk : fn() -> structural\n",
+        );
+        assert_eq!(problems[0].line, 0);
+        assert_eq!(
+            problems[0].message,
+            "`structural { a: integer }` is not a valid type name."
+        );
+        // The nominal is refused, so the use below reports too, and an author
+        // who reads only the second error is not sent to a correct line.
+        assert_eq!(problems[1].line, 1);
+    }
+
     /// Whether a name is an S3 operator method (`+.Date`) or an operator group
-    /// generic (`Arith.difftime`, `Compare.Date`) — a dispatch target for the
-    /// checker's operator lookup rather than a name a namespace exports.
+    /// generic, such as `Arith.difftime` or `Compare.Date`. Either is a
+    /// dispatch target for the checker's operator lookup rather than a name a
+    /// namespace exports.
     fn is_operator_method_name(name: &str) -> bool {
         const GROUP_GENERICS: [&str; 3] = ["Arith.", "Compare.", "Ops."];
         GROUP_GENERICS

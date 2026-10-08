@@ -78,8 +78,8 @@ impl Name {
 /// Resolves the escapes R allows inside a backtick-quoted name. Only the
 /// character escapes a name can actually carry are translated; anything else
 /// keeps its backslash, which matches R treating an unknown escape as an error
-/// rather than as a silent deletion — dropping it here would make two
-/// different names compare equal.
+/// rather than as a silent deletion. Dropping it here would make two different
+/// names compare equal.
 fn unescape_name(quoted: &str) -> String {
     let mut out = String::with_capacity(quoted.len());
     let mut characters = quoted.chars();

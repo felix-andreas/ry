@@ -6,7 +6,7 @@
 //!
 //! Phases, each on a fresh database:
 //!   A. sequential full check (one thread, every file)
-//!   B. demand `interface_sccs` alone — it pulls `item_naming` for every
+//!   B. demand `interface_sccs` alone. It pulls `item_naming` for every
 //!      item, so computed cold inside that one query it serializes the whole
 //!      parse+naming front half of the pass on one thread
 //!   C. after B, sequential full check (the remainder)
@@ -22,7 +22,7 @@
 //!   H. interner scaling in isolation (hot-value hits vs distinct values)
 //!
 //! Caveat when reading numbers: on shared/throttled cloud vCPUs, verify raw
-//! thread scaling first (phase H, or any lock-free compute loop) — a host
+//! thread scaling first (phase H, or any lock-free compute loop), because a host
 //! that delivers well under N cores of throughput makes every parallel
 //! phase look serialized regardless of the code under test.
 
@@ -262,8 +262,8 @@ fn main() {
         start.elapsed()
     );
 
-    // F: the E pipeline on the event-counting database — how many query
-    // executions vs cross-thread blocks does the parallel check incur?
+    // F: the E pipeline on the event-counting database. How many query
+    // executions, against cross-thread blocks, does the parallel check incur?
     let (db, files) = setup::<ProbeDatabase>(&sources);
     let chunk = files.len().div_ceil(workers).max(1);
     std::thread::scope(|scope| {
