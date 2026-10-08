@@ -1,11 +1,9 @@
 //! Style lints: syntax-level checks over the parse tree plus the
 //! naming-driven unused-parameter and shadow lints.
 //!
-//! The legacy stack also carried a `missing-comma` lint compensating for
-//! tree-sitter silently accepting `f(1 2)`; the hand parser rejects that
-//! input with a syntax error (as R itself does), so the lint no longer
-//! exists — the config key is still accepted for compatibility and has no
-//! effect.
+//! There is no `missing-comma` lint: the parser rejects `f(1 2)` with a
+//! syntax error, as R itself does. The config key is still accepted for
+//! compatibility and has no effect.
 
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::{Db, SourceFile, item_naming, item_spans, parse};

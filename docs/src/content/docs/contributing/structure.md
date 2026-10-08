@@ -5,8 +5,7 @@ description: The file structure of the syntax, semantics, ide, format, ry, and r
 
 This document is the authoritative file structure for ry's code. The
 crate graph and phase boundaries live in [Architecture](/contributing/architecture); this
-page records the file split and the role of each file. The `*-legacy` crates
-keep their own (frozen) layout and are not documented here.
+page records the file split and the role of each file.
 
 ## `syntax` crate (`src/syntax.rs` is the root)
 
@@ -22,7 +21,8 @@ keep their own (frozen) layout and are not documented here.
 - `reparse.rs` — statement-splice incremental reparse (an optimization; parse
   correctness never depends on it)
 - `testing.rs` — the fixture harness (`.test` format, `RY_BLESS`,
-  `FIXTURE_FILTER`, duplicate-id rejection) shared by every fixture suite
+  `FIXTURE_FILTER`, duplicate-id rejection, `#~~~~` multi-file splitting)
+  shared by every fixture suite, and the program corpus reader
 
 ## `semantics` crate (`src/semantics.rs` is the root)
 
@@ -49,8 +49,10 @@ keep their own (frozen) layout and are not documented here.
 - `metadata.rs` — the `PackageMetadata` input: NAMESPACE and DESCRIPTION
   parsing, import and dependency resolution
 - `lints.rs` — the style lints and their configuration types
-- `testing.rs` — the semantic pipeline's invariant battery, shared by the
-  fuzz harness and the coverage-guided targets
+- `testing.rs` — test support shared across crates: the semantic pipeline's
+  invariant battery (fuzz harness and coverage-guided targets), the shared
+  fixture database, and `ProbeDatabase`, which logs query executions for the
+  incrementality tests
 - `diagnostics.rs` — the diagnostics edge (parse-stage and full per-file
   sets, strict rendering) and the one user-facing `TypeRenderer`
 

@@ -34,10 +34,6 @@ compiler-checked analog of "make illegal states unrepresentable":
   (`check`, `fmt`, `server`, `debug`). Owns configuration, position-encoding
   conversion, diagnostics assembly and publication, and suppression comments.
 
-The `*-legacy` crates (`ry-legacy`, `analysis-legacy`, `engine-legacy`)
-are the previous stack, frozen in-tree as the baseline the performance
-benchmarks measure against; no code is shared between the two stacks by
-design.
 
 ## The semantics database
 
@@ -161,13 +157,10 @@ confined to that thread).
 ## Correctness and performance instruments
 
 The fixture suites are the correctness contract; see the [testing
-page](/contributing/testing). The cross-implementation parity program that once compared
-every finding against the frozen legacy stack is complete and retired — the
-new stack's fixtures stand on their own, and no change needs the old
-implementation's agreement.
-
-What remains in `legacy/differential` is the benchmark harness. Its perf and
-memory witnesses (`test_stats`) assert measured budgets — wall time, resident
-set, and resolve-step linearity — against a real-file corpus, so a regression
-in any of the three fails a test rather than being noticed later. The corpus
-is fetched on demand, so these run locally rather than in CI.
+page](/contributing/testing). The incrementality contracts are asserted by
+counting query executions (`crates/semantics/tests/test_incremental.rs`). The
+perf and memory witness (`crates/semantics/tests/test_perf.rs`) asserts
+measured budgets — wall time, resident set, resolve-step linearity, and
+keystroke latency — against a real-file corpus, so a regression in any of
+them fails a test rather than being noticed later. The corpus is fetched on
+demand, so the witness runs locally rather than in CI.

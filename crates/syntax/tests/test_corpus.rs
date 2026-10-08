@@ -174,7 +174,7 @@ fn in_tree_acceptance() {
         .set_language(&tree_sitter_r::LANGUAGE.into())
         .expect("load tree-sitter-r grammar");
 
-    let mut sources = syntax::testing::legacy_corpus_sources();
+    let mut sources = syntax::testing::program_corpus_sources();
     sources.extend(syntax::testing::fixture_case_sources());
 
     let mut accepted_only_by_us = Vec::new();

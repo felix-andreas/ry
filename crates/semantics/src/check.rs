@@ -7,7 +7,7 @@
 //! binding (level-gated so escaped variables stay monomorphic); reads
 //! instantiate schemes with fresh variables. Arithmetic rides the numeric
 //! constraint; comparisons and logic produce logicals; `if` joins branches by
-//! unify-else-union exactly like the legacy contract.
+//! unify-else-union.
 //!
 //! This is the foundation walk: parameter-position coercions, overload sets,
 //! `#:` annotation enforcement, strict origins, and cross-item schemes layer
@@ -351,8 +351,8 @@ pub fn check_item_with_annotation<'db>(
             .unwrap_or(0),
     };
     // An annotation whose type mentions a cyclically expanding alias is
-    // unusable: report once at the annotated statement (where legacy blames
-    // it) and fall back to plain inference.
+    // unusable: report once at the annotated statement and fall back to plain
+    // inference.
     let mut annotation = annotation;
     if let Some(root) = module.root
         && let Some(present) = annotation
@@ -3020,11 +3020,9 @@ impl<'db> Checker<'db, '_> {
         None
     }
 
-    /// The condition of `if`/`while` and the operands of `&&`/`||` must be
-    /// scalar logicals; a still-flexible operand binds to `logical`.
     /// The range to blame for the value an expression produces:
     /// parentheses only group, so the innermost non-paren expression
-    /// carries the precise range (the oracle blames the same way).
+    /// carries the precise range.
     fn blame_range(&self, mut id: ExprId) -> TextRange {
         while let ExpressionKind::Paren(inner) = &self.module.expression(id).kind {
             id = *inner;
@@ -3032,6 +3030,8 @@ impl<'db> Checker<'db, '_> {
         self.module.expression(id).range
     }
 
+    /// The condition of `if`/`while` and the operands of `&&`/`||` must be
+    /// scalar logicals; a still-flexible operand binds to `logical`.
     fn expect_scalar_logical(&mut self, condition: ExprId) {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);

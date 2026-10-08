@@ -2764,10 +2764,9 @@ fn render_signature<'db>(
     (label, parameters)
 }
 
-/// The rendered parameter the cursor's argument targets (legacy algorithm:
-/// matching works in slot space — positionals, then named, the rest slot
-/// last — and translates to the display order, which interleaves `...` at
-/// its formal position).
+/// The rendered parameter the cursor's argument targets. Matching works in
+/// slot space — positionals, then named, the rest slot last — and translates
+/// to the display order, which interleaves `...` at its formal position.
 fn active_parameter(
     db: &dyn Db,
     function: &FunctionType<'_>,

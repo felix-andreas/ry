@@ -1,7 +1,0 @@
-#==== audit_function_inference
-#---- conflicting_param_constraints
-bad <- function(x) x + !x
-#++++
-error[type-error] expected a numeric value (`integer` or `double`), found `logical`
---> 1:20-1:21
-| bad <- function(x) x + !x

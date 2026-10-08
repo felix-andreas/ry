@@ -65,9 +65,7 @@ fn render_case(
 
 /// Package-metadata cases: leading `#namespace ` lines form the NAMESPACE
 /// source and `#description ` lines the DESCRIPTION source (both stay in the
-/// analyzed text as ordinary comments, so ranges are honest). The suite is
-/// new-stack only — the oracle has no package-metadata concept — so it is
-/// deliberately absent from the differential fixture arm.
+/// analyzed text as ordinary comments, so ranges are honest).
 fn render_with_metadata(source: &str) -> String {
     let mut db = RootDatabase::default();
     semantics::stubs::install_shipped_stubs(&db);

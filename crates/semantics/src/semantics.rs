@@ -1223,9 +1223,9 @@ fn global_scheme_initial<'db>(
     types::TypeScheme::monomorphic(types::unknown(db))
 }
 
-/// Bound fixpoint rounds mirroring the legacy interface round cap: a scheme
-/// still changing after the cap pins to `Unknown` (sound-by-refusal) rather
-/// than iterating toward salsa's panic limit.
+/// Bound fixpoint rounds: a scheme still changing after the cap pins to
+/// `Unknown` (sound-by-refusal) rather than iterating toward salsa's panic
+/// limit.
 const SCHEME_ROUND_CAP: u32 = 16;
 
 fn global_scheme_recover<'db>(

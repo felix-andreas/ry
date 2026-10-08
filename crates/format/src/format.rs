@@ -65,8 +65,8 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
     let line_starts = line_starts(source);
 
     // Errors from the `#:` annotation grammar do not refuse the file: the
-    // affected block goes down the verbatim path (the oracle formatter never
-    // even parsed annotations). Any R-grammar syntax error refuses.
+    // affected block goes down the verbatim path. Any R-grammar syntax error
+    // refuses.
     for error in parse.errors() {
         if !error.in_annotation {
             let offset = u32::from(error.range.start()) as usize;
