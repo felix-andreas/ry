@@ -58,7 +58,7 @@ session, so completing `account$` lists a record's fields with their types, but 
 and objects created by `source()` do not complete.
 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
-`Rscript`. R's startup banner is printed.
+`Rscript`. R's startup banner is printed first, so it ends up in the script's output.
 
 ## Exit codes
 
@@ -70,8 +70,8 @@ and objects created by `source()` do not complete.
   not exist, a file or stub it cannot read, an invalid `exclude` pattern, or, for `repl` and `run`, no
   usable R. A `2` overrides a `1`, so a broken setup never looks like ordinary findings.
 
-A misspelled key in `ry.toml` is only a warning, not a `2`, so read the log after changing the
-configuration.
+A [misspelled key](/reference/configuration#mistakes-in-rytoml) in `ry.toml` is only a warning, not
+a `2`.
 
 ## JSON output
 

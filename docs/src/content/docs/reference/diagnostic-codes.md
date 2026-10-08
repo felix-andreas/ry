@@ -49,7 +49,7 @@ Some R idioms silence findings on their own:
 ## On by default
 
 **`syntax-error`** (error): code R would refuse to parse, or an assignment target R would refuse to
-run, such as `1 + a <- 2`. The error names what is missing, stays on the line that caused it, and
+run, such as `1 + a <- 2`. A parse error names what is missing, stays on the line that caused it, and
 hides every other finding in the broken statement, because ry draws no conclusions from code it
 could not read.
 
@@ -103,13 +103,13 @@ reported although it is safe.
 **`naming-style`** (warning), with `[lint] naming-style = "snake_case"` or `"camelCase"`: a variable
 or parameter in the other style. `SCREAMING_SNAKE_CASE` always conforms.
 
-**`unused-parameter`**: a parameter the body never reads. S3 generics and methods are exempt,
+**`unused-parameter`** (off by default): a parameter the body never reads. S3 generics and methods are exempt,
 because the generic dictates their parameters.
 
-**`unused-import`**: an `importFrom` in `NAMESPACE` whose name your code never mentions. Only
+**`unused-import`** (off by default): an `importFrom` in `NAMESPACE` whose name your code never mentions. Only
 `ry check` reports it.
 
-**`shadows-builtin`** and **`shadows-namespace`**: a top-level name that hides a function from
+**`shadows-builtin`** and **`shadows-namespace`** (off by default): a top-level name that hides a function from
 `base`, or from another package, such as defining your own `filter` while `stats::filter` exists.
 
-The last four take a level in `[lint]`, such as `"warn"` or `"error"`.
+These four take a level in `[lint]`, such as `"warn"` or `"error"`.

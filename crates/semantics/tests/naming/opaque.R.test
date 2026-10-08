@@ -141,6 +141,22 @@ f <- function(frame) {
   30..38 column_a -> quiet deferred
   47..52 frame -> b0
 
+#---- transform_named_column_is_masked_not_the_data
+# `transform`'s data formal is `_data`, so `x = column_a * 2` adds a column `x`
+# computed in the data's frame. Treating `x` as the data formal evaluated it in
+# the caller's frame and reported the column as unresolved.
+f <- function(frame) {
+  transform(frame, x = column_a * 2)
+}
+#++++
+# f
+  b0 frame parameter 14..19
+  b1 f top-level 0..1
+  0..1 f <- b1
+  25..34 transform -> non-local deferred
+  35..40 frame -> b0
+  46..54 column_a -> quiet deferred
+
 #---- a_base_qualified_masking_verb_masks_what_the_bare_one_does
 # `base::with` is the same function as `with`, so the qualified spelling has to
 # mask identically. Only `base` counts: another package's `with` is its own.

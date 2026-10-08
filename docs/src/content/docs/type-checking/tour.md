@@ -93,7 +93,13 @@ apply_discount <- function(price, rate) price * (1 - rate)
 
 An annotation is checked against the body and against every call. Inference already covers the
 inside of a function, so annotate where code meets other code: exported functions, values read from
-files, and anything whose contract you want enforced.
+files, and anything whose contract you want enforced. A value read from a file has no type until you
+give it one, and then every use of it is checked:
+
+```r
+#: list{name: character, age: integer}
+person <- readRDS("person.rds")
+```
 
 ## Scalars and vectors
 
@@ -150,14 +156,15 @@ A fixed shape is also exact, so passing a list with an extra field where a recor
 error: an unexpected field is usually a misspelled one.
 
 A list-like or dict-like list can have any length, so ry knows only its element type. Reading a key
-gives `T | NULL`, because the key may be missing:
+gives the element type or `NULL`, because the key may be missing:
 
 ```r
 counts[["pears"]]                        # integer | NULL
 ```
 
-`list(...)` literals infer as fixed shapes, so a list you grow element by element needs an
-annotation, as `counts` does.
+A `list(...)` literal infers as a fixed shape, so a dictionary that starts from a literal needs an
+annotation, as `counts` does. An empty `list()` filled by key needs none: reading a key from it
+already gives the element type or `NULL`.
 
 ## `NULL`
 
@@ -214,8 +221,8 @@ Every type so far is *structural*: two types are the same if they have the same 
 interchangeable with every other. That is the right default for R, where values are plain data, and
 it is why inference needs no declarations.
 
-It is also what lets the wrong value through. A `double` cannot tell Celsius from Fahrenheit, and a
-`character` cannot tell a user ID from an email address. A *nominal* type is distinct by name, even
+But structure cannot tell Celsius from Fahrenheit, both `double`, or a user ID from an email
+address, both `character`. A *nominal* type is distinct by name, even
 from a type with the same representation. `@type` declares one, and `@new` creates a value of it:
 
 ```r
@@ -290,10 +297,11 @@ total <- function(df) sum(df$amount)
 x strict mode: this expression has an undetermined type (`Unknown`)
 ```
 
-`Any` is also compatible with everything, but it is a deliberate choice, made by an annotation or a
-package declaration, so strict mode ignores it. S3 generics that dispatch through `UseMethod()`
-return `Any`, so strict mode does not report their calls either. Two gaps are not reported yet: R6
-objects, and values from packages ry knows only by name.
+`Any` is also compatible with everything, but a value declared `Any`, such as the result of a
+function declared `-> Any`, is a deliberate choice, so strict mode ignores it. Calls to S3 generics
+that dispatch through `UseMethod()` return `Any` and are not reported either. Strict mode does not
+yet report R6 objects or values from packages ry knows only by name, and it wrongly reports a
+`stop()` guard such as the one in `money()` above.
 
 A plain `#:` annotation gives an `Unknown` value a type, and every later use is checked against it.
 `#: @if-unknown TYPE` does the same, but becomes an error once ry can infer the value's type, so it
@@ -357,7 +365,7 @@ cannot fall outside the block it belongs to. The only settings are indent width 
 ## Editors
 
 `ry server` provides hover with inferred types, completion (including record fields), go-to
-definition, references, rename, signature help, and inlay hints in any LSP editor. Rename edits the
+definition, references, rename, signature help, inlay hints, and formatting in any LSP editor. Rename edits the
 binding you picked and nothing else: a local `total`, a global `total`, and the word "total" in a
 string are three different things.
 
@@ -379,11 +387,9 @@ assignment-operator
   ! Use <-, not =, for assignment
 ```
 
-Besides names and types, three lints are on by default. `=` for assignment is a warning, because
-`<-` says unambiguously that a line assigns rather than passes an argument. `T` and `F` are warnings,
-because they are ordinary variables that any code can reassign, unlike `TRUE` and `FALSE`. A trailing
-comma in a call is an error, because R reads it as an empty argument, and `c(1, 2, )` fails when it
-runs.
+Besides names and types, three lints are on by default: `=` for assignment, `T` and `F` for `TRUE`
+and `FALSE`, and a trailing comma in a call, which is an error because `c(1, 2, )` fails when it
+runs. [Diagnostic codes](/reference/diagnostic-codes) gives the reason for each.
 
 Codes are what you configure in `ry.toml` and what you name to silence one finding:
 
@@ -392,15 +398,13 @@ total = 2L  # ry: allow(assignment-operator)
 ```
 
 A suppression covers its own line and the line below, so it can sit at the end of the line or above
-it. It covers nothing else, because it marks one exception you have reviewed and should not hide
-findings in code written later. To turn a lint off everywhere, set it in
-[`ry.toml`](/reference/configuration).
+it, and nothing else. To turn a lint off everywhere, set it in [`ry.toml`](/reference/configuration).
 
 In CI, `ry check` exits with status 1 when it finds anything, and `ry fmt --check` does when a file
 is not formatted, so a CI job needs nothing more than those two commands.
 
 ## Next
 
-- [Getting started](/getting-started): installation and the first run
+- [Stubs](/type-checking/stubs): describing a package ry does not know
 - [Limitations](/type-checking/limitations): what is not checked, and how much that matters
 - [Type system](/reference/type-system): every rule, precisely

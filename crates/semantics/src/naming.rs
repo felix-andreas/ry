@@ -1403,7 +1403,10 @@ fn diverges(module: &Module, id: ExprId) -> bool {
 fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "with" | "within" => Some(vec!["data"]),
-        "subset" | "transform" => Some(vec!["x"]),
+        "subset" => Some(vec!["x"]),
+        // `transform(`_data`, ...)`: a column assignment such as `x = mpg * 2` must
+        // stay masked, so `x` cannot be the data formal here as it is for `subset`.
+        "transform" => Some(vec!["_data"]),
         _ => None,
     }
 }

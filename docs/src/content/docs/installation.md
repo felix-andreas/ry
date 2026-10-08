@@ -6,9 +6,9 @@ description: Every way to install ry, including the cases the quick path does no
 ## VS Code
 
 The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) bundles the
-binary for **Linux x86_64, macOS aarch64, and Windows x86_64**. On any other platform, install the
-[command-line binary](#command-line): the extension falls back to `ry` on your `PATH`, or to the
-path in the `ry.path` setting.
+binary for **Linux x86_64, macOS on Apple silicon, and Windows x86_64**. On any other platform,
+install the [command-line binary](#command-line) and set `ry.path` to it, or put `ry` on your
+`PATH`.
 
 Positron and VSCodium install extensions from Open VSX, where ry is not published (an unrelated
 extension there is also called "ry"). Download the `.vsix` for your platform from

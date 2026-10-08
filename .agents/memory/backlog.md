@@ -38,6 +38,14 @@ False reports on correct R, worst first:
 - **Positional append on `list()` infers dict-like.** `res <- list(); for (i in ...) res[[i]] <- x;
   res[[1]]` reports `position 1 does not exist in list{} | list[named: integer]`. An integer index
   write should infer list-like.
+- **A trailing comma inside rlang's dynamic dots.** `mutate(d, y = 1, )` runs in dplyr, because
+  rlang's `list2()` drops a trailing empty argument, but `trailing-comma` reports it as an error.
+  The lint should skip calls to functions the stubs mark as taking dynamic dots (the `@masked`
+  dplyr verbs at least). Unverified against a live R session.
+- **`data.frame()` is a strict finding.** base declares `data.frame`, `with`, `subset`, and
+  `transform` as a bare `Any` value, which calls to give `Unknown`, so `d <- data.frame(a = 1)` is
+  the first strict finding in most data code. Declaring them `fn(...) -> data.frame` (or `-> Any`)
+  would make the result deliberate.
 - **The loop variable after a `for` loop.** At the top level of a file, `for (i in xs) {}; print(i)`
   reports `i` as unresolved, although R keeps the last value. Inside a function the read is
   `Unknown` and not reported.

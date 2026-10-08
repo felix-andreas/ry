@@ -5,8 +5,8 @@ description: What ry does not check, and where it reports correct code
 
 When ry cannot determine a type, the value becomes `Unknown`, which is compatible with everything, so
 most gaps on this page are checks that are silently skipped, and a clean run proves less than it
-seems. [Strict mode](/reference/type-system#strict-mode) reports where that happens. The last section
-lists the places where ry reports correct code instead.
+seems. [Strict mode](/type-checking/tour#unknown-and-strict-mode) reports where that happens. The
+last section lists the places where ry reports correct code instead.
 
 ## Data frames
 
@@ -18,7 +18,9 @@ count_rows <- function(df) df$whatever
 ```
 
 This passes, although the column may not exist. It is the gap that matters most for analysis code,
-because analysis code lives in data frames: annotations on such code look protective and are not.
+because analysis code lives in data frames: `df: data.frame` checks that a data frame arrives, not
+which columns it has. `data.frame()` itself returns `Unknown`, so it is usually the first place
+strict mode reports in data code.
 
 Matrices have the same gap one level down: matrix arithmetic is checked, but dimensions are not, so a
 non-conformable product goes unreported.
@@ -27,9 +29,9 @@ non-conformable product goes unreported.
 
 S4 and R6 objects are `Unknown`, and calls to an S3 generic that dispatches through `UseMethod()`
 return `Any`, because their behavior is decided at run time from class attributes. Strict mode
-reports S4 objects, but not R6 objects or S3 calls. What is checked: operator methods such as
-`+.Date`, directly called methods, and `structure(x, class = "dog")`, which keeps `x`'s type because
-a class attribute is data. The [tour](/type-checking/tour#structural-and-nominal-types) shows how to
+reports S4 objects, but not R6 objects or S3 calls. Operator methods such as `+.Date` and methods
+called directly are checked, and `structure(x, class = "dog")` keeps `x`'s type, because a class
+attribute is data. The [tour](/type-checking/tour#structural-and-nominal-types) shows how to
 give your own classes checked types.
 
 ## Packages
@@ -70,6 +72,9 @@ These are known bugs, not design decisions:
   declarations (dplyr, data.table, ggplot2, testthat, and base R) mark which arguments are column
   names, so after `library(tidyr)`, `pivot_longer(d, cols = c(a, b))` reports `a` and `b`. A top-level
   `utils::globalVariables(c("a", "b"))` silences them, as it does for `R CMD check`.
+- **A trailing comma for rlang's dynamic dots.** Functions built on rlang, such as dplyr's verbs,
+  accept `mutate(d, y = 1, )`, but ry reports the trailing comma as an error, as it would for
+  `c(1, 2, )`.
 - **Package-qualified calls in scripts.** In a script with no `library(pkg)`, `pkg::fun()` reports an
   unknown namespace for packages outside R's own. In a package, the same report for a package missing
   from `DESCRIPTION` is correct, because R CMD check warns about it too.

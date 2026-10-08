@@ -2046,7 +2046,7 @@ unresolved-name warning and no strict-mode origin. The recognized masks are:
   `.EACHI`.
 - The base masking family, `with()`, `within()`, `subset()`, and `transform()`, masks every argument
   except the data. Which argument is the data follows R's own matching: a named argument claims its
-  formal first (`data` for the `with` pair, `x` for `subset` and `transform`), and the remaining
+  formal first (`data` for the `with` pair, `x` for `subset`, `_data` for `transform`), and the remaining
   positional arguments fill what is left. So `with(data = frame, speed > 20)` and
   `with(speed > 20, data = frame)` both mask the condition. The `base::` spelling of any of the four
   masks exactly like the bare one, while another package's export of the same name is a different

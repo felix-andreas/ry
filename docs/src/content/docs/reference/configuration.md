@@ -9,7 +9,7 @@ CI always agree. This is every key, with its default:
 ```toml
 [check]
 typing = false           # report type errors
-strict = false           # report unknown types; unresolved names are errors
+strict = false           # report unknown types (needs typing for type errors)
 unused = true            # report values that are never read
 maybe-undefined = false  # report reads some path reaches before a write
 exclude = []             # gitignore-style patterns that ry check skips
@@ -29,17 +29,16 @@ indent-width = 2
 line-ending = "auto"     # keep the file's own; or "lf", "cr-lf"
 ```
 
-The [diagnostic codes](/reference/diagnostic-codes) page explains each finding. `maybe-undefined` is
-off because it treats two conditions that always agree at run time as independent, so
-`if (ok) v <- 1` followed by `if (ok) print(v)` is reported although it is safe. A
-`# typing: off`, `on`, or `strict` comment in a file overrides `typing` and `strict` for that file.
+The [diagnostic codes](/reference/diagnostic-codes) page explains each finding and why the opt-in
+ones are off. `strict` also raises unresolved names to errors, but it does not turn on type errors:
+set `typing` as well. A `# typing: off`, `on`, or `strict` comment in a file overrides both keys for
+that file, and `# typing: strict` does imply type errors.
 
 ## Which file applies
 
 ry walks up from the file you check, or from the editor's workspace folder, and uses the first
-`ry.toml` it finds. Nothing is merged: there is no home-directory file and no environment variable,
-because a second source of settings is how the editor and CI start to disagree. The language server
-reloads the file when it changes. A `roughly.toml` from before the rename is still read.
+`ry.toml` it finds. Nothing is merged, and there is no home-directory file or environment variable.
+The language server reloads the file when it changes. A `roughly.toml` from before the rename is still read.
 
 The project root is a separate question: it decides which files see each other's definitions. It is
 the nearest directory with a `ry.toml` or a `DESCRIPTION`. Without one, it is the directory you
@@ -61,8 +60,8 @@ Patterns follow gitignore rules and are anchored at the directory holding `ry.to
 ## Mistakes in `ry.toml`
 
 An unknown or misplaced key is a warning, and the rest of the file still loads, so a configuration
-written for a newer ry still works with an older one. The catch is that a typo is silent in CI:
-`typng = true` leaves type checking off and only prints a warning.
+written for a newer ry still works with an older one. So a typo does not fail CI: with
+`typng = true`, `ry check` leaves type checking off, exits 0 on clean code, and only prints this:
 
 ```text
 ! ignoring unknown config key `check.typng`. Check the spelling, or update ry
@@ -76,8 +75,8 @@ The older top-level keys `case` and `spaces` still work, as `naming-style` and `
 
 ## Editor settings
 
-Editor settings only say where the binary is. The server ignores any configuration the editor sends,
-so that every setting that changes a finding is in `ry.toml`.
+Editor settings only say where the binary is. The server ignores any configuration the editor
+sends.
 
 In VS Code, the extension uses, in order, the `SERVER_PATH` environment variable, `ry.path`, its
 bundled binary, and `ry` on your `PATH`. A change takes effect after **ry: Restart Server**.
