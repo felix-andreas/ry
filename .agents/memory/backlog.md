@@ -46,6 +46,9 @@ False reports on correct R, worst first:
   `transform` as a bare `Any` value, which calls to give `Unknown`, so `d <- data.frame(a = 1)` is
   the first strict finding in most data code. Declaring them `fn(...) -> data.frame` (or `-> Any`)
   would make the result deliberate.
+- **`source()` is not followed.** `source("utils.R"); util_fn(1)` reports `util_fn` as unresolved in
+  the caller and unused in `utils.R`. Following a literal `source()` path would remove both; until
+  then, limitations.md recommends moving shared helpers into `R/`.
 - **The loop variable after a `for` loop.** At the top level of a file, `for (i in xs) {}; print(i)`
   reports `i` as unresolved, although R keeps the last value. Inside a function the read is
   `Unknown` and not reported.
