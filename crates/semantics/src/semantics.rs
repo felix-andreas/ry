@@ -398,10 +398,10 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db)
-        .map(|files| package_definitions(db, files).contains_key(name))
-        .unwrap_or(false)
-    {
+    if ProjectFiles::try_get(db).is_some_and(|files| {
+        package_definitions(db, files).contains_key(name)
+            || conditional_slot_items(db, files).contains_key(name)
+    }) {
         return true;
     }
     stubs::stubs(db).is_some_and(|library| {
@@ -703,10 +703,10 @@ pub fn project_type_definitions<'db>(
     definitions
 }
 
-/// Statement items binding each top-level name, in project order: a
-/// conditional write at a document's top level (inside a top-level
-/// `if`/`for`/`while`/`repeat` or a bare block) creates the document's
-/// variable slot, and cross-item reads of a name with no unconditional
+/// Items binding each top-level name other than their own, in project order:
+/// a conditional write at a document's top level (inside a top-level
+/// `if`/`for`/`while`/`repeat` or a bare block) or a nested one
+/// (`y <- (x <- 1L)`) creates the document's variable slot, and cross-item reads of a name with no unconditional
 /// winner resolve here — the slot's type is the join of every writer.
 #[salsa::tracked(returns(ref))]
 pub fn conditional_slot_items<'db>(
@@ -720,11 +720,11 @@ pub fn conditional_slot_items<'db>(
             continue;
         }
         for &item in item_tree(db, file) {
-            if *item.kind(db) != ItemKind::Statement {
-                continue;
-            }
+            let own_name = item.name(db).clone();
             for name in item_top_level_names(db, item) {
-                writers.entry(name.clone()).or_default().push(item);
+                if own_name.as_ref() != Some(name) {
+                    writers.entry(name.clone()).or_default().push(item);
+                }
             }
         }
     }
@@ -1421,18 +1421,16 @@ fn file_binders<'db>(
     let mut binders: rustc_hash::FxHashMap<String, Vec<(usize, Item<'db>)>> =
         rustc_hash::FxHashMap::default();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
-        match *item.kind(db) {
-            ItemKind::Function | ItemKind::Value => {
-                if let Some(name) = item.name(db).clone() {
-                    binders.entry(name).or_default().push((index, item));
-                }
-            }
-            // A statement item binds through a conditional top-level write
-            // (the document-slot model), and may bind several names.
-            ItemKind::Statement => {
-                for name in item_top_level_names(db, item) {
-                    binders.entry(name.clone()).or_default().push((index, item));
-                }
+        let own_name = item.name(db).clone();
+        if let Some(name) = &own_name {
+            binders.entry(name.clone()).or_default().push((index, item));
+        }
+        // Any item can bind further names at the top level: a statement item
+        // through a conditional write, a definition through a nested one
+        // (`y <- (x <- 1L)` binds `x` too).
+        for name in item_top_level_names(db, item) {
+            if own_name.as_ref() != Some(name) {
+                binders.entry(name.clone()).or_default().push((index, item));
             }
         }
     }
@@ -1507,13 +1505,12 @@ impl<'db> SalsaGlobals<'db> {
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
         if let Some(item) = self.frame_definition(name, deferred) {
-            if *item.kind(self.db) == ItemKind::Statement {
-                let interned = types::Name::new(self.db, name.to_owned());
-                if let Some(scheme) = statement_binding_scheme(self.db, item, interned) {
-                    return Some(scheme);
-                }
-            } else {
+            if item.name(self.db).as_deref() == Some(name) {
                 return Some(global_scheme(self.db, item));
+            }
+            let interned = types::Name::new(self.db, name.to_owned());
+            if let Some(scheme) = statement_binding_scheme(self.db, item, interned) {
+                return Some(scheme);
             }
         }
         if let Some(item) = self
@@ -1539,6 +1536,8 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
                 .definitions
                 .as_ref()
                 .is_some_and(|winners| winners.contains_key(name))
+            || ProjectFiles::try_get(self.db)
+                .is_some_and(|files| conditional_slot_items(self.db, files).contains_key(name))
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {

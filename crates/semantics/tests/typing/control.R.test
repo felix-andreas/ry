@@ -343,6 +343,16 @@ f <- function(k) {
 f: <T> fn(k: T) -> integer
 
 #==== maybe_undefined
+#---- a_read_after_a_repeat_without_break_is_unreachable
+f <- function() {
+  repeat {
+    x <- 1L
+  }
+  x
+}
+#++++
+f: fn() -> integer
+
 #---- a_conditional_introduction_is_reported_at_the_read
 # R: `object 'x' not found` when `flag` is FALSE. The read still resolves to
 # the slot — this is not an unresolved name — but one path reaches it with
@@ -430,6 +440,21 @@ flag: logical
 after: integer
 
 #==== scoping
+#---- a_name_bound_in_a_top_level_block_resolves_from_another_file
+#~~~~ R/a.R
+{
+  x <- 1L
+}
+if (is.na(NA)) {
+  y <- 2L
+}
+#~~~~ R/b.R
+use <- function() x + y
+#++++
+== R/a.R
+== R/b.R
+use: fn() -> integer
+
 #---- local_scopes_its_bindings
 f <- function() {
   n <- local({

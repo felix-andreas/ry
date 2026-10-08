@@ -105,6 +105,17 @@ double_it: fn(m: Meters) -> Meters
 78..83 error[type-mismatch] expected `Meters`, found `double`
 
 #==== unknown_names
+#---- a_refused_alias_still_declares_its_name
+#: @alias Wrap<T> {list{v: T}}
+
+#: @alias Outer<Wrap> {Wrap<integer>}
+
+#: Outer<character>
+x <- list(v = 1L)
+#++++
+x: Outer<character>
+55..68 error[annotation] `Wrap` is a type parameter here and takes no type arguments.
+
 #---- misspelled_type_inside_a_type_body
 #: @type Instrument {list{isin: character}}
 

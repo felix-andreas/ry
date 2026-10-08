@@ -860,7 +860,6 @@ impl Context<'_> {
         self.emit = saved_emit;
         // Final pass over the converged state records diagnostics once — and
         // is the only pass whose `break` states describe the converged loop.
-        let converged = self.flow.clone();
         self.loop_exits.clear();
         self.resolve(body);
         let breaks = std::mem::replace(&mut self.loop_exits, enclosing_exits);
@@ -871,13 +870,11 @@ impl Context<'_> {
         for exit in &breaks {
             join_flow(&mut self.flow, exit);
         }
+        // A `repeat` with no `break` is never left normally (only `return` or
+        // a condition leaves it), so code after it is unreachable and the
+        // body-end state stands rather than a head state no read can see.
         if may_skip {
             join_flow(&mut self.flow, &entry);
-        } else if breaks.is_empty() {
-            // No `break` anywhere: the only way out is a jump the walk does
-            // not model (`return`, a condition), so keep the conservative
-            // head-state join rather than claim the body always completed.
-            join_flow(&mut self.flow, &converged);
         }
     }
 

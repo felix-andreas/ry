@@ -22,9 +22,47 @@ fn render_script(source: &str) -> String {
 fn render_as(source: &str, kind: DocumentKind) -> String {
     let db = RootDatabase::default();
     semantics::stubs::install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, source.to_owned(), kind);
-    ProjectFiles::new(&db, vec![file]);
-    render_file(&db, file)
+    render_project(&db, &project_files(&db, source, kind), &render_file)
+}
+
+/// The case's files: one unnamed file, or every `#~~~~ path` section of a
+/// multi-file case — package files under `R/`, scripts elsewhere.
+fn project_files(
+    db: &RootDatabase,
+    source: &str,
+    kind: DocumentKind,
+) -> Vec<(Option<String>, SourceFile)> {
+    let files: Vec<(Option<String>, SourceFile)> = match syntax::testing::split_files(source) {
+        None => vec![(None, SourceFile::new(db, source.to_owned(), kind))],
+        Some(files) => files
+            .into_iter()
+            .map(|(path, text)| {
+                let kind = if path.starts_with("R/") {
+                    DocumentKind::Package
+                } else {
+                    DocumentKind::Script
+                };
+                (Some(path), SourceFile::new(db, text, kind))
+            })
+            .collect(),
+    };
+    ProjectFiles::new(db, files.iter().map(|(_, file)| *file).collect());
+    files
+}
+
+fn render_project(
+    db: &RootDatabase,
+    files: &[(Option<String>, SourceFile)],
+    render: &dyn Fn(&RootDatabase, SourceFile) -> String,
+) -> String {
+    let mut output = String::new();
+    for (path, file) in files {
+        if let Some(path) = path {
+            output.push_str(&format!("== {path}\n"));
+        }
+        output.push_str(&render(db, *file));
+    }
+    output
 }
 
 /// Package-metadata cases: leading `#namespace ` lines form the NAMESPACE
@@ -88,6 +126,12 @@ fn render_file(db: &RootDatabase, file: SourceFile) -> String {
         output.push_str(&renderer.render_scheme(db, &scheme));
         output.push('\n');
     }
+    output.push_str(&render_diagnostics(db, file));
+    output
+}
+
+fn render_diagnostics(db: &RootDatabase, file: SourceFile) -> String {
+    let mut output = String::new();
     for diagnostic in file_diagnostics(db, file) {
         let severity = match diagnostic.severity {
             Severity::Error => "error",
@@ -128,23 +172,24 @@ fn typing_script_fixtures() {
 fn render_with_strict(source: &str) -> String {
     let db = RootDatabase::default();
     semantics::stubs::install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&db, vec![file]);
-    let mut output = String::new();
-    if let Some(mode) = file_typing_mode(&db, file) {
-        output.push_str(&format!("typing mode: {mode:?}\n"));
-    }
-    output.push_str(&render(source));
-    for diagnostic in strict_diagnostics(&db, file) {
-        output.push_str(&format!(
-            "{}..{} error[{}] {}\n",
-            u32::from(diagnostic.range.start()),
-            u32::from(diagnostic.range.end()),
-            diagnostic.code,
-            diagnostic.message
-        ));
-    }
-    output
+    let files = project_files(&db, source, DocumentKind::Package);
+    render_project(&db, &files, &|db, file| {
+        let mut output = String::new();
+        if let Some(mode) = file_typing_mode(db, file) {
+            output.push_str(&format!("typing mode: {mode:?}\n"));
+        }
+        output.push_str(&render_file(db, file));
+        for diagnostic in strict_diagnostics(db, file) {
+            output.push_str(&format!(
+                "{}..{} error[{}] {}\n",
+                u32::from(diagnostic.range.start()),
+                u32::from(diagnostic.range.end()),
+                diagnostic.code,
+                diagnostic.message
+            ));
+        }
+        output
+    })
 }
 
 #[test]

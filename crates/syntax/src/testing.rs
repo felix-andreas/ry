@@ -233,6 +233,23 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     );
 }
 
+/// Splits a multi-file case at its `#~~~~ <path>` lines; a source without one
+/// is a single file and yields `None`.
+pub fn split_files(source: &str) -> Option<Vec<(String, String)>> {
+    if !source.lines().any(|line| line.starts_with("#~~~~ ")) {
+        return None;
+    }
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in source.split_inclusive('\n') {
+        if let Some(path) = line.strip_prefix("#~~~~ ") {
+            files.push((path.trim().to_owned(), String::new()));
+        } else if let Some((_, text)) = files.last_mut() {
+            text.push_str(line);
+        }
+    }
+    Some(files)
+}
+
 /// Whether a suite next to `suite_dir` holds `id`. One test binary drives
 /// several suites, so a focused run naming one case leaves every other suite
 /// matching nothing — and "this case lives next door" is the only thing that

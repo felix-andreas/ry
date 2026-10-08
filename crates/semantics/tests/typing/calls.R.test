@@ -281,6 +281,20 @@ pick <- function(kind) {
 pick: <T> fn(kind: T) -> character
 
 #==== higher_order
+#---- a_wrapper_over_disagreeing_overloads_leaves_its_parameter_unchecked
+keep_positive <- function(values) Filter(function(x) x > 0L, values)
+kept <- keep_positive(list(1L, -2L))
+#++++
+keep_positive: fn(values: Unknown) -> Unknown
+kept: Unknown
+
+#---- a_lambda_argument_does_not_make_an_overload_a_guess
+named <- lapply(list(a = 1L), function(v) v + 1L)
+plain <- lapply(c(1L, 2L), function(v) v + 1L)
+#++++
+named: list[named: integer]
+plain: list[integer]
+
 #---- callback_pairs_positionally
 apply1 <- function() {
   call_with <- function(f) f(1L)

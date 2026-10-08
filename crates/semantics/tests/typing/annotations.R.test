@@ -663,6 +663,12 @@ out: Unknown
 113..119 error[type-mismatch] expected `integer`, found `character`
 
 #==== elided_returns
+#---- a_trusted_elided_return_is_null
+#: @trust fn(count: integer)
+log_count <- function(count) count
+#++++
+log_count: fn(count: integer) -> NULL
+
 #---- elided_callback_return_means_null
 #: @param cb {fn(integer)}
 run_cb <- function(cb) cb(1L)

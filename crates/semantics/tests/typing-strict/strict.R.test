@@ -1,4 +1,15 @@
 #==== origins
+#---- an_annotation_covers_the_origin_it_types
+#: @trust integer
+y <- 1L %then% 2L
+#: integer
+z <- 1L %then% 2L
+#: @trust Any
+1L %then% 2L
+#++++
+y: integer
+z: integer
+
 #---- unsupported_constructs_are_origins
 special <- function(a, b) a %undeclared% b
 formula_model <- function() y ~ x

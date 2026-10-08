@@ -215,9 +215,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                     "trust" => {
                         annotation.trusted = true;
                         if let Some(ty) = child.children().find(|c| is_type_kind(c.kind())) {
-                            lowering.definition_type = true;
                             let lowered = lowering.lower_type(&ty);
-                            lowering.definition_type = false;
                             annotation.declared = Some(TypeScheme {
                                 binders: Vec::new(),
                                 body: lowered,
@@ -246,9 +244,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                     "if-unknown" => {
                         annotation.if_unknown = true;
                         if let Some(ty) = child.children().find(|c| is_type_kind(c.kind())) {
-                            lowering.definition_type = true;
                             let lowered = lowering.lower_type(&ty);
-                            lowering.definition_type = false;
                             annotation.declared = Some(TypeScheme {
                                 binders: Vec::new(),
                                 body: lowered,
@@ -312,11 +308,23 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
         ));
     }
     // A violating block keeps only its errors: applying half-understood
-    // typing payload would cascade follow-on findings from one mistake.
+    // typing payload would cascade follow-on findings from one mistake. The
+    // type names it declares stay declared, with `Unknown` bodies, or every
+    // use of one would add an unknown-type finding to the one already made.
     if !lowering.errors.is_empty() || !annotation.typing_errors.is_empty() {
+        let definitions = annotation
+            .definitions
+            .iter()
+            .map(|definition| NamedDefinition {
+                body: unknown(db),
+                ..definition.clone()
+            })
+            .collect();
         return Annotation {
             errors: lowering.errors,
             typing_errors: std::mem::take(&mut annotation.typing_errors),
+            definitions,
+            definition_sites: std::mem::take(&mut annotation.definition_sites),
             range: annotation.range,
             ..Annotation::default()
         };
@@ -541,12 +549,13 @@ struct Lowering<'db> {
     depth: usize,
     beyond_check_depth: bool,
     beyond_parse_depth: bool,
-    /// Lowering the annotated definition's own declared type (a compact or
-    /// `@trust` annotation): only there an elided `->` on the OUTERMOST
-    /// function type means "inferred from the body". Everywhere else — a
-    /// nested function type, `@param`/`@return` payloads, `@type`/`@alias`
-    /// bodies — an elided return means `NULL`, R's default for a function
-    /// that returns nothing declared.
+    /// Lowering the annotated definition's own checked declared type (the
+    /// compact form): only there an elided `->` on the OUTERMOST function type
+    /// means "inferred from the body". Everywhere else — a nested function
+    /// type, `@param`/`@return` payloads, `@type`/`@alias` bodies, and the
+    /// `@trust`/`@if-unknown` coercions, which adopt the written type without
+    /// consulting the body — an elided return means `NULL`, R's default for a
+    /// function that returns nothing declared.
     definition_type: bool,
 }
 

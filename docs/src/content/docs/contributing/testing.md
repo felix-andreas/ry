@@ -327,6 +327,9 @@ Rules:
   rejected rather than silently shadowing one another
 - what the expectation *shows* is the suite runner's contract (schemes, diagnostics, tree dumps,
   hover output, …); suite-specific behavior belongs in the runner, not in fixture syntax
+- a typing case may hold several files: each `#~~~~ <path>` line starts one
+  (`syntax::testing::split_files`). Paths under `R/` are package files, anything else a script, and
+  the expectation renders each file's output under an `== <path>` line
 - the runner only loads files with the `.test` extension, so a suite directory may hold notes
   (a `README.md` describing its rendered-output contract, say) without the runner treating them
   as cases
