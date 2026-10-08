@@ -163,8 +163,8 @@ counts[["pears"]]                        # integer | NULL
 ```
 
 A `list(...)` literal infers as a fixed shape, so a dictionary that starts from a literal needs an
-annotation, as `counts` does. An empty `list()` filled by key needs none: reading a key from it
-already gives the element type or `NULL`.
+annotation, as `counts` does. An empty `list()` filled by computed keys, as in `d[[key]] <- value`,
+needs none. Filled by literal keys, it becomes a record.
 
 ## `NULL`
 

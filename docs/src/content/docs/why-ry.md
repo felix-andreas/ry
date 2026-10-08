@@ -7,8 +7,8 @@ description: What ry checks that other R tools cannot, and the trade-offs it mak
 
 R reports an undefined name, a call that does not match its function, or a `NULL` where a value is
 needed only when that line runs, possibly hours into a job. ry reads the source instead, so it
-reports these as you type. It gives the same answers in your editor and in CI, and it needs no R
-installation.
+reports these as you type. It needs no R installation, and your editor and CI read the same
+`ry.toml`, so they check by the same rules.
 
 ## Speed
 

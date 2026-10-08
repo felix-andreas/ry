@@ -14,8 +14,7 @@
 </div>
 
 ry is a language server, checker, formatter, and console for R. It analyzes source code without
-running it, so it gives the same answers in your editor and in CI, and needs no R
-installation except for the console.
+running it, so it reports problems as you type and needs no R installation except for the console.
 
 Its parser is written for tooling: it says what is missing and keeps analyzing the rest of the file.
 

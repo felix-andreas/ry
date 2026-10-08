@@ -30,8 +30,8 @@ another file resolves however you spell the paths. The exception is a file match
 which is analyzed only when you name it.
 
 `ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents. Findings go to
-stderr and the one-line summary to stdout. A terminal gets color and box drawing, which `NO_COLOR`
-turns off, and a pipe gets plain ASCII. [Diagnostic codes](/reference/diagnostic-codes) shows how to
+stderr and the one-line summary to stdout. A terminal gets color and Unicode box drawing, `NO_COLOR`
+turns off only the color, and a pipe gets plain ASCII. [Diagnostic codes](/reference/diagnostic-codes) shows how to
 read a finding.
 
 ## fmt
@@ -58,7 +58,8 @@ session, so completing `account$` lists a record's fields with their types, but 
 and objects created by `source()` do not complete.
 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
-`Rscript`. R's startup banner is printed first, so it ends up in the script's output.
+`Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE` and code
+that branches on it takes the interactive path. R's startup banner is printed first, so it ends up in the script's output.
 
 ## Exit codes
 

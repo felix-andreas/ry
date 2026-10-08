@@ -44,7 +44,9 @@ evaluating it, as magrittr's `%>%` does, and checking it as a call would reject 
 
 ## What is analyzed together
 
-`source()` is not followed. Files under `R/` share one namespace, and every other file is analyzed
+`source()` is not followed, so a function from a sourced file is reported as unresolved where you
+call it, and as unused where you define it. Moving shared helpers into `R/`, with a `ry.toml` at the
+project root, makes them visible to every script. Files under `R/` share one namespace, and every other file is analyzed
 on its own, seeing its own definitions plus the package's. Files directly under `tests/testthat/` are
 analyzed as one environment with the helpers first, which is more permissive than testthat: a name
 one test file defines and another uses resolves in ry and fails when the tests run.
@@ -75,8 +77,9 @@ These are known bugs, not design decisions:
 - **A trailing comma for rlang's dynamic dots.** Functions built on rlang, such as dplyr's verbs,
   accept `mutate(d, y = 1, )`, but ry reports the trailing comma as an error, as it would for
   `c(1, 2, )`.
-- **Package-qualified calls in scripts.** In a script with no `library(pkg)`, `pkg::fun()` reports an
-  unknown namespace for packages outside R's own. In a package, the same report for a package missing
-  from `DESCRIPTION` is correct, because R CMD check warns about it too.
+- **Package-qualified calls outside a package.** `pkg::fun()` reports an unknown namespace unless
+  some file in the project calls `library(pkg)`, and for a package ry has no stub or export list for,
+  even then. In a package, the same report for a package missing from `DESCRIPTION` is correct,
+  because R CMD check warns about it too.
 - **Strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an undetermined type.
   No annotation on a binding clears a strict finding yet; `# ry: allow(strict)` does.

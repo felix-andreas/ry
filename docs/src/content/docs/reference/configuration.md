@@ -60,7 +60,7 @@ Patterns follow gitignore rules and are anchored at the directory holding `ry.to
 ## Mistakes in `ry.toml`
 
 An unknown or misplaced key is a warning, and the rest of the file still loads, so a configuration
-written for a newer ry still works with an older one. So a typo does not fail CI: with
+written for a newer ry still works with an older one. The cost is that a typo does not fail CI: with
 `typng = true`, `ry check` leaves type checking off, exits 0 on clean code, and only prints this:
 
 ```text
@@ -75,7 +75,7 @@ The older top-level keys `case` and `spaces` still work, as `naming-style` and `
 
 ## Editor settings
 
-Editor settings only say where the binary is. The server ignores any configuration the editor
+Editor settings only say how to start the server. The server ignores any configuration the editor
 sends.
 
 In VS Code, the extension uses, in order, the `SERVER_PATH` environment variable, `ry.path`, its

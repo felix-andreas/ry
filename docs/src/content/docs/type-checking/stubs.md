@@ -26,8 +26,8 @@ Without a stub, attaching a package with `library()` means that any bare name in
 one of its exports. ry cannot tell a typo from an export it has never heard of, so it stops reporting
 unresolved names across the whole project. Only a near miss of a name your own project defines
 (`repositry` next to a `repository` parameter) is still reported, and
-[strict mode](/type-checking/tour#unknown-and-strict-mode) lists every name that got through. A stub, even
-the two lines above, turns the check back on.
+[strict mode](/type-checking/tour#unknown-and-strict-mode) lists every name that got through. Any stub for
+the package, even an empty file, turns the check back on.
 
 ## What ships
 
