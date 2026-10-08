@@ -85,9 +85,8 @@
             strictDeps = true;
           };
 
-          commonArgsLinux = commonArgs // {
+          commonArgsNative = commonArgs // {
             cargoExtraArgs = "-p ry-lang";
-            CARGO_BUILD_TARGET = "x86_64-unknown-linux-gnu";
           };
 
           # The dep-only builds compile dependencies against a dummified copy
@@ -102,16 +101,20 @@
             cp -r --no-preserve=mode ${./patches} "$out"/patches
           '';
 
-          cargoArtifactsLinux = craneLib.buildDepsOnly (
-            commonArgsLinux
+          # The flake's own package: a native build against nixpkgs, for NixOS
+          # and anyone who installs ry through this flake. Its console loads
+          # the R from nixpkgs. It is also the only build the sandbox can run,
+          # so it carries the test suite.
+          cargoArtifactsNative = craneLib.buildDepsOnly (
+            commonArgsNative
             // {
               extraDummyScript = keepPatchesInDummySrc;
             }
           );
-          packageLinux = craneLib.buildPackage (
-            commonArgsLinux
+          packageNative = craneLib.buildPackage (
+            commonArgsNative
             // {
-              cargoArtifacts = cargoArtifactsLinux;
+              cargoArtifacts = cargoArtifactsNative;
               # The LSP tests exercise stub materialization, which writes to
               # the user cache directory — the sandbox's HOME is not
               # writable, so give it a real one.
@@ -121,16 +124,25 @@
             }
           );
 
-          # The macOS binaries cross-link with zig, which bundles link stubs
-          # for libSystem only — no Apple frameworks. The dependency graph is
-          # kept framework-free on purpose (see patches/iana-time-zone and the
-          # preflight in the justfile's release recipe), so no macOS SDK is
-          # needed here.
+          # The release binaries run outside Nix, so they are cross-linked
+          # with zig, which bundles each target's C runtime and link stubs.
+          # None of them can run in the build sandbox, so they skip the tests
+          # the native package runs.
+          #
+          # - Linux links against glibc 2.17 — cargo-zigbuild reads the
+          #   version suffix off the target — with the standard loader at
+          #   /lib64/ld-linux-x86-64.so.2. It runs on any distribution with
+          #   glibc 2.17 or newer and can load R for the console. NixOS has no
+          #   loader there; its users install the native package.
+          # - macOS: zig bundles link stubs for libSystem only — no Apple
+          #   frameworks. The dependency graph is kept framework-free on
+          #   purpose (see patches/iana-time-zone and the preflight in the
+          #   justfile's release recipe), so no macOS SDK is needed here.
           makeCrossArgs =
             target:
             commonArgs
             // {
-              CARGO_BUILD_TARGET = target;
+              CARGO_BUILD_TARGET = builtins.head (pkgs.lib.splitString "." target);
 
               nativeBuildInputs = [
                 pkgs.cargo-zigbuild
@@ -173,7 +185,7 @@
               (makeCrossArgs target)
               // {
                 extraDummyScript = keepPatchesInDummySrc;
-                buildPhaseCargoCommand = "cargo zigbuild --release -p ry-lang";
+                buildPhaseCargoCommand = "cargo zigbuild --release --target ${target} -p ry-lang";
                 checkPhaseCargoCommand = "true";
               }
             );
@@ -186,13 +198,18 @@
                 cargoArtifacts = makeCrossArtifacts target;
                 buildPhaseCargoCommand = ''
                   cargoBuildLog=$(mktemp cargoBuildLogXXXX.json)
-                  cargo zigbuild --release --message-format json-render-diagnostics -p ry-lang >"$cargoBuildLog"
+                  cargo zigbuild --release --target ${target} --message-format json-render-diagnostics -p ry-lang >"$cargoBuildLog"
                 '';
+                # A release binary must not reference anything in the Nix
+                # store: an ELF interpreter or RUNPATH there fails this build
+                # instead of shipping.
+                allowedReferences = [ ];
               }
             );
         in
         {
-          ry-linux-x86_64 = packageLinux;
+          default = packageNative;
+          ry-linux-x86_64 = buildCrossPackage "x86_64-unknown-linux-gnu.2.17";
           ry-macos-aarch64 = buildCrossPackage "aarch64-apple-darwin";
           ry-windows-x86_64 = buildCrossPackage "x86_64-pc-windows-gnu";
         }
