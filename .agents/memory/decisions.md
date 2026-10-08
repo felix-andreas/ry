@@ -918,3 +918,18 @@ Impact: correctness — the corpus differential reaches 1,523/1,523 with one adj
 **Shape.** `classify_top_level` now delegates to `top_level_definition`, which returns the item's kind, name, and the range of the syntax spelling that name (the assignment target, or the `setGeneric` name inside its quotes); `:=` is no longer a binding spelling. In the IDE a project-defined generic is one global symbol: its `setGeneric`/`setMethod`/`standardGeneric` strings and its calls navigate, reference and rename together. `semantics::item_name_range(db, item)` re-reads it off `item_node` at the rendering edge (item identity stays position-free). All three consumers read it; the heuristics are deleted.
 
 **Impact.** Item identity and the name site cannot disagree about which name a statement binds. Unused warnings, goto, hover and the outline land on the name for every definition shape. No new query or stored state: the lookup is a hash probe plus a descent into one statement.
+
+# Decision record: a check reads per-name firewalls, never project-wide maps
+
+**Status:** decided and implemented.
+
+**Problem.** `item_check` resolved cross-item reads against three whole maps it read eagerly: `package_definitions` (every winner in the project), `interface_sccs` membership, and its own file's item positions. Any new or renamed definition anywhere changed those maps, so every check in the project re-ran on its next demand, even one reading no name at all. The previous engine had per-symbol firewalls; the new stack had lost them, and nothing measured it (the keystroke probe edits one file and demands only that file).
+
+**Shape.** Three small tracked projections, each re-run per read after a structural edit and backdated when its answer is unchanged:
+- `package_name(files, name)`: the name's winner and conditional writers;
+- `interface_group(files, item)`: the item's cyclic group, if any;
+- `frame_binder(item, name, deferred)`: the file-local binder an immediate or script read sees. Package function bodies (the common item) never consult it.
+
+`SalsaGlobals` holds no map any more. `item_check` also grows the stack on demand (`stacker`): demand recursion is as deep as the longest chain of definitions each reading the next.
+
+**Impact.** Correctness unchanged: every fixture suite is byte-identical. A new definition re-checks only its readers; a statement insertion re-checks only the reads it intercepts (`crates/semantics/tests/test_incremental.rs`). Memory: +3.5% resident at 794K lines (1270 → 1314 bytes/line); cold time unchanged. Remaining gap: salsa-level cycles through statement items, which `interface_sccs` does not model, re-iterate on every structural edit (`backlog.md`).

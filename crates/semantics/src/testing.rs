@@ -1,17 +1,20 @@
-//! The semantic pipeline's fuzz invariant battery, shared by the in-tree
-//! property harness and the coverage-guided `fuzz/` target so the contract
-//! has one home. On every input: never panic (salsa fixpoints converge),
-//! deterministic rendering across fresh databases, in-bounds diagnostic and
-//! lint ranges, and incremental equivalence — editing through the salsa
-//! setter equals a fresh database on the edited text, and editing back
-//! restores the original output.
+//! Test support shared across crates and the coverage-guided `fuzz/` target.
+//!
+//! The fuzz invariant battery, so the contract has one home. On every input:
+//! never panic (salsa fixpoints converge), deterministic rendering across
+//! fresh databases, in-bounds diagnostic and lint ranges, and incremental
+//! equivalence — editing through the salsa setter equals a fresh database on
+//! the edited text, and editing back restores the original output.
 
 use crate::diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics};
 use crate::lints::{LintConfig, LintLevel, NameStyle, lint_file};
 use crate::{
-    DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree,
+    Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, SpliceCache, item_check,
+    item_tree,
 };
 use salsa::Setter as _;
+use salsa::plumbing::AsId as _;
+use std::sync::{Arc, Mutex};
 
 /// One canonical rendering of everything the pipeline produces for a file:
 /// exported schemes, diagnostics (typing and strict), and every lint under
@@ -159,4 +162,73 @@ pub fn with_fixture_project<R>(
         }
         render(db, &sources)
     })
+}
+
+/// A database that logs every query execution, for asserting what an edit
+/// re-runs.
+#[salsa::db]
+#[derive(Clone)]
+pub struct ProbeDatabase {
+    storage: salsa::Storage<Self>,
+    splice_cache: Arc<SpliceCache>,
+    executed: Arc<Mutex<Vec<String>>>,
+}
+
+impl Default for ProbeDatabase {
+    fn default() -> Self {
+        let executed: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = executed.clone();
+        ProbeDatabase {
+            storage: salsa::Storage::new(Some(Box::new(move |event| {
+                if let salsa::EventKind::WillExecute { database_key } = event.kind {
+                    log.lock()
+                        .expect("probe log")
+                        .push(format!("{database_key:?}"));
+                }
+            }))),
+            splice_cache: Arc::default(),
+            executed,
+        }
+    }
+}
+
+#[salsa::db]
+impl salsa::Database for ProbeDatabase {}
+
+#[salsa::db]
+impl Db for ProbeDatabase {
+    fn splice_cache(&self) -> &SpliceCache {
+        &self.splice_cache
+    }
+}
+
+impl ProbeDatabase {
+    /// A package project of one file per source.
+    pub fn project(&self, sources: &[&str]) -> Vec<SourceFile> {
+        let files: Vec<SourceFile> = sources
+            .iter()
+            .map(|source| SourceFile::new(self, (*source).to_owned(), DocumentKind::Package))
+            .collect();
+        ProjectFiles::new(self, files.clone());
+        files
+    }
+
+    pub fn edit(&mut self, file: SourceFile, text: impl Into<String>) {
+        file.set_text(self).to(text.into());
+    }
+
+    /// The sorted names of the project's items whose `item_check` ran since
+    /// the last call.
+    pub fn checked_since(&self) -> Vec<String> {
+        let executed = std::mem::take(&mut *self.executed.lock().expect("probe log"));
+        let mut names: Vec<String> = ProjectFiles::get(self)
+            .files(self)
+            .iter()
+            .flat_map(|&file| item_tree(self, file).clone())
+            .filter(|&item| executed.contains(&format!("item_check({:?})", item.as_id())))
+            .filter_map(|item| item.name(self).clone())
+            .collect();
+        names.sort();
+        names
+    }
 }

@@ -98,6 +98,14 @@ Analysis is incremental at **item** granularity on salsa:
   resolution) are small tracked queries whose values survive body edits that
   only shift ranges — the common keystroke backdates the projection and the
   project-wide graph walks stay green instead of re-executing.
+- A check never reads a project-wide map. Its cross-item lookups go through
+  per-name and per-item firewalls: `package_name` (a name's winner and
+  conditional writers), `interface_group` (an item's cyclic group), and
+  `frame_binder` (the file-local binder an immediate or script read sees).
+  A structural edit re-runs each firewall a check read; an unchanged answer
+  backdates, so a new definition re-checks only the items that read its name.
+  `crates/semantics/tests/test_incremental.rs` pins these contracts by
+  counting query executions.
 - Types are **interned** (id equality, no deep clones). Deep resolution over
   the interned type DAG is memoized per binding epoch with
   cycle-cut-to-`Unknown` semantics; the decision log records the design.

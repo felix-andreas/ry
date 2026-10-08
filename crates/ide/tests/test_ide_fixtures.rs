@@ -5,7 +5,7 @@
 //! file. `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs
 //! one case.
 
-use semantics::testing::with_fixture_project;
+use semantics::testing::{ProbeDatabase, with_fixture_project};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::path::Path;
 use syntax::{TextRange, TextSize};
@@ -358,6 +358,48 @@ setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
         .map(|symbol| symbol.name)
         .collect();
     assert_eq!(deposit, vec!["deposit".to_owned()]);
+}
+
+// The per-keystroke features read cached checks: repeated on an unchanged
+// workspace they re-check nothing, after an edit elsewhere nothing in the
+// queried file, and after an edit to one queried item that item alone.
+// Completion is the exception that proves the rule: it renders every global
+// candidate's type, so it re-checks the one global the edit changed.
+#[test]
+fn point_queries_recheck_only_what_an_edit_changed() {
+    let mut db = ProbeDatabase::default();
+    let source = "helper <- function(x) x + 1L\nuse <- function() helper(2L)\n";
+    let files = db.project(&[source, "other <- function() 3L\n"]);
+    let project = ProjectFiles::get(&db);
+    let at = |needle: &str| TextSize::from(source.find(needle).expect("needle") as u32);
+    let point_queries = |db: &ProbeDatabase| {
+        let file = files[0];
+        ide::hover(db, project, file, at("helper(2L)"));
+        ide::signature_help(db, file, at("2L)"));
+        ide::inlay_hints(db, file, None);
+        ide::definition(db, project, file, at("helper(2L)"));
+    };
+    let complete = |db: &ProbeDatabase| {
+        ide::completion(db, project, files[0], at("helper(2L)"));
+    };
+    point_queries(&db);
+    complete(&db);
+    db.checked_since();
+
+    point_queries(&db);
+    complete(&db);
+    assert_eq!(db.checked_since(), Vec::<String>::new());
+
+    db.edit(files[1], "other <- function() 4L\n");
+    point_queries(&db);
+    assert_eq!(db.checked_since(), Vec::<String>::new());
+    complete(&db);
+    assert_eq!(db.checked_since(), ["other"]);
+
+    db.edit(files[0], source.replace("2L", "3L"));
+    point_queries(&db);
+    complete(&db);
+    assert_eq!(db.checked_since(), ["use"]);
 }
 
 #[test]

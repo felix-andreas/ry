@@ -497,6 +497,19 @@ node, while most arms then re-extract only `Copy` fields — the clone exists on
 on `self.module`. It appeared in the profile solely as `drop_in_place` and malloc/free frames, so its
 cost was never isolated. Measure before acting.
 
+### Cycles through statement items re-iterate on every structural edit
+
+`interface_sccs` has nodes for named definitions only, so a reference cycle that runs through a
+statement item (a conditional top-level write, read back through `statement_binding_scheme`) is
+resolved by salsa's cycle backstop rather than `scc_schemes`. Salsa cannot verify a cycle's memos
+without re-running it, so every structural edit (a new or renamed definition anywhere) re-iterates
+each such cycle twice once something demands it. Measured on data.table: a new top-level binding
+re-runs 72 `item_check`s (13 of them twice) for the edited file's diagnostics, ~50 ms against 12 ms
+for a body edit; the members are ordinary functions (`setattr`, `setnames`, `stopf`, …) tied into
+one cycle by a statement in `utils.R`. Fix: make conditional writers nodes of the static graph (an
+edge from a reader to each writer of a name with no winner), so these cycles route through
+`scc_schemes` like any other, and extend `test_incremental.rs` with a statement-item cycle.
+
 ### Judged fast enough — do not invent work here
 
 Single-package cold analysis (ggplot2 68K lines 1.9 s / 88 MiB peak; mgcv 37K lines 1.3 s / 72 MiB

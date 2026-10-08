@@ -57,6 +57,11 @@ fuzz-run target="semantics" *args:
 stats path=".":
     cargo run -q -p ry-lang -- debug analysis-stats {{ path }}
 
+# The corpus-wide perf and memory budgets (fetch the corpus first with
+# `cargo +nightly -Zscript scripts/fetch-corpus.rs`).
+perf:
+    cargo test -p semantics --release --test test_perf -- --ignored --nocapture
+
 # The REPL's end-to-end tests: drive `ry repl` through a pty against the
 # system R. Local-only — they skip (green) on machines without R.
 repl-e2e:

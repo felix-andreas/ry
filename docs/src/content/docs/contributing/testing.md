@@ -309,14 +309,31 @@ marker appears, so the edit's flip provably lands while the pull is in flight �
 `SERVER_CANCELLED` response, and the successful retry after it, can be asserted without
 sleeping-and-hoping. The variables exist only for this test; production runs never set them.
 
-### The perf and memory witnesses
+### Incrementality contracts
 
-`legacy/differential/tests/test_stats.rs` (ignored; needs the fetched corpus and a release
-build) carries the measurement instruments — one process per stack reporting wall, phase
-splits, and resident/peak memory into `target/stats-{new,legacy}.txt` — and `stats_witness`,
-the CI-checkable assertion form: cold-pass wall per line, resident bytes per line, and
-resolve steps per line (the resolve-memoization regression tripwire) against budgets set from
-the measured gate numbers with headroom.
+`crates/semantics/tests/test_incremental.rs` asserts what an edit re-runs, not only what it
+produces. `semantics::testing::ProbeDatabase` logs every query execution, and
+`checked_since` names the items whose `item_check` ran. The contracts it pins:
+- a body edit that keeps the scheme re-checks the edited item alone;
+- one that changes the scheme also re-checks its readers;
+- a new definition re-checks only the items reading its name;
+- an inserted statement re-checks only the reads it intercepts.
+
+Re-export chains resolve to their base, cycles pin to `Unknown`, and a 4,096-link chain resolves
+without overflowing the analysis thread's stack. `point_queries_recheck_only_what_an_edit_changed`
+in the IDE harness holds the per-keystroke features to the same rule.
+
+### The perf and memory witness
+
+`crates/semantics/tests/test_perf.rs` (ignored; needs the fetched corpus and a release build)
+asserts budgets set from measured numbers with headroom:
+- cold-pass wall per line;
+- resolve steps per line (the resolve-memoization tripwire);
+- resident bytes per line;
+- keystroke-to-diagnostics p50/p95 on the corpus's largest package.
+
+It prints the measured values, so it doubles as the corpus-wide measurement; `ry debug
+analysis-stats` is the per-phase diagnosis for one workspace.
 
 ## Fixture format
 
