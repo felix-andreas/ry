@@ -215,7 +215,12 @@ fn render_stub_source(source: &str) -> String {
     for (name, _) in names {
         for scheme in library.schemes.get(name).into_iter().flatten() {
             let rendered = TypeRenderer::default().render_scheme(&db, scheme);
-            output.push_str(&format!("{name} : {rendered}\n"));
+            let masked = if library.masked.contains_key(name) {
+                "@masked "
+            } else {
+                ""
+            };
+            output.push_str(&format!("{name} : {masked}{rendered}\n"));
         }
     }
     for problem in semantics::stubs::stub_source_problems(&db, source) {

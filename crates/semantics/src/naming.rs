@@ -1305,15 +1305,12 @@ impl Context<'_> {
     }
 
     fn collect_unused(&mut self) {
+        // A `.`- or `_`-prefixed name is conventionally an intentional
+        // hold-over (hidden helpers, ignored results, a formal a callback
+        // signature forces); the convention opts it out of unused reporting.
+        let throwaway = |name: &str| name.starts_with('.') || name.starts_with('_');
         for write in &self.writes {
-            // A `.`- or `_`-prefixed name is conventionally an intentional
-            // hold-over (hidden helpers, ignored results); the convention
-            // opts it out of dead-store reporting.
-            if write.reportable
-                && !write.used
-                && !write.name.starts_with('.')
-                && !write.name.starts_with('_')
-            {
+            if write.reportable && !write.used && !throwaway(&write.name) {
                 self.naming.unused_assignments.push(UnusedAssignment {
                     name: write.name.clone(),
                     range: write.range,
@@ -1321,10 +1318,10 @@ impl Context<'_> {
             }
         }
         for binding in self.naming.bindings.values() {
-            // Dots reads never resolve (`resolve_read` skips `...`/`..1`), so
-            // dots parameters cannot be marked and are exempt instead.
+            // `...` is covered by the prefix rule too, which matters because
+            // dots reads never resolve (`resolve_read` skips `...`/`..1`).
             if binding.kind == BindingKind::Parameter
-                && binding.name != "..."
+                && !throwaway(&binding.name)
                 && !self.read_parameter_slots.contains(&binding.id)
             {
                 self.naming.unused_parameters.push(UnusedAssignment {

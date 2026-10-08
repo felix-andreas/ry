@@ -158,7 +158,7 @@ Enabling `strict` also raises every `unresolved` finding in the file from warnin
 | `boolean-shorthand` | warning | yes | An identifier that is exactly `T` or `F`. Identifiers inside `#:` annotations are exempt, so a type variable named `T` is fine |
 | `trailing-comma` | **error** | yes | A comma after a call's last argument. In R this supplies a missing argument rather than being ignored — hence error, unlike the other default-on lints |
 | `naming-style` | warning | no | An assignment target or a function parameter that does not match the configured casing. `SCREAMING_SNAKE_CASE` conforms under either style. Always a warning: the `"warn"`/`"error"` levels do not apply to this lint, which is configured by style value instead |
-| `unused-parameter` | as configured | no | A formal no read resolves to. `...` is exempt, and S3 generics and their methods are exempt entirely — their formals are dictated by the generic |
+| `unused-parameter` | as configured | no | A formal no read resolves to. `...` and other names starting with `.` or `_` are exempt (the throwaway convention), and S3 generics and their methods are exempt entirely — their formals are dictated by the generic |
 | `unused-import` | as configured | no | An `importFrom(pkg, name)` in `NAMESPACE` whose `name` appears in no token of any checked source. Whole-namespace `import(pkg)` is never checked. Reported by `check` only, not by the language server |
 | `shadows-builtin` | as configured | no | A top-level binding whose name `base` exports. Requires stubs to be installed |
 | `shadows-namespace` | as configured | no | A top-level binding whose name a non-`base` stub namespace declares and that resolves bare (`stats::filter`, `utils::head`) |

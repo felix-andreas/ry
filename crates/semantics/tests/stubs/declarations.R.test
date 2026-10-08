@@ -59,6 +59,18 @@ abs : fn(x: double) -> double
 abs : fn(x: integer) -> integer
 abs : fn(x: double) -> double
 
+#==== masked
+#---- masked_variadic_verb
+filter : @masked fn(.data: Any, ...: Any) -> Any
+#++++
+filter : @masked fn(.data: Any, ...: Any) -> Any
+
+#---- masked_requires_a_rest_parameter
+f : @masked fn(x: Any) -> Any
+#++++
+f : fn(x: Any) -> Any
+line 0: `@masked` on `f` requires a variadic function type — the mask covers the arguments the `...` rest parameter absorbs.
+
 #==== malformed
 #---- missing_colon
 length fn(x: Any) -> integer
