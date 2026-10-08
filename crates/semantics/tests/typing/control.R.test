@@ -497,12 +497,14 @@ f <- function() {
 #++++
 f: fn() -> integer
 
-#---- trailing_semicolon_yields_null
+#---- trailing_semicolon_keeps_the_last_value
+# R's grammar drops a trailing `;` without adding an expression, so the block's
+# value is still its last expression.
 f <- function() {
   1L;
 }
 #++++
-f: fn() -> NULL
+f: fn() -> integer
 
 #---- forward_capture_resolves_after_repass
 f <- function() {

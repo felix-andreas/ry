@@ -214,9 +214,6 @@ pub enum ExpressionKind {
     },
     Block {
         statements: Vec<ExprId>,
-        /// The last expression is terminated with `;`, so the block's value
-        /// is `NULL`.
-        trailing_semicolon: bool,
     },
     Paren(ExprId),
     Break,
@@ -337,34 +334,9 @@ impl Lowering {
                     .iter()
                     .map(|child| self.lower_expression(child))
                     .collect();
-                // Walking backwards over the block's direct tokens: hitting a
-                // `;` before any statement node means the last expression is
-                // terminated (statement content lives in child nodes, so the
-                // direct tokens are only braces, separators, and trivia).
-                let trailing_semicolon = node
-                    .children_with_tokens()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .find_map(|element| match element {
-                        rowan::NodeOrToken::Token(token) => match token.kind() {
-                            SyntaxKind::WHITESPACE
-                            | SyntaxKind::NEWLINE
-                            | SyntaxKind::COMMENT
-                            | SyntaxKind::R_BRACE => None,
-                            SyntaxKind::SEMICOLON => Some(true),
-                            _ => Some(false),
-                        },
-                        rowan::NodeOrToken::Node(_) => Some(false),
-                    })
-                    .unwrap_or(false);
-                self.allocate(
-                    ExpressionKind::Block {
-                        statements,
-                        trailing_semicolon,
-                    },
-                    range,
-                )
+                // A trailing `;` adds no expression in R's grammar, so
+                // `{ 1L; }` is `1L` and needs no flag here.
+                self.allocate(ExpressionKind::Block { statements }, range)
             }
             SyntaxKind::UNARY_EXPR => {
                 let operator = node

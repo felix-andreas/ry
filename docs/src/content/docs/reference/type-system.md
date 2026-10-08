@@ -316,8 +316,8 @@ A type parameter may appear inside a structural type, a function type, and the v
 Using a type parameter as a vector element restricts it. A `T` in `T[]` carries the atomic-element
 bound, so it can only be instantiated with one of the six atomic types: `logical`, `integer`,
 `double`, `complex`, `character`, and `raw`. This is what makes element-preserving signatures
-possible. With `sort : <T> fn(x: T[]) -> T[]`, `sort(c("b", "a"))` is `character[]` and
-`sort(c(1L))` is `integer[]`, while a list argument cannot bind `T` at all, because a list is not an
+possible. With `keep : <T> fn(x: T[]) -> T[]`, `keep(c("b", "a"))` is `character[]` and
+`keep(c(1L))` is `integer[]`, while a list argument cannot bind `T` at all, because a list is not an
 atomic element type. Several rules follow from the bound:
 
 - A scalar argument coerces into a generic vector parameter and binds the element, so
@@ -325,7 +325,7 @@ atomic element type. Several rules follow from the bound:
 - `[[` on a generic vector `T[]` extracts `T`.
 - An arithmetic operator on a `T[]` operand also requires the element to be numeric. The variable
   then holds both bounds, so it is a scalar `integer` or `double`. The result keeps the element, so
-  `sort(x) + 1L` is still `T[]`, unless a `double` operand promotes the result to `double[]`.
+  `keep(x) + 1L` is still `T[]`, unless a `double` operand promotes the result to `double[]`.
 - A comparison on a `T[]` operand yields `logical[]`, and a numeric partner requires the element to
   be numeric.
 
@@ -342,7 +342,8 @@ while an alias of a record is refused.
 
 An alias is purely structural: writing its name is the same as writing the type it stands for. It
 creates no new identity and is compatible with whatever its underlying type is. An alias may appear
-anywhere a type may, including inside a larger type, and a cycle of alias definitions is an error.
+anywhere a type may, including inside a larger type. Using an alias that expands in a cycle is an
+error, reported where it is used; a cycle no annotation uses is not reported.
 
 ```r
 #: @alias PersonShape {list{ name: character, age: double }}
@@ -594,8 +595,9 @@ Omitting the return type [elides](#elided-return-types) it.
 
 A function may declare one rest parameter to accept a variable number of arguments. It is written
 `...: TYPE`, and `fn(...)` is shorthand for `...: Any`. It has no name, because rest arguments are
-matched by position, so `...items: TYPE` does not match the function's `...` and is reported as a
-signature mismatch. It can come after the fixed
+matched by position, so `...items: TYPE` does not match the function's `...` and is reported, twice
+at the same range: as a signature mismatch and as a parameter the function does not define. It can
+come after the fixed
 parameters, as in `fn(prefix: TYPE, ...: TYPE) -> RETURN_TYPE`, or before named ones, as in
 `fn(...: TYPE, [option]: TYPE) -> RETURN_TYPE`:
 
@@ -654,13 +656,11 @@ the parameters is the usual partial form, and it must not silently pin the retur
 the return as `Unknown` has the same effect, because `Unknown` says nothing is known and so never
 overrides what the body shows. (`Any` is the annotation that turns checking off for a value.)
 
-**When there is no body, an elided return means `NULL`**, which matches R functions called for their
-side effects. There are three such positions:
-
-- a nested function type, such as a callback parameter written `@param cb {fn(integer)}`;
-- a [trusted coercion](#trusted-coercions) or an [`@if-unknown` coercion](#unknown-only-coercions),
-  both of which adopt exactly the written type without looking at the body;
-- an annotation on a value that is not a function literal, such as `#: fn(integer)` on `g <- f`.
+**When there is no body, an elided return means `NULL` in a nested function type**, such as a
+callback parameter written `@param cb {fn(integer)}`, which matches R functions called for their
+side effects. In a [trusted coercion](#trusted-coercions), and in an annotation on a value that is not
+a function literal, such as `#: fn(integer)` on `g <- f`, the elided return is `Unknown`, so a call's
+result goes unchecked even when `f`'s return type is known. This is a known gap.
 
 A function that really does return `NULL` can always say so, with `@returns {NULL}` or `-> NULL`.
 The explicit form is enforced, so a body that returns anything other than `NULL` is then a type
@@ -742,10 +742,9 @@ definition, the formals supply the name, and `f(count = 1L)` stays legal.
 An optional parameter follows the same rule, and must be named, as in
 `fn(count: integer, [label]: character) -> integer`.
 
-Parameter and record field names may contain an interior `.`, matching R's convention for arguments
-such as `na.rm` and `length.out`: `fn(x: double, na.rm: logical) -> double` and
-`list{na.rm: logical}` are both valid. The first character must still be a letter or `_`, and the dot
-can only be interior. Type names and type parameter names cannot contain a `.` at all.
+Parameter, field, and type names may contain `.`, matching R's convention for names such as
+`na.rm` and `length.out`: `fn(x: double, na.rm: logical) -> double`, `list{na.rm: logical}`, and
+`@type My.Type {integer}` are all valid.
 
 ### Function type compatibility
 
@@ -780,8 +779,9 @@ may pass, and the function's return type must be compatible with the expected on
   optional formals the callback never passes.
 - `fn(a: integer, b: integer) -> integer` is rejected there, because the interface never supplies `b`,
   and `fn() -> integer` is rejected because it cannot receive the argument the interface sends.
-- `fn(count: integer, [label]: character) -> integer` does not accept `function(count, label) count`,
-  because `label` has no default.
+- `fn(count: integer, [label]: character) -> integer` does not accept `function(count, label) count`
+  in a checked annotation, because `label` has no default. At an argument position this is not yet
+  checked, which is a known gap.
 
 Variadic compatibility is conservative. A variadic function type is compatible only with another
 variadic function type, never with a fixed-arity one in either direction. Their rest element types
@@ -814,7 +814,8 @@ call is an error.
 
 When a function value is rejected at a parameter, the finding names the one position that failed
 rather than printing both whole signatures: either the parameter to which the interface passes a
-value the function will not take, or the function's return, which the interface will not take.
+value the function will not take, or the function's return, which the interface will not take. An
+arity mismatch still shows both signatures.
 
 ### Higher-order function types
 
@@ -974,9 +975,10 @@ for the result.
 ### Indexing
 
 `[[` extracts a single element, and `[` is R's general subsetting operator, defined here for the
-vector and list shapes. Failures that only happen at run time are not modelled anywhere in this
-section: an out-of-range position or a missing name gives `NA` at run time, which is a property of
-the value, not the type.
+vector and list shapes. `[` with an out-of-range position or a missing name gives `NA` at run time,
+which is a property of the value, not of its type. `[[` with a missing name gives `NULL` on a list,
+which the rules below record as `| NULL`; they record the same for a named vector, where R instead
+fails at run time.
 
 `$name` behaves like `[["name"]]` on lists, on records, and on the opaque nominals where access is
 tolerated, and a backtick-quoted name follows the same rule. It does not work on atomic vectors,
@@ -1154,8 +1156,9 @@ to `function(x) x + 1L` is accepted when the project defines `+.Money`, and refu
 no arithmetic method.
 
 `c()` dispatches the same way. A class that declares a `c.Class` method keeps its class through
-concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. A nominal with no such method gives
-`Unknown`, because R's default `c()` strips attributes.
+concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. A nominal with no such method loses
+its class but keeps its data, as R's default `c()` does, so two values of `@type Money {double}`
+combine to `double[]`. An opaque nominal has no representation, so combining it gives `Unknown`.
 
 The method name's suffix is the nominal type's name, not R's full class vector, so a class declared
 as `@type ggplot` takes `+.ggplot`, even though R registers the method as `+.gg`.
@@ -1250,7 +1253,7 @@ turn out to be a `double`.
 - An argument whose element type is not known statically, such as `Any`, `Unknown`, or an unannotated
   parameter (as in `function(x) c(x, 1L)`), is tolerated rather than rejected, and the whole result is
   `Unknown`. Under strict mode, an unannotated parameter makes the `c()` call the origin, an `Unknown`
-  argument was already reported where it arose, and an `Any` argument is never reported. This keeps
+  argument was already reported where it arose, and an `Any` argument is not reported. This keeps
   `c` from reporting a false "expected `integer`, found `T`" in a generic wrapper, and from cascading
   on a value that is already `Unknown`. Claiming a
   concrete element type would be unsound, because a later argument could widen it.
@@ -1297,7 +1300,7 @@ after `x <- 1L; if (flag) x <- "foo"`, a later `x` is `integer | character`.
 A function can call itself, because its own name is visible inside its body: the target is bound to a
 fresh type variable before the body is inferred, and that variable is then unified with the inferred
 function type. `fact <- function(k) if (k <= 1L) 1L else k * fact(k - 1L)` is therefore
-`fn(integer) -> integer`, and a call that violates the recursively inferred signature is an error.
+`fn(k: integer) -> integer`, and a call that violates the recursively inferred signature is an error.
 The recursive uses share one instantiation, so there is no polymorphic recursion.
 
 Two local functions that call each other are beyond this, because names are bound one at a time. The
@@ -1389,7 +1392,8 @@ Arguments are checked for compatibility, not exact equality:
 - The promotion order from [vector coercions](#vector-coercions) applies, so `mean(1L)`,
   `sd(c(1L, 2L))`, and `sum(x > threshold)` are not errors.
 - A whole-number `double` literal counts as `integer` at a parameter, so for a function annotated
-  `fn(n: integer)`, `f(10)` is as valid as `f(10L)`. This generalizes the rule
+  `fn(n: integer)`, `f(10)` is as valid as `f(10L)`. `-3` is unary minus applied to a literal, not a
+literal, so `f(-3)` is still rejected. This generalizes the rule
   that the `:` operator applies to its endpoints. A fractional literal such as `2.5` is still
   rejected at an `integer` parameter, and so is a `double` variable that happens to hold a whole
   number.
@@ -1425,7 +1429,8 @@ to such a name is resolved separately at each call site:
   into the committed result.
 - A candidate that leaves the caller's undetermined types as they were beats one that constrains
   them, whatever the declaration order. A wrapper like `function(x) sum(x)` therefore keeps its
-  parameter open, because the `Any` fallback accepts it without constraining anything. When only one
+  parameter open, because the `Any` fallback accepts it without constraining anything. Strict mode
+  reports a call that resolves to such a fallback, because the declarations could not describe it. When only one
   candidate fits, it is selected and whatever it determines stands.
 - The [whole-number literal rule](#argument-compatibility) does not influence which candidate is
   selected. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the
@@ -1606,9 +1611,8 @@ The test also narrows whether the formal was supplied, along the branch edges, l
 
 ### Blocks
 
-A block evaluates to the type of its last expression. An empty block, and a block whose last
-expression ends with `;`, evaluate to `NULL`, and a block whose last expression is `Unknown` is
-`Unknown`.
+A block evaluates to the type of its last expression, so an empty block is `NULL`. A trailing `;`
+adds no expression in R's grammar, so `{ 1L; }` is `integer`.
 
 ### `return`
 
@@ -1699,8 +1703,8 @@ A top-level value name in a package is global across its files:
 
 - Any file may refer to a top-level binding in another.
 - When several files define the same name, the later file wins, and both definitions are reported.
-- A bare top-level `{ }` block always runs, so the assignments directly inside it are package globals
-  too.
+- A bare top-level `{ }` block always runs, so the assignments directly inside it are visible to the
+  rest of their file. Another file does not see them yet, which is a known gap.
 - An assignment inside an `if`, `for`, or `while` body runs only conditionally, so it is not a
   package global, and a reference to it from another file is unresolved.
 
@@ -1849,8 +1853,9 @@ Manifests follow the way R itself exposes each namespace:
 - A conditional namespace's manifest activates together with its stubs (see
   [conditional stub namespaces](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat)).
   While the namespace is inactive, its names stay unknown, bare and qualified alike.
-- A read satisfied only by an import still counts as a use for the unused check, and strict mode
-  reports its `Unknown` exactly like any other undetermined reference.
+- A read satisfied only by an import still counts as a use for the unused check. A bare read of such
+  a name is not a strict-mode origin, which is a known gap; a qualified `pkg::name` read with no
+  known type is.
 
 ### Replacement-form assignment
 
@@ -1912,7 +1917,9 @@ one.
 Definite assignment follows four rules:
 
 - A read that some path reaches with no prior write reports [`maybe-undefined`](/reference/diagnostic-codes),
-  because R raises `object 'x' not found` on that path. The finding is off by default; turn it on
+  because R raises `object 'x' not found` on that path. Inside a function, a binding of the same name
+  outside the function would be read instead, which this check does not yet consider. The finding is
+  off by default; turn it on
   with `[check] maybe-undefined = true`. Two conditions that always agree at run time are still two
   branches to the checker, so `if (ok) v <- …` followed by `if (ok) use(v)` is reported, although it
   is safe.
@@ -2139,7 +2146,8 @@ out of the parts decided at run time from a value's class attribute:
 - `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled, so `new(...)` is `Unknown`.
 - `x@slot`, read or written, is lowered fully and typed as `Unknown`; see below.
 - `R6Class(...)`, `$new(...)`, and R6 fields and methods are not modeled and are `Unknown`. Inside an
-  R6 method, `self`, `private`, and `super` resolve as names typed `Unknown`.
+  R6 method, `self`, `private`, and `super` resolve as names typed `Unknown`. Strict mode does not
+  report R6 values yet, because `R6Class` is known only from an export list.
 
 `x@slot` reads an S4 slot and `x@slot <- v` writes one. The slot's type is unknown, but the construct
 is still analyzed: a slot read types as `Unknown` and is a strict-mode origin; the subject expression
@@ -2182,8 +2190,10 @@ unannotated `function(x) speak(x)`, that class is not known there.
 Strict mode is an opt-in check, switched on with `[check] strict` and off by default. It changes
 nothing about inference and adds no typing rules. The type checker already computes every type;
 strict mode reads those types and reports the places where the checker genuinely could not determine
-one, and it escalates unresolved references to errors. A value typed `Any` is an intentional opt-out
-and never produces a strict finding.
+one, and it escalates unresolved references to errors. A value typed `Any` by an annotation or a
+single declaration is an intentional opt-out and never produces a strict finding. A call that falls
+back to an overload set's `Any` candidate is the exception, because the fallback marks a call the
+declarations could not describe.
 
 It also reports each read that the [attached-package tolerance](#package-imports-namespace-and-description)
 silenced, and points at the [stub](/type-checking/stubs) that would make it checkable. Without that,
@@ -2256,7 +2266,7 @@ and nothing else, because the checker draws no conclusions from source it could 
 - Every well-formed statement in the file is analyzed normally. Definitions keep their exports,
   references resolve, and a genuine type error outside the broken region still surfaces.
 - A broken statement contributes nothing: no names, no reads, and no diagnostics beyond the syntax
-  error covering it.
+  error covering it. Strict mode is the exception, and can still report an undetermined type there.
 - An unterminated argument or parameter list ends at the next statement, so the mistake stays on the
   line that made it. A list that runs onto the next line is ordinary R, and a fragment there such as
   `beta)` really is a forgotten separator and is reported as one. But a line that assigns is the next

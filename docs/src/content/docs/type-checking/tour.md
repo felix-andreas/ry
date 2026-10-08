@@ -298,9 +298,10 @@ x strict mode: this expression has an undetermined type (`Unknown`)
 ```
 
 `Any` is also compatible with everything, but a value declared `Any`, such as the result of a
-function declared `-> Any`, is a deliberate choice, so strict mode ignores it. Calls to S3 generics
+function declared `-> Any`, is a deliberate choice, so strict mode ignores it. (A call that falls back
+to a stub's catch-all `Any` overload, such as `sum(x)` on an unannotated `x`, is still reported.) Calls to S3 generics
 that dispatch through `UseMethod()` return `Any` and are not reported either. Strict mode does not
-yet report R6 objects or values from packages ry knows only by name, and it wrongly reports a
+yet report R6 objects or bare names from packages ry knows only by name, and it wrongly reports a
 `stop()` guard such as the one in `money()` above.
 
 A plain `#:` annotation gives an `Unknown` value a type, and every later use is checked against it.

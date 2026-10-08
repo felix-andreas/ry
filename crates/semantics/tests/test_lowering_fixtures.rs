@@ -178,19 +178,8 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
             let _ = writeln!(output, "{indent}Local");
             render_expression(output, module, *body, depth + 1);
         }
-        ExpressionKind::Block {
-            statements,
-            trailing_semicolon,
-        } => {
-            let _ = writeln!(
-                output,
-                "{indent}Block{}",
-                if *trailing_semicolon {
-                    " trailing-semicolon"
-                } else {
-                    ""
-                }
-            );
+        ExpressionKind::Block { statements } => {
+            let _ = writeln!(output, "{indent}Block");
             for &statement in statements {
                 render_expression(output, module, statement, depth + 1);
             }

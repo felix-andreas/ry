@@ -1492,22 +1492,13 @@ impl<'db> Checker<'db, '_> {
                 self.reapply_enclosing_writes(pending_mark);
                 value
             }
-            ExpressionKind::Block {
-                statements,
-                trailing_semicolon,
-            } => {
+            ExpressionKind::Block { statements } => {
                 let statements = statements.clone();
-                let trailing_semicolon = *trailing_semicolon;
                 let mut last = crate::types::null(self.db);
                 for statement in statements {
                     last = self.infer(statement);
                 }
-                // A `;`-terminated final expression discards the value.
-                if trailing_semicolon {
-                    crate::types::null(self.db)
-                } else {
-                    last
-                }
+                last
             }
             ExpressionKind::Paren(inner) => self.infer(*inner),
             ExpressionKind::Break | ExpressionKind::Next => self.unknown(),
@@ -3736,10 +3727,7 @@ impl<'db> Checker<'db, '_> {
     /// no expression, so it contributes its branch and nothing else.
     fn collect_tail_expressions(&self, id: ExprId, into: &mut Vec<ExprId>) {
         match &self.module.expression(id).kind {
-            ExpressionKind::Block {
-                statements,
-                trailing_semicolon: false,
-            } => match statements.last() {
+            ExpressionKind::Block { statements } => match statements.last() {
                 Some(&tail) => self.collect_tail_expressions(tail, into),
                 None => into.push(id),
             },
