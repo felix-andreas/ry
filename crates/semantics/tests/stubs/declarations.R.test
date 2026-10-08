@@ -1,0 +1,90 @@
+#==== plain
+#---- function_declaration
+length : fn(x: Any) -> integer
+#++++
+length : fn(x: Any) -> integer
+
+#---- function_multiple_parameters
+substr : fn(x: character, start: integer, stop: integer) -> character
+#++++
+substr : fn(x: character, start: integer, stop: integer) -> character
+
+#---- dotted_name
+is.null : fn(x: Any) -> logical
+#++++
+is.null : fn(x: Any) -> logical
+
+#==== values
+#---- atomic_value
+pi : double
+#++++
+pi : double
+
+#---- any_value
+paste : Any
+#++++
+paste : Any
+
+#==== generics
+#---- generic_identity
+identity : <T> fn(x: T) -> T
+#++++
+identity : <T> fn(x: T) -> T
+
+#---- generic_higher_order
+lapply : <T, U> fn(x: list[T], f: fn(T) -> U) -> list[U]
+#++++
+lapply : <T, U> fn(x: list[T], f: fn(T) -> U) -> list[U]
+
+#==== comments_and_blanks
+#---- trailing_comment_ignored
+abs : Any  # widened: result mirrors the argument
+#++++
+abs : Any
+
+#---- comment_and_blank_lines_skipped
+# a leading comment
+
+length : fn(x: Any) -> integer
+
+# a trailing comment
+#++++
+length : fn(x: Any) -> integer
+
+#==== repeated
+#---- repeated_name_parses_both
+abs : fn(x: integer) -> integer
+abs : fn(x: double) -> double
+#++++
+abs : fn(x: integer) -> integer
+abs : fn(x: double) -> double
+
+#==== malformed
+#---- missing_colon
+length fn(x: Any) -> integer
+#++++
+line 0: this line is not a declaration (`name : TYPE`).
+
+#---- empty_name
+: fn(x: Any) -> integer
+#++++
+line 0: expected a name before `:`.
+
+#---- missing_type
+length :
+#++++
+line 0: expected a type after `length :`.
+
+#---- invalid_type_expression
+broken : fn(x: ) -> integer
+#++++
+line 0: this declaration does not load: `fn(x: ) -> integer` is not a valid type.
+
+#---- valid_and_malformed_mixed
+length : fn(x: Any) -> integer
+oops
+pi : double
+#++++
+length : fn(x: Any) -> integer
+pi : double
+line 1: this line is not a declaration (`name : TYPE`).

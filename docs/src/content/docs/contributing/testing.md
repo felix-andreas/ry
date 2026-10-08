@@ -55,6 +55,13 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
 - `crates/semantics/tests/typing-scripts` — the same pipeline over script documents (one
   sequential top-down scope); besides script semantics it holds the expression-level rules
   (literals, operators, indexing, lists, stub calls), one line per statement
+- `crates/semantics/tests/annotations` — one `#:` block per case (the case lines are the
+  block): what it lowers to — the coercion kind, the declared type, the `@new` target, each
+  `@type`/`@alias` definition — then its grammar and lowering errors. The compact contract for
+  the type notation; the `syntax` suite pins the trees and the `errors` suite the wording
+- `crates/semantics/tests/stubs` — `.Rtypes` declaration sources: each case renders the
+  declarations it loads (overload candidates in order) and the problems the loader drops lines
+  for, in the wording the editor and the override report show
 - `crates/semantics/tests/typing-strict` — the strict stream: the per-file typing mode and
   the `strict`-code diagnostics appended after the ordinary rendering
 - `crates/semantics/tests/typing-imports` — package-metadata cases: leading `#namespace `

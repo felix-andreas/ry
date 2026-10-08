@@ -1,0 +1,32 @@
+#==== simple_multiline
+#---- multiline_function_type
+fn(
+    integer,
+    label: character
+) -> logical
+#++++
+fn(integer, label: character) -> logical
+
+#---- multiline_record_type
+list{
+    value: integer,
+    label: character
+}
+#++++
+list{value: integer, label: character}
+
+#==== non_ascii_names
+#---- non_ascii_record_field_name
+list{naïve: integer}
+#++++
+list{naïve: integer}
+
+#---- non_ascii_named_type_reference
+Élément
+#++++
+Élément
+
+#---- non_ascii_function_parameter_name
+fn(naïve: integer) -> character
+#++++
+fn(naïve: integer) -> character

@@ -5,35 +5,41 @@
 //! `shadows-namespace = "warn"` (all off by default). `RY_BLESS=1`
 //! accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
+use semantics::DocumentKind;
 use semantics::diagnostics::Severity;
 use semantics::lints::{LintConfig, LintLevel, NameStyle, lint_file};
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::testing::with_fixture_project;
 use std::path::Path;
 
 fn render_with(source: &str, config: &LintConfig) -> String {
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&db, vec![file]);
+    with_fixture_project(
+        vec![(source.to_owned(), DocumentKind::Package)],
+        |db, files| {
+            let [file] = files else {
+                panic!("a fixture case is one file");
+            };
+            let file = *file;
 
-    let mut output = String::new();
-    for diagnostic in lint_file(&db, file, config) {
-        let severity = match diagnostic.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
-        output.push_str(&format!(
-            "{}..{} {severity}[{}] {}\n",
-            u32::from(diagnostic.range.start()),
-            u32::from(diagnostic.range.end()),
-            diagnostic.code,
-            diagnostic.message
-        ));
-    }
-    if output.is_empty() {
-        output.push_str("clean\n");
-    }
-    output
+            let mut output = String::new();
+            for diagnostic in lint_file(db, file, config) {
+                let severity = match diagnostic.severity {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                };
+                output.push_str(&format!(
+                    "{}..{} {severity}[{}] {}\n",
+                    u32::from(diagnostic.range.start()),
+                    u32::from(diagnostic.range.end()),
+                    diagnostic.code,
+                    diagnostic.message
+                ));
+            }
+            if output.is_empty() {
+                output.push_str("clean\n");
+            }
+            output
+        },
+    )
 }
 
 #[test]

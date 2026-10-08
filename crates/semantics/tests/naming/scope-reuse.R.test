@@ -1,0 +1,89 @@
+#==== blocks
+#---- nested_block_uses_nearest_binding
+x <- 1L
+f <- function() {
+  x <- "ok"
+  {
+    x
+  }
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 x local 20..21
+  b1 f top-level 0..1
+  0..1 f <- b1
+  20..21 x <- b0
+  38..39 x -> b0
+
+#---- braces_do_not_restore_outer_binding
+x <- 1L
+f <- function() {
+  {
+    x <- "ok"
+  }
+  x
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 x local 26..27
+  b1 f top-level 0..1
+  0..1 f <- b1
+  26..27 x <- b0
+  42..43 x -> b0
+
+#---- braces_inside_loop_do_not_restore_pre_loop_binding
+x <- 0L
+for (x in list(1L)) {
+  {
+    x <- 2L
+  }
+  x
+}
+x
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  b0 x for-variable 5..6
+  10..14 list -> non-local
+  30..31 x <- b0
+  44..45 x -> b0
+# <statement>
+  0..1 x -> non-local
+
+#---- assignment_inside_loop_body_remains_visible_later_in_same_body
+for (item in list(1L)) {
+  value <- 1L
+  value
+}
+#++++
+# <statement>
+  b0 item for-variable 5..9
+  b1 value top-level 27..32
+  13..17 list -> non-local
+  27..32 value <- b1
+  41..46 value -> b1
+  used top-level: value
+
+#---- nested_block_resolves_outer_global_when_unshadowed
+x <- 1L
+f <- function() {
+  {
+    x
+  }
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 f top-level 0..1
+  0..1 f <- b0
+  26..27 x -> non-local deferred

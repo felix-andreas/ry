@@ -1,0 +1,48 @@
+#==== generic_semantic_errors
+#---- duplicate_type_parameters_in_universal_binder
+<T, T> fn(T) -> T
+#++++
+error: duplicate type parameter name `T` in `<...>`.
+
+#---- duplicate_type_parameters_in_expanded_forall
+@forall T
+@forall T
+@param value {T}
+@return {T}
+#++++
+error: duplicate type parameter name `T` in expanded function annotation.
+
+#---- unknown_constraint_in_universal_binder
+<T: frobnicate> fn(values: T) -> T
+#++++
+error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
+
+#---- unknown_constraint_in_expanded_forall
+@forall T: frobnicate
+@param value {T}
+@return {T}
+#++++
+error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
+
+#---- consecutive_typing_comments
+integer
+character
+#++++
+error: only one compact annotation fits in a `#:` block — separate the annotations with a blank line so each gets its own block.
+
+#---- expanded_param_after_return
+@return {integer}
+@param count {integer}
+#++++
+error: `@param` directives must appear before `@return` or `@returns` in the same `#:` block.
+
+#---- generic_arity_is_not_a_parse_error
+Pair<integer>
+#++++
+Pair<integer>
+
+#==== record_semantic_errors
+#---- duplicate_record_field_name
+list{id: integer, id: integer}
+#++++
+error: the field `id` appears twice in this `list{...}` type

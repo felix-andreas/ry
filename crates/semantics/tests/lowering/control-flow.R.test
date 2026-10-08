@@ -197,3 +197,21 @@ x <- 1L;
   Assign Local
     NameRef x
     Literal Integer("1L")
+
+#==== control_flow
+#---- block_trailing_semicolon
+{
+  1L;
+}
+#++++
+# <statement>
+  Block trailing-semicolon
+    Literal Integer("1L")
+
+#---- if_statement_no_else
+if (FALSE) "no"
+#++++
+# <statement>
+  If
+    Literal Logical(false)
+    Literal String("no")

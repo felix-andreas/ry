@@ -1,0 +1,55 @@
+#==== basics
+#---- literals
+1L
+1.5
+"hello"
+TRUE
+#++++
+# <statement>
+  Literal Integer("1L")
+# <statement>
+  Literal Double("1.5")
+# <statement>
+  Literal String("hello")
+# <statement>
+  Literal Logical(true)
+
+#---- assignment_with_annotation
+#: integer
+x <- 1L
+#++++
+# x
+  Assign Local
+    NameRef x
+    Literal Integer("1L")
+
+#---- function_with_annotation
+#: fn(integer) -> integer
+f <- function(x) x
+#++++
+# f
+  Assign Local
+    NameRef f
+    Function(x)
+      NameRef x
+
+#---- standalone_type_alias
+#: @alias User {list{id: integer, name: character}}
+#++++
+
+#---- type_definition_with_generic
+#: @type Pair<T, U> {list{first: T, second: U}}
+#++++
+
+#==== namespace_access
+#---- namespace_get_lowers
+stats::sd
+#++++
+# <statement>
+  Namespace stats::sd
+
+#---- internal_namespace_get_lowers
+stats:::sd
+#++++
+# <statement>
+  Namespace stats:::sd

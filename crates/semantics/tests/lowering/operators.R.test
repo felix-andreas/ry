@@ -1,0 +1,79 @@
+#==== operators
+#---- unary_minus
+-1L
+#++++
+# <statement>
+  Unary Minus
+    Literal Integer("1L")
+
+#---- binary_plus
+1L + 2L
+#++++
+# <statement>
+  Binary Add
+    Literal Integer("1L")
+    Literal Integer("2L")
+
+#---- binary_minus
+1L - 2L
+#++++
+# <statement>
+  Binary Subtract
+    Literal Integer("1L")
+    Literal Integer("2L")
+
+#---- binary_multiply
+1L * 2L
+#++++
+# <statement>
+  Binary Multiply
+    Literal Integer("1L")
+    Literal Integer("2L")
+
+#---- binary_divide
+1L / 2L
+#++++
+# <statement>
+  Binary Divide
+    Literal Integer("1L")
+    Literal Integer("2L")
+
+#---- binary_power
+1L ** 2L
+#++++
+# <statement>
+  Binary Power
+    Literal Integer("1L")
+    Literal Integer("2L")
+
+#---- logical_and
+TRUE && FALSE
+#++++
+# <statement>
+  Binary And2
+    Literal Logical(true)
+    Literal Logical(false)
+
+#---- logical_or
+TRUE || FALSE
+#++++
+# <statement>
+  Binary Or2
+    Literal Logical(true)
+    Literal Logical(false)
+
+#---- assignment_left
+x <- 1L
+#++++
+# x
+  Assign Local
+    NameRef x
+    Literal Integer("1L")
+
+#---- assignment_equals
+x = 1L
+#++++
+# x
+  Assign Equals
+    NameRef x
+    Literal Integer("1L")

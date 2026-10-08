@@ -1,0 +1,123 @@
+#==== primitive_scalars
+#---- logical_scalar
+logical
+#++++
+logical
+
+#---- integer_scalar
+integer
+#++++
+integer
+
+#---- double_scalar
+double
+#++++
+double
+
+#---- complex_scalar
+complex
+#++++
+complex
+
+#---- character_scalar
+character
+#++++
+character
+
+#---- raw_scalar
+raw
+#++++
+raw
+
+#==== special_primitive_keywords
+#---- null_uppercase
+NULL
+#++++
+NULL
+
+#---- null_lowercase
+null
+#++++
+NULL
+
+#---- unknown_uppercase
+Unknown
+#++++
+Unknown
+
+#---- unknown_lowercase
+unknown
+#++++
+Unknown
+
+#---- any_uppercase
+Any
+#++++
+Any
+
+#---- any_lowercase
+any
+#++++
+Any
+
+#==== primitive_vector_forms
+#---- logical_vector
+logical[]
+#++++
+logical[]
+
+#---- integer_vector
+integer[]
+#++++
+integer[]
+
+#---- double_vector
+double[]
+#++++
+double[]
+
+#---- complex_vector
+complex[]
+#++++
+complex[]
+
+#---- character_vector
+character[]
+#++++
+character[]
+
+#---- raw_vector
+raw[]
+#++++
+raw[]
+
+#==== primitive_named_vector_forms
+#---- logical_named_vector
+logical[named]
+#++++
+logical[named]
+
+#---- integer_named_vector
+integer[named]
+#++++
+integer[named]
+
+#---- double_named_vector
+double[named]
+#++++
+double[named]
+
+#---- complex_named_vector
+complex[named]
+#++++
+complex[named]
+
+#---- character_named_vector
+character[named]
+#++++
+character[named]
+
+#---- raw_named_vector
+raw[named]
+#++++
+raw[named]

@@ -722,6 +722,16 @@ impl<'db> Lowering<'db> {
                     Ty::new(self.db, TyKind::List(element))
                 }
             }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
+                if node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD)
+                    && node.children().any(|c| is_type_kind(c.kind())) =>
+            {
+                self.errors.push((
+                    "a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them".to_owned(),
+                    node.text_range(),
+                ));
+                unknown(self.db)
+            }
             SyntaxKind::TYPE_TUPLE => {
                 let items = node
                     .children()
@@ -731,6 +741,24 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, TyKind::Tuple(items))
             }
             SyntaxKind::TYPE_RECORD => {
+                let mut seen = rustc_hash::FxHashSet::default();
+                for field in node
+                    .children()
+                    .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
+                {
+                    if let Some(name) = field
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::NAME)
+                        .and_then(syntax::ast::Name::cast)
+                        .and_then(|name| name.text())
+                        && !seen.insert(name.clone())
+                    {
+                        self.errors.push((
+                            format!("the field `{name}` appears twice in this `list{{...}}` type"),
+                            field.text_range(),
+                        ));
+                    }
+                }
                 let fields = node
                     .children()
                     .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -857,6 +885,16 @@ impl<'db> Lowering<'db> {
                     .children()
                     .find(|c| is_type_kind(c.kind()))
                     .map(|ty| self.lower_type(&ty));
+                if variadic.is_some() && (has_dots || name.is_none()) {
+                    self.errors.push((
+                        if has_dots {
+                            "a function type has at most one `...` rest parameter".to_owned()
+                        } else {
+                            "a parameter after `...` is matched by name only, so it needs a name: write `name: TYPE`".to_owned()
+                        },
+                        parameter.text_range(),
+                    ));
+                }
                 if has_dots {
                     variadic = Some(RestParameter {
                         element: ty.unwrap_or_else(|| any(self.db)),

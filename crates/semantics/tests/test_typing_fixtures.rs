@@ -188,3 +188,118 @@ fn typing_strict_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-strict");
     syntax::testing::run_fixture_suite(&suite, &render_with_strict);
 }
+
+/// A stub source's declarations, overload candidates in declaration order,
+/// then the problems the loader drops lines for — the wording the editor and
+/// the override report show.
+fn render_stub_source(source: &str) -> String {
+    let db = RootDatabase::default();
+    let sources = semantics::stubs::StubSources::new(
+        &db,
+        vec![("base".to_owned(), source.to_owned())],
+        vec![],
+    );
+    let library = semantics::stubs::stub_library(&db, sources);
+    let mut names: Vec<(&String, _)> = library
+        .declarations
+        .iter()
+        .map(|(name, declaration)| (name, declaration.range.start()))
+        .collect();
+    names.sort_by_key(|(_, start)| *start);
+    let mut nominals: Vec<&String> = library.nominals.iter().collect();
+    nominals.sort();
+    let mut output = String::new();
+    for nominal in nominals {
+        output.push_str(&format!("@type {nominal}\n"));
+    }
+    for (name, _) in names {
+        for scheme in library.schemes.get(name).into_iter().flatten() {
+            let rendered = TypeRenderer::default().render_scheme(&db, scheme);
+            output.push_str(&format!("{name} : {rendered}\n"));
+        }
+    }
+    for problem in semantics::stubs::stub_source_problems(&db, source) {
+        output.push_str(&format!("line {}: {}\n", problem.line, problem.message));
+    }
+    output
+}
+
+#[test]
+fn stub_source_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stubs");
+    syntax::testing::run_fixture_suite(&suite, &render_stub_source);
+}
+
+/// One `#:` block on its own: the case's lines become the block, and the
+/// expectation is what it lowers to — the coercion kind, the declared type,
+/// the `@new` target, each `@type`/`@alias` definition — then the grammar's
+/// and the lowering's errors.
+fn render_annotation_block(source: &str) -> String {
+    let text: String = source.lines().map(|line| format!("#: {line}\n")).collect();
+    let db = RootDatabase::default();
+    let parse = syntax::parse(&format!("{text}x <- NULL\n"));
+    let Some(node) = parse
+        .syntax_node()
+        .descendants()
+        .find(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+    else {
+        return "no annotation".to_owned();
+    };
+    let annotation = semantics::annotations::lower_annotation(&db, &node);
+    let mut renderer = TypeRenderer::default();
+    let mut output = String::new();
+    if let Some(declared) = &annotation.declared {
+        let kind = match (annotation.trusted, annotation.if_unknown) {
+            (true, _) => "trust ",
+            (_, true) => "if-unknown ",
+            _ => "",
+        };
+        output.push_str(&format!(
+            "{kind}{}\n",
+            renderer.render_scheme(&db, declared)
+        ));
+    }
+    if let Some((name, arguments, _)) = &annotation.new_nominal {
+        let arguments: Vec<String> = arguments
+            .iter()
+            .map(|ty| renderer.render(&db, *ty))
+            .collect();
+        let arguments = if arguments.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", arguments.join(", "))
+        };
+        output.push_str(&format!("new {}{arguments}\n", name.text(&db)));
+    }
+    for definition in &annotation.definitions {
+        let parameters: Vec<&str> = definition
+            .parameters
+            .iter()
+            .map(|name| name.text(&db))
+            .collect();
+        let parameters = if parameters.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", parameters.join(", "))
+        };
+        output.push_str(&format!(
+            "{} {}{parameters} = {}\n",
+            if definition.alias { "alias" } else { "type" },
+            definition.name.text(&db),
+            renderer.render(&db, definition.body)
+        ));
+    }
+    for error in parse.errors() {
+        output.push_str(&format!("syntax error: {}\n", error.message));
+    }
+    for (message, _) in annotation.errors.iter().chain(&annotation.typing_errors) {
+        output.push_str(&format!("error: {message}\n"));
+    }
+    output
+}
+
+#[test]
+fn annotation_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/annotations");
+    syntax::testing::run_fixture_suite(&suite, &render_annotation_block);
+}

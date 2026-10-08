@@ -195,3 +195,88 @@ setMethod("area", "Circle", function(shape) shape@radius)
     Function(shape)
       Field @radius
         NameRef shape
+
+#==== functions
+#---- one_parameter
+function(x) x
+#++++
+# <statement>
+  Function(x)
+    NameRef x
+
+#---- parameter_with_default
+function(count, label = NULL) count
+#++++
+# <statement>
+  Function(count, label = …)
+    NameRef count
+
+#---- simple_call
+f()
+#++++
+# <statement>
+  Call
+    NameRef f
+
+#---- call_with_arguments
+f(1L, "a")
+#++++
+# <statement>
+  Call
+    NameRef f
+    Literal Integer("1L")
+    Literal String("a")
+
+#---- call_with_named_arguments
+f(x = 1L, y = 2L)
+#++++
+# <statement>
+  Call
+    NameRef f
+    arg x =
+      Literal Integer("1L")
+    arg y =
+      Literal Integer("2L")
+
+#---- call_with_mixed_arguments
+f(1L, y = 2L)
+#++++
+# <statement>
+  Call
+    NameRef f
+    Literal Integer("1L")
+    arg y =
+      Literal Integer("2L")
+
+#---- library_bare_name_lowers_as_character
+library(stats)
+#++++
+# <statement>
+  Call
+    NameRef library
+    NameRef stats
+
+#---- require_bare_name_lowers_as_character
+require(utils)
+#++++
+# <statement>
+  Call
+    NameRef require
+    NameRef utils
+
+#---- help_bare_name_lowers_as_character
+help(mean)
+#++++
+# <statement>
+  Call
+    NameRef help
+    NameRef mean
+
+#---- library_named_first_argument_stays_a_reference
+library(package = stats)
+#++++
+# <statement>
+  Call
+    NameRef library
+    arg package =
+      NameRef stats
