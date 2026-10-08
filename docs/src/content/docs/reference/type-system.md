@@ -1392,11 +1392,10 @@ Arguments are checked for compatibility, not exact equality:
 - The promotion order from [vector coercions](#vector-coercions) applies, so `mean(1L)`,
   `sd(c(1L, 2L))`, and `sum(x > threshold)` are not errors.
 - A whole-number `double` literal counts as `integer` at a parameter, so for a function annotated
-  `fn(n: integer)`, `f(10)` is as valid as `f(10L)`. `-3` is unary minus applied to a literal, not a
-literal, so `f(-3)` is still rejected. This generalizes the rule
-  that the `:` operator applies to its endpoints. A fractional literal such as `2.5` is still
-  rejected at an `integer` parameter, and so is a `double` variable that happens to hold a whole
-  number.
+  `fn(n: integer)`, `f(10)` is as valid as `f(10L)`. This generalizes the rule that the `:` operator
+  applies to its endpoints. A fractional literal such as `2.5` is still rejected at an `integer`
+  parameter, and so is a `double` variable that happens to hold a whole number. `-3` is unary minus
+  applied to a literal, not a literal, so `f(-3)` is rejected too.
 - An argument whose type is `Unknown` is accepted at any parameter. Whatever made the value `Unknown`
   was already diagnosed where it happened, and repeating it at every later use would add nothing.
 
@@ -2261,7 +2260,8 @@ expression are worded differently, because a binding can be annotated and a bare
 ## Syntax errors
 
 A file with syntax errors is still analyzed, under one rule: a broken region reports its syntax error
-and nothing else, because the checker draws no conclusions from source it could not read.
+and, strict mode aside, nothing else, because the checker draws no conclusions from source it could
+not read.
 
 - Every well-formed statement in the file is analyzed normally. Definitions keep their exports,
   references resolve, and a genuine type error outside the broken region still surfaces.

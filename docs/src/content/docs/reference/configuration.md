@@ -29,8 +29,7 @@ indent-width = 2
 line-ending = "auto"     # keep the file's own; or "lf", "cr-lf"
 ```
 
-The [diagnostic codes](/reference/diagnostic-codes) page explains each finding and why the opt-in
-ones are off. `strict` also raises unresolved names to errors, but it does not turn on type errors:
+The [diagnostic codes](/reference/diagnostic-codes) page explains each finding. `strict` also raises unresolved names to errors, but it does not turn on type errors:
 set `typing` as well. A `# typing: off`, `on`, or `strict` comment in a file overrides both keys for
 that file, and `# typing: strict` does imply type errors.
 

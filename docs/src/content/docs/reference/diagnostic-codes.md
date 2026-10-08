@@ -50,8 +50,8 @@ Some R idioms silence findings on their own:
 
 **`syntax-error`** (error): code R would refuse to parse, or an assignment target R would refuse to
 run, such as `1 + a <- 2`. A parse error names what is missing, stays on the line that caused it, and
-hides every other finding in the broken statement, because ry draws no conclusions from code it
-could not read.
+hides every other finding in the broken statement except strict-mode ones, because ry draws no
+conclusions from code it could not read.
 
 **`annotation`** (error): a `#:` comment that is malformed, names a type that does not exist, or
 annotates nothing, and an unknown `# typing:` value. It is reported even in files with type checking
