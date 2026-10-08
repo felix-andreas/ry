@@ -1,0 +1,215 @@
+#==== nominal_introduction
+#---- new_introduces_nominal_type
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+person
+#++++
+person: Person
+Person
+
+#---- new_on_generic_nominal
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer>
+box <- list(value = 1L)
+box
+#++++
+box: Box<integer>
+Box<integer>
+
+#---- new_rejects_incompatible_value
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = 1L)
+#++++
+person: Unknown
+56..62 warning[unused] `person` is assigned but never used.
+78..80 error[type-mismatch] expected `character` for field `name`, found `integer`
+
+#---- new_rejects_wrong_generic_argument
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<character>
+box <- list(value = 1L)
+#++++
+box: Unknown
+57..60 warning[unused] `box` is assigned but never used.
+77..79 error[type-mismatch] expected `character` for field `value`, found `integer`
+
+#---- new_accepts_already_nominal_value
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+
+#: @new Person
+same <- person
+#++++
+person: Person
+same: Person
+101..105 warning[unused] `same` is assigned but never used.
+
+#==== nominal_projection
+#---- dollar_access_projects_to_representation
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+person$name
+#++++
+person: Person
+character
+
+#---- double_bracket_access_projects_to_representation
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+person[["name"]]
+#++++
+person: Person
+character
+
+#---- generic_nominal_field_access_uses_type_argument
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer>
+box <- list(value = 1L)
+box$value
+#++++
+box: Box<integer>
+integer
+
+#---- arithmetic_projects_nominal_to_numeric_representation
+#: @type Meters {double}
+
+#: @new Meters
+height <- 1.8
+height + height
+#++++
+height: Meters
+double
+
+#---- comparison_projects_nominal_representation
+#: @type Meters {double}
+
+#: @new Meters
+height <- 1.8
+height < 2.0
+#++++
+height: Meters
+logical
+
+#---- for_iterates_nominal_vector_representation
+#: @type Scores {integer[]}
+
+#: @new Scores
+scores <- c(1L, 2L)
+for (score in scores) score
+#++++
+scores: Scores
+NULL
+
+#==== nominal_functions
+#---- nominal_parameter_accepts_nominal_value
+#: @type Person {list{name: character}}
+
+#: fn(value: Person) -> character
+get_name <- function(value) value$name
+
+#: @new Person
+person <- list(name = "bob")
+get_name(person)
+#++++
+get_name: fn(value: Person) -> character
+person: Person
+character
+
+#---- nominal_parameter_rejects_structural_value
+#: @type Person {list{name: character}}
+
+#: fn(value: Person) -> character
+get_name <- function(value) value$name
+
+get_name(list(name = "bob"))
+#++++
+get_name: fn(value: Person) -> character
+character
+124..142 error[type-mismatch] expected `Person`, found `list{name: character}`
+
+#---- two_nominals_with_same_representation_are_incompatible
+#: @type Cat {list{name: character}}
+#: @type Dog {list{name: character}}
+
+#: fn(value: Cat) -> character
+pet_cat <- function(value) value$name
+
+#: @new Dog
+dog <- list(name = "rex")
+pet_cat(dog)
+#++++
+pet_cat: fn(value: Cat) -> character
+dog: Dog
+character
+191..194 error[type-mismatch] expected `Cat`, found `Dog`
+
+#---- nominal_return_type_flows_through_call
+#: @type Person {list{name: character}}
+
+#: fn(name: character) -> Person
+make_person <- function(name) {
+  #: @new Person
+  person <- list(name = name)
+  person
+}
+
+made <- make_person("bob")
+made$name
+#++++
+make_person: fn(name: character) -> Person
+made: Person
+character
+
+#==== alias_use
+#---- alias_annotation_is_structural
+#: @alias Count {integer}
+
+#: Count
+value <- 1L
+value
+#++++
+value: Count
+integer
+
+#---- alias_inside_larger_type
+#: @alias Person {list{name: character}}
+
+#: list{owner: Person}
+value <- list(owner = list(name = "bob"))
+value
+#++++
+value: list{owner: Person}
+list{owner: list{name: character}}
+
+#---- generic_alias_application
+#: @alias Box<T> {list{value: T}}
+
+#: Box<integer>
+value <- list(value = 1L)
+value$value
+#++++
+value: Box<integer>
+integer
+
+#---- alias_in_function_annotation
+#: @alias Formatter {fn(count: integer) -> character}
+
+#: Formatter
+render <- function(count) "ok"
+render(1L)
+#++++
+render: Formatter
+character

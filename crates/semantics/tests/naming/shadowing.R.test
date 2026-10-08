@@ -1,0 +1,17 @@
+#==== nested_functions
+#---- repeated_shadow_chain
+x <- 1L
+f <- function(x) {
+  x <- "ok"
+  x
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 x parameter 14..15
+  b1 f top-level 0..1
+  0..1 f <- b1
+  21..22 x <- b0
+  33..34 x -> b0

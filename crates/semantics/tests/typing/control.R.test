@@ -343,6 +343,16 @@ f <- function(k) {
 f: <T> fn(k: T) -> integer
 
 #==== maybe_undefined
+#---- a_read_after_a_repeat_without_break_is_unreachable
+f <- function() {
+  repeat {
+    x <- 1L
+  }
+  x
+}
+#++++
+f: fn() -> integer
+
 #---- a_conditional_introduction_is_reported_at_the_read
 # R: `object 'x' not found` when `flag` is FALSE. The read still resolves to
 # the slot — this is not an unresolved name — but one path reaches it with
@@ -427,9 +437,27 @@ if (flag) {
 after <- value
 #++++
 flag: logical
+integer | NULL
 after: integer
 
 #==== scoping
+#---- a_name_bound_in_a_top_level_block_resolves_from_another_file
+#~~~~ R/a.R
+{
+  x <- 1L
+}
+if (is.na(NA)) {
+  y <- 2L
+}
+#~~~~ R/b.R
+use <- function() x + y
+#++++
+== R/a.R
+integer
+integer | NULL
+== R/b.R
+use: fn() -> integer
+
 #---- local_scopes_its_bindings
 f <- function() {
   n <- local({
@@ -541,6 +569,7 @@ f: <T> fn(x: T) -> Unknown
 for (i in 1:3) total <- i
 report <- function() total
 #++++
+NULL
 report: fn() -> integer
 
 #---- a_few_conditional_writers_still_join
@@ -550,6 +579,8 @@ if (Sys.getenv("MODE") == "fast") mode <- 1L
 if (Sys.getenv("MODE") == "named") mode <- "fast"
 report <- function() mode
 #++++
+integer | NULL
+character | NULL
 report: fn() -> integer | character
 
 #---- many_conditional_writers_widen_to_unknown
@@ -571,6 +602,15 @@ if (flag) shared <- 9L
 report <- function() shared
 #++++
 flag: logical
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
 report: fn() -> Unknown
 
 #---- loop_carried_read_starts_from_the_outer_binding
@@ -578,6 +618,7 @@ p <- "word"
 while (TRUE) p <- p - 1L
 #++++
 p: character
+NULL
 30..31 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- loop_carried_read_continues_the_outer_type
@@ -586,6 +627,7 @@ while (n > 0L) n <- n - 1L
 after <- function() n
 #++++
 n: integer
+NULL
 after: fn() -> integer
 
 #---- rebinding_statement_reads_the_earlier_binding
@@ -609,6 +651,7 @@ for (i in 1:3) total <- total + i
 report <- function() total
 #++++
 total: integer
+NULL
 report: fn() -> integer
 
 #---- shadowed_outer_binding_is_dead_despite_the_capture

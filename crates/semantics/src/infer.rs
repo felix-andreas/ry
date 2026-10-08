@@ -317,63 +317,26 @@ impl<'db> InferenceTable<'db> {
         Ok(())
     }
 
-    fn adjust_levels(&mut self, db: &'db dyn Db, level: u32, ty: Ty<'db>) {
+    /// Lowers every unbound variable in `ty` to at most `level`, so a
+    /// generalization at an outer level cannot quantify a variable that is
+    /// still reachable from an inner one.
+    pub(crate) fn adjust_levels(&mut self, db: &'db dyn Db, level: u32, ty: Ty<'db>) {
         let shallow = self.shallow_resolve(db, ty);
-        match shallow.kind(db) {
-            TyKind::Var(var) => {
-                let representative = self.find(*var);
-                if let Entry::Unbound {
-                    level: var_level,
-                    constraint,
-                } = *self.entry(representative)
-                    && var_level > level
-                {
-                    self.set(representative, Entry::Unbound { level, constraint });
-                }
+        if let TyKind::Var(var) = shallow.kind(db) {
+            let representative = self.find(*var);
+            if let Entry::Unbound {
+                level: var_level,
+                constraint,
+            } = *self.entry(representative)
+                && var_level > level
+            {
+                self.set(representative, Entry::Unbound { level, constraint });
             }
-            TyKind::Vector(inner)
-            | TyKind::NamedVector(inner)
-            | TyKind::List(inner)
-            | TyKind::NamedList(inner) => self.adjust_levels(db, level, *inner),
-            TyKind::Tuple(items) => {
-                for &item in items.clone().iter() {
-                    self.adjust_levels(db, level, item);
-                }
-            }
-            TyKind::Record(fields) => {
-                for field in fields.clone().iter() {
-                    self.adjust_levels(db, level, field.ty);
-                }
-            }
-            TyKind::Function(function) => {
-                let function = function.clone();
-                for &ty in &function.positional {
-                    self.adjust_levels(db, level, ty);
-                }
-                for ty in function
-                    .named
-                    .iter()
-                    .flat_map(|parameter| parameter.types())
-                {
-                    self.adjust_levels(db, level, ty);
-                }
-                if let Some(rest) = &function.variadic {
-                    self.adjust_levels(db, level, rest.element);
-                }
-                self.adjust_levels(db, level, function.ret);
-            }
-            TyKind::Union(members) => {
-                for &member in members.clone().iter() {
-                    self.adjust_levels(db, level, member);
-                }
-            }
-            TyKind::Named(_, arguments) => {
-                for &argument in arguments.clone().iter() {
-                    self.adjust_levels(db, level, argument);
-                }
-            }
-            _ => {}
+            return;
         }
+        crate::types::for_each_child_type(db, shallow, &mut |child| {
+            self.adjust_levels(db, level, child)
+        });
     }
 
     fn occurs(&self, db: &'db dyn Db, var: InferenceVar, ty: Ty<'db>) -> bool {

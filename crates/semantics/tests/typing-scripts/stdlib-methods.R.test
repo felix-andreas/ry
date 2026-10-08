@@ -1,0 +1,59 @@
+#==== s4_predicates
+#---- extends_is_logical
+extends("Speaker", "Person")
+#++++
+logical
+
+#---- isVirtualClass_is_logical
+isVirtualClass("Person")
+#++++
+logical
+
+#---- isGeneric_is_logical
+isGeneric("show")
+#++++
+logical
+
+#---- existsMethod_and_hasMethod_are_logical
+existsMethod("show", "Person")
+hasMethod("show")
+#++++
+logical
+logical
+
+#==== s4_dynamic
+#---- is_is_unknown
+is(1L, "integer")
+#++++
+Unknown
+
+#---- new_with_arbitrary_slot_names_is_unknown
+new("Person", name = "bob")
+#++++
+Unknown
+
+#---- setClass_machinery_is_unknown
+setClass("Person", representation(name = "character"))
+#++++
+Unknown
+
+#---- validObject_is_unknown
+validObject(1L)
+#++++
+Unknown
+
+#---- callNextMethod_is_unknown
+callNextMethod()
+#++++
+Unknown
+
+#==== s4_slots
+#---- slotNames_is_character_vector
+slotNames("Person")
+#++++
+character[]
+
+#---- standardGeneric_dispatches_as_any
+standardGeneric("show")
+#++++
+Any

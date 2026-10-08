@@ -78,7 +78,10 @@ error: expected `,` or `>` in the type parameter list
 #: <> fn(x: integer) -> integer
 id <- function(x) x
 #++++
-no errors
+error: expected a type parameter name in `<...>`
+ --> 1:5
+  | #: <> fn(x: integer) -> integer
+  |     ^
 
 #---- binder_missing_constraint
 #: <T: > fn(x: T) -> T
@@ -120,6 +123,15 @@ error: higher-rank polymorphism is not supported: type parameter binders may onl
   |              ^
 
 #==== type_arguments
+#---- trailing_comma_in_type_arguments
+#: Box<integer,>
+x <- NULL
+#++++
+error: expected a type in the type argument list
+ --> 1:16
+  | #: Box<integer,>
+  |                ^
+
 #---- unclosed_type_arguments
 #: Box<integer
 wrapped <- make_box(1L)

@@ -473,6 +473,22 @@ impl Parser<'_> {
                 }
                 self.ann_trivia(end);
                 self.ann_braced_type(end, &name);
+                // A definition ends its line; text after it would otherwise
+                // parse as a second annotation and silently refuse the block.
+                while self.at(SyntaxKind::WHITESPACE) && self.pos < end {
+                    self.bump();
+                }
+                if self.pos < end
+                    && !matches!(
+                        self.current(),
+                        Some(SyntaxKind::NEWLINE | SyntaxKind::COMMENT) | None
+                    )
+                {
+                    self.error_here(format!("unexpected text after the `@{name}` definition"));
+                    while self.pos < end && !self.at(SyntaxKind::NEWLINE) {
+                        self.bump();
+                    }
+                }
             }
             "param" => {
                 self.ann_trivia(end);
@@ -602,7 +618,10 @@ impl Parser<'_> {
         loop {
             self.ann_trivia(end);
             match self.current() {
+                // Only an empty list or a trailing comma reaches `>` here: an
+                // item consumes the `>` that follows it.
                 Some(SyntaxKind::GREATER) if self.pos < end => {
+                    self.error_here("expected a type parameter name in `<...>`");
                     self.bump();
                     break;
                 }
@@ -804,10 +823,17 @@ impl Parser<'_> {
         self.start(SyntaxKind::TYPE_ARG_LIST);
         debug_assert!(self.at(SyntaxKind::LESS));
         self.bump();
+        let mut arguments = 0;
         loop {
             self.ann_trivia(end);
             match self.current() {
+                // As in a binder list, only an empty list or a trailing comma
+                // reaches `>` here. An empty list is left to the arity check,
+                // which names the count the type expects.
                 Some(SyntaxKind::GREATER) if self.pos < end => {
+                    if arguments > 0 {
+                        self.error_here("expected a type in the type argument list");
+                    }
                     self.bump();
                     break;
                 }
@@ -817,6 +843,7 @@ impl Parser<'_> {
                 }
                 _ => {
                     self.ann_type(end, false);
+                    arguments += 1;
                     self.ann_trivia(end);
                     if self.at(SyntaxKind::COMMA) && self.pos < end {
                         self.bump();

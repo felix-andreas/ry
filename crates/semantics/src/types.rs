@@ -1,8 +1,7 @@
 //! The interned type representation.
 //!
 //! Types are salsa-interned: a `Ty` is a copyable id, equality is id
-//! comparison, and no deep clones exist anywhere in inference — the structural
-//! churn that capped the legacy checker is designed out from the start.
+//! comparison, and no deep clones exist anywhere in inference.
 //! Inference variables are ordinary interned types (`TyKind::Var`), so there is
 //! exactly one type representation end to end.
 //!

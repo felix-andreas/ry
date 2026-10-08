@@ -1,0 +1,285 @@
+#==== nominal_new
+#---- alias_scalar_binding
+#: @alias Count {integer}
+
+#: Count
+value <- 1L
+#++++
+value: Count
+
+#---- alias_record_binding
+#: @alias PersonShape {list{name: character, age: double}}
+
+#: PersonShape
+value <- list(name = "bob", age = 20)
+#++++
+value: PersonShape
+
+#---- generic_alias_binding
+#: @alias Box<T> {list{value: T}}
+
+#: Box<integer>
+value <- list(value = 1L)
+#++++
+value: Box<integer>
+
+#---- generic_alias_two_params_binding
+#: @alias Pair<T, U> {list{first: T, second: U}}
+
+#: Pair<integer, character>
+value <- list(first = 1L, second = "a")
+#++++
+value: Pair<integer, character>
+
+#---- nominal_new_record_binding
+#: @type Person {list{name: character, age: double}}
+
+#: @new Person
+person <- list(name = "bob", age = 20)
+#++++
+person: Person
+
+#---- generic_nominal_new_binding
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer>
+box <- list(value = 1L)
+#++++
+box: Box<integer>
+
+#---- nominal_atomic_representation_binding
+#: @type Meters {double}
+
+#: @new Meters
+height <- 1.8
+#++++
+height: Meters
+
+#---- nominal_value_projects_to_underlying
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+
+#: list{name: character}
+shape <- person
+#++++
+person: Person
+shape: list{name: character}
+
+#---- nominal_rebound_to_same_nominal
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+copy <- person
+#++++
+person: Person
+copy: Person
+
+#---- nominal_field_access_projects
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+
+name <- person$name
+#++++
+person: Person
+name: character
+
+#---- nominal_atomic_arithmetic_projects
+#: @type Meters {double}
+
+#: @new Meters
+height <- 1.8
+
+total <- height + height
+#++++
+height: Meters
+total: double
+
+#---- nominal_in_function_return_annotation
+#: @type Person {list{name: character}}
+
+#: fn(name: character) -> Person
+make_person <- function(name) {
+  #: @new Person
+  list(name = name)
+}
+#++++
+make_person: fn(name: character) -> Person
+
+#---- nominal_param_field_access
+#: @type Person {list{name: character, age: double}}
+
+#: fn(value: Person) -> character
+get_name <- function(value) value$name
+#++++
+get_name: fn(value: Person) -> character
+
+#---- generic_nominal_nested_argument
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<list{name: character}>
+box <- list(value = list(name = "bob"))
+#++++
+box: Box<list{name: character}>
+
+#---- nominal_value_as_function_arg
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+
+#: fn(p: Person) -> character
+get_name <- function(p) p$name
+
+n <- get_name(person)
+#++++
+person: Person
+get_name: fn(p: Person) -> character
+n: character
+
+#---- nominal_distinct_identity_alias_binding
+#: @type Celsius {double}
+#: @type Fahrenheit {double}
+
+#: @new Celsius
+c <- 20.0
+
+copy <- c
+#++++
+c: Celsius
+copy: Celsius
+
+#---- generic_nominal_new_character
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<character>
+b <- list(value = "x")
+#++++
+b: Box<character>
+
+#---- generic_nominal_new_two_params
+#: @type Pairing<T, U> {list{first: T, second: U}}
+
+#: @new Pairing<integer, character>
+p <- list(first = 1L, second = "a")
+#++++
+p: Pairing<integer, character>
+
+#---- nominal_representation_uses_alias
+#: @alias Name {character}
+#: @type Person {list{name: Name}}
+
+#: @new Person
+p <- list(name = "bob")
+#++++
+p: Person
+
+#---- new_maplike_representation
+#: @type Env {list[named: integer]}
+
+#: @new Env
+e <- list(a = 1L, b = 2L)
+#++++
+e: Env
+
+#---- new_arraylike_representation
+#: @type Stack {list[integer]}
+
+#: @new Stack
+s <- list(1L, 2L)
+#++++
+s: Stack
+
+#---- new_generic_arraylike_representation
+#: @type Stack<T> {list[T]}
+
+#: @new Stack<integer>
+s <- list(1L, 2L)
+#++++
+s: Stack<integer>
+
+#---- new_generic_maplike_representation
+#: @type Env<T> {list[named: T]}
+
+#: @new Env<integer>
+e <- list(a = 1L, b = 2L)
+#++++
+e: Env<integer>
+
+#---- nominal_nullable_binding
+#: @type Person {list{name: character}}
+
+#: @new Person
+p <- list(name = "bob")
+
+#: Person | NULL
+q <- p
+#++++
+p: Person
+q: Person | NULL
+
+#---- nominal_value_into_representation_param
+#: @type Person {list{name: character}}
+
+#: fn(s: list{name: character}) -> character
+f <- function(s) s$name
+
+#: @new Person
+p <- list(name = "bob")
+
+r <- f(p)
+#++++
+f: fn(s: list{name: character}) -> character
+p: Person
+r: character
+
+#---- nested_nominal_field_value
+#: @type Inner {list{v: integer}}
+#: @type Outer {list{inner: Inner}}
+
+#: @new Inner
+i <- list(v = 1L)
+
+#: @new Outer
+o <- list(inner = i)
+#++++
+i: Inner
+o: Outer
+
+#---- new_atomic_return_keeps_numeric_scheme
+#: @type Meters {double}
+
+asM <- function(x) {
+  #: @new Meters
+  x + 0
+}
+#++++
+asM: <T: numeric> fn(x: T) -> Meters
+
+#---- new_noop_on_already_nominal
+#: @type Person {list{name: character}}
+
+#: @new Person
+p <- list(name = "bob")
+
+#: @new Person
+p2 <- p
+#++++
+p: Person
+p2: Person
+
+#---- new_generic_noop_on_already_nominal
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer>
+b <- list(value = 1L)
+
+#: @new Box<integer>
+b2 <- b
+#++++
+b: Box<integer>
+b2: Box<integer>

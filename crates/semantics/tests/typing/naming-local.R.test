@@ -1,0 +1,45 @@
+#==== local_scope
+#---- assignment_inside_local_does_not_leak
+#~~~~ R/main.R
+local({
+  a <- 1L
+  a
+})
+a
+#++++
+== R/main.R
+integer
+Unknown
+25..26 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
+
+#---- local_sees_enclosing_local_binding
+#~~~~ R/main.R
+x <- 1L
+local({
+  x
+})
+#++++
+== R/main.R
+x: integer
+integer
+
+#---- local_of_bare_expression
+#~~~~ R/main.R
+local(1L + 2L)
+#++++
+== R/main.R
+integer
+
+#---- local_binding_shadows_enclosing_binding
+#~~~~ R/main.R
+x <- 1L
+local({
+  x <- "inner"
+  x
+})
+x
+#++++
+== R/main.R
+x: integer
+character
+integer

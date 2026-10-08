@@ -268,6 +268,7 @@ reading <- want_chr(record$age)
 #++++
 want_chr: fn(s: character) -> character
 record: list{name: character, age: integer}
+character
 reading: character
 
 #---- a_function_body_sees_the_settled_value_not_the_pre_write_one
@@ -280,6 +281,7 @@ record$age <- 40L
 reader <- function() record$age
 #++++
 record: list{age: integer}
+integer
 reader: fn() -> integer
 
 #---- a_forward_reference_from_a_function_body_still_resolves

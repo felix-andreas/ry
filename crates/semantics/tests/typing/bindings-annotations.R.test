@@ -1,0 +1,90 @@
+#==== annotations
+#---- compact_annotation_without_return
+#: fn(count: integer)
+log_count <- function(count) { }
+#++++
+log_count: fn(count: integer) -> NULL
+
+#---- compact_elided_return_is_inferred_from_the_body
+#: fn(count: integer)
+add_one <- function(count) count + 1L
+#++++
+add_one: fn(count: integer) -> integer
+
+#---- expanded_param_only_return_is_inferred_from_the_body
+#: @param count {integer}
+add_one <- function(count) count + 1L
+#++++
+add_one: fn(count: integer) -> integer
+
+#---- forall_with_elided_return_generalizes
+#: @forall T
+#: @param value {T}
+mirror <- function(value) value
+#++++
+mirror: <T> fn(value: T) -> T
+
+#---- scalar_checked_annotation
+#: integer
+value <- 1L
+#++++
+value: integer
+
+#---- unknown_only_annotation_on_unknown_binding
+#: @if-unknown integer
+value <- 1L ~ 2L
+#++++
+value: integer
+
+#---- trusted_annotation_on_incompatible_binding
+#: @trust integer
+value <- "hello"
+#++++
+value: integer
+
+#---- list_map_checked_annotation
+#: list[named: integer]
+value <- list(foo = 1L, bar = 2L)
+#++++
+value: list[named: integer]
+
+#---- record_checked_annotation
+#: list{name: character, age: double}
+value <- list(name = "bob", age = 20)
+#++++
+value: list{name: character, age: double}
+
+#---- constrained_binder_scheme_keeps_its_constraint
+#: <T: numeric> fn(values: T) -> T
+passthrough <- function(values) values
+#++++
+passthrough: <T: numeric> fn(values: T) -> T
+
+#---- expanded_forall_two_lines_binding
+#: @forall T
+#: @forall U
+#: @param left {T}
+#: @param right {U}
+#: @return {T}
+keep_left <- function(left, right) left
+#++++
+keep_left: <T, U> fn(left: T, right: U) -> T
+
+#---- nullable_return_function_binding
+#: fn(count: integer) -> integer | NULL
+maybe_count <- function(count) {
+  if (count > 0L) count
+}
+#++++
+maybe_count: fn(count: integer) -> integer | NULL
+
+#---- higher_order_named_parameter_binding
+#: fn(transform: fn(integer) -> character, count: integer) -> character
+apply_transform <- function(transform, count) transform(count)
+#++++
+apply_transform: fn(transform: fn(integer) -> character, count: integer) -> character
+
+#---- optional_parameter_default_inferred_binding
+pad <- function(value, width = NULL) value
+#++++
+pad: <T, U> fn(value: T, [width]: U) -> T

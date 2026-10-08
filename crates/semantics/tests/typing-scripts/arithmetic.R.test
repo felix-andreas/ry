@@ -1,0 +1,155 @@
+#==== arithmetic
+#---- integer_plus_integer
+1L + 2L
+#++++
+integer
+
+#---- integer_plus_double
+1L + 2.5
+#++++
+double
+
+#---- integer_minus_integer
+2L - 1L
+#++++
+integer
+
+#---- integer_times_double
+2L * 1.5
+#++++
+double
+
+#---- integer_div_integer
+4L / 2L
+#++++
+double
+
+#---- double_power_integer
+2.5 ** 2L
+#++++
+double
+
+#---- vector_plus_scalar
+c(1L, 2L) + 4L
+#++++
+integer[]
+
+#---- scalar_plus_vector
+4L + c(1L, 2.5)
+#++++
+double[]
+
+#---- named_map_plus_scalar_loses_map_likeness
+c(foo = 1L, bar = 2L) + 4L
+#++++
+integer[]
+
+#---- unary_minus_integer
+-1L
+#++++
+integer
+
+#---- unary_minus_vector
+-c(1L, 2L)
+#++++
+integer[]
+
+#---- unary_minus_named_map_loses_map_likeness
+-c(foo = 1L, bar = 2L)
+#++++
+integer[]
+
+#---- string_plus_integer
+"foo" + 4L
+#++++
+Unknown
+0..5 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#==== modulo_and_integer_division
+#---- integer_modulo_integer
+5L %% 2L
+#++++
+integer
+
+#---- double_modulo_integer
+5.5 %% 2L
+#++++
+double
+
+#---- integer_division_integer
+5L %/% 2L
+#++++
+integer
+
+#---- integer_division_with_double
+5L %/% 2.5
+#++++
+double
+
+#---- vector_modulo_scalar
+c(5L, 6L) %% 2L
+#++++
+integer[]
+
+#---- character_modulo_is_rejected
+"a" %% 2L
+#++++
+Unknown
+0..3 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#==== power
+#---- caret_is_power_operator
+2L ^ 3L
+#++++
+double
+
+#---- double_star_power
+2L ** 3L
+#++++
+double
+
+#---- vector_power
+c(1L, 2L) ^ 2L
+#++++
+double[]
+
+#==== operators
+#---- outer_product_types_through_its_stub
+1L %o% 2L
+#++++
+matrix
+
+#==== unsupported_operators
+#---- tilde_formula_is_unsupported
+1L ~ 2L
+#++++
+Unknown
+
+#---- s4_slot_read_is_unknown_but_visits_the_subject
+value <- 1L
+value@slot
+#++++
+value: integer
+Unknown
+
+#---- s4_slot_read_still_surfaces_subject_errors
+result <- (1L + "x")@slot
+#++++
+result: Unknown
+0..6 warning[unused] `result` is assigned but never used.
+16..19 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#==== whole_number_literal_operands
+#---- double_literal_times_parameter_returns_double
+double_it <- function(x) 2 * x
+double_it(5L)
+#++++
+double_it: <T: numeric> fn(x: T) -> double
+double
+
+#---- integer_literal_times_parameter_preserves_integer
+int_double_it <- function(x) 2L * x
+int_double_it(5L)
+#++++
+int_double_it: <T: numeric> fn(x: T) -> T
+integer

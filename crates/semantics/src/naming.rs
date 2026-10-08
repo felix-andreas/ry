@@ -860,7 +860,6 @@ impl Context<'_> {
         self.emit = saved_emit;
         // Final pass over the converged state records diagnostics once — and
         // is the only pass whose `break` states describe the converged loop.
-        let converged = self.flow.clone();
         self.loop_exits.clear();
         self.resolve(body);
         let breaks = std::mem::replace(&mut self.loop_exits, enclosing_exits);
@@ -871,13 +870,11 @@ impl Context<'_> {
         for exit in &breaks {
             join_flow(&mut self.flow, exit);
         }
+        // A `repeat` with no `break` is never left normally (only `return` or
+        // a condition leaves it), so code after it is unreachable and the
+        // body-end state stands rather than a head state no read can see.
         if may_skip {
             join_flow(&mut self.flow, &entry);
-        } else if breaks.is_empty() {
-            // No `break` anywhere: the only way out is a jump the walk does
-            // not model (`return`, a condition), so keep the conservative
-            // head-state join rather than claim the body always completed.
-            join_flow(&mut self.flow, &converged);
         }
     }
 
@@ -1308,15 +1305,12 @@ impl Context<'_> {
     }
 
     fn collect_unused(&mut self) {
+        // A `.`- or `_`-prefixed name is conventionally an intentional
+        // hold-over (hidden helpers, ignored results, a formal a callback
+        // signature forces); the convention opts it out of unused reporting.
+        let throwaway = |name: &str| name.starts_with('.') || name.starts_with('_');
         for write in &self.writes {
-            // A `.`- or `_`-prefixed name is conventionally an intentional
-            // hold-over (hidden helpers, ignored results); the convention
-            // opts it out of dead-store reporting.
-            if write.reportable
-                && !write.used
-                && !write.name.starts_with('.')
-                && !write.name.starts_with('_')
-            {
+            if write.reportable && !write.used && !throwaway(&write.name) {
                 self.naming.unused_assignments.push(UnusedAssignment {
                     name: write.name.clone(),
                     range: write.range,
@@ -1324,10 +1318,10 @@ impl Context<'_> {
             }
         }
         for binding in self.naming.bindings.values() {
-            // Dots reads never resolve (`resolve_read` skips `...`/`..1`), so
-            // dots parameters cannot be marked and are exempt instead.
+            // `...` is covered by the prefix rule too, which matters because
+            // dots reads never resolve (`resolve_read` skips `...`/`..1`).
             if binding.kind == BindingKind::Parameter
-                && binding.name != "..."
+                && !throwaway(&binding.name)
                 && !self.read_parameter_slots.contains(&binding.id)
             {
                 self.naming.unused_parameters.push(UnusedAssignment {

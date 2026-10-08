@@ -1,0 +1,450 @@
+#==== errors
+#---- call_too_many_positional
+mirror <- function(x) x
+mirror(1L, 2L, 3L)
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+35..37 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 1
+
+#---- call_too_few_required
+#: fn(a: integer, b: integer) -> integer
+add <- function(a, b) a + b
+add(1L)
+#++++
+add: fn(a: integer, b: integer) -> integer
+integer
+69..72 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+
+#---- call_named_arg_not_in_interface
+mirror <- function(x) x
+mirror(z = 1L)
+#++++
+mirror: <T> fn(x: T) -> T
+T
+31..32 error[type-mismatch] this function has no parameter `z` — its named parameter is `x`
+
+#---- call_argument_type_mismatch
+#: fn(count: integer) -> integer
+f <- function(count) count
+f("two")
+#++++
+f: fn(count: integer) -> integer
+integer
+62..67 error[type-mismatch] expected `integer`, found `character`
+
+#---- calling_non_function_value
+x <- 1L
+x(2L)
+#++++
+x: integer
+Unknown
+8..9 error[type-mismatch] this has type `integer`, which is not a function — it cannot be called
+
+#---- calling_character
+x <- "foo"
+x()
+#++++
+x: character
+Unknown
+11..12 error[type-mismatch] this has type `character`, which is not a function — it cannot be called
+
+#---- unknown_name_reference
+nonexistent
+#++++
+Unknown
+0..11 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins.
+
+#---- unknown_name_in_arithmetic_no_cascade
+nonexistent + 1L
+#++++
+Unknown
+0..11 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins.
+
+#---- arith_character_operand
+"a" + 1L
+#++++
+Unknown
+0..3 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- arithmetic_promotes_a_logical_operand
+TRUE + 1L
+#++++
+integer
+
+#---- arith_list_operand
+list(1L) + 1L
+#++++
+Unknown
+0..8 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list{integer}`
+
+#---- unary_minus_character
+-"a"
+#++++
+Unknown
+1..4 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- comparison_cross_family
+1L < "a"
+#++++
+Unknown
+5..8 error[type-mismatch] expected `integer`, found `character`
+
+#---- comparison_promotes_logical
+TRUE == 1L
+#++++
+logical
+
+#---- negation_of_integer_coerces
+!1L
+#++++
+logical
+
+#---- and_numeric_operand_coerces
+1L && TRUE
+#++++
+logical
+
+#---- and_numeric_right_operand_coerces
+TRUE && 1L
+#++++
+logical
+
+#---- boolean_or_vector
+c(TRUE, FALSE) || TRUE
+#++++
+logical
+0..14 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- range_vector_operand
+c(1L, 2L):3L
+#++++
+Unknown
+0..9 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `integer[]`
+
+#---- range_character_operand
+"a":3L
+#++++
+Unknown
+0..3 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`
+
+#---- combine_incompatible_types
+c(1L, "a")
+#++++
+character[]
+
+#---- if_branch_union_accepted
+if (TRUE) 1L else "foo"
+#++++
+integer | character
+
+#---- if_condition_not_scalar
+if (c(TRUE, FALSE)) 1L
+#++++
+integer | NULL
+4..18 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- if_condition_integer_coerces
+if (1L) 2L
+#++++
+integer | NULL
+
+#---- while_condition_integer_coerces
+while (1L) { }
+#++++
+NULL
+
+#---- null_not_assignable
+#: integer
+value <- NULL
+#++++
+value: integer
+20..24 error[type-mismatch] expected `integer`, found `NULL`
+
+#---- occurs_check_self_application
+f <- function(x) x(x)
+#++++
+f: Unknown
+17..21 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+
+#---- duplicate_type_name
+#: @type Person {list{name: character}}
+#: @alias Person {integer}
+value <- 1L
+#++++
+value: integer
+3..39 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+43..66 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- recovery_unknown_no_cascade
+#: fn(count: integer) -> integer
+f <- function(count) count
+bad <- f("oops")
+result <- bad + 1L
+#++++
+f: fn(count: integer) -> integer
+bad: Unknown
+result: Unknown
+69..75 error[type-mismatch] expected `integer`, found `character`
+
+#---- recovery_unknown_name_no_cascade
+y <- nonexistent + 1L
+z <- y + 2L
+#++++
+y: Unknown
+z: Unknown
+5..16 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins.
+
+#---- for_iter_scalar_source_coerces
+for (item in 1L) { }
+#++++
+NULL
+
+#---- new_unknown_nominal
+#: @new Missing
+value <- list(name = "bob")
+#++++
+value: list{name: character}
+8..15 error[annotation] I do not know the type `Missing`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- assignment_list_field_mismatch
+#: list{a: integer}
+value <- list(a = "x")
+#++++
+value: list{a: integer}
+38..41 error[type-mismatch] expected `integer` for field `a`, found `character`
+
+#---- an_error_in_one_binding_leaves_the_next_checked
+a <- "x" + 1L
+b <- !2L
+#++++
+a: Unknown
+b: logical
+5..8 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- named_arg_type_mismatch
+#: fn(count: integer) -> integer
+f <- function(count) count
+f(count = "x")
+#++++
+f: fn(count: integer) -> integer
+integer
+70..73 error[type-mismatch] expected `integer`, found `character`
+
+#---- null_default_needs_a_nullable_declared_type
+#: fn(count: integer, [label]: character) -> integer
+f <- function(count, label = NULL) count
+f(1L)
+#++++
+f: fn(count: integer, [label]: character) -> integer
+integer
+82..86 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+
+#---- optional_param_wrong_type
+#: fn(count: integer, [label]: character) -> integer
+f <- function(count, label = NULL) count
+f(1L, 2L)
+#++++
+f: fn(count: integer, [label]: character) -> integer
+integer
+82..86 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+100..102 error[type-mismatch] expected `character`, found `integer`
+
+#---- arith_null_operand
+NULL + 1L
+#++++
+Unknown
+0..4 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`
+
+#---- boolean_null_operand
+NULL && TRUE
+#++++
+logical
+0..4 error[type-mismatch] expected `logical`, found `NULL`
+
+#---- negation_null
+!NULL
+#++++
+Unknown
+1..5 error[type-mismatch] expected a `logical` value, found `NULL`
+
+#---- call_null_as_function
+NULL()
+#++++
+Unknown
+0..4 error[type-mismatch] this has type `NULL`, which is not a function — it cannot be called
+
+#---- comparison_null_operand
+NULL == 1L
+#++++
+Unknown
+0..4 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `NULL`
+
+#---- nested_list_field_mismatch
+#: list{ owner: list{ name: character } }
+value <- list(owner = list(name = 1L))
+#++++
+value: list{owner: list{name: character}}
+76..78 error[type-mismatch] expected `character` for field `owner.name`, found `integer`
+
+#---- return_type_mismatch_annotation
+#: fn() -> integer
+f <- function() "x"
+#++++
+f: fn() -> integer
+35..38 error[type-mismatch] expected `integer`, found `character`
+
+#---- new_on_alias
+#: @alias Shape {list{name: character}}
+
+#: @new Shape
+value <- list(name = "bob")
+#++++
+value: list{name: character}
+49..54 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias.
+
+#---- new_generic_unapplied_infers_arguments
+#: @type Box<T> {list{value: T}}
+
+#: @new Box
+value <- list(value = 1L)
+#++++
+value: Box<integer>
+
+#---- generic_arg_count_mismatch
+#: @type Pair<T, U> {list{a: T, b: U}}
+
+#: Pair<integer>
+value <- list(a = 1L, b = 2L)
+#++++
+value: Pair<integer>
+43..47 error[annotation] generic type `Pair` expects 2 type arguments, but found 1.
+
+#---- duplicate_forall_param
+#: @forall T
+#: @forall T
+#: @param x {T}
+#: @return {T}
+f <- function(x) x
+#++++
+f: <T> fn(x: T) -> T
+24..29 error[annotation] duplicate type parameter name `T` in expanded function annotation.
+
+#---- map_index_bracket_ok
+#: list[named: integer]
+m <- list(a = 1L)
+m["a"]
+#++++
+m: list[named: integer]
+list[named: integer]
+
+#---- recovery_after_unknown_call_arg
+#: fn(n: integer) -> integer
+f <- function(n) n
+bad <- f("x")
+worse <- bad - 2L
+#++++
+f: fn(n: integer) -> integer
+bad: Unknown
+worse: Unknown
+57..60 error[type-mismatch] expected `integer`, found `character`
+
+#---- dollar_field_does_not_exist
+x <- list(a = 1L)
+x$b
+#++++
+x: list{a: integer}
+Unknown
+20..21 error[type-mismatch] field `b` does not exist in `list{a: integer}`
+
+#---- double_bracket_field_does_not_exist
+x <- list(a = 1L)
+x[["b"]]
+#++++
+x: list{a: integer}
+Unknown
+21..24 error[type-mismatch] field `b` does not exist in `list{a: integer}`
+
+#---- dollar_on_non_list
+x <- 1L
+x$foo
+#++++
+x: integer
+Unknown
+8..13 error[type-mismatch] R's `$` operator is invalid on atomic vectors; this value is `integer` — extract an element with `[[` instead.
+
+#---- double_bracket_position_does_not_exist
+x <- list(1L, 2L)
+x[[5L]]
+#++++
+x: list{integer, integer}
+Unknown
+18..25 error[type-mismatch] position 5 does not exist in `list{integer, integer}`
+
+#---- double_bracket_tuple_computed_position_unions_items
+x <- list(1L, 2L)
+i <- 1L
+x[[i]]
+#++++
+x: list{integer, integer}
+i: integer
+integer
+
+#---- double_bracket_record_computed_name_unions_fields
+x <- list(a = 1L)
+key <- "a"
+x[[key]]
+#++++
+x: list{a: integer}
+key: character
+integer
+
+#---- bracket_on_vector
+x <- c(1L, 2L)
+x[1L]
+#++++
+x: integer[]
+integer
+
+#---- unbound_local_in_uninferred_call_arg_no_panic
+f <- function(x) {
+  frobnicate(x, a = (k <- 1L))
+  k
+}
+#++++
+f: <T> fn(x: T) -> integer
+21..31 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+
+#==== return_position_coercions
+#---- return_nullable_widening_ok
+#: fn() -> integer | NULL
+f <- function() 1L
+#++++
+f: fn() -> integer | NULL
+
+#---- return_scalar_to_array_ok
+#: fn(x: integer) -> integer[]
+f <- function(x) x
+#++++
+f: fn(x: integer) -> integer[]
+
+#---- return_tuple_to_array_list_ok
+#: fn() -> list[integer]
+f <- function() list(1L, 2L)
+#++++
+f: fn() -> list[integer]
+
+#==== polymorphic_annotation
+#---- generic_body_returns_concrete_is_rejected
+#: <T> fn(value: T) -> T
+f <- function(value) 1L
+#++++
+f: <T> fn(value: T) -> T
+46..48 error[type-mismatch] expected `T`, found `integer`
+
+#---- generic_body_constrains_param_is_rejected
+#: <T> fn(value: T) -> T
+g <- function(value) value + 1L
+#++++
+g: <T> fn(value: T) -> T
+46..51 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`

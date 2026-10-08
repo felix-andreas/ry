@@ -1,0 +1,306 @@
+#==== cross_file
+#---- polymorphic_identity_two_instantiations
+#~~~~ R/a.R
+mirror <- function(value) value
+#~~~~ R/b.R
+#: integer
+a <- mirror(1L)
+
+#: character
+b <- mirror("x")
+#++++
+== R/a.R
+mirror: <T> fn(value: T) -> T
+== R/b.R
+a: integer
+b: character
+
+#---- partial_annotation_return_is_inferred_across_files
+#~~~~ R/a.R
+#: @param count {integer}
+add_one <- function(count) count + 1L
+#~~~~ R/b.R
+#: integer
+total <- add_one(2L) + 10L
+#++++
+== R/a.R
+add_one: fn(count: integer) -> integer
+== R/b.R
+total: integer
+
+#---- numeric_scheme_accepts_numeric
+#~~~~ R/a.R
+add_one <- function(x) x + 1L
+#~~~~ R/b.R
+#: integer
+r <- add_one(2L)
+#++++
+== R/a.R
+add_one: <T: numeric> fn(x: T) -> T
+== R/b.R
+r: integer
+
+#---- numeric_scheme_rejects_non_numeric
+#~~~~ R/a.R
+add_one <- function(x) x + 1L
+#~~~~ R/b.R
+r <- add_one("x")
+#++++
+== R/a.R
+add_one: <T: numeric> fn(x: T) -> T
+== R/b.R
+r: Unknown
+13..16 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- later_file_value_wins_for_type
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- "text"
+#~~~~ R/c.R
+#: character
+y <- x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: character
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/c.R
+y: character
+
+#---- later_file_winner_drives_annotation_error
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- "text"
+#~~~~ R/c.R
+#: integer
+y <- x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: character
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/c.R
+y: integer
+16..17 error[type-mismatch] expected `integer`, found `character`
+
+#---- later_function_winner_changes_call_checking
+#~~~~ R/a.R
+f <- function(value) value
+#~~~~ R/b.R
+f <- function(x) x + 1L
+#~~~~ R/c.R
+r <- f("x")
+#++++
+== R/a.R
+f: <T> fn(value: T) -> T
+0..1 warning[duplicate] Top-level binding `f` is overwritten by a later top-level binding in this package.
+== R/b.R
+f: <T: numeric> fn(x: T) -> T
+0..1 warning[duplicate] Top-level binding `f` overwrites an earlier top-level binding in this package.
+== R/c.R
+r: Unknown
+7..10 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- cross_file_arithmetic_on_package_value
+#~~~~ R/a.R
+base <- 10L
+#~~~~ R/b.R
+#: integer
+total <- base + 5L
+#++++
+== R/a.R
+base: integer
+== R/b.R
+total: integer
+
+#---- cross_file_named_argument
+#~~~~ R/a.R
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+#~~~~ R/b.R
+r <- double_count(count = 2L)
+#++++
+== R/a.R
+double_count: fn(count: integer) -> integer
+== R/b.R
+r: integer
+
+#---- annotation_types_do_not_restrict_argument_names
+#~~~~ R/a.R
+#: fn(integer) -> integer
+inc <- function(n) n + 1L
+#~~~~ R/b.R
+r <- inc(n = 2L)
+#++++
+== R/a.R
+inc: fn(n: integer) -> integer
+== R/b.R
+r: integer
+
+#---- cross_file_optional_argument
+#~~~~ R/a.R
+#: fn(count: integer, [label]: character) -> integer
+tag <- function(count, label = NULL) count
+#~~~~ R/b.R
+#: integer
+a <- tag(1L)
+
+#: integer
+b <- tag(1L, "x")
+#++++
+== R/a.R
+tag: fn(count: integer, [label]: character) -> integer
+84..88 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+== R/b.R
+a: integer
+b: integer
+
+#---- cross_file_generic_alias_use
+#~~~~ R/a.R
+#: @alias Box<T> {list{value: T}}
+#~~~~ R/b.R
+#: Box<integer>
+v <- list(value = 1L)
+#++++
+== R/a.R
+== R/b.R
+v: Box<integer>
+
+#---- forward_generic_alias_reference
+#~~~~ R/a.R
+#: Box<integer>
+v <- list(value = 1L)
+#~~~~ R/b.R
+#: @alias Box<T> {list{value: T}}
+#++++
+== R/a.R
+v: Box<integer>
+== R/b.R
+
+#---- cross_file_generic_nominal_new
+#~~~~ R/a.R
+#: @type Box<T> {list{value: T}}
+#~~~~ R/b.R
+#: @new Box<integer>
+v <- list(value = 1L)
+#++++
+== R/a.R
+== R/b.R
+v: Box<integer>
+
+#---- cross_file_generic_nominal_wrong_repr
+#~~~~ R/a.R
+#: @type Box<T> {list{value: T}}
+#~~~~ R/b.R
+#: @new Box<integer>
+v <- list(value = "x")
+#++++
+== R/a.R
+== R/b.R
+v: Unknown
+39..42 error[type-mismatch] expected `integer` for field `value`, found `character`
+
+#---- cross_file_nominal_value_field_access
+#~~~~ R/a.R
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+#~~~~ R/b.R
+#: character
+n <- person$name
+#++++
+== R/a.R
+person: Person
+== R/b.R
+n: character
+
+#---- cross_file_alias_in_function_signature
+#~~~~ R/a.R
+#: @alias Count {integer}
+
+#: fn(value: Count) -> Count
+inc <- function(value) value + 1L
+#~~~~ R/b.R
+#: integer
+r <- inc(1L)
+#++++
+== R/a.R
+inc: fn(value: Count) -> Count
+== R/b.R
+r: integer
+
+#---- duplicate_type_names_across_files_error_both
+#~~~~ R/a.R
+#: @type Shape {integer}
+#~~~~ R/b.R
+#: @alias Shape {character}
+#++++
+== R/a.R
+3..24 error[annotation] the type name `Shape` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+== R/b.R
+3..27 error[annotation] the type name `Shape` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#==== cross_file_scripts
+#---- script_polymorphic_package_function
+#~~~~ R/a.R
+mirror <- function(value) value
+#~~~~ scripts/use.R
+#: integer
+a <- mirror(1L)
+
+#: character
+b <- mirror("x")
+#++++
+== R/a.R
+mirror: <T> fn(value: T) -> T
+== scripts/use.R
+a: integer
+b: character
+11..12 warning[unused] `a` is assigned but never used.
+41..42 warning[unused] `b` is assigned but never used.
+
+#---- script_numeric_package_function_rejects
+#~~~~ R/a.R
+add_one <- function(x) x + 1L
+#~~~~ scripts/use.R
+r <- add_one("x")
+#++++
+== R/a.R
+add_one: <T: numeric> fn(x: T) -> T
+== scripts/use.R
+r: Unknown
+0..1 warning[unused] `r` is assigned but never used.
+13..16 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- script_binding_not_visible_to_other_script
+#~~~~ scripts/define.R
+helper <- function(x) x
+#~~~~ scripts/use.R
+r <- helper(1L)
+#++++
+== scripts/define.R
+helper: <T> fn(x: T) -> T
+0..6 warning[unused] `helper` is assigned but never used.
+== scripts/use.R
+r: Unknown
+0..1 warning[unused] `r` is assigned but never used.
+5..11 warning[unresolved] I could not resolve `helper` in this package, its imports, or builtins.
+
+#---- script_uses_package_alias
+#~~~~ R/a.R
+#: @alias Count {integer}
+#~~~~ scripts/use.R
+#: Count
+value <- 1L
+#++++
+== R/a.R
+== scripts/use.R
+value: Count
+9..14 warning[unused] `value` is assigned but never used.

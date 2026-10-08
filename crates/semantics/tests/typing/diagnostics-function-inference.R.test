@@ -1,0 +1,5 @@
+#==== function_inference
+#---- conflicting_param_constraints
+bad <- function(x) x + !x
+#++++
+bad: fn(x: logical) -> integer

@@ -1,0 +1,84 @@
+#==== top_level
+#---- top_level_reference
+#~~~~ R/main.R
+x <- 1L
+x
+#++++
+== R/main.R
+x: integer
+integer
+
+#---- top_level_reference_before_first_binding
+#~~~~ R/main.R
+x
+x <- 1L
+#++++
+== R/main.R
+integer
+x: integer
+
+#---- top_level_call_resolves_callee_and_argument
+#~~~~ R/main.R
+value <- 1L
+mirror <- function(x) x
+mirror(value)
+#++++
+== R/main.R
+value: integer
+mirror: <T> fn(x: T) -> T
+integer
+
+#---- distinct_top_level_bindings_have_distinct_uses
+#~~~~ R/main.R
+x <- 1L
+y <- "ok"
+x
+y
+#++++
+== R/main.R
+x: integer
+y: character
+integer
+character
+
+#==== rebinding
+#---- top_level_rebinding_creates_fresh_binding
+#~~~~ R/main.R
+x <- 1L
+x <- "ok"
+x
+#++++
+== R/main.R
+x: integer
+x: character
+character
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+
+#---- earlier_use_resolves_to_final_global_binding
+#~~~~ R/main.R
+x <- 1L
+x
+x <- "ok"
+x
+#++++
+== R/main.R
+x: integer
+integer
+x: character
+character
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+10..11 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+
+#---- assignment_rhs_resolves_to_final_global_binding
+#~~~~ R/main.R
+x <- 1L
+x <- x
+x
+#++++
+== R/main.R
+x: integer
+x: Unknown
+Unknown
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.

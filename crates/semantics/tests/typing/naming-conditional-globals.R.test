@@ -1,0 +1,132 @@
+#==== conditional_top_level_globals
+#---- if_body_binding_is_package_global
+#~~~~ R/a.R
+if (TRUE) {
+  x <- 1L
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+integer | NULL
+== R/b.R
+integer
+
+#---- else_body_binding_is_package_global
+#~~~~ R/a.R
+if (FALSE) {
+  1L
+} else {
+  x <- 1L
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+integer
+== R/b.R
+integer
+
+#---- else_if_body_binding_is_package_global
+#~~~~ R/a.R
+if (FALSE) {
+  1L
+} else if (TRUE) {
+  x <- 1L
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+integer | NULL
+== R/b.R
+integer
+
+#---- for_body_binding_is_package_global
+#~~~~ R/a.R
+for (item in list(1L)) {
+  x <- 1L
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+NULL
+== R/b.R
+integer
+
+#---- while_body_binding_is_package_global
+#~~~~ R/a.R
+while (TRUE) {
+  x <- 1L
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+NULL
+== R/b.R
+integer
+
+#---- repeat_body_binding_is_package_global
+#~~~~ R/a.R
+repeat {
+  x <- 1L
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+NULL
+== R/b.R
+integer
+
+#---- nested_conditional_body_binding_is_package_global
+#~~~~ R/a.R
+if (TRUE) {
+  for (item in list(1L)) {
+    x <- 1L
+  }
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+NULL
+== R/b.R
+integer
+
+#==== conditional_top_level_slots
+#---- reference_within_top_level_if_body_resolves_to_slot
+#~~~~ R/a.R
+if (TRUE) {
+  x <- 1L
+  x
+}
+#++++
+== R/a.R
+integer | NULL
+
+#---- reference_after_top_level_if_resolves
+#~~~~ R/a.R
+if (TRUE) {
+  x <- 1L
+}
+x
+#++++
+== R/a.R
+integer | NULL
+integer
+
+#---- conditional_reassignment_of_global_keeps_global_resolution
+#~~~~ R/a.R
+x <- 1L
+if (TRUE) {
+  x <- 2L
+}
+x
+#++++
+== R/a.R
+x: integer
+integer | NULL
+integer

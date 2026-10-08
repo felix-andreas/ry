@@ -1,0 +1,121 @@
+#==== utils_structure
+#---- head_preserves_the_element_type
+head(c(1L, 2L, 3L))
+#++++
+integer[]
+
+#---- head_accepts_count
+head(c(1L, 2L, 3L), 2)
+#++++
+Any
+
+#---- tail_accepts_named_count
+tail(c(1L, 2L), n = 1L)
+#++++
+integer[]
+
+#---- str_is_null
+str(list(1L, 2L))
+#++++
+NULL
+
+#---- str_accepts_display_controls
+str(list(1L), max.level = 1L)
+#++++
+NULL
+
+#==== utils_io
+#---- read_csv_returns_a_data_frame
+read.csv("data.csv")
+#++++
+data.frame
+
+#---- read_csv_checks_declared_controls_and_absorbs_passthrough_keywords
+read.csv("data.csv", header = FALSE, stringsAsFactors = FALSE)
+read.table("data.tsv", sep = "\t", nrows = 10L, comment.char = "")
+#++++
+data.frame
+data.frame
+
+#---- read_csv_rejects_a_mistyped_declared_control
+read.csv("data.csv", header = "yes")
+#++++
+data.frame
+30..35 error[type-mismatch] expected `logical`, found `character`
+
+#---- read_csv_accepts_a_connection_subject
+read.csv(file("data.csv"))
+#++++
+data.frame
+
+#---- write_csv_is_null
+write.csv("x", "out.csv")
+#++++
+NULL
+
+#---- write_csv_accepts_row_names_by_name
+write.csv(1L, "out.csv", row.names = FALSE)
+#++++
+NULL
+
+#---- write_table_accepts_separator_controls
+write.table(1L, "out.tsv", sep = "\t", col.names = TRUE)
+#++++
+NULL
+
+#---- download_file_is_integer_status
+download.file("https://example.org", "dest.html", quiet = TRUE)
+#++++
+integer
+
+#---- capture_output_is_character_vector
+capture.output(1L)
+#++++
+character[]
+
+#==== utils_packages
+#---- install_packages_is_null
+install.packages("roughly")
+#++++
+NULL
+
+#---- install_packages_accepts_repos_and_dependencies
+install.packages("pkg", repos = "https://cran.r-project.org", dependencies = TRUE)
+#++++
+NULL
+
+#---- packageVersion_is_any
+packageVersion("base")
+#++++
+Any
+
+#---- sessionInfo_is_any
+sessionInfo()
+#++++
+Any
+
+#==== utils_misc
+#---- help_returns_help_object_as_any
+help("sum", package = "base")
+#++++
+Any
+
+#---- modifyList_has_checked_arity
+modifyList(list(a = 1L), list(a = 2L))
+#++++
+Any
+
+#---- combn_stays_any
+combn(4L, 2L)
+#++++
+Any
+
+#---- object_size_is_any
+object.size(c(1L, 2L))
+#++++
+Any
+
+#---- URLencode_is_character
+URLencode("a b", reserved = TRUE)
+#++++
+character

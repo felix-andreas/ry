@@ -1,0 +1,214 @@
+#==== explicit_special_types
+#---- any_annotation_accepts_integer
+#: Any
+value <- 1L
+value
+#++++
+value: Any
+Any
+
+#---- any_annotation_accepts_null
+#: Any
+value <- NULL
+value
+#++++
+value: Any
+Any
+
+#---- any_annotation_accepts_unknown
+#: Any
+value <- 1L ~ 2L
+value
+#++++
+value: Any
+Any
+
+#---- unknown_only_coercion_accepts_unknown
+#: @if-unknown integer
+value <- 1L ~ 2L
+value
+#++++
+value: integer
+integer
+
+#---- unknown_only_coercion_rejects_known_type
+#: @if-unknown integer
+value <- 1L
+#++++
+value: Unknown
+23..28 warning[unused] `value` is assigned but never used.
+32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+
+#---- trusted_coercion_overrides_incompatible_source
+#: @trust integer
+value <- "hello"
+value
+#++++
+value: integer
+integer
+
+#---- checked_annotation_accepts_unknown
+#: integer
+value <- 1L ~ 2L
+#++++
+value: integer
+11..16 warning[unused] `value` is assigned but never used.
+
+#==== nullable_unions
+#---- nullable_union_annotation_accepts_integer
+#: integer | NULL
+value <- 1L
+value
+#++++
+value: integer | NULL
+integer | NULL
+
+#---- nullable_union_annotation_accepts_null
+#: integer | NULL
+value <- NULL
+value
+#++++
+value: integer | NULL
+integer | NULL
+
+#---- nullable_union_not_assignable_to_plain_integer
+#: integer
+value <- if (TRUE) 1L
+#++++
+value: integer
+11..16 warning[unused] `value` is assigned but never used.
+20..32 error[type-mismatch] expected `integer`, found `integer | NULL`
+
+#==== unknown_propagation
+#---- unknown_argument_is_accepted_without_cascading
+unsupported <- 1L ~ 2L
+
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+double_count(unsupported)
+#++++
+unsupported: Unknown
+double_count: fn(count: integer) -> integer
+integer
+
+#---- unknown_callee_call_evaluates_to_unknown
+unsupported <- 1L ~ 2L
+unsupported(1L)
+#++++
+unsupported: Unknown
+Unknown
+
+#---- any_callee_call_is_unknown
+#: @trust Any
+callee <- 1L
+callee(1L)
+#++++
+callee: Any
+Unknown
+
+#---- any_argument_is_accepted
+#: @trust Any
+anything <- 1L
+
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+double_count(anything)
+#++++
+anything: Any
+double_count: fn(count: integer) -> integer
+integer
+
+#---- unknown_in_arithmetic_stays_unknown
+unsupported <- 1L ~ 2L
+unsupported + 1L
+#++++
+unsupported: Unknown
+Unknown
+
+#==== multi_member_unions
+#---- union_annotation_accepts_integer
+#: integer | character
+value <- 1L
+value
+#++++
+value: integer | character
+integer | character
+
+#---- union_annotation_accepts_character
+#: integer | character
+value <- "two"
+value
+#++++
+value: integer | character
+integer | character
+
+#---- union_annotation_accepts_promoted_logical
+#: integer | character
+value <- TRUE
+#++++
+value: integer | character
+23..28 warning[unused] `value` is assigned but never used.
+
+#---- member_accepted_where_union_parameter_expected
+#: fn(value: integer | character | NULL) -> logical
+accepts <- function(value) TRUE
+
+accepts(1L)
+#++++
+accepts: fn(value: integer | character | NULL) -> logical
+logical
+
+#---- null_accepted_where_union_contains_null
+#: fn(value: integer | character | NULL) -> logical
+accepts <- function(value) TRUE
+
+accepts(NULL)
+#++++
+accepts: fn(value: integer | character | NULL) -> logical
+logical
+
+#---- union_rejected_where_plain_member_expected
+#: integer | character
+value <- 1L
+
+#: integer
+narrowed <- value
+#++++
+value: integer | character
+narrowed: integer
+47..55 warning[unused] `narrowed` is assigned but never used.
+59..64 error[type-mismatch] expected `integer`, found `integer | character`
+
+#---- union_accepted_where_wider_union_expected
+#: integer | NULL
+narrow <- 1L
+
+#: integer | character | NULL
+wide <- narrow
+wide
+#++++
+narrow: integer | NULL
+wide: integer | character | NULL
+integer | character | NULL
+
+#---- union_rejected_where_narrower_union_expected
+#: integer | character | NULL
+wide <- 1L
+
+#: integer | NULL
+narrow <- wide
+#++++
+wide: integer | character | NULL
+narrow: integer | NULL
+60..66 warning[unused] `narrow` is assigned but never used.
+70..74 error[type-mismatch] expected `integer | NULL`, found `integer | character | NULL`
+
+#---- alias_expansion_into_union_dedupes
+#: @alias MaybeCount {integer | NULL}
+
+#: MaybeCount | integer | NULL
+value <- 1L
+value
+#++++
+value: MaybeCount | integer | NULL
+integer | NULL

@@ -398,10 +398,10 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db)
-        .map(|files| package_definitions(db, files).contains_key(name))
-        .unwrap_or(false)
-    {
+    if ProjectFiles::try_get(db).is_some_and(|files| {
+        package_definitions(db, files).contains_key(name)
+            || conditional_slot_items(db, files).contains_key(name)
+    }) {
         return true;
     }
     stubs::stubs(db).is_some_and(|library| {
@@ -703,10 +703,10 @@ pub fn project_type_definitions<'db>(
     definitions
 }
 
-/// Statement items binding each top-level name, in project order: a
-/// conditional write at a document's top level (inside a top-level
-/// `if`/`for`/`while`/`repeat` or a bare block) creates the document's
-/// variable slot, and cross-item reads of a name with no unconditional
+/// Items binding each top-level name other than their own, in project order:
+/// a conditional write at a document's top level (inside a top-level
+/// `if`/`for`/`while`/`repeat` or a bare block) or a nested one
+/// (`y <- (x <- 1L)`) creates the document's variable slot, and cross-item reads of a name with no unconditional
 /// winner resolve here — the slot's type is the join of every writer.
 #[salsa::tracked(returns(ref))]
 pub fn conditional_slot_items<'db>(
@@ -720,15 +720,43 @@ pub fn conditional_slot_items<'db>(
             continue;
         }
         for &item in item_tree(db, file) {
-            if *item.kind(db) != ItemKind::Statement {
-                continue;
-            }
+            let own_name = item.name(db).clone();
             for name in item_top_level_names(db, item) {
-                writers.entry(name.clone()).or_default().push(item);
+                if own_name.as_ref() != Some(name) {
+                    writers.entry(name.clone()).or_default().push(item);
+                }
             }
         }
     }
     writers
+}
+
+/// What the package namespace binds one name to: its unconditional winner,
+/// and the items writing it conditionally or nested, whose join serves the
+/// name when there is no winner. A per-name projection of the two
+/// project-wide maps, so a check depends on the names it reads rather than
+/// on every definition in the project: a definition added elsewhere re-runs
+/// this for each read name, it compares equal, and the check stays green.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct PackageName<'db> {
+    pub winner: Option<Item<'db>>,
+    pub conditional_writers: Vec<Item<'db>>,
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn package_name<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: types::Name<'db>,
+) -> PackageName<'db> {
+    let text = name.text(db);
+    PackageName {
+        winner: package_definitions(db, files).get(text).copied(),
+        conditional_writers: conditional_slot_items(db, files)
+            .get(text)
+            .cloned()
+            .unwrap_or_default(),
+    }
 }
 
 /// The settled scheme a statement item exports for one of its top-level
@@ -1012,6 +1040,14 @@ pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceScc
     result
 }
 
+/// The cyclic interface group an item belongs to, if any: the per-item
+/// projection a check reads, so an unrelated edit that reshapes the graph
+/// leaves every acyclic item's check green.
+#[salsa::tracked(returns(copy))]
+fn interface_group<'db>(db: &'db dyn Db, files: ProjectFiles, item: Item<'db>) -> Option<u32> {
+    interface_sccs(db, files).membership.get(&item).copied()
+}
+
 /// The canonical fixpoint of one cyclic interface group, independent of which
 /// member was queried first: every member starts at the tolerant `Unknown`
 /// scheme, each round re-checks every member in canonical order against the
@@ -1187,9 +1223,9 @@ fn global_scheme_initial<'db>(
     types::TypeScheme::monomorphic(types::unknown(db))
 }
 
-/// Bound fixpoint rounds mirroring the legacy interface round cap: a scheme
-/// still changing after the cap pins to `Unknown` (sound-by-refusal) rather
-/// than iterating toward salsa's panic limit.
+/// Bound fixpoint rounds: a scheme still changing after the cap pins to
+/// `Unknown` (sound-by-refusal) rather than iterating toward salsa's panic
+/// limit.
 const SCHEME_ROUND_CAP: u32 = 16;
 
 fn global_scheme_recover<'db>(
@@ -1218,6 +1254,13 @@ fn global_scheme_recover<'db>(
     cycle_initial = item_check_initial
 )]
 pub fn item_check<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<'db>> {
+    // A check demands the schemes it reads, so the recursion is as deep as
+    // the longest chain of definitions each reading the next (a script of
+    // thousands of `df <- step(df)` rebindings); no fixed stack bounds that.
+    stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || check_item(db, item))
+}
+
+fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<'db>> {
     let module = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
     let annotation = item_annotation_syntax(db, item)
@@ -1236,7 +1279,7 @@ pub fn item_check<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCh
     // run one propagation hop ahead of what every reader sees).
     if check.scheme.is_some()
         && let Some(files) = ProjectFiles::try_get(db)
-        && let Some(&group) = interface_sccs(db, files).membership.get(&item)
+        && let Some(group) = interface_group(db, files, item)
     {
         check.scheme = scc_schemes(db, files, group).get(&item).cloned();
         // A member whose body checked clean but whose exported scheme still
@@ -1325,30 +1368,15 @@ fn refuse_check<'db>(db: &'db dyn Db, check: check::ItemCheck<'db>) -> check::It
     }
 }
 
-/// The salsa-backed cross-item resolver handed to the checker.
+/// The salsa-backed cross-item resolver handed to the checker. Every lookup
+/// goes through a per-name query, so the check depends on exactly the names
+/// it reads.
 struct SalsaGlobals<'db> {
     db: &'db dyn Db,
-    definitions: Option<&'db rustc_hash::FxHashMap<String, Item<'db>>>,
-    /// This item's own position in its file, for both document kinds — a file
-    /// is sourced top-down whichever it is.
-    ///
-    /// An **immediate** read therefore sees the nearest EARLIER writer in this
-    /// file, ahead of the project-wide winner. That covers a top-level
-    /// statement rewriting a name the file defined above it, which the
-    /// project-wide map cannot express: it holds definition items only, so a
-    /// later `record$age <- …` was invisible and the read answered from the
-    /// pre-write type.
-    ///
-    /// A **deferred** read — from inside a closure — differs by kind, because
-    /// what has finished running when the body executes differs. In a script
-    /// the closure runs once the file's frame has settled, so it sees the last
-    /// writer anywhere in that file, its own binding included (self-recursion).
-    /// In a package the function runs after the *whole package* is sourced, so
-    /// the answer is the project-wide winner and this file must stand aside —
-    /// a later file's override would otherwise be lost.
-    frame_index: Option<usize>,
+    item: Item<'db>,
+    files: Option<ProjectFiles>,
     /// Whether this item's file is a script, which decides the deferred-read
-    /// rule above.
+    /// rule of [`frame_binder`].
     is_script: bool,
     /// The item's own file, for the facts that are per-file rather than
     /// per-item: its type declarations and its arithmetic classes.
@@ -1421,74 +1449,98 @@ fn file_binders<'db>(
     let mut binders: rustc_hash::FxHashMap<String, Vec<(usize, Item<'db>)>> =
         rustc_hash::FxHashMap::default();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
-        match *item.kind(db) {
-            ItemKind::Function | ItemKind::Value => {
-                if let Some(name) = item.name(db).clone() {
-                    binders.entry(name).or_default().push((index, item));
-                }
-            }
-            // A statement item binds through a conditional top-level write
-            // (the document-slot model), and may bind several names.
-            ItemKind::Statement => {
-                for name in item_top_level_names(db, item) {
-                    binders.entry(name.clone()).or_default().push((index, item));
-                }
+        let own_name = item.name(db).clone();
+        if let Some(name) = &own_name {
+            binders.entry(name.clone()).or_default().push((index, item));
+        }
+        // Any item can bind further names at the top level: a statement item
+        // through a conditional write, a definition through a nested one
+        // (`y <- (x <- 1L)` binds `x` too).
+        for name in item_top_level_names(db, item) {
+            if own_name.as_ref() != Some(name) {
+                binders.entry(name.clone()).or_default().push((index, item));
             }
         }
     }
     binders
 }
 
+/// The item of `item`'s own file that binds `name` as `item` sees it, ahead
+/// of the project-wide winner. A file is sourced top-down whichever its kind,
+/// so an **immediate** read sees the nearest EARLIER writer in the file. That
+/// covers a top-level statement rewriting a name the file defined above it,
+/// which the project-wide map cannot express: it holds definition items only,
+/// so a later `record$age <- …` was invisible and the read answered from the
+/// pre-write type.
+///
+/// A **deferred** read — from inside a closure — differs by kind, because
+/// what has finished running when the body executes differs. In a script the
+/// closure runs once the file's frame has settled, so it sees the last writer
+/// anywhere in that file, its own binding included (self-recursion). In a
+/// package the function runs after the *whole package* is sourced, so the
+/// answer is the project-wide winner and this file must stand aside — a later
+/// file's override would otherwise be lost; callers skip the query then.
+///
+/// Tracked so that inserting an item shifts positions without re-running the
+/// checks of the items after it: the answer per name compares equal.
+#[salsa::tracked(returns(copy))]
+fn frame_binder<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    name: types::Name<'db>,
+    deferred: bool,
+) -> Option<Item<'db>> {
+    let file = *item.file(db);
+    let binders = file_binders(db, file).get(name.text(db))?;
+    let visible = match deferred {
+        true => &binders[..],
+        false => {
+            // Looked up, not scanned for: a linear search here would be
+            // quadratic in a file's top-level items.
+            let index = item_tree_positions(db, file)
+                .get(&item)
+                .copied()
+                .unwrap_or_else(|| item_tree(db, file).len());
+            &binders[..binders.partition_point(|&(at, _)| at < index)]
+        }
+    };
+    visible.last().map(|&(_, item)| item)
+}
+
 impl<'db> SalsaGlobals<'db> {
     fn for_item(db: &'db dyn Db, item: Item<'db>) -> SalsaGlobals<'db> {
-        let definitions = ProjectFiles::try_get(db).map(|files| package_definitions(db, files));
         let file = *item.file(db);
-        let is_script = *file.kind(db) == DocumentKind::Script;
-        // Looked up, not scanned for: this runs once per checked item, so a
-        // linear search here is quadratic in a file's top-level items.
-        let index = item_tree_positions(db, file)
-            .get(&item)
-            .copied()
-            .unwrap_or_else(|| item_tree(db, file).len());
         SalsaGlobals {
             db,
-            definitions,
-            frame_index: Some(index),
-            is_script,
+            item,
+            files: ProjectFiles::try_get(db),
+            is_script: *file.kind(db) == DocumentKind::Script,
             file,
         }
     }
 
-    fn frame_definition(&self, name: &str, deferred: bool) -> Option<Item<'db>> {
-        let index = self.frame_index?;
-        // A package function body runs after every file is sourced, so the
-        // project-wide winner owns that answer, not this file's last writer.
+    fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
         if deferred && !self.is_script {
             return None;
         }
-        let binders = file_binders(self.db, self.file).get(name)?;
-        // A deferred read in a script sees the whole settled frame, its own
-        // binding included; an immediate one sees only what ran above it.
-        let visible = match deferred {
-            true => &binders[..],
-            false => &binders[..binders.partition_point(|&(at, _)| at < index)],
-        };
-        visible.last().map(|&(_, item)| item)
+        frame_binder(self.db, self.item, name, deferred)
+    }
+
+    fn package_name(&self, name: types::Name<'db>) -> Option<&'db PackageName<'db>> {
+        Some(package_name(self.db, self.files?, name))
     }
 
     /// The joined scheme of a package-level conditional slot: every
     /// statement item writing the name contributes its settled binding type,
     /// up to [`CONDITIONAL_SLOT_JOIN_CAP`].
-    fn conditional_slot_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        let files = ProjectFiles::try_get(self.db)?;
-        let writers = conditional_slot_items(self.db, files).get(name)?;
-        let interned = types::Name::new(self.db, name.to_owned());
+    fn conditional_slot_scheme(&self, name: types::Name<'db>) -> Option<types::TypeScheme<'db>> {
+        let writers = &self.package_name(name)?.conditional_writers;
         if writers.len() > CONDITIONAL_SLOT_JOIN_CAP {
             return Some(types::TypeScheme::monomorphic(types::unknown(self.db)));
         }
         let mut schemes: Vec<types::TypeScheme<'db>> = writers
             .iter()
-            .filter_map(|&item| statement_binding_scheme(self.db, item, interned))
+            .filter_map(|&item| statement_binding_scheme(self.db, item, name))
             .collect();
         match schemes.len() {
             0 => None,
@@ -1502,28 +1554,37 @@ impl<'db> SalsaGlobals<'db> {
             }
         }
     }
+
+    /// The scheme a frame binder gives `name`: its own exported scheme when
+    /// it defines the name, else the binding it writes on the way.
+    fn binder_scheme(
+        &self,
+        item: Item<'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        if item.name(self.db).as_deref() == Some(name.text(self.db)) {
+            return Some(global_scheme(self.db, item));
+        }
+        statement_binding_scheme(self.db, item, name)
+    }
+
+    fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
+        self.package_name(name)?.winner
+    }
 }
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        if let Some(item) = self.frame_definition(name, deferred) {
-            if *item.kind(self.db) == ItemKind::Statement {
-                let interned = types::Name::new(self.db, name.to_owned());
-                if let Some(scheme) = statement_binding_scheme(self.db, item, interned) {
-                    return Some(scheme);
-                }
-            } else {
-                return Some(global_scheme(self.db, item));
-            }
-        }
-        if let Some(item) = self
-            .definitions
-            .as_ref()
-            .and_then(|winners| winners.get(name))
+        let interned = types::Name::new(self.db, name.to_owned());
+        if let Some(item) = self.frame_definition(interned, deferred)
+            && let Some(scheme) = self.binder_scheme(item, interned)
         {
-            return Some(global_scheme(self.db, *item));
+            return Some(scheme);
         }
-        if let Some(scheme) = self.conditional_slot_scheme(name) {
+        if let Some(item) = self.winner(interned) {
+            return Some(global_scheme(self.db, item));
+        }
+        if let Some(scheme) = self.conditional_slot_scheme(interned) {
             return Some(scheme);
         }
         // Reading an overloaded stub name as a plain value (not a call)
@@ -1534,24 +1595,26 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        self.frame_definition(name, deferred).is_some()
-            || self
-                .definitions
-                .as_ref()
-                .is_some_and(|winners| winners.contains_key(name))
+        let interned = types::Name::new(self.db, name.to_owned());
+        self.frame_definition(interned, deferred).is_some()
+            || self.package_name(interned).is_some_and(|binding| {
+                binding.winner.is_some() || !binding.conditional_writers.is_empty()
+            })
+    }
+
+    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        let interned = types::Name::new(self.db, name.to_owned());
+        if let Some(item) = self.frame_definition(interned, false) {
+            return self.binder_scheme(item, interned);
+        }
+        Some(global_scheme(self.db, self.winner(interned)?))
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
         // A script-local or package definition wins over the stub set,
         // disabling per-call overload selection for that name.
-        if self.frame_definition(name, deferred).is_some() {
-            return None;
-        }
-        if self
-            .definitions
-            .as_ref()
-            .is_some_and(|winners| winners.contains_key(name))
-        {
+        let interned = types::Name::new(self.db, name.to_owned());
+        if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
         let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
@@ -1633,6 +1696,13 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
             .get(name)
             .cloned()
             .or_else(|| self.base.scheme(name, deferred))
+    }
+
+    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        self.members
+            .get(name)
+            .cloned()
+            .or_else(|| self.base.earlier_binding(name))
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {

@@ -1,0 +1,204 @@
+#==== tuple_like_lists
+#---- empty_tuple_like_list
+list{}
+#++++
+list{}
+
+#---- single_item_tuple_like_list
+list{integer}
+#++++
+list{integer}
+
+#---- multiple_item_tuple_like_list
+list{integer,character,logical}
+#++++
+list{integer, character, logical}
+
+#---- tuple_like_list_with_nullable_item
+list{integer|NULL,character}
+#++++
+list{integer | NULL, character}
+
+#---- tuple_like_list_with_nested_tuple
+list{integer,list{character,logical}}
+#++++
+list{integer, list{character, logical}}
+
+#---- tuple_like_list_with_nested_record
+list{integer,list{label:character,ok:logical}}
+#++++
+list{integer, list{label: character, ok: logical}}
+
+#---- tuple_like_list_with_function_item
+list{fn(integer)->character,logical}
+#++++
+list{fn(integer) -> character, logical}
+
+#==== homogeneous_lists
+#---- simple_homogeneous_list
+list[integer]
+#++++
+list[integer]
+
+#---- nullable_item_list
+list[integer|NULL]
+#++++
+list[integer | NULL]
+
+#---- nested_homogeneous_list
+list[list[integer]]
+#++++
+list[list[integer]]
+
+#---- list_of_tuple_like_lists
+list[list{integer,character}]
+#++++
+list[list{integer, character}]
+
+#---- list_of_record_like_lists
+list[list{length:integer,label:character}]
+#++++
+list[list{length: integer, label: character}]
+
+#---- list_of_functions
+list[fn(integer,label:character)->logical]
+#++++
+list[fn(integer, label: character) -> logical]
+
+#==== named_lists
+#---- simple_named_list
+list[named:integer]
+#++++
+list[named: integer]
+
+#---- nullable_named_list
+list[named:integer|NULL]
+#++++
+list[named: integer | NULL]
+
+#---- nested_named_list
+list[named:list[integer]]
+#++++
+list[named: list[integer]]
+
+#---- named_list_of_tuple_like_lists
+list[named:list{integer,character}]
+#++++
+list[named: list{integer, character}]
+
+#---- named_list_of_record_like_lists
+list[named:list{length:integer,label:character}]
+#++++
+list[named: list{length: integer, label: character}]
+
+#---- named_list_of_functions
+list[named:fn(integer)->character]
+#++++
+list[named: fn(integer) -> character]
+
+#---- nested_named_list_inside_record_field_shape
+list{items:list[named:list{integer,character}]}
+#++++
+list{items: list[named: list{integer, character}]}
+
+#---- sibling_record_field_after_named_list_field_shape
+list{items:list[named:list{integer,character}],render:fn(integer)->list{label:character}}
+#++++
+list{items: list[named: list{integer, character}], render: fn(integer) -> list{label: character}}
+
+#---- nested_render_field_shape
+list{meta:list{render:fn(integer)->list{label:character}}}
+#++++
+list{meta: list{render: fn(integer) -> list{label: character}}}
+
+#---- named_list_field_before_sibling_inside_nested_record_shape
+list{meta:list{items:list[named:list{integer,character}],render:character}}
+#++++
+list{meta: list{items: list[named: list{integer, character}], render: character}}
+
+#---- named_list_field_before_function_sibling_inside_nested_record_shape
+list{meta:list{items:list[named:list{integer,character}],render:fn(integer)->character}}
+#++++
+list{meta: list{items: list[named: list{integer, character}], render: fn(integer) -> character}}
+
+#---- named_list_with_nullable_element_before_sibling_inside_nested_record_shape
+list{meta:list{items:list[named:character|NULL],render:character}}
+#++++
+list{meta: list{items: list[named: character | NULL], render: character}}
+
+#==== record_like_lists
+#---- simple_record_like_list
+list{length:integer}
+#++++
+list{length: integer}
+
+#---- multiple_field_record_like_list
+list{length:integer,label:character,ok:logical}
+#++++
+list{length: integer, label: character, ok: logical}
+
+#---- record_like_list_with_nullable_field
+list{length:integer|NULL,label:character}
+#++++
+list{length: integer | NULL, label: character}
+
+#---- record_like_list_with_tuple_field
+list{items:list{integer,character}}
+#++++
+list{items: list{integer, character}}
+
+#---- record_like_list_with_record_field
+list{meta:list{length:integer,label:character}}
+#++++
+list{meta: list{length: integer, label: character}}
+
+#---- record_like_list_with_homogeneous_list_field
+list{items:list[integer],labels:list[character]}
+#++++
+list{items: list[integer], labels: list[character]}
+
+#---- record_like_list_with_named_list_field
+list{items:list[named:integer],labels:list[named:character]}
+#++++
+list{items: list[named: integer], labels: list[named: character]}
+
+#---- record_like_list_with_function_field
+list{render:fn(integer,label:character)->character}
+#++++
+list{render: fn(integer, label: character) -> character}
+
+#---- deeply_nested_record_like_list
+list{meta:list{items:list[named:list{integer,character}],render:fn(integer)->list{label:character}}}
+#++++
+list{meta: list{items: list[named: list{integer, character}], render: fn(integer) -> list{label: character}}}
+
+#---- deeply_nested_record_like_list_with_tuple_like_inner_value
+list{meta:list{items:list[named:list{integer,character}]}}
+#++++
+list{meta: list{items: list[named: list{integer, character}]}}
+
+#---- function_returning_record_inside_record_field
+list{render:fn(integer)->list{label:character}}
+#++++
+list{render: fn(integer) -> list{label: character}}
+
+#---- malformed_missing_inner_named_list_closing_bracket_before_sibling
+list{meta:list{items:list[named:list{integer,character},render:character}}
+#++++
+list{meta: list{items: list[named: list{integer, character}], render: character}}
+syntax error: unclosed `[` in this list type; expected a matching `]`
+
+#---- mixed_named_and_unnamed_items
+list{integer,label:character}
+#++++
+error: a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them
+
+#---- non_ascii_record_field_name
+list{naïve:integer}
+#++++
+list{naïve: integer}
+
+#---- record_field_name_with_interior_dot
+list{na.rm:logical,length.out:integer}
+#++++
+list{na.rm: logical, length.out: integer}

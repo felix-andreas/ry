@@ -1,0 +1,37 @@
+#==== nominals
+#---- generic_nominal_introduction_binding
+#: @type Person<T> {list{value: T}}
+
+#: @new Person<integer>
+person <- list(value = 1L)
+#++++
+person: Person<integer>
+
+#---- new_annotation_on_block_final_expression
+#: @type User {list{name: character, age: integer}}
+
+#: fn(name: character, age: integer) -> User
+createUser <- function(name, age) {
+  #: @new User
+  list(name = name, age = age)
+}
+#++++
+createUser: fn(name: character, age: integer) -> User
+
+#---- new_infers_unannotated_function_parameter_types
+#: @type Instrument {list{id: integer, name: character}}
+Instrument <- function(id, name) {
+  #: @new Instrument
+  list(id = id, name = name)
+}
+#++++
+Instrument: fn(id: integer, name: character) -> Instrument
+
+#---- new_generic_infers_unannotated_parameter_types
+#: @type Box<T> {list{value: T}}
+makeBox <- function(value) {
+  #: @new Box<integer>
+  list(value = value)
+}
+#++++
+makeBox: fn(value: integer) -> Box<integer>

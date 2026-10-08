@@ -1,0 +1,43 @@
+#==== cross_file_types
+#---- cross_file_nominal_new_and_use
+#~~~~ R/a.R
+#: @type Person {list{name: character}}
+
+#: fn(value: Person) -> character
+get_name <- function(value) value$name
+#~~~~ R/b.R
+#: @new Person
+person <- list(name = "bob")
+result <- get_name(person)
+#++++
+== R/a.R
+get_name: fn(value: Person) -> character
+== R/b.R
+person: Person
+result: character
+
+#---- cross_file_nominal_rejects_structural_value
+#~~~~ R/a.R
+#: @type Person {list{name: character}}
+
+#: fn(value: Person) -> character
+get_name <- function(value) value$name
+#~~~~ R/b.R
+result <- get_name(list(name = "bob"))
+#++++
+== R/a.R
+get_name: fn(value: Person) -> character
+== R/b.R
+result: Unknown
+19..37 error[type-mismatch] expected `Person`, found `list{name: character}`
+
+#---- forward_type_reference_across_files
+#~~~~ R/a.R
+#: Count
+value <- 1L
+#~~~~ R/b.R
+#: @alias Count {integer}
+#++++
+== R/a.R
+value: Count
+== R/b.R

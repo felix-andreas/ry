@@ -5,7 +5,7 @@
 **Quality bar (acceptance):**
 - **Sound on idiomatic R:** no known accepts-then-crashes holes on supported constructs; unsupported constructs may be refused loudly (sound-by-refusal is acceptable) but never silently mistyped.
 - **Zero false positives on the ~200 most-used base functions** with `[check] typing = true` on idiomatic call forms.
-- **Performance:** keystroke-to-diagnostics p50 ≤ 30 ms / p95 ≤ 100 ms at 300k LoC (read against the raw-parse floor the instrument prints — latency numbers swing ~1.4x with machine load); budgets pinned by `stats_witness` (per-line wall/memory/resolve-step ceilings) with the measurement instruments in `legacy/differential/tests/test_stats.rs`.
+- **Performance:** keystroke-to-diagnostics p50 ≤ 30 ms / p95 ≤ 100 ms at 300k LoC (read against the raw-parse floor the instrument prints — latency numbers swing ~1.4x with machine load); budgets pinned by `crates/semantics/tests/test_perf.rs` (per-line wall/memory/resolve-step ceilings plus keystroke latency, `just perf`).
 - **No server-killing input** (no `unwrap` panics on protocol-legal messages).
 
 ## Open — test-user round 3: typing enthusiasts (the type system, not the libraries)
@@ -497,6 +497,19 @@ node, while most arms then re-extract only `Copy` fields — the clone exists on
 on `self.module`. It appeared in the profile solely as `drop_in_place` and malloc/free frames, so its
 cost was never isolated. Measure before acting.
 
+### Cycles through statement items re-iterate on every structural edit
+
+`interface_sccs` has nodes for named definitions only, so a reference cycle that runs through a
+statement item (a conditional top-level write, read back through `statement_binding_scheme`) is
+resolved by salsa's cycle backstop rather than `scc_schemes`. Salsa cannot verify a cycle's memos
+without re-running it, so every structural edit (a new or renamed definition anywhere) re-iterates
+each such cycle twice once something demands it. Measured on data.table: a new top-level binding
+re-runs 72 `item_check`s (13 of them twice) for the edited file's diagnostics, ~50 ms against 12 ms
+for a body edit; the members are ordinary functions (`setattr`, `setnames`, `stopf`, …) tied into
+one cycle by a statement in `utils.R`. Fix: make conditional writers nodes of the static graph (an
+edge from a reader to each writer of a name with no winner), so these cycles route through
+`scc_schemes` like any other, and extend `test_incremental.rs` with a statement-item cycle.
+
 ### Judged fast enough — do not invent work here
 
 Single-package cold analysis (ggplot2 68K lines 1.9 s / 88 MiB peak; mgcv 37K lines 1.3 s / 72 MiB
@@ -646,7 +659,7 @@ fixture corpus instead of the 35 hand seeds.
 ### The generators cannot express most of the type system
 
 Diagnostics normalized to message *shapes*: all three semantics fuzz arms reach **60 shapes (33 of them
-parser errors, 9 distinct `type-mismatch`, 0 lint)** against the legacy corpus's 110 and the typing
+parser errors, 9 distinct `type-mismatch`, 0 lint)** against the program corpus's 110 and the typing
 fixtures' 80. In 250 generated programs the annotation grammar produces `TYPE_REF`/`TYPE_FUNCTION`/
 `TYPE_RECORD` and **zero** unions, binders (`<T>`), applications (`Box<T>`), vectors, `list[T]`, tuples,
 parens, optional `[x]:` or rest `...r:` parameters. The generator calls **6 of 872 declared stub names**
@@ -680,7 +693,7 @@ the semantic pipeline reach **86.92% of `check.rs`** and 80 shapes, against the 
 battery's 54.35% and 60. Wire it into `syntax`, `semantics` and `ide`, and use both corpora as *mutation
 seeds* rather than only fixed inputs.
 
-**A fair criticism of the legacy-corpus arm as landed**: it runs one shared database over all 1,967 files,
+**A fair criticism of the program-corpus arm as landed**: it runs one shared database over all 1,967 files,
 `file_diagnostics` only, asserting never-panic plus range geometry. That shared project changes what is
 tested — `unresolved` collapses from 284 to 148 while `duplicate` explodes from 20 to **2,182**, because
 1,967 unrelated files redeclare each other's names. Per-file with the full battery it reaches 110 shapes.
@@ -732,7 +745,7 @@ Derive the edit from the source instead: replace or insert one statement at a bo
 A third independent review, asking what protection each hour of compute and minute of developer time
 actually buys. Every number below was produced on a 4-vCPU machine, debug profile unless stated. The
 headline: **fuzzing is 327.3 s of a 672 s local gate (49%), and CI runs none of it.** The rest of the
-gate is `legacy/` at 249.0 s (37.3%), the shipping crates' fixture suites at 68.8 s (10.3%) and
+gate was the since-deleted `legacy/` at 249.0 s (37.3%), the shipping crates' fixture suites at 68.8 s (10.3%) and
 `crates/ry` — the only thing CI runs — at 22.4 s (3.4%).
 
 Where this review **disagrees** with the input-generation review above, and the disagreement is real:
@@ -800,11 +813,9 @@ the completion fix.
 `ide::fuzz_deep` runs `iterations().max(5000)` sweeps; that `.max` floor means `FUZZ_ITERS` **cannot
 lower it**, which is the bug. Measured in release on that exact input shape (1–12 concatenated seeds, avg
 214 bytes, 111 offsets/sweep): **665 ms per sweep × 5,000 = 55.4 minutes** on 4 cores, against the job's
-`timeout-minutes: 45` on a 2–4 vCPU runner. That is before `semantics::fuzz_deep` (~4 min projected) and
-the `test_stats.rs` instruments that hard-assert on a corpus CI never fetches. The two blockers already
+`timeout-minutes: 45` on a 2–4 vCPU runner. That is before `semantics::fuzz_deep` (~4 min projected). The two blockers already
 in this file are joined by this one, and it is the one that costs 45 minutes of runner time to discover.
-**Fix the floor, make the stats instruments skip on an unfetched corpus the way `test_corpus.rs` does,
-and raise the timeout with measured headroom — before the human `git mv`.**
+**Fix the floor and raise the timeout with measured headroom — before the human `git mv`.**
 
 ### The battery pays a 6.1× debug tax for identical assertions
 
@@ -832,19 +843,22 @@ isolated target dir, **1.6 s warm**), so the compile-rot risk flagged earlier is
 realised. `scripts/seed-fuzz-corpus.rs` writes 1,416 files / 5.7 MB into each of three corpora in 2 s,
 but it globs `.Rtypes` under `crates/` where there are **0** — all 11 `.Rtypes` (and 33 `.exports`) live
 in the top-level `types/`. So it seeds **zero stub files**, and zero of the 1,967 mined
-`corpus-legacy/*.R.corpus` programs, and never looks at `corpus/`. Its own doc comment ("plus the shipped
+`programs/*.R.corpus` programs, and never looks at `corpus/`. Its own doc comment ("plus the shipped
 stubs") and the testing page repeating it are both false. `fuzz/corpus`, `fuzz/artifacts` and
 `fuzz/Cargo.lock` are gitignored and no job persists them, so every run restarts from the same seeds and
 rediscovers the same shallow frontier. `REGRESSIONS` exists in `format` (21) and `semantics` (2), none in
 `syntax` or `ide`, and both constants were last modified ~60 commits ago — the pinning path works
 (`format` 0.12 s, `semantics` 0.94 s) and is simply not being fed. In value order: persist the corpus,
-fix the seeder to read `types/` and `corpus-legacy/`, and add the 1.6 s `cargo check` of `fuzz/` to the
-gate.
+fix the seeder to read `types/` and `crates/syntax/tests/programs/`, and add the 1.6 s `cargo check` of `fuzz/` to the
+gate. The gitignored `fuzz/Cargo.lock` is also a trap: a fresh resolution can pick a `salsa-macro-rules`
+that does not match the exactly-pinned `salsa`, and `semantics` then fails to compile inside `fuzz/`
+(`missing hash in implementation` on every interned struct). Commit that lockfile, or seed it with
+`cargo update --precise` from the workspace lock.
 
 ### The one failure mode fuzzing exists to catch is the one that prints no input
 
 `catch_unwind` counts: syntax **1**, format **1**, semantics **2**, ide **0** — and in `syntax`/`format`
-the single wrapper is on the legacy-corpus arm only. Every `assert!` in `check_parse_invariants` and
+the single wrapper is on the program-corpus arm only. Every `assert!` in `check_parse_invariants` and
 `check_format_invariants` embeds `{input:?}`, so assertion failures replay fine; a genuine **panic**
 inside the generative arms prints a backtrace with **no input**, and a stack overflow (a live risk the
 harness itself acknowledges with `deep_nesting_is_refused_not_fatal`) aborts printing nothing.
@@ -896,14 +910,6 @@ job repeats the defect, so `fuzz_deep` never runs either. The widened commands a
 `.github/pending-ci.yml` and need a human with `workflow` scope to move the file.
 
 Two blockers before that move is safe, both agent-side:
-
-- Activating the staged file **reds the extended job immediately**: the five instruments in
-  `legacy/differential/tests/test_stats.rs` hard-assert on a corpus CI never fetches, unlike every
-  other corpus-dependent test, which skips with a note (the pattern is in `test_corpus.rs`). Make
-  them skip the same way.
-- The fuzz doctrine's own claim — "a bounded pass runs in the default test suite so CI fuzzes on
-  every change" in `decisions.md`, and the testing page by implication — is false until the move
-  lands. Correct the wording, or land the move first.
 
 ### The default fuzz pass spends ~95% of its time re-parsing the shipped stubs
 
@@ -975,8 +981,7 @@ there. This replaces four copies with one; it is not a new abstraction.
 
 ### Seeds are hand-maintained while 1183 fixture sources sit unused, and the reader is dead code
 
-`syntax::testing::parse_fixture_files` is public with zero callers — its doc comment advertises the
-cross-stack differential harness, retired with the identity-parity program. Meanwhile the batteries
+`syntax::testing::parse_fixture_files` is public with zero callers outside its module. Meanwhile the batteries
 seed from 81 hand-written strings and never see the 1183 fixture cases, the richest R corpus in the
 repo and the one that grows with every slice. Seed the `syntax` and `format` batteries from it, delete
 the three `SEEDS` lists (~110 lines), and keep hand seeds only where they encode something fixtures do
@@ -1031,7 +1036,7 @@ directly — but nothing observable exists for it today.
 
 ### No witness measures one file with many top-level items
 
-`stats_witness` is corpus-wide, i.e. many files. The shape that hid the known quadratic — one file,
+The `test_perf.rs` witness is corpus-wide, i.e. many files. The shape that hid the known quadratic — one file,
 many annotated items — is measured by nothing. It is linear today: 100/400/1600 items cost
 0.24/0.65/3.36 s, i.e. 2.43/1.62/2.10 ms per item. One assertion that ms-per-item at 1600 stays within
 ~2× of ms-per-item at 200 is the only cheap guard against the highest-severity performance class this
@@ -1519,7 +1524,7 @@ measured the competition). The accuracy fixes landed; what remains is below.
 **Documentation that is still wrong (verified, not yet fixed):** `reference.md` documents a
 rest-parameter spelling (`...items`) that never parses, and cites `contributing/design/open-questions.md`
 — a published contract pointing at an unpublished file; `stdlib-stubs.md` names six symbols
-(`BuiltinKind`, `parse_surface_type`, …) that exist only in the frozen legacy tree, and puts `...`
+(`BuiltinKind`, `parse_surface_type`, …) that exist nowhere in the shipping code, and puts `...`
 last in `paste` when the real declaration has it first (the position is load-bearing);
 `architecture.md` still uses internal gate vocabulary; `development.md`'s re-bless command omits
 `ROUGHLY_BLESS=1`; the `stub` diagnostic code and the SCREAMING_SNAKE naming exemption are emitted
@@ -1681,7 +1686,12 @@ below, ranked by how often a real user hits it.
 
 - (Stub completeness audit CLOSED by the export-manifest layer — see the decision record and `stdlib-stubs.md` §Export manifests. `uname`-style reports remain user-project names: the fix stays a project stub or the DESCRIPTION-import tolerance.)
 
-- **Legacy ide fixture port DONE** (fixtures directive, first half): 81 cases ported into `crates/ide/tests/ide/*_ported.R.test` (real legacy corpus: 134 cases / 206 operation sites; ~36 already covered; 15 skipped as genuinely multi-file — the harness is one `SourceFile` per case; deliberate improvements blessed). Cross-file navigation coverage now rests on the LSP tests — consider a multi-file fixture harness extension if that surface grows.
+- **`Unknown` is both the gradual top and the recursion fixpoint's seed.** Because the fixpoint starts
+  every member at `Unknown`, a join must keep the other side of an `Unknown` branch or recursion never
+  sharpens — so `if (c) 1L else untyped()` is `integer`, not `integer | Unknown`, and the reference says
+  so. Absorbing `Unknown` at joins (the gradual reading) broke recursion convergence when tried. The
+  clean fix is a separate bottom for the seed, so a join can absorb a genuine `Unknown` while the
+  fixpoint starts from nothing.
 
 - (Design forks all DECIDED — two-flexible comparison stays unconstrained without a third constraint kind, union compatibility commits flexibles at first use in program order, NAMESPACE bare-resolution stays ungated; decisions.md has the three records.)
 - **FIXED — an annotation in a call's argument list is now reported.** It attached to nothing and
@@ -1852,7 +1862,7 @@ The third of three independent fuzzing reviews, asking the complementary questio
 not *what inputs do we feed* or *what does it cost*, but **what can be wrong while every arm stays
 green**. Method: injected-bug experiments against a byte-copy of `crates/` built as its own workspace,
 so the shipping `test_fuzz` targets ran verbatim against mutated code. Baseline and restored-copy
-controls both green. Oracle corpus = 1,967 mined legacy-corpus programs + 1,192 fixture sources.
+controls both green. Oracle corpus = 1,967 mined program-corpus programs + 1,192 fixture sources.
 
 ### FIXED — the type renderer printed types that could not be written back, and one that meant something else
 
@@ -1939,7 +1949,7 @@ Both halves are fixed and the oracle's allowlist is now empty (527 schemes, 0 un
 exactly what a stale or off-by-one `raw()` range produces — preserves kinds perfectly, and R is
 case-sensitive, so this is a miscompile. Injected bug: uppercase the first letter of IDENT tokens ≥4
 chars. The shipping `format` battery passed **8/8**, including `fixture_sources_hold_invariants` and
-`legacy_corpus_holds_invariants`; a `(kind, text)` oracle caught **1,723 of 2,731** sources. Pristine
+`program_corpus_holds_invariants`; a `(kind, text)` oracle caught **1,723 of 2,731** sources. Pristine
 baseline 0 violations, cost **0.1 s** for all 3,159 sources — cheaper than the check it replaces.
 (Control: a mutant dropping the `L` suffix *was* caught, because `1L`→`1` crosses a kind boundary. The
 blind spot is precisely within-kind.) Worth having alongside it: **format ⇒ semantics agreement**,
@@ -2341,8 +2351,7 @@ or allocator contention, and the fix would be a cap rather than a different form
 ## Open — structure & performance
 
 - **Diagnostics-phase remainder:** the duplicate-binding/duplicate-type O(files²) walk is killed (see the ledger); the post-burst workspace revalidate (~1.1s at 713K LoC, user measurement) should shrink too — every file's diagnostics used to depend on every file's ranges through those walks, so any edit re-executed all of them — but re-measure on the real workspace to confirm before closing.
-- **The rewrite is complete and shipping** (decisions.md "target architecture" record): every phase gate holds — corpus/round-trip/acceptance/fuzzing, semantic parity via the differentials, cutover suites, perf + memory + keystroke budgets, order-independent fixpoint, multi-core stress. The legacy crates stay in-tree **by user directive** until the user asks for the final deletion sweep; when that comes, migrate the remaining fixture data out of the legacy trees and archive a final corpus parity report first.
-- **Parallel cold pass: measure on real hardware before optimizing further.** The investigation (`crates/roughly/examples/parallel_probe.rs` is the reproduction tool) found: (a) the long-recorded "4 workers buy only 1.2x" was mostly a measurement artifact — this container's 4 vCPUs deliver only ~1.8x of lock-free native compute at 4 threads (~1.2x at 2), so no in-container parallel number is meaningful; (b) the one real structural serializer was `interface_sccs` demanding naming for every item inside one salsa query (25-51% of cold wall depending on package shape) — fixed by the CLI's parallel per-item naming warm before the fan-out (mgcv cold pass 0.99s → 0.80s even in the throttled container); (c) salsa's same-query blocking is negligible (53 blocks per 5,657 executions) and the interface DAG is wide (ggplot2: 1,198 items, depth 22), so no fixpoint-scheduling work is warranted until a real-hardware measurement says otherwise.
+- **Parallel cold pass: measure on real hardware before optimizing further.** The investigation (`crates/ry/examples/parallel_probe.rs` is the reproduction tool) found: (a) the long-recorded "4 workers buy only 1.2x" was mostly a measurement artifact — this container's 4 vCPUs deliver only ~1.8x of lock-free native compute at 4 threads (~1.2x at 2), so no in-container parallel number is meaningful; (b) the one real structural serializer was `interface_sccs` demanding naming for every item inside one salsa query (25-51% of cold wall depending on package shape) — fixed by the CLI's parallel per-item naming warm before the fan-out (mgcv cold pass 0.99s → 0.80s even in the throttled container); (c) salsa's same-query blocking is negligible (53 blocks per 5,657 executions) and the interface DAG is wide (ggplot2: 1,198 items, depth 22), so no fixpoint-scheduling work is warranted until a real-hardware measurement says otherwise.
 - **Coverage-guided fuzzing landed** (`fuzz/` crate, testing.md documents the workflow): libFuzzer targets `parse`, `format`, and `semantics` over the exported invariant batteries plus `scripts/seed-fuzz-corpus.rs` (a `cargo +nightly -Zscript` single-file script, like all of `scripts/`); the lint layer is folded into the semantics battery (everything-on config), closing the last unfuzzed stage. First sessions found and fixed nine formatter bugs and two splice-equivalence bugs (a middle ending mid-construct must refuse suffix reuse; an empty-suffix splice must not rebase the old end-of-file error) — all pinned in per-harness `REGRESSIONS` batteries. Remaining: a scheduled deep-fuzz run on real CI hardware, and an `llvm-cov` coverage report (recipe in testing.md; skipped in-container for disk).
 - CI: the widened whole-workspace workflow is staged in `.github/pending-ci.yml` — a human must `git mv` it into `.github/workflows/` (automated tokens lack workflow scope). Until then CI gates only the product crate's own suites; the workspace battery runs locally per slice. Authoritative perf numbers need the CI runner.
 
@@ -2364,62 +2373,6 @@ or allocator contention, and the fix would be a cap rather than a different form
 - **v1 SHIPPED and e2e-VERIFIED against real R** (`crates/repl` behind `roughly repl`; `contributing/design/repl.md` has the architecture, status, and the two pty-harness requirements): runtime-loaded R (no build-time link — the workspace builds R-less everywhere), reedline console inside the ReadConsole hook, lexer highlighting, conservative completeness with R's continuation as the safety net, SIGINT interrupt routing. The pty e2e suite (skip-if-no-R) runs green against real R — agent containers CAN install R (recipe in MEMORY.md short-term), so run `cargo test -p roughly --test test_repl_e2e` before REPL-touching changes, anywhere.
 - **Analysis-backed Tab completion SHIPPED** (first analysis rung; `contributing/design/repl.md` has the seam design): typed signatures for stdlib names, session bindings, `pkg::` exports, manifest names — `SessionCompleter` seam keeps the repl crate syntax-only, `AnalysisCompleter` in roughly runs `ide::completion` over the session-as-script. **Open — remaining rungs:** live-session facts (the R environment listing unioned into completions), pre-evaluation diagnostics on pending input, hover on the input line, graphics-device story (versioned mirror structs, see the design record). The headless runner is shipped.
 - **REPL Windows: real-machine smoke test pending.** The embedding is implemented (`contributing/design/repl.md` has the recipe: Rstart callbacks via R_DefParamsEx's version handshake, sibling-DLL preloading, RGui→LinkDLL switch, UserBreak+deferred interrupt pair) and compile/clippy-verified against x86_64-pc-windows-gnu — but no Windows machine with R has ever executed it. Smoke: `roughly repl` (prompt, evaluate, Ctrl-C, vi mode) and `roughly run` (output, exit 0/1). Known caveat to watch: terminal VT input handling in the editor layer.
-
-## FIXED — the `rofy` crate is deleted
-
-The user gave an explicit go for `rofy` alone, conditional on parity, and then asked for it. **Every
-other crate under `legacy/` still needs its own explicit go and stays in-tree until then** — see the
-note below on why this is not a precedent.
-
-Parity was established by reading both crates rather than assuming. `rofy`'s whole surface was
-multiline editing, command history with reverse search, an optional vi mode, syntax highlighting, a
-hinter, and a vi-aware prompt. `crates/repl` has every one — `LexerValidator`, `FileBackedHistory`,
-`reedline::Vi` behind `--keybindings vi`, `LexerHighlighter`, `DefaultHinter`, `RPrompt` — and exceeds
-them with Tab completion through a `ColumnarMenu` and history *persisted to a file* where `rofy` kept
-it in memory for the session. One deliberate difference: highlighting runs off ry's own lexer rather
-than tree-sitter, which is the better answer — one parser, not two.
-
-Nothing depended on it. The removal took the crate, the `rofy` and `publish-rofy` justfile recipes,
-the `--exclude rofy` in the staged CI and the justfile gate, and prose in `decisions.md`,
-`contributing/development.md` and `contributing/design/repl.md`. The R-`parse()` acceptance
-cross-check the old entry warned about never used `rofy` — `corpus_acceptance` compares against
-tree-sitter-r; `decisions.md` only said to run it locally "like `rofy`", an analogy now rewritten.
-
-**The payoff is the gate, as predicted.** The canonical invocation is now
-`cargo test --workspace --exclude zed_ry` — one exclusion, not two, and one fewer thing a future
-session gets wrong. Deleting the crate also dropped `extendr-api`, `extendr-engine` and `libR-sys`
-from the workspace (89 lines out of `Cargo.lock`), which removes the build-time dependency on a local
-R entirely.
-
-**This is not a precedent for the rest of `legacy/`, and the reason is measured.** `rofy` was a
-predecessor of a shipped component with a 266-line surface that could be read in full. `analysis-legacy`
-is different in kind: it holds **2,830 fixture cases** against the new stack's 1,192, and **the new
-code does not run a single one of them** — `legacy/fixtures` is a harness-only crate and
-`analysis-legacy/tests/test_fixtures.rs` drives those cases against the frozen oracle, with no
-new-stack test reading those directories. Case-name overlap is 15 of 138 for ide and 1 for the whole
-typecheck suite, so the corpus was reimplemented rather than ported. Name overlap understates
-behavioural overlap and should not be read as 2,830 cases of missing coverage — but it does establish
-that nothing has shown the new suites cover what those do.
-
-**The inputs are now mined, which is the part that transfers.** 1,967 distinct sources live in
-`crates/syntax/tests/corpus-legacy/` and run in the `syntax`, `format` and `semantics` invariant
-batteries (see the testing page). Expectations deliberately did **not** come with them: the naming
-suite renders binding-resolution trees and the type suites use an older notation, so bulk-blessing
-would encode today's behavior as the contract. What ran was measured rather than assumed — all 2,447
-extracted sources through `ry check`, **zero crashes and zero non-clean exits** — and the invariants
-pass on all of them, so this arm is a regression net rather than a bug-finder today.
-
-Two findings from the mining worth keeping. The frozen `type_syntax` suite stores **bare annotation
-bodies** without the `#:` marker, because that stack parsed the type grammar standalone; 287 of its 303
-cases therefore read as `expected a statement, found @` until the marker is prepended, which is a
-format difference and not a parser gap. And automated *semantic* mining has a high noise floor: the
-sources are fragments whose declaring context lives in the case's other files, so `@new Person` alone
-reports an unknown type. Adjudicating the type suites needs per-case context, not a bulk pass.
-
-What is left before deleting that directory is the **expectation** half: a differential triage
-emitting (id, source, frozen expectation, new rendering), bucketed by shape, adjudicated per suite
-against the type-system reference. Priority `naming` (513 cases, no new-stack counterpart at all),
-then typecheck, type_syntax, diagnostics, ide.
 
 ## Open — rename to `ry`: what is left
 
@@ -2548,3 +2501,4 @@ is moved once rather than renamed, so nobody loses their history.
 - **Editor:** hover quality (`name : TYPE`, overload notes, constraint display); annotation cursor features via re-lexing (hover/goto/completion in `#:` comments); insert-annotation code action (round-trips); unused fade-outs; formatter rewrite with `#:` block awareness; letrec naming (local recursive closures resolve).
 - **Engine & scheduling:** red-green core with per-symbol interface firewalls, SCC fixed point, tombstones, eviction, stacker-grown validation spine; durability tiers (open docs LOW, corpus HIGH; sound downgrade re-min through cutoff nodes); memoized completion index + `NamesGlobal`-valued symbol index (zero-copy reads); two-wave diagnostics publish + idle-time semantic wave + lossless preemption pairing + background prime; error-tolerant lowering ("a broken region reports its syntax error and nothing else"); differential correctness vs from-scratch oracle over adversarial edit streams, byte-exact, IDE features included; committed latency witnesses (at-rest reads ≤ 32 memos, size-independent post-keystroke walk, blast-radius exec counters); memory shape at scale (rope-only corpus inputs + on-demand trees, single-retained modules, boxed annotations: 1 GiB → ~300 MiB at 302K LoC) and O(open) keystroke validation (fold split over the `OpenFiles` seam, FxHash memo table: 11K → ~280 slots/keystroke); `analysis-stats` reports per-phase memory, typing-burst recompute counts, and walk attribution.
 - **Docs:** getting-started leads with a real bug; installation split out; typing guide + reference as contracts; architecture/structure/testing contributor pages; linter/configuration/stdlib-stubs pages current.
+- **`legacy/` deleted after a full port:** every case of the previous implementation's suites was rendered on the shipping stack, bucketed by agreement and adjudicated against the typing reference (18 real bugs fixed, the distinct cases ported into the fixture suites); its incrementality contracts became `crates/semantics/tests/test_incremental.rs` (which surfaced and fixed the missing per-name firewalls), its perf instruments the one `test_perf.rs` witness, and its 1,967 programs stay as inputs in `crates/syntax/tests/programs/`.

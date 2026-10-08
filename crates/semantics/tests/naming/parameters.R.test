@@ -1,0 +1,24 @@
+#==== parameters
+#---- function_parameter_referenced_in_body
+mirror <- function(x) x
+#++++
+# mirror
+  b0 x parameter 19..20
+  b1 mirror top-level 0..6
+  0..6 mirror <- b1
+  22..23 x -> b0
+
+#---- parameter_referenced_after_local_statement
+mirror <- function(x) {
+  helper <- 1L
+  x
+}
+#++++
+# mirror
+  b0 x parameter 19..20
+  b1 helper local 26..32
+  b2 mirror top-level 0..6
+  0..6 mirror <- b2
+  26..32 helper <- b1
+  41..42 x -> b0
+  unused helper 26..32

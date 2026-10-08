@@ -1,0 +1,554 @@
+#==== inferred_functions
+#---- identity_function
+mirror <- function(x) x
+#++++
+mirror: <T> fn(x: T) -> T
+0..6 warning[unused] `mirror` is assigned but never used.
+
+#---- two_parameter_function_returns_first_argument_type
+first <- function(x, y) x
+#++++
+first: <T, U> fn(x: T, y: U) -> T
+0..5 warning[unused] `first` is assigned but never used.
+
+#==== annotated_functions
+#---- compact_annotation_named_parameter_and_return
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+double_count
+#++++
+double_count: fn(count: integer) -> integer
+fn(count: integer) -> integer
+
+#---- compact_annotation_without_return_defaults_to_null
+#: fn(count: integer)
+log_count <- function(count) { }
+log_count
+#++++
+log_count: fn(count: integer) -> NULL
+fn(count: integer) -> NULL
+
+#---- expanded_annotation_with_optional_parameter
+#: @param count {integer}
+#: @param [label] {character}
+#: @return {integer}
+double_count <- function(count, label = NULL) count + count
+double_count(1L)
+double_count(1L, "units")
+#++++
+double_count: fn(count: integer, [label]: character) -> integer
+integer
+integer
+117..121 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+
+#---- higher_order_function_annotation
+#: @param render_count {fn(integer) -> character}
+#: @param count {integer}
+#: @return {character}
+apply_renderer <- function(render_count, count) { render_count(count) }
+#: fn(integer) -> character
+render_count <- function(count) "ok"
+apply_renderer(render_count, 1L)
+#++++
+apply_renderer: fn(render_count: fn(integer) -> character, count: integer) -> character
+render_count: fn(count: integer) -> character
+character
+
+#==== calls
+#---- annotated_named_parameter_accepts_named_argument
+#: fn(count: integer) -> integer
+mirror <- function(count) count
+mirror(count = 1L)
+#++++
+mirror: fn(count: integer) -> integer
+integer
+
+#---- annotated_identity_call
+#: fn(count: integer) -> integer
+mirror <- function(count) count
+mirror(1L)
+#++++
+mirror: fn(count: integer) -> integer
+integer
+
+#---- annotation_types_do_not_restrict_argument_names
+#: fn(integer) -> integer
+mirror <- function(value) value
+mirror(value = 1L)
+#++++
+mirror: fn(value: integer) -> integer
+integer
+
+#---- missing_required_argument
+mirror <- function(x) x
+mirror()
+#++++
+mirror: <T> fn(x: T) -> T
+T
+24..30 error[type-mismatch] this call supplies 0 arguments, but the function requires 1 — a required argument is missing
+
+#---- extra_argument
+mirror <- function(x) x
+mirror(1L, 2L)
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+35..37 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- non_variadic_annotated_function_still_rejects_surplus_arguments
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+double_count(1L, 2L)
+#++++
+double_count: fn(count: integer) -> integer
+integer
+96..98 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- call_argument_type_mismatch
+#: fn(integer) -> integer
+mirror <- function(value) value
+mirror("hello")
+#++++
+mirror: fn(value: integer) -> integer
+integer
+65..72 error[type-mismatch] expected `integer`, found `character`
+
+#---- calling_non_function
+value <- 1L
+value(2L)
+#++++
+value: integer
+Unknown
+12..17 error[type-mismatch] this has type `integer`, which is not a function — it cannot be called
+
+#==== named_argument_calls
+#---- inferred_function_accepts_named_argument
+mirror <- function(x) x
+mirror(x = 1L)
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+
+#---- inferred_function_accepts_named_arguments_out_of_order
+#: fn(count: integer, label: character) -> character
+describe <- function(count, label) label
+describe(label = "items", count = 2L)
+#++++
+describe: fn(count: integer, label: character) -> character
+character
+
+#---- unknown_named_argument_is_rejected
+mirror <- function(x) x
+mirror(y = 1L)
+#++++
+mirror: <T> fn(x: T) -> T
+T
+31..32 error[type-mismatch] this function has no parameter `y` — its named parameter is `x`
+
+#==== optional_parameters
+#---- inferred_default_makes_parameter_optional
+pad <- function(value, width = NULL) value
+pad(1L)
+#++++
+pad: <T, U> fn(value: T, [width]: U) -> T
+integer
+
+#---- inferred_default_parameter_can_still_be_supplied
+pad <- function(value, width = NULL) value
+pad(1L, 2L)
+#++++
+pad: <T, U> fn(value: T, [width]: U) -> T
+integer
+
+#---- optional_parameter_supplied_by_name
+#: fn(count: integer, [label]: character) -> integer
+double_count <- function(count, label = NULL) count + count
+double_count(1L, label = "units")
+#++++
+double_count: fn(count: integer, [label]: character) -> integer
+integer
+93..97 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+
+#---- omitting_required_parameter_is_rejected
+#: fn(count: integer, label: character) -> integer
+double_count <- function(count, label = NULL) count + count
+double_count(1L)
+#++++
+double_count: fn(count: integer, [label]: character) -> integer
+integer
+67..110 error[type-mismatch] this annotation declares `label` as required, but the function gives it a default — write `[label]` to declare it optional, or drop the default
+91..95 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+
+#---- expected_optional_requires_actual_default
+#: fn(count: integer, [label]: character) -> integer
+double_count <- function(count, label) count + count
+#++++
+double_count: fn(count: integer, label: character) -> integer
+53..65 warning[unused] `double_count` is assigned but never used.
+69..105 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
+
+#==== argument_coercions
+#---- scalar_argument_coerces_to_array_parameter
+#: fn(values: integer[]) -> integer[]
+keep <- function(values) values
+keep(1L)
+#++++
+keep: fn(values: integer[]) -> integer[]
+integer[]
+
+#---- named_map_argument_coerces_to_array_parameter
+#: fn(values: integer[]) -> integer[]
+keep <- function(values) values
+keep(c(foo = 1L, bar = 2L))
+#++++
+keep: fn(values: integer[]) -> integer[]
+integer[]
+
+#---- null_argument_accepted_for_nullable_parameter
+#: fn(label: character | NULL) -> NULL
+log_label <- function(label) NULL
+log_label(NULL)
+#++++
+log_label: fn(label: character | NULL) -> NULL
+NULL
+
+#---- value_argument_accepted_for_nullable_parameter
+#: fn(label: character | NULL) -> NULL
+log_label <- function(label) NULL
+log_label("items")
+#++++
+log_label: fn(label: character | NULL) -> NULL
+NULL
+
+#---- tuple_argument_coerces_to_array_like_list_parameter
+#: fn(items: list[integer]) -> NULL
+consume <- function(items) NULL
+consume(list(1L, 2L))
+#++++
+consume: fn(items: list[integer]) -> NULL
+NULL
+
+#---- record_argument_coerces_to_map_like_list_parameter
+#: fn(items: list[named: integer]) -> NULL
+consume <- function(items) NULL
+consume(list(foo = 1L, bar = 2L))
+#++++
+consume: fn(items: list[named: integer]) -> NULL
+NULL
+
+#---- nullable_parameter_rejects_wrong_base_type
+#: fn(label: character | NULL) -> NULL
+log_label <- function(label) NULL
+log_label(1L)
+#++++
+log_label: fn(label: character | NULL) -> NULL
+NULL
+83..85 error[type-mismatch] expected `character | NULL`, found `integer`
+
+#---- array_argument_rejected_for_scalar_parameter
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+double_count(c(1L, 2L))
+#++++
+double_count: fn(count: integer) -> integer
+integer
+92..101 error[type-mismatch] expected `integer`, found `integer[]`
+
+#==== function_arguments
+#---- annotated_function_accepted_where_positional_interface_expected
+#: fn(transform: fn(integer) -> character, count: integer) -> character
+apply_transform <- function(transform, count) transform(count)
+
+#: fn(value: integer) -> character
+render <- function(value) "ok"
+apply_transform(render, 1L)
+#++++
+apply_transform: fn(transform: fn(integer) -> character, count: integer) -> character
+render: fn(value: integer) -> character
+character
+
+#---- function_argument_with_wrong_return_is_rejected
+#: fn(transform: fn(integer) -> character) -> character
+apply_transform <- function(transform) transform(1L)
+
+#: fn(value: integer) -> integer
+render <- function(value) value
+apply_transform(render)
+#++++
+apply_transform: fn(transform: fn(integer) -> character) -> character
+render: fn(value: integer) -> integer
+character
+191..197 error[type-mismatch] this function must return `character`, but it returns `integer`
+
+#==== parameter_coercions
+#---- whole_number_literal_accepted_at_integer_parameter
+#: fn(n: integer) -> integer
+f <- function(n) n
+f(10)
+#++++
+f: fn(n: integer) -> integer
+integer
+
+#---- fractional_literal_rejected_at_integer_parameter
+#: fn(n: integer) -> integer
+f <- function(n) n
+f(2.5)
+#++++
+f: fn(n: integer) -> integer
+integer
+50..53 error[type-mismatch] expected `integer`, found `double`
+
+#---- double_variable_rejected_at_integer_parameter
+#: fn(n: integer) -> integer
+f <- function(n) n
+x <- 10
+f(x)
+#++++
+f: fn(n: integer) -> integer
+x: double
+integer
+58..59 error[type-mismatch] expected `integer`, found `double`
+
+#---- integer_widens_at_double_parameter
+#: fn(x: double) -> double
+g <- function(x) x
+g(1L)
+#++++
+g: fn(x: double) -> double
+double
+
+#---- integer_vector_widens_at_double_vector_parameter
+#: fn(x: double[]) -> double
+h <- function(x) 1.0
+h(c(1L, 2L))
+#++++
+h: fn(x: double[]) -> double
+double
+
+#---- double_rejected_at_integer_annotation
+#: integer
+value <- 1.5
+#++++
+value: integer
+11..16 warning[unused] `value` is assigned but never used.
+20..23 error[type-mismatch] expected `integer`, found `double`
+
+#---- whole_number_literal_accepted_at_integer_annotation
+#: fn(n: integer, m: integer) -> integer
+add2 <- function(n, m) n
+add2(3, m = 4)
+#++++
+add2: fn(n: integer, m: integer) -> integer
+integer
+
+#==== annotation_name_matching
+#---- swapped_names_align_to_formals
+#: fn(a: integer, b: character) -> integer
+swapped <- function(b, a) b + 1L
+#++++
+swapped: fn(b: character, a: integer) -> integer
+43..50 warning[unused] `swapped` is assigned but never used.
+69..70 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- swapped_names_accept_when_body_matches
+#: fn(a: integer, b: character) -> character
+swapped <- function(b, a) b
+swapped(a = 1L, b = "x")
+#++++
+swapped: fn(b: character, a: integer) -> character
+character
+
+#---- annotation_renaming_a_parameter_is_rejected
+#: fn(count: integer) -> integer
+f <- function(n) n
+#++++
+f: fn(n: integer) -> integer
+33..34 warning[unused] `f` is assigned but never used.
+38..51 error[type-mismatch] this annotation names a parameter `count`, but the function does not define one — annotation parameter names must match the function's parameter names
+
+#---- positional_annotation_needs_no_names
+#: fn(integer) -> integer
+f <- function(n) n
+f(1L)
+#++++
+f: fn(n: integer) -> integer
+integer
+
+#==== early_return
+#---- early_return_joins_the_trailing_value
+f <- function() {
+  if (4 > 2) {
+    return("foo")
+  }
+  5
+}
+#++++
+f: fn() -> character | double
+0..1 warning[unused] `f` is assigned but never used.
+
+#---- bare_return_contributes_null
+f <- function(x) {
+  if (x) {
+    return()
+  }
+  1L
+}
+#++++
+f: fn(x: logical) -> integer | NULL
+0..1 warning[unused] `f` is assigned but never used.
+
+#---- return_value_errors_still_surface
+f <- function() {
+  return(1L + "x")
+}
+#++++
+f: Unknown
+0..1 warning[unused] `f` is assigned but never used.
+32..35 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- return_inside_a_loop_exits_the_function
+f <- function() {
+  for (item in c(1L, 2L)) {
+    return(item)
+  }
+  NULL
+}
+#++++
+f: fn() -> integer | NULL
+0..1 warning[unused] `f` is assigned but never used.
+
+#==== switch_calls
+#---- switch_branches_union_with_null_without_default
+describe <- function(x) {
+  switch(x, a = 1L, b = "two")
+}
+#++++
+describe: <T> fn(x: T) -> integer | character | NULL
+0..8 warning[unused] `describe` is assigned but never used.
+
+#---- switch_default_branch_removes_null
+describe <- function(x) {
+  switch(x, a = 1L, "fallback")
+}
+#++++
+describe: <T> fn(x: T) -> integer | character
+0..8 warning[unused] `describe` is assigned but never used.
+
+#---- switch_branches_are_typechecked
+f <- function(x) {
+  switch(x, a = 1L + "oops")
+}
+#++++
+f: Unknown
+0..1 warning[unused] `f` is assigned but never used.
+40..46 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#==== variadic_functions
+#---- dots_formal_infers_a_rest_parameter
+join <- function(...) NULL
+#++++
+join: fn(...: Any) -> NULL
+0..4 warning[unused] `join` is assigned but never used.
+
+#---- pre_dots_formal_fills_positionally_and_surplus_is_absorbed
+wrap <- function(x, ...) x + 1L
+wrap(1L, "extra", TRUE)
+#++++
+wrap: <T: numeric> fn(x: T, ...: Any) -> T
+integer
+
+#---- pre_dots_formal_still_matches_by_name
+wrap <- function(x, ...) x
+wrap(x = 1L, "extra")
+#++++
+wrap: <T> fn(x: T, ...: Any) -> T
+integer
+
+#---- post_dots_formal_is_matched_by_name
+f <- function(..., sep) sep
+f("a", "b", sep = 1L)
+#++++
+f: <T> fn(...: Any, sep: T) -> T
+integer
+
+#---- post_dots_formal_is_not_filled_positionally
+f <- function(..., sep) sep
+f("a", 1L)
+#++++
+f: <T> fn(...: Any, sep: T) -> T
+T
+28..29 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- unmatched_keyword_is_absorbed_by_the_rest
+f <- function(...) NULL
+f(anything = 1L, other = "x")
+#++++
+f: fn(...: Any) -> NULL
+NULL
+
+#---- variadic_annotation_now_checks_against_the_body
+#: fn(x: character, ...: character) -> character
+wrap <- function(x, ...) x
+wrap("a", "b", "c")
+#++++
+wrap: fn(x: character, ...: character) -> character
+character
+
+#---- variadic_annotation_element_is_enforced_at_calls
+#: fn(...: character) -> NULL
+f <- function(...) NULL
+f("a", 1L)
+#++++
+f: fn(...: character) -> NULL
+NULL
+61..63 error[type-mismatch] expected `character`, found `integer`
+
+#---- annotation_rest_position_must_match_the_formals
+#: fn(...: Any, x: integer) -> integer
+f <- function(x, ...) x
+#++++
+f: fn(x: integer, ...: Any) -> integer
+39..40 warning[unused] `f` is assigned but never used.
+44..62 error[type-mismatch] expected `fn(...: Any, x: integer) -> integer`, found `fn(x: integer, ...: Any) -> integer`
+
+#---- fixed_annotation_on_a_variadic_function_is_rejected
+#: fn(x: integer) -> integer
+f <- function(x, ...) x
+#++++
+f: fn(x: integer, ...: Any) -> integer
+29..30 warning[unused] `f` is assigned but never used.
+34..52 error[type-mismatch] expected `fn(x: integer) -> integer`, found `fn(x: integer, ...: Any) -> integer`
+
+#==== constrained_binders
+#---- numeric_binder_is_writable_and_enforced
+#: <T: numeric> fn(values: T) -> T
+passthrough <- function(values) values
+kept <- passthrough(2.5)
+rejected <- passthrough("text")
+#++++
+passthrough: <T: numeric> fn(values: T) -> T
+kept: double
+rejected: Unknown
+74..78 warning[unused] `kept` is assigned but never used.
+99..107 warning[unused] `rejected` is assigned but never used.
+123..129 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- numeric_binder_accepts_numeric_arguments
+#: <T: numeric> fn(values: T) -> T
+passthrough <- function(values) values
+passthrough(2.5)
+passthrough(1L)
+#++++
+passthrough: <T: numeric> fn(values: T) -> T
+double
+integer
+
+#---- forall_binder_takes_the_same_constraint
+#: @forall T: numeric
+#: @param values {T}
+#: @return {T}
+passthrough <- function(values) values
+passthrough(3.5)
+#++++
+passthrough: <T: numeric> fn(values: T) -> T
+double

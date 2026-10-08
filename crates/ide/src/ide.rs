@@ -12,13 +12,14 @@
 //! project-defined global name), and every feature is a projection of that
 //! target's occurrence list.
 
+use semantics::check::ItemCheck;
 use semantics::diagnostics::TypeRenderer;
 use semantics::hir::{Argument, ExprId, ExpressionKind};
 use semantics::naming::{BindingId, BindingKind};
-use semantics::types::{FunctionType, Ty, TyKind, TypeScheme};
+use semantics::types::{FunctionType, Ty, TyKind, TypeScheme, contains_inference_var};
 use semantics::{
-    Db, Item, ItemKind, ProjectFiles, SourceFile, item_annotation_syntax, item_check, item_hir,
-    item_name_range, item_naming, item_node, item_tree, package_definitions,
+    Db, Item, ItemKind, ProjectFiles, SourceFile, global_scheme, item_annotation_syntax,
+    item_check, item_hir, item_name_range, item_naming, item_node, item_tree, package_definitions,
 };
 use syntax::{TextRange, TextSize};
 
@@ -132,31 +133,39 @@ pub fn hover(
         .find_map(|id| check.expression_types.get(&id).map(|ty| (id, *ty)))?;
 
     let mut renderer = TypeRenderer::default();
-    let (line, definition) = match &hir.expression(expression).kind {
+    let (lines, definition) = match &hir.expression(expression).kind {
         ExpressionKind::NameRef(name) => {
             // The item's own top-level name renders the EXPORTED scheme —
             // the single exported truth — not the initializer's checked
             // type: a `#: @new` declaration brands the scheme even when the
             // initializer's own type is Unknown.
-            let exported = item_naming(db, position.item).as_ref().and_then(|naming| {
+            let naming = item_naming(db, position.item).as_ref();
+            let exported = naming.and_then(|naming| {
                 let binding = naming.resolutions.get(&expression)?;
                 (naming.bindings.get(binding)?.kind == BindingKind::TopLevel).then_some(())?;
-                check.scheme.as_ref()
+                check.scheme.clone()
             });
+            // A use of another definition checked against an instantiation,
+            // whose variables carry no binder and have lost their
+            // constraints; the scheme it instantiated says what it accepts.
+            let referenced = || {
+                naming.filter(|naming| naming.non_locals.contains_key(&expression))?;
+                contains_inference_var(db, ty).then_some(())?;
+                referenced_scheme(db, files, name, &check, expression)
+            };
             // The whole scheme, binders included: rendering only the body
             // drops the `<T>` prefix, so a polymorphic function hovered as
             // `fn(x: T) -> T` left `T` unexplained — and disagreed with the
             // inlay hint for the same binding, which renders the scheme.
-            let rendered = match exported {
-                Some(scheme) => renderer.render_scheme(db, scheme),
-                None => renderer.render(db, ty),
-            };
+            let scheme = exported
+                .or_else(referenced)
+                .unwrap_or_else(|| TypeScheme::monomorphic(ty));
             (
-                format!("{name}: {rendered}"),
+                hover_lines(db, name, &scheme),
                 hover_definition(db, files, position.item, expression, name),
             )
         }
-        _ => (renderer.render(db, ty), None),
+        _ => (vec![renderer.render(db, ty)], None),
     };
 
     // Expression nodes may swallow trailing trivia; the hover highlight must
@@ -167,9 +176,42 @@ pub fn hover(
     );
     Some(Hover {
         range,
-        lines: vec![line],
+        lines,
         definition,
     })
+}
+
+/// `name: TYPE`, with a function's parameters one per line once the
+/// signature is too long to read on one.
+fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> {
+    const WIDTH: usize = 80;
+    let mut renderer = TypeRenderer::default();
+    let line = format!("{name}: {}", renderer.render_scheme(db, scheme));
+    let TyKind::Function(function) = scheme.body.kind(db) else {
+        return vec![line];
+    };
+    if line.chars().count() <= WIDTH {
+        return vec![line];
+    }
+    let mut renderer = TypeRenderer::default();
+    let binders = renderer
+        .render_binder_prefix(&scheme.binders)
+        .map(|prefix| format!("{prefix} "))
+        .unwrap_or_default();
+    let (label, parameters) =
+        render_signature(db, &mut renderer, format!("{name}: {binders}"), function);
+    let (Some(first), Some(last)) = (parameters.first(), parameters.last()) else {
+        return vec![line];
+    };
+    let mut lines = vec![label[..usize::from(first.start())].to_owned()];
+    for parameter in &parameters {
+        lines.push(format!(
+            "  {},",
+            &label[usize::from(parameter.start())..usize::from(parameter.end())]
+        ));
+    }
+    lines.push(label[usize::from(last.end())..].to_owned());
+    lines
 }
 
 /// Where the hovered name-use is defined: a slot's binding site, the global
@@ -224,7 +266,21 @@ fn global_hover_definition(
     name: &str,
     own_item: Option<Item<'_>>,
 ) -> Option<HoverDefinition> {
-    let declaring = package_definitions(db, files)
+    let declaring = declaring_item(db, files, name).or(own_item)?;
+    let node = item_node(db, declaring)?;
+    let range = item_name_range(db, declaring).unwrap_or_else(|| node.text_range());
+    Some(HoverDefinition::Global {
+        target: NavigationTarget {
+            file: *declaring.file(db),
+            range,
+        },
+    })
+}
+
+/// The project item that defines a global `name`: the package winner, or
+/// the first declaring item across the project.
+fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Option<Item<'db>> {
+    package_definitions(db, files)
         .get(name)
         .copied()
         .or_else(|| {
@@ -235,15 +291,28 @@ fn global_hover_definition(
                 })
             })
         })
-        .or(own_item)?;
-    let node = item_node(db, declaring)?;
-    let range = item_name_range(db, declaring).unwrap_or_else(|| node.text_range());
-    Some(HoverDefinition::Global {
-        target: NavigationTarget {
-            file: *declaring.file(db),
-            range,
-        },
-    })
+}
+
+/// The scheme a non-local `name` refers to: the defining item's exported
+/// scheme, or the stub declaration the call committed (the last candidate, by
+/// corpus convention the most general, when none did).
+fn referenced_scheme<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: &str,
+    check: &ItemCheck<'db>,
+    reference: ExprId,
+) -> Option<TypeScheme<'db>> {
+    if let Some(item) = declaring_item(db, files, name) {
+        return Some(global_scheme(db, item));
+    }
+    let candidates = semantics::stubs::stubs(db)?.schemes.get(name)?;
+    let index = check
+        .selected_overloads
+        .get(&reference)
+        .copied()
+        .unwrap_or(candidates.len().saturating_sub(1));
+    candidates.get(index).cloned()
 }
 
 /// Per-phase internal facts at the cursor, for hosts with debug hover
@@ -616,6 +685,26 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     }
 
     let function = &function?;
+    // An open callee renders the scheme it instantiates, binders and
+    // constraints included, rather than variables nothing binds.
+    let naming = item_naming(db, position.item).as_ref();
+    if let Some(name) = callee_name(hir, callee)
+        && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
+        && contains_inference_var(db, Ty::new(db, TyKind::Function(function.clone())))
+        && let Some(files) = ProjectFiles::try_get(db)
+        && let Some(scheme) = referenced_scheme(db, files, &name, &check, callee)
+    {
+        return Some(SignatureHelp {
+            signatures: vec![overload_signature(
+                db,
+                &scheme,
+                arguments,
+                hir,
+                position.relative,
+            )],
+            active_signature: 0,
+        });
+    }
     let mut renderer = TypeRenderer::default();
     let (label, parameters) = render_signature(db, &mut renderer, String::new(), function);
     let active_parameter = active_parameter(
@@ -1807,7 +1896,8 @@ fn s4_argument(
 }
 
 /// The class-name strings of a `setMethod` signature: a single string, or
-/// the string elements of a `c(...)` vector.
+/// the string elements of a `c(...)`, `list(...)` or `signature(...)` call,
+/// named (`x = "Person"`) or not.
 fn s4_signature_strings(signature: &syntax::SyntaxNode) -> Vec<syntax::SyntaxNode> {
     if is_string_literal(signature) {
         return vec![signature.clone()];
@@ -1820,7 +1910,7 @@ fn s4_signature_strings(signature: &syntax::SyntaxNode) -> Vec<syntax::SyntaxNod
         return arguments
             .children()
             .filter(|child| child.kind() == syntax::SyntaxKind::ARGUMENT)
-            .filter_map(|argument| argument.children().next())
+            .filter_map(|argument| argument.children().last())
             .filter(is_string_literal)
             .collect();
     }
@@ -2674,10 +2764,9 @@ fn render_signature<'db>(
     (label, parameters)
 }
 
-/// The rendered parameter the cursor's argument targets (legacy algorithm:
-/// matching works in slot space — positionals, then named, the rest slot
-/// last — and translates to the display order, which interleaves `...` at
-/// its formal position).
+/// The rendered parameter the cursor's argument targets. Matching works in
+/// slot space — positionals, then named, the rest slot last — and translates
+/// to the display order, which interleaves `...` at its formal position.
 fn active_parameter(
     db: &dyn Db,
     function: &FunctionType<'_>,

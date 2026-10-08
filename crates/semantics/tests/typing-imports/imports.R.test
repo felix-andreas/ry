@@ -46,6 +46,7 @@ Counter: Unknown
 library(jsonlite)
 make <- function(d) toJSON(d)
 #++++
+Any
 make: <T> fn(d: T) -> Unknown
 
 #---- attaching_the_project_itself_buys_no_tolerance
@@ -56,6 +57,7 @@ make: <T> fn(d: T) -> Unknown
 library(tallyr)
 f <- function(x) zzframboz(x)
 #++++
+Any
 f: <T> fn(x: T) -> Unknown
 291..300 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
 
@@ -64,6 +66,7 @@ f: <T> fn(x: T) -> Unknown
 library(jsonlite)
 f <- function(x) zzframboz(x)
 #++++
+Any
 f: <T> fn(x: T) -> Unknown
 64..73 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
 
@@ -73,6 +76,7 @@ validate_url <- function(url) nchar(url) > 0L
 check_one <- function(url) validte_url(url)
 use_library_name <- function(x) expect_equal(x, x)
 #++++
+Any
 validate_url: <T> fn(url: T) -> logical
 check_one: <T> fn(url: T) -> Unknown
 use_library_name: <T> fn(x: T) -> T
@@ -87,6 +91,7 @@ library(stringr)
 shout <- function(x) str_to_upper(x)
 oops <- function(x) str_to_uper(x)
 #++++
+Any
 shout: <T> fn(x: T) -> Unknown
 oops: <T> fn(x: T) -> Unknown
 353..364 warning[unresolved] I could not resolve `str_to_uper` in this package, its imports, or builtins. Did you mean `str_to_upper`?
@@ -100,6 +105,7 @@ library(tidyverse)
 #: fn(frame: data.frame) -> integer
 wrong <- function(frame) frame |> filter(cyl > 4) |> mutate(ratio = 1)
 #++++
+Any
 wrong: fn(frame: data.frame) -> integer
 331..376 error[type-mismatch] expected `integer`, found `data.frame`
 
@@ -117,6 +123,7 @@ g: <T> fn(d: T) -> Unknown
 library(ggplot2)
 plot <- ggplot(mtcars, aes(x = mpg, y = wt)) + geom_point() + theme_minimal()
 #++++
+Any
 plot: ggplot
 
 #---- masked_aesthetics_are_not_unresolved
@@ -228,6 +235,7 @@ load: <T> fn(path: T) -> Unknown
 library(data.table)
 load <- function(path) fread(path)
 #++++
+Any
 load: fn(path: character) -> data.table
 
 #---- brackets_keep_the_class_through_chains

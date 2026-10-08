@@ -1,0 +1,66 @@
+#==== locals
+#---- local_assignment_introduces_fresh_binding
+#~~~~ R/main.R
+f <- function() {
+  value <- 1L
+  value
+}
+#++++
+== R/main.R
+f: fn() -> integer
+
+#---- local_rebinding_creates_fresh_binding
+#~~~~ R/main.R
+f <- function() {
+  value <- 1L
+  value <- "ok"
+  value
+}
+#++++
+== R/main.R
+f: fn() -> character
+20..25 warning[unused] `value` is assigned but never used.
+
+#---- assignment_rhs_sees_outer_parameter_before_local_rebinding
+#~~~~ R/main.R
+f <- function(x) {
+  x <- x
+  x
+}
+#++++
+== R/main.R
+f: <T> fn(x: T) -> T
+
+#---- local_assignment_shadows_top_level_binding
+#~~~~ R/main.R
+x <- 1L
+f <- function() {
+  x <- "ok"
+  x
+}
+#++++
+== R/main.R
+x: integer
+f: fn() -> character
+
+#---- local_assignment_rebinds_parameter_name
+#~~~~ R/main.R
+f <- function(x) {
+  x <- "ok"
+  x
+}
+#++++
+== R/main.R
+f: <T> fn(x: T) -> character
+
+#---- assignment_rhs_can_use_other_outer_binding_while_rebinding_different_name
+#~~~~ R/main.R
+x <- 1L
+f <- function(y) {
+  x <- y
+  x
+}
+#++++
+== R/main.R
+x: integer
+f: <T> fn(y: T) -> T

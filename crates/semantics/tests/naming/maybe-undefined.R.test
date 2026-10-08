@@ -1,0 +1,256 @@
+#==== loops
+#---- for_body_introduction_might_be_undefined_after_loop
+f <- function() {
+  for (item in list(1L)) {
+    value <- 1L
+  }
+  value
+}
+#++++
+# f
+  b0 item for-variable 25..29
+  b1 value local 49..54
+  b2 f top-level 0..1
+  0..1 f <- b2
+  33..37 list -> non-local deferred
+  49..54 value <- b1
+  67..72 value -> b1 maybe-undefined
+
+#---- while_body_introduction_might_be_undefined_after_loop
+f <- function() {
+  while (TRUE) {
+    x <- 1L
+  }
+  x
+}
+#++++
+# f
+  b0 x local 39..40
+  b1 f top-level 0..1
+  0..1 f <- b1
+  39..40 x <- b0
+  53..54 x -> b0 maybe-undefined
+
+#---- repeat_body_introduction_is_defined_after_loop
+f <- function() {
+  repeat {
+    x <- 1L
+  }
+  x
+}
+#++++
+# f
+  b0 x local 33..34
+  b1 f top-level 0..1
+  0..1 f <- b1
+  33..34 x <- b0
+  47..48 x -> b0
+
+#==== within_branch_resolves_locally
+#---- reference_within_if_body_resolves_to_local_binding
+f <- function() {
+  if (TRUE) {
+    x <- 1L
+    x
+  }
+}
+#++++
+# f
+  b0 x local 36..37
+  b1 f top-level 0..1
+  0..1 f <- b1
+  36..37 x <- b0
+  48..49 x -> b0
+
+#---- reference_within_for_body_resolves_to_local_binding
+f <- function() {
+  for (item in list(1L)) {
+    x <- 1L
+    x
+  }
+}
+#++++
+# f
+  b0 item for-variable 25..29
+  b1 x local 49..50
+  b2 f top-level 0..1
+  0..1 f <- b2
+  33..37 list -> non-local deferred
+  49..50 x <- b1
+  61..62 x -> b1
+
+#---- reference_within_while_body_resolves_to_local_binding
+f <- function() {
+  while (TRUE) {
+    x <- 1L
+    x
+  }
+}
+#++++
+# f
+  b0 x local 39..40
+  b1 f top-level 0..1
+  0..1 f <- b1
+  39..40 x <- b0
+  51..52 x -> b0
+
+#==== conditionals
+#---- if_branch_introduction_might_be_undefined_after_conditional
+f <- function(cond) {
+  if (cond) {
+    x <- 1L
+  }
+  x
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 x local 40..41
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..32 cond -> b0
+  40..41 x <- b1
+  54..55 x -> b1 maybe-undefined
+
+#---- else_branch_introduction_might_be_undefined_after_conditional
+f <- function(cond) {
+  if (cond) {
+    1L
+  } else {
+    x <- 2L
+  }
+  x
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 x local 58..59
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..32 cond -> b0
+  58..59 x <- b1
+  72..73 x -> b1 maybe-undefined
+
+#---- nested_if_introduction_might_be_undefined_after_outer_conditional
+f <- function(cond) {
+  if (cond) {
+    if (cond) {
+      x <- 1L
+    }
+  }
+  x
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 x local 58..59
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..32 cond -> b0
+  44..48 cond -> b0
+  58..59 x <- b1
+  78..79 x -> b1 maybe-undefined
+
+#---- nested_loop_introduction_might_be_undefined_after_conditional
+f <- function(cond) {
+  if (cond) {
+    for (item in list(1L)) {
+      x <- 1L
+    }
+  }
+  x
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 item for-variable 45..49
+  b2 x local 71..72
+  b3 f top-level 0..1
+  0..1 f <- b3
+  28..32 cond -> b0
+  53..57 list -> non-local deferred
+  71..72 x <- b2
+  91..92 x -> b2 maybe-undefined
+
+#---- no_warning_when_existing_name_is_assigned_in_all_branches
+f <- function(cond) {
+  x <- 0L
+  if (cond) {
+    x <- 1L
+  } else {
+    x <- 2L
+  }
+  x
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 x local 24..25
+  b2 f top-level 0..1
+  0..1 f <- b2
+  24..25 x <- b1
+  38..42 cond -> b0
+  50..51 x <- b1
+  73..74 x <- b1
+  87..88 x -> b1
+  unused x 24..25
+
+#---- no_warning_when_fresh_name_is_assigned_in_all_branches
+f <- function(cond) {
+  if (cond) {
+    x <- 1L
+  } else {
+    x <- 2L
+  }
+  x
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 x local 40..41
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..32 cond -> b0
+  40..41 x <- b1
+  63..64 x <- b1
+  77..78 x -> b1
+
+#---- else_branch_cannot_read_then_branch_introduction
+f <- function(cond) {
+  if (cond) {
+    x <- 1L
+  } else {
+    x
+  }
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 x local 40..41
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..32 cond -> b0
+  40..41 x <- b1
+  63..64 x -> non-local deferred
+  unused x 40..41
+
+#---- while_body_read_sees_write_around_back_edge
+f <- function(cond) {
+  while (cond) {
+    y <- x
+    x <- 1L
+  }
+  y
+}
+#++++
+# f
+  b0 cond parameter 14..18
+  b1 y local 43..44
+  b2 x local 54..55
+  b3 f top-level 0..1
+  0..1 f <- b3
+  31..35 cond -> b0
+  43..44 y <- b1
+  48..49 x -> b2 maybe-undefined
+  54..55 x <- b2
+  68..69 y -> b1 maybe-undefined

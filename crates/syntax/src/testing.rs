@@ -47,8 +47,8 @@ pub fn parse_fixture_files(suite_dir: &Path) -> Vec<FixtureFile> {
 ///
 /// The hand-written fixture sources are the highest-quality R in the repository
 /// — each one was written to exercise something — so the invariant batteries and
-/// the differential oracles want all of them, not the subset one crate happens
-/// to know about. Listing the suites here rather than in each harness is what
+/// the tree-sitter acceptance test want all of them, not the subset one crate
+/// happens to know about. Listing the suites here rather than in each harness is what
 /// keeps a newly added suite from being silently invisible to every battery.
 pub fn fixture_case_sources() -> Vec<(String, String)> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -83,22 +83,16 @@ const FIXTURE_SUITES: [&str; 13] = [
     "syntax/tests/tsr",
 ];
 
-/// Every source in the mined legacy corpus (`tests/corpus-legacy/*.R.corpus`),
-/// oldest-stack fixture cases kept for their *inputs* rather than their
-/// expectations.
-///
-/// The frozen stack's suites hold ~2,000 curated R edge cases whose expected
-/// output cannot be ported — it renders binding-resolution trees and a different
-/// type notation — but the programs themselves are the richest hand-written
-/// corpus in the repository, and nothing in the shipping crates ran a single one
-/// of them. They are wired into the invariant batteries instead, where no
+/// Every source in the program corpus (`tests/programs/*.R.corpus`): ~2,000
+/// curated R edge cases mined from an earlier implementation's fixture suites,
+/// kept for their inputs. They run through the invariant batteries, where no
 /// expectation is needed: never panic, stay deterministic, keep ranges in
 /// bounds, and do not lose code when formatting.
 ///
 /// Each file is `#---- <id>` followed by that case's source, up to the next
 /// header. Sources are deduplicated across suites.
-pub fn legacy_corpus_sources() -> Vec<(String, String)> {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus-legacy");
+pub fn program_corpus_sources() -> Vec<(String, String)> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs");
     let Ok(entries) = std::fs::read_dir(&directory) else {
         return Vec::new();
     };
@@ -233,6 +227,23 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     );
 }
 
+/// Splits a multi-file case at its `#~~~~ <path>` lines; a source without one
+/// is a single file and yields `None`.
+pub fn split_files(source: &str) -> Option<Vec<(String, String)>> {
+    if !source.lines().any(|line| line.starts_with("#~~~~ ")) {
+        return None;
+    }
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in source.split_inclusive('\n') {
+        if let Some(path) = line.strip_prefix("#~~~~ ") {
+            files.push((path.trim().to_owned(), String::new()));
+        } else if let Some((_, text)) = files.last_mut() {
+            text.push_str(line);
+        }
+    }
+    Some(files)
+}
+
 /// Whether a suite next to `suite_dir` holds `id`. One test binary drives
 /// several suites, so a focused run naming one case leaves every other suite
 /// matching nothing — and "this case lives next door" is the only thing that
@@ -272,9 +283,7 @@ fn collect_fixture_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Parse one fixture file. Public for harnesses that pre-filter which files
-/// to consume (the legacy-corpus differential skips multi-document
-/// composites the shared single-file format cannot express).
+/// Parse one fixture file.
 pub fn parse_fixture_file(path: &Path, text: String) -> FixtureFile {
     let mut cases = Vec::new();
     let mut group: Option<String> = None;

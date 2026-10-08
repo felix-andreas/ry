@@ -1,0 +1,40 @@
+#==== general
+#---- empty_input
+
+#++++
+clean
+
+#---- clean_input
+snake_name <- function(value_name) {
+  helper_name(value_name)
+  TRUE
+}
+#++++
+clean
+
+#---- short_true
+snake_name <- T
+#++++
+14..15 warning[boolean-shorthand] Use TRUE, not T, for Boolean values
+
+#---- assignment_equals
+snake_name = 1L
+#++++
+11..12 warning[assignment-operator] Use <-, not =, for assignment
+
+#---- trailing_comma
+snake_name(
+  value_name,
+)
+#++++
+24..25 error[trailing-comma] Unexpected comma after last argument
+
+#==== naming_style
+#---- snake_case_required_in_function
+snake_name <- function(badParam) {
+  badName <- 1L
+}
+#++++
+23..31 warning[naming-style] Parameter `badParam` should have snake_case name, e.g. bad_param
+23..31 warning[unused-parameter] parameter `badParam` is never used.
+37..44 warning[naming-style] Variable `badName` should have snake_case name, e.g. bad_name

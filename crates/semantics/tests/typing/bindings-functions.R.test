@@ -1,0 +1,36 @@
+#==== functions
+#---- character_binding
+label <- "ok"
+#++++
+label: character
+
+#---- constant_function_binding
+render <- function(count) "ok"
+#++++
+render: <T> fn(count: T) -> character
+
+#---- constant_integer_function_binding
+const_integer <- function(x) 1L
+#++++
+const_integer: <T> fn(x: T) -> integer
+
+#---- annotated_monomorphic_binding
+#: fn(integer) -> integer
+increment <- function(value) value
+#++++
+increment: fn(value: integer) -> integer
+
+#---- numeric_param_plus_literal
+increment <- function(x) x + 1L
+#++++
+increment: <T: numeric> fn(x: T) -> T
+
+#---- numeric_param_negate
+negate <- function(x) -x
+#++++
+negate: <T: numeric> fn(x: T) -> T
+
+#---- numeric_param_compare_literal
+is_positive <- function(x) x > 0L
+#++++
+is_positive: <T: numeric> fn(x: T) -> logical

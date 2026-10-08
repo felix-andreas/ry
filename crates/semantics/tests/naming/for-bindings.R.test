@@ -1,0 +1,95 @@
+#==== for_loops
+#---- for_variable_introduces_fresh_binding
+for (x in list(1L)) {
+  x
+}
+#++++
+# <statement>
+  b0 x for-variable 5..6
+  10..14 list -> non-local
+  24..25 x -> b0
+
+#---- loop_body_resolves_other_outer_binding
+y <- 1L
+for (x in list(1L)) {
+  y
+}
+#++++
+# y
+  b0 y top-level 0..1
+  0..1 y <- b0
+# <statement>
+  b0 x for-variable 5..6
+  10..14 list -> non-local
+  24..25 y -> non-local
+
+#---- assignment_inside_loop_rhs_sees_loop_binding
+x <- 0L
+for (x in list(1L)) {
+  x <- x
+  x
+}
+x
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  b0 x for-variable 5..6
+  10..14 list -> non-local
+  24..25 x <- b0
+  29..30 x -> b0
+  33..34 x -> b0
+# <statement>
+  0..1 x -> non-local
+
+#---- assignment_inside_loop_rhs_can_use_other_outer_binding
+y <- 0L
+for (x in list(1L)) {
+  y <- y
+  y
+}
+y
+#++++
+# y
+  b0 y top-level 0..1
+  0..1 y <- b0
+# <statement>
+  b0 x for-variable 5..6
+  b1 y top-level 24..25
+  10..14 list -> non-local
+  24..25 y <- b1
+  29..30 y -> b1 maybe-undefined
+  33..34 y -> b1
+  used top-level: y
+# <statement>
+  0..1 y -> non-local
+
+#---- nested_closure_inside_loop_captures_loop_binding
+for (x in list(1L)) {
+  g <- function() x
+}
+#++++
+# <statement>
+  b0 x for-variable 5..6
+  b1 g top-level 24..25
+  10..14 list -> non-local
+  24..25 g <- b1
+  40..41 x -> b0 captured
+
+#---- for_variable_shadows_outer_top_level_binding
+x <- 1L
+for (x in list(1L)) {
+  x
+}
+x
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  b0 x for-variable 5..6
+  10..14 list -> non-local
+  24..25 x -> b0
+# <statement>
+  0..1 x -> non-local

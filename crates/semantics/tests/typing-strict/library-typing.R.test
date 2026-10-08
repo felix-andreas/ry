@@ -1,0 +1,43 @@
+#==== strict_composition_with_library_typing
+#---- base_values_and_calls_are_strict_clean
+#~~~~ R/main.R
+flag <- T
+no_flag <- F
+half <- pi / 2
+count <- length(c(1L, 2L, 3L))
+width <- nchar("hello")
+ids <- seq_len(count)
+#++++
+== R/main.R
+flag: logical
+no_flag: logical
+half: double
+count: integer
+width: integer
+ids: integer[]
+
+#---- degraded_stub_yields_any_which_strict_tolerates
+#~~~~ R/main.R
+joined <- paste("a", "b", "c")
+reversed <- rev(c(1L, 2L, 3L))
+#++++
+== R/main.R
+joined: character
+reversed: integer[]
+
+#---- stub_call_is_clean_but_unsupported_construct_still_originates
+#~~~~ R/main.R
+ok <- length(c(1L, 2L))
+bad <- 1L %then% 2L
+#++++
+== R/main.R
+ok: integer
+bad: Unknown
+31..43 error[strict] strict mode: could not determine the type of `bad`; add a type annotation
+
+#---- shadowing_a_base_stub_is_strict_clean
+#~~~~ R/main.R
+length <- function(x) 0L
+#++++
+== R/main.R
+length: <T> fn(x: T) -> integer

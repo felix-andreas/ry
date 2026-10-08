@@ -1,0 +1,429 @@
+#==== annotations
+#---- checked_scalar_to_array_widening
+#: integer[]
+value <- 1L
+#++++
+value: integer[]
+
+#---- checked_tuple_list_to_array_list
+#: list[integer]
+value <- list(1L, 2L, 3L)
+#++++
+value: list[integer]
+
+#---- checked_record_list_to_array_list
+#: list[integer]
+value <- list(a = 1L, b = 2L)
+#++++
+value: list[integer]
+
+#---- checked_record_to_map_list
+#: list[named: integer]
+value <- list(a = 1L, b = 2L)
+#++++
+value: list[named: integer]
+
+#---- checked_scalar_into_nullable
+#: integer | NULL
+value <- 1L
+#++++
+value: integer | NULL
+
+#---- checked_mismatch
+#: integer
+value <- "foo"
+#++++
+value: integer
+20..25 error[type-mismatch] expected `integer`, found `character`
+
+#---- checked_array_not_into_scalar
+#: integer
+value <- c(1L, 2L)
+#++++
+value: integer
+20..29 error[type-mismatch] expected `integer`, found `integer[]`
+
+#---- checked_nullable_not_into_plain
+#: integer
+value <- if (TRUE) 1L
+#++++
+value: integer
+20..32 error[type-mismatch] expected `integer`, found `integer | NULL`
+
+#---- checked_double_into_integer_rejected
+#: integer
+value <- 1.5
+#++++
+value: integer
+20..23 error[type-mismatch] expected `integer`, found `double`
+
+#==== annotations_trust
+#---- trust_incompatible_value
+#: @trust integer
+value <- "foo"
+#++++
+value: integer
+
+#---- trust_function_type
+#: @trust fn(count: integer) -> character
+render_count <- function(x) x
+#++++
+render_count: fn(count: integer) -> character
+
+#---- trust_unknown_name
+#: @trust integer
+value <- some_unknown
+#++++
+value: integer
+27..39 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
+
+#---- trust_on_bare_expression
+#: @trust character
+1L
+#++++
+character
+
+#==== annotations_if_unknown
+#---- if_unknown_on_unknown_value
+#: @if-unknown integer
+value <- some_unknown
+#++++
+value: integer
+32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
+
+#---- if_unknown_on_known_type
+#: @if-unknown integer
+value <- 1L
+#++++
+value: Unknown
+32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+
+#---- if_unknown_on_known_matching_type
+#: @if-unknown integer
+value <- 5L
+#++++
+value: Unknown
+32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+
+#==== annotations_new
+#---- new_compatible
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+#++++
+person: Person
+
+#---- new_generic_fully_applied
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer>
+boxed <- list(value = 1L)
+#++++
+boxed: Box<integer>
+
+#---- new_generic_infers_missing_arguments
+#: @type Box<T> {list{value: T}}
+
+#: @new Box
+boxed <- list(value = 1L)
+#++++
+boxed: Box<integer>
+
+#---- new_on_unknown_type
+#: @new Person
+person <- list(name = "bob")
+#++++
+person: list{name: character}
+8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- new_already_nominal
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = "bob")
+
+#: Person
+same <- person
+#++++
+person: Person
+same: Person
+
+#==== annotations_functions
+#---- compact_function_success
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+#++++
+double_count: fn(count: integer) -> integer
+
+#---- expanded_function_success
+#: @param count {integer}
+#: @return {integer}
+double_count <- function(count) count + count
+#++++
+double_count: fn(count: integer) -> integer
+
+#---- expanded_default_return_null
+#: @param count {integer}
+log_count <- function(count) { }
+#++++
+log_count: fn(count: integer) -> NULL
+
+#---- expanded_optional_param
+#: @param count {integer}
+#: @param [label] {character}
+#: @return {integer}
+render <- function(count, label = NULL) count
+#++++
+render: fn(count: integer, [label]: character) -> integer
+111..115 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+
+#---- forall_identity
+#: @forall T
+#: @param value {T}
+#: @return {T}
+mirror <- function(value) value
+#++++
+mirror: <T> fn(value: T) -> T
+
+#---- compact_forall_identity
+#: <T> fn(value: T) -> T
+mirror <- function(value) value
+#++++
+mirror: <T> fn(value: T) -> T
+
+#==== annotations_more
+#---- checked_alias_annotation
+#: @alias PersonShape {list{name: character}}
+
+#: PersonShape
+value <- list(name = "bob")
+#++++
+value: PersonShape
+
+#---- checked_list_element_mismatch
+#: list[integer]
+value <- list(1L, "a")
+#++++
+value: list[integer]
+26..39 error[type-mismatch] expected `list[integer]`, found `list{integer, character}`
+
+#---- if_unknown_unknown_type_name
+#: @if-unknown user_id
+value <- some_unknown
+#++++
+value: user_id
+15..22 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
+
+#---- new_wrong_arity
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer, double>
+boxed <- list(value = 1L)
+#++++
+boxed: Box<integer>
+42..45 error[annotation] generic type `Box` expects 1 type argument, but found 2.
+
+#---- checked_nominal_requires_new
+#: @type Person {list{name: character}}
+
+#: Person
+value <- list(name = "bob")
+#++++
+value: Person
+60..78 error[type-mismatch] expected `Person`, found `list{name: character}`
+
+#---- expanded_optional_param_no_default_rejected
+#: @param count {integer}
+#: @param [label] {character}
+#: @return {integer}
+render <- function(count, label) count
+#++++
+render: fn(count: integer, label: character) -> integer
+87..115 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
+
+#==== annotations
+#---- trust_same_known_type
+#: @trust integer
+value <- 1L
+#++++
+value: integer
+
+#---- trust_widen_arbitrary
+#: @trust character[]
+value <- list(1L, 2L)
+#++++
+value: character[]
+
+#---- checked_into_any
+#: Any
+value <- 1L
+#++++
+value: Any
+
+#---- checked_null_literal
+#: NULL
+value <- NULL
+#++++
+value: NULL
+
+#---- checked_null_mismatch
+#: NULL
+value <- 1L
+#++++
+value: NULL
+17..19 error[type-mismatch] expected `NULL`, found `integer`
+
+#---- checked_nullable_null_value
+#: integer | NULL
+value <- NULL
+#++++
+value: integer | NULL
+
+#---- new_value_incompatible_representation
+#: @type Person {list{name: character}}
+
+#: @new Person
+person <- list(name = 1L)
+#++++
+person: Unknown
+78..80 error[type-mismatch] expected `character` for field `name`, found `integer`
+
+#---- new_on_bare_expression
+#: @type Person {list{name: character}}
+
+#: @new Person
+list(name = "bob")
+#++++
+Person
+
+#---- new_generic_representation_mismatch
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer>
+boxed <- list(value = "a")
+#++++
+boxed: Unknown
+77..80 error[type-mismatch] expected `integer` for field `value`, found `character`
+
+#---- if_unknown_on_bare_expression_known
+#: @if-unknown integer
+1L
+#++++
+integer
+23..25 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+
+#---- compact_fn_explicit_null_return_is_enforced
+#: fn(count: integer) -> NULL
+f <- function(count) count
+#++++
+f: fn(count: integer) -> NULL
+51..56 error[type-mismatch] expected `NULL`, found `integer`
+
+#---- compact_fn_nullable_params
+#: fn(count: integer | NULL) -> integer | NULL
+f <- function(count) count
+#++++
+f: fn(count: integer | NULL) -> integer | NULL
+
+#---- expanded_returns_keyword
+#: @param count {integer}
+#: @returns {integer}
+double_count <- function(count) count + count
+#++++
+double_count: fn(count: integer) -> integer
+
+#---- compact_fn_return_mismatch
+#: fn(count: integer) -> character
+f <- function(count) count + count
+#++++
+f: fn(count: integer) -> character
+56..69 error[type-mismatch] expected `character`, found `integer`
+
+#---- compact_optional_default_non_null_compatible
+#: fn(count: integer, [label]: character) -> integer
+f <- function(count, label = "x") count
+#++++
+f: fn(count: integer, [label]: character) -> integer
+
+#---- forall_two_params
+#: @forall T, U
+#: @param left {T}
+#: @param right {U}
+#: @return {T}
+keep_left <- function(left, right) left
+#++++
+keep_left: <T, U> fn(left: T, right: U) -> T
+
+#---- compact_forall_two_params
+#: <T, U> fn(left: T, right: U) -> T
+keep_left <- function(left, right) left
+#++++
+keep_left: <T, U> fn(left: T, right: U) -> T
+
+#---- checked_named_vector_into_array
+#: integer[]
+value <- c(a = 1L, b = 2L)
+#++++
+value: integer[]
+
+#---- checked_array_into_named_rejected
+#: integer[named]
+value <- c(1L, 2L)
+#++++
+value: integer[named]
+27..36 error[type-mismatch] expected `integer[named]`, found `integer[]`
+
+#---- expanded_return_mismatch_concrete
+#: @param count {integer}
+#: @return {character}
+f <- function(count) count
+#++++
+f: fn(count: integer) -> character
+70..75 error[type-mismatch] expected `character`, found `integer`
+
+#---- nominal_over_atomic_new
+#: @type Meters {double}
+
+#: @new Meters
+h <- 1.8
+#++++
+h: Meters
+
+#---- nominal_over_atomic_new_mismatch
+#: @type Meters {double}
+
+#: @new Meters
+h <- "tall"
+#++++
+h: Unknown
+46..52 error[type-mismatch] expected `double`, found `character`
+
+#---- optional_default_incompatible
+#: fn(count: integer, [label]: character) -> integer
+f <- function(count, label = 5L) count
+#++++
+f: fn(count: integer, [label]: character) -> integer
+82..84 error[type-mismatch] expected `character`, found `integer`
+
+#---- checked_fn_type_on_non_function
+#: fn(integer) -> integer
+value <- 1L
+#++++
+value: fn(integer) -> integer
+35..37 error[type-mismatch] expected `fn(integer) -> integer`, found `integer`
+
+#---- expanded_param_type_violation_in_body
+#: @param count {character}
+#: @return {character}
+f <- function(count) count + count
+#++++
+f: fn(count: character) -> character
+72..77 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- compact_unnamed_param_named_call_site
+#: fn(integer) -> integer
+f <- function(count) count + count
+#++++
+f: fn(count: integer) -> integer
