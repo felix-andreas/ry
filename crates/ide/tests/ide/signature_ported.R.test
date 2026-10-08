@@ -76,7 +76,7 @@ hover 34..40: T
 definition: none
 references: none
 rename: none
-signature: fn(x: T, y: U) -> T
+signature: <T, U> fn(x: T, y: U) -> T
 parameters: [x: T] | y: U
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(x: T, y: U) -> T\n"

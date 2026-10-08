@@ -588,7 +588,7 @@ completion (1): item
 mirror <- function(x) x
 mir$0ror
 #++++
-hover 24..30: mirror: fn(x: T) -> T
+hover 24..30: mirror: <T> fn(x: T) -> T
 hover-definition: global 0..6
 definition 0..6
 references: 0..6*, 24..30
@@ -603,7 +603,7 @@ hint @6: <T> fn(x: T) -> T
 pair <- function(x, y) x
 pa$0ir
 #++++
-hover 25..29: pair: fn(x: T, y: U) -> T
+hover 25..29: pair: <T, U> fn(x: T, y: U) -> T
 hover-definition: global 0..4
 definition 0..4
 references: 0..4*, 25..29
@@ -618,7 +618,7 @@ hint @4: <T, U> fn(x: T, y: U) -> T
 add_one <- function(x) x + 1L
 add$0_one
 #++++
-hover 30..37: add_one: fn(x: T) -> T
+hover 30..37: add_one: <T: numeric> fn(x: T) -> T
 hover-definition: global 0..7
 definition 0..7
 references: 0..7*, 30..37
@@ -633,7 +633,7 @@ hint @7: <T: numeric> fn(x: T) -> T
 make <- function(x) list(x, 1L)
 ma$0ke
 #++++
-hover 32..36: make: fn(x: T) -> list{T, integer}
+hover 32..36: make: <T> fn(x: T) -> list{T, integer}
 hover-definition: global 0..4
 definition 0..4
 references: 0..4*, 32..36

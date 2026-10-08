@@ -1,38 +1,67 @@
 //! IDE feature fixtures: the case source carries one `$0` cursor marker
 //! (stripped before analysis); the expectation renders each feature's result
-//! at that position. `RY_BLESS=1` accepts new output;
-//! `FIXTURE_FILTER=group__case` runs one case.
+//! at that position, then the inlay hints of the file holding the cursor. A
+//! multi-file case (`#~~~~ path` sections) prefixes every location with its
+//! file. `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs
+//! one case.
 
+use semantics::testing::with_fixture_project;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::path::Path;
-use syntax::TextSize;
-
-/// The `$0` cursor marker, stripped from the source. Cases without a marker
-/// render only the position-independent features (inlay hints).
-fn split_marker(source: &str) -> (String, Option<TextSize>) {
-    let Some(at) = source.find("$0") else {
-        return (source.to_owned(), None);
-    };
-    let mut text = source.to_owned();
-    text.replace_range(at..at + 2, "");
-    (text, Some(TextSize::from(at as u32)))
-}
+use syntax::{TextRange, TextSize};
 
 fn render(source: &str) -> String {
-    let (text, offset) = split_marker(source);
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, text, DocumentKind::Package);
-    let files = ProjectFiles::new(&db, vec![file]);
-
-    let mut output = String::new();
-    if let Some(offset) = offset {
-        render_at(&db, files, file, offset, &mut output);
+    let files: Vec<(Option<String>, String)> = match syntax::testing::split_files(source) {
+        None => vec![(None, source.to_owned())],
+        Some(files) => files
+            .into_iter()
+            .map(|(path, text)| (Some(path), text))
+            .collect(),
+    };
+    // The `$0` cursor marker, stripped from the file holding it. Cases
+    // without one render only the position-independent features.
+    let mut cursor = None;
+    let mut inputs = Vec::new();
+    for (index, (path, text)) in files.iter().enumerate() {
+        let mut text = text.clone();
+        if let Some(at) = text.find("$0") {
+            text.replace_range(at..at + 2, "");
+            cursor = Some((index, TextSize::from(at as u32)));
+        }
+        let kind = match path {
+            Some(path) if !path.starts_with("R/") => DocumentKind::Script,
+            _ => DocumentKind::Package,
+        };
+        inputs.push((text, kind));
     }
-    for hint in ide::inlay_hints(&db, file, None) {
-        output.push_str(&format!("hint @{}{}\n", u32::from(hint.offset), hint.label));
-    }
-    output
+    with_fixture_project(inputs, |db, sources| {
+        let Some(project) = ProjectFiles::try_get(db) else {
+            return "no project".to_owned();
+        };
+        let place = |file: SourceFile, range: TextRange| {
+            let path = sources
+                .iter()
+                .position(|source| *source == file)
+                .and_then(|index| files[index].0.as_ref())
+                .map(|path| format!("{path}:"))
+                .unwrap_or_default();
+            format!(
+                "{path}{}..{}",
+                u32::from(range.start()),
+                u32::from(range.end())
+            )
+        };
+        let (index, offset) = cursor.unwrap_or((0, TextSize::from(0)));
+        let file = sources[index];
+        let mut output = String::new();
+        if cursor.is_some() {
+            render_at(db, project, file, offset, &place, &mut output);
+        }
+        for hint in ide::inlay_hints(db, file, None) {
+            output.push_str(&format!("hint @{}{}\n", u32::from(hint.offset), hint.label));
+        }
+        output
+    })
 }
 
 /// The text a stub-source range covers, rendered instead of the absolute byte
@@ -40,7 +69,7 @@ fn render(source: &str) -> String {
 /// unrelated stub is added, so pinning the number made every corpus addition
 /// re-bless these cases while proving nothing; pinning the *token* proves the
 /// range points where it should and survives.
-fn stub_text(db: &RootDatabase, source_index: usize, range: syntax::TextRange) -> String {
+fn stub_text(db: &RootDatabase, source_index: usize, range: TextRange) -> String {
     let Some(sources) = semantics::stubs::StubSources::try_get(db) else {
         return "<no stub sources>".to_owned();
     };
@@ -60,6 +89,7 @@ fn render_at(
     files: ProjectFiles,
     file: SourceFile,
     offset: TextSize,
+    place: &dyn Fn(SourceFile, TextRange) -> String,
     output: &mut String,
 ) {
     match ide::hover(db, files, file, offset) {
@@ -76,9 +106,8 @@ fn render_at(
                     target,
                     maybe_undefined,
                 }) => output.push_str(&format!(
-                    "hover-definition: local {}..{}{}\n",
-                    u32::from(target.range.start()),
-                    u32::from(target.range.end()),
+                    "hover-definition: local {}{}\n",
+                    place(target.file, target.range),
                     if maybe_undefined {
                         " (maybe undefined)"
                     } else {
@@ -86,9 +115,8 @@ fn render_at(
                     },
                 )),
                 Some(ide::HoverDefinition::Global { target }) => output.push_str(&format!(
-                    "hover-definition: global {}..{}\n",
-                    u32::from(target.range.start()),
-                    u32::from(target.range.end()),
+                    "hover-definition: global {}\n",
+                    place(target.file, target.range),
                 )),
                 Some(ide::HoverDefinition::Stub {
                     namespace,
@@ -115,9 +143,8 @@ fn render_at(
     }
     match ide::definition(db, files, file, offset) {
         Some(ide::DefinitionTarget::Project(target)) => output.push_str(&format!(
-            "definition {}..{}\n",
-            u32::from(target.range.start()),
-            u32::from(target.range.end()),
+            "definition {}\n",
+            place(target.file, target.range),
         )),
         Some(ide::DefinitionTarget::Stub(target)) => output.push_str(&format!(
             "definition: stub source {} at {}\n",
@@ -134,9 +161,8 @@ fn render_at(
             .iter()
             .map(|occurrence| {
                 format!(
-                    "{}..{}{}",
-                    u32::from(occurrence.range.start()),
-                    u32::from(occurrence.range.end()),
+                    "{}{}",
+                    place(occurrence.file, occurrence.range),
                     if occurrence.is_declaration { "*" } else { "" }
                 )
             })
@@ -149,9 +175,8 @@ fn render_at(
     }
     match ide::type_definition(db, files, file, offset) {
         Some(ide::DefinitionTarget::Project(target)) => output.push_str(&format!(
-            "type-definition {}..{}\n",
-            u32::from(target.range.start()),
-            u32::from(target.range.end()),
+            "type-definition {}\n",
+            place(target.file, target.range),
         )),
         Some(ide::DefinitionTarget::Stub(target)) => output.push_str(&format!(
             "type-definition: stub source {} at {}\n",
@@ -269,6 +294,10 @@ Account <- R6Class(\"Account\",
   active = list(status = function() \"open\")
 )
 plain <- function(x, ...) x
+setMethod(f = \"baz\", signature = \"Person\", definition = function(x) x)
+setMethod(\"qux\", c(\"Person\", \"Other\"), function(x, y) x)
+setMethod(f = \"foo\", signature = list(x = \"Person\", y = \"Other\"), definition = function(x, y) x)
+setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
 ";
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
@@ -297,6 +326,10 @@ plain <- function(x, ...) x
             "greet (S4Method, Person)",
             "Account (R6Class)",
             "plain (Function, fn(x, ...))",
+            "baz (S4Method, Person)",
+            "qux (S4Method, Person, Other)",
+            "foo (S4Method, Person, Other)",
+            "bar (S4Method, Person, Other)",
         ],
         "{symbols:#?}"
     );
@@ -329,6 +362,8 @@ plain <- function(x, ...) x
 
 #[test]
 fn ide_fixtures() {
-    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ide");
-    syntax::testing::run_fixture_suite(&suite, &render);
+    syntax::testing::run_fixture_suite(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ide"),
+        &render,
+    );
 }
