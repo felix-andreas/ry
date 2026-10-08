@@ -20,7 +20,7 @@ The project is built by AI agents driving development, with light human steering
 
 # Ownership mandate
 
-The user has delegated full technical ownership to the agents: empty the backlog and bring the project to the best possible state — rust-analyzer quality. That explicitly covers code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for "safe, risk-free" minimal diffs; bring code to its intended shape, including large refactors, and take responsibility for the outcome. Design decisions that previously required a user check-in are now the agent's to make: decide, implement, and record the decision and rationale in `.agents/memory/decisions.md` (or the docs page it belongs to) in the same session. Two standing constraints: work directly on `main` (user directive), and do not open new pull requests.
+The user has delegated full technical ownership to the agents: empty the backlog and bring the project to the best possible state — rust-analyzer quality. That explicitly covers code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for "safe, risk-free" minimal diffs; bring code to its intended shape, including large refactors, and take responsibility for the outcome. Design decisions that previously required a user check-in are now the agent's to make: decide, implement, and record the decision and rationale in `.agents/memory/decisions.md` (or the docs page it belongs to) in the same session. Work lands through pull requests (user directive).
 
 # Do not think like a human (user directive)
 

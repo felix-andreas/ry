@@ -9,6 +9,7 @@ z <- 1L %then% 2L
 #++++
 y: integer
 z: integer
+Any
 
 #---- unsupported_constructs_are_origins
 special <- function(a, b) a %undeclared% b

@@ -273,6 +273,12 @@ pub trait GlobalEnv<'db> {
     /// it propagates an `Unknown` instead of re-originating one.
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool;
 
+    /// What a top-level name already holds before this item writes it: an
+    /// earlier writer in the item's own file, or the package's unconditional
+    /// definition. Never a stub, and never the project-wide conditional slot,
+    /// whose join includes this item's own write.
+    fn earlier_binding(&self, name: &str) -> Option<TypeScheme<'db>>;
+
     /// The `@type` / `@alias` definitions visible to the item being checked.
     ///
     /// **Borrowed, and both of these are per-FILE facts.** A check consults them
@@ -1783,7 +1789,28 @@ impl<'db> Checker<'db, '_> {
             return None;
         }
         let scheme = self.globals?.scheme(&binding.name, false)?;
-        let instantiated = self.instantiate(&scheme);
+        self.materialize_pre_state(slot, &scheme)
+    }
+
+    /// Like [`Self::materialize_top_level_pre_state`] for the path of a branch
+    /// or loop that did not write the slot. A name only this item and other
+    /// conditional statements write has no earlier value to join: that path is
+    /// `maybe-undefined`, not a read of a builtin or of the item's own write.
+    fn materialize_earlier_binding(&mut self, slot: BindingId) -> Option<Ty<'db>> {
+        let binding = self.naming.bindings.get(&slot)?;
+        if binding.kind != crate::naming::BindingKind::TopLevel {
+            return None;
+        }
+        let scheme = self.globals?.earlier_binding(&binding.name)?;
+        self.materialize_pre_state(slot, &scheme)
+    }
+
+    fn materialize_pre_state(
+        &mut self,
+        slot: BindingId,
+        scheme: &TypeScheme<'db>,
+    ) -> Option<Ty<'db>> {
+        let instantiated = self.instantiate(scheme);
         // An Unknown cross-item binding (or a self-cycle's recovery value)
         // adds nothing over the tolerant read, and materializing it would
         // absorb the real body writes at the loop join.
@@ -5988,17 +6015,8 @@ impl<'db> Checker<'db, '_> {
             // something read it. A name the project never bound keeps the
             // written type on that path: the read is `maybe-undefined`, not a
             // read of whatever builtin shares the name.
-            let naming = self.naming;
-            if current.is_none()
-                && branch_entry.is_some()
-                && let Some(binding) = naming.bindings.get(&slot)
-                && self
-                    .globals
-                    .is_some_and(|globals| globals.defined_in_project(&binding.name, false))
-            {
-                current = self
-                    .materialize_top_level_pre_state(slot)
-                    .map(EnvEntry::Mono);
+            if current.is_none() && branch_entry.is_some() {
+                current = self.materialize_earlier_binding(slot).map(EnvEntry::Mono);
             }
             let joined = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {

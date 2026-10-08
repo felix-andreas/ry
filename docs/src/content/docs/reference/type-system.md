@@ -330,7 +330,8 @@ variable can be in:
   This is the same sound-by-refusal move as the loop rule above: the checker declines to describe the
   value rather than describing it at a size nothing can consume
 - joining equal types keeps the type; genuinely different types join into their union, exactly as
-  `if ... else` result values do; joining with `Unknown` is `Unknown`
+  `if ... else` result values do; joining with `Unknown` keeps the other side, because a recursive
+  definition's fixpoint starts from `Unknown` and could not otherwise converge to a precise type
 
 Joins and generalization:
 

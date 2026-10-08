@@ -437,6 +437,7 @@ if (flag) {
 after <- value
 #++++
 flag: logical
+integer | NULL
 after: integer
 
 #==== scoping
@@ -452,6 +453,8 @@ if (is.na(NA)) {
 use <- function() x + y
 #++++
 == R/a.R
+integer
+integer | NULL
 == R/b.R
 use: fn() -> integer
 
@@ -566,6 +569,7 @@ f: <T> fn(x: T) -> Unknown
 for (i in 1:3) total <- i
 report <- function() total
 #++++
+NULL
 report: fn() -> integer
 
 #---- a_few_conditional_writers_still_join
@@ -575,6 +579,8 @@ if (Sys.getenv("MODE") == "fast") mode <- 1L
 if (Sys.getenv("MODE") == "named") mode <- "fast"
 report <- function() mode
 #++++
+integer | NULL
+character | NULL
 report: fn() -> integer | character
 
 #---- many_conditional_writers_widen_to_unknown
@@ -596,6 +602,15 @@ if (flag) shared <- 9L
 report <- function() shared
 #++++
 flag: logical
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
+integer | NULL
 report: fn() -> Unknown
 
 #---- loop_carried_read_starts_from_the_outer_binding
@@ -603,6 +618,7 @@ p <- "word"
 while (TRUE) p <- p - 1L
 #++++
 p: character
+NULL
 30..31 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- loop_carried_read_continues_the_outer_type
@@ -611,6 +627,7 @@ while (n > 0L) n <- n - 1L
 after <- function() n
 #++++
 n: integer
+NULL
 after: fn() -> integer
 
 #---- rebinding_statement_reads_the_earlier_binding
@@ -634,6 +651,7 @@ for (i in 1:3) total <- total + i
 report <- function() total
 #++++
 total: integer
+NULL
 report: fn() -> integer
 
 #---- shadowed_outer_binding_is_dead_despite_the_capture

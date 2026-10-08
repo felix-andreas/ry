@@ -1540,6 +1540,18 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
                 .is_some_and(|files| conditional_slot_items(self.db, files).contains_key(name))
     }
 
+    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        if let Some(item) = self.frame_definition(name, false) {
+            if item.name(self.db).as_deref() == Some(name) {
+                return Some(global_scheme(self.db, item));
+            }
+            let interned = types::Name::new(self.db, name.to_owned());
+            return statement_binding_scheme(self.db, item, interned);
+        }
+        let item = self.definitions.as_ref()?.get(name)?;
+        Some(global_scheme(self.db, *item))
+    }
+
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
         // A script-local or package definition wins over the stub set,
         // disabling per-call overload selection for that name.
@@ -1632,6 +1644,13 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
             .get(name)
             .cloned()
             .or_else(|| self.base.scheme(name, deferred))
+    }
+
+    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        self.members
+            .get(name)
+            .cloned()
+            .or_else(|| self.base.earlier_binding(name))
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {

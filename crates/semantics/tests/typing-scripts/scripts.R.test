@@ -98,11 +98,13 @@ counter: integer
 #---- unused_generic_marks_the_name_string
 setGeneric("area", function(shape) standardGeneric("area"))
 #++++
+Unknown
 12..16 warning[unused] `area` is assigned but never used.
 
 #---- a_walrus_statement_defines_nothing
 x := 1
 #++++
+Unknown
 0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
 2..4 warning[unresolved] I could not resolve ``:=`` in this package, its imports, or builtins.
 
@@ -114,6 +116,7 @@ print(count)
 #++++
 steps_for: fn(spec: character) -> integer
 count: Unknown
+T
 62..78 error[type-mismatch] expected `integer`, found `character`
 98..101 error[type-mismatch] expected `character`, found `integer`
 
@@ -130,6 +133,7 @@ label <- "next"
 print(label)
 #++++
 total: character
+T
 466..471 warning[unused] `total` is assigned but never used.
 475..484 error[syntax-error] this is a value, not a name, so nothing can be assigned to it — the operator at the end of this line pulled the next line in as its right-hand side
 501..506 warning[unresolved] I could not resolve `label` in this package, its imports, or builtins. Did you mean `labels`?
@@ -140,6 +144,7 @@ a <- 1L
 1 + a <- 2L
 #++++
 a: integer
+integer
 56..57 warning[unused] `a` is assigned but never used.
 64..69 error[syntax-error] this is a value, not a name, so nothing can be assigned to it
 
@@ -151,6 +156,8 @@ lead
 + lead <- 2L
 #++++
 lead: integer
+integer
+integer
 166..172 error[syntax-error] this is a value, not a name, so nothing can be assigned to it
 
 #---- an_unquoted_assignment_target_stays_quiet
@@ -163,12 +170,14 @@ name <- 1L
 !!name <- 2L
 #++++
 name: integer
+integer
 
 #---- other_unary_targets_are_still_reported
 negated <- 1L
 -negated <- 2L
 #++++
 negated: integer
+integer
 0..7 warning[unused] `negated` is assigned but never used.
 14..22 error[syntax-error] this is a value, not a name, so nothing can be assigned to it
 
@@ -182,6 +191,7 @@ print(limit)
 #++++
 x: integer
 limit: integer
+integer
 244..247 warning[unused] `x` is assigned but never used.
 
 #---- a_string_target_works_with_super_assign_and_dotted_names
@@ -196,7 +206,10 @@ print(counter)
 print(na.rm.default)
 #++++
 outer: fn() -> integer
+integer
 na.rm.default: logical
+T
+logical
 
 #---- replacement_targets_stay_quiet
 v <- c(1, 2)
@@ -204,6 +217,8 @@ names(v) <- c("a", "b")
 attr(v, "k") <- 1L
 #++++
 v: double[]
+character[]
+integer
 42..43 warning[unused] `v` is assigned but never used.
 
 #---- use_before_any_definition_is_unresolved
@@ -214,6 +229,8 @@ print(a)
 #++++
 b: Unknown
 a: integer
+T
+integer
 5..6 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
 
 #---- read_inside_the_defining_statement_is_unresolved
@@ -221,6 +238,7 @@ x <- x + 1L
 print(x)
 #++++
 x: Unknown
+T
 5..6 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
 
 #---- self_recursive_closure_resolves
@@ -228,6 +246,7 @@ a <- function() a()
 print(a())
 #++++
 a: fn() -> Unknown
+T
 
 #---- forward_capture_resolves_to_the_later_binding
 f <- function() y + 1L
@@ -236,6 +255,7 @@ print(f())
 #++++
 f: fn() -> integer
 y: integer
+integer
 
 #---- deferred_read_sees_the_last_binding
 g <- function() g()
@@ -247,6 +267,8 @@ print(g(1L))
 g: Unknown
 h: Unknown
 g: <T> fn(x: T) -> T
+T
+integer
 16..17 error[type-mismatch] this call supplies 0 arguments, but the function requires 1 — a required argument is missing
 
 #---- an_immediate_read_picks_the_nearest_earlier_binding_of_several
@@ -292,6 +314,7 @@ y <- x
 #++++
 flag: logical
 x: integer
+character | NULL
 y: integer | character
 45..46 warning[unused] `y` is assigned but never used.
 
@@ -305,6 +328,7 @@ w <- z
 #++++
 flag: logical
 z: integer
+NULL
 w: integer | character
 54..55 warning[unused] `w` is assigned but never used.
 
@@ -312,6 +336,7 @@ w: integer | character
 if (is.na(NA)) q <- "a"
 r <- q
 #++++
+character | NULL
 r: character
 24..25 warning[unused] `r` is assigned but never used.
 
@@ -328,10 +353,13 @@ copy: integer
 for (i in 1:3) x <- i
 print(x)
 #++++
+NULL
+integer
 
 #---- loop_binding_with_no_read_warns
 for (i in 1:3) dead <- i + 1L
 #++++
+NULL
 15..19 warning[unused] `dead` is assigned but never used.
 
 #---- loop_reading_its_carried_variable_stays_alive
@@ -339,6 +367,7 @@ x <- 1L
 while (x > 0L) x <- x - 1L
 #++++
 x: integer
+NULL
 
 #---- conditional_rebinding_keeps_the_earlier_definition_alive
 g <- function(x) x
@@ -346,6 +375,8 @@ for (i in 1:3) g <- f + i
 print(g)
 #++++
 g: <T> fn(x: T) -> T
+NULL
+fn(x: Unknown) -> Unknown
 39..40 warning[unresolved] I could not resolve `f` in this package, its imports, or builtins.
 
 #==== reads_that_keep_bindings_alive
@@ -356,6 +387,7 @@ print(y)
 #++++
 x: integer
 y: integer
+integer
 
 #---- an_on_exit_read_keeps_later_writes_alive
 # R stores `on.exit`'s expression and runs it when the function returns, so it
@@ -371,6 +403,7 @@ guard <- function(con) {
 print(guard)
 #++++
 guard: <T> fn(con: T) -> logical
+fn(con: T) -> logical
 383..391 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins.
 
 #---- a_real_dead_store_beside_an_on_exit_guard_still_reports
@@ -385,6 +418,7 @@ guard <- function(con) {
 print(guard)
 #++++
 guard: <T> fn(con: T) -> integer
+fn(con: T) -> integer
 72..80 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins.
 89..96 warning[unused] `scratch` is assigned but never used.
 
@@ -400,12 +434,14 @@ print(speak(structure(list(), class = "dog")))
 speak: <T> fn(x: T, ...: Any) -> Any
 speak.dog: <T> fn(x: T, ...: Any) -> character
 speak.default: <T> fn(x: T, ...: Any) -> character
+T
 
 #---- a_dotted_name_that_dispatches_nowhere_is_still_dead
 render.thing <- function(x) x
 print(1L)
 #++++
 render.thing: <T> fn(x: T) -> T
+integer
 0..12 warning[unused] `render.thing` is assigned but never used.
 
 #---- operator_use_is_a_use
@@ -415,12 +451,14 @@ print(fallback)
 #++++
 %||%: <T> fn(a: T | NULL, b: T) -> T
 fallback: Unknown
+T
 
 #---- an_operator_nothing_uses_still_warns
 `%unused%` <- function(a, b) a
 print(1L)
 #++++
 %unused%: <T, U> fn(a: T, b: U) -> T
+integer
 0..10 warning[unused] `%unused%` is assigned but never used.
 
 #---- a_local_operator_use_is_a_use
@@ -436,6 +474,7 @@ keep <- function(values, table) {
 print(keep(c(1L, 2L), 2L))
 #++++
 keep: <T, U> fn(values: T, table: U) -> Unknown
+T
 
 #---- an_unused_local_operator_still_warns
 # Marking the slot must not make the check blanket-quiet for operators.
@@ -446,6 +485,7 @@ dead <- function(x) {
 print(dead(1L))
 #++++
 dead: <T> fn(x: T) -> T
+integer
 96..106 warning[unused] `%unused%` is assigned but never used.
 
 #---- a_local_alias_of_a_namespaced_operator_is_a_use
@@ -458,6 +498,7 @@ themed <- function(...) {
 print(themed())
 #++++
 themed: fn(...: Any) -> Unknown
+T
 190..211 warning[unresolved] unknown package namespace `ggplot2`.
 
 #---- masked_read_is_a_use
@@ -467,6 +508,7 @@ print(out)
 #++++
 x: integer
 out: Unknown
+T
 
 #==== loop_carried_reads
 #---- rebinding_reads_the_nearest_earlier_binding
@@ -483,6 +525,7 @@ p <- "word"
 while (TRUE) p <- p - 1L
 #++++
 p: character
+NULL
 30..31 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- sequential_rebinding_chains_types
@@ -519,6 +562,7 @@ if (is.null(x)) {
 want_chr: fn(s: character) -> character
 maybe: fn() -> character | NULL
 x: character | NULL
+character
 419..426 warning[unused] `message` is assigned but never used.
 
 #---- a_negated_top_level_guard_narrows_the_other_edge
@@ -570,6 +614,7 @@ after <- want_chr(x)
 want_chr: fn(s: character) -> character
 maybe: fn() -> character | NULL
 x: character | NULL
+NULL
 after: Unknown
 371..376 warning[unused] `after` is assigned but never used.
 389..390 error[type-mismatch] expected `character`, found `character | NULL`
@@ -589,6 +634,7 @@ maybe <- function() NULL
 #++++
 want_chr: fn(s: character) -> character
 maybe: fn() -> character | NULL
+character
 162..166 warning[unused] `kept` is assigned but never used.
 
 #==== duplicate_type_names
@@ -643,6 +689,8 @@ print(target)
 print(built)
 #++++
 built: Any
+T
+T
 467..473 warning[unresolved] I could not resolve `target` in this package, its imports, or builtins.
 
 #---- quoted_code_is_not_judged
@@ -670,3 +718,4 @@ eval(expression_to_run)
 #++++
 value: integer
 expression_to_run: Any
+Any

@@ -155,6 +155,7 @@ frame <- read.csv("x.csv")
 print(frame)
 #++++
 frame: data.frame
+data.frame
 
 #==== generic_arity
 #---- applied_arity_must_match
@@ -207,6 +208,9 @@ setGeneric("deposit", function(account, amount) standardGeneric("deposit"))
 setMethod("deposit", "Account", function(account, amount) account)
 use <- function(account) deposit(account, 50)
 #++++
+Unknown
+Unknown
+Unknown
 use: <T> fn(account: T) -> Unknown
 
 #==== nominal_field_writes
@@ -219,6 +223,7 @@ ada$age <- 40L
 still <- ada
 #++++
 ada: Person
+integer
 still: Person
 
 #---- a_write_the_representation_refuses_is_reported_at_the_value
@@ -229,6 +234,7 @@ ada <- list(name = "Ada", age = 36L)
 ada$age <- "not a number"
 #++++
 ada: Person
+character
 118..132 error[type-mismatch] expected `integer`, found `character`
 
 #---- the_bracket_spelling_is_checked_the_same_way
@@ -239,6 +245,7 @@ ada <- list(name = "Ada", age = 36L)
 ada[["age"]] <- "not a number"
 #++++
 ada: Person
+character
 123..137 error[type-mismatch] expected `integer`, found `character`
 
 #---- a_field_the_representation_does_not_carry_is_reported
@@ -249,6 +256,7 @@ ada <- list(name = "Ada", age = 36L)
 ada$email <- "ada@example.com"
 #++++
 ada: Person
+character
 120..137 error[type-mismatch] field `email` does not exist in `Person`
 
 #---- a_refused_write_leaves_the_field_type_standing
@@ -274,6 +282,7 @@ temperature <- 20.0
 temperature$anything <- 1L
 #++++
 temperature: Celsius
+integer
 
 #---- a_structural_record_still_retypes_its_field
 # The contrast with the nominal cases above, in one item so the write and the
@@ -310,6 +319,7 @@ print(bump(price))
 +.Money: <T, U> fn(e1: T, e2: U) -> T
 price: Money
 bump: <T: numeric> fn(x: T) -> T
+Money
 
 #---- a_class_with_no_arithmetic_method_is_still_refused
 # The constraint must stay discriminating: R halts on this one too.
@@ -323,6 +333,7 @@ print(bump(label))
 #++++
 label: Tag
 bump: <T: numeric> fn(x: T) -> T
+T
 158..163 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Tag`
 
 #---- a_recursive_function_keeps_the_arithmetic_classes
@@ -379,4 +390,8 @@ md: Mod
 dv: Div
 tg: Tag
 bump: <T: numeric> fn(x: T) -> double
+double
+double
+double
+double
 669..671 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Tag`

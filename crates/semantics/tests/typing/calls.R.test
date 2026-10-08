@@ -20,6 +20,7 @@ f: fn(choices: character | character[]) -> integer
 options(error = recover)
 handler <- function() traceback()
 #++++
+Unknown
 handler: fn() -> Any
 
 #---- manifest_only_exports_resolve

@@ -7,7 +7,7 @@
 use semantics::diagnostics::{Severity, TypeRenderer, file_diagnostics, strict_diagnostics};
 use semantics::{
     DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, file_typing_mode, item_check,
-    item_tree,
+    item_hir, item_tree,
 };
 use std::path::Path;
 
@@ -108,23 +108,19 @@ fn render_with_metadata(source: &str) -> String {
 fn render_file(db: &RootDatabase, file: SourceFile) -> String {
     let mut output = String::new();
     for &item in item_tree(db, file) {
-        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
-            continue;
-        }
-        let Some(name) = item.name(db).clone() else {
-            continue;
-        };
         let Some(check) = item_check(db, item) else {
             continue;
         };
-        let Some(scheme) = check.scheme else {
-            continue;
-        };
         let mut renderer = TypeRenderer::default();
-        output.push_str(&name);
-        output.push_str(": ");
-        output.push_str(&renderer.render_scheme(db, &scheme));
-        output.push('\n');
+        let definition = matches!(*item.kind(db), ItemKind::Function | ItemKind::Value);
+        if definition && let (Some(name), Some(scheme)) = (item.name(db), &check.scheme) {
+            output.push_str(&format!("{name}: {}\n", renderer.render_scheme(db, scheme)));
+        } else if let Some(root) = item_hir(db, item).as_ref().and_then(|module| module.root)
+            && let Some(&ty) = check.expression_types.get(&root)
+        {
+            output.push_str(&renderer.render(db, ty));
+            output.push('\n');
+        }
     }
     output.push_str(&render_diagnostics(db, file));
     output
