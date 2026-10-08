@@ -1,0 +1,361 @@
+#==== vectors
+#---- c_single_integer
+c(1L)
+#++++
+integer[]
+
+#---- c_single_logical
+c(TRUE)
+#++++
+logical[]
+
+#---- c_single_character
+c("a")
+#++++
+character[]
+
+#---- c_single_double
+c(1.5)
+#++++
+double[]
+
+#---- c_partial_named_is_array
+c(foo = 1L, 2L)
+#++++
+integer[]
+
+#---- c_partial_named_promotes_double
+c(foo = 1L, 2.5)
+#++++
+double[]
+
+#---- c_all_named_promotes_double
+c(a = 1L, b = 2.5)
+#++++
+double[named]
+
+#---- c_nested_array_arg
+c(c(1L, 2L))
+#++++
+integer[]
+
+#---- c_nested_named_flatten
+c(c(foo = 1L), c(bar = 2L))
+#++++
+integer[]
+
+#---- c_array_plus_named_arg
+c(c(1L, 2L), foo = 3L)
+#++++
+integer[]
+
+#---- c_three_types_mismatch
+c(1L, "a", TRUE)
+#++++
+character[]
+
+#---- c_double_and_character
+c(1.5, "a")
+#++++
+character[]
+
+#---- c_logical_and_double
+c(TRUE, 1.5)
+#++++
+double[]
+
+#---- c_logical_named
+c(yes = TRUE, no = FALSE)
+#++++
+logical[named]
+
+#---- compare_named_map_loses_map
+c(foo = 1L) == 1L
+#++++
+logical[]
+
+#---- range_integer
+1L:5L
+#++++
+integer[]
+
+#---- range_whole_double_literals
+1:5
+#++++
+integer[]
+
+#---- range_double
+1.5:3
+#++++
+double[]
+
+#---- negate_logical_vector
+!c(TRUE, FALSE)
+#++++
+logical[]
+
+#---- negate_logical_named_loses_map
+!c(yes = TRUE)
+#++++
+logical[]
+
+#---- arith_named_plus_named
+c(foo = 1L) + c(bar = 2L)
+#++++
+integer[]
+
+#---- div_vector_scalar
+c(1L, 2L) / 2L
+#++++
+double[]
+
+#---- mult_double_by_array
+2.5 * c(1L, 2L)
+#++++
+double[]
+
+#---- scalar_to_named_map_rejected
+#: integer[named]
+value <- 1L
+#++++
+value: integer[named]
+18..23 warning[unused] `value` is assigned but never used.
+27..29 error[type-mismatch] expected `integer[named]`, found `integer`
+
+#---- array_to_named_map_rejected
+#: integer[named]
+value <- c(1L, 2L)
+#++++
+value: integer[named]
+18..23 warning[unused] `value` is assigned but never used.
+27..36 error[type-mismatch] expected `integer[named]`, found `integer[]`
+
+#---- named_map_to_named_map_ok
+#: integer[named]
+value <- c(foo = 1L)
+value
+#++++
+value: integer[named]
+integer[named]
+
+#---- record_to_named_map_rejected_for_vectors
+#: character[]
+value <- c("a", "b")
+value
+#++++
+value: character[]
+character[]
+
+#---- index_array_element
+x <- c(1L, 2L)
+x[[1]]
+#++++
+x: integer[]
+integer
+
+#---- index_scalar_element
+x <- 1L
+x[[1]]
+#++++
+x: integer
+integer
+
+#---- index_named_map_element
+x <- c(foo = 1L, bar = 2L)
+x[["foo"]]
+#++++
+x: integer[named]
+integer | NULL
+
+#---- range_array_operand_rejected
+c(1L, 2L):3L
+#++++
+Unknown
+0..9 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `integer[]`
+
+#---- c_single_named_is_map
+c(foo = 1L)
+#++++
+integer[named]
+
+#---- c_nested_single_named
+c(c(foo = 1L))
+#++++
+integer[]
+
+#---- compare_array_array
+c(1L, 2L) == c(3L, 4L)
+#++++
+logical[]
+
+#---- range_double_nonwhole
+1.5:3.5
+#++++
+double[]
+
+#---- power_scalar_by_array
+2L ^ c(1L, 2L)
+#++++
+double[]
+
+#---- c_scalar_and_array_mix
+c(1L, c(2L, 3L))
+#++++
+integer[]
+
+#---- compare_array_scalar
+c(1L, 2L) > 1L
+#++++
+logical[]
+
+#---- compare_array_cross_family
+c(1L, 2L) < "a"
+#++++
+Unknown
+12..15 error[type-mismatch] expected `integer[]`, found `character`
+
+#---- sub_named_map_scalar
+c(foo = 1L, bar = 2L) - 1L
+#++++
+integer[]
+
+#---- c_three_numeric_promote
+c(1L, 2.5, 3L)
+#++++
+double[]
+
+#---- fn_scalar_arg_to_array_param
+#: fn(x: integer[]) -> integer[]
+f <- function(x) x
+f(1L)
+#++++
+f: fn(x: integer[]) -> integer[]
+integer[]
+
+#---- range_mixed_whole
+1:10L
+#++++
+integer[]
+
+#---- range_descending
+10L:1L
+#++++
+integer[]
+
+#---- range_double_var
+x <- 2.5
+x:5L
+#++++
+x: double
+double[]
+
+#---- index_c_result_direct
+c(1L, 2L)[[1]]
+#++++
+integer
+
+#---- c_named_array_value
+c(x = c(1L, 2L))
+#++++
+integer[named]
+
+#---- index_array_nonliteral
+x <- c(1L, 2L)
+i <- 1L
+x[[i]]
+#++++
+x: integer[]
+i: integer
+integer
+
+#==== vector_shapes
+#---- logical_array
+c(TRUE, FALSE)
+#++++
+logical[]
+
+#---- integer_array
+c(1L, 2L, 3L)
+#++++
+integer[]
+
+#---- double_array
+c(1.5, 2.5)
+#++++
+double[]
+
+#---- integer_and_double_array_promotes_to_double
+c(1L, 2.5)
+#++++
+double[]
+
+#---- character_array
+c("foo", "bar")
+#++++
+character[]
+
+#---- integer_named_map
+c(foo = 1L, bar = 2L)
+#++++
+integer[named]
+
+#---- character_named_map
+c(x = "foo", y = "bar")
+#++++
+character[named]
+
+#==== vector_annotations
+#---- scalar_checked_annotation_coerces_to_array
+#: integer[]
+value <- 1L
+value
+#++++
+value: integer[]
+integer[]
+
+#---- named_map_checked_annotation_coerces_to_array
+#: integer[]
+value <- c(foo = 1L, bar = 2L)
+value
+#++++
+value: integer[]
+integer[]
+
+#---- reverse_array_to_scalar_annotation_is_rejected
+#: integer
+value <- c(1L, 2L)
+#++++
+value: integer
+11..16 warning[unused] `value` is assigned but never used.
+20..29 error[type-mismatch] expected `integer`, found `integer[]`
+
+#==== combine_edge_cases
+#---- empty_combine_is_null
+c()
+#++++
+NULL
+
+#---- nested_combine_flattens
+c(c(1L, 2L), 3L)
+#++++
+integer[]
+
+#---- combine_promotes_named_map_argument
+c(c(foo = 1L), 2.5)
+#++++
+double[]
+
+#---- combine_of_logical_and_integer_coerces
+c(TRUE, 1L)
+#++++
+integer[]
+
+#---- combine_with_a_list_is_a_list
+c(list(1L), 2L)
+#++++
+list[integer]
+
+#---- combine_with_unannotated_param_is_unknown
+function(x) c(x, 1L)
+#++++
+fn(x: T) -> Unknown

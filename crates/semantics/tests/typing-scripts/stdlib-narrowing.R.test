@@ -1,0 +1,229 @@
+#==== null_guards
+#---- else_branch_drops_the_null_member
+#: fn(x: integer | NULL) -> integer
+f <- function(x) {
+  if (is.null(x)) {
+    0L
+  } else {
+    x + 1L
+  }
+}
+#++++
+f: fn(x: integer | NULL) -> integer
+36..37 warning[unused] `f` is assigned but never used.
+
+#---- true_branch_is_null
+#: fn(x: integer | NULL) -> character
+f <- function(x) {
+  if (is.null(x)) {
+    "missing"
+  } else {
+    "present"
+  }
+}
+#++++
+f: fn(x: integer | NULL) -> character
+38..39 warning[unused] `f` is assigned but never used.
+
+#---- negated_guard_swaps_the_edges
+#: fn(x: integer | NULL) -> integer
+f <- function(x) {
+  if (!is.null(x)) {
+    x + 1L
+  } else {
+    0L
+  }
+}
+#++++
+f: fn(x: integer | NULL) -> integer
+36..37 warning[unused] `f` is assigned but never used.
+
+#---- without_narrowing_the_union_still_errors
+#: fn(x: integer | NULL) -> integer
+f <- function(x) {
+  x + 1L
+}
+#++++
+f: fn(x: integer | NULL) -> integer
+36..37 warning[unused] `f` is assigned but never used.
+57..58 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
+
+#==== early_exit_guards
+#---- early_return_persists_the_false_edge
+#: fn(x: integer | NULL) -> integer
+f <- function(x) {
+  if (is.null(x)) {
+    return(0L)
+  }
+  x + 1L
+}
+#++++
+f: fn(x: integer | NULL) -> integer
+36..37 warning[unused] `f` is assigned but never used.
+
+#---- stop_call_persists_the_false_edge
+#: fn(x: character | NULL) -> character
+f <- function(x) {
+  if (is.null(x)) {
+    stop("x is required")
+  }
+  x
+}
+#++++
+f: fn(x: character | NULL) -> character
+40..41 warning[unused] `f` is assigned but never used.
+
+#---- negated_early_return_persists_the_true_edge
+#: fn(x: integer | NULL) -> integer
+f <- function(x) {
+  if (!is.null(x)) {
+    return(x)
+  }
+  0L
+}
+#++++
+f: fn(x: integer | NULL) -> integer
+36..37 warning[unused] `f` is assigned but never used.
+
+#==== family_guards
+#---- character_guard_splits_a_two_family_union
+#: fn(x: integer | character) -> character
+f <- function(x) {
+  if (is.character(x)) {
+    x
+  } else {
+    "number"
+  }
+}
+#++++
+f: fn(x: integer | character) -> character
+43..44 warning[unused] `f` is assigned but never used.
+
+#---- numeric_guard_keeps_both_numeric_families
+#: fn(x: integer | double | character) -> double
+g <- function(x) {
+  if (is.numeric(x)) {
+    x + 0.5
+  } else {
+    0.0
+  }
+}
+#++++
+g: fn(x: integer | double | character) -> double
+49..50 warning[unused] `g` is assigned but never used.
+
+#---- list_guard_selects_the_list_member
+#: fn(x: list[integer] | integer) -> list[integer]
+h <- function(x) {
+  if (is.list(x)) {
+    x
+  } else {
+    list(x)
+  }
+}
+#++++
+h: fn(x: list[integer] | integer) -> list[integer]
+51..52 warning[unused] `h` is assigned but never used.
+
+#==== invalidation_and_joins
+#---- branch_write_replaces_the_refinement
+#: fn(x: integer | NULL) -> integer | character
+f <- function(x) {
+  if (is.null(x)) {
+    x <- "fallback"
+  }
+  x
+}
+#++++
+f: fn(x: integer | NULL) -> integer | character
+48..49 warning[unused] `f` is assigned but never used.
+
+#---- refined_edges_rejoin_to_the_original_union
+#: fn(x: integer | NULL) -> integer | NULL
+f <- function(x) {
+  if (is.null(x)) {
+    y <- 1L
+  }
+  x
+}
+#++++
+f: fn(x: integer | NULL) -> integer | NULL
+43..44 warning[unused] `f` is assigned but never used.
+86..87 warning[unused] `y` is assigned but never used.
+
+#==== diverging_branch_values
+#---- diverging_else_contributes_no_value
+#: fn(x: integer | NULL) -> integer
+f <- function(x) {
+  y <- if (!is.null(x)) x else return(0L)
+  y + 1L
+}
+#++++
+f: fn(x: integer | NULL) -> integer
+36..37 warning[unused] `f` is assigned but never used.
+
+#---- guard_on_any_pins_the_true_edge_to_null
+f <- function() {
+  x <- getOption("value")
+  if (is.null(x)) {
+    x
+  } else {
+    "something"
+  }
+}
+#++++
+f: fn() -> character | NULL
+0..1 warning[unused] `f` is assigned but never used.
+
+#==== unannotated_null_guards
+#---- coalesce_generalizes_to_optional
+or_else <- function(value, fallback) {
+  if (is.null(value)) {
+    fallback
+  } else {
+    value
+  }
+}
+#++++
+or_else: <T> fn(value: T | NULL, fallback: T) -> T
+0..7 warning[unused] `or_else` is assigned but never used.
+
+#---- coalesce_accepts_null_and_binds_from_the_fallback
+or_else <- function(value, fallback) {
+  if (is.null(value)) fallback else value
+}
+picked <- or_else(NULL, "anonymous")
+picked
+#++++
+or_else: <T> fn(value: T | NULL, fallback: T) -> T
+picked: character
+character
+
+#---- early_return_shapes_the_parameter
+f <- function(x) {
+  if (is.null(x)) {
+    return(0L)
+  }
+  x + 1L
+}
+#++++
+f: <T: numeric> fn(x: T | NULL) -> integer | T
+0..1 warning[unused] `f` is assigned but never used.
+
+#---- negated_guard_shapes_too
+f <- function(x) {
+  if (!is.null(x)) x + 1L else 0L
+}
+#++++
+f: fn(x: integer | NULL) -> integer
+0..1 warning[unused] `f` is assigned but never used.
+
+#---- testing_null_makes_unguarded_use_a_real_finding
+f <- function(x) {
+  if (is.null(x)) 0L else 1L
+  x + 1L
+}
+#++++
+f: Unknown
+0..1 warning[unused] `f` is assigned but never used.
+50..51 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T | NULL`

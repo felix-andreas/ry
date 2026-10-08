@@ -1,0 +1,260 @@
+#==== function_inference
+#---- mirror
+mirror <- function(x) x
+#++++
+mirror: <T> fn(x: T) -> T
+
+#---- first_of_two
+first <- function(x, y) x
+#++++
+first: <T, U> fn(x: T, y: U) -> T
+
+#---- second_of_two
+second <- function(x, y) y
+#++++
+second: <T, U> fn(x: T, y: U) -> U
+
+#---- nullary_constant
+make <- function() 1L
+#++++
+make: fn() -> integer
+
+#---- constant_ignores_param
+const <- function(x) "ok"
+#++++
+const: <T> fn(x: T) -> character
+
+#---- param_numeric_from_add_literal
+inc <- function(x) x + 1L
+#++++
+inc: <T: numeric> fn(x: T) -> T
+
+#---- param_numeric_from_negate
+neg <- function(x) -x
+#++++
+neg: <T: numeric> fn(x: T) -> T
+
+#---- param_numeric_from_compare
+is_pos <- function(x) x > 0L
+#++++
+is_pos: <T: numeric> fn(x: T) -> logical
+
+#---- param_numeric_division_double
+halve <- function(x) x / 2
+#++++
+halve: <T: numeric> fn(x: T) -> double
+
+#---- param_logical_from_negation
+notx <- function(x) !x
+#++++
+notx: fn(x: logical) -> logical
+
+#---- param_logical_from_and
+both <- function(x, y) x && y
+#++++
+both: fn(x: logical, y: logical) -> logical
+
+#---- param_logical_from_if_cond
+when <- function(x) if (x) 1L else 2L
+#++++
+when: fn(x: logical) -> integer
+
+#---- if_without_else_returns_nullable
+maybe <- function(x) if (x) 1L
+#++++
+maybe: fn(x: logical) -> integer | NULL
+
+#---- higher_order_apply
+invoke <- function(f, value) f(value)
+#++++
+invoke: <T, U> fn(f: fn(T) -> U, value: T) -> U
+
+#---- higher_order_compose
+compose <- function(f, g, x) f(g(x))
+#++++
+compose: <T, U, V> fn(f: fn(T) -> U, g: fn(V) -> T, x: V) -> U
+
+#---- default_makes_param_optional
+greet <- function(count, label = NULL) count
+#++++
+greet: <T, U> fn(count: T, [label]: U) -> T
+
+#---- default_non_null_optional
+withdef <- function(x, y = 1L) x + y
+#++++
+withdef: <T: numeric> fn(x: T, [y]: T) -> T
+
+#---- local_binding_return
+compute <- function(x) {
+  doubled <- x + x
+  doubled
+}
+#++++
+compute: <T: numeric> fn(x: T) -> T
+
+#---- block_last_expr_return
+f <- function(x) {
+  y <- 1L
+  x
+}
+#++++
+f: <T> fn(x: T) -> T
+21..22 warning[unused] `y` is assigned but never used.
+
+#---- let_polymorphism_two_uses
+mirror <- function(x) x
+a <- mirror(1L)
+b <- mirror("foo")
+#++++
+mirror: <T> fn(x: T) -> T
+a: integer
+b: character
+
+#---- alias_of_polymorphic
+mirror <- function(x) x
+alias <- mirror
+#++++
+mirror: <T> fn(x: T) -> T
+alias: <T> fn(x: T) -> T
+
+#---- return_arithmetic_result
+sumlit <- function(x, y) x + y + 1L
+#++++
+sumlit: <T: numeric> fn(x: T, y: T) -> T
+
+#---- nested_function_returns_function
+adder <- function(x) function(y) x + y
+#++++
+adder: <T: numeric> fn(x: T) -> fn(y: T) -> T
+
+#---- param_used_as_nullary_callee
+call_it <- function(f) f()
+#++++
+call_it: <T> fn(f: fn() -> T) -> T
+
+#---- empty_body_returns_null
+noop <- function(x) { }
+#++++
+noop: <T> fn(x: T) -> NULL
+
+#---- param_passed_to_two_funcs_same_constraint
+twice <- function(x) x + x
+#++++
+twice: <T: numeric> fn(x: T) -> T
+
+#---- compare_character_literal
+gtchar <- function(x) x > "a"
+#++++
+gtchar: <T> fn(x: T) -> logical
+
+#---- closure_captures_outer
+outer <- 1L
+capf <- function(x) x + outer
+#++++
+outer: integer
+capf: <T: numeric> fn(x: T) -> T
+
+#---- param_passed_to_annotated
+#: fn(integer) -> character
+render <- function(n) "ok"
+wrap <- function(x) render(x)
+#++++
+render: fn(n: integer) -> character
+wrap: fn(x: integer) -> character
+
+#---- nested_let_generalization
+mk <- function(a) {
+  id <- function(x) x
+  id(a)
+}
+#++++
+mk: <T> fn(a: T) -> T
+
+#---- param_used_numeric_then_returned_in_block
+acc <- function(x) {
+  s <- x + 1L
+  s + x
+}
+#++++
+acc: <T: numeric> fn(x: T) -> T
+
+#---- higher_order_returns_param_call_twice
+applytwice <- function(f, x) f(f(x))
+#++++
+applytwice: <T> fn(f: fn(T) -> T, x: T) -> T
+
+#---- param_or_default_logical
+flagfn <- function(flag = TRUE) if (flag) 1L else 2L
+#++++
+flagfn: fn([flag]: logical) -> integer
+
+#---- if_with_param_value_nullable
+pick <- function(c, v) if (c) v
+#++++
+pick: <T> fn(c: logical, v: T) -> T | NULL
+
+#---- nested_call_result_numeric
+addcall <- function(f, x) f(x) + 1L
+#++++
+addcall: <T, U: numeric> fn(f: fn(T) -> U, x: T) -> U
+
+#---- modulo_param
+modp <- function(x) x %% 2L
+#++++
+modp: <T: numeric> fn(x: T) -> T
+
+#---- double_negate
+dn <- function(x) -(-x)
+#++++
+dn: <T: numeric> fn(x: T) -> T
+
+#---- three_param_sum
+sum3 <- function(a, b, c) a + b + c
+#++++
+sum3: <T: numeric> fn(a: T, b: T, c: T) -> T
+
+#---- param_used_in_sequence_block
+seqf <- function(x) { x; x }
+#++++
+seqf: <T> fn(x: T) -> T
+
+#---- nullary_empty_body
+emptyf <- function() { }
+#++++
+emptyf: fn() -> NULL
+
+#---- mult_literal_param
+mulp <- function(x) x * 2L
+#++++
+mulp: <T: numeric> fn(x: T) -> T
+
+#---- power_param_double
+powp <- function(x) x ^ 2L
+#++++
+powp: <T: numeric> fn(x: T) -> double
+
+#---- and_with_literal
+andlit <- function(x) x && TRUE
+#++++
+andlit: fn(x: logical) -> logical
+
+#---- nested_higher_order_apply_to_self
+twiceapply <- function(f) function(x) f(f(x))
+#++++
+twiceapply: <T> fn(f: fn(T) -> T) -> fn(x: T) -> T
+
+#==== branch_unification
+#---- chooser_unifies_branch_variables
+pick <- function(cond, a, b) if (cond) a else b
+#++++
+pick: <T> fn(cond: logical, a: T, b: T) -> T
+
+#---- null_else_branch_keeps_variable_polymorphic
+maybe <- function(flag, value) if (flag) value else NULL
+#++++
+maybe: <T> fn(flag: logical, value: T) -> T | NULL
+
+#---- different_branch_literals_join_to_union
+label_or_count <- function(flag) if (flag) 1L else "one"
+#++++
+label_or_count: fn(flag: logical) -> integer | character

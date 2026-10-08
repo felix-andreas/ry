@@ -124,3 +124,39 @@ pub fn check_semantics_input(input: &str) {
     let edited = format!("{}\nprobe <- 1L\n", &input[..cut]);
     check_semantics_invariants(input, &edited, kind);
 }
+
+std::thread_local! {
+    static FIXTURE_DATABASE: std::cell::RefCell<Option<RootDatabase>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `render` over a project of `files`, on a database the calling thread
+/// reuses across fixture cases. Parsing the shipped stub corpus costs far more
+/// than checking a typical case, so a case swaps the project's files rather
+/// than building a fresh database; the setter path is the one the incremental
+/// invariants above prove equivalent to a fresh database.
+pub fn with_fixture_project<R>(
+    files: Vec<(String, DocumentKind)>,
+    render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
+) -> R {
+    FIXTURE_DATABASE.with_borrow_mut(|slot| {
+        let db = slot.get_or_insert_with(|| {
+            let db = RootDatabase::default();
+            crate::stubs::install_shipped_stubs(&db);
+            db
+        });
+        let sources: Vec<SourceFile> = files
+            .into_iter()
+            .map(|(text, kind)| SourceFile::new(db, text, kind))
+            .collect();
+        match ProjectFiles::try_get(db) {
+            Some(project) => {
+                project.set_files(db).to(sources.clone());
+            }
+            None => {
+                ProjectFiles::new(db, sources.clone());
+            }
+        }
+        render(db, &sources)
+    })
+}

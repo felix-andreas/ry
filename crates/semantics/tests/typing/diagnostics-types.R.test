@@ -1,0 +1,126 @@
+#==== typing_comments
+#---- missing_following_expression
+#: integer
+#++++
+0..10 error[annotation] A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block.
+
+#---- empty_line_after_typing_comment
+#: integer
+
+value <- 1L
+#++++
+value: integer
+0..10 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
+
+#---- consecutive_typing_comments
+#: integer
+#: character
+value <- 1L
+#++++
+value: integer
+0..23 error[annotation] only one compact annotation fits in a `#:` block — separate the annotations with a blank line so each gets its own block.
+
+#---- invalid_type_syntax
+#: list{length:
+value <- list(length = 1L)
+#++++
+value: list{length: Unknown}
+14..15 error[annotation] expected a type
+
+#---- missing_closing_paren
+#: fn(integer
+value <- function(x) x
+#++++
+value: fn(x: integer) -> integer
+12..13 error[annotation] expected `,` or `)` in this function type's parameters
+
+#---- missing_closing_bracket
+#: list[integer
+value <- list(1L)
+#++++
+value: list[integer]
+7..8 error[annotation] unclosed `[` in this list type; expected a matching `]`
+
+#---- missing_closing_brace
+#: list{value: integer
+value <- list(value = 1L)
+#++++
+value: list{value: integer}
+21..22 error[annotation] expected `,` or `}` in this list type
+
+#---- unknown_type
+#: user_id
+value <- 1L
+#++++
+value: user_id
+3..10 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#==== expanded_typing_comments
+#---- expanded_missing_following_expression
+#: @param count {integer}
+#++++
+0..25 error[annotation] A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block.
+
+#---- expanded_invalid_type_syntax
+#: @param count {list{length:}
+render <- function(count) count
+#++++
+render: fn(count: list{length: Unknown}) -> list{length: Unknown}
+16..17 error[annotation] unclosed `{` in `@param`; expected a matching `}`
+29..30 error[annotation] expected a type, found `}`
+
+#---- expanded_missing_closing_brace
+#: @param count {list{length: integer}
+render <- function(count) count
+#++++
+render: fn(count: list{length: integer}) -> list{length: integer}
+16..17 error[annotation] unclosed `{` in `@param`; expected a matching `}`
+
+#---- expanded_unknown_type
+#: @param count {user_id}
+render <- function(count) count
+#++++
+render: fn(count: user_id) -> user_id
+17..24 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#==== mixed_typing_comments
+#---- compact_followed_by_expanded
+#: integer
+#: @param count {integer}
+render <- function(count) count
+#++++
+render: <T> fn(count: T) -> T
+0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both — separate the two forms with a blank line.
+
+#---- expanded_followed_by_compact
+#: @param count {integer}
+#: integer
+render <- function(count) count
+#++++
+render: <T> fn(count: T) -> T
+0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both — separate the two forms with a blank line.
+
+#==== type_definitions
+#---- definition_can_reference_previous_definition
+#: @type Person {list{name: character}}
+#: @type Team {list{owner: Person}}
+value <- 1L
+#++++
+value: integer
+
+#---- definition_unknown_type
+#: @type Team {list{owner: Person}}
+value <- 1L
+#++++
+value: integer
+27..33 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- nominal_introduction_rejects_alias
+#: @alias Person {list{name: character}}
+value <- 1L
+#: @new Person
+other <- list(name = "bob")
+#++++
+value: integer
+other: list{name: character}
+61..67 error[annotation] `@new` requires a nominal type declared with `@type`, but `Person` is an alias.

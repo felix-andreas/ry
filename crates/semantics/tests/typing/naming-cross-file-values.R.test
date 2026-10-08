@@ -1,0 +1,144 @@
+#==== value_globals
+#---- later_file_uses_earlier_global
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+x: integer
+== R/b.R
+integer
+
+#---- earlier_file_uses_later_global
+#~~~~ R/a.R
+x
+#~~~~ R/b.R
+x <- 1L
+#++++
+== R/a.R
+integer
+== R/b.R
+x: integer
+
+#---- later_file_call_resolves_cross_file_callee_and_argument
+#~~~~ R/a.R
+value <- 1L
+#~~~~ R/b.R
+mirror <- function(x) x
+#~~~~ R/c.R
+mirror(value)
+#++++
+== R/a.R
+value: integer
+== R/b.R
+mirror: <T> fn(x: T) -> T
+== R/c.R
+integer
+
+#---- later_file_can_be_consumed_by_several_later_files
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x
+#~~~~ R/c.R
+x
+#++++
+== R/a.R
+x: integer
+== R/b.R
+integer
+== R/c.R
+integer
+
+#---- function_body_uses_global_from_other_file
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+f <- function() x
+#++++
+== R/a.R
+x: integer
+== R/b.R
+f: fn() -> integer
+
+#---- package_path_order_controls_package_winner
+#~~~~ R/a.R
+x <- 2L
+#~~~~ R/b.R
+x <- 1L
+#~~~~ R/c.R
+x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/c.R
+integer
+
+#---- three_file_rebinding_chain_uses_final_winner
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- 2L
+#~~~~ R/c.R
+x <- 3L
+#~~~~ R/d.R
+x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/c.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/d.R
+integer
+
+#---- rebinding_chain_with_intermediate_consumers
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x
+x <- 2L
+#~~~~ R/c.R
+x
+x <- 3L
+#~~~~ R/d.R
+x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+integer
+x: integer
+2..3 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+2..3 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/c.R
+integer
+x: integer
+2..3 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/d.R
+integer
+
+#==== bare_block_globals
+#---- bare_top_level_block_assign_is_package_global
+#~~~~ R/a.R
+{
+  x <- 1L
+}
+#~~~~ R/b.R
+x
+#++++
+== R/a.R
+integer
+== R/b.R
+integer

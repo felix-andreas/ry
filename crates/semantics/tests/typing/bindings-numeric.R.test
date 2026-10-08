@@ -1,0 +1,317 @@
+#==== numeric
+#---- double_literal_add
+x <- 1 + 2
+#++++
+x: double
+
+#---- integer_literal_add
+x <- 1L + 2L
+#++++
+x: integer
+
+#---- mix_integer_double_add
+x <- 1L + 2.5
+#++++
+x: double
+
+#---- division_always_double
+x <- 5L / 2L
+#++++
+x: double
+
+#---- power_always_double
+x <- 2L ^ 3L
+#++++
+x: double
+
+#---- power_starstar_always_double
+x <- 2L ** 3L
+#++++
+x: double
+
+#---- modulo_integer
+x <- 5L %% 2L
+#++++
+x: integer
+
+#---- modulo_mix_double
+x <- 5L %% 2.0
+#++++
+x: double
+
+#---- intdiv_integer
+x <- 5L %/% 2L
+#++++
+x: integer
+
+#---- unary_minus_integer
+x <- -3L
+#++++
+x: integer
+
+#---- unary_minus_double
+x <- -3.5
+#++++
+x: double
+
+#---- range_integer_literals
+x <- 1L:5L
+#++++
+x: integer[]
+
+#---- range_whole_double_literals
+x <- 1:10
+#++++
+x: integer[]
+
+#---- range_double_literal
+x <- 1.5:3
+#++++
+x: double[]
+
+#---- scalar_times_array
+x <- 2L * c(1L, 2L)
+#++++
+x: integer[]
+
+#---- double_times_int_array
+x <- 2.0 * c(1L, 2L)
+#++++
+x: double[]
+
+#---- comparison_scalar_logical
+x <- 1L < 2L
+#++++
+x: logical
+
+#---- comparison_mixed_numeric
+x <- 1L == 1.5
+#++++
+x: logical
+
+#---- comparison_array_logical
+x <- c(1L, 2L) > 1L
+#++++
+x: logical[]
+
+#---- numeric_param_modulo
+f <- function(x) x %% 2L
+#++++
+f: <T: numeric> fn(x: T) -> T
+
+#---- numeric_param_intdiv
+f <- function(x) x %/% 2L
+#++++
+f: <T: numeric> fn(x: T) -> T
+
+#---- numeric_param_power
+f <- function(x) x ^ 2L
+#++++
+f: <T: numeric> fn(x: T) -> double
+
+#---- numeric_param_times
+f <- function(x) x * 2L
+#++++
+f: <T: numeric> fn(x: T) -> T
+
+#---- numeric_param_minus
+f <- function(x) x - 1L
+#++++
+f: <T: numeric> fn(x: T) -> T
+
+#---- numeric_param_compare_eq
+f <- function(x) x == 0L
+#++++
+f: <T: numeric> fn(x: T) -> logical
+
+#---- numeric_param_compare_le
+f <- function(x) x <= 10L
+#++++
+f: <T: numeric> fn(x: T) -> logical
+
+#---- numeric_two_params_mul
+f <- function(a, b) a * b
+#++++
+f: <T: numeric> fn(a: T, b: T) -> T
+
+#---- numeric_param_unary_minus_in_expr
+f <- function(x) -x + 1L
+#++++
+f: <T: numeric> fn(x: T) -> T
+
+#---- call_numeric_fn_integer
+f <- function(x) x + 1L
+r <- f(2L)
+#++++
+f: <T: numeric> fn(x: T) -> T
+r: integer
+
+#---- call_numeric_fn_double
+f <- function(x) x + 1L
+r <- f(2.5)
+#++++
+f: <T: numeric> fn(x: T) -> T
+r: double
+
+#---- numeric_param_div_two_double_result
+f <- function(x, y) x / y
+#++++
+f: <T: numeric> fn(x: T, y: T) -> double
+
+#---- numeric_chain_local
+f <- function(x) {
+  a <- x + 1L
+  b <- a * 2L
+  b
+}
+#++++
+f: <T: numeric> fn(x: T) -> T
+
+#---- numeric_escape_defaults_double
+make <- function() {
+  total <- 0L
+  total
+}
+v <- make()
+#++++
+make: fn() -> integer
+v: integer
+
+#---- numeric_param_used_then_returned_plus
+f <- function(x) {
+  x + 1L
+  x
+}
+#++++
+f: <T: numeric> fn(x: T) -> T
+
+#---- promotion_array_mix
+x <- c(1L, 2L) + c(1.0, 2.0)
+#++++
+x: double[]
+
+#---- named_vector_arith_loses_map
+x <- c(foo = 1L, bar = 2L) + 1L
+#++++
+x: integer[]
+
+#---- unary_minus_array
+x <- -c(1L, 2L)
+#++++
+x: integer[]
+
+#---- unary_minus_named
+x <- -c(foo = 1L, bar = 2L)
+#++++
+x: integer[]
+
+#---- numeric_double_div_literal
+f <- function(x) x / 2.0
+#++++
+f: <T: numeric> fn(x: T) -> double
+
+#---- nested_arith_double
+x <- (1L + 2L) / (3L - 1L)
+#++++
+x: double
+
+#---- complex_minus_unsupported_clean
+x <- 1L - 2L * 3L
+#++++
+x: integer
+
+#---- range_double_scalar_var
+x <- 2.5
+y <- x:5L
+#++++
+x: double
+y: double[]
+
+#---- self_power_param
+f <- function(x) x ^ x
+#++++
+f: <T: numeric> fn(x: T) -> double
+
+#---- two_params_div_double
+f <- function(a, b) a / b
+#++++
+f: <T: numeric> fn(a: T, b: T) -> double
+
+#---- compare_then_arith_param
+f <- function(x) {
+  y <- x > 0L
+  x + 1L
+}
+#++++
+f: <T: numeric> fn(x: T) -> T
+21..22 warning[unused] `y` is assigned but never used.
+
+#---- param_sum_then_compare
+f <- function(a, b) a + b > 0L
+#++++
+f: <T: numeric> fn(a: T, b: T) -> logical
+
+#---- numeric_escape_top_integer
+y <- 1L
+z <- y + 1L
+#++++
+y: integer
+z: integer
+
+#---- modulo_param_double_literal
+f <- function(x) x %% 2.0
+#++++
+f: <T: numeric> fn(x: T) -> double
+
+#---- range_both_double_vars
+a <- 1
+b <- 10
+x <- a:b
+#++++
+a: double
+b: double
+x: double[]
+
+#---- unconstrained_vs_numeric_param
+f <- function(x) x
+g <- function(x) x + 1L
+#++++
+f: <T> fn(x: T) -> T
+g: <T: numeric> fn(x: T) -> T
+
+#---- nested_closure_captures_numeric
+outer <- function(x) {
+  inner <- function() x + 1L
+  inner()
+}
+#++++
+outer: <T: numeric> fn(x: T) -> T
+
+#---- arith_div_result_double_local
+f <- function(x) {
+  a <- x / 2L
+  a
+}
+#++++
+f: <T: numeric> fn(x: T) -> double
+
+#---- param_add_double_literal_stays_numeric
+f <- function(x) x + 2.5
+#++++
+f: <T: numeric> fn(x: T) -> double
+
+#---- compare_against_character_leaves_unconstrained
+f <- function(x) x == "a"
+#++++
+f: <T> fn(x: T) -> logical
+
+#---- compare_against_numeric_literal_constrains
+f <- function(x) x == 1L
+#++++
+f: <T: numeric> fn(x: T) -> logical
+
+#==== range_numeric_var
+#---- range_over_numeric_var_is_double
+rangef <- function(n) 1:n
+#++++
+rangef: <T: scalar numeric> fn(n: T) -> double[]

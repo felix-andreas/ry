@@ -1,0 +1,15 @@
+#==== colon_endpoints
+#---- colon_endpoint_variable_is_scalar_constrained
+f <- function(n) 1:n
+f(3L)
+#++++
+f: <T: scalar numeric> fn(n: T) -> double[]
+double[]
+
+#---- vector_endpoint_through_a_polymorphic_call_is_rejected
+f <- function(n) 1:n
+f(c(1.5, 2.5))
+#++++
+f: <T: scalar numeric> fn(n: T) -> double[]
+double[]
+23..34 error[type-mismatch] expected `T`, found `double[]`

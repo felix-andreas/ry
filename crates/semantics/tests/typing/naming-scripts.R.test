@@ -1,0 +1,97 @@
+#==== value_lookup
+#---- script_can_consume_package_global_value
+#~~~~ R/main.R
+x <- 1L
+#~~~~ inst/scripts/helper.R
+x
+#++++
+== R/main.R
+x: integer
+== inst/scripts/helper.R
+integer
+
+#---- script_value_does_not_contribute_package_global
+#~~~~ R/main.R
+x
+#~~~~ inst/scripts/helper.R
+x <- 1L
+#++++
+== R/main.R
+Unknown
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+== inst/scripts/helper.R
+x: integer
+0..1 warning[unused] `x` is assigned but never used.
+
+#---- script_value_does_not_contribute_to_other_script
+#~~~~ inst/scripts/a.R
+x <- 1L
+#~~~~ inst/scripts/b.R
+x
+#++++
+== inst/scripts/a.R
+x: integer
+0..1 warning[unused] `x` is assigned but never used.
+== inst/scripts/b.R
+Unknown
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+
+#---- package_and_script_same_value_name_do_not_conflict
+#~~~~ R/main.R
+x <- 1L
+#~~~~ inst/scripts/helper.R
+x <- 2L
+#++++
+== R/main.R
+x: integer
+== inst/scripts/helper.R
+x: integer
+0..1 warning[unused] `x` is assigned but never used.
+
+#==== type_lookup
+#---- script_can_consume_package_global_type
+#~~~~ R/main.R
+#: @type Person {integer}
+#~~~~ inst/scripts/helper.R
+#: Person
+value <- 1L
+#++++
+== R/main.R
+== inst/scripts/helper.R
+value: Person
+10..15 warning[unused] `value` is assigned but never used.
+19..21 error[type-mismatch] expected `Person`, found `integer`
+
+#---- script_type_does_not_contribute_project_global
+#~~~~ R/main.R
+#: Person
+value <- 1L
+#~~~~ inst/scripts/helper.R
+#: @type Person {integer}
+#++++
+== R/main.R
+value: Person
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+== inst/scripts/helper.R
+
+#---- script_type_does_not_contribute_to_other_script
+#~~~~ inst/scripts/a.R
+#: @type Person {integer}
+#~~~~ inst/scripts/b.R
+#: Person
+value <- 1L
+#++++
+== inst/scripts/a.R
+== inst/scripts/b.R
+value: Person
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+10..15 warning[unused] `value` is assigned but never used.
+
+#---- package_and_script_same_type_name_do_not_conflict
+#~~~~ R/main.R
+#: @type Person {integer}
+#~~~~ inst/scripts/helper.R
+#: @type Person {double}
+#++++
+== R/main.R
+== inst/scripts/helper.R

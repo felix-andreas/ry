@@ -1,0 +1,140 @@
+#==== strict_unknown
+#---- unsupported_construct_bare_flags_the_expression
+#~~~~ R/main.R
+1L %then% 2L
+#++++
+== R/main.R
+Unknown
+0..12 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
+#---- unsupported_construct_binding_flags_the_binding_name
+#~~~~ R/main.R
+x <- 1L %then% 2L
+#++++
+== R/main.R
+x: Unknown
+5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+
+#---- cascade_single_origin_one_origin_used_downstream_flags_once
+#~~~~ R/main.R
+x <- 1L %then% 2L
+y <- x + 1L
+z <- x * 2L
+#++++
+== R/main.R
+x: Unknown
+y: Unknown
+z: Unknown
+5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+
+#---- existing_type_error_does_not_also_strict_flag
+#~~~~ R/main.R
+x <- "foo"
+bad <- x + 1L
+#++++
+== R/main.R
+x: character
+bad: Unknown
+18..19 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- any_is_tolerated_trust_any_over_unsupported
+#~~~~ R/main.R
+#: @trust Any
+1L %then% 2L
+#++++
+== R/main.R
+Any
+
+#---- cross_file_unknown_global_origin_flagged_once_reference_not_flagged
+#~~~~ R/a.R
+x <- 1L %then% 2L
+#~~~~ R/b.R
+y <- x
+#++++
+== R/a.R
+x: Unknown
+5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+== R/b.R
+y: Unknown
+
+#---- dollar_on_unannotated_param_is_a_strict_origin
+#~~~~ R/main.R
+get_value <- function(node) node$value
+#++++
+== R/main.R
+get_value: <T> fn(node: T) -> Unknown
+28..38 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
+#---- double_bracket_on_unannotated_param_is_a_strict_origin
+#~~~~ R/main.R
+first <- function(x) x[[1L]]
+#++++
+== R/main.R
+first: <T> fn(x: T) -> Unknown
+21..28 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
+#---- bracket_on_unannotated_param_is_a_strict_origin
+#~~~~ R/main.R
+slice <- function(x) x[1L]
+#++++
+== R/main.R
+slice: <T> fn(x: T) -> Unknown
+21..26 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
+#---- combine_of_unannotated_param_is_a_strict_origin
+#~~~~ R/main.R
+grow <- function(x) c(x, 1L)
+#++++
+== R/main.R
+grow: <T> fn(x: T) -> Unknown
+20..28 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
+#==== per_file_directive
+#---- strict_off_directive_silences_a_strict_file
+#~~~~ R/main.R
+#: @strict off
+x <- 1L %then% 2L
+#++++
+== R/main.R
+typing mode: On
+x: Unknown
+20..32 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+
+#==== unresolved
+#---- unresolved_name_is_reported
+#~~~~ R/main.R
+frobnicate(1L)
+#++++
+== R/main.R
+Unknown
+0..10 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+
+#==== unresolved_escalation
+#---- unknown_namespace_is_an_error_under_strict
+#~~~~ R/main.R
+foobar::bazqux(1L)
+#++++
+== R/main.R
+Unknown
+0..14 warning[unresolved] unknown package namespace `foobar`.
+0..14 error[strict] strict mode: could not determine the type of `bazqux`; it has no known type
+
+#---- strict_off_keeps_unresolved_a_warning
+#~~~~ R/main.R
+#: @strict off
+frobnicate(1L)
+#++++
+== R/main.R
+typing mode: On
+Unknown
+15..25 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+
+#---- s4_slot_read_is_a_strict_origin
+#~~~~ R/main.R
+config <- 1L
+port <- config@port
+#++++
+== R/main.R
+config: integer
+port: Unknown
+21..32 error[strict] strict mode: could not determine the type of `port`; add a type annotation

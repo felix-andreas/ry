@@ -1,0 +1,61 @@
+#==== nominal_new
+#---- new_infers_atomic_parameter_2
+#: @type Meters {double}
+
+asMeters <- function(value) {
+  #: @new Meters
+  value
+}
+#++++
+asMeters: fn(value: double) -> Meters
+
+#---- alias_after_new_is_error_not_nominal
+#: @type Cat {list{name: character}}
+#: @type Dog {list{name: character}}
+
+#: fn(value: Cat) -> character
+pet_cat <- function(value) value$name
+
+#: @new Dog
+dog <- list(name = "rex")
+pet_cat(dog)
+#++++
+pet_cat: fn(value: Cat) -> character
+dog: Dog
+character
+191..194 error[type-mismatch] expected `Cat`, found `Dog`
+
+#---- new_on_alias_is_error
+#: @alias Shape {list{name: character}}
+
+#: @new Shape
+v <- list(name = "bob")
+#++++
+v: list{name: character}
+49..54 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias.
+
+#---- structural_value_to_nominal_param
+#: @type Person {list{name: character}}
+
+#: fn(value: Person) -> character
+get_name <- function(value) value$name
+
+get_name(list(name = "bob"))
+#++++
+get_name: fn(value: Person) -> character
+character
+124..142 error[type-mismatch] expected `Person`, found `list{name: character}`
+
+#---- distinct_nominal_mismatch_annotation
+#: @type Cat {list{name: character}}
+#: @type Dog {list{name: character}}
+
+#: @new Cat
+kit <- list(name = "felix")
+
+#: Dog
+d <- kit
+#++++
+kit: Cat
+d: Dog
+128..131 error[type-mismatch] expected `Dog`, found `Cat`

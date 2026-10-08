@@ -1,0 +1,5 @@
+#==== containers
+#---- mixed_named_and_unnamed_list
+list(1L, bar = "foo")
+#++++
+list[integer | character]

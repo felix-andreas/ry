@@ -1,0 +1,325 @@
+#==== cross_file_values
+#---- cross_file_value_annotation_mismatch
+#~~~~ R/a.R
+count <- 1L
+#~~~~ R/b.R
+#: character
+label <- count
+#++++
+== R/a.R
+count: integer
+== R/b.R
+label: character
+22..27 error[type-mismatch] expected `character`, found `integer`
+
+#---- later_file_definition_is_visible_earlier
+#~~~~ R/a.R
+result <- render(1L)
+#~~~~ R/b.R
+#: fn(count: integer) -> character
+render <- function(count) "ok"
+#++++
+== R/a.R
+result: character
+== R/b.R
+render: fn(count: integer) -> character
+
+#==== multiple_errors
+#---- several_errors_in_one_file_all_report
+#~~~~ R/a.R
+#: integer
+first <- "one"
+#: integer
+second <- "two"
+#++++
+== R/a.R
+first: integer
+second: integer
+20..25 error[type-mismatch] expected `integer`, found `character`
+47..52 error[type-mismatch] expected `integer`, found `character`
+
+#---- errors_in_several_files_all_report
+#~~~~ R/a.R
+#: integer
+first <- "one"
+#~~~~ R/b.R
+#: integer
+second <- "two"
+#++++
+== R/a.R
+first: integer
+20..25 error[type-mismatch] expected `integer`, found `character`
+== R/b.R
+second: integer
+21..26 error[type-mismatch] expected `integer`, found `character`
+
+#==== forward_references
+#---- deep_chain_resolves_within_and_across_files
+#~~~~ R/a.R
+third <- second
+second <- first
+first <- 1L
+#~~~~ R/b.R
+#: integer
+ok <- third
+#++++
+== R/a.R
+third: integer
+second: integer
+first: integer
+== R/b.R
+ok: integer
+
+#==== cross_file_reexport
+#---- value_reexport_resolves_across_files
+#~~~~ R/a.R
+first <- 1L
+#~~~~ R/b.R
+second <- first
+#~~~~ R/c.R
+#: integer
+check <- second
+#++++
+== R/a.R
+first: integer
+== R/b.R
+second: integer
+== R/c.R
+check: integer
+
+#---- function_wrapper_reexports_return_type
+#~~~~ R/a.R
+base <- 10L
+#~~~~ R/b.R
+get_base <- function() base
+#~~~~ R/c.R
+#: integer
+value <- get_base()
+#++++
+== R/a.R
+base: integer
+== R/b.R
+get_base: fn() -> integer
+== R/c.R
+value: integer
+
+#---- reexport_type_error_is_caught
+#~~~~ R/a.R
+first <- 1L
+#~~~~ R/b.R
+second <- first
+#~~~~ R/c.R
+#: character
+bad <- second
+#++++
+== R/a.R
+first: integer
+== R/b.R
+second: integer
+== R/c.R
+bad: character
+20..26 error[type-mismatch] expected `character`, found `integer`
+
+#---- deep_cross_file_chain_resolves
+#~~~~ R/a.R
+first <- 1L
+#~~~~ R/b.R
+second <- first
+#~~~~ R/c.R
+third <- second
+#~~~~ R/d.R
+#: integer
+fourth <- third
+#++++
+== R/a.R
+first: integer
+== R/b.R
+second: integer
+== R/c.R
+third: integer
+== R/d.R
+fourth: integer
+
+#==== reexport_cycles
+#---- mutual_reexport_cycle_resolves_to_unknown
+#~~~~ R/a.R
+a <- b
+#~~~~ R/b.R
+b <- a
+#~~~~ R/c.R
+result <- a(2L)
+#++++
+== R/a.R
+a: Unknown
+== R/b.R
+b: Unknown
+== R/c.R
+result: Unknown
+
+#---- typed_mutual_reexport_cycle_does_not_panic
+#~~~~ R/a.R
+#: fn(value: integer) -> integer
+seed <- function(value) value
+a <- b
+#~~~~ R/b.R
+b <- a
+#~~~~ R/c.R
+good <- seed(2L)
+bad <- seed("two")
+#++++
+== R/a.R
+seed: fn(value: integer) -> integer
+a: Unknown
+== R/b.R
+b: Unknown
+== R/c.R
+good: integer
+bad: Unknown
+29..34 error[type-mismatch] expected `integer`, found `character`
+
+#---- three_file_reexport_cycle_resolves_to_unknown
+#~~~~ R/a.R
+ring_one <- ring_two
+#~~~~ R/b.R
+ring_two <- ring_three
+#~~~~ R/c.R
+ring_three <- ring_one
+#~~~~ R/d.R
+result <- ring_one(1L)
+#++++
+== R/a.R
+ring_one: Unknown
+== R/b.R
+ring_two: Unknown
+== R/c.R
+ring_three: Unknown
+== R/d.R
+result: Unknown
+
+#==== error_tolerant_lowering
+#---- broken_tail_keeps_earlier_exports
+#~~~~ R/a.R
+helper <- function() 1L
+oops <- function() (
+#~~~~ R/b.R
+result <- helper()
+#++++
+== R/a.R
+helper: fn() -> integer
+oops: fn() -> Unknown
+43..44 error[syntax-error] unclosed `(`; expected a matching `)`
+45..45 error[syntax-error] expected an expression inside `(`, found end of file
+== R/b.R
+result: integer
+
+#---- broken_value_keeps_annotated_scheme
+#~~~~ R/a.R
+#: fn() -> integer
+get_count <- function() {
+#~~~~ R/b.R
+total <- get_count() + 1L
+#++++
+== R/a.R
+get_count: fn() -> integer
+43..44 error[syntax-error] unclosed `{`; expected a matching `}`
+== R/b.R
+total: integer
+
+#---- dangling_assignment_defines_unknown
+#~~~~ R/a.R
+count <-
+#~~~~ R/b.R
+mirrored <- count
+#++++
+== R/a.R
+count: Unknown
+6..8 error[syntax-error] expected an expression after `<-`
+== R/b.R
+mirrored: Unknown
+
+#==== data_masking
+#---- data_table_syntax_produces_no_noise
+#~~~~ R/dt.R
+summarize_sales <- function(dt) {
+  dt[region == "west", .(total = sum(amount)), by = product]
+}
+add_revenue <- function(dt) {
+  dt[, revenue := price * quantity]
+}
+peek <- function(dt) {
+  with(dt, mean(score_col))
+}
+#++++
+== R/dt.R
+summarize_sales: <T> fn(dt: T) -> Unknown
+add_revenue: <T> fn(dt: T) -> Unknown
+peek: <T> fn(dt: T) -> Unknown
+
+#---- base_indexing_still_reports_unresolved_names
+#~~~~ R/plain.R
+pick <- function(m) {
+  m[not_a_column]
+}
+#++++
+== R/plain.R
+pick: <T> fn(m: T) -> Unknown
+26..38 warning[unresolved] I could not resolve `not_a_column` in this package, its imports, or builtins.
+
+#---- global_variables_declarations_suppress_unresolved
+#~~~~ R/globals.R
+utils::globalVariables(c("generated_col", "another_col"))
+globalVariables("single_name")
+#~~~~ R/use.R
+use_them <- function() {
+  generated_col + another_col + single_name
+}
+#++++
+== R/globals.R
+character[]
+character[]
+== R/use.R
+use_them: fn() -> Unknown
+
+#---- undeclared_names_still_warn_alongside_declarations
+#~~~~ R/globals.R
+utils::globalVariables("declared_name")
+#~~~~ R/use.R
+f <- function() declared_name + genuinely_undefined
+#++++
+== R/globals.R
+character[]
+== R/use.R
+f: fn() -> Unknown
+32..51 warning[unresolved] I could not resolve `genuinely_undefined` in this package, its imports, or builtins.
+
+#==== top_level_recursion
+#---- self_recursive_top_level_function_stays_tolerant
+#~~~~ R/fact.R
+# A package-level self-recursive function keeps the fixed point's Unknown return on purpose:
+# heterogeneous self-recursion (the tree fold T = double | list[T]) is untypeable in HM, and
+# pinning the parameter through the recursive call manufactures call-site false positives.
+# Unannotated consumers tolerate the Unknown; the mutual case below shows the typed contrast.
+top_fact <- function(k) {
+  if (k <= 1L) 1L else k * top_fact(k - 1L)
+}
+#~~~~ R/use.R
+total <- top_fact(4L) + 1L
+#++++
+== R/fact.R
+top_fact: fn(k: integer) -> integer
+== R/use.R
+total: integer
+
+#---- mutual_top_level_recursion_types_through
+#~~~~ R/pair.R
+is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)
+is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
+#~~~~ R/use.R
+#: logical
+check <- is_even(4L)
+#++++
+== R/pair.R
+is_even: <T: numeric> fn(n: T) -> logical
+is_odd: <T: numeric> fn(n: T) -> logical
+== R/use.R
+check: logical

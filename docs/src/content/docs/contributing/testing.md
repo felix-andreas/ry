@@ -33,9 +33,12 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
   `no errors`, and recovery cases assert that one broken construct reports once and leaves
   the rest of the file clean
 - `crates/semantics/tests/typing` — the typing suite: each case runs the full semantic
-  pipeline on one package file (shipped stubs installed) and renders every named top-level
-  definition's exported scheme (`name: <T: numeric> fn(x: T) -> T`) followed by the file's
-  diagnostics (`start..end severity[code] message`, byte offsets). Cases are grouped by feature,
+  pipeline on one package file, or on several (`#~~~~ path` sections), with the shipped stubs
+  installed, and renders every top-level definition's exported scheme
+  (`name: <T: numeric> fn(x: T) -> T`), every other top-level statement's type as a bare line,
+  then the file's diagnostics (`start..end severity[code] message`, byte offsets). One database
+  per test thread is reused across cases (`semantics::testing::with_fixture_project`): parsing the
+  stub corpus costs far more than checking a case. Cases are grouped by feature,
   except `programs.R.test`, which holds whole small programs written the way a real project is:
   a case there earns its place by exercising several features at once, and a clean case with an
   empty diagnostics block is a **zero-false-positive** contract for that style of code
@@ -50,7 +53,8 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
   `WRONG-BUT-CURRENT` pin a known defect together with the shape it should have, so a fix
   turns them red; the open ones are listed in `.agents/memory/backlog.md`
 - `crates/semantics/tests/typing-scripts` — the same pipeline over script documents (one
-  sequential top-down scope)
+  sequential top-down scope); besides script semantics it holds the expression-level rules
+  (literals, operators, indexing, lists, stub calls), one line per statement
 - `crates/semantics/tests/typing-strict` — the strict stream: the per-file typing mode and
   the `strict`-code diagnostics appended after the ordinary rendering
 - `crates/semantics/tests/typing-imports` — package-metadata cases: leading `#namespace `

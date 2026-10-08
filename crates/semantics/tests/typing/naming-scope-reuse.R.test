@@ -1,0 +1,94 @@
+#==== blocks
+#---- nested_block_uses_nearest_binding
+#~~~~ R/main.R
+x <- 1L
+f <- function() {
+  x <- "ok"
+  {
+    x
+  }
+}
+#++++
+== R/main.R
+x: integer
+f: fn() -> character
+
+#---- braces_do_not_restore_outer_binding
+#~~~~ R/main.R
+x <- 1L
+f <- function() {
+  {
+    x <- "ok"
+  }
+  x
+}
+#++++
+== R/main.R
+x: integer
+f: fn() -> character
+
+#---- binding_inside_braces_remains_visible_after_braces
+#~~~~ R/main.R
+f <- function() {
+  {
+    x <- 1L
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn() -> integer
+
+#---- nested_braces_reuse_same_scope_chain
+#~~~~ R/main.R
+f <- function() {
+  {
+    x <- 1L
+    {
+      x
+    }
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn() -> integer
+
+#---- braces_inside_loop_do_not_restore_pre_loop_binding
+#~~~~ R/main.R
+x <- 0L
+for (x in list(1L)) {
+  {
+    x <- 2L
+  }
+  x
+}
+x
+#++++
+== R/main.R
+x: integer
+NULL
+integer
+
+#---- assignment_inside_loop_body_remains_visible_later_in_same_body
+#~~~~ R/main.R
+for (item in list(1L)) {
+  value <- 1L
+  value
+}
+#++++
+== R/main.R
+NULL
+
+#---- nested_block_resolves_outer_global_when_unshadowed
+#~~~~ R/main.R
+x <- 1L
+f <- function() {
+  {
+    x
+  }
+}
+#++++
+== R/main.R
+x: integer
+f: fn() -> integer

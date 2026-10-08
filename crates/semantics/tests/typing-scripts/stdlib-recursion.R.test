@@ -1,0 +1,54 @@
+#==== monomorphic_recursion
+#---- top_level_factorial_types
+fact <- function(k) {
+  if (k <= 1L) 1L else k * fact(k - 1L)
+}
+fact(5L)
+#++++
+fact: fn(k: integer) -> integer
+integer
+
+#---- recursive_scheme_rejects_a_bad_argument
+countdown <- function(x) if (x > 0L) countdown(x - 1L) else "done"
+countdown("not an integer")
+#++++
+countdown: <T: numeric> fn(x: T) -> Unknown
+Unknown
+77..93 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- local_recursive_helper_inside_a_function
+driver <- function(n) {
+  fact <- function(k) {
+    if (k <= 1L) 1L else k * fact(k - 1L)
+  }
+  fact(n)
+}
+#++++
+driver: fn(n: integer) -> integer
+0..6 warning[unused] `driver` is assigned but never used.
+
+#---- mutual_local_recursion_resolves
+pair <- function() {
+  is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)
+  is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
+  is_even(4L)
+}
+#++++
+pair: fn() -> logical
+0..4 warning[unused] `pair` is assigned but never used.
+
+#---- mutual_top_level_pair_schemes
+is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)
+is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
+is_even(4L)
+#++++
+is_even: <T: numeric> fn(n: T) -> logical
+is_odd: <T: numeric> fn(n: T) -> logical
+logical
+
+#---- mutual_pair_without_in_file_call
+even2 <- function(n) if (n == 0L) TRUE else odd2(n - 1L)
+odd2 <- function(n) if (n == 0L) FALSE else even2(n - 1L)
+#++++
+even2: <T: numeric> fn(n: T) -> logical
+odd2: <T: numeric> fn(n: T) -> logical

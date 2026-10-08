@@ -1,0 +1,99 @@
+#==== nominal_variance
+#---- contravariant_arg_rejected
+#: @type Handler<T> {fn(value: T) -> NULL}
+
+#: @new Handler<integer>
+handler <- function(value) NULL
+
+#: Handler<integer | NULL>
+widened <- handler
+#++++
+handler: Handler<integer>
+widened: Handler<integer | NULL>
+129..136 warning[unused] `widened` is assigned but never used.
+140..147 error[type-mismatch] expected `Handler<integer | NULL>`, found `Handler<integer>`
+
+#---- contravariant_arg_widening_accepted
+#: @type Handler<T> {fn(value: T) -> NULL}
+
+#: @new Handler<integer | NULL>
+handler <- function(value) NULL
+
+#: Handler<integer>
+narrowed <- handler
+narrowed
+#++++
+handler: Handler<integer | NULL>
+narrowed: Handler<integer>
+Handler<integer>
+
+#---- covariant_arg_still_accepted
+#: @type Box<T> {list{value: T}}
+
+#: @new Box<integer>
+box <- list(value = 1L)
+
+#: Box<integer | NULL>
+widened <- box
+widened
+#++++
+box: Box<integer>
+widened: Box<integer | NULL>
+Box<integer | NULL>
+
+#---- invariant_arg_rejects_widening
+#: @type Cell<T> {list{get: T, set: fn(value: T) -> NULL}}
+
+#: @new Cell<integer>
+cell <- list(get = 1L, set = function(value) NULL)
+
+#: Cell<integer | NULL>
+widened <- cell
+#++++
+cell: Cell<integer>
+widened: Cell<integer | NULL>
+158..165 warning[unused] `widened` is assigned but never used.
+169..173 error[type-mismatch] expected `Cell<integer | NULL>`, found `Cell<integer>`
+
+#---- invariant_arg_requires_exact_match
+#: @type Cell<T> {list{get: T, set: fn(value: T) -> NULL}}
+
+#: @new Cell<integer>
+cell <- list(get = 1L, set = function(value) NULL)
+
+#: Cell<integer>
+same <- cell
+same
+#++++
+cell: Cell<integer>
+same: Cell<integer>
+Cell<integer>
+
+#---- phantom_param_accepts_any
+#: @type Tagged<T> {integer}
+
+#: @new Tagged<integer>
+tagged <- 1L
+
+#: Tagged<logical>
+relabelled <- tagged
+relabelled
+#++++
+tagged: Tagged<integer>
+relabelled: Tagged<logical>
+Tagged<logical>
+
+#---- nested_nominal_arg_is_invariant
+#: @type Sink<T> {fn(value: T) -> NULL}
+#: @type Outer<T> {Sink<T>}
+
+#: @new Outer<integer>
+outer <- function(value) NULL
+
+#: Outer<integer | NULL>
+widened <- outer
+#++++
+outer: Unknown
+widened: Outer<integer | NULL>
+101..121 error[type-mismatch] expected `Sink<integer>`, found `fn(value: T) -> NULL`
+148..155 warning[unused] `widened` is assigned but never used.

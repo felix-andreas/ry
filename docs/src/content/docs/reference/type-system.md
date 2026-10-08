@@ -346,7 +346,9 @@ Joins and generalization:
   `fn(x: T) -> T` and `fn(x: U) -> character` unify only by binding `T := character` — a signature
   that belongs to neither path and links variables that were made separate on purpose. Two
   conditionally-assigned functions therefore read as a union of both signatures, and a call on that
-  union returns the union of their return types
+  union returns the union of their return types. An argument whose type is still open, and which a member
+  accepts only by narrowing it, becomes `Unknown`: no single signature states what the members
+  demand together
 
 Definite assignment:
 

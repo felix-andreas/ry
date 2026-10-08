@@ -1,0 +1,42 @@
+#==== general
+#---- empty_input
+
+#++++
+
+#---- valid_assignment
+value <- 1L
+#++++
+value: integer
+
+#---- invalid_syntax
+value <-
+#++++
+value: Unknown
+6..8 error[syntax-error] expected an expression after `<-`
+
+#==== names
+#---- unknown_name
+value
+#++++
+Unknown
+0..5 warning[unresolved] I could not resolve `value` in this package, its imports, or builtins.
+
+#---- loop_body_binding_is_visible_after_the_loop
+for (item in list(1L)) {
+  value <- "hello"
+}
+#: integer
+other <- value
+#++++
+NULL
+other: integer
+66..71 error[type-mismatch] expected `integer`, found `character`
+
+#---- duplicate_top_level_binding
+x <- 1L
+x <- 2L
+#++++
+x: integer
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.

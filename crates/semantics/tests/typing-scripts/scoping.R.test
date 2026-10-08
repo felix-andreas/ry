@@ -1,0 +1,123 @@
+#==== local_expression
+#---- local_block_result_is_last_expression
+x <- local({
+  a <- 1L
+  a + 1L
+})
+x
+#++++
+x: integer
+integer
+
+#---- local_of_bare_expression_is_its_type
+y <- local("hi")
+y
+#++++
+y: character
+character
+
+#---- local_sees_enclosing_binding
+n <- 2L
+m <- local(n + 1L)
+m
+#++++
+n: integer
+m: integer
+integer
+
+#==== shadowing
+#---- global_access
+x <- 1L
+f <- function() {
+  x
+}
+#++++
+x: integer
+f: fn() -> integer
+8..9 warning[unused] `f` is assigned but never used.
+
+#---- local_shadows_global
+x <- 1L
+f <- function() {
+  x <- "s"
+  x
+}
+#++++
+x: integer
+f: fn() -> character
+0..1 warning[unused] `x` is assigned but never used.
+8..9 warning[unused] `f` is assigned but never used.
+
+#---- argument_shadows_global
+x <- 1L
+f <- function(x) {
+  x
+}
+#++++
+x: integer
+f: <T> fn(x: T) -> T
+0..1 warning[unused] `x` is assigned but never used.
+8..9 warning[unused] `f` is assigned but never used.
+
+#---- nested_function_access
+f <- function() {
+  x <- 1L
+  g <- function() {
+    x
+  }
+  g()
+}
+#++++
+f: fn() -> integer
+0..1 warning[unused] `f` is assigned but never used.
+
+#---- nested_shadowing
+f <- function() {
+  x <- 1L
+  g <- function() {
+    x <- "s"
+    x
+  }
+  g()
+}
+#++++
+f: fn() -> character
+0..1 warning[unused] `f` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used.
+
+#==== scope_visibility
+#---- local_binding_does_not_escape
+x <- 1L
+f <- function() {
+  x <- "ok"
+  x
+}
+x
+#++++
+x: integer
+f: fn() -> character
+integer
+8..9 warning[unused] `f` is assigned but never used.
+
+#---- parameter_shadowing_preserves_outer_binding
+x <- 1L
+f <- function(x) x
+x
+f("ok")
+#++++
+x: integer
+f: <T> fn(x: T) -> T
+integer
+character
+
+#---- nested_function_uses_enclosing_binding
+x <- 1L
+f <- function() {
+  g <- function() x
+  g()
+}
+f()
+#++++
+x: integer
+f: fn() -> integer
+integer

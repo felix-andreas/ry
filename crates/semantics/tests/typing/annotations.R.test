@@ -143,6 +143,12 @@ label: Unknown
 77..80 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #==== checked
+#---- a_binder_constraint_applies_to_a_value_annotation
+#: <T: numeric> list{add: fn(left: T, right: T) -> T}
+handlers <- list(add = function(left, right) left + right)
+#++++
+handlers: <T: numeric> list{add: fn(left: T, right: T) -> T}
+
 #---- declared_scheme_wins
 #: <T> fn(x: T) -> T
 id <- function(x) x

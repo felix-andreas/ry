@@ -5,6 +5,7 @@
 //! case.
 
 use semantics::diagnostics::{Severity, TypeRenderer, file_diagnostics, strict_diagnostics};
+use semantics::testing::with_fixture_project;
 use semantics::{
     DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, file_typing_mode, item_check,
     item_hir, item_tree,
@@ -20,49 +21,46 @@ fn render_script(source: &str) -> String {
 }
 
 fn render_as(source: &str, kind: DocumentKind) -> String {
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    render_project(&db, &project_files(&db, source, kind), &render_file)
+    render_case(source, kind, &render_file)
 }
 
-/// The case's files: one unnamed file, or every `#~~~~ path` section of a
-/// multi-file case — package files under `R/`, scripts elsewhere.
-fn project_files(
-    db: &RootDatabase,
+/// Renders every file of the case: one unnamed file, or each `#~~~~ path`
+/// section of a multi-file case under an `== path` line — package files under
+/// `R/`, scripts elsewhere.
+fn render_case(
     source: &str,
     kind: DocumentKind,
-) -> Vec<(Option<String>, SourceFile)> {
-    let files: Vec<(Option<String>, SourceFile)> = match syntax::testing::split_files(source) {
-        None => vec![(None, SourceFile::new(db, source.to_owned(), kind))],
-        Some(files) => files
-            .into_iter()
-            .map(|(path, text)| {
-                let kind = if path.starts_with("R/") {
-                    DocumentKind::Package
-                } else {
-                    DocumentKind::Script
-                };
-                (Some(path), SourceFile::new(db, text, kind))
-            })
-            .collect(),
-    };
-    ProjectFiles::new(db, files.iter().map(|(_, file)| *file).collect());
-    files
-}
-
-fn render_project(
-    db: &RootDatabase,
-    files: &[(Option<String>, SourceFile)],
     render: &dyn Fn(&RootDatabase, SourceFile) -> String,
 ) -> String {
-    let mut output = String::new();
-    for (path, file) in files {
-        if let Some(path) = path {
-            output.push_str(&format!("== {path}\n"));
+    let files: Vec<(Option<String>, String, DocumentKind)> =
+        match syntax::testing::split_files(source) {
+            None => vec![(None, source.to_owned(), kind)],
+            Some(files) => files
+                .into_iter()
+                .map(|(path, text)| {
+                    let kind = if path.starts_with("R/") {
+                        DocumentKind::Package
+                    } else {
+                        DocumentKind::Script
+                    };
+                    (Some(path), text, kind)
+                })
+                .collect(),
+        };
+    let inputs = files
+        .iter()
+        .map(|(_, text, kind)| (text.clone(), *kind))
+        .collect();
+    with_fixture_project(inputs, |db, sources| {
+        let mut output = String::new();
+        for ((path, _, _), file) in files.iter().zip(sources) {
+            if let Some(path) = path {
+                output.push_str(&format!("== {path}\n"));
+            }
+            output.push_str(&render(db, *file));
         }
-        output.push_str(&render(db, *file));
-    }
-    output
+        output
+    })
 }
 
 /// Package-metadata cases: leading `#namespace ` lines form the NAMESPACE
@@ -166,10 +164,7 @@ fn typing_script_fixtures() {
 /// The strict stream: the per-file typing mode (when set) and the
 /// `strict`-code diagnostics appended after the ordinary rendering.
 fn render_with_strict(source: &str) -> String {
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let files = project_files(&db, source, DocumentKind::Package);
-    render_project(&db, &files, &|db, file| {
+    render_case(source, DocumentKind::Package, &|db, file| {
         let mut output = String::new();
         if let Some(mode) = file_typing_mode(db, file) {
             output.push_str(&format!("typing mode: {mode:?}\n"));

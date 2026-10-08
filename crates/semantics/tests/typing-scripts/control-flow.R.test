@@ -1,0 +1,561 @@
+#==== control_flow
+#---- if_without_else_double
+if (TRUE) 1.5
+#++++
+double | NULL
+
+#---- if_without_else_character
+if (TRUE) "x"
+#++++
+character | NULL
+
+#---- if_without_else_logical
+if (TRUE) FALSE
+#++++
+logical | NULL
+
+#---- if_without_else_vector_branch
+if (TRUE) c(1L, 2L)
+#++++
+integer[] | NULL
+
+#---- if_without_else_null_literal
+if (TRUE) NULL
+#++++
+NULL
+
+#---- if_without_else_block_last_expr
+if (TRUE) {
+  1L
+}
+#++++
+integer | NULL
+
+#---- if_without_else_block_trailing_semicolon
+if (TRUE) {
+  1L;
+}
+#++++
+NULL
+
+#---- if_else_double_branches
+if (TRUE) 1.5 else 2.5
+#++++
+double
+
+#---- if_else_character_branches
+if (TRUE) "a" else "b"
+#++++
+character
+
+#---- if_else_both_null
+if (TRUE) NULL else NULL
+#++++
+NULL
+
+#---- if_else_vector_branches
+if (TRUE) c(1L, 2L) else c(3L, 4L)
+#++++
+integer[]
+
+#---- if_else_integer_double_union
+if (TRUE) 1L else 2.5
+#++++
+integer | double
+
+#---- if_else_character_integer_union
+if (TRUE) "a" else 1L
+#++++
+character | integer
+
+#---- if_condition_integer_coerces
+if (1L) 1L else 2L
+#++++
+integer
+
+#---- if_condition_character_rejected
+if ("x") 1L else 2L
+#++++
+integer
+4..7 error[type-mismatch] expected `logical`, found `character`
+
+#---- if_else_nested_in_else
+if (TRUE) 1L else if (FALSE) 2L else 3L
+#++++
+integer
+
+#---- if_value_assigned_nullable
+result <- if (TRUE) 1L
+result
+#++++
+result: integer | NULL
+integer | NULL
+
+#---- if_else_value_assigned
+result <- if (TRUE) 1L else 2L
+result
+#++++
+result: integer
+integer
+
+#---- if_branch_is_assignment
+flag <- TRUE
+if (flag) x <- 1L
+x
+#++++
+flag: logical
+integer | NULL
+integer
+
+#==== control_flow_blocks
+#---- nested_block_last_expr
+{
+  {
+    1L
+  }
+}
+#++++
+integer
+
+#---- block_single_semicolon_only
+{
+  ;
+}
+#++++
+NULL
+
+#---- block_assignment_last_returns_assigned_type
+{
+  x <- 1L
+}
+#++++
+integer
+4..5 warning[unused] `x` is assigned but never used.
+
+#---- block_last_is_if_without_else
+{
+  if (TRUE) 1L
+}
+#++++
+integer | NULL
+
+#---- block_leaks_binding_to_top_level
+{
+  x <- 1L
+}
+x
+#++++
+integer
+integer
+
+#==== control_flow_loops
+#---- for_over_double_vector_null
+for (item in c(1.5, 2.5)) item
+#++++
+NULL
+
+#---- for_over_character_vector_null
+for (item in c("a", "b")) item
+#++++
+NULL
+
+#---- while_with_logical_variable
+flag <- TRUE
+while (flag) { }
+#++++
+flag: logical
+NULL
+
+#---- repeat_with_body_null
+repeat {
+  1L
+}
+#++++
+NULL
+
+#---- while_condition_integer_coerces
+while (1L) { }
+#++++
+NULL
+
+#---- for_loop_var_element_type_in_body
+for (n in c(1L, 2L)) {
+  n + 1L
+}
+#++++
+NULL
+
+#---- for_over_double_range_element_type
+total <- 0
+for (x in 1.5:3.5) {
+  total <- total + x
+}
+total
+#++++
+total: double
+NULL
+double
+
+#==== control_flow_scoping
+#---- rebinding_changes_type_across_block
+x <- 1L
+{
+  x <- "s"
+}
+x
+#++++
+x: integer
+character
+character
+
+#---- if_branch_does_not_create_scope
+y <- 1L
+if (TRUE) y <- "s"
+y
+#++++
+y: integer
+character | NULL
+integer | character
+
+#==== control_flow_explore
+#---- while_value_assigned_null
+x <- while (FALSE) { }
+x
+#++++
+x: NULL
+NULL
+
+#---- repeat_with_break_null
+repeat {
+  break
+}
+#++++
+NULL
+
+#---- for_with_next_null
+for (i in c(1L, 2L)) next
+#++++
+NULL
+
+#---- nested_for_loops_null
+for (i in c(1L, 2L)) {
+  for (j in c(1L, 2L)) { }
+}
+#++++
+NULL
+
+#---- block_last_is_for_loop_null
+{
+  for (i in c(1L, 2L)) { }
+}
+#++++
+NULL
+
+#==== if_expressions
+#---- if_without_else_integer_branch
+if (TRUE) 1L
+#++++
+integer | NULL
+
+#---- if_without_else_empty_block
+if (TRUE) { }
+#++++
+NULL
+
+#---- if_else_matching_integer_branches
+if (TRUE) 1L else 2L
+#++++
+integer
+
+#---- if_else_integer_and_null
+if (TRUE) 1L else NULL
+#++++
+integer | NULL
+
+#---- if_else_null_and_integer
+if (TRUE) NULL else 2L
+#++++
+integer | NULL
+
+#---- if_else_both_empty_blocks
+if (TRUE) { } else { }
+#++++
+NULL
+
+#---- if_else_different_branches_union
+if (TRUE) 1L else "foo"
+#++++
+integer | character
+
+#---- if_else_union_flows_into_binding
+flag <- TRUE
+value <- if (flag) 1L else "foo"
+value
+#++++
+flag: logical
+value: integer | character
+integer | character
+
+#---- if_condition_must_be_scalar_logical
+if (c(TRUE, FALSE)) 1L else 2L
+#++++
+integer
+4..18 error[type-mismatch] expected `logical`, found `logical[]`
+
+#==== boolean_operators
+#---- scalar_logical_and
+TRUE && FALSE
+#++++
+logical
+
+#---- scalar_logical_or
+flag <- TRUE
+other_flag <- FALSE
+flag || other_flag
+#++++
+flag: logical
+other_flag: logical
+logical
+
+#==== loops
+#---- for_over_scalar_vector_returns_null
+for (item in 1L) item
+#++++
+NULL
+
+#---- for_over_tuple_like_list_returns_null
+for (item in list(1L, 2L)) item
+#++++
+NULL
+
+#---- while_returns_null
+while (TRUE) { }
+#++++
+NULL
+
+#---- while_condition_must_be_scalar_logical
+while (c(TRUE, FALSE)) { }
+#++++
+NULL
+7..21 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- repeat_returns_null
+repeat { }
+#++++
+NULL
+
+#==== if_normalization
+#---- if_without_else_nullable_branch_stays_single_nullable
+flag <- TRUE
+value <- if (flag) 1L
+if (flag) value
+#++++
+flag: logical
+value: integer | NULL
+integer | NULL
+
+#---- if_else_same_nullable_branches
+flag <- TRUE
+left <- if (flag) 1L
+right <- if (flag) 2L
+if (flag) left else right
+#++++
+flag: logical
+left: integer | NULL
+right: integer | NULL
+integer | NULL
+
+#---- negated_condition
+flag <- TRUE
+if (!flag) 1L else 2L
+#++++
+flag: logical
+integer
+
+#---- comparison_condition
+count <- 3L
+if (count > 2L) "big" else "small"
+#++++
+count: integer
+character
+
+#==== loop_iteration_types
+#---- for_over_range_binds_element_type
+total <- 0L
+for (index in 1L:3L) {
+  total <- total + index
+}
+#++++
+total: integer
+NULL
+
+#---- for_over_record_like_list
+for (field in list(foo = 1L, bar = 2L)) field
+#++++
+NULL
+
+#---- for_over_map_like_list_annotation
+#: list[named: integer]
+values <- list(foo = 1L, bar = 2L)
+for (value in values) value
+#++++
+values: list[named: integer]
+NULL
+
+#---- for_body_uses_element_type_in_typed_call
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+for (count in c(1L, 2L)) double_count(count)
+#++++
+double_count: fn(count: integer) -> integer
+NULL
+
+#---- for_over_heterogeneous_tuple_allowed
+for (item in list(1L, "foo")) item
+#++++
+NULL
+
+#---- for_over_empty_list_allowed
+for (item in list()) item
+#++++
+NULL
+
+#---- for_over_heterogeneous_named_list_allowed
+for (item in list(a = 1L, b = "two")) item
+#++++
+NULL
+
+#---- for_element_union_usable_at_union_parameter
+#: fn(value: integer | character) -> logical
+accepts <- function(value) TRUE
+for (item in list(a = 1L, b = "two")) accepts(item)
+#++++
+accepts: fn(value: integer | character) -> logical
+NULL
+
+#---- for_element_union_rejected_at_member_parameter
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+for (item in list(a = 1L, b = "two")) double_count(item)
+#++++
+double_count: fn(count: integer) -> integer
+NULL
+130..134 error[type-mismatch] expected `integer`, found `integer | character`
+
+#---- for_over_function_is_rejected
+for (item in function(x) x) item
+#++++
+NULL
+13..26 error[type-mismatch] this `for` sequence is `fn(x: T) -> T`, which cannot be iterated — expected a vector or list.
+
+#---- for_over_null_runs_zero_iterations
+for (item in NULL) item
+#++++
+NULL
+
+#---- for_over_any_yields_any_items
+#: fn(values: Any) -> NULL
+consume <- function(values) {
+  for (item in values) item
+  NULL
+}
+#++++
+consume: fn(values: Any) -> NULL
+27..34 warning[unused] `consume` is assigned but never used.
+
+#---- for_over_unannotated_parameter_stays_unconstrained
+drain <- function(items) {
+  for (item in items) item
+  items
+}
+#++++
+drain: <T> fn(items: T) -> T
+0..5 warning[unused] `drain` is assigned but never used.
+
+#==== branch_unification
+#---- unknown_branch_propagates
+u <- 1L ~ 2L
+if (TRUE) 1L else u
+#++++
+u: Unknown
+integer
+
+#==== variable_joins
+#---- conditional_retype_joins_with_prior_state
+flag <- TRUE
+x <- 1L
+if (flag) x <- "a"
+x
+#++++
+flag: logical
+x: integer
+character | NULL
+integer | character
+
+#---- both_branches_retype_join_without_prior_state_member
+flag <- TRUE
+x <- 1L
+if (flag) x <- "a" else x <- 2L
+x
+#++++
+flag: logical
+x: integer
+character | integer
+integer | character
+
+#---- same_type_rewrite_keeps_single_type
+flag <- TRUE
+x <- 1L
+if (flag) x <- 2L
+x
+#++++
+flag: logical
+x: integer
+integer | NULL
+integer
+
+#---- loop_accumulator_stays_integer
+total <- 0L
+for (i in 1:3) {
+  total <- total + i
+}
+total
+#++++
+total: integer
+NULL
+integer
+
+#---- loop_rewrite_joins_across_iterations
+flag <- TRUE
+x <- 1L
+while (flag) {
+  x <- "a"
+}
+x
+#++++
+flag: logical
+x: integer
+NULL
+integer | character
+
+#---- repeat_division_widens_to_double
+x <- 1L
+repeat {
+  x <- x / 2
+}
+x
+#++++
+x: integer
+NULL
+double
+
+#---- structurally_growing_loop_slot_widens_to_unknown
+x <- 1L
+repeat {
+  x <- list(x)
+}
+x
+#++++
+x: integer
+NULL
+Unknown

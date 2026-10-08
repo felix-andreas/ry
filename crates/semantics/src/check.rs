@@ -462,6 +462,9 @@ pub fn check_item_with_annotation<'db>(
                             }
                         }
                         Some(declared) => {
+                            for (name, constraint) in &declared.binders {
+                                context.table.rigid_constraints.insert(*name, *constraint);
+                            }
                             if annotation.is_some_and(|a| !a.trusted)
                                 && !matches!(declared.body.kind(db), TyKind::Unknown | TyKind::Any)
                             {
@@ -1652,6 +1655,9 @@ impl<'db> Checker<'db, '_> {
         }
         if matches!(declared.body.kind(self.db), TyKind::Unknown | TyKind::Any) {
             return declared.body;
+        }
+        for (name, constraint) in &declared.binders {
+            self.table.rigid_constraints.insert(*name, *constraint);
         }
         let resolved_value = self.table.resolve(self.db, value_ty);
         if !self
@@ -4304,6 +4310,38 @@ impl<'db> Checker<'db, '_> {
         union_of(self.db, members)
     }
 
+    /// The caller's own still-open variables among a call's argument types,
+    /// with their current entries. Only a variable from outside the call is
+    /// the caller's: one minted deeper, by a lambda among the arguments, is
+    /// that lambda's to infer, and narrowing it is how
+    /// `lapply(xs, function(v) v + 1L)` types `v`.
+    fn caller_open_variables(
+        &self,
+        arguments: &[CallArgument<'db>],
+    ) -> Vec<(InferenceVar, Entry<'db>)> {
+        let mut variables = FxHashSet::default();
+        for argument in arguments {
+            if let Some(ty) = argument.ty {
+                self.table.collect_unbound_vars(self.db, ty, &mut variables);
+            }
+        }
+        variables
+            .into_iter()
+            .map(|var| (var, self.table.entry(var).clone()))
+            .filter(|(_, entry)| {
+                matches!(entry, Entry::Unbound { level, .. } if *level <= self.table.level)
+            })
+            .collect()
+    }
+
+    /// Whether every captured caller variable is still unbound with the entry
+    /// it was captured with.
+    fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
+        entries
+            .iter()
+            .all(|(var, entry)| self.table.find(*var) == *var && self.table.entry(*var) == entry)
+    }
+
     /// Ordered overload probing. Declaration order is the tiebreak, not the
     /// whole rule: a candidate that accepts the arguments without narrowing
     /// any of the caller's still-open inference variables is a fact rather
@@ -4363,24 +4401,7 @@ impl<'db> Checker<'db, '_> {
         // fallback taking `Any` accepts without binding, so it is a fact and
         // already outranks any guess above it — `function(x) sum(x)` keeps its
         // parameter open without needing a last-wins tiebreak.
-        let mut caller_variables = FxHashSet::default();
-        for argument in &call_arguments {
-            if let Some(ty) = argument.ty {
-                self.table
-                    .collect_unbound_vars(self.db, ty, &mut caller_variables);
-            }
-        }
-        // Only a variable from outside the call is the caller's: one minted
-        // deeper, by a lambda among the arguments, is that lambda's to infer,
-        // and narrowing it is how `lapply(xs, function(v) v + 1L)` types `v`.
-        let current_level = self.table.level;
-        let caller_entries: Vec<(InferenceVar, Entry<'db>)> = caller_variables
-            .into_iter()
-            .map(|var| (var, self.table.entry(var).clone()))
-            .filter(|(_, entry)| {
-                matches!(entry, Entry::Unbound { level, .. } if *level <= current_level)
-            })
-            .collect();
+        let caller_entries = self.caller_open_variables(&call_arguments);
 
         // Selection runs strict first, then (only if nothing matched and a
         // whole-number double literal is present) once more with the
@@ -4415,9 +4436,7 @@ impl<'db> Checker<'db, '_> {
                             self.selected_overloads.insert(callee, index);
                             return Some(self.committed_overload_return(id, function.ret));
                         }
-                        let free = caller_entries.iter().all(|(var, entry)| {
-                            self.table.find(*var) == *var && self.table.entry(*var) == entry
-                        });
+                        let free = self.caller_variables_untouched(&caller_entries);
                         let narrowing = caller_entries
                             .iter()
                             .map(|(var, _)| {
@@ -4759,6 +4778,8 @@ impl<'db> Checker<'db, '_> {
                 }) =>
             {
                 let members = members.clone();
+                let caller_entries = self.caller_open_variables(arguments);
+                let mut narrowed = false;
                 let mut returns = Vec::with_capacity(members.len());
                 for member in members {
                     let member = self.table.shallow_resolve(self.db, member);
@@ -4768,6 +4789,7 @@ impl<'db> Checker<'db, '_> {
                     let snapshot = self.table.snapshot();
                     let findings = self.match_arguments(callee_range, &function, arguments);
                     if findings.is_empty() {
+                        narrowed |= !self.caller_variables_untouched(&caller_entries);
                         let member_return = self.table.resolve(self.db, function.ret);
                         self.table.rollback(snapshot);
                         returns.push(crate::types::erase_vars(self.db, member_return));
@@ -4775,6 +4797,20 @@ impl<'db> Checker<'db, '_> {
                         self.table.rollback(snapshot);
                         self.errors.extend(findings);
                         return self.unknown();
+                    }
+                }
+                // Each member's match rolls back, so a caller variable a member
+                // only accepted by narrowing would stay open, and the caller's
+                // signature would claim arguments no member takes. No single
+                // signature states what the members demand together, so those
+                // variables become `Unknown`, as a disputed overload guess does.
+                if narrowed {
+                    for (var, _) in &caller_entries {
+                        let var = Ty::new(self.db, TyKind::Var(*var));
+                        let unknown = self.unknown();
+                        if self.table.unify(self.db, var, unknown).is_err() {
+                            return unknown;
+                        }
                     }
                 }
                 union_of(self.db, returns)
