@@ -12,4 +12,5 @@ rowan.workspace = true
 rustc-hash.workspace = true
 salsa.workspace = true
 serde = { workspace = true, features = ["derive"] }
+stacker.workspace = true
 syntax = { path = "../syntax" }

@@ -33,9 +33,12 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
   `no errors`, and recovery cases assert that one broken construct reports once and leaves
   the rest of the file clean
 - `crates/semantics/tests/typing` — the typing suite: each case runs the full semantic
-  pipeline on one package file (shipped stubs installed) and renders every named top-level
-  definition's exported scheme (`name: <T: numeric> fn(x: T) -> T`) followed by the file's
-  diagnostics (`start..end severity[code] message`, byte offsets). Cases are grouped by feature,
+  pipeline on one package file, or on several (`#~~~~ path` sections), with the shipped stubs
+  installed, and renders every top-level definition's exported scheme
+  (`name: <T: numeric> fn(x: T) -> T`), every other top-level statement's type as a bare line,
+  then the file's diagnostics (`start..end severity[code] message`, byte offsets). One database
+  per test thread is reused across cases (`semantics::testing::with_fixture_project`): parsing the
+  stub corpus costs far more than checking a case. Cases are grouped by feature,
   except `programs.R.test`, which holds whole small programs written the way a real project is:
   a case there earns its place by exercising several features at once, and a clean case with an
   empty diagnostics block is a **zero-false-positive** contract for that style of code
@@ -50,7 +53,15 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
   `WRONG-BUT-CURRENT` pin a known defect together with the shape it should have, so a fix
   turns them red; the open ones are listed in `.agents/memory/backlog.md`
 - `crates/semantics/tests/typing-scripts` — the same pipeline over script documents (one
-  sequential top-down scope)
+  sequential top-down scope); besides script semantics it holds the expression-level rules
+  (literals, operators, indexing, lists, stub calls), one line per statement
+- `crates/semantics/tests/annotations` — one `#:` block per case (the case lines are the
+  block): what it lowers to — the coercion kind, the declared type, the `@new` target, each
+  `@type`/`@alias` definition — then its grammar and lowering errors. The compact contract for
+  the type notation; the `syntax` suite pins the trees and the `errors` suite the wording
+- `crates/semantics/tests/stubs` — `.Rtypes` declaration sources: each case renders the
+  declarations it loads (overload candidates in order) and the problems the loader drops lines
+  for, in the wording the editor and the override report show
 - `crates/semantics/tests/typing-strict` — the strict stream: the per-file typing mode and
   the `strict`-code diagnostics appended after the ordinary rendering
 - `crates/semantics/tests/typing-imports` — package-metadata cases: leading `#namespace `
@@ -58,11 +69,8 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
   installed as the `PackageMetadata` input before rendering. The directive lines stay in the
   analyzed text as ordinary comments, so expectation offsets are honest. Attach facts need no
   directive: a `library(data.table)` statement in the case source activates the conditional
-  stub namespace through the same scan the hosts run. This suite is new-stack only — the
-  oracle had no package-metadata concept — and was deliberately absent from the retired differential
-  fixture arm
-- `crates/format/tests/format` — the formatter golden suite (ported from the legacy suite):
-  each case's source formats to the expected block, and the runner re-formats the output to
+  stub namespace through the same scan the hosts run
+- `crates/format/tests/format` — the formatter golden suite: each case's source formats to the expected block, and the runner re-formats the output to
   assert idempotence on every case; a case whose expectation is a refusal renders the
   structured `FormatError`
 - `crates/ide/tests/ide` — IDE feature fixtures: the case source carries one `$0` cursor
@@ -73,17 +81,6 @@ expectations and `FIXTURE_FILTER=group__case` runs one case. Suites:
   shipped corpus shifts whenever an unrelated declaration is added, which forced a re-bless
   on every corpus edit while proving nothing, and the token proves the range points where
   it should
-
-### The retired identity differentials, and the benchmark harness
-
-The rewrite was verified against the frozen previous implementation by a family of
-differential suites (typing, scripts, strict, fuzz, the legacy-corpus sweep, the real-file
-corpus arm, and a per-position IDE comparison with adjudicated divergence ledgers). That
-program is **complete and retired**: the new stack no longer proves equivalence to the
-oracle — its own fixture suites are the semantics contract, and improvements land without
-oracle adjudication. What remains of the `differential` crate is the cross-stack
-**benchmark** harness (`legacy/differential/tests/test_stats.rs`): the same corpus timed
-and memory-measured through both stacks, kept until the legacy code is deleted.
 
 ### The semantics fuzz harness
 
@@ -155,33 +152,20 @@ feature here, it asserts only that a label is non-empty, and what it offers is d
 context rather than by the exact byte, so a full sweep re-derives the same candidate list many times
 over. Sampling by context halves the harness's wall clock and keeps the assertion.
 
-### The mined legacy corpus
+### The program corpus
 
-`crates/syntax/tests/corpus-legacy/*.R.corpus` holds 1,967 distinct R programs extracted from the
-frozen stack's fixture suites, and `syntax::testing::legacy_corpus_sources` reads them. The `syntax`,
-`format` and `semantics` batteries each run the whole set.
+`crates/syntax/tests/programs/*.R.corpus` holds 1,967 distinct R programs mined from an earlier
+implementation's fixture suites, and `syntax::testing::program_corpus_sources` reads them. The
+`syntax`, `format` and `semantics` batteries each run the whole set. Those suites' distinct
+behaviors were adjudicated and ported into the fixture suites above; the corpus keeps every
+program as an input with no expectation.
 
-They are kept for their **inputs**, not their expectations. That stack's suites hold ~2,830 curated
-edge cases, but their expected output cannot be ported — the naming suite renders binding-resolution
-trees, and the type suites use an older notation (`fn(x: ?1) -> ?1` where the shipping crates render
-`<T> fn(x: T) -> T`) — so bulk-blessing them would encode today's behavior as the contract rather than
-check it. Case-name overlap with the current suites is 15 of 138 for ide and 1 across the whole
-typecheck suite, so the corpus was reimplemented rather than ported, and **nothing in the shipping
-crates ran a single one of those programs** until this arm existed: the harness that runs them drives
-them against the frozen oracle.
-
-The invariants need no expectations, which is what makes the inputs usable on their own: never panic,
-lossless reprint and tree geometry in `syntax`, the preservation oracle in `format`, and diagnostic
-ranges inside their file in `semantics`. The semantics arm shares **one** database across the whole
-corpus rather than using the per-input battery — a fresh database costs a stub re-parse each — so it
-asserts what a shared database can and leaves determinism and incremental equivalence to the generated
-arms. Each arm asserts the corpus is non-empty, so deleting it fails loudly instead of passing green
-on zero cases.
-
-Regenerating: the corpus is derived from `legacy/analysis-legacy/tests/**/*.test` by taking each
-case's source between its `#---- <id>` header and the `#++++` expectation, stripping the per-file
-headers multi-file cases use, and deduplicating. It is committed rather than derived at test time so
-it survives the eventual deletion of that directory.
+The invariants need no expectations: never panic, lossless reprint and tree geometry in `syntax`,
+the preservation oracle in `format`, and diagnostic ranges inside their file in `semantics`. The
+semantics arm shares **one** database across the whole corpus rather than using the per-input
+battery — a fresh database costs a stub re-parse each — so it asserts what a shared database can and
+leaves determinism and incremental equivalence to the generated arms. Each arm asserts the corpus is
+non-empty, so deleting it fails loudly instead of passing green on zero cases.
 
 ### The annotation round-trip oracle
 
@@ -216,7 +200,7 @@ test instead of blending into a category.
 
 `corpus_acceptance` runs over the fetched `corpus/` and gates **ours-only-error** — we reject what
 tree-sitter accepts, which means a grammar gap. `in_tree_acceptance` runs over inputs that are
-always present (the mined legacy corpus plus every fixture case source) and gates the other
+always present (the program corpus plus every fixture case source) and gates the other
 direction, **theirs-only-error**: we accept what tree-sitter rejects.
 
 That second direction is the only thing in the project that bounds the parse-error count from
@@ -298,14 +282,31 @@ marker appears, so the edit's flip provably lands while the pull is in flight �
 `SERVER_CANCELLED` response, and the successful retry after it, can be asserted without
 sleeping-and-hoping. The variables exist only for this test; production runs never set them.
 
-### The perf and memory witnesses
+### Incrementality contracts
 
-`legacy/differential/tests/test_stats.rs` (ignored; needs the fetched corpus and a release
-build) carries the measurement instruments — one process per stack reporting wall, phase
-splits, and resident/peak memory into `target/stats-{new,legacy}.txt` — and `stats_witness`,
-the CI-checkable assertion form: cold-pass wall per line, resident bytes per line, and
-resolve steps per line (the resolve-memoization regression tripwire) against budgets set from
-the measured gate numbers with headroom.
+`crates/semantics/tests/test_incremental.rs` asserts what an edit re-runs, not only what it
+produces. `semantics::testing::ProbeDatabase` logs every query execution, and
+`checked_since` names the items whose `item_check` ran. The contracts it pins:
+- a body edit that keeps the scheme re-checks the edited item alone;
+- one that changes the scheme also re-checks its readers;
+- a new definition re-checks only the items reading its name;
+- an inserted statement re-checks only the reads it intercepts.
+
+Re-export chains resolve to their base, cycles pin to `Unknown`, and a 4,096-link chain resolves
+without overflowing the analysis thread's stack. `point_queries_recheck_only_what_an_edit_changed`
+in the IDE harness holds the per-keystroke features to the same rule.
+
+### The perf and memory witness
+
+`crates/semantics/tests/test_perf.rs` (ignored; needs the fetched corpus and a release build)
+asserts budgets set from measured numbers with headroom:
+- cold-pass wall per line;
+- resolve steps per line (the resolve-memoization tripwire);
+- resident bytes per line;
+- keystroke-to-diagnostics p50/p95 on the corpus's largest package.
+
+It prints the measured values, so it doubles as the corpus-wide measurement; `ry debug
+analysis-stats` is the per-phase diagnosis for one workspace.
 
 ## Fixture format
 
@@ -327,6 +328,9 @@ Rules:
   rejected rather than silently shadowing one another
 - what the expectation *shows* is the suite runner's contract (schemes, diagnostics, tree dumps,
   hover output, …); suite-specific behavior belongs in the runner, not in fixture syntax
+- a typing case may hold several files: each `#~~~~ <path>` line starts one
+  (`syntax::testing::split_files`). Paths under `R/` are package files, anything else a script, and
+  the expectation renders each file's output under an `== <path>` line
 - the runner only loads files with the `.test` extension, so a suite directory may hold notes
   (a `README.md` describing its rendered-output contract, say) without the runner treating them
   as cases
@@ -369,20 +373,6 @@ Review every blessed change before committing: bless captures whatever the runne
 produces, so it records an intentionally wrong outcome when the implementation is wrong.
 Fixtures are the desired-semantics contract, not a regression archive — accept a changed
 expectation only when the behavior or wording intentionally improved.
-
-## The frozen legacy stack's harnesses
-
-The previous implementation stays in-tree (`legacy/analysis-legacy`, `legacy/engine-legacy`,
-`legacy/ry-legacy`, with its own `legacy/fixtures` harness) as the cross-implementation oracle
-the differential compares against, and as the benchmark baseline. Its suites still run —
-`cargo test -p analysis-legacy` / `-p engine-legacy` / `-p ry-legacy`, and the workspace-wide
-battery covers them — but the stack is frozen: do not extend its fixtures or harnesses, and never
-share code between the two stacks. Its `fixtures` crate parses the same `Simple` shape plus a
-`MultiFile` shape (explicit file paths and grouped workspace edits) that its engine-era suites use.
-Beyond fixtures, the legacy engine carries its own differential regression net (engine output
-asserted equal to a from-scratch rebuild over adversarial edit streams, per-position IDE parity
-against a fresh-analysis oracle, exec-counter and memory witnesses); it documents the bar the
-rewrite's own harnesses were built to meet.
 
 ## Testing guidance
 

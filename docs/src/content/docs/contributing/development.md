@@ -23,13 +23,6 @@ ry is a Rust workspace. The shipping language tool is six crates:
 - **`crates/repl`** — the interactive R console behind `ry repl` and `ry run`, embedding
   the system R by locating and loading it at runtime.
 
-The workspace also contains the **frozen legacy stack** (`legacy/analysis-legacy`,
-`legacy/engine-legacy`, `legacy/ry-legacy`, plus its `legacy/fixtures` harness): the previous
-implementation, kept in-tree only as the benchmark baseline for `legacy/differential`. The parity
-program that once ran every fixture through both stacks is complete and retired. Do not extend the
-legacy stack, and never share or abstract code between the two stacks — data files may be
-duplicated freely instead.
-
 The console embeds R **without any build-time link dependency**: the R shared library is located (`R_HOME`, or
 `R RHOME` from `PATH`) and loaded at runtime, so the whole workspace builds and its unit tests run
 on machines with no R at all. Only *running* the console needs R; it runs on Unix (through the
@@ -57,6 +50,7 @@ just bless -p semantics --test ...  # re-bless fixture expectations (review the 
 just fuzz-deep           # the long-running seeded fuzz pass (FUZZ_ITERS scales)
 just fuzz-run <target>   # one coverage-guided fuzz target
 just stats <path>        # the workspace performance diagnosis
+just perf                # the corpus-wide perf and memory budgets (needs corpus/)
 ```
 
 The raw commands, for environments without `just`:
@@ -64,8 +58,7 @@ The raw commands, for environments without `just`:
 ```sh
 cargo build                                   # the product crate (workspace default member)
 cargo test                                    # the product crate's suites
-cargo test --workspace --exclude zed_ry       # everything: all six crates, the benchmark
-                                              # harness, and the frozen legacy stack
+cargo test --workspace --exclude zed_ry       # everything: all six crates
 cargo test -p semantics                       # the analysis core's fixture + fuzz suites
 cargo test -p format --test test_format_fixtures
 ```
@@ -80,8 +73,9 @@ environment variables matter day to day:
 
 The real-world corpus some suites and all measurement instruments use is fetched with
 `scripts/fetch-corpus.rs` (a `cargo +nightly -Zscript` single-file script) into the gitignored
-`corpus/`; the resolved inventory is committed as `scripts/corpus-manifest.txt`. The performance and memory instruments live in
-`legacy/differential/tests/test_stats.rs` and are documented on the [Testing](/contributing/testing) page.
+`corpus/`; the resolved inventory is committed as `scripts/corpus-manifest.txt`. The performance
+and memory witness is `crates/semantics/tests/test_perf.rs`, documented on the
+[Testing](/contributing/testing) page.
 
 ## Debug mode
 

@@ -1,0 +1,19 @@
+#==== strict_off
+#---- unsupported_construct_bare_is_tolerated_by_default
+1L %then% 2L
+#++++
+Unknown
+
+#---- unsupported_construct_binding_is_tolerated_by_default
+x <- 1L %then% 2L
+#++++
+x: Unknown
+
+#---- unknown_origin_used_downstream_is_tolerated_by_default
+x <- 1L %then% 2L
+y <- x + 1L
+z <- x * 2L
+#++++
+x: Unknown
+y: Unknown
+z: Unknown

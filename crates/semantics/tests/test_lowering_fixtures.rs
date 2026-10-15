@@ -17,9 +17,8 @@
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
 use semantics::hir::{Argument, ExprId, ExpressionKind, Module, Parameter};
-use semantics::{
-    DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, item_hir, item_tree,
-};
+use semantics::testing::with_fixture_project;
+use semantics::{DocumentKind, ItemKind, item_hir, item_tree};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -30,29 +29,34 @@ fn lowering_fixtures() {
 }
 
 fn render(source: &str) -> String {
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&db, vec![file]);
+    with_fixture_project(
+        vec![(source.to_owned(), DocumentKind::Package)],
+        |db, files| {
+            let [file] = files else {
+                panic!("a fixture case is one file");
+            };
+            let file = *file;
 
-    let mut output = String::new();
-    for &item in item_tree(&db, file) {
-        let Some(module) = item_hir(&db, item).as_ref() else {
-            continue;
-        };
-        let header = match item.name(&db).clone() {
-            Some(name) => name,
-            None => format!("<{}>", item_kind(*item.kind(&db))),
-        };
-        let _ = writeln!(output, "# {header}");
-        match module.root {
-            Some(root) => render_expression(&mut output, module, root, 1),
-            None => {
-                let _ = writeln!(output, "  <no root>");
+            let mut output = String::new();
+            for &item in item_tree(db, file) {
+                let Some(module) = item_hir(db, item).as_ref() else {
+                    continue;
+                };
+                let header = match item.name(db).clone() {
+                    Some(name) => name,
+                    None => format!("<{}>", item_kind(*item.kind(db))),
+                };
+                let _ = writeln!(output, "# {header}");
+                match module.root {
+                    Some(root) => render_expression(&mut output, module, root, 1),
+                    None => {
+                        let _ = writeln!(output, "  <no root>");
+                    }
+                }
             }
-        }
-    }
-    output
+            output
+        },
+    )
 }
 
 fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: usize) {

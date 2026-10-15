@@ -1,0 +1,255 @@
+#==== directive_failures
+#---- bare_at_sign
+@
+#++++
+syntax error: expected a directive name after `@`
+
+#---- unknown_directive_without_payload
+@unknown
+#++++
+syntax error: unknown annotation directive `@unknown`
+
+#---- unknown_directive_with_payload
+@unknown integer
+#++++
+syntax error: unknown annotation directive `@unknown`
+
+#==== incomplete_forms
+#---- bare_list_keyword
+list
+#++++
+list
+
+#---- bare_function_keyword
+fn
+#++++
+fn
+
+#---- empty_list_brackets
+list[]
+#++++
+list[Unknown]
+syntax error: expected a type, found `]`
+
+#---- empty_named_list_value
+list[named:]
+#++++
+list[named: Unknown]
+syntax error: expected a type, found `]`
+
+#==== unexpected_closing_delimiters
+#---- bare_closing_brace
+}
+#++++
+syntax error: expected a type, found `}`
+
+#---- bare_closing_bracket
+]
+#++++
+syntax error: expected a type, found `]`
+
+#---- bare_closing_paren
+)
+#++++
+syntax error: expected a type, found `)`
+
+#==== missing_closing_delimiters
+#---- unclosed_list_bracket
+list[integer
+#++++
+list[integer]
+syntax error: unclosed `[` in this list type; expected a matching `]`
+
+#---- unclosed_list_brace
+list{integer
+#++++
+list{integer}
+syntax error: expected `,` or `}` in this list type
+
+#---- unclosed_function_parameters
+fn(integer
+#++++
+fn(integer) -> Unknown
+syntax error: expected `,` or `)` in this function type's parameters
+
+#---- unclosed_named_list
+list[named: integer
+#++++
+list[named: integer]
+syntax error: unclosed `[` in this list type; expected a matching `]`
+
+#==== malformed_separators
+#---- double_comma_in_function_parameters
+fn(integer,,character)
+#++++
+fn(integer, Unknown, character) -> Unknown
+syntax error: expected a type, found `,`
+
+#---- double_comma_in_tuple_items
+list{integer,,character}
+#++++
+list{integer, character}
+syntax error: expected a type, found `,`
+
+#---- semicolon_in_function_parameters
+fn(integer;character)
+#++++
+syntax error: expected `,` or `)` in this function type's parameters
+
+#---- semicolon_in_tuple_items
+list{integer;character}
+#++++
+syntax error: expected `,` or `}` in this list type
+
+#==== unexpected_trailing_or_mismatched_delimiters
+#---- trailing_closing_brace_after_primitive
+integer}
+#++++
+integer
+syntax error: expected a type, found `}`
+
+#---- trailing_closing_bracket_after_primitive
+integer]
+#++++
+integer
+syntax error: expected a type, found `]`
+
+#---- mismatched_named_list_record_closer
+list[named: integer}
+#++++
+list[named: integer]
+syntax error: unclosed `[` in this list type; expected a matching `]`
+
+#---- mismatched_function_list_closer
+fn(integer]
+#++++
+fn(integer) -> Unknown
+syntax error: expected `,` or `)` in this function type's parameters
+
+#==== generic_syntax_failures
+#---- square_bracket_named_generic_definition
+@type Person[T] {list{value: T}}
+#++++
+type Person = Unknown
+syntax error: expected `{TYPE}` after `@type`
+
+#---- square_bracket_named_generic_alias_definition
+@alias Box[T] {list{value: T}}
+#++++
+alias Box = Unknown
+syntax error: expected `{TYPE}` after `@alias`
+
+#---- misplaced_binder_inside_named_type_body
+@type Person {<T> list{value: T}}
+#++++
+syntax error: higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level
+
+#---- misplaced_binder_inside_named_alias_body
+@alias Box {<T> list{value: T}}
+#++++
+syntax error: higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level
+
+#---- attached_function_binder_not_supported
+fn<T>(T) -> T
+#++++
+syntax error: expected a type, found `->`
+
+#---- attached_named_type_application_not_supported
+Person[T]
+#++++
+syntax error: expected a type, found `[`
+
+#---- bare_forall_without_type
+<T>
+#++++
+syntax error: expected a type
+
+#---- empty_forall_parameter_list
+<> fn(integer) -> integer
+#++++
+fn(integer) -> integer
+syntax error: expected a type parameter name in `<...>`
+
+#---- trailing_comma_in_forall
+<T,> fn(T) -> T
+#++++
+<T> fn(T) -> T
+syntax error: expected a type parameter name in `<...>`
+
+#---- repeated_comma_in_forall
+<T,,U> fn(T) -> U
+#++++
+syntax error: expected a type parameter name in `<...>`
+
+#---- malformed_expanded_forall_trailing_comma
+@forall T,
+#++++
+syntax error: expected a type parameter name after `@forall`
+
+#---- malformed_expanded_forall_double_comma
+@forall T,,U
+#++++
+syntax error: expected a type parameter name after `@forall`
+
+#---- unclosed_universal_binder
+<T fn(T) -> T
+#++++
+<T> fn(T) -> T
+syntax error: expected `,` or `>` in the type parameter list
+
+#---- unclosed_named_generic_application
+Person<integer
+#++++
+Person<integer>
+syntax error: expected `,` or `>` in the type argument list
+
+#---- empty_named_generic_application
+Person<>
+#++++
+Person
+
+#---- trailing_comma_in_named_generic_application
+Person<integer,>
+#++++
+Person<integer>
+syntax error: expected a type in the type argument list
+
+#---- double_comma_in_named_generic_application
+Person<integer,,character>
+#++++
+Person<integer, character>
+syntax error: expected a type, found `,`
+
+#---- missing_comma_in_named_generic_application
+Person<integer character>
+#++++
+syntax error: expected `,` or `>` in the type argument list
+
+#---- malformed_named_generic_definition_parameter_list
+@alias Box<T,> {list{value: T}}
+#++++
+alias Box<T> = list{value: T}
+syntax error: expected a type parameter name in `<...>`
+
+#---- trailing_pipe_in_union
+integer |
+#++++
+integer
+syntax error: expected a type
+
+#---- leading_pipe_in_union
+| integer
+#++++
+integer
+syntax error: expected a type, found `|`
+
+#---- bare_pipe
+|
+#++++
+NULL
+syntax error: expected a type, found `|`
+
+#---- double_pipe_in_union
+integer || NULL
+#++++
+syntax error: expected a type, found `||`

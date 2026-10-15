@@ -1,0 +1,15 @@
+#==== unsupported_generics
+#---- higher_rank_function_parameter_not_supported
+fn(transform: <T> fn(T) -> T) -> integer
+#++++
+syntax error: higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level
+
+#---- higher_rank_record_field_not_supported
+list{value: <T> list[T]}
+#++++
+syntax error: higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level
+
+#---- nested_forall_inside_function_return_not_supported
+fn(integer) -> <T> fn(T) -> T
+#++++
+syntax error: higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level

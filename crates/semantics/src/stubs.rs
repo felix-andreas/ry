@@ -465,7 +465,11 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         if name.is_empty() || !is_stub_name(name) {
             problems.push(StubProblem {
                 line,
-                message: format!("`{name}` is not a valid declaration name."),
+                message: if name.is_empty() {
+                    "expected a name before `:`.".to_owned()
+                } else {
+                    format!("`{name}` is not a valid declaration name.")
+                },
             });
             continue;
         }

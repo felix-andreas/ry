@@ -174,11 +174,11 @@ fn seeds_hold_invariants() {
     }
 }
 
-/// The mined legacy corpus: ~2,000 curated R edge cases from the frozen stack's
-/// suites, which nothing in the shipping crates otherwise runs.
+/// The program corpus: ~2,000 curated R edge cases (see
+/// `syntax::testing::program_corpus_sources`).
 #[test]
-fn legacy_corpus_holds_invariants() {
-    let sources = syntax::testing::legacy_corpus_sources();
+fn program_corpus_holds_invariants() {
+    let sources = syntax::testing::program_corpus_sources();
     assert!(
         sources.len() > 1_000,
         "expected the mined corpus, found {}",
@@ -186,7 +186,7 @@ fn legacy_corpus_holds_invariants() {
     );
     for (id, source) in &sources {
         std::panic::catch_unwind(|| check_invariants(source))
-            .unwrap_or_else(|_| panic!("legacy corpus case `{id}` broke a parse invariant"));
+            .unwrap_or_else(|_| panic!("program corpus case `{id}` broke a parse invariant"));
     }
 }
 

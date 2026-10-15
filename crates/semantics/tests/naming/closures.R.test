@@ -396,3 +396,240 @@ with_transaction <- function(connection, body) {
   125..135 connection -> b0 captured
   139..148 committed <- b2 captured
   159..168 invisible -> non-local deferred
+
+#==== nested_functions
+#---- nested_function_closes_over_outer_local
+f <- function() {
+  x <- 1L
+  g <- function() x
+}
+#++++
+# f
+  b0 x local 20..21
+  b1 g local 30..31
+  b2 f top-level 0..1
+  0..1 f <- b2
+  20..21 x <- b0 captured
+  30..31 g <- b1
+  46..47 x -> b0 captured
+  unused g 30..31
+
+#---- nested_function_closes_over_outer_parameter
+f <- function(x) {
+  g <- function() x
+}
+#++++
+# f
+  b0 x parameter 14..15
+  b1 g local 21..22
+  b2 f top-level 0..1
+  0..1 f <- b2
+  21..22 g <- b1
+  37..38 x -> b0 captured
+  unused g 21..22
+
+#---- nested_function_closes_over_top_level_global
+x <- 1L
+f <- function() {
+  g <- function() x
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 g local 20..21
+  b1 f top-level 0..1
+  0..1 f <- b1
+  20..21 g <- b0
+  36..37 x -> non-local deferred
+  unused g 20..21
+
+#---- multi_hop_nested_function_closes_over_outer_local
+f <- function() {
+  x <- 1L
+  g <- function() {
+    h <- function() x
+  }
+}
+#++++
+# f
+  b0 x local 20..21
+  b1 g local 30..31
+  b2 h local 52..53
+  b3 f top-level 0..1
+  0..1 f <- b3
+  20..21 x <- b0 captured
+  30..31 g <- b1
+  52..53 h <- b2
+  68..69 x -> b0 captured
+  unused h 52..53
+  unused g 30..31
+
+#---- closure_parameter_shadows_enclosing_binding
+f <- function() {
+  x <- 1L
+  g <- function(x) x
+}
+#++++
+# f
+  b0 x local 20..21
+  b1 g local 30..31
+  b2 x parameter 44..45
+  b3 f top-level 0..1
+  0..1 f <- b3
+  20..21 x <- b0
+  30..31 g <- b1
+  47..48 x -> b2
+  unused x 20..21
+  unused g 30..31
+
+#---- closure_local_shadows_enclosing_binding
+f <- function(x) {
+  g <- function() {
+    x <- "ok"
+    x
+  }
+}
+#++++
+# f
+  b0 x parameter 14..15
+  b1 g local 21..22
+  b2 x local 43..44
+  b3 f top-level 0..1
+  0..1 f <- b3
+  21..22 g <- b1
+  43..44 x <- b2
+  57..58 x -> b2
+  unused g 21..22
+  unused-parameter x 14..15
+
+#---- closure_uses_nearest_shadowing_binding_across_hops
+x <- 1L
+f <- function() {
+  x <- "outer"
+  g <- function() {
+    x <- TRUE
+    h <- function() x
+  }
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 x local 20..21
+  b1 g local 35..36
+  b2 x local 57..58
+  b3 h local 71..72
+  b4 f top-level 0..1
+  0..1 f <- b4
+  20..21 x <- b0
+  35..36 g <- b1
+  57..58 x <- b2 captured
+  71..72 h <- b3
+  87..88 x -> b2 captured
+  unused x 20..21
+  unused h 71..72
+  unused g 35..36
+
+#==== recursive_closures
+#---- local_recursive_function_resolves_its_own_name
+driver <- function(n) {
+  fact <- function(k) {
+    if (k <= 1L) 1L else k * fact(k - 1L)
+  }
+  fact(n)
+}
+#++++
+# driver
+  b0 n parameter 19..20
+  b1 fact local 26..30
+  b2 k parameter 43..44
+  b3 driver top-level 0..6
+  0..6 driver <- b3
+  26..30 fact <- b1 captured
+  56..57 k -> b2
+  73..74 k -> b2
+  77..81 fact -> b1 captured
+  82..83 k -> b2
+  96..100 fact -> b1 captured
+  101..102 n -> b0
+
+#---- non_closure_rhs_still_reads_the_old_binding
+outer_value <- 1L
+f <- function() {
+  outer_value <- outer_value + 1L
+  outer_value
+}
+#++++
+# outer_value
+  b0 outer_value top-level 0..11
+  0..11 outer_value <- b0
+# f
+  b0 outer_value local 20..31
+  b1 f top-level 0..1
+  0..1 f <- b1
+  20..31 outer_value <- b0
+  35..46 outer_value -> non-local deferred
+  54..65 outer_value -> b0
+
+#==== data_masking
+#---- data_table_brackets_mask_column_references
+report <- function(dt) {
+  dt[region == "west", .(total = sum(amount)), by = product]
+}
+#++++
+# report
+  b0 dt parameter 19..21
+  b1 report top-level 0..6
+  0..6 report <- b1
+  27..29 dt -> b0
+  30..36 region -> quiet deferred
+  48..49 . -> quiet deferred
+  58..61 sum -> quiet deferred
+  62..68 amount -> quiet deferred
+  77..84 product -> quiet deferred
+  masked-subset 27..85
+
+#---- walrus_marks_the_mask
+add_revenue <- function(dt) {
+  dt[, revenue := price * quantity]
+}
+#++++
+# add_revenue
+  b0 dt parameter 24..26
+  b1 add_revenue top-level 0..11
+  0..11 add_revenue <- b1
+  32..34 dt -> b0
+  37..44 revenue -> quiet deferred
+  45..47 := -> quiet deferred
+  48..53 price -> quiet deferred
+  56..64 quantity -> quiet deferred
+  masked-subset 32..65
+
+#---- base_indexing_stays_lexical
+pick <- function(m) {
+  m[not_a_column]
+}
+#++++
+# pick
+  b0 m parameter 17..18
+  b1 pick top-level 0..4
+  0..4 pick <- b1
+  24..25 m -> b0
+  26..38 not_a_column -> non-local deferred
+
+#---- with_family_masks_after_the_data
+peek <- function(dt) {
+  with(dt, mean(score_col))
+}
+#++++
+# peek
+  b0 dt parameter 17..19
+  b1 peek top-level 0..4
+  0..4 peek <- b1
+  25..29 with -> non-local deferred
+  30..32 dt -> b0
+  34..38 mean -> quiet deferred
+  39..48 score_col -> quiet deferred

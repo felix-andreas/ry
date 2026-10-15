@@ -1,0 +1,1126 @@
+#==== true_positives
+#---- union_arithmetic_without_a_guard
+parse_count <- function(raw) {
+  count <- 0L
+  if (raw == "unknown") {
+    count <- "?"
+  }
+  count + 1L
+}
+#++++
+parse_count: Unknown
+94..99 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | character`
+
+#---- wrong_argument_type
+#: fn(count: integer, label: character) -> character
+render_row <- function(count, label) {
+  paste0(label, ": ", count)
+}
+broken <- function() {
+  render_row("three", 3L)
+}
+#++++
+render_row: fn(count: integer, label: character) -> character
+broken: Unknown
+159..166 error[type-mismatch] expected `integer`, found `character`
+168..170 error[type-mismatch] expected `character`, found `integer`
+
+#---- missing_required_argument
+#: fn(numerator: double, denominator: double) -> double
+ratio <- function(numerator, denominator) {
+  numerator / denominator
+}
+broken <- function() {
+  ratio(1.0)
+}
+#++++
+ratio: fn(numerator: double, denominator: double) -> double
+broken: Unknown
+153..158 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+
+#---- unguarded_nullable_use
+#: fn(x: integer | NULL) -> integer
+increment <- function(x) {
+  x + 1L
+}
+#++++
+increment: fn(x: integer | NULL) -> integer
+65..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
+
+#---- calling_a_non_function
+broken <- function() {
+  total <- 10L
+  total(2L)
+}
+#++++
+broken: Unknown
+40..45 error[type-mismatch] this has type `integer`, which is not a function — it cannot be called
+
+#---- post_dots_option_cannot_be_filled_positionally
+join_fields <- function(..., strict) {
+  if (strict) {
+    paste(..., sep = ",")
+  } else {
+    paste(...)
+  }
+}
+broken <- function() {
+  join_fields("a", "b", TRUE)
+}
+#++++
+join_fields: fn(...: Any, strict: logical) -> character
+broken: Unknown
+138..149 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 1
+
+#---- typed_rest_parameter_rejects_a_wrong_element
+#: fn(...: double) -> double
+total_of <- function(...) {
+  sum(...)
+}
+broken <- function() {
+  total_of(1.5, "two")
+}
+#++++
+total_of: fn(...: double) -> double
+broken: Unknown
+109..114 error[type-mismatch] expected `double`, found `character`
+
+#==== option_handling
+#---- config_module_is_clean
+#: fn(name: character, [fallback]: character) -> character
+env_or <- function(name, fallback = "") {
+  value <- Sys.getenv(name)
+  if (nchar(value) == 0L) {
+    return(fallback)
+  }
+  value
+}
+
+#: fn(level: character) -> integer
+log_level_rank <- function(level) {
+  switch(level, debug = 1L, info = 2L, warn = 3L, error = 4L, 2L)
+}
+
+#: fn(timeout: integer | NULL) -> integer
+effective_timeout <- function(timeout) {
+  if (is.null(timeout)) {
+    return(30L)
+  }
+  if (timeout < 1L) {
+    stop("timeout must be positive")
+  }
+  timeout
+}
+
+describe_config <- function() {
+  host <- env_or("SERVICE_HOST", "localhost")
+  rank <- log_level_rank(env_or("LOG_LEVEL", "info"))
+  timeout <- effective_timeout(NULL)
+  sprintf("%s (level %d, timeout %ds)", host, rank, timeout)
+}
+#++++
+env_or: fn(name: character, [fallback]: character) -> character
+log_level_rank: fn(level: character) -> integer
+effective_timeout: fn(timeout: integer | NULL) -> integer
+describe_config: fn() -> character
+
+#---- optional_without_default_via_missing_guard
+settings <- list(host = "localhost", port = 8080L)
+
+describe <- function(name, punct) {
+  label <- toupper(name)
+  if (missing(punct)) {
+    label
+  } else {
+    paste0(label, punct)
+  }
+}
+
+report <- function() {
+  first <- settings[[1L]]
+  header <- describe("connection")
+  loud <- describe("connection", "!")
+  paste(header, loud, first, sep = " | ")
+}
+#++++
+settings: list{host: character, port: integer}
+describe: <T, U> fn(name: T, [punct]: U) -> character
+report: fn() -> character
+
+#---- missing_guard_write_and_early_exit_are_clean
+fill_default <- function(name, punct) {
+  if (missing(punct)) {
+    punct <- "!"
+  }
+  paste0(name, punct)
+}
+
+require_x <- function(x) {
+  if (missing(x)) stop("x is required")
+  x + 1L
+}
+
+pick <- function(x) {
+  if (!missing(x)) {
+    return(x + 1L)
+  }
+  0L
+}
+
+use_all <- function() {
+  paste(fill_default("a"), require_x(1L), pick(), sep = " ")
+}
+#++++
+fill_default: <T> fn(name: T, [punct]: character) -> character
+require_x: <T: numeric> fn([x]: T) -> T
+pick: <T: numeric> fn([x]: T) -> T | integer
+use_all: fn() -> character
+
+#==== control_flow
+#---- while_loop_accumulator_is_clean
+collatz_steps <- function(n) {
+  steps <- 0L
+  while (n > 1L) {
+    if (n %% 2L == 0L) {
+      n <- n %/% 2L
+    } else {
+      n <- 3L * n + 1L
+    }
+    steps <- steps + 1L
+  }
+  steps
+}
+
+run <- function() collatz_steps(27L)
+#++++
+collatz_steps: <T: numeric> fn(n: T) -> integer
+run: fn() -> integer
+
+#---- repeat_with_early_return_is_clean
+find_index <- function(xs, target) {
+  index <- 1L
+  repeat {
+    if (index > length(xs)) {
+      return(-1L)
+    }
+    if (xs[[index]] == target) {
+      return(index)
+    }
+    index <- index + 1L
+  }
+}
+
+run <- function() find_index(list(10L, 20L, 30L), 20L)
+#++++
+find_index: <T, U> fn(xs: T, target: U) -> integer | NULL
+run: fn() -> integer | NULL
+
+#---- switch_dispatch_is_clean
+apply_op <- function(op, a, b) {
+  switch(op,
+    add = a + b,
+    sub = a - b,
+    mul = a * b,
+    stop("unknown op"))
+}
+
+run <- function() apply_op("add", 3L, 4L)
+#++++
+apply_op: <T, U: numeric> fn(op: T, a: U, b: U) -> Unknown
+run: fn() -> Unknown
+
+#---- mutual_recursion_is_clean
+is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)
+
+is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
+
+run <- function() list(even = is_even(10L), odd = is_odd(7L))
+#++++
+is_even: <T: numeric> fn(n: T) -> logical
+is_odd: <T: numeric> fn(n: T) -> logical
+run: fn() -> list{even: logical, odd: logical}
+
+#==== stateful_closures
+#---- closure_captured_counter_is_clean
+make_counter <- function() {
+  count <- 0L
+  function() {
+    count <<- count + 1L
+    count
+  }
+}
+
+run <- function() {
+  next_id <- make_counter()
+  next_id()
+  next_id()
+}
+#++++
+make_counter: fn() -> fn() -> integer
+run: fn() -> integer
+
+#==== s3_objects
+#---- structure_constructor_and_field_access_is_clean
+new_point <- function(x, y) {
+  structure(list(x = x, y = y), class = "point")
+}
+
+distance_from_origin <- function(p) {
+  sqrt(p$x * p$x + p$y * p$y)
+}
+
+run <- function() {
+  origin_distance <- distance_from_origin(new_point(3.0, 4.0))
+  origin_distance
+}
+#++++
+new_point: <T, U> fn(x: T, y: U) -> list{x: T, y: U}
+distance_from_origin: <T> fn(p: T) -> double
+run: fn() -> double
+
+#==== control_flow_bugs
+#---- switch_union_result_used_arithmetically
+classify <- function(code) {
+  switch(code,
+    ok = 1L,
+    warn = 2L,
+    "unknown")
+}
+
+run <- function() classify("ok") + 10L
+#++++
+classify: <T> fn(code: T) -> integer | character
+run: Unknown
+108..122 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | character`
+
+#==== data_pipeline
+#---- sales_report_is_clean
+read_sales <- function(path) {
+  read.csv(path, header = TRUE, stringsAsFactors = FALSE)
+}
+
+#: fn(prefix: character, amount: double) -> character
+format_line <- function(prefix, amount) {
+  sprintf("%s: %.2f", prefix, round(amount, 2L))
+}
+
+summarize_sales <- function(path, out_path) {
+  sales <- read_sales(path)
+  if (nrow(sales) == 0L) {
+    stop("no rows in ", path)
+  }
+  amounts <- as.numeric(sales$amount)
+  total <- sum(amounts)
+  average <- mean(amounts)
+  lines <- c(
+    format_line("total", total),
+    format_line("average", average)
+  )
+  high_value <- sales[amounts > average, ]
+  write.csv(high_value, out_path, row.names = FALSE)
+  paste(lines, collapse = "\n")
+}
+#++++
+read_sales: fn(path: character | connection) -> data.frame
+format_line: fn(prefix: character, amount: double) -> character
+summarize_sales: <T> fn(path: character | connection, out_path: T) -> character
+
+#==== functional_idioms
+#---- recursion_defaults_and_composition_are_clean
+countdown <- function(n) {
+  if (n <= 0L) 0L else countdown(n - 1L)
+}
+
+greet <- function(name, greeting = "Hello") {
+  paste(greeting, name)
+}
+
+clamp <- function(x, lo, hi) {
+  if (x < lo) {
+    lo
+  } else if (x > hi) {
+    hi
+  } else {
+    x
+  }
+}
+
+compose <- function(f, g) {
+  function(x) f(g(x))
+}
+
+run <- function() {
+  depth <- countdown(5L)
+  hello <- greet("Ada")
+  hi <- greet("Bob", "Hi")
+  bounded <- clamp(12L, 0L, 10L)
+  inc_then_double <- compose(function(x) x * 2L, function(x) x + 1L)
+  list(depth = depth, hello = hello, hi = hi, bounded = bounded, out = inc_then_double(5L))
+}
+#++++
+countdown: <T: numeric> fn(n: T) -> integer
+greet: <T, U> fn(name: T, [greeting]: U) -> character
+clamp: <T> fn(x: T, lo: T, hi: T) -> T
+compose: <T, U, V> fn(f: fn(T) -> U, g: fn(V) -> T) -> fn(x: V) -> U
+run: fn() -> list{depth: integer, hello: character, hi: character, bounded: integer, out: integer}
+
+#---- higher_order_stub_combinators_are_clean
+keep_positive <- function(values) {
+  Filter(function(x) x > 0L, values)
+}
+
+is_present <- Negate(is.null)
+
+sum_all <- function(values) {
+  Reduce(function(acc, x) acc + x, values, 0L)
+}
+
+run <- function() {
+  kept <- keep_positive(list(1L, -2L, 3L))
+  present <- is_present(5L)
+  total <- sum_all(list(1L, 2L, 3L))
+  list(kept = kept, present = present, total = total)
+}
+#++++
+keep_positive: fn(values: Unknown) -> Unknown
+is_present: Unknown
+sum_all: fn(values: list[integer] | integer[]) -> integer
+run: fn() -> list{kept: Unknown, present: Unknown, total: integer}
+
+#---- structural_access_on_unannotated_params_is_clean
+sum_tree <- function(node) {
+  if (is.null(node)) {
+    0L
+  } else {
+    node$value + sum_tree(node$left) + sum_tree(node$right)
+  }
+}
+
+first_element <- function(x) x[[1L]]
+
+field_of <- function(record) record$payload
+
+leading_slice <- function(x) x[1L]
+
+run <- function() {
+  total <- sum_tree(NULL)
+  head <- first_element(list(1L, 2L))
+  payload <- field_of(list(payload = "ok"))
+  front <- leading_slice(list(1L, 2L))
+  list(total = total, head = head, payload = payload, front = front)
+}
+#++++
+sum_tree: <T> fn(node: T | NULL) -> integer
+first_element: <T> fn(x: T) -> Unknown
+field_of: <T> fn(record: T) -> Unknown
+leading_slice: <T> fn(x: T) -> Unknown
+run: fn() -> list{total: integer, head: Unknown, payload: Unknown, front: Unknown}
+
+#---- combine_tolerates_non_concrete_arguments
+prepend_zero <- function(x) c(x, 0L)
+
+with_any <- function() {
+  #: @trust Any
+  head <- 1L
+  c(head, 2L, 3L)
+}
+
+with_unknown <- function() {
+  config <- 1L
+  port <- config@port
+  c(port, 8080L)
+}
+
+run <- function() {
+  list(a = prepend_zero(c(1L, 2L)), b = with_any(), d = with_unknown())
+}
+#++++
+prepend_zero: <T> fn(x: T) -> Unknown
+with_any: fn() -> Unknown
+with_unknown: fn() -> Unknown
+run: fn() -> list{a: Unknown, b: Unknown, d: Unknown}
+
+#---- partial_annotation_leaves_the_return_inferred
+#: @param base {double}
+#: @param exponent {integer}
+power <- function(base, exponent) base^exponent
+
+#: fn(name: character)
+greet <- function(name) paste("Hello,", name)
+
+run <- function() {
+  list(eight = power(2.0, 3L), hi = greet("Ada"))
+}
+#++++
+power: fn(base: double, exponent: integer) -> double
+greet: fn(name: character) -> character
+run: fn() -> list{eight: double, hi: character}
+
+#---- script_preamble_library_calls_are_clean
+library(stats)
+require(utils)
+
+lookup_docs <- function() help(mean)
+
+run <- function() {
+  values <- rnorm(10L)
+  mean(values)
+}
+#++++
+Any
+logical
+lookup_docs: fn() -> Any
+run: fn() -> double
+
+#==== option_helpers
+#---- generic_option_library_is_clean
+
+#: <T> fn(value: T | NULL, fallback: T) -> T
+or_else <- function(value, fallback) {
+  if (is.null(value)) {
+    fallback
+  } else {
+    value
+  }
+}
+
+#: <T, U> fn(value: T | NULL, transform: fn(T) -> U) -> U | NULL
+map_option <- function(value, transform) {
+  if (is.null(value)) {
+    NULL
+  } else {
+    transform(value)
+  }
+}
+
+#: fn(name: character) -> integer | NULL
+lookup_limit <- function(name) {
+  if (nchar(name) == 0L) {
+    NULL
+  } else {
+    nchar(name)
+  }
+}
+
+#: fn(text: character) -> character | NULL
+first_word <- function(text) {
+  parts <- strsplit(text, " ")[[1L]]
+  if (length(parts) == 0L) {
+    NULL
+  } else {
+    parts[[1L]]
+  }
+}
+
+summarize <- function() {
+  limit <- or_else(lookup_limit("requests"), 100L)
+  label <- or_else(first_word("anonymous user"), "anonymous")
+  # A bare NULL value: `T` is determined by the fallback argument, not pinned to
+  # NULL by the literal, so this is `character`.
+  fallback_label <- or_else(NULL, "anonymous")
+  doubled <- map_option(lookup_limit("cache"), function(size) size * 2L)
+  effective <- or_else(doubled, 0L)
+  sprintf("%s/%s: limit %d, effective %d", label, fallback_label, limit, effective)
+}
+#++++
+or_else: <T> fn(value: T | NULL, fallback: T) -> T
+map_option: <T, U> fn(value: T | NULL, transform: fn(T) -> U) -> U | NULL
+lookup_limit: fn(name: character) -> integer | NULL
+first_word: fn(text: character) -> character | NULL
+summarize: fn() -> character
+
+#==== option_helpers_bugs
+#---- fallback_type_must_match_the_value
+#: <T> fn(value: T | NULL, fallback: T) -> T
+or_else <- function(value, fallback) {
+  if (is.null(value)) fallback else value
+}
+broken <- function() {
+  or_else(3L, "zero")
+}
+#++++
+or_else: <T> fn(value: T | NULL, fallback: T) -> T
+broken: Unknown
+165..171 error[type-mismatch] expected `integer`, found `character`
+
+#---- transform_callback_must_accept_the_value_type
+#: <T, U> fn(value: T | NULL, transform: fn(T) -> U) -> U | NULL
+map_option <- function(value, transform) {
+  if (is.null(value)) NULL else transform(value)
+}
+broken <- function() {
+  map_option("text", function(n) n + 1L)
+}
+#++++
+map_option: <T, U> fn(value: T | NULL, transform: fn(T) -> U) -> U | NULL
+broken: Unknown
+203..221 error[type-mismatch] this function is passed `character`, but its parameter `n` is used as a numeric value (`integer` or `double`)
+
+#==== optional_callbacks
+#---- optional_callback_annotation_is_writable_and_narrows
+#: @param on_done {(fn() -> integer) | NULL}
+finish <- function(on_done) {
+  if (is.null(on_done)) 0L else on_done()
+}
+
+run <- function() {
+  list(quiet = finish(NULL), loud = finish(function() 42L))
+}
+#++++
+finish: fn(on_done: (fn() -> integer) | NULL) -> integer
+run: fn() -> list{quiet: integer, loud: integer}
+
+#==== optional_callbacks_bugs
+#---- callback_with_the_wrong_result_type_is_caught
+#: @param on_done {(fn() -> integer) | NULL}
+finish <- function(on_done) {
+  if (is.null(on_done)) 0L else on_done()
+}
+
+run <- function() finish(function() "text")
+#++++
+finish: fn(on_done: (fn() -> integer) | NULL) -> integer
+run: Unknown
+145..162 error[type-mismatch] expected `(fn() -> integer) | NULL`, found `fn() -> character`
+
+#==== log_processing
+#---- log_analyzer_is_clean
+
+parse_line <- function(line) {
+  parts <- strsplit(line, " :: ")[[1L]]
+  list(level = tolower(trimws(parts[[1L]])), message = parts[[2L]])
+}
+
+#: fn(level: character) -> integer
+rank_of <- function(level) {
+  switch(level, error = 3L, warn = 2L, 1L)
+}
+
+make_counter <- function() {
+  total <- 0L
+  function() {
+    total <<- total + 1L
+    total
+  }
+}
+
+#: fn(lines: character[], prefix: character) -> character | NULL
+first_with_prefix <- function(lines, prefix) {
+  for (line in lines) {
+    if (startsWith(line, prefix)) {
+      return(line)
+    }
+  }
+  NULL
+}
+
+analyze <- function() {
+  lines <- c("ERROR :: disk full", "INFO :: started", "WARN :: low memory")
+  seen <- make_counter()
+  worst <- 0L
+  for (line in lines) {
+    entry <- parse_line(line)
+    seen()
+    rank <- rank_of(entry$level)
+    if (rank > worst) {
+      worst <- rank
+    }
+  }
+  first_error <- first_with_prefix(lines, "ERROR")
+  summary <- if (is.null(first_error)) {
+    "no errors"
+  } else {
+    first_error
+  }
+  sprintf("%d lines, worst rank %d, first error: %s", seen(), worst, summary)
+}
+#++++
+parse_line: <T> fn(line: T) -> list{level: character, message: character}
+rank_of: fn(level: character) -> integer
+make_counter: fn() -> fn() -> integer
+first_with_prefix: fn(lines: character[], prefix: character) -> character | NULL
+analyze: fn() -> character
+
+#==== log_processing_bugs
+#---- summing_a_character_field
+
+parse_line <- function(line) {
+  parts <- strsplit(line, " :: ")[[1L]]
+  list(level = parts[[1L]], message = parts[[2L]])
+}
+
+count_levels <- function(lines) {
+  total <- 0L
+  for (line in lines) {
+    entry <- parse_line(line)
+    total <- total + entry$level
+  }
+  total
+}
+#++++
+parse_line: <T> fn(line: T) -> list{level: character, message: character}
+count_levels: Unknown
+249..260 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#==== dispatch_tables
+#---- handler_table_dispatch_is_clean
+handlers <- list(
+  add = function(left, right) left + right,
+  subtract = function(left, right) left - right,
+  multiply = function(left, right) left * right
+)
+
+apply_operation <- function(name, left, right) {
+  handler <- handlers[[name]]
+  handler(left, right)
+}
+
+report <- function() {
+  total <- apply_operation("add", 2, 3)
+  difference <- apply_operation("subtract", total, 1)
+  sprintf("total %.1f, difference %.1f", total, difference)
+}
+#++++
+handlers: <T: numeric, U: numeric, V: numeric> list{add: fn(left: T, right: T) -> T, subtract: fn(left: U, right: U) -> U, multiply: fn(left: V, right: V) -> V}
+apply_operation: <T> fn(name: T, left: Unknown, right: Unknown) -> Unknown
+report: fn() -> character
+
+#---- mixed_arity_handler_table_is_caught
+handlers <- list(
+  add = function(left, right) left + right,
+  shout = function(text) toupper(text)
+)
+
+broken <- function(name) {
+  handler <- handlers[[name]]
+  handler(1, 2)
+}
+#++++
+handlers: <T: numeric> list{add: fn(left: T, right: T) -> T, shout: fn(text: Unknown) -> character}
+broken: Unknown
+174..175 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#==== numeric_analysis
+#---- descriptive_statistics_is_clean
+#: <T: numeric> fn(values: T) -> T
+clamp_positive <- function(values) {
+  values
+}
+
+#: fn(values: double[]) -> character
+describe <- function(values) {
+  sprintf(
+    "n=%d mean=%.2f sd=%.2f range=[%.1f, %.1f]",
+    length(values),
+    mean(values),
+    sd(values),
+    min(values),
+    max(values)
+  )
+}
+
+#: fn(n: integer) -> double[]
+running_means <- function(n) {
+  observations <- rev(sort(c(2.5, 1.0, 4.5, 3.0)))
+  means <- double()
+  for (index in seq_len(n)) {
+    window <- head(observations, index)
+    means <- c(means, mean(window))
+  }
+  means
+}
+
+summary_report <- function() {
+  values <- c(1.5, 2.5, 3.5, 4.5)
+  kept <- clamp_positive(values)
+  describe(kept)
+}
+#++++
+clamp_positive: <T: numeric> fn(values: T) -> T
+describe: fn(values: double[]) -> character
+running_means: fn(n: integer) -> double[]
+summary_report: fn() -> character
+
+#---- matrix_margins_with_forwarded_reductions
+summarize_matrix <- function(values) {
+  m <- as.matrix(values)
+  row_totals <- apply(m, 1L, sum)
+  col_totals <- apply(m, 2L, sum, na.rm = TRUE)
+  list(rows = identity(row_totals), cols = col_totals)
+}
+
+format_total <- function(value, unit) {
+  text <- as.character(value)
+  if (missing(unit)) {
+    text
+  } else {
+    paste0(text, " ", unit)
+  }
+}
+
+report <- function() {
+  totals <- summarize_matrix(c(1.5, 2.5, 3.5))
+  format_total(length(totals$rows), "rows")
+}
+#++++
+summarize_matrix: <T, U> fn(values: T) -> list{rows: U, cols: Any}
+format_total: <T, U> fn(value: T, [unit]: U) -> character
+report: fn() -> character
+
+#==== let_polymorphism
+#---- generic_helper_used_at_two_types_is_clean
+identity_of <- function(x) x
+
+pair_of <- function(a, b) list(first = a, second = b)
+
+run <- function() {
+  numbers <- identity_of(1L)
+  words <- identity_of("text")
+  mixed <- pair_of(1L, "x")
+  flags <- pair_of(TRUE, FALSE)
+  list(numbers = numbers, words = words, mixed = mixed, flags = flags)
+}
+#++++
+identity_of: <T> fn(x: T) -> T
+pair_of: <T, U> fn(a: T, b: U) -> list{first: T, second: U}
+run: fn() -> list{numbers: integer, words: character, mixed: list{first: integer, second: character}, flags: list{first: logical, second: logical}}
+
+#==== recursive_descent
+#---- family_guarded_tree_fold_is_clean
+sum_leaves <- function(node) {
+  if (is.numeric(node)) {
+    node
+  } else {
+    total <- 0
+    for (child in node) {
+      total <- total + sum_leaves(child)
+    }
+    total
+  }
+}
+
+run <- function() sum_leaves(list(1, list(2, 3), list(list(4, 5), 6)))
+#++++
+sum_leaves: Unknown
+run: fn() -> Unknown
+
+#==== accumulators
+#---- record_field_updates_are_clean
+step_counter <- function() {
+  acc <- list(count = 0L, name = "start")
+  acc$count <- acc$count + 1L
+  acc$name <- paste0(acc$name, "!")
+  acc
+}
+
+report <- function() {
+  state <- step_counter()
+  sprintf("%s: %d", state$name, state$count)
+}
+#++++
+step_counter: fn() -> list{count: integer, name: character}
+report: fn() -> character
+
+#==== list_builders
+#---- map_build_and_record_start_are_clean
+build_totals <- function(labels) {
+  totals <- list()
+  for (label in labels) {
+    totals[[label]] <- 0L
+  }
+  totals
+}
+
+first_total <- function(labels) {
+  totals <- build_totals(labels)
+  first <- totals[["a"]]
+  if (is.null(first)) {
+    0L
+  } else {
+    first + 1L
+  }
+}
+
+new_counter <- function() {
+  acc <- list()
+  acc$count <- 0L
+  acc$count + 1L
+}
+#++++
+build_totals: <T> fn(labels: T) -> list{} | list[named: integer]
+first_total: <T> fn(labels: T) -> integer
+new_counter: fn() -> integer
+
+#==== accumulators_bugs
+#---- field_retype_via_replacement_is_tracked
+mutate_field <- function() {
+  acc <- list(count = 0L)
+  acc$count <- "now text"
+  acc$count + 1L
+}
+#++++
+mutate_field: Unknown
+83..92 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- unguarded_map_read_is_nullable
+unguarded_total <- function(labels) {
+  totals <- list()
+  for (label in labels) {
+    totals[[label]] <- 0L
+  }
+  totals[["a"]] + 1L
+}
+#++++
+unguarded_total: Unknown
+115..128 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
+
+#==== clean_programs
+#---- monthly_sales_report
+read_sales <- function(path) {
+  if (!file.exists(path)) {
+    stop(paste("no such file:", path))
+  }
+  read.csv(path, stringsAsFactors = FALSE)
+}
+
+#: fn(amounts: double[], rate: double) -> double[]
+apply_discount <- function(amounts, rate) {
+  amounts * (1 - rate)
+}
+
+format_row <- function(month, total) {
+  sprintf("%s: %0.2f", month, total)
+}
+
+main <- function() {
+  sales <- read_sales("sales.csv")
+  amounts <- as.double(sales$amount)
+  discounted <- apply_discount(amounts, 0.1)
+
+  lines <- character()
+  months <- unique(as.character(sales$month))
+  for (index in seq_len(length(months))) {
+    month <- months[[index]]
+    total <- sum(discounted, na.rm = TRUE)
+    lines <- c(lines, format_row(month, total))
+  }
+  paste(lines, collapse = "\n")
+}
+#++++
+read_sales: fn(path: character | connection) -> data.frame
+apply_discount: fn(amounts: double[], rate: double) -> double[]
+format_row: <T, U> fn(month: T, total: U) -> character
+main: fn() -> character
+
+#---- variadic_wrappers_forward_cleanly
+log_line <- function(level, ...) {
+  message(level, ": ", ...)
+}
+
+banner <- function(...) {
+  text <- paste(..., sep = " | ")
+  toupper(text)
+}
+
+report <- function() {
+  log_line("info", "run started")
+  log_line("warn", "low disk", " retrying")
+  banner("alpha", "beta", "gamma")
+}
+#++++
+log_line: <T> fn(level: T, ...: Any) -> NULL
+banner: fn(...: Any) -> character
+report: fn() -> character
+
+#---- guarded_config_lookup
+#: fn(name: character, fallback: integer) -> integer
+option_or <- function(name, fallback) {
+  value <- getOption(name)
+  if (is.null(value)) {
+    return(fallback)
+  }
+  if (!is.integer(value)) {
+    return(fallback)
+  }
+  value
+}
+
+#: fn(mode: character) -> integer
+retries_for <- function(mode) {
+  base <- option_or("app.retries", 3L)
+  extra <- switch(mode, aggressive = 5L, patient = 0L, 1L)
+  base + extra
+}
+#++++
+option_or: fn(name: character, fallback: integer) -> integer
+retries_for: fn(mode: character) -> integer
+
+#==== simulation
+#---- monte_carlo_power_study_is_clean
+
+#: fn(n: integer, effect: double) -> double[]
+draw_treated <- function(n, effect) {
+  rnorm(n, mean = effect, sd = 1)
+}
+
+#: fn(summarise: fn(sample_values: double[]) -> double) -> fn(treated: double[], control: double[]) -> double
+make_statistic <- function(summarise) {
+  function(treated, control) {
+    summarise(treated) - summarise(control)
+  }
+}
+
+#: fn(n_rep: integer, n: integer, effect: double, statistic: fn(treated: double[], control: double[]) -> double) -> double[]
+simulate_statistics <- function(n_rep, n, effect, statistic) {
+  values <- numeric()
+  for (replicate in seq_len(n_rep)) {
+    treated <- draw_treated(n, effect)
+    control <- rnorm(n)
+    values <- c(values, statistic(treated, control))
+  }
+  values
+}
+
+#: fn(values: double[], threshold: double) -> double
+rejection_rate <- function(values, threshold) {
+  sum(abs(values) > threshold) / length(values)
+}
+
+power_study <- function() {
+  statistic <- make_statistic(mean)
+  effects <- c(0.0, 0.2, 0.5, 0.8)
+  rates <- lapply(effects, function(effect) {
+    draws <- simulate_statistics(200L, 30L, effect, statistic)
+    rejection_rate(draws, 0.5)
+  })
+  best <- Reduce(function(current, rate) if (rate > current) rate else current, rates, 0.0)
+  sprintf("best power %.3f over %d scenarios", best, length(effects))
+}
+#++++
+draw_treated: fn(n: integer, effect: double) -> double[]
+make_statistic: fn(summarise: fn(sample_values: double[]) -> double) -> fn(treated: double[], control: double[]) -> double
+simulate_statistics: fn(n_rep: integer, n: integer, effect: double, statistic: fn(treated: double[], control: double[]) -> double) -> double[]
+rejection_rate: fn(values: double[], threshold: double) -> double
+power_study: fn() -> character
+
+#---- bootstrap_interval_is_clean
+
+#: fn(observed: double[], n_boot: integer) -> double[]
+bootstrap_means <- function(observed, n_boot) {
+  means <- numeric()
+  for (draw in seq_len(n_boot)) {
+    resample <- sample(observed, replace = TRUE)
+    means <- c(means, mean(resample))
+  }
+  means
+}
+
+interval <- function(means, level) {
+  alpha <- if (missing(level)) 0.05 else 1 - level
+  ordered <- sort(means)
+  bounds <- quantile(ordered, probs = c(alpha / 2, 1 - alpha / 2))
+  list(lower = bounds[[1L]], upper = bounds[[2L]])
+}
+
+report_interval <- function() {
+  observed <- rnorm(50L, mean = 1.5)
+  means <- bootstrap_means(observed, 500L)
+  default_band <- interval(means)
+  wide_band <- interval(means, 0.99)
+  sprintf(
+    "default [%.2f, %.2f], wide [%.2f, %.2f]",
+    default_band$lower,
+    default_band$upper,
+    wide_band$lower,
+    wide_band$upper
+  )
+}
+#++++
+bootstrap_means: fn(observed: double[], n_boot: integer) -> double[]
+interval: <T, U: numeric> fn(means: T, [level]: U) -> list{lower: double, upper: double}
+report_interval: fn() -> character
+
+#==== simulation_bugs
+#---- statistic_called_with_wrong_sample
+
+#: fn(summarise: fn(sample_values: double[]) -> double) -> fn(treated: double[], control: double[]) -> double
+make_statistic <- function(summarise) {
+  function(treated, control) {
+    summarise(treated) - summarise(control)
+  }
+}
+
+broken <- function() {
+  statistic <- make_statistic(mean)
+  statistic(rnorm(10L), "control")
+}
+#++++
+make_statistic: fn(summarise: fn(sample_values: double[]) -> double) -> fn(treated: double[], control: double[]) -> double
+broken: Unknown
+316..325 error[type-mismatch] expected `double[]`, found `character`
+
+#---- reduce_accumulator_mismatch
+
+count_positive <- function() {
+  draws <- lapply(c(1.0, -2.0, 3.0), function(value) value)
+  Reduce(function(count, value) count + 1L, draws, "start")
+}
+#++++
+count_positive: Unknown
+143..150 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#==== text_processing
+#---- word_statistics_is_clean
+#: fn(line: character) -> character
+normalize <- function(line) {
+  collapsed <- gsub("[[:space:]]+", " ", line)
+  tolower(trimws(collapsed))
+}
+
+#: fn(word: character) -> character
+classify_word <- function(word) {
+  if (grepl("^[0-9]+$", word)) {
+    "number"
+  } else if (nchar(word) > 7L) {
+    "long"
+  } else {
+    "short"
+  }
+}
+
+count_long_words <- function(lines) {
+  total <- 0L
+  for (line in c("alpha beta", "gamma delta epsilon")) {
+    cleaned <- normalize(line)
+    words <- strsplit(cleaned, " ", fixed = TRUE)
+    total <- total + length(words)
+  }
+  invisible(lines)
+  total
+}
+
+report_words <- function() {
+  count <- count_long_words(c("The quick Brown fox", "jumps  over the lazy dog"))
+  label <- classify_word("extraordinary")
+  paste0(label, ": ", count)
+}
+#++++
+normalize: fn(line: character) -> character
+classify_word: fn(word: character) -> character
+count_long_words: <T> fn(lines: T) -> integer
+report_words: fn() -> character
+
+#---- functional_pipeline_with_forwarded_callbacks
+normalize_words <- function(words) {
+  cleaned <- lapply(words, gsub, pattern = "[^a-z]", replacement = "")
+  lengths <- lapply(words, nchar)
+  list(cleaned = cleaned, lengths = lengths)
+}
+
+report <- function() {
+  stats <- normalize_words(c("alpha!", "beta?"))
+  length(stats$cleaned) + length(stats$lengths)
+}
+#++++
+normalize_words: fn(words: Unknown) -> list{cleaned: Unknown, lengths: list[named: integer]}
+report: fn() -> integer

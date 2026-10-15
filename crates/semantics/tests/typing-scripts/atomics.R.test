@@ -1,0 +1,95 @@
+#==== atomics
+#---- logical_true
+TRUE
+#++++
+logical
+
+#---- logical_false
+FALSE
+#++++
+logical
+
+#---- integer_literal
+1L
+#++++
+integer
+
+#---- integer_zero
+0L
+#++++
+integer
+
+#---- integer_hex
+0x1aL
+#++++
+integer
+
+#---- double_literal
+1.5
+#++++
+double
+
+#---- double_bare_whole
+1
+#++++
+double
+
+#---- double_zero
+0
+#++++
+double
+
+#---- double_scientific
+1e5
+#++++
+double
+
+#---- double_leading_dot
+.5
+#++++
+double
+
+#---- double_hex
+0xff
+#++++
+double
+
+#---- character_double_quote
+"hello"
+#++++
+character
+
+#---- character_single_quote
+'hello'
+#++++
+character
+
+#---- character_empty
+""
+#++++
+character
+
+#---- null_literal
+NULL
+#++++
+NULL
+
+#---- empty_block
+{ }
+#++++
+NULL
+
+#---- empty_block_nested
+{ { } }
+#++++
+NULL
+
+#---- parenthesized_integer
+(1L)
+#++++
+integer
+
+#---- parenthesized_null
+(NULL)
+#++++
+NULL

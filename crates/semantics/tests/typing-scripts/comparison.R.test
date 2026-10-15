@@ -1,0 +1,125 @@
+#==== comparisons
+#---- integer_less_than_integer
+1L < 2L
+#++++
+logical
+
+#---- integer_equals_double
+1L == 1.5
+#++++
+logical
+
+#---- double_greater_equal_double
+2.5 >= 1.5
+#++++
+logical
+
+#---- not_equal_integers
+1L != 2L
+#++++
+logical
+
+#---- character_ordering
+"a" < "b"
+#++++
+logical
+
+#---- character_equality
+"a" == "b"
+#++++
+logical
+
+#---- logical_equality
+TRUE == FALSE
+#++++
+logical
+
+#---- scalar_compared_to_vector_returns_logical_array
+1L == c(1L, 2L)
+#++++
+logical[]
+
+#---- named_map_comparison_loses_map_likeness
+c(foo = 1L, bar = 2L) > 0L
+#++++
+logical[]
+
+#---- character_vector_comparison
+c("a", "b") == "a"
+#++++
+logical[]
+
+#---- numeric_compared_to_character_is_rejected
+1L < "a"
+#++++
+Unknown
+5..8 error[type-mismatch] expected `integer`, found `character`
+
+#---- logical_compared_to_numeric_promotes
+TRUE > 1L
+#++++
+logical
+
+#---- list_comparison_is_rejected
+list(1L) == list(1L)
+#++++
+Unknown
+0..8 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `list{integer}`
+
+#==== negation
+#---- not_logical_scalar
+!TRUE
+#++++
+logical
+
+#---- not_comparison_result
+!(1L < 2L)
+#++++
+logical
+
+#---- not_integer_coerces
+!1L
+#++++
+logical
+
+#---- not_character_is_rejected
+!"foo"
+#++++
+Unknown
+1..6 error[type-mismatch] expected a `logical` value, found `character`
+
+#==== ranges
+#---- integer_colon_integer
+1L:10L
+#++++
+integer[]
+
+#---- whole_double_literals_count_as_integer_endpoints
+1:10
+#++++
+integer[]
+
+#---- fractional_double_literal_makes_double_range
+1.5:10L
+#++++
+double[]
+
+#---- double_typed_operand_makes_double_range
+from <- 1.5
+from:10L
+#++++
+from: double
+double[]
+
+#---- integer_typed_operand_range
+from <- 1L
+from:10L
+#++++
+from: integer
+integer[]
+
+#---- character_range_operand_is_rejected
+"a":2L
+#++++
+Unknown
+0..3 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`

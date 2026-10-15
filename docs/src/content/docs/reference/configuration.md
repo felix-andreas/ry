@@ -65,7 +65,7 @@ Every key except `naming-style` takes a level: `"off"`, `"warn"`, `"error"`, or 
 | `assignment-operator` | level | `"warn"` | `=` used for assignment. |
 | `boolean-shorthand` | level | `"warn"` | `T` or `F` written instead of `TRUE` or `FALSE`. |
 | `trailing-comma` | level | `"error"` | A comma after the last argument of a call. |
-| `unused-parameter` | level | `"off"` | Function formals never read. S3 methods and your project's own generics are exempt. |
+| `unused-parameter` | level | `"off"` | Function formals never read. Names starting with `.` or `_` (so `...` too), S3 methods and your project's own generics are exempt. |
 | `unused-import` | level | `"off"` | An `importFrom(pkg, name)` in `NAMESPACE` whose name appears nowhere in your sources. Whole-namespace `import(pkg)` is never checked, and this finding is raised by `ry check` only — not in the editor. |
 | `shadows-builtin` | level | `"off"` | A top-level binding with the same name as a `base` export. |
 | `shadows-namespace` | level | `"off"` | A top-level binding with the same name as an export of another namespace, such as `stats::filter`. |

@@ -7,7 +7,7 @@
 //! binding (level-gated so escaped variables stay monomorphic); reads
 //! instantiate schemes with fresh variables. Arithmetic rides the numeric
 //! constraint; comparisons and logic produce logicals; `if` joins branches by
-//! unify-else-union exactly like the legacy contract.
+//! unify-else-union.
 //!
 //! This is the foundation walk: parameter-position coercions, overload sets,
 //! `#:` annotation enforcement, strict origins, and cross-item schemes layer
@@ -273,6 +273,12 @@ pub trait GlobalEnv<'db> {
     /// it propagates an `Unknown` instead of re-originating one.
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool;
 
+    /// What a top-level name already holds before this item writes it: an
+    /// earlier writer in the item's own file, or the package's unconditional
+    /// definition. Never a stub, and never the project-wide conditional slot,
+    /// whose join includes this item's own write.
+    fn earlier_binding(&self, name: &str) -> Option<TypeScheme<'db>>;
+
     /// The `@type` / `@alias` definitions visible to the item being checked.
     ///
     /// **Borrowed, and both of these are per-FILE facts.** A check consults them
@@ -319,6 +325,7 @@ pub fn check_item_with_annotation<'db>(
         naming,
         globals,
         table,
+        frame_level: 0,
         expression_annotations: expression_annotations.iter().cloned().collect(),
         environment: Environment::default(),
         scheme_arena: Vec::new(),
@@ -344,8 +351,8 @@ pub fn check_item_with_annotation<'db>(
             .unwrap_or(0),
     };
     // An annotation whose type mentions a cyclically expanding alias is
-    // unusable: report once at the annotated statement (where legacy blames
-    // it) and fall back to plain inference.
+    // unusable: report once at the annotated statement and fall back to plain
+    // inference.
     let mut annotation = annotation;
     if let Some(root) = module.root
         && let Some(present) = annotation
@@ -415,6 +422,9 @@ pub fn check_item_with_annotation<'db>(
             (ExpressionKind::Assign { value, .. }, _) => {
                 let root_ty = context.infer(root);
                 let value_ty = context.recorded.get(value).copied().unwrap_or(root_ty);
+                if annotation.is_some_and(|a| a.declared.is_some() || a.new_nominal.is_some()) {
+                    context.annotation_covers(*value);
+                }
                 scheme = if let Some((new_name, new_arguments, _)) =
                     annotation.and_then(|a| a.new_nominal.clone())
                 {
@@ -452,6 +462,9 @@ pub fn check_item_with_annotation<'db>(
                             }
                         }
                         Some(declared) => {
+                            for (name, constraint) in &declared.binders {
+                                context.table.rigid_constraints.insert(*name, *constraint);
+                            }
                             if annotation.is_some_and(|a| !a.trusted)
                                 && !matches!(declared.body.kind(db), TyKind::Unknown | TyKind::Any)
                             {
@@ -562,9 +575,12 @@ fn close_scheme<'db>(
     table: &mut InferenceTable<'db>,
     scheme: TypeScheme<'db>,
 ) -> TypeScheme<'db> {
+    let mut abstracted = FxHashSet::default();
+    collect_parameter_vars(db, table, scheme.body, &mut abstracted);
     let mut closer = ResidualCloser {
         binders: scheme.binders,
         generalized: FxHashMap::default(),
+        abstracted,
     };
     let body = erase_residual_vars_at(db, table, scheme.body, 0, Some(&mut closer));
     debug_assert!(
@@ -581,6 +597,42 @@ fn close_scheme<'db>(
 struct ResidualCloser<'db> {
     binders: Vec<(Name<'db>, Constraint)>,
     generalized: FxHashMap<crate::types::InferenceVar, Ty<'db>>,
+    /// Variables some function parameter in the scheme abstracts: only these
+    /// generalize. A constrained variable no parameter reaches is a value of
+    /// one fixed type nobody chooses, so it takes the constraint's default.
+    abstracted: FxHashSet<crate::types::InferenceVar>,
+}
+
+/// The unbound variables that occur in a parameter position of any function
+/// type inside `ty`.
+fn collect_parameter_vars<'db>(
+    db: &'db dyn Db,
+    table: &InferenceTable<'db>,
+    ty: Ty<'db>,
+    found: &mut FxHashSet<crate::types::InferenceVar>,
+) {
+    let resolved = table.shallow_resolve(db, ty);
+    if let TyKind::Function(function) = resolved.kind(db) {
+        let parameters = function
+            .positional
+            .iter()
+            .copied()
+            .chain(
+                function
+                    .named
+                    .iter()
+                    .flat_map(|parameter| parameter.types()),
+            )
+            .chain(function.variadic.iter().map(|rest| rest.element));
+        for parameter in parameters {
+            let mut vars = FxHashSet::default();
+            table.collect_unbound_vars(db, parameter, &mut vars);
+            found.extend(vars.into_iter().map(|var| table.find(var)));
+        }
+    }
+    crate::types::for_each_child_type(db, resolved, &mut |child| {
+        collect_parameter_vars(db, table, child, found)
+    });
 }
 
 /// Substitutes every bound inference variable and replaces every still-unbound
@@ -614,6 +666,12 @@ fn erase_residual_vars_at<'db>(
     };
     if constraint == Constraint::Unconstrained {
         return unknown(db);
+    }
+    if !closer.abstracted.contains(&table.find(var)) {
+        return match constraint {
+            Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
+            Constraint::AtomicElement | Constraint::Unconstrained => unknown(db),
+        };
     }
     if let Some(&rigid) = closer.generalized.get(&var) {
         return rigid;
@@ -704,6 +762,13 @@ struct Checker<'db, 'a> {
     naming: &'a ItemNaming,
     globals: Option<&'a dyn GlobalEnv<'db>>,
     table: InferenceTable<'db>,
+    /// The inference level of the frame whose slots assignments write: the
+    /// item's top level, or the body of the function being checked. A
+    /// binding's right-hand side infers one level deeper so a function value
+    /// generalizes at its binding; a value stored as a monotype is lowered
+    /// back to this level, or a later generalization in the same frame would
+    /// quantify a variable the environment still holds.
+    frame_level: u32,
     /// Statement-level annotations below the item root, by annotated
     /// expression (plus the item annotation itself for a non-assignment
     /// root): applied where the expression infers.
@@ -1269,7 +1334,18 @@ impl<'db> Checker<'db, '_> {
                         self.record(value, body)
                     }
                     None => {
+                        let binds_name = spelling != AssignSpelling::Super
+                            && matches!(
+                                self.module.expression(target).kind,
+                                ExpressionKind::NameRef(_)
+                            );
+                        if binds_name {
+                            self.table.level += 1;
+                        }
                         let value_ty = self.infer(value);
+                        if binds_name {
+                            self.table.level -= 1;
+                        }
                         // A statement-level annotation on the assignment applies
                         // before the write so the binding takes the annotated type.
                         self.apply_expression_annotation(id, value, value_ty)
@@ -1375,6 +1451,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 let parameters = parameters.clone();
                 self.table.level += 1;
+                let enclosing_frame_level =
+                    std::mem::replace(&mut self.frame_level, self.table.level);
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
                 // A formal the body tests with `missing(name)` is optional at
@@ -1430,6 +1508,7 @@ impl<'db> Checker<'db, '_> {
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty);
                 self.environment.rollback(mark);
                 self.reapply_enclosing_writes(pending_mark);
+                self.frame_level = enclosing_frame_level;
                 self.table.level -= 1;
                 Ty::new(
                     self.db,
@@ -1542,6 +1621,9 @@ impl<'db> Checker<'db, '_> {
         let Some(annotation) = self.expression_annotations.get(&annotated).cloned() else {
             return value_ty;
         };
+        if annotation.declared.is_some() || annotation.new_nominal.is_some() {
+            self.annotation_covers(value);
+        }
         if let Some((name, arguments, _)) = &annotation.new_nominal {
             let scheme = self.check_new_nominal(*name, arguments, value, value_ty);
             return self.instantiate(&scheme);
@@ -1574,6 +1656,9 @@ impl<'db> Checker<'db, '_> {
         if matches!(declared.body.kind(self.db), TyKind::Unknown | TyKind::Any) {
             return declared.body;
         }
+        for (name, constraint) in &declared.binders {
+            self.table.rigid_constraints.insert(*name, *constraint);
+        }
         let resolved_value = self.table.resolve(self.db, value_ty);
         if !self
             .table
@@ -1584,6 +1669,14 @@ impl<'db> Checker<'db, '_> {
             self.errors.push(error);
         }
         declared.body
+    }
+
+    /// An annotation gives `value` its type, so an undetermined type there is
+    /// no longer a strict origin: annotating is exactly what the strict
+    /// finding asks for.
+    fn annotation_covers(&mut self, value: ExprId) {
+        self.strict_origins
+            .retain(|origin| origin.expression != value);
     }
 
     fn literal_ty(&mut self, literal: &LiteralKind) -> Ty<'db> {
@@ -1684,32 +1777,58 @@ impl<'db> Checker<'db, '_> {
                     if let Some(&join) = self.capture_joins.get(&slot) {
                         return join;
                     }
-                } else if let Some(binding) = self.naming.bindings.get(&slot)
-                    && binding.kind == crate::naming::BindingKind::TopLevel
-                {
-                    let name = binding.name.clone();
-                    if let Some(scheme) = self
-                        .globals
-                        .and_then(|globals| globals.scheme(&name, false))
-                    {
-                        let instantiated = self.instantiate(&scheme);
-                        // An Unknown cross-item binding (or a self-cycle's
-                        // recovery value) adds nothing over the tolerant
-                        // read, and materializing it would absorb the real
-                        // body writes at the loop join.
-                        if !matches!(
-                            self.table.resolve(self.db, instantiated).kind(self.db),
-                            TyKind::Unknown
-                        ) {
-                            self.environment.set(slot, EnvEntry::Mono(instantiated));
-                            self.pre_materialized.insert(slot, instantiated);
-                            return instantiated;
-                        }
-                    }
+                } else if let Some(observed) = self.materialize_top_level_pre_state(slot) {
+                    return observed;
                 }
                 self.unknown()
             }
         }
+    }
+
+    /// The type a top-level slot holds before this item writes it: the
+    /// name's cross-item binding, materialized as the slot's entry so a
+    /// branch or loop join keeps it as the pre-state. `None` for a slot that
+    /// is not top-level or has no informative earlier binding.
+    fn materialize_top_level_pre_state(&mut self, slot: BindingId) -> Option<Ty<'db>> {
+        let binding = self.naming.bindings.get(&slot)?;
+        if binding.kind != crate::naming::BindingKind::TopLevel {
+            return None;
+        }
+        let scheme = self.globals?.scheme(&binding.name, false)?;
+        self.materialize_pre_state(slot, &scheme)
+    }
+
+    /// Like [`Self::materialize_top_level_pre_state`] for the path of a branch
+    /// or loop that did not write the slot. A name only this item and other
+    /// conditional statements write has no earlier value to join: that path is
+    /// `maybe-undefined`, not a read of a builtin or of the item's own write.
+    fn materialize_earlier_binding(&mut self, slot: BindingId) -> Option<Ty<'db>> {
+        let binding = self.naming.bindings.get(&slot)?;
+        if binding.kind != crate::naming::BindingKind::TopLevel {
+            return None;
+        }
+        let scheme = self.globals?.earlier_binding(&binding.name)?;
+        self.materialize_pre_state(slot, &scheme)
+    }
+
+    fn materialize_pre_state(
+        &mut self,
+        slot: BindingId,
+        scheme: &TypeScheme<'db>,
+    ) -> Option<Ty<'db>> {
+        let instantiated = self.instantiate(scheme);
+        // An Unknown cross-item binding (or a self-cycle's recovery value)
+        // adds nothing over the tolerant read, and materializing it would
+        // absorb the real body writes at the loop join.
+        if matches!(
+            self.table.resolve(self.db, instantiated).kind(self.db),
+            TyKind::Unknown
+        ) {
+            return None;
+        }
+        self.environment.set(slot, EnvEntry::Mono(instantiated));
+        self.pre_materialized.insert(slot, instantiated);
+        Some(instantiated)
     }
 
     fn write_target(
@@ -1740,6 +1859,8 @@ impl<'db> Checker<'db, '_> {
                         let index = self.push_scheme(scheme);
                         self.environment.set(slot, EnvEntry::Scheme(index));
                     } else {
+                        self.table
+                            .adjust_levels(self.db, self.frame_level, value_ty);
                         self.environment.set(slot, EnvEntry::Mono(value_ty));
                     }
                 }
@@ -2899,11 +3020,9 @@ impl<'db> Checker<'db, '_> {
         None
     }
 
-    /// The condition of `if`/`while` and the operands of `&&`/`||` must be
-    /// scalar logicals; a still-flexible operand binds to `logical`.
     /// The range to blame for the value an expression produces:
     /// parentheses only group, so the innermost non-paren expression
-    /// carries the precise range (the oracle blames the same way).
+    /// carries the precise range.
     fn blame_range(&self, mut id: ExprId) -> TextRange {
         while let ExpressionKind::Paren(inner) = &self.module.expression(id).kind {
             id = *inner;
@@ -2911,6 +3030,8 @@ impl<'db> Checker<'db, '_> {
         self.module.expression(id).range
     }
 
+    /// The condition of `if`/`while` and the operands of `&&`/`||` must be
+    /// scalar logicals; a still-flexible operand binds to `logical`.
     fn expect_scalar_logical(&mut self, condition: ExprId) {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);
@@ -3418,6 +3539,7 @@ impl<'db> Checker<'db, '_> {
         };
 
         self.table.level += 1;
+        let enclosing_frame_level = std::mem::replace(&mut self.frame_level, self.table.level);
         // One walk pairs formals with declared types the way R's matcher pairs
         // a call's arguments with them, and builds the exported signature as
         // it goes. What the annotation declares and this walk never consumes
@@ -3698,6 +3820,7 @@ impl<'db> Checker<'db, '_> {
         }
         self.environment.rollback(mark);
         self.reapply_enclosing_writes(pending_mark);
+        self.frame_level = enclosing_frame_level;
         self.table.level -= 1;
         // Not resolved: every type in here came from the annotation, so it
         // holds no inference variables — and resolving would expand the
@@ -4187,6 +4310,38 @@ impl<'db> Checker<'db, '_> {
         union_of(self.db, members)
     }
 
+    /// The caller's own still-open variables among a call's argument types,
+    /// with their current entries. Only a variable from outside the call is
+    /// the caller's: one minted deeper, by a lambda among the arguments, is
+    /// that lambda's to infer, and narrowing it is how
+    /// `lapply(xs, function(v) v + 1L)` types `v`.
+    fn caller_open_variables(
+        &self,
+        arguments: &[CallArgument<'db>],
+    ) -> Vec<(InferenceVar, Entry<'db>)> {
+        let mut variables = FxHashSet::default();
+        for argument in arguments {
+            if let Some(ty) = argument.ty {
+                self.table.collect_unbound_vars(self.db, ty, &mut variables);
+            }
+        }
+        variables
+            .into_iter()
+            .map(|var| (var, self.table.entry(var).clone()))
+            .filter(|(_, entry)| {
+                matches!(entry, Entry::Unbound { level, .. } if *level <= self.table.level)
+            })
+            .collect()
+    }
+
+    /// Whether every captured caller variable is still unbound with the entry
+    /// it was captured with.
+    fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
+        entries
+            .iter()
+            .all(|(var, entry)| self.table.find(*var) == *var && self.table.entry(*var) == entry)
+    }
+
     /// Ordered overload probing. Declaration order is the tiebreak, not the
     /// whole rule: a candidate that accepts the arguments without narrowing
     /// any of the caller's still-open inference variables is a fact rather
@@ -4246,17 +4401,7 @@ impl<'db> Checker<'db, '_> {
         // fallback taking `Any` accepts without binding, so it is a fact and
         // already outranks any guess above it — `function(x) sum(x)` keeps its
         // parameter open without needing a last-wins tiebreak.
-        let mut caller_variables = FxHashSet::default();
-        for argument in &call_arguments {
-            if let Some(ty) = argument.ty {
-                self.table
-                    .collect_unbound_vars(self.db, ty, &mut caller_variables);
-            }
-        }
-        let caller_entries: Vec<(InferenceVar, Entry<'db>)> = caller_variables
-            .into_iter()
-            .map(|var| (var, self.table.entry(var).clone()))
-            .collect();
+        let caller_entries = self.caller_open_variables(&call_arguments);
 
         // Selection runs strict first, then (only if nothing matched and a
         // whole-number double literal is present) once more with the
@@ -4275,7 +4420,9 @@ impl<'db> Checker<'db, '_> {
         // strict round only: the courtesy round is a leniency, so a candidate
         // it also rejects was already rejected on the honest reading.
         let mut candidate_errors: Vec<TypeError<'db>> = Vec::new();
-        let mut fits: Vec<(usize, bool)> = Vec::new();
+        // Each fit: the candidate, whether it left the caller's open
+        // variables untouched, and what it narrowed them to.
+        let mut fits: Vec<(usize, bool, Vec<Ty<'db>>)> = Vec::new();
         let mut fitting_courtesy = false;
         for &courtesy in rounds {
             for (index, scheme) in schemes.iter().enumerate() {
@@ -4289,11 +4436,16 @@ impl<'db> Checker<'db, '_> {
                             self.selected_overloads.insert(callee, index);
                             return Some(self.committed_overload_return(id, function.ret));
                         }
-                        let free = caller_entries.iter().all(|(var, entry)| {
-                            self.table.find(*var) == *var && self.table.entry(*var) == entry
-                        });
+                        let free = self.caller_variables_untouched(&caller_entries);
+                        let narrowing = caller_entries
+                            .iter()
+                            .map(|(var, _)| {
+                                self.table
+                                    .resolve(self.db, Ty::new(self.db, TyKind::Var(*var)))
+                            })
+                            .collect();
                         self.table.rollback(snapshot);
-                        fits.push((index, free));
+                        fits.push((index, free, narrowing));
                         fitting_courtesy = courtesy;
                     }
                     Err(outcome) => {
@@ -4311,11 +4463,43 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        // With one fit the two arms agree, so a forced choice is never treated
-        // as a guess. The winner is re-probed because probing rolls back: the
-        // table is in its pre-probe state again and matching is a pure
-        // function of it, so the fit repeats — and this time it commits.
-        if let Some(&(index, _)) = fits.iter().find(|(_, free)| *free).or(fits.first())
+        // A free fit is a fact and wins. Without one, a guess is only taken
+        // when every guess narrows the caller's types the same way — a single
+        // fit trivially does. Guesses that disagree would pin a wrapper's
+        // parameter to whichever shape was declared first and reject the
+        // calls that pass another (`function(xs) lapply(xs, f)` given a plain
+        // list). A type the candidates disagree on is one no signature here
+        // can state, so it becomes `Unknown`: an unchecked parameter rather
+        // than a wrong one, and the call's type is undetermined.
+        let winner = fits.iter().find(|(_, free, _)| *free).or_else(|| {
+            let (_, _, first) = fits.first()?;
+            fits.iter()
+                .all(|(_, _, narrowing)| narrowing == first)
+                .then(|| fits.first())
+                .flatten()
+        });
+        if winner.is_none()
+            && let Some((_, _, first)) = fits.first()
+        {
+            for (position, (var, _)) in caller_entries.iter().enumerate() {
+                if fits
+                    .iter()
+                    .any(|(_, _, narrowing)| narrowing.get(position) != first.get(position))
+                {
+                    let var = Ty::new(self.db, TyKind::Var(*var));
+                    let unknown = self.unknown();
+                    if self.table.unify(self.db, var, unknown).is_err() {
+                        return Some(unknown);
+                    }
+                }
+            }
+            self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
+            return Some(self.unknown());
+        }
+        // The winner is re-probed because probing rolls back: the table is in
+        // its pre-probe state again and matching is a pure function of it, so
+        // the fit repeats — and this time it commits.
+        if let Some(&(index, _, _)) = winner
             && let Some(scheme) = schemes.get(index)
         {
             let snapshot = self.table.snapshot();
@@ -4594,6 +4778,8 @@ impl<'db> Checker<'db, '_> {
                 }) =>
             {
                 let members = members.clone();
+                let caller_entries = self.caller_open_variables(arguments);
+                let mut narrowed = false;
                 let mut returns = Vec::with_capacity(members.len());
                 for member in members {
                     let member = self.table.shallow_resolve(self.db, member);
@@ -4603,6 +4789,7 @@ impl<'db> Checker<'db, '_> {
                     let snapshot = self.table.snapshot();
                     let findings = self.match_arguments(callee_range, &function, arguments);
                     if findings.is_empty() {
+                        narrowed |= !self.caller_variables_untouched(&caller_entries);
                         let member_return = self.table.resolve(self.db, function.ret);
                         self.table.rollback(snapshot);
                         returns.push(crate::types::erase_vars(self.db, member_return));
@@ -4610,6 +4797,20 @@ impl<'db> Checker<'db, '_> {
                         self.table.rollback(snapshot);
                         self.errors.extend(findings);
                         return self.unknown();
+                    }
+                }
+                // Each member's match rolls back, so a caller variable a member
+                // only accepted by narrowing would stay open, and the caller's
+                // signature would claim arguments no member takes. No single
+                // signature states what the members demand together, so those
+                // variables become `Unknown`, as a disputed overload guess does.
+                if narrowed {
+                    for (var, _) in &caller_entries {
+                        let var = Ty::new(self.db, TyKind::Var(*var));
+                        let unknown = self.unknown();
+                        if self.table.unify(self.db, var, unknown).is_err() {
+                            return unknown;
+                        }
                     }
                 }
                 union_of(self.db, returns)
@@ -5844,7 +6045,15 @@ impl<'db> Checker<'db, '_> {
                 Some(EnvEntry::MissingFormal(ty)) => Some(EnvEntry::Mono(ty)),
                 other => other,
             };
-            let current = self.environment.get(slot);
+            let mut current = self.environment.get(slot);
+            // The path that did not write a top-level slot still holds the
+            // name's earlier project binding, which only reached this item if
+            // something read it. A name the project never bound keeps the
+            // written type on that path: the read is `maybe-undefined`, not a
+            // read of whatever builtin shares the name.
+            if current.is_none() && branch_entry.is_some() {
+                current = self.materialize_earlier_binding(slot).map(EnvEntry::Mono);
+            }
             let joined = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
                     Some(EnvEntry::Mono(self.join_types(a, b)))

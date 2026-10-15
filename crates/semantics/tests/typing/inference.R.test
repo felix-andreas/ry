@@ -1,4 +1,23 @@
 #==== schemes
+#---- an_escaping_numeric_value_defaults_to_double
+increment <- function(x) x + 1L
+#: Any
+anything <- 1L
+result <- increment(anything)
+#++++
+increment: <T: numeric> fn(x: T) -> T
+anything: Any
+result: double
+
+#---- an_alias_inside_a_body_stays_polymorphic
+f <- function() {
+  mirror <- function(x) x
+  alias <- mirror
+  list(alias(1L), alias("a"))
+}
+#++++
+f: fn() -> list{integer, character}
+
 #---- identity
 id <- function(x) x
 #++++

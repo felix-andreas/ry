@@ -173,4 +173,21 @@ mod tests {
         );
         assert!(kept.is_empty(), "{kept:?}");
     }
+
+    #[test]
+    fn former_prefix_suppresses_and_other_codes_do_not() {
+        let source =
+            "x <- T # roughly: allow(boolean-shorthand)\n# ry: allow(naming-style)\ny <- T\n";
+        let suppressed = source.find('T').expect("line 1 has a `T`") as u32;
+        let reported = source.rfind('T').expect("line 3 has a `T`") as u32;
+        let kept = apply_suppressions(
+            vec![
+                diagnostic(suppressed, "boolean-shorthand"),
+                diagnostic(reported, "boolean-shorthand"),
+            ],
+            source,
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(u32::from(kept[0].range.start()), reported);
+    }
 }

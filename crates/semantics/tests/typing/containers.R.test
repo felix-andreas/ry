@@ -157,6 +157,7 @@ row_id <- function(row) row$id
 print(row_id(list(id = 1L, label = "a", amount = 2, active = "yes")))
 #++++
 row_id: fn(row: list{id: integer, label: character, amount: double, active: logical}) -> integer
+integer
 327..332 error[type-mismatch] expected `logical` for field `active`, found `character`
 
 #---- a_nested_field_names_the_path
@@ -165,6 +166,7 @@ tries <- function(settings) settings$retry$count
 print(tries(list(name = "job", retry = list(count = "3", delay = 0.5))))
 #++++
 tries: fn(settings: list{name: character, retry: list{count: integer, delay: double}}) -> integer
+integer
 195..198 error[type-mismatch] expected `integer` for field `retry.count`, found `character`
 
 #---- a_renamed_field_reads_as_the_typo_it_is
@@ -175,6 +177,7 @@ row_id <- function(row) row$identifier
 print(row_id(list(idenifier = 1L, label = "a")))
 #++++
 row_id: fn(row: list{identifier: integer, label: character}) -> integer
+integer
 245..278 error[type-mismatch] expected a field `identifier` here, and this list has `idenifier` instead — check the spelling
 
 #---- a_missing_field_with_no_near_miss_says_so
@@ -183,6 +186,7 @@ row_id <- function(row) row$id
 print(row_id(list(id = 1L)))
 #++++
 row_id: fn(row: list{id: integer, label: character}) -> integer
+integer
 103..116 error[type-mismatch] expected a field `label` here, which this list does not have
 
 #---- a_surplus_field_is_reported_after_the_paired_ones
@@ -191,6 +195,7 @@ row_id <- function(row) row$id
 print(row_id(list(id = 1L, extra = 2L)))
 #++++
 row_id: fn(row: list{id: integer}) -> integer
+integer
 99..104 error[type-mismatch] this list has a field `extra`, which is not expected here
 
 #---- fields_pair_by_name_so_order_does_not_matter
@@ -199,6 +204,7 @@ row_id <- function(row) row$id
 print(row_id(list(label = "a", id = 1L)))
 #++++
 row_id: fn(row: list{id: integer, label: character}) -> integer
+integer
 
 #---- the_caret_falls_back_to_the_value_when_there_is_no_field_to_point_at
 # The path is walked against the expression that BUILT the record, so a variable
@@ -211,6 +217,7 @@ print(row_id(built))
 #++++
 row_id: fn(row: list{id: integer, label: character}) -> integer
 built: list{id: integer, label: integer}
+integer
 344..349 error[type-mismatch] expected `character` for field `label`, found `integer`
 
 #---- a_new_nominal_narrows_to_the_field_too
@@ -223,6 +230,7 @@ who <- list(name = "Ada", age = "36")
 print(who)
 #++++
 who: Unknown
+T
 212..216 error[type-mismatch] expected `integer` for field `age`, found `character`
 
 #---- a_record_against_a_non_record_keeps_both_types
@@ -232,6 +240,7 @@ row_id <- function(row) row$id
 print(row_id(42L))
 #++++
 row_id: fn(row: list{id: integer}) -> integer
+integer
 158..161 error[type-mismatch] expected `list{id: integer}`, found `integer`
 
 #---- a_record_against_an_array_like_list_keeps_both_types
@@ -240,6 +249,7 @@ first <- function(xs) xs[[1]]
 print(first(list(a = 1L, b = "two")))
 #++++
 first: fn(xs: list[integer]) -> integer
+integer
 78..101 error[type-mismatch] expected `list[integer]`, found `list{a: integer, b: character}`
 
 #==== errors

@@ -616,6 +616,32 @@ fn check_collate_order_decides_the_package_winner() {
     assert_eq!(exit_code(&output), 0, "stderr: {rendered}");
 }
 
+// Without a configuration typing defaults off; the diagnosis forces it on
+// and says so, so the timings are not mistaken for a typing-off workspace.
+#[test]
+fn analysis_stats_notes_when_it_forces_typing_on() {
+    let directory = project(&[("R/a.R", "f <- function(x) x + 1\n")]);
+    let output = ry(directory.path(), &["debug", "analysis-stats", "."]);
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("note: [check] typing is off in the configuration"),
+        "report:\n{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn analysis_stats_rejects_a_workspace_without_r_files() {
+    let directory = project(&[("README.md", "no code here\n")]);
+    let output = ry(directory.path(), &["debug", "analysis-stats", "."]);
+    assert_eq!(exit_code(&output), 2);
+    assert!(
+        stderr(&output).contains("no R files"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn analysis_stats_reports_phases_and_probe() {
     let directory = project(&[

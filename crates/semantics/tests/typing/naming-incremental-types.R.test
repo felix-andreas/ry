@@ -1,0 +1,113 @@
+#==== incremental_types
+#---- added_dropped_duplicate_flip
+#~~~~ R/a.R
+#: @type Person {integer}
+person <- 1L
+#~~~~ R/b.R
+#: Person
+value <- 1L
+#++++
+== R/a.R
+person: integer
+== R/b.R
+value: Person
+19..21 error[type-mismatch] expected `Person`, found `integer`
+
+#---- added_dropped_duplicate_flip_then_second_definer_added
+#~~~~ R/a.R
+#: @type Person {integer}
+person <- 1L
+#~~~~ R/b.R
+#: Person
+value <- 1L
+#~~~~ R/c.R
+#: @type Person {double}
+other <- 2L
+#++++
+== R/a.R
+person: integer
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+== R/b.R
+value: Person
+19..21 error[type-mismatch] expected `Person`, found `integer`
+== R/c.R
+other: integer
+3..24 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- kind_flip_on_non_dirty_referrer
+#~~~~ R/a.R
+#: @type Shape {integer}
+shape <- 1L
+#~~~~ R/b.R
+#: @new Shape
+value <- 1L
+#++++
+== R/a.R
+shape: integer
+== R/b.R
+value: Shape
+
+#---- kind_flip_on_non_dirty_referrer_then_shape_becomes_alias
+#~~~~ R/a.R
+#: @alias Shape {integer}
+shape <- 1L
+#~~~~ R/b.R
+#: @new Shape
+value <- 1L
+#++++
+== R/a.R
+shape: integer
+== R/b.R
+value: integer
+8..13 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias.
+
+#---- arity_flip_on_non_dirty_referrer
+#~~~~ R/a.R
+#: @type Slot {integer}
+compartment <- 1L
+#~~~~ R/b.R
+#: Slot
+value <- 1L
+#++++
+== R/a.R
+compartment: integer
+== R/b.R
+value: Slot
+17..19 error[type-mismatch] expected `Slot`, found `integer`
+
+#---- arity_flip_on_non_dirty_referrer_then_slot_gains_type_parameter
+#~~~~ R/a.R
+#: @type Slot<T> {list{value: T}}
+compartment <- 1L
+#~~~~ R/b.R
+#: Slot
+value <- 1L
+#++++
+== R/a.R
+compartment: integer
+== R/b.R
+value: Slot
+3..7 error[annotation] generic type `Slot` expects 1 type argument, but found 0.
+
+#---- forward_type_reference
+#~~~~ R/a.R
+#: Widget
+value <- 1L
+#++++
+== R/a.R
+value: Widget
+3..9 error[annotation] I do not know the type `Widget`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- forward_type_reference_then_defined_later
+#~~~~ R/a.R
+#: Widget
+value <- 1L
+#~~~~ R/b.R
+#: @type Widget {integer}
+widget <- 1L
+#++++
+== R/a.R
+value: Widget
+19..21 error[type-mismatch] expected `Widget`, found `integer`
+== R/b.R
+widget: integer

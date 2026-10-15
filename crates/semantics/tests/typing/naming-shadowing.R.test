@@ -1,0 +1,30 @@
+#==== nested_functions
+#---- repeated_shadow_chain
+#~~~~ R/main.R
+x <- 1L
+f <- function(x) {
+  x <- "ok"
+  x
+}
+#++++
+== R/main.R
+x: integer
+f: <T> fn(x: T) -> character
+
+#==== cross_file_rebinding
+#---- later_file_rebinding_wins_for_later_files
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- x
+#~~~~ R/c.R
+x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: Unknown
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/c.R
+Unknown

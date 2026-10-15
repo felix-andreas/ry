@@ -7,7 +7,6 @@ The type checker is central: no static type checker exists for R, so ry defines 
 Crates:
 
 - `crates/` — the shipping product: `syntax` (lexer/parser, lossless rowan trees), `semantics` (the salsa-based analysis core and type checker), `format` (the formatter, syntax-only), `ide` (editor features as pure reads), `ry` (LSP server + CLI), and `repl` (the R console behind `ry repl` and `ry run` — runtime-loaded R, so the rest of the workspace stays R-less)
-- `legacy/` — the frozen previous implementation (`analysis-legacy`, `engine-legacy`, `ry-legacy`, its `fixtures` harness) and `differential`, now ONLY the cross-stack benchmark harness (the identity-parity program is complete and retired by user decision — the new stack's fixtures are the contract; no change needs oracle agreement); everything lives here because every dependency edge points at the oracle, so the eventual legacy deletion sweep is one directory removal (its new-stack-only perf witnesses migrate out first)
 
 The project is built by AI agents driving development, with light human steering. Agents keep two written homes current: the docs site (`docs/`) holds the authoritative, user- and contributor-facing specs (they are contracts — mandatory to keep accurate), and `.agents/memory/MEMORY.md` is the agent knowledge base (engineering state, priorities, debt, and non-obvious design rationale, so they are not rediscovered). Update both in the same session as the work that changes them.
 
@@ -20,7 +19,7 @@ The project is built by AI agents driving development, with light human steering
 
 # Ownership mandate
 
-The user has delegated full technical ownership to the agents: empty the backlog and bring the project to the best possible state — rust-analyzer quality. That explicitly covers code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for "safe, risk-free" minimal diffs; bring code to its intended shape, including large refactors, and take responsibility for the outcome. Design decisions that previously required a user check-in are now the agent's to make: decide, implement, and record the decision and rationale in `.agents/memory/decisions.md` (or the docs page it belongs to) in the same session. Two standing constraints: work directly on `main` (user directive), and do not open new pull requests.
+The user has delegated full technical ownership to the agents: empty the backlog and bring the project to the best possible state — rust-analyzer quality. That explicitly covers code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for "safe, risk-free" minimal diffs; bring code to its intended shape, including large refactors, and take responsibility for the outcome. Design decisions that previously required a user check-in are now the agent's to make: decide, implement, and record the decision and rationale in `.agents/memory/decisions.md` (or the docs page it belongs to) in the same session. Work lands through pull requests (user directive).
 
 # Do not think like a human (user directive)
 
@@ -33,9 +32,11 @@ Human engineering instincts — de-risking, staging, keeping diffs small and rev
 
 # Incremental analysis
 
-Implemented: the `engine` crate is a red-green memoized query core with per-symbol interface firewalls, cooperative cancellation, and idle-time diagnostics scheduling; the architecture page (`docs/src/content/docs/contributing/architecture.md`) is the contract — read it before touching the engine or the server's scheduling, and keep it accurate. Known deferred levers live in `backlog.md` (sub-linear validation walk, durability tiers).
+Analysis is salsa queries at item granularity behind per-name firewalls, with cooperative cancellation and idle-time diagnostics scheduling in the server. The architecture page (`docs/src/content/docs/contributing/architecture.md`) is the contract — read it before touching the query graph or the server's scheduling, and keep it accurate. A check must never read a project-wide map directly: go through a per-name or per-item tracked projection, and pin the property in `crates/semantics/tests/test_incremental.rs`.
 
 # Working autonomously
+
+Never use the interactive question tool (`AskUserQuestion`); ask questions as plain text in your reply (user directive).
 
 When working autonomously on a larger goal — a workflow, a multi-step change, or any task that spans several logical units — commit and push after each logical step, instead of saving everything for one final commit. A single large invasive redesign is ONE logical step: commit it when it is green, not in fragments along the way.
 
@@ -123,17 +124,16 @@ The recorded decision must state: the previous source of truth, what was duplica
 
 - Prefer fixtures: they are the primary way to validate analysis behavior, they are easy for humans to read in diffs, and they make it easy to create many tests quickly.
 - Fuzzing is pipeline-wide and from day one (user directive): every stage — parsing, lowering, naming, inference, diagnostics, incrementality, formatting, IDE — gets fuzz + property coverage the day it exists, never as a later add-on. A bounded pass belongs in the default test suite; see the fuzzing decision record in `decisions.md`.
-- Prefer adding or tightening fixtures before writing parser-local or engine-local unit tests unless the behavior is genuinely awkward to express as a fixture.
+- Prefer adding or tightening fixtures before writing parser-local or crate-local unit tests unless the behavior is genuinely awkward to express as a fixture.
 - Favor fixture renderers that expose semantic facts rather than implementation detail.
 - When adding a new phase or module, add or extend a fixture suite for that phase before relying on ad hoc unit tests.
 - Use the lightest fixture change that captures the failing shape.
 - Read the testing page in the docs (`docs/src/content/docs/contributing/testing.md`) before changing the fixture harness or adding a new fixture suite.
-- Run focused fixture cases with `FIXTURE_FILTER=group__case cargo test -p analysis --test test_fixtures <suite> -- --nocapture`.
-- Prefer running focused crate tests while iterating; `cargo test -p analysis` is the default crate test command.
+- Run focused fixture cases with `just fixture group__case [test-binary] [package]` (defaults: `test_typing_fixtures`, `semantics`).
+- Prefer running focused crate tests while iterating (`cargo test -p semantics`); `just gate` is the full pre-landing check.
 - Keep fixture `group__case` names stable as the test identity, and reject duplicate names across the suite instead of silently shadowing one case with another.
 - Treat fixtures as the desired semantics contract, not as a regression suite for preserving known-wrong behavior. Review expectation changes deliberately and update expectations only when wording or behavior intentionally improves; never commit an intentionally wrong outcome just to keep the suite green.
 - Some fixture cases may be unreasonable or no longer worth preserving. If you encounter one, clean it up instead of treating it as authoritative by default.
-- Do not reintroduce end-to-end named-argument mismatch fixtures until function-parameter lowering can represent the needed semantics.
 
 # Rules hygiene
 

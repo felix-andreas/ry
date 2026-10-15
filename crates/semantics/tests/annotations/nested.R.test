@@ -1,0 +1,151 @@
+#==== nested_records
+#---- nested_record
+list{meta:list{length:integer}}
+#++++
+list{meta: list{length: integer}}
+
+#---- nested_record_multiple_fields
+list{meta:list{length:integer,label:character},value:double}
+#++++
+list{meta: list{length: integer, label: character}, value: double}
+
+#---- deeply_nested_record
+list{meta:list{shape:list{rows:integer,cols:integer}},payload:list{ok:logical}}
+#++++
+list{meta: list{shape: list{rows: integer, cols: integer}}, payload: list{ok: logical}}
+
+#---- multiline_record_with_nested_named_list_and_function
+list{
+    meta: list{
+        items: list[named: list{
+            integer,
+            character
+        }],
+        render: fn(
+            integer
+        ) -> list{
+            label: character
+        }
+    }
+}
+#++++
+list{meta: list{items: list[named: list{integer, character}], render: fn(integer) -> list{label: character}}}
+
+#==== nested_lists
+#---- nested_named_list_and_record
+list[named:list{meta:list[named:character],items:list[integer]}]
+#++++
+list[named: list{meta: list[named: character], items: list[integer]}]
+
+#==== nested_tuples_and_records
+#---- tuple_containing_record
+list{integer,list{label:character}}
+#++++
+list{integer, list{label: character}}
+
+#---- tuple_containing_list
+list{integer,list[character],logical}
+#++++
+list{integer, list[character], logical}
+
+#---- record_containing_tuple
+list{shape:list{integer,integer},label:character}
+#++++
+list{shape: list{integer, integer}, label: character}
+
+#---- deep_mixed_structure
+list{meta:list{tags:list[character],shape:list{integer,integer}},items:list[list{value:double}]}
+#++++
+list{meta: list{tags: list[character], shape: list{integer, integer}}, items: list[list{value: double}]}
+
+#==== nested_functions
+#---- function_returning_record
+fn(integer)->list{value:character}
+#++++
+fn(integer) -> list{value: character}
+
+#---- function_returning_list
+fn(integer)->list[character]
+#++++
+fn(integer) -> list[character]
+
+#---- function_taking_record
+fn(list{length:integer,label:character})->logical
+#++++
+fn(list{length: integer, label: character}) -> logical
+
+#---- function_taking_list_of_records
+fn(list[list{value:double}])->integer
+#++++
+fn(list[list{value: double}]) -> integer
+
+#---- higher_order_nested_function
+fn(handler:fn(integer)->list{value:character})->list[named:logical]
+#++++
+fn(handler: fn(integer) -> list{value: character}) -> list[named: logical]
+
+#---- deeply_nested_higher_order_function
+fn(loader:fn(list{path:character})->list[list{value:double}],fallback:list{ok:logical})->fn(integer)->list{result:double}
+#++++
+fn(loader: fn(list{path: character}) -> list[list{value: double}], fallback: list{ok: logical}) -> fn(integer) -> list{result: double}
+
+#---- multiline_function_and_record_type_expression
+fn(
+    integer,
+    options: list{
+        label: character,
+        nested: fn(
+            integer,
+            value: list[named: double]
+        ) -> list{
+            ok: logical
+        }
+    }
+) -> list{
+    result: character
+}
+#++++
+fn(integer, options: list{label: character, nested: fn(integer, value: list[named: double]) -> list{ok: logical}}) -> list{result: character}
+
+#---- multiline_higher_order_function
+fn(
+    handler: fn(
+        integer,
+        label: character
+    ) -> list{
+        ok: logical
+    },
+    fallback: list[named: double]
+) -> fn(
+    character
+) -> list{
+    result: double
+}
+#++++
+fn(handler: fn(integer, label: character) -> list{ok: logical}, fallback: list[named: double]) -> fn(character) -> list{result: double}
+
+#==== nested_nullable_types
+#---- nullable_list_item
+list[integer | NULL]
+#++++
+list[integer | NULL]
+
+#---- nullable_record_field
+list{value:integer | NULL}
+#++++
+list{value: integer | NULL}
+
+#---- nullable_nested_record
+list{meta:list{value:integer | NULL}}
+#++++
+list{meta: list{value: integer | NULL}}
+
+#---- nullable_function_parameter
+fn(integer | NULL)->character
+#++++
+fn(integer | NULL) -> character
+
+#---- nullable_function_returning_record
+fn(list{value:integer | NULL})->list{result:character | NULL}
+#++++
+fn(list{value: integer | NULL}) -> list{result: character | NULL}

@@ -1,0 +1,227 @@
+#==== let_polymorphism
+#---- identity_instantiates_at_multiple_types
+mirror <- function(x) x
+first <- mirror(1L)
+second <- mirror("hello")
+#++++
+mirror: <T> fn(x: T) -> T
+first: integer
+second: character
+24..29 warning[unused] `first` is assigned but never used.
+44..50 warning[unused] `second` is assigned but never used.
+
+#---- repeated_polymorphic_instantiations_remain_independent
+mirror <- function(x) x
+first <- mirror(1L)
+second <- mirror("hello")
+third <- mirror(2L)
+#++++
+mirror: <T> fn(x: T) -> T
+first: integer
+second: character
+third: integer
+24..29 warning[unused] `first` is assigned but never used.
+44..50 warning[unused] `second` is assigned but never used.
+70..75 warning[unused] `third` is assigned but never used.
+
+#---- aliased_polymorphic_function_remains_polymorphic
+mirror <- function(x) x
+alias <- mirror
+first <- alias(1L)
+second <- alias("hello")
+#++++
+mirror: <T> fn(x: T) -> T
+alias: <T> fn(x: T) -> T
+first: integer
+second: character
+40..45 warning[unused] `first` is assigned but never used.
+59..65 warning[unused] `second` is assigned but never used.
+
+#---- higher_order_polymorphic_identity
+mirror <- function(x) x
+apply_once <- function(f, value) f(value)
+first <- apply_once(mirror, 1L)
+second <- apply_once(mirror, "hello")
+#++++
+mirror: <T> fn(x: T) -> T
+apply_once: <T, U> fn(f: fn(T) -> U, value: T) -> U
+first: integer
+second: character
+66..71 warning[unused] `first` is assigned but never used.
+98..104 warning[unused] `second` is assigned but never used.
+
+#---- constant_function_instantiates_across_argument_types
+const_integer <- function(x) 1L
+const_integer(1L)
+const_integer("hello")
+#++++
+const_integer: <T> fn(x: T) -> integer
+integer
+integer
+
+#---- repeated_fresh_instantiation_in_higher_order_calls
+invoke <- function(f, value) f(value)
+const_integer <- function(x) 1L
+mirror <- function(x) x
+invoke(const_integer, "hello")
+invoke(mirror, 1L)
+invoke(mirror, "hello")
+#++++
+invoke: <T, U> fn(f: fn(T) -> U, value: T) -> U
+const_integer: <T> fn(x: T) -> integer
+mirror: <T> fn(x: T) -> T
+integer
+integer
+character
+
+#---- solved_returned_function_keeps_outer_argument_type
+apply_left <- function(x) function(f) f(x)
+use_integer <- apply_left(1L)
+use_integer(function(value) 1L)
+#++++
+apply_left: <T, U> fn(x: T) -> fn(f: fn(T) -> U) -> U
+use_integer: <T> fn(f: fn(integer) -> T) -> T
+integer
+
+#==== explicit_foralls
+#---- compact_forall_identity_instantiates
+#: <T> fn(value: T) -> T
+mirror <- function(value) value
+mirror(1L)
+mirror("hello")
+#++++
+mirror: <T> fn(value: T) -> T
+integer
+character
+
+#---- expanded_forall_identity_instantiates
+#: @forall T
+#: @param value {T}
+#: @return {T}
+mirror <- function(value) value
+mirror(1L)
+mirror("hello")
+#++++
+mirror: <T> fn(value: T) -> T
+integer
+character
+
+#---- forall_two_parameters_keep_left
+#: <T, U> fn(left: T, right: U) -> T
+keep_left <- function(left, right) left
+keep_left(1L, "x")
+keep_left("x", 1L)
+#++++
+keep_left: <T, U> fn(left: T, right: U) -> T
+integer
+character
+
+#---- forall_nullable_return
+#: <T> fn(condition: logical, value: T) -> T | NULL
+then_some <- function(condition, value) {
+  if (condition) value
+}
+then_some(TRUE, 1L)
+then_some(FALSE, "x")
+#++++
+then_some: <T> fn(condition: logical, value: T) -> T | NULL
+integer | NULL
+character | NULL
+
+#---- forall_higher_order_application
+#: <T, U> fn(transform: fn(T) -> U, value: T) -> U
+apply_once <- function(transform, value) transform(value)
+
+#: fn(count: integer) -> character
+render <- function(count) "ok"
+apply_once(render, 1L)
+#++++
+apply_once: <T, U> fn(transform: fn(T) -> U, value: T) -> U
+render: fn(count: integer) -> character
+character
+
+#==== generic_vector_elements
+#---- forall_vector_element_preserves_atomic
+#: <T> fn(x: T[]) -> T[]
+same <- function(x) x
+same(c(1L, 2L))
+same(c("a", "b"))
+#++++
+same: <T> fn(x: T[]) -> T[]
+integer[]
+character[]
+
+#---- forall_vector_element_accepts_scalar_coercion
+#: <T> fn(x: T[]) -> T[]
+same <- function(x) x
+same(2.5)
+#++++
+same: <T> fn(x: T[]) -> T[]
+double[]
+
+#---- forall_vector_element_rejects_list
+#: <T> fn(x: T[]) -> T[]
+same <- function(x) x
+same(list(1L, 2L))
+#++++
+same: <T> fn(x: T[]) -> T[]
+T[]
+52..64 error[type-mismatch] expected `T[]`, found `list{integer, integer}`
+
+#---- forall_vector_element_used_arithmetically
+#: <T> fn(x: T[]) -> T[]
+same <- function(x) x
+same(c(1L, 2L)) + 1L
+#++++
+same: <T> fn(x: T[]) -> T[]
+integer[]
+
+#---- forall_vector_element_extraction
+#: <T> fn(x: T[]) -> T
+first_of <- function(x) x[[1L]]
+first_of(c("a", "b"))
+#++++
+first_of: <T> fn(x: T[]) -> T
+character
+
+#---- vector_suffix_rejects_non_atomic_element
+#: @alias Person {list{name: character}}
+
+#: fn(x: Person[]) -> NULL
+f <- function(x) NULL
+#++++
+f: fn(x: Person[]) -> NULL
+51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person` — for a list of these, write `list[Person]`
+69..70 warning[unused] `f` is assigned but never used.
+
+#---- numeric_binder_authorizes_body_arithmetic
+#: <T: numeric> fn(x: T) -> T
+add_one <- function(x) x + 1L
+add_one(2L)
+#++++
+add_one: <T: numeric> fn(x: T) -> T
+integer
+
+#---- unconstrained_binder_still_refuses_body_arithmetic
+#: <T> fn(x: T) -> T
+add_one <- function(x) x + 1L
+#++++
+add_one: <T> fn(x: T) -> T
+21..28 warning[unused] `add_one` is assigned but never used.
+44..45 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
+
+#---- atomic_binder_does_not_authorize_arithmetic
+#: <T: atomic> fn(x: T[]) -> T[]
+bump <- function(x) x + 1L
+#++++
+bump: <T: atomic> fn(x: T[]) -> T[]
+33..37 warning[unused] `bump` is assigned but never used.
+53..54 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T[]`
+
+#---- numeric_binder_authorizes_comparison
+#: <T: numeric> fn(x: T) -> logical
+positive <- function(x) x > 0L
+positive(1.5)
+#++++
+positive: <T: numeric> fn(x: T) -> logical
+logical

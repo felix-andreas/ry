@@ -1,0 +1,81 @@
+#==== numeric
+#---- compare_cross_family_logical_num
+TRUE < 1L
+#++++
+logical
+
+#---- modulo_character
+"a" %% 2L
+#++++
+Unknown
+0..3 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- division_character
+"a" / 2L
+#++++
+Unknown
+0..3 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- power_character_exponent
+2L ^ "a"
+#++++
+Unknown
+5..8 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- single_param_numeric_call_character
+f <- function(x) x + 1L
+f("oops")
+#++++
+f: <T: numeric> fn(x: T) -> T
+T
+26..32 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- two_param_numeric_call_character
+add <- function(a, b) a + b
+add(1L, "x")
+#++++
+add: <T: numeric> fn(a: T, b: T) -> T
+integer
+36..39 error[type-mismatch] expected `integer`, found `character`
+
+#---- clean_intdiv
+1L %/% 2L
+#++++
+integer
+
+#---- clean_range_whole_doubles
+1:10
+#++++
+integer[]
+
+#---- clean_promote_int_double
+c(1L, 2.5)
+#++++
+double[]
+
+#---- clean_unary_minus_double
+-3.5
+#++++
+double
+
+#---- clean_numeric_call_double
+increment <- function(x) x + 1L
+increment(2.5)
+#++++
+increment: <T: numeric> fn(x: T) -> T
+double
+
+#---- clean_modulo_double
+5L %% 2.0
+#++++
+double
+
+#---- clean_power_int
+2L ^ 3L
+#++++
+double
+
+#---- clean_self_arith_param
+f <- function(x) x + x
+#++++
+f: <T: numeric> fn(x: T) -> T

@@ -1,0 +1,62 @@
+#==== data_structures
+#---- subset_single
+x[1L]
+#++++
+# <statement>
+  Index [
+    NameRef x
+    Literal Integer("1L")
+
+#---- subset_named
+x[row = 1L, col = 2L]
+#++++
+# <statement>
+  Index [
+    NameRef x
+    arg row =
+      Literal Integer("1L")
+    arg col =
+      Literal Integer("2L")
+
+#---- subset2_single
+x[[1L]]
+#++++
+# <statement>
+  Index [[
+    NameRef x
+    Literal Integer("1L")
+
+#---- subset2_multiple
+x[[1L, 2L]]
+#++++
+# <statement>
+  Index [[
+    NameRef x
+    Literal Integer("1L")
+    Literal Integer("2L")
+
+#---- subset2_named
+x[[row = 1L, col = 2L]]
+#++++
+# <statement>
+  Index [[
+    NameRef x
+    arg row =
+      Literal Integer("1L")
+    arg col =
+      Literal Integer("2L")
+
+#---- subset2_string_literal_converted
+x[["a"]]
+#++++
+# <statement>
+  Index [[
+    NameRef x
+    Literal String("a")
+
+#---- dollar_string_converted
+x$"a"
+#++++
+# <statement>
+  Field $a
+    NameRef x

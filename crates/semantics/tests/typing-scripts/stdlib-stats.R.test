@@ -1,0 +1,169 @@
+#==== stats_summaries
+#---- sd_is_double
+sd(c(1, 2, 3))
+#++++
+double
+
+#---- median_is_type_preserving_any
+median(c(1L, 2L, 3L))
+#++++
+Any
+
+#---- median_accepts_na_rm
+median(c(1, 2), na.rm = TRUE)
+#++++
+Any
+
+#---- var_and_cor_are_matrix_capable_any
+var(c(1, 2))
+cor(c(1, 2), c(2, 3))
+#++++
+Any
+Any
+
+#---- cor_single_matrix_argument_is_idiomatic
+m <- matrix(c(1, 2, 3, 4), nrow = 2L)
+cor(m)
+#++++
+m: Any
+Any
+
+#---- weighted_mean_weights_are_optional
+weighted.mean(c(1, 2))
+weighted.mean(c(1, 2), c(0.3, 0.7))
+#++++
+double
+double
+
+#---- mad_and_IQR_are_double
+mad(c(1, 2))
+IQR(c(1, 2), na.rm = TRUE)
+#++++
+double
+double
+
+#==== stats_quantiles
+#---- quantile_is_double_vector
+quantile(c(1, 2, 3))
+#++++
+double[]
+
+#---- quantile_second_positional_is_probs
+quantile(c(1, 2, 3), 0.5)
+#++++
+double[]
+
+#---- quantile_accepts_probs_vector_and_na_rm
+quantile(c(1, 2, 3), probs = c(0.25, 0.75), na.rm = TRUE)
+#++++
+double[]
+
+#---- fivenum_is_double_vector
+fivenum(c(1, 2), na.rm = TRUE)
+#++++
+double[]
+
+#==== stats_generics
+#---- setNames_preserves_object_type
+setNames(c(1L, 2L), c("a", "b"))
+#++++
+integer[]
+
+#---- na_omit_is_type_preserving_any
+na.omit(c(1, NA))
+#++++
+Any
+
+#---- complete_cases_is_logical
+complete.cases(c(1, NA))
+#++++
+logical
+
+#==== stats_random
+#---- rnorm_is_double_vector
+rnorm(5L)
+#++++
+double[]
+
+#---- rnorm_accepts_mean_and_sd
+rnorm(10, mean = 5, sd = 2)
+#++++
+double[]
+
+#---- runif_accepts_positional_bounds
+runif(5, 0, 1)
+#++++
+double[]
+
+#---- rbinom_is_integer_vector
+rbinom(5, 10, 0.5)
+#++++
+integer[]
+
+#---- rpois_is_integer_vector
+rpois(3, 2.5)
+#++++
+integer[]
+
+#==== stats_distributions
+#---- pnorm_is_double_vector
+pnorm(1.96)
+#++++
+double[]
+
+#---- qnorm_accepts_tail_controls
+qnorm(0.975, lower.tail = FALSE)
+#++++
+double[]
+
+#---- dnorm_accepts_mean_and_sd
+dnorm(0, mean = 0, sd = 1)
+#++++
+double[]
+
+#---- dbinom_is_double_vector
+dbinom(3, 10, 0.5, log = TRUE)
+#++++
+double[]
+
+#==== stats_models
+#---- model_fitters_take_a_formula_and_return_any
+x <- c(1, 2)
+y <- c(2, 4)
+lm(y ~ x)
+glm(y ~ x, family = "poisson")
+#++++
+x: double[]
+y: double[]
+Any
+Any
+0..1 warning[unused] `x` is assigned but never used.
+13..14 warning[unused] `y` is assigned but never used.
+
+#---- model_fitters_absorb_passthrough_keywords
+x <- c(1, 2)
+y <- c(2, 4)
+lm(y ~ x, singular.ok = TRUE)
+#++++
+x: double[]
+y: double[]
+Any
+0..1 warning[unused] `x` is assigned but never used.
+13..14 warning[unused] `y` is assigned but never used.
+
+#---- model_fitter_rejects_a_non_formula_subject
+lm(c(1, 2))
+#++++
+Any
+3..10 error[type-mismatch] expected `formula`, found `double[]`
+
+#---- prediction_helpers_are_unknown
+predict(1L)
+coef(1L)
+residuals(1L)
+fitted(1L)
+#++++
+Unknown
+Unknown
+Unknown
+Unknown

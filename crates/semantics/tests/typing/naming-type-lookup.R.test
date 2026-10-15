@@ -1,0 +1,129 @@
+#==== definitions
+#---- definition_can_reference_previous_definition
+#~~~~ R/main.R
+#: @type Person {list{name: character}}
+#: @type Team {list{owner: Person}}
+value <- 1L
+#++++
+== R/main.R
+value: integer
+
+#---- definition_forward_reference_same_file
+#~~~~ R/main.R
+#: @type Team {list{owner: Person}}
+#: @type Person {list{name: character}}
+value <- 1L
+#++++
+== R/main.R
+value: integer
+
+#---- definition_forward_reference_resolves_across_files
+#~~~~ R/a.R
+#: @type Team {list{owner: Person}}
+#~~~~ R/b.R
+#: @type Person {list{name: character}}
+#~~~~ R/c.R
+value <- 1L
+#++++
+== R/a.R
+== R/b.R
+== R/c.R
+value: integer
+
+#---- alias_can_reference_nominal_from_other_file
+#~~~~ R/a.R
+#: @type Person {list{name: character}}
+#~~~~ R/b.R
+#: @alias TeamOwner {Person}
+#++++
+== R/a.R
+== R/b.R
+
+#==== annotations
+#---- annotation_can_reference_declared_nominal
+#~~~~ R/main.R
+#: @type Person {integer}
+
+#: Person
+value <- 1L
+#++++
+== R/main.R
+value: Person
+46..48 error[type-mismatch] expected `Person`, found `integer`
+
+#---- annotation_can_reference_alias
+#~~~~ R/main.R
+#: @alias Count {integer}
+
+#: Count
+value <- 1L
+#++++
+== R/main.R
+value: Count
+
+#---- annotation_uses_nominal_type_from_other_file
+#~~~~ R/a.R
+#: @type Person {integer}
+#~~~~ R/b.R
+#: Person
+value <- 1L
+#++++
+== R/a.R
+== R/b.R
+value: Person
+19..21 error[type-mismatch] expected `Person`, found `integer`
+
+#---- annotation_uses_alias_from_other_file
+#~~~~ R/a.R
+#: @alias Count {integer}
+#~~~~ R/b.R
+#: Count
+value <- 1L
+#++++
+== R/a.R
+== R/b.R
+value: Count
+
+#---- annotation_forward_reference_resolves_across_files
+#~~~~ R/a.R
+#: Person
+value <- 1L
+#~~~~ R/b.R
+#: @type Person {integer}
+#++++
+== R/a.R
+value: Person
+19..21 error[type-mismatch] expected `Person`, found `integer`
+== R/b.R
+
+#==== nominal_introduction
+#---- nominal_introduction_accepts_nominal_type
+#~~~~ R/main.R
+#: @type Person {list{name: character}}
+
+#: @new Person
+value <- list(name = "bob")
+#++++
+== R/main.R
+value: Person
+
+#---- nominal_introduction_uses_type_from_other_file
+#~~~~ R/a.R
+#: @type Person {list{name: character}}
+#~~~~ R/b.R
+#: @new Person
+value <- list(name = "bob")
+#++++
+== R/a.R
+== R/b.R
+value: Person
+
+#---- nominal_introduction_accepts_fully_applied_generic_type
+#~~~~ R/main.R
+#: @type Person<T> {list{value: T}}
+
+#: @new Person<integer>
+value <- list(value = 1L)
+#++++
+== R/main.R
+value: Person<integer>

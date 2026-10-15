@@ -1,0 +1,156 @@
+#==== unknown_values
+#---- top_level_unknown_value_in_package
+#~~~~ R/main.R
+x
+#++++
+== R/main.R
+Unknown
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+
+#---- nested_function_unknown_value_in_package
+#~~~~ R/main.R
+f <- function() x
+#++++
+== R/main.R
+f: fn() -> Unknown
+16..17 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+
+#==== global_warnings
+#---- top_level_binding_may_shadow_a_builtin
+#~~~~ R/main.R
+list <- 1L
+#++++
+== R/main.R
+list: integer
+
+#==== duplicate_values
+#---- duplicate_top_level_value_names_across_two_files_warn_at_both_sites
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- 2L
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+
+#---- duplicate_top_level_value_names_across_three_files_produce_full_warning_chain
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- 2L
+#~~~~ R/c.R
+x <- 3L
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/c.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+
+#==== type_conflicts
+#---- duplicate_type_names_across_several_files_mark_every_conflicting_declaration
+#~~~~ R/a.R
+#: @type Person {integer}
+#~~~~ R/b.R
+#: @type Person {double}
+#~~~~ R/c.R
+#: @alias Person {character}
+#++++
+== R/a.R
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+== R/b.R
+3..24 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+== R/c.R
+3..28 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#==== mixed_package_failures
+#---- later_package_winner_does_not_beat_local_shadow
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- 2L
+#~~~~ R/c.R
+f <- function() {
+  x <- 3L
+  x
+}
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/c.R
+f: fn() -> integer
+
+#---- cross_file_value_lookup_and_type_failure_in_same_package
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+#: Person
+x
+#++++
+== R/a.R
+x: integer
+== R/b.R
+Person
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#==== package_and_scripts
+#---- package_and_script_diagnostics_render_on_both_sides
+#~~~~ R/main.R
+x
+#~~~~ inst/scripts/helper.R
+#: Person
+value <- 1L
+#++++
+== R/main.R
+Unknown
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+== inst/scripts/helper.R
+value: Person
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+10..15 warning[unused] `value` is assigned but never used.
+
+#==== namespace_reads
+#---- known_namespace_and_export_is_clean
+#~~~~ R/main.R
+deviation <- stats::sd(c(1, 2, 3))
+#++++
+== R/main.R
+deviation: double
+
+#---- unknown_namespace_warns
+#~~~~ R/main.R
+result <- foobar::bazqux(1L)
+#++++
+== R/main.R
+result: Unknown
+10..24 warning[unresolved] unknown package namespace `foobar`.
+
+#---- known_namespace_unknown_export_warns
+#~~~~ R/main.R
+result <- stats::bazqux(1L)
+#++++
+== R/main.R
+result: Unknown
+10..23 warning[unresolved] `bazqux` is not exported by `stats`.
+
+#==== typo_suggestions
+#---- near_miss_of_a_stub_name_suggests_it
+#~~~~ R/main.R
+lenght(c(1L, 2L))
+#++++
+== R/main.R
+Unknown
+0..6 warning[unresolved] I could not resolve `lenght` in this package, its imports, or builtins. Did you mean `length`?

@@ -1,0 +1,160 @@
+#==== incremental_naming
+#---- winner_flip
+#~~~~ R/a.R
+g <- 1L
+#~~~~ R/b.R
+g
+#++++
+== R/a.R
+g: integer
+== R/b.R
+integer
+
+#---- winner_flip_then_later_definer_appears
+#~~~~ R/a.R
+g <- 1L
+#~~~~ R/b.R
+g
+#~~~~ R/c.R
+g <- 2L
+#++++
+== R/a.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+== R/b.R
+integer
+== R/c.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+
+#---- winner_flip_then_later_definer_drops
+#~~~~ R/a.R
+g <- 1L
+#~~~~ R/b.R
+g
+#~~~~ R/c.R
+other <- 2L
+#++++
+== R/a.R
+g: integer
+== R/b.R
+integer
+== R/c.R
+other: integer
+
+#---- drop
+#~~~~ R/a.R
+g <- 1L
+#~~~~ R/b.R
+g <- 2L
+#~~~~ R/c.R
+g <- 3L
+#~~~~ R/d.R
+g
+#++++
+== R/a.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+== R/b.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+== R/c.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+== R/d.R
+integer
+
+#---- drop_then_winner_drops
+#~~~~ R/a.R
+g <- 1L
+#~~~~ R/b.R
+g <- 2L
+#~~~~ R/c.R
+c_other <- 3L
+#~~~~ R/d.R
+g
+#++++
+== R/a.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+== R/b.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+== R/c.R
+c_other: integer
+== R/d.R
+integer
+
+#---- delete_then_delete_sole_definer
+#~~~~ R/b.R
+g
+#++++
+== R/b.R
+Unknown
+0..1 warning[unresolved] I could not resolve `g` in this package, its imports, or builtins.
+
+#---- earlier_path_insert
+#~~~~ R/b.R
+g <- 1L
+#~~~~ R/c.R
+g
+#++++
+== R/b.R
+g: integer
+== R/c.R
+integer
+
+#---- earlier_path_insert_then_insert_earlier_definer
+#~~~~ R/a.R
+g <- 2L
+#~~~~ R/b.R
+g <- 1L
+#~~~~ R/c.R
+g
+#++++
+== R/a.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+== R/b.R
+g: integer
+0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+== R/c.R
+integer
+
+#---- rename_re_add
+#~~~~ R/a.R
+foo <- 1L
+#~~~~ R/b.R
+foo
+#++++
+== R/a.R
+foo: integer
+== R/b.R
+integer
+
+#---- rename_re_add_then_rename_binding
+#~~~~ R/a.R
+bar <- 1L
+#~~~~ R/b.R
+foo
+bar
+#++++
+== R/a.R
+bar: integer
+== R/b.R
+Unknown
+integer
+0..3 warning[unresolved] I could not resolve `foo` in this package, its imports, or builtins.
+
+#---- D_defined_ness_flip_on_non_dirty_referrer
+#~~~~ R/a.R
+placeholder <- 1L
+#~~~~ R/b.R
+g
+#++++
+== R/a.R
+placeholder: integer
+== R/b.R
+Unknown
+0..1 warning[unresolved] I could not resolve `g` in this package, its imports, or builtins.

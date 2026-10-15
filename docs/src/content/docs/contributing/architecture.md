@@ -34,10 +34,6 @@ compiler-checked analog of "make illegal states unrepresentable":
   (`check`, `fmt`, `server`, `debug`). Owns configuration, position-encoding
   conversion, diagnostics assembly and publication, and suppression comments.
 
-The `*-legacy` crates (`ry-legacy`, `analysis-legacy`, `engine-legacy`)
-are the previous stack, frozen in-tree as the baseline the performance
-benchmarks measure against; no code is shared between the two stacks by
-design.
 
 ## The semantics database
 
@@ -98,6 +94,14 @@ Analysis is incremental at **item** granularity on salsa:
   resolution) are small tracked queries whose values survive body edits that
   only shift ranges — the common keystroke backdates the projection and the
   project-wide graph walks stay green instead of re-executing.
+- A check never reads a project-wide map. Its cross-item lookups go through
+  per-name and per-item firewalls: `package_name` (a name's winner and
+  conditional writers), `interface_group` (an item's cyclic group), and
+  `frame_binder` (the file-local binder an immediate or script read sees).
+  A structural edit re-runs each firewall a check read; an unchanged answer
+  backdates, so a new definition re-checks only the items that read its name.
+  `crates/semantics/tests/test_incremental.rs` pins these contracts by
+  counting query executions.
 - Types are **interned** (id equality, no deep clones). Deep resolution over
   the interned type DAG is memoized per binding epoch with
   cycle-cut-to-`Unknown` semantics; the decision log records the design.
@@ -153,13 +157,10 @@ confined to that thread).
 ## Correctness and performance instruments
 
 The fixture suites are the correctness contract; see the [testing
-page](/contributing/testing). The cross-implementation parity program that once compared
-every finding against the frozen legacy stack is complete and retired — the
-new stack's fixtures stand on their own, and no change needs the old
-implementation's agreement.
-
-What remains in `legacy/differential` is the benchmark harness. Its perf and
-memory witnesses (`test_stats`) assert measured budgets — wall time, resident
-set, and resolve-step linearity — against a real-file corpus, so a regression
-in any of the three fails a test rather than being noticed later. The corpus
-is fetched on demand, so these run locally rather than in CI.
+page](/contributing/testing). The incrementality contracts are asserted by
+counting query executions (`crates/semantics/tests/test_incremental.rs`). The
+perf and memory witness (`crates/semantics/tests/test_perf.rs`) asserts
+measured budgets — wall time, resident set, resolve-step linearity, and
+keystroke latency — against a real-file corpus, so a regression in any of
+them fails a test rather than being noticed later. The corpus is fetched on
+demand, so the witness runs locally rather than in CI.

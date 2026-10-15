@@ -18,10 +18,8 @@
 
 use semantics::hir::{ExprId, Module};
 use semantics::naming::{BindingKind, ItemNaming};
-use semantics::{
-    DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, item_hir, item_naming,
-    item_tree,
-};
+use semantics::testing::with_fixture_project;
+use semantics::{DocumentKind, ItemKind, item_hir, item_naming, item_tree};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -32,27 +30,31 @@ fn naming_fixtures() {
 }
 
 fn render(source: &str) -> String {
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&db, vec![file]);
+    with_fixture_project(
+        vec![(source.to_owned(), DocumentKind::Package)],
+        |db, files| {
+            let [file] = files else {
+                panic!("a fixture case is one file");
+            };
+            let file = *file;
 
-    let mut output = String::new();
-    for &item in item_tree(&db, file) {
-        let (Some(naming), Some(module)) = (
-            item_naming(&db, item).as_ref(),
-            item_hir(&db, item).as_ref(),
-        ) else {
-            continue;
-        };
-        let header = match item.name(&db).clone() {
-            Some(name) => name,
-            None => format!("<{}>", item_kind(*item.kind(&db))),
-        };
-        let _ = writeln!(output, "# {header}");
-        render_item(&mut output, naming, module);
-    }
-    output
+            let mut output = String::new();
+            for &item in item_tree(db, file) {
+                let (Some(naming), Some(module)) =
+                    (item_naming(db, item).as_ref(), item_hir(db, item).as_ref())
+                else {
+                    continue;
+                };
+                let header = match item.name(db).clone() {
+                    Some(name) => name,
+                    None => format!("<{}>", item_kind(*item.kind(db))),
+                };
+                let _ = writeln!(output, "# {header}");
+                render_item(&mut output, naming, module);
+            }
+            output
+        },
+    )
 }
 
 /// One item's naming facts. Bindings first, because every resolution below

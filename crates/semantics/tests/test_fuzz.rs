@@ -229,16 +229,16 @@ fn run_multi_file(budget: usize, seed: u64) {
 /// text (the middle re-derives the end state).
 const REGRESSIONS: &[&str] = &["foo$\n", "f)\nla<- function()"];
 
-/// The mined legacy corpus through the full pipeline. One shared database over
+/// The program corpus through the full pipeline. One shared database over
 /// all of it rather than the per-input battery: the corpus is ~2,000 cases and a
 /// fresh database costs a stub re-parse each, so this arm asserts what a shared
 /// db can — never panic, diagnostic ranges inside their file — and leaves
 /// determinism and incremental equivalence to the generated arms.
 #[test]
-fn legacy_corpus_holds_invariants() {
+fn program_corpus_holds_invariants() {
     use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 
-    let sources = syntax::testing::legacy_corpus_sources();
+    let sources = syntax::testing::program_corpus_sources();
     assert!(
         sources.len() > 1_000,
         "expected the mined corpus, found {}",
@@ -261,13 +261,13 @@ fn legacy_corpus_holds_invariants() {
         let diagnostics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             semantics::diagnostics::file_diagnostics(&db, *file)
         }))
-        .unwrap_or_else(|_| panic!("legacy corpus case `{id}` panicked the pipeline"));
+        .unwrap_or_else(|_| panic!("program corpus case `{id}` panicked the pipeline"));
         for diagnostic in diagnostics {
             let start = u32::from(diagnostic.range.start()) as usize;
             let end = u32::from(diagnostic.range.end()) as usize;
             assert!(
                 start <= end && end <= length,
-                "legacy corpus case `{id}`: range {start}..{end} escapes the file (length {length})"
+                "program corpus case `{id}`: range {start}..{end} escapes the file (length {length})"
             );
         }
     }

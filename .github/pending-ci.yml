@@ -8,8 +8,7 @@
 #
 # What changed vs the active ci.yml: every cargo command is widened from the
 # default member (crates/ry, the shipping server + CLI) to `--workspace
-# --exclude zed_ry`, so the syntax/semantics/format/ide
-# crates, the cross-stack differential, and the frozen legacy stack are all
+# --exclude zed_ry`, so the syntax/semantics/format/ide/repl crates are all
 # linted and tested — the bare commands cover only the product crate's own
 # suites today.
 #

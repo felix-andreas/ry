@@ -1,0 +1,70 @@
+#==== special_types
+#---- nullable_union_allows_null_branch
+#: integer | NULL
+value <- if (TRUE) 1L else NULL
+#++++
+value: integer | NULL
+
+#---- break_branch_yields_null_not_assignable
+#: integer
+value <- if (TRUE) break
+#++++
+value: integer
+20..35 error[type-mismatch] expected `integer`, found `NULL`
+
+#---- unknown_is_accepted_by_a_plain_type
+holder <- list(a = 1L)
+#: integer
+value <- holder@slot
+#++++
+holder: list{a: integer}
+value: integer
+
+#---- any_accepts_null
+#: Any
+value <- NULL
+#++++
+value: Any
+
+#---- any_accepts_unknown
+#: Any
+value <- if (TRUE) break
+#++++
+value: Any
+
+#---- multi_member_union_not_assignable_to_plain_member
+#: integer | character
+value <- 1L
+
+#: integer
+narrowed <- value
+#++++
+value: integer | character
+narrowed: integer
+59..64 error[type-mismatch] expected `integer`, found `integer | character`
+
+#==== unsupported_index_shapes
+#---- matrix_style_indexing_on_unknown_stays_silent
+holder <- list(a = 1L)
+m <- holder@slot
+cell <- m[1, 2]
+#++++
+holder: list{a: integer}
+m: Unknown
+cell: Unknown
+
+#---- matrix_style_indexing_on_list_names_indexing
+values <- list(1L, 2L)
+cell <- values[1, 2]
+#++++
+values: list{integer, integer}
+cell: Unknown
+31..43 error[type-mismatch] indexing with 2 indexes is not supported yet — ry does not model matrix and data.frame subsetting
+
+#---- empty_index_is_reported_as_indexing
+values <- list(1L, 2L)
+copy <- values[]
+#++++
+values: list{integer, integer}
+copy: Unknown
+31..39 error[type-mismatch] indexing with an empty index (`x[]`) is not supported yet

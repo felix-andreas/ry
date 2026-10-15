@@ -1,0 +1,201 @@
+#==== definitions
+#---- duplicate_nominal_type_name
+#~~~~ R/main.R
+#: @type Person {integer}
+#: @type Person {double}
+value <- 1L
+#++++
+== R/main.R
+value: integer
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+29..50 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- duplicate_alias_name
+#~~~~ R/main.R
+#: @alias Person {integer}
+#: @alias Person {double}
+value <- 1L
+#++++
+== R/main.R
+value: integer
+3..26 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+30..52 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- alias_collides_with_nominal_type_name
+#~~~~ R/main.R
+#: @type Person {integer}
+#: @alias Person {double}
+value <- 1L
+#++++
+== R/main.R
+value: integer
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+29..51 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- nominal_type_collides_with_alias_name
+#~~~~ R/main.R
+#: @alias Person {integer}
+#: @type Person {double}
+value <- 1L
+#++++
+== R/main.R
+value: integer
+3..26 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+30..51 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- definition_unknown_type
+#~~~~ R/main.R
+#: @type Team {list{owner: Person}}
+value <- 1L
+#++++
+== R/main.R
+value: integer
+27..33 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- duplicate_nominal_type_name_across_files
+#~~~~ R/a.R
+#: @type Person {integer}
+#~~~~ R/b.R
+#: @type Person {double}
+#++++
+== R/a.R
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+== R/b.R
+3..24 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- duplicate_alias_name_across_files
+#~~~~ R/a.R
+#: @alias Person {integer}
+#~~~~ R/b.R
+#: @alias Person {double}
+#++++
+== R/a.R
+3..26 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+== R/b.R
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#---- nominal_alias_collision_across_files
+#~~~~ R/a.R
+#: @type Person {integer}
+#~~~~ R/b.R
+#: @alias Person {double}
+#++++
+== R/a.R
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+== R/b.R
+3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+
+#==== annotations
+#---- annotation_unknown_type
+#~~~~ R/main.R
+#: Person
+value <- 1L
+#++++
+== R/main.R
+value: Person
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- annotation_unknown_field_type_underlines_only_the_name
+#~~~~ R/main.R
+#: list{age: intgr}
+record <- list(age = 1L)
+#++++
+== R/main.R
+record: list{age: intgr}
+13..18 error[annotation] I do not know the type `intgr`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- annotation_unknown_type_nested_in_generic_argument
+#~~~~ R/main.R
+#: @alias Box<T> {list{value: T}}
+
+#: Box<Person>
+value <- list(value = 1L)
+#++++
+== R/main.R
+value: Box<Person>
+42..48 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- annotation_wrong_type_argument_arity
+#~~~~ R/main.R
+#: @alias Pair<T, U> {list{left: T, right: U}}
+
+#: Pair<integer>
+value <- list(left = 1L, right = 2L)
+#++++
+== R/main.R
+value: Pair<integer>
+51..55 error[annotation] generic type `Pair` expects 2 type arguments, but found 1.
+
+#---- annotation_wrong_nominal_type_argument_arity
+#~~~~ R/main.R
+#: @type Person<T> {list{value: T}}
+
+#: Person<integer, character>
+value <- list(value = 1L)
+#++++
+== R/main.R
+value: Person<integer, character>
+40..46 error[annotation] generic type `Person` expects 1 type argument, but found 2.
+
+#---- annotation_non_generic_type_rejects_type_arguments
+#~~~~ R/main.R
+#: @type Person {integer}
+
+#: Person<integer>
+value <- 1L
+#++++
+== R/main.R
+value: Person<integer>
+30..36 error[annotation] `Person` is not a generic type — it takes no type arguments.
+
+#==== nominal_introduction
+#---- nominal_introduction_rejects_alias
+#~~~~ R/main.R
+#: @alias Person {list{name: character}}
+value <- 1L
+#: @new Person
+other <- list(name = "bob")
+#++++
+== R/main.R
+value: integer
+other: list{name: character}
+61..67 error[annotation] `@new` requires a nominal type declared with `@type`, but `Person` is an alias.
+
+#---- nominal_introduction_rejects_unknown_type
+#~~~~ R/main.R
+#: @new Person
+value <- list(name = "bob")
+#++++
+== R/main.R
+value: list{name: character}
+8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- nominal_introduction_infers_missing_type_arguments
+#~~~~ R/main.R
+#: @type Person<T> {list{value: T}}
+
+#: @new Person
+value <- list(value = 1L)
+#++++
+== R/main.R
+value: Person<integer>
+
+#---- nominal_introduction_rejects_non_nominal_type_form
+#~~~~ R/main.R
+#: @new list{name: character}
+value <- list(name = "bob")
+#++++
+== R/main.R
+value: list{name: character}
+8..29 error[annotation] expected a nominal type reference after `@new`.
+
+#---- nominal_introduction_rejects_too_many_type_arguments
+#~~~~ R/main.R
+#: @type Person<T> {list{value: T}}
+
+#: @new Person<integer, character>
+value <- list(value = 1L)
+#++++
+== R/main.R
+value: Person<integer>
+45..51 error[annotation] generic type `Person` expects 1 type argument, but found 2.

@@ -1,0 +1,117 @@
+#==== calls
+#---- calling_non_function
+value <- 1L
+value(2L)
+#++++
+value: integer
+Unknown
+12..17 error[type-mismatch] this has type `integer`, which is not a function — it cannot be called
+
+#---- call_arity_mismatch
+mirror <- function(x) x
+mirror(1L, 2L)
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+35..37 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- unknown_callee_in_call
+zzz_unknown(1L)
+#++++
+Unknown
+0..11 warning[unresolved] I could not resolve `zzz_unknown` in this package, its imports, or builtins.
+
+#---- unknown_callee_after_valid_polymorphic_use
+mirror <- function(x) x
+mirror(1L)
+zzz_unknown(mirror("ok"))
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+Unknown
+35..46 warning[unresolved] I could not resolve `zzz_unknown` in this package, its imports, or builtins.
+
+#---- named_argument_not_in_interface
+mirror <- function(x) x
+mirror(y = 1L)
+#++++
+mirror: <T> fn(x: T) -> T
+T
+31..32 error[type-mismatch] this function has no parameter `y` — its named parameter is `x`
+
+#---- missing_required_argument
+#: fn(count: integer, label: character) -> character
+describe <- function(count, label) label
+describe(1L)
+#++++
+describe: fn(count: integer, label: character) -> character
+character
+94..102 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+
+#---- argument_type_mismatch_points_at_argument
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+double_count("two")
+#++++
+double_count: fn(count: integer) -> integer
+integer
+92..97 error[type-mismatch] expected `integer`, found `character`
+
+#---- function_argument_contravariant_parameter_accepted
+#: fn(callback: fn(integer) -> integer) -> integer
+run <- function(callback) callback(1L)
+#: fn(value: integer | NULL) -> integer
+wider <- function(value) 1L
+run(wider)
+#++++
+run: fn(callback: fn(integer) -> integer) -> integer
+wider: fn(value: integer | NULL) -> integer
+integer
+
+#---- function_argument_contravariant_parameter_rejected
+#: fn(callback: fn(integer | NULL) -> integer) -> integer
+run <- function(callback) 1L
+#: fn(value: integer) -> integer
+narrower <- function(value) value
+run(narrower)
+#++++
+run: fn(callback: fn(integer | NULL) -> integer) -> integer
+narrower: fn(value: integer) -> integer
+integer
+158..166 error[type-mismatch] this function is passed `integer | NULL`, but its parameter `value` accepts `integer`
+
+#==== defaults
+#---- default_expression_internal_error
+make <- function(value = "a" + 1L) value
+#++++
+make: Unknown
+25..28 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- annotated_non_null_default_incompatible
+#: @param count {integer}
+#: @return {integer}
+describe <- function(count = "x") count
+#++++
+describe: fn([count]: integer) -> integer
+59..86 error[type-mismatch] this annotation declares `count` as required, but the function gives it a default — write `[count]` to declare it optional, or drop the default
+76..79 error[type-mismatch] expected `integer`, found `character`
+
+#---- null_default_allowed_for_annotated_parameter
+#: @param count {integer}
+#: @param [label] {character}
+#: @return {integer}
+double_count <- function(count, label = NULL) count + count
+#++++
+double_count: fn(count: integer, [label]: character) -> integer
+117..121 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+
+#==== control_flow_builtins
+#---- return_and_switch_resolve_without_warnings
+classify <- function(x) {
+  if (x > 2L) {
+    return("big")
+  }
+  switch("mode", a = "one", "other")
+}
+#++++
+classify: <T: numeric> fn(x: T) -> character

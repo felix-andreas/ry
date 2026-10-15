@@ -138,10 +138,10 @@ Top-level value names are package-global across files.
 - if several files define the same top-level value name, the later file wins
 - if several package files define the same top-level value name, both the overwritten earlier
   definition and the overwriting later definition should warn
-- a bare top-level `{ }` block executes unconditionally, so its direct-child assignments are
-  package globals too, exactly like a top-level `name <- value`; assignments inside `if`/`for`/`while`
-  bodies are conditionally executed and are not yet package globals (a cross-file reference to such a
-  name is unresolved), pending a future conditional-global tier
+- any top-level assignment binds a package global, wherever it sits in the statement: a bare
+  `{ }` block, an `if`/`for`/`while` body, a call's block argument (`suppressWarnings({ x <- f() })`),
+  or another assignment's value (`y <- (x <- 1L)` binds both). A name only written conditionally has
+  the union of every writer's type when another file reads it
 
 Cross-file references are scheme-based:
 
@@ -330,12 +330,14 @@ variable can be in:
   This is the same sound-by-refusal move as the loop rule above: the checker declines to describe the
   value rather than describing it at a size nothing can consume
 - joining equal types keeps the type; genuinely different types join into their union, exactly as
-  `if ... else` result values do; joining with `Unknown` is `Unknown`
+  `if ... else` result values do; joining with `Unknown` keeps the other side, because a recursive
+  definition's fixpoint starts from `Unknown` and could not otherwise converge to a precise type
 
 Joins and generalization:
 
 - a variable with exactly one reaching write keeps that write's generalized (possibly polymorphic)
-  scheme, so `f <- function(x) x` inside a body stays `<T> fn(x: T) -> T`
+  scheme, so `f <- function(x) x` inside a body stays `<T> fn(x: T) -> T`, and so does an alias of
+  it: after `g <- f`, both `g(1L)` and `g("a")` check
 - when writes merge at a join, the variable holds the join of the written types as a **monotype**
   (a scheme-producing write contributes its instantiated body); conditional reassignment therefore
   monomorphizes
@@ -344,7 +346,9 @@ Joins and generalization:
   `fn(x: T) -> T` and `fn(x: U) -> character` unify only by binding `T := character` — a signature
   that belongs to neither path and links variables that were made separate on purpose. Two
   conditionally-assigned functions therefore read as a union of both signatures, and a call on that
-  union returns the union of their return types
+  union returns the union of their return types. An argument whose type is still open, and which a member
+  accepts only by narrowing it, becomes `Unknown`: no single signature states what the members
+  demand together
 
 Definite assignment:
 
@@ -357,7 +361,7 @@ Definite assignment:
   though it is safe. Measured on six packages, that shape is most of what fires
 - the loop and branch rules are exact where the shape allows it: a `repeat` is left through its
   `break` points, so one that always assigns before breaking reports nothing, while a `break` that
-  precedes the write does report; a branch that cannot fall through — one ending in `stop()` —
+  precedes the write does report, and nothing after a `repeat` with no `break` is reachable; a branch that cannot fall through — one ending in `stop()` —
   contributes no path at all
 - a read no write can reach at all does not resolve to the variable (see the shadowing rule above)
 - a **top-level** variable's unwritten path is different: at run time it reaches the enclosing
@@ -704,7 +708,7 @@ Tuple-like and record-like lists are fixed-shape collections where positions or 
 
 - tuple-like: when all elements are unnamed
 - record-like: when all elements are named
-- Mixing named and unnamed elements is a type error.
+- array-like: when named and unnamed elements are mixed (see [below](#mixed-named-and-unnamed-lists))
 
 Array-like and map-like list types are primarily produced by annotations or by coercing structural list shapes.
 
@@ -1640,7 +1644,12 @@ call site:
   enclosing function, for example), a candidate may fit only *because* unification narrowed that
   variable — a guess, not a fact. Every candidate is still tried, and one that fits while leaving the
   caller's undetermined types exactly as they were beats one that does not, whatever their
-  declaration order; among fits of the same kind the first declared wins. A wrapper like
+  declaration order. Guesses are taken only when they all narrow the caller's types the same way;
+  when they disagree, the type they disagree on is one no single signature states, so it becomes
+  `Unknown` and so does the call: `function(xs) Filter(f, xs)` infers `fn(xs: Unknown) -> Unknown`
+  and accepts both a vector and a list, instead of being pinned to whichever shape was declared
+  first. A lambda among the arguments is not the caller's: narrowing its
+  parameters is how `lapply(xs, function(v) v + 1L)` types `v`. A wrapper like
   `function(x) sum(x)` keeps its parameter unconstrained this way: a candidate whose parameter is
   `Any` accepts without binding anything, which makes the general fallback a fact and puts it ahead of
   the narrower candidates above it. A single fitting candidate is never a guess: it is the only
@@ -2038,9 +2047,9 @@ Examples:
 
 ### Unary `!`
 
-Logical negation `!` accepts only `logical` operands:
+Logical negation `!` takes a [scalar condition](#conditions) or a logical vector:
 
-- `!logical` returns `logical`
+- `!logical` returns `logical`; a numeric operand coerces as in a condition (`!0L` is `TRUE`)
 - `!logical[]` returns `logical[]`
 - `!logical[named]` returns `logical[]`; negation does not preserve map-likeness
 - any other operand is a type error
@@ -2989,3 +2998,6 @@ expression:
   `strict mode: could not determine the type of \`x\`; add a type annotation`;
 - a bare expression that originates an `Unknown` reads
   `strict mode: this expression has an undetermined type (\`Unknown\`)`.
+
+A `#:` annotation on the value (checked, `@trust`, `@if-unknown`, or `@new`) gives it a type, so the
+origin it covers is no longer reported.

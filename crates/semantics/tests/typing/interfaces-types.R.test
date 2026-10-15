@@ -1,0 +1,38 @@
+#==== types
+#---- type_definitions_and_binding
+#: @type Person {list{name: character}}
+
+#: @alias Formatter {fn(integer) -> character}
+value <- 1L
+#++++
+value: integer
+
+#---- latest_binding_wins_in_interface
+mirror <- function(x) x
+mirror <- function(x) 1L
+#++++
+mirror: <T> fn(x: T) -> T
+mirror: <T> fn(x: T) -> integer
+0..6 warning[duplicate] Top-level binding `mirror` is overwritten by a later top-level binding in this package.
+24..30 warning[duplicate] Top-level binding `mirror` overwrites an earlier top-level binding in this package.
+
+#---- generic_alias_export
+#: @alias Box<T> {list{value: T}}
+value <- list(value = 1L)
+#++++
+value: list{value: integer}
+
+#---- generic_nominal_export
+#: @type Person<T> {list{value: T}}
+value <- 1L
+#++++
+value: integer
+
+#---- mixed_nominal_alias_and_value_exports
+#: @alias PersonShape {list{name: character}}
+#: @type Person {PersonShape}
+
+#: @new Person
+person <- list(name = "bob")
+#++++
+person: Person

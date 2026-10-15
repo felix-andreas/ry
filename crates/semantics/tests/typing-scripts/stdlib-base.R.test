@@ -1,0 +1,868 @@
+#==== values
+#---- T_is_logical
+T
+#++++
+logical
+
+#---- F_is_logical
+F
+#++++
+logical
+
+#---- pi_is_double
+pi
+#++++
+double
+
+#---- pi_arithmetic_promotes_through_operator_kernel
+pi / 2
+#++++
+double
+
+#---- letters_is_character_vector
+letters
+#++++
+character[]
+
+#==== precise_base_calls
+#---- length_of_vector_is_integer
+length(c(1L, 2L, 3L))
+#++++
+integer
+
+#---- nchar_is_integer
+nchar("hello")
+#++++
+integer
+
+#---- is_null_is_logical
+is.null(NULL)
+#++++
+logical
+
+#---- seq_len_is_integer_vector
+seq_len(3L)
+#++++
+integer[]
+
+#---- seq_along_is_integer_vector
+seq_along(c(1L, 2L))
+#++++
+integer[]
+
+#---- toupper_is_character
+toupper("x")
+#++++
+character
+
+#---- tolower_is_character
+tolower("HELLO")
+#++++
+character
+
+#---- is_na_is_logical
+is.na(1L)
+#++++
+logical
+
+#---- as_integer_is_integer
+as.integer("3")
+#++++
+integer
+
+#---- as_character_is_character
+as.character(3L)
+#++++
+character
+
+#---- as_numeric_is_double
+as.numeric("3.5")
+#++++
+double
+
+#---- substr_is_character
+substr("hello", 1L, 3L)
+#++++
+character
+
+#==== idiomatic_coercion_forms
+#---- seq_len_accepts_double_literal
+seq_len(10)
+#++++
+integer[]
+
+#---- substr_accepts_double_literal_positions
+substr("hello", 1, 3)
+#++++
+character
+
+#---- substring_accepts_optional_last
+substring("hello", 1, 3)
+#++++
+character
+
+#---- substring_two_argument_form
+substring("hello", 2)
+#++++
+character
+
+#---- round_accepts_double_literal_digits
+round(3.14159, 2)
+#++++
+double
+
+#---- mean_second_positional_is_trim_not_na_rm
+mean(c(1, 2), 0.1)
+#++++
+double
+
+#---- toupper_accepts_vector
+toupper(c("a", "b"))
+#++++
+character
+
+#---- nchar_accepts_vector_and_coerced_input
+nchar(c("aa", "b"))
+nchar(42L)
+#++++
+integer
+integer
+
+#---- gsub_accepts_vector_subject_and_flags
+gsub("a", "b", c("aa", "ab"), fixed = TRUE)
+#++++
+character
+
+#---- grepl_accepts_flags
+grepl("^x", "xy", perl = TRUE, ignore.case = TRUE)
+#++++
+logical
+
+#---- sort_accepts_decreasing_by_name
+sort(c(2L, 1L), decreasing = TRUE)
+#++++
+integer[]
+
+#---- unique_accepts_fromLast
+unique(c(1L, 1L), fromLast = TRUE)
+#++++
+integer[]
+
+#==== precise_variadic_calls
+#---- paste_of_many_arguments_is_character
+paste("a", "b", "c")
+#++++
+character
+
+#---- paste_of_zero_arguments_is_character
+paste()
+#++++
+character
+
+#---- paste_accepts_sep_and_collapse
+paste(c("a", "b"), collapse = ", ")
+paste("a", "b", sep = "-")
+#++++
+character
+character
+
+#---- paste_accepts_explicit_null_collapse
+paste("a", collapse = NULL)
+#++++
+character
+
+#---- paste0_accepts_collapse
+paste0("x", 1L, collapse = "")
+#++++
+character
+
+#---- cat_is_null_and_accepts_sep
+cat("a", "b")
+cat("a", "b", sep = "\n")
+#++++
+NULL
+NULL
+
+#---- format_accepts_named_controls
+format(3.14159, nsmall = 2L)
+#++++
+character
+
+#---- sprintf_variadic_is_character
+sprintf("%d-%s", 1L, "a")
+#++++
+character
+
+#---- unmatched_named_argument_absorbs_into_rest
+paste("a", quote = FALSE)
+#++++
+character
+
+#---- absorbed_named_argument_checks_the_rest_element_and_steers_selection
+sum(1L, 2L, extra = 2L)
+sum(1L, 2L, extra = "x")
+#++++
+integer
+Any
+
+#---- duplicated_declared_parameter_is_rejected_despite_rest
+paste("a", sep = "-", sep = "_")
+#++++
+character
+22..25 error[type-mismatch] this call gives `sep` more than once — R matches each named parameter at most once
+
+#==== type_preserving_reductions
+#---- sum_of_integers_is_integer
+sum(1L, 2L, 3L)
+#++++
+integer
+
+#---- sum_accepts_named_na_rm_with_rest_arguments
+sum(1, 2, na.rm = TRUE)
+#++++
+double
+
+#---- sum_of_mixed_integer_and_double_is_double
+sum(1L, 2.5)
+#++++
+double
+
+#---- sum_of_logicals_is_integer
+sum(TRUE, FALSE)
+#++++
+integer
+
+#---- sum_of_vector_and_scalar_is_integer
+sum(c(1L, 2L), 3L)
+#++++
+integer
+
+#---- min_accepts_character_arguments
+min("a", "z")
+#++++
+character
+
+#---- max_of_integers_is_integer
+max(1L, 2L, na.rm = TRUE)
+#++++
+integer
+
+#---- range_of_integers_is_integer_vector
+range(1L, 2L, 3L)
+#++++
+integer[]
+
+#---- reduction_of_mixed_character_and_numeric_falls_back_to_any
+min(1L, "a")
+#++++
+Any
+
+#---- prod_is_genuinely_double
+prod(2L, 3L)
+#++++
+double
+
+#---- mean_of_vector_is_double
+mean(c(1L, 2L))
+#++++
+double
+
+#---- mean_accepts_named_na_rm
+mean(c(1, 2), na.rm = TRUE)
+#++++
+double
+
+#==== logic_reductions
+#---- any_is_logical
+any(TRUE, FALSE)
+#++++
+logical
+
+#---- all_accepts_vector_and_na_rm
+all(c(TRUE, FALSE), na.rm = TRUE)
+#++++
+logical
+
+#---- isTRUE_is_logical
+isTRUE(TRUE)
+#++++
+logical
+
+#==== generic_element_preservation
+#---- rev_preserves_the_element_type
+rev(c(1L, 2L, 3L))
+#++++
+integer[]
+
+#---- sort_of_characters_is_character_vector
+sort(c("b", "a"))
+#++++
+character[]
+
+#---- setdiff_threads_the_element_type
+setdiff(c("a", "b"), c("b"))
+#++++
+character[]
+
+#---- rev_of_list_preserves_the_item_type
+rev(list(1L, 2L))
+#++++
+list[integer]
+
+#==== overloaded_shape_preservation
+#---- abs_of_integer_scalar_is_integer
+abs(1L)
+#++++
+integer
+
+#---- abs_of_double_vector_is_double_vector
+abs(c(1.5, -2.5))
+#++++
+double[]
+
+#---- cumsum_of_integer_vector_is_integer_vector
+cumsum(c(1L, 2L, 3L))
+#++++
+integer[]
+
+#---- unresolved_argument_selects_general_fallback
+f <- function(x) sum(x)
+f(c("a", "b"))
+#++++
+f: <T> fn(x: T) -> Any
+Any
+
+#==== precise_strings
+#---- trimws_is_character
+trimws("  hi  ")
+#++++
+character
+
+#---- substring_is_character
+substring("hello", 1L)
+#++++
+character
+
+#---- gsub_is_character
+gsub("a", "b", "banana")
+#++++
+character
+
+#---- grepl_is_logical
+grepl("a", "banana")
+#++++
+logical
+
+#---- strsplit_is_list_of_character_vectors
+strsplit("a,b", ",")
+#++++
+list[character[]]
+
+#---- strrep_is_character
+strrep("ab", 3L)
+#++++
+character
+
+#---- toString_accepts_sep
+toString(c(1L, 2L), sep = "; ")
+#++++
+character
+
+#==== precise_math
+#---- round_is_double
+round(3.14159, 2L)
+#++++
+double
+
+#---- floor_is_double
+floor(3.7)
+#++++
+double
+
+#---- signif_is_double
+signif(3.14159, 3L)
+#++++
+double
+
+#---- sqrt_of_integer_is_double
+sqrt(4L)
+#++++
+double
+
+#---- exp_and_log_are_double
+exp(1L)
+log(8, base = 2)
+#++++
+double
+double
+
+#==== generic_apply
+#---- lapply_preserves_element_type_via_mapper
+#: list[character]
+xs <- list("a", "b")
+lapply(xs, toupper)
+#++++
+xs: list[character]
+list[character]
+
+#---- lapply_maps_element_type_through_predicate
+#: list[character]
+words <- list("a", "b")
+lapply(words, nchar)
+#++++
+words: list[character]
+list[integer]
+
+#---- filter_preserves_list_type
+#: list[integer]
+ns <- list(1L, 2L)
+Filter(is.numeric, ns)
+#++++
+ns: list[integer]
+list[integer]
+
+#---- find_returns_nullable_element
+#: list[integer]
+ns <- list(1L, 2L)
+Find(is.numeric, ns)
+#++++
+ns: list[integer]
+integer | NULL
+
+#---- position_returns_nullable_index
+#: list[integer]
+ns <- list(1L, 2L)
+Position(is.numeric, ns)
+#++++
+ns: list[integer]
+integer | NULL
+
+#---- reduce_folds_to_element_type
+Reduce(function(a, b) a + b, list(1L, 2L))
+#++++
+integer
+
+#---- reduce_accepts_init_with_distinct_accumulator_type
+Reduce(function(acc, x) paste0(acc, x), list(1L, 2L), init = "")
+#++++
+character
+
+#---- invisible_passes_value_through
+invisible(5L)
+#++++
+integer
+
+#---- force_passes_value_through
+force(1L)
+#++++
+integer
+
+#---- print_returns_its_argument
+print(42L)
+print(c("a", "b"), quote = FALSE)
+#++++
+integer
+character[]
+
+#---- suppressWarnings_passes_body_type_through
+suppressWarnings(as.numeric("x"))
+#++++
+double
+
+#==== never_and_conditions
+#---- stop_in_else_branch_does_not_poison_the_join
+x <- if (TRUE) 1L else stop("bad")
+x + 1L
+#++++
+x: integer
+integer
+
+#---- stopifnot_is_null_and_accepts_string_labels
+stopifnot(TRUE)
+stopifnot("must hold" = TRUE)
+#++++
+NULL
+NULL
+
+#---- message_is_null
+message("hi", appendLF = FALSE)
+#++++
+NULL
+
+#---- tryCatch_resolves_with_handler
+tryCatch(1L, error = function(e) NULL)
+#++++
+Unknown
+
+#---- try_returns_any
+try(log(-1), silent = TRUE)
+#++++
+Any
+
+#==== structure_queries
+#---- names_is_null_hybrid_any
+names(list(a = 1L))
+#++++
+Any
+
+#---- class_is_character
+class(1L)
+#++++
+character
+
+#---- inherits_is_logical
+inherits(1L, "integer")
+#++++
+logical
+
+#---- nrow_is_null_hybrid_any_and_arithmetic_stays_clean
+n <- nrow(c(1L))
+n + 1L
+#++++
+n: Any
+Unknown
+
+#---- NROW_is_genuinely_integer
+NROW(c(1L, 2L))
+#++++
+integer
+
+#---- dim_is_null_hybrid_any
+dim(1L)
+#++++
+Any
+
+#---- typeof_is_character
+typeof(1L)
+#++++
+character
+
+#---- which_is_integer_vector
+which(c(TRUE, FALSE))
+#++++
+integer[]
+
+#---- which_max_is_integer
+which.max(c(1, 3))
+#++++
+integer
+
+#---- match_is_integer
+match("a", c("a", "b"))
+#++++
+integer
+
+#---- identical_is_logical
+identical(1L, 1L)
+#++++
+logical
+
+#---- attr_reads_any
+attr(1L, "names")
+#++++
+Any
+
+#==== builders
+#---- atomic_constructors_return_typed_vectors
+numeric(3)
+integer(2L)
+character(0L)
+logical(1L)
+#++++
+double[]
+integer[]
+character[]
+logical[]
+
+#---- matrix_and_factor_degrade_to_any_with_checked_formals
+matrix(c(1L, 2L), nrow = 1L)
+factor(c("a"), levels = c("a", "b"))
+#++++
+Any
+Any
+
+#---- rowSums_is_double_vector
+rowSums(matrix(c(1, 2), nrow = 1L), na.rm = TRUE)
+#++++
+double[]
+
+#---- order_is_integer_vector
+order(c(2L, 1L), decreasing = TRUE)
+#++++
+integer[]
+
+#---- tabulate_is_integer_vector
+tabulate(c(1L, 2L))
+#++++
+integer[]
+
+#---- split_returns_list
+split(c(1L, 2L), c("a", "b"))
+#++++
+list[Any]
+
+#==== file_and_system
+#---- file_path_is_character
+file.path("a", "b")
+#++++
+character
+
+#---- file_exists_scalar_claim_keeps_if_clean
+if (file.exists("f")) 1L else 2L
+#++++
+integer
+
+#---- readLines_is_character_vector
+readLines("f.txt")
+#++++
+character[]
+
+#---- writeLines_is_null
+writeLines("hi")
+#++++
+NULL
+
+#---- readRDS_is_any_saveRDS_is_null
+readRDS("f.rds")
+saveRDS(1L, "f.rds")
+#++++
+Any
+NULL
+
+#---- basename_is_character
+basename("/a/b.R")
+#++++
+character
+
+#---- list_files_is_character_vector
+list.files("dir", pattern = "[.]R$", full.names = TRUE)
+#++++
+character[]
+
+#---- tempfile_is_character
+tempfile(fileext = ".csv")
+#++++
+character
+
+#---- dir_exists_is_logical
+dir.exists("d")
+#++++
+logical
+
+#---- sys_time_is_any_sys_getenv_is_character
+Sys.time()
+Sys.getenv("HOME")
+#++++
+POSIXct
+character
+
+#---- sys_getpid_is_integer
+Sys.getpid()
+#++++
+integer
+
+#---- commandArgs_is_character_vector
+commandArgs(trailingOnly = TRUE)
+#++++
+character[]
+
+#---- set_seed_is_null
+set.seed(42)
+#++++
+NULL
+
+#==== attach_and_load
+#---- library_with_string_argument_resolves
+library("utils", character.only = TRUE)
+#++++
+Any
+
+#---- require_is_logical
+if (require("utils", quietly = TRUE)) 1L else 2L
+#++++
+integer
+
+#---- requireNamespace_is_logical
+requireNamespace("utils", quietly = TRUE)
+#++++
+logical
+
+#---- getOption_is_any
+getOption("digits", default = 7L)
+#++++
+Any
+
+#==== untyped_stubs
+#---- grep_is_unknown
+grep("a", "banana")
+#++++
+Unknown
+
+#---- sapply_is_unknown
+sapply(list(1L), is.numeric)
+#++++
+Unknown
+
+#---- arbitrary_named_argument_sinks
+data.frame(x = 1L)
+structure(1L, class = "score")
+cbind(a = 1L, b = 2L)
+Sys.setenv(MY_VAR = "v")
+table(group = c("a", "a"))
+#++++
+Unknown
+integer
+Unknown
+Unknown
+Unknown
+
+#==== still_any
+#---- reflection_resolves
+do.call(sum, list(1L))
+ifelse(TRUE, 1L, 2L)
+eval(parse(text = "1 + 1"))
+#++++
+Any
+Any
+Any
+
+#---- exists_and_get_have_string_signatures
+exists("count")
+get("count")
+assign("count", 1L)
+#++++
+logical
+Any
+Any
+
+#==== namespace_qualified_access
+#---- qualified_stub_call_types_like_the_bare_name
+deviation <- stats::sd(c(1, 2, 3))
+#++++
+deviation: double
+0..9 warning[unused] `deviation` is assigned but never used.
+
+#---- unknown_namespace_read_is_unknown
+mystery <- foobar::bazqux
+#++++
+mystery: Unknown
+0..7 warning[unused] `mystery` is assigned but never used.
+11..25 warning[unresolved] unknown package namespace `foobar`.
+
+#==== opaque_nominal_types
+#---- sys_date_returns_the_date_nominal
+Sys.Date()
+#++++
+Date
+
+#---- as_factor_returns_the_factor_nominal
+as.factor(c("a", "b"))
+#++++
+factor
+
+#---- file_returns_a_connection
+file("data.txt", open = "r")
+#++++
+connection
+
+#---- annotation_can_name_a_stub_nominal
+#: fn(x: factor) -> logical
+check_factor <- function(x) TRUE
+check_factor(as.factor("a"))
+#++++
+check_factor: fn(x: factor) -> logical
+logical
+
+#---- stub_nominals_are_distinct
+#: fn(x: factor) -> logical
+check_factor <- function(x) TRUE
+check_factor(Sys.Date())
+#++++
+check_factor: fn(x: factor) -> logical
+logical
+74..84 error[type-mismatch] expected `factor`, found `Date`
+
+#---- combine_drops_null_members_of_union_arguments
+grow <- function() {
+  acc <- c()
+  for (value in c(1.5, 2.5)) {
+    acc <- c(acc, value)
+  }
+  acc
+}
+#++++
+grow: fn() -> double[] | NULL
+0..4 warning[unused] `grow` is assigned but never used.
+
+#==== callback_forwarding
+#---- lapply_forwards_named_arguments_into_the_callback
+words <- c("alpha", "beta")
+lapply(words, gsub, pattern = "a", replacement = "o")
+#++++
+words: character[]
+list[character]
+
+#---- lapply_forwards_positional_arguments_after_the_element
+words <- c("alpha", "beta")
+lapply(words, gsub, "a", "o")
+#++++
+words: character[]
+list[character]
+
+#---- lapply_accepts_a_callback_with_surplus_optional_formals
+words <- c("alpha", "beta")
+lapply(words, nchar)
+#++++
+words: character[]
+list[integer]
+
+#---- lapply_over_an_atomic_vector_types_the_elements
+values <- c(1L, 2L, 3L)
+lapply(values, function(value) value + 1L)
+#++++
+values: integer[]
+list[integer]
+
+#---- forwarded_argument_with_a_wrong_type_is_rejected
+words <- c("alpha", "beta")
+lapply(words, gsub, pattern = 1L, replacement = "o")
+#++++
+words: character[]
+Unknown
+42..46 error[type-mismatch] expected `fn(character) -> T`, found `fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character`
+
+#==== missing_guarded_formals
+#---- missing_tested_formal_is_optional_at_call_sites
+greet <- function(name, punct) {
+  if (missing(punct)) {
+    name
+  } else {
+    punct
+  }
+}
+greet("ada")
+#++++
+greet: <T> fn(name: T, [punct]: T) -> T
+character
+
+#---- unguarded_formal_stays_required
+join2 <- function(left, right) {
+  paste0(left, right)
+}
+join2("a")
+#++++
+join2: <T, U> fn(left: T, right: U) -> character
+character
+57..62 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+
+#---- negated_missing_test_also_marks_optional
+pick <- function(x) {
+  if (!missing(x)) {
+    return(x + 1L)
+  }
+  0L
+}
+pick(2L)
+#++++
+pick: <T: numeric> fn([x]: T) -> T | integer
+integer
