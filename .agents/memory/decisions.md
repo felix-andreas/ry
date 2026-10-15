@@ -523,14 +523,6 @@ Impact: correctness — the corpus differential reaches 1,523/1,523 with one adj
 
 **Framework-free is sustainable for this product.** libR is dlopen'd at runtime (zero link-time deps), and a terminal REPL's plotting story is file output, terminal image protocols, or a browser — nothing on the roadmap needs `-framework` at link time. **Triggers to revisit:** a dependency that genuinely needs an Apple framework (native windows, clipboard integration), or signing/notarization pressure — at that point build the mac artifact on a real macOS runner (the only fully license-clean way to use Apple's SDK), which is also the natural home for running the REPL e2e suite against a real R in CI.
 
-# Decision record: diagnostic rendering stays handrolled (miette rejected)
-
-**Status:** decided and implemented (user delegated: "miette or similar, only if it doesn't add too much weight — otherwise handroll").
-
-**Why.** The CLI's human renderer already has the rustc shape (severity header, `-->` location, gutter, snippet, colored carets, related notes); adopting miette would mean rebuilding a working system around a new dependency tree (fancy feature: several transitive crates plus backtrace machinery) for visuals we largely have. The actual weaknesses were fixable in-place.
-
-**What changed.** The header now carries the diagnostic code (`warning[unused]:` — exactly what a `# roughly: allow(...)` suppression must spell, so the output teaches it); multi-line spans render their first line with the underline to end-of-line plus a dim "range continues for N more lines" note (previously every spanned line printed with one dangling caret); paths render relative to the working directory. Revisit miette only if requirements grow past this shape (multi-span labels, error chains with source causes).
-
 # Decision record: vendored export manifests — the name-level truth beside the typed stubs
 
 **Status:** decided and implemented (closes the stub-completeness audit).
