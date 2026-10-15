@@ -444,6 +444,32 @@ x <- 1L
 #: integer
 x <- 1L
 
+#---- semicolon_separated_blocks_stay_apart
+#: integer
+;#: character
+x <- 1L
+#++++
+#: integer
+
+#: character
+x <- 1L
+
+#---- semicolon_separated_block_after_trailing_annotation_stays_apart
+x <- 1L #: integer
+;#: character
+#++++
+x <- 1L #: integer
+
+#: character
+
+#---- annotation_after_semicolon_stays_standalone
+x <- 1L;#: character
+y <- "a"
+#++++
+x <- 1L
+#: character
+y <- "a"
+
 #==== annotation_multiline_hug
 #---- record_value_across_lines
 #: list{

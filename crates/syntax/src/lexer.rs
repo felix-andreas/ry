@@ -64,6 +64,13 @@ impl Lexer<'_> {
             TextSize::from(start as u32),
             TextSize::from(self.pos as u32),
         );
+        // Deliberately NOT flagged `in_annotation`, even inside a `#:` region.
+        // That flag means "the type grammar rejected this", which consumers
+        // treat leniently — the formatter keeps the block verbatim and formats
+        // the file anyway. Lexical damage is not that: the token boundaries
+        // themselves are wrong, so the text a lenient consumer would keep is
+        // not text anyone wrote. A stray quote refuses the file here exactly as
+        // it does in R code.
         self.errors.push(SyntaxError::new(message, range));
     }
 
@@ -352,6 +359,16 @@ impl Lexer<'_> {
                     self.error("unterminated string; expected a closing quote", start);
                     break;
                 }
+                // A `#:` region ends at the line break, so a string opened
+                // inside one cannot span lines the way an R string may. A token
+                // that ran past the break would hold code that is not in the
+                // annotation at all, and laying the block out again would write
+                // its `#: ` markers inside the quotes.
+                Some('\n' | '\r') if self.in_annotation => {
+                    self.end_unterminated_at_line_break(start);
+                    self.error("unterminated string; expected a closing quote", start);
+                    break;
+                }
                 Some('\\') => {
                     // Any escaped character is skipped wholesale; escape validity is
                     // a semantic concern, termination is the lexer's only job here.
@@ -390,7 +407,15 @@ impl Lexer<'_> {
             closer.push('-');
         }
         closer.push(quote);
-        match self.text[self.pos..].find(&closer) {
+        // A `#:` region ends at the line break, so a closer below it is not
+        // this token's (see `string`).
+        let limit = match self.in_annotation {
+            true => self.text[self.pos..]
+                .find(['\n', '\r'])
+                .map_or(self.text.len(), |offset| self.pos + offset),
+            false => self.text.len(),
+        };
+        match self.text[self.pos..limit].find(&closer) {
             Some(offset) => {
                 self.pos += offset + closer.len();
                 SyntaxKind::RAW_STRING
@@ -432,6 +457,15 @@ impl Lexer<'_> {
                         );
                         break;
                     }
+                }
+                // A `#:` region ends at the line break; see `string`.
+                Some('\n' | '\r') if self.in_annotation => {
+                    self.end_unterminated_at_line_break(start);
+                    self.error(
+                        "unterminated backtick name; expected a closing `` ` ``",
+                        start,
+                    );
+                    break;
                 }
                 Some('`') => break,
                 Some(_) => {}

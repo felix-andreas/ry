@@ -886,6 +886,25 @@ fn( # (
   # 2
 ) # )
 
+#---- comment_between_argument_name_and_value
+fn(x, y # note
+= 2)
+#++++
+fn(x, y # note
+  = 2)
+
+#---- comment_between_parameter_name_and_default
+f <- function(x, y # note
+= 2) x
+#++++
+f <- function(
+  x,
+  y # note
+    = 2
+) {
+  x
+}
+
 #==== extract
 #---- basic
 x$y
@@ -1601,6 +1620,34 @@ x ::: y
 #++++
 x::y
 x:::y
+
+#---- line_break_after_operator_joined
+x::
+y
+#++++
+x::y
+
+#---- comment_after_operator_keeps_break
+x::
+# c
+y
+x:::# c
+y
+#++++
+x::
+  # c
+  y
+x::: # c
+  y
+
+#---- annotation_after_operator_keeps_its_own_line
+x::
+#: c
+y
+#++++
+x::
+  #: c
+  y
 
 #==== parenthesized
 #---- basic

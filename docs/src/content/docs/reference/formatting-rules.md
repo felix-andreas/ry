@@ -21,6 +21,35 @@ ry fmt --diff    # Show a diff of formatting changes without applying them
 (for example a file that cannot be parsed) exit 2 — see the full
 [exit-code table](/reference/cli#exit-codes).
 
+### Formatting a selection
+
+In an editor, "Format Document" lays out the whole file and "Format Selection" lays out only what
+you selected. The selected lines come out exactly as formatting the whole file would lay them out
+at the indentation the file already uses, and every other line of the file stays byte for byte as
+it was — so you can tidy the function you are working on without a diff that touches the rest of
+the file.
+
+Four things follow from that:
+
+* **The selection keeps the file's indentation.** In a file indented by four spaces or by tabs, the
+  selected lines are indented the same way — statements at the depth of the lines around them, and
+  the arguments of a call broken across lines by the same step — rather than by `indent-width`,
+  which would leave them at a different depth from their unselected neighbours. The step is read
+  from the statements the file already indents: each one nested `n` levels deep and indented by
+  `n` copies of the same text votes for that text, and the most common step wins. A file with no
+  indented statement uses `indent-width`. Re-indenting a file to `indent-width` is what
+  "Format Document" and `ry fmt` are for.
+
+* **The selection widens to whole lines.** Selecting half of a line selects the line; putting the
+  cursor on a line with nothing selected selects that line.
+* **A statement is laid out as a unit.** The formatter decides how to break a call from that call's
+  own line structure, so a line just outside your selection can change when it belongs to a
+  statement your selection reaches into. Statements nest: selecting one line inside a long function
+  rewrites that line's statement, not the function.
+* **What formatting leaves alone, this leaves alone too.** A `# fmt: off` region or a
+  `# fmt: skip` expression inside the selection is untouched, and a file that does not parse
+  produces no edits at all — the same refusal `ry fmt` makes.
+
 ## Philosophy
 
 The formatter preserves existing line breaks and does not split expressions that are written on one line. Four principles follow from that:
@@ -28,7 +57,7 @@ The formatter preserves existing line breaks and does not split expressions that
 * **Single-line expressions remain single-line:** The formatter adds line breaks only where the expression is already multi-line, and never breaks a single-line expression into several (with [one exception](#loops)).
 * **Both nesting styles are preserved:** Compact ("hugged") and expanded forms for nested expressions are equally valid, and neither is rewritten into the other (see [hugging behavior](#hugging-behavior)).
 * **Braces are added only where they prevent a bug:** Auto-bracing applies where omitting braces changes what a later edit means (see [auto-bracing](#auto-bracing)).
-* **Two configuration keys:** Indent width and line endings, both documented under [configuration](/reference/configuration). There are no style options, because a reflowing formatter would rewrite line breaks the author chose.
+* **Two configuration keys:** Indent width and line endings, both documented under [configuration](/reference/configuration). Formatting a selection keeps the indentation the file already uses instead (see [formatting a selection](#formatting-a-selection)). There are no style options, because a reflowing formatter would rewrite line breaks the author chose.
 
 ## Formatting Rules
 
@@ -436,7 +465,7 @@ pkg::process
 pkg:::filter
 ```
 
-When an extract or namespace chain spans several lines, each subsequent line is indented one step:
+When an extract chain continues on the next line after `$` or `@`, each subsequent line is indented one step. Outside brackets R ends an expression at a line break after `::` or `:::`, so a namespace access is joined onto one line — unless a comment sits after the operator, in which case the break stays and the name is indented like an extract chain's:
 
 ```r
 # Before formatting
@@ -448,6 +477,21 @@ call(x, y)
 object$
   call(x)$
   call(x, y)
+```
+
+```r
+# Before formatting
+pkg::
+process
+pkg::
+# kept apart by the comment
+filter
+
+# After formatting
+pkg::process
+pkg::
+  # kept apart by the comment
+  filter
 ```
 
 ### String Literals
@@ -616,7 +660,7 @@ and mixed closer shapes normalize to the nearest consistent style:
 #: }
 ```
 
-A blank line, a non-`#:` comment, or ordinary code ends an annotation block, so unrelated comments are never pulled into one. Trailing empty `#:` lines at the end of a block are dropped.
+A blank line, a non-`#:` comment, or ordinary code ends an annotation block, so unrelated comments are never pulled into one. Trailing empty `#:` lines at the end of a block are dropped. A `;` separating two blocks becomes a blank line rather than disappearing, since removing it would merge them into one; and an annotation after a `;` moves to its own line rather than joining the statement before it, which it does not annotate.
 
 ### Line Spacing
 
@@ -639,7 +683,7 @@ z <- 3
 
 ### Line Endings
 
-The formatter automatically detects and preserves the line ending style (`LF` or `CRLF`) used in the original file.
+With the default `line-ending = "auto"`, the formatter keeps the file's line ending style (`LF` or `CRLF`), taken from the first line break after the file's first code or comment. Leading blank lines do not count, because formatting removes them; a file with no line break after its first code or comment uses its first line break.
 
 ## Format Suppression
 

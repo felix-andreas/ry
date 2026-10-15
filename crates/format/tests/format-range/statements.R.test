@@ -1,0 +1,181 @@
+#==== granularity
+#---- one_statement_of_a_function_body
+f<-function(x){
+  a<-1
+  b$0<-2
+  c<-3
+}
+#++++
+edit 3:1-4:1
+----
+f<-function(x){
+  a<-1
+«  b <- 2»
+  c<-3
+}
+
+#---- a_statement_nested_three_deep
+f<-function(){
+  for(i in 1:3){
+    if(i>1){
+      x<-i
+      y$0<-2
+    }
+  }
+}
+#++++
+edit 5:1-6:1
+----
+f<-function(){
+  for(i in 1:3){
+    if(i>1){
+      x<-i
+«      y <- 2»
+    }
+  }
+}
+
+#---- the_line_a_function_opens_on
+f<-$0function(x){
+  a<-1
+}
+#++++
+edit 1:1-2:1
+----
+«f <- function(x) {»
+  a<-1
+}
+
+#---- a_statement_spanning_several_lines
+before<-1
+total<-foo(
+  a=1,
+  b$0=2
+)
+after<-1
+#++++
+edit 2:1-5:1
+----
+before<-1
+«total <- foo(
+  a = 1,
+  b = 2»
+)
+after<-1
+
+#---- a_multiline_statement_selected_from_its_first_line
+total<-foo($0
+  a=1,
+  b=2
+)
+after<-1
+#++++
+edit 1:1-4:1
+----
+«total <- foo(
+  a = 1,
+  b = 2»
+)
+after<-1
+
+#---- a_statement_that_gains_lines
+before<-1
+x<-1; y$0<-2
+after<-1
+#++++
+edit 2:1-3:1
+----
+before<-1
+«x <- 1
+y <- 2»
+after<-1
+
+#---- a_body_that_gains_braces
+before<-1
+if (a)
+  b$0
+after<-1
+#++++
+edit 2:1-4:1
+----
+before<-1
+«if (a) {
+  b
+}»
+after<-1
+
+#---- a_body_that_stays_unbraced
+before<-1
+if$0 (a) b
+after<-1
+#++++
+no edits
+
+#---- an_if_else_chain
+if(a){
+  x<-1
+}else{
+  y$0<-2
+}
+#++++
+edit 4:1-5:1
+----
+if(a){
+  x<-1
+}else{
+«  y <- 2»
+}
+
+#---- a_loop_body
+for(i in 1:3){
+  x<-i
+  y$0<-2
+}
+#++++
+edit 3:1-4:1
+----
+for(i in 1:3){
+  x<-i
+«  y <- 2»
+}
+
+#---- a_block_on_one_line
+before<-1
+{a<-1; b$0<-2}
+after<-1
+#++++
+edit 2:1-3:1
+----
+before<-1
+«{ a <- 1; b <- 2 }»
+after<-1
+
+#---- a_function_argument_holding_a_function
+before<-1
+lapply(xs,function(x){
+  y<-x
+  z$0<-2
+})
+#++++
+edit 4:1-5:1
+----
+before<-1
+lapply(xs,function(x){
+  y<-x
+«  z <- 2»
+})
+
+#---- statements_around_the_selected_one_stay
+a<-1
+b<-2
+c$0<-3
+d<-4
+e<-5
+#++++
+edit 3:1-4:1
+----
+a<-1
+b<-2
+«c <- 3»
+d<-4
+e<-5
