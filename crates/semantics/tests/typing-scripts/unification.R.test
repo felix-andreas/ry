@@ -1,0 +1,77 @@
+#==== basics
+#---- assignment_then_call
+mirror <- function(x) x
+mirror(1L)
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+
+#==== mismatch_errors
+#---- tuple_length_mismatch
+#: list{integer}
+value <- list(1L, 2L)
+#++++
+value: list{integer}
+17..22 warning[unused] `value` is assigned but never used.
+26..38 error[type-mismatch] expected `list{integer}`, found `list{integer, integer}`
+
+#---- record_field_mismatch
+#: list{left: integer}
+value <- list(right = 1L)
+#++++
+value: list{left: integer}
+23..28 warning[unused] `value` is assigned but never used.
+32..48 error[type-mismatch] expected a field `left` here, which this list does not have
+
+#==== unions
+#---- null_join_keeps_variable_in_union
+maybe <- function(flag, value) if (flag) value
+#++++
+maybe: <T> fn(flag: logical, value: T) -> T | NULL
+0..5 warning[unused] `maybe` is assigned but never used.
+
+#---- union_typed_argument_instantiates_scheme
+maybe <- function(flag, value) if (flag) value
+maybe(TRUE, 1L)
+#++++
+maybe: <T> fn(flag: logical, value: T) -> T | NULL
+integer | NULL
+
+#---- branch_join_falls_back_to_union
+pick_label <- function(flag) if (flag) 1L else "one"
+pick_label(TRUE)
+#++++
+pick_label: fn(flag: logical) -> integer | character
+integer | character
+
+#==== functions
+#---- identity_function_literal
+function(x) x
+#++++
+fn(x: T) -> T
+
+#---- constant_function_literal
+function(x) 1L
+#++++
+fn(x: T) -> integer
+
+#---- higher_order_apply_literal
+function(f, value) f(value)
+#++++
+fn(f: fn(T) -> U, value: T) -> U
+
+#---- two_parameter_function_literal
+function(x, y) x
+#++++
+fn(x: T, y: U) -> T
+
+#---- function_returning_identity_literal
+function(f) function(x) f(x)
+#++++
+fn(f: fn(T) -> U) -> fn(x: T) -> U
+
+#---- self_application_occurs_check
+function(x) x(x)
+#++++
+fn(x: T) -> U
+12..16 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.

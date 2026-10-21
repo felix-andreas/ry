@@ -7,9 +7,6 @@ description: How to contribute to ry
 
 ry is a Rust workspace of six product crates, described file by file in
 [Structure](/contributing/structure) and as a system in [Architecture](/contributing/architecture).
-`legacy/` holds the frozen previous implementation, kept only as a benchmark baseline. Do not extend
-it, and never share or abstract code between the two stacks, although duplicating a data file between
-them is fine.
 
 The console embeds R without linking against it at build time. It finds R's shared library through
 `R_HOME` (or by asking `R RHOME` on the `PATH`) and loads it at runtime, so the whole workspace
@@ -35,6 +32,7 @@ just fixture <group__case>          # one focused fixture case
 just bless -p semantics --test ...  # re-bless fixture expectations
 just fuzz-deep           # the long-running seeded fuzz pass
 just stats <path>        # the workspace performance diagnosis
+just perf                # the corpus-wide perf and memory budgets (needs corpus/)
 ```
 
 `just fixture` runs a case from the `test_typing_fixtures` target in `semantics` unless you pass a
@@ -46,8 +44,7 @@ Without `just`, these are the raw commands:
 ```sh
 cargo build                                   # the product crate, the workspace default member
 cargo test                                    # the product crate's suites
-cargo test --workspace --exclude zed_ry       # everything: the six crates, the benchmark
-                                              # harness, and the frozen legacy stack
+cargo test --workspace --exclude zed_ry       # everything: all six crates
 cargo test -p semantics                       # the analysis core's fixture and fuzz suites
 cargo test -p format --test test_format_fixtures
 ```
@@ -62,8 +59,8 @@ add or change one. Two environment variables come up every day:
 Some suites, and every measurement instrument, read a corpus of real-world R code. Fetch it with
 `scripts/fetch-corpus.rs`, a single-file script that needs `cargo +nightly -Zscript` and writes into
 the gitignored `corpus/` directory. The resolved inventory is committed as
-`scripts/corpus-manifest.txt`. The performance and memory instruments live in
-`legacy/differential/tests/test_stats.rs`, and [Testing](/contributing/testing) documents them.
+`scripts/corpus-manifest.txt`. The performance and memory witness is
+`crates/semantics/tests/test_perf.rs`, and [Testing](/contributing/testing) documents it.
 
 ## Debug mode
 

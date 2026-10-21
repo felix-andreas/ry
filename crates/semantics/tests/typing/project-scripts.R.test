@@ -1,0 +1,146 @@
+#==== scripts
+#---- script_uses_package_globals
+#~~~~ R/a.R
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+#~~~~ scripts/use.R
+result <- double_count(2L)
+#++++
+== R/a.R
+double_count: fn(count: integer) -> integer
+== scripts/use.R
+result: integer
+0..6 warning[unused] `result` is assigned but never used.
+
+#---- script_binding_is_not_package_global
+#~~~~ R/a.R
+result <- helper(1L)
+#~~~~ scripts/local.R
+helper <- function(x) x
+#++++
+== R/a.R
+result: Unknown
+10..16 warning[unresolved] I could not resolve `helper` in this package, its imports, or builtins.
+== scripts/local.R
+helper: <T> fn(x: T) -> T
+0..6 warning[unused] `helper` is assigned but never used.
+
+#---- script_type_declaration_is_not_project_global
+#~~~~ R/a.R
+#: Person
+value <- list(name = "bob")
+#~~~~ scripts/local.R
+#: @type Person {list{name: character}}
+#++++
+== R/a.R
+value: Person
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+== scripts/local.R
+
+#---- package_and_script_can_reuse_type_name
+#~~~~ R/a.R
+#: @type Person {list{name: character}}
+#~~~~ scripts/local.R
+#: @type Person {list{age: double}}
+#++++
+== R/a.R
+== scripts/local.R
+
+#==== script_typing
+#---- script_self_reference_typechecks_sequentially
+#~~~~ R/pkg.R
+pkg_value <- 1L
+#~~~~ scripts/local.R
+count <- 1L
+
+#: integer
+doubled <- count + count
+#++++
+== R/pkg.R
+pkg_value: integer
+== scripts/local.R
+count: integer
+doubled: integer
+24..31 warning[unused] `doubled` is assigned but never used.
+
+#---- script_rebinding_uses_latest_type
+#~~~~ R/pkg.R
+pkg_value <- 1L
+#~~~~ scripts/local.R
+value <- 1L
+value <- "text"
+
+#: character
+label <- value
+#++++
+== R/pkg.R
+pkg_value: integer
+== scripts/local.R
+value: integer
+value: character
+label: character
+0..5 warning[unused] `value` is assigned but never used.
+42..47 warning[unused] `label` is assigned but never used.
+
+#---- script_annotation_error_reports
+#~~~~ R/pkg.R
+pkg_value <- 1L
+#~~~~ scripts/local.R
+#: integer
+x <- "wrong"
+#++++
+== R/pkg.R
+pkg_value: integer
+== scripts/local.R
+x: integer
+11..12 warning[unused] `x` is assigned but never used.
+16..23 error[type-mismatch] expected `integer`, found `character`
+
+#---- script_local_type_shadows_package_type
+#~~~~ R/pkg.R
+#: @type Person {list{name: character}}
+#~~~~ scripts/local.R
+#: @type Person {list{age: double}}
+
+#: @new Person
+person <- list(age = 20)
+#++++
+== R/pkg.R
+== scripts/local.R
+person: Person
+52..58 warning[unused] `person` is assigned but never used.
+
+#---- script_resolves_its_own_type_declaration
+#~~~~ R/pkg.R
+pkg_value <- 1L
+#~~~~ scripts/local.R
+#: @type Widget {list{size: integer}}
+
+#: @new Widget
+w <- list(size = 3L)
+
+#: integer
+s <- w$size
+#++++
+== R/pkg.R
+pkg_value: integer
+== scripts/local.R
+w: Widget
+s: integer
+87..88 warning[unused] `s` is assigned but never used.
+
+#==== per_file_strict_directive
+#---- strict_directive_enables_for_one_file
+#~~~~ R/main.R
+#: @strict
+x <- 1L %then% 2L
+#++++
+== R/main.R
+x: Unknown
+
+#---- without_directive_strict_stays_off
+#~~~~ R/main.R
+x <- 1L %then% 2L
+#++++
+== R/main.R
+x: Unknown

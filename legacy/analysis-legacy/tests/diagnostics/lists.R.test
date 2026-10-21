@@ -1,7 +1,0 @@
-#==== containers
-#---- mixed_named_and_unnamed_list
-list(1L, bar = "foo")
-#++++
-error[type-error] All elements in `list(...)` must be either all named or all unnamed.
---> 1:1-1:22
-| list(1L, bar = "foo")

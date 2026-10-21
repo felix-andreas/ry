@@ -82,7 +82,8 @@ so `c(1, 2, )` fails when it runs.
 **`stub`** (error): a line in your `stubs/*.Rtypes` files that ry could not load, so a broken
 declaration is never dropped in silence.
 
-**`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`.
+**`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`. The language server
+marks the line in `ry.toml`, while `ry check` stops with exit status 2 instead of reporting it.
 
 ## Opt-in
 
@@ -113,4 +114,5 @@ mentions. Only `ry check` reports it.
 function from `base`, or from another package, such as defining your own `filter` while
 `stats::filter` exists.
 
-These four take a level in `[lint]`, such as `"warn"` or `"error"`.
+These four take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
+still accepted and does nothing, because `f(1 2)` is now a syntax error, as it is in R.

@@ -875,8 +875,8 @@ This is an error, because the checker already knows the type.
 `TYPE` without requiring the usual compatibility at that site. It has the same effect as coercing the
 value to `Any` and then to `TYPE`, and exists as a shorter way to write that.
 
-No annotation silences [strict mode](#strict-mode) yet: an `Unknown` value under a plain `#:`,
-`@trust`, or `@if-unknown` is still reported at its origin. This is a known gap.
+Any annotation on a value gives it a type, so [strict mode](#strict-mode) no longer reports the
+undetermined origin it covers.
 
 ```r
 #: @trust integer
@@ -1431,6 +1431,13 @@ to such a name is resolved separately at each call site:
   parameter open, because the `Any` fallback accepts it without constraining anything. Strict mode
   reports a call that resolves to such a fallback, because the declarations could not describe it. When only one
   candidate fits, it is selected and whatever it determines stands.
+- When several candidates fit only by narrowing the caller's undetermined types, the call keeps that
+  narrowing only if they all narrow the same way. When they disagree, no single signature states the
+  type, so it becomes `Unknown`, and so does the call: `function(xs) Filter(f, xs)` infers
+  `fn(xs: Unknown) -> Unknown` and accepts both a vector and a list, instead of being pinned to
+  whichever shape was declared first. A function literal among the arguments does not belong to the
+  caller, so narrowing its parameters is no guess: that is how `lapply(xs, function(v) v + 1L)` gives
+  `v` a type.
 - The [whole-number literal rule](#argument-compatibility) does not influence which candidate is
   selected. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the
   `double` candidate, matching what R computes. Only if no candidate accepts them is the set tried
@@ -1702,10 +1709,12 @@ A top-level value name in a package is global across its files:
 
 - Any file may refer to a top-level binding in another.
 - When several files define the same name, the later file wins, and both definitions are reported.
-- A bare top-level `{ }` block always runs, so the assignments directly inside it are visible to the
-  rest of their file. Another file does not see them yet, which is a known gap.
-- An assignment inside an `if`, `for`, or `while` body runs only conditionally, so it is not a
-  package global, and a reference to it from another file is unresolved.
+- Every top-level assignment binds a package global, wherever it sits in the statement: in a bare
+  `{ }` block, in an `if`, `for`, or `while` body, in a block passed to a call such as
+  `suppressWarnings({ x <- f() })`, or in the value of another assignment, so `y <- (x <- 1L)` binds
+  both names.
+- A name that is written only conditionally has the union of every writer's type when another file
+  reads it.
 
 A reference from another file sees the binding's generalized exported type. Type information does not
 flow back into the exporting file, so a call in one file never changes the inferred type of a
@@ -1900,18 +1909,22 @@ variable's possible states are joined:
 - A loop body may run zero or more times, so reads inside the body and after the loop join the state
   from before the loop with the state flowing around the back edge.
 - `repeat` runs at least once, so after the loop the variable has the state the body left it in.
-- Joining equal types keeps the type, joining different types gives their union, and joining with
-  `Unknown` gives `Unknown`.
+- Joining equal types keeps the type, and joining different types gives their union. Joining with
+  `Unknown` keeps the other side, because the fixpoint for a recursive definition starts from
+  `Unknown` and could never reach a precise type if `Unknown` absorbed everything it met.
 
 - `f <- function(flag) { x <- 1L; if (flag) { x <- 2L }; x }` is clean, and `x` reads as `integer`.
 - `f <- function(flag) { x <- 1L; if (flag) x <- "two"; x + 1L }` is a type error, because `x` reads
   as `integer | character`, and `+` rejects the `character` member.
 
 A variable with exactly one reaching write keeps that write's generalized type, so
-`f <- function(x) x` inside a body stays `<T> fn(x: T) -> T`. When writes merge at a join, the
-variable holds a single type instead, so a conditional reassignment loses the polymorphism: two
-conditionally assigned functions read as a union of both signatures, rather than being unified into
-one.
+`f <- function(x) x` inside a body stays `<T> fn(x: T) -> T`, and so does an alias of it: after
+`g <- f`, both `g(1L)` and `g("a")` check. When writes merge at a join, the variable holds a single
+type instead, so a conditional reassignment loses the polymorphism: two conditionally assigned
+functions read as a union of both signatures, rather than being unified into one. A call on that
+union returns the union of their return types. An argument whose type is still open, and which a
+member accepts only by narrowing it, becomes `Unknown`, because no single signature states what the
+members demand together.
 
 Definite assignment follows four rules:
 
@@ -1923,7 +1936,7 @@ Definite assignment follows four rules:
   branches to the checker, so `if (ok) v <- …` followed by `if (ok) use(v)` is reported, although it
   is safe.
 - A `repeat` is left through its `break` points, so one that always assigns before breaking reports
-  nothing. A branch that cannot fall through, such as one ending in `stop()`, contributes no path.
+  nothing, and nothing after a `repeat` without a `break` is reachable. A branch that cannot fall through, such as one ending in `stop()`, contributes no path.
 - A read that no write can reach does not resolve to the variable at all (see the shadowing rule
   under [value names](#value-names)).
 - A top-level variable is different, because a path without a write reaches the enclosing
@@ -2249,7 +2262,8 @@ could not type.
 A reference to a binding defined in this project is not an origin. The binding's own definition is
 reported instead, so one undetermined value does not produce a finding in every file that reads it.
 An unresolved bare name is not an origin either, because naming already reports it. An unresolved
-`pkg::name` is currently reported both ways.
+`pkg::name` is currently reported both ways. A value under a `#:` annotation (checked, `@trust`,
+`@if-unknown`, or `@new`) is not an origin, because the annotation gives it a type.
 
 ### Diagnostics
 

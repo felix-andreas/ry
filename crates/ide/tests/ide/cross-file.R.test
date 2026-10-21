@@ -1,0 +1,598 @@
+#==== definition_globals
+#---- cross_file_use_helper_use
+#~~~~ R/def.R
+helper <- function(value) value
+#~~~~ R/use.R
+result <- $0helper(1L)
+#++++
+hover 10..16: helper: fn(value: integer) -> integer
+hover-definition: global R/def.R:0..6
+definition R/def.R:0..6
+references: R/def.R:0..6*, R/use.R:10..16
+rename: 2 edit(s)
+signature: fn(value: integer) -> integer
+parameters: [value: integer]
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- global_use_inside_function_helper_use
+#~~~~ R/def.R
+helper <- function(value) value
+#~~~~ R/use.R
+wrapper <- function() {
+  $0helper(1L)
+}
+#++++
+hover 26..32: helper: fn(value: integer) -> integer
+hover-definition: global R/def.R:0..6
+definition R/def.R:0..6
+references: R/def.R:0..6*, R/use.R:26..32
+rename: 2 edit(s)
+signature: fn(value: integer) -> integer
+parameters: [value: integer]
+action: Add inferred type annotation for `wrapper`
+  edit 0..0 -> "#: fn() -> integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: fn() -> integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @7: fn() -> integer
+
+#==== definition_redefinition
+#---- multi_file_redefinition_use_resolves_to_winner
+#~~~~ R/a.R
+value <- 1L
+#~~~~ R/b.R
+value <- 2L
+#~~~~ R/c.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/b.R:0..5
+definition R/b.R:0..5
+references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- multi_file_redefinition_shadowed_declaration_is_local
+#~~~~ R/a.R
+$0value <- 1L
+#~~~~ R/b.R
+value <- 2L
+#~~~~ R/c.R
+result <- value
+#++++
+hover 0..5: value: integer
+hover-definition: global R/b.R:0..5
+definition R/b.R:0..5
+references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `value`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @5: integer
+
+#==== definition_workspace
+#---- updates_after_edit_before_edit
+#~~~~ R/def.R
+value <- 1L
+#~~~~ R/use.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/def.R:0..5
+definition R/def.R:0..5
+references: R/def.R:0..5*, R/use.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- updates_after_edit_after_edit_after_edit
+#~~~~ R/def.R
+other <- 2L
+value <- 1L
+#~~~~ R/use.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/def.R:12..17
+definition R/def.R:12..17
+references: R/def.R:12..17*, R/use.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- gone_after_delete_before_delete
+#~~~~ R/def.R
+value <- 1L
+#~~~~ R/use.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/def.R:0..5
+definition R/def.R:0..5
+references: R/def.R:0..5*, R/use.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#==== definition_s4
+#---- class_reference_in_signature_resolves_to_setclass_class_ref
+#~~~~ R/classes.R
+setClass("Animal", representation(name = "character"))
+setGeneric("speak", function(x) standardGeneric("speak"))
+#~~~~ R/methods.R
+setMethod("speak", "A$0nimal", function(x) x)
+make <- function() new("Animal")
+#++++
+hover 19..27: character
+definition R/classes.R:10..16
+references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
+rename: 3 edit(s)
+signature: none
+completion: none
+
+#---- class_reference_in_signature_resolves_to_setclass_generic_ref
+#~~~~ R/classes.R
+setClass("Animal", representation(name = "character"))
+setGeneric("speak", function(x) standardGeneric("speak"))
+#~~~~ R/methods.R
+setMethod("$0speak", "Animal", function(x) x)
+make <- function() new("Animal")
+#++++
+hover 10..17: character
+definition R/classes.R:67..72
+references: R/classes.R:67..72*, R/classes.R:104..109, R/methods.R:11..16
+rename: 3 edit(s)
+signature: none
+completion: none
+
+#---- class_reference_in_signature_resolves_to_setclass_new_class_ref
+#~~~~ R/classes.R
+setClass("Animal", representation(name = "character"))
+setGeneric("speak", function(x) standardGeneric("speak"))
+#~~~~ R/methods.R
+setMethod("speak", "Animal", function(x) x)
+make <- function() new("$0Animal")
+#++++
+hover 67..75: character
+definition R/classes.R:10..16
+references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
+rename: 3 edit(s)
+signature: none
+completion: none
+
+#==== definition_annotation_type_names
+#---- cross_file_type_use_cross_file_use
+#~~~~ R/types.R
+#: @type Person {list{name: character}}
+#~~~~ R/main.R
+#: P$0erson
+who <- make_person()
+#++++
+hover 3..9: Person
+definition R/types.R:9..15
+references: R/types.R:9..15*, R/main.R:3..9
+rename: 2 edit(s)
+signature: none
+completion (1): Person
+
+#==== workspace
+#---- cross_file_use_updates_after_move_lookup
+#~~~~ R/a.R
+value <- 1L
+#~~~~ R/b.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/a.R:0..5
+definition R/a.R:0..5
+references: R/a.R:0..5*, R/b.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- cross_file_use_updates_after_move_after_move_lookup
+#~~~~ R/b.R
+result <- $0value
+#~~~~ R/c.R
+value <- 1L
+#++++
+hover 10..15: value: integer
+hover-definition: global R/c.R:0..5
+definition R/c.R:0..5
+references: R/b.R:10..15, R/c.R:0..5*
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#==== references_globals
+#---- cross_file_references_from_declaration
+#~~~~ R/def.R
+$0value <- 1L
+#~~~~ R/use.R
+result <- value
+other <- value
+#++++
+hover 0..5: value: integer
+hover-definition: global R/def.R:0..5
+definition R/def.R:0..5
+references: R/def.R:0..5*, R/use.R:10..15, R/use.R:25..30
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `value`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @5: integer
+
+#---- cross_file_references_from_cross_file_use
+#~~~~ R/def.R
+value <- 1L
+#~~~~ R/use.R
+result <- $0value
+other <- value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/def.R:0..5
+definition R/def.R:0..5
+references: R/def.R:0..5*, R/use.R:10..15, R/use.R:25..30
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+  edit 16..16 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+hint @21: integer
+
+#---- global_function_references_from_use
+#~~~~ R/def.R
+helper <- function(value) value
+#~~~~ R/use.R
+wrapper <- function() {
+  $0helper(1L)
+}
+result <- helper(2L)
+#++++
+hover 26..32: helper: fn(value: integer) -> integer
+hover-definition: global R/def.R:0..6
+definition R/def.R:0..6
+references: R/def.R:0..6*, R/use.R:26..32, R/use.R:49..55
+rename: 3 edit(s)
+signature: fn(value: integer) -> integer
+parameters: [value: integer]
+action: Add inferred type annotation for `wrapper`
+  edit 0..0 -> "#: fn() -> integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: fn() -> integer\n"
+  edit 39..39 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @7: fn() -> integer
+hint @45: integer
+
+#==== references_redefinition
+#---- multi_file_redefinition_from_use
+#~~~~ R/a.R
+value <- 1L
+#~~~~ R/b.R
+value <- 2L
+#~~~~ R/c.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/b.R:0..5
+definition R/b.R:0..5
+references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- multi_file_redefinition_from_shadowed_declaration
+#~~~~ R/a.R
+$0value <- 1L
+#~~~~ R/b.R
+value <- 2L
+#~~~~ R/c.R
+result <- value
+#++++
+hover 0..5: value: integer
+hover-definition: global R/b.R:0..5
+definition R/b.R:0..5
+references: R/a.R:0..5*, R/b.R:0..5*, R/c.R:10..15
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `value`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @5: integer
+
+#==== references_workspace
+#---- updates_after_move_before_move
+#~~~~ R/a.R
+value <- 1L
+#~~~~ R/b.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/a.R:0..5
+definition R/a.R:0..5
+references: R/a.R:0..5*, R/b.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- updates_after_move_after_move_after_move
+#~~~~ R/b.R
+result <- $0value
+#~~~~ R/c.R
+value <- 1L
+#++++
+hover 10..15: value: integer
+hover-definition: global R/c.R:0..5
+definition R/c.R:0..5
+references: R/b.R:10..15, R/c.R:0..5*
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#==== references_global_with_same_named_local
+#---- global_excludes_same_named_local_from_global_declaration
+#~~~~ R/def.R
+$0value <- 1L
+#~~~~ R/use.R
+result <- value
+helper <- function() {
+  value <- 99L
+  value
+}
+#++++
+hover 0..5: value: integer
+hover-definition: global R/def.R:0..5
+definition R/def.R:0..5
+references: R/def.R:0..5*, R/use.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `value`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @5: integer
+
+#---- global_excludes_same_named_local_from_local_declaration
+#~~~~ R/def.R
+value <- 1L
+#~~~~ R/use.R
+result <- value
+helper <- function() {
+  $0value <- 99L
+  value
+}
+#++++
+hover 41..46: value: integer
+hover-definition: local R/use.R:41..46
+definition R/use.R:41..46
+references: R/use.R:41..46*, R/use.R:56..61
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `value`
+  edit 39..39 -> "  #: integer\n"
+action: Add inferred type annotation for `helper`
+  edit 16..16 -> "#: fn() -> integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+  edit 39..39 -> "  #: integer\n"
+  edit 16..16 -> "#: fn() -> integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+hint @22: fn() -> integer
+hint @46: integer
+
+#==== references_s4
+#---- class_references_across_files_animal_class
+#~~~~ R/classes.R
+setClass("A$0nimal", representation(name = "character"))
+#~~~~ R/methods.R
+setMethod("speak", "Animal", function(x) x)
+make <- function() new("Animal")
+#++++
+hover 9..17: character
+definition R/classes.R:10..16
+references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
+rename: 3 edit(s)
+signature: none
+completion: none
+
+#==== type_names
+#---- type_references_span_annotations_across_files_type
+#~~~~ R/a.R
+#: @type handle
+#: fn(x: hand$0le) -> handle
+open_it <- function(x) x
+#~~~~ R/b.R
+#: fn(value: handle) -> NULL
+close_it <- function(value) NULL
+#++++
+hover 0..42: @type handle {Unknown}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): handle
+hint @50: <T> fn(x: T) -> T
+
+#---- alias_renames_across_files_alias
+#~~~~ R/a.R
+#: @alias s$0core {double}
+#: fn(x: score) -> score
+bump <- function(x) x
+#~~~~ R/b.R
+#: fn(value: score) -> score
+keep <- function(value) value
+#++++
+hover 10..15: score
+definition R/a.R:10..15
+references: R/a.R:10..15*, R/a.R:34..39, R/a.R:44..49, R/b.R:13..18, R/b.R:23..28
+rename: 5 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 50..50 -> "#: <T> fn(x: T) -> T\n"
+completion: none
+hint @54: <T> fn(x: T) -> T
+
+#==== global
+#---- top_level_across_files_global
+#~~~~ R/a.R
+$0value <- 1L
+#~~~~ R/b.R
+result <- value
+#++++
+hover 0..5: value: integer
+hover-definition: global R/a.R:0..5
+definition R/a.R:0..5
+references: R/a.R:0..5*, R/b.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `value`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @5: integer
+
+#==== rename_global_use_site
+#---- variable_from_other_file_from_use_site
+#~~~~ R/a.R
+value <- 1L
+#~~~~ R/b.R
+result <- $0value
+#++++
+hover 10..15: value: integer
+hover-definition: global R/a.R:0..5
+definition R/a.R:0..5
+references: R/a.R:0..5*, R/b.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#---- function_from_callee_from_callee
+#~~~~ R/def.R
+helper <- function(value) value
+#~~~~ R/use.R
+result <- $0helper(1L)
+#++++
+hover 10..16: helper: fn(value: integer) -> integer
+hover-definition: global R/def.R:0..6
+definition R/def.R:0..6
+references: R/def.R:0..6*, R/use.R:10..16
+rename: 2 edit(s)
+signature: fn(value: integer) -> integer
+parameters: [value: integer]
+action: Add inferred type annotation for `result`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @6: integer
+
+#==== rename_global_with_same_named_local
+#---- global_rename_skips_same_named_local_from_global
+#~~~~ R/def.R
+$0value <- 1L
+#~~~~ R/use.R
+result <- value
+helper <- function() {
+  value <- 99L
+  value
+}
+#++++
+hover 0..5: value: integer
+hover-definition: global R/def.R:0..5
+definition R/def.R:0..5
+references: R/def.R:0..5*, R/use.R:10..15
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `value`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (128+): break, else, FALSE, for, function, if, in, Inf
+hint @5: integer
+
+#==== s4
+#---- rename_class_across_files_animal
+#~~~~ R/classes.R
+setClass("A$0nimal", representation(name = "character"))
+#~~~~ R/methods.R
+setMethod("speak", "Animal", function(x) x)
+make <- function() new("Animal")
+#++++
+hover 9..17: character
+definition R/classes.R:10..16
+references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
+rename: 3 edit(s)
+signature: none
+completion: none

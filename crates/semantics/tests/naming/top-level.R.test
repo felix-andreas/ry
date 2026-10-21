@@ -1,0 +1,87 @@
+#==== top_level
+#---- top_level_reference
+x <- 1L
+x
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  0..1 x -> non-local
+
+#---- top_level_reference_before_first_binding
+x
+x <- 1L
+#++++
+# <statement>
+  0..1 x -> non-local
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+
+#---- top_level_call_resolves_callee_and_argument
+value <- 1L
+mirror <- function(x) x
+mirror(value)
+#++++
+# value
+  b0 value top-level 0..5
+  0..5 value <- b0
+# mirror
+  b0 x parameter 19..20
+  b1 mirror top-level 0..6
+  0..6 mirror <- b1
+  22..23 x -> b0
+# <statement>
+  0..6 mirror -> non-local
+  7..12 value -> non-local
+
+#---- distinct_top_level_bindings_have_distinct_uses
+x <- 1L
+y <- "ok"
+x
+y
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# y
+  b0 y top-level 0..1
+  0..1 y <- b0
+# <statement>
+  0..1 x -> non-local
+# <statement>
+  0..1 y -> non-local
+
+#==== rebinding
+#---- earlier_use_resolves_to_final_global_binding
+x <- 1L
+x
+x <- "ok"
+x
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  0..1 x -> non-local
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  0..1 x -> non-local
+
+#---- assignment_rhs_resolves_to_final_global_binding
+x <- 1L
+x <- x
+x
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+  5..6 x -> non-local
+# <statement>
+  0..1 x -> non-local

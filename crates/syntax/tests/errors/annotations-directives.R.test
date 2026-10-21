@@ -1,4 +1,12 @@
 #==== directives
+#---- text_after_a_definition
+#: @type Person {list{name: character}} extra
+#++++
+error: unexpected text after the `@type` definition
+ --> 1:41
+  | #: @type Person {list{name: character}} extra
+  |                                         ^^^^^
+
 #---- bare_at
 #: @
 x <- 1

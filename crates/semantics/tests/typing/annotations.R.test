@@ -143,6 +143,12 @@ label: Unknown
 77..80 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #==== checked
+#---- a_binder_constraint_applies_to_a_value_annotation
+#: <T: numeric> list{add: fn(left: T, right: T) -> T}
+handlers <- list(add = function(left, right) left + right)
+#++++
+handlers: <T: numeric> list{add: fn(left: T, right: T) -> T}
+
 #---- declared_scheme_wins
 #: <T> fn(x: T) -> T
 id <- function(x) x
@@ -622,12 +628,14 @@ f: fn() -> integer
 #: integer
 "foo"
 #++++
+integer
 11..16 error[type-mismatch] expected `integer`, found `character`
 
 #---- checked_bare_expression_matching_is_quiet
 #: integer
 1L
 #++++
+integer
 
 #---- blank_line_still_breaks_nested_attachment
 f <- function() {
@@ -663,12 +671,19 @@ out: Unknown
 113..119 error[type-mismatch] expected `integer`, found `character`
 
 #==== elided_returns
+#---- a_trusted_elided_return_is_null
+#: @trust fn(count: integer)
+log_count <- function(count) count
+#++++
+log_count: fn(count: integer) -> NULL
+
 #---- elided_callback_return_means_null
 #: @param cb {fn(integer)}
 run_cb <- function(cb) cb(1L)
 run_cb(function(x) x + 1L)
 #++++
 run_cb: fn(cb: fn(integer) -> NULL) -> NULL
+NULL
 64..82 error[type-mismatch] this function must return `NULL`, but it returns `integer`
 
 #---- elided_callback_accepts_a_null_callback
@@ -677,6 +692,7 @@ run_cb <- function(cb) cb(1L)
 run_cb(function(x) NULL)
 #++++
 run_cb: fn(cb: fn(integer) -> NULL) -> NULL
+NULL
 
 #---- elided_definition_return_still_infers
 #: fn(count: integer)
@@ -693,6 +709,7 @@ run_cb <- function(cb) {
 run_cb(function(x) x + 1L)
 #++++
 run_cb: fn(cb: fn(integer) -> NULL) -> NULL
+NULL
 81..99 error[type-mismatch] this function must return `NULL`, but it returns `integer`
 
 #==== placement

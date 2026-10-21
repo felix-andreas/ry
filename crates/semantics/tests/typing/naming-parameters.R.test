@@ -1,0 +1,70 @@
+#==== parameters
+#---- function_parameter_referenced_in_body
+#~~~~ R/main.R
+mirror <- function(x) x
+#++++
+== R/main.R
+mirror: <T> fn(x: T) -> T
+
+#---- multiple_parameters_referenced_in_order
+#~~~~ R/main.R
+pair <- function(x, y) {
+  x
+  y
+}
+#++++
+== R/main.R
+pair: <T, U> fn(x: T, y: U) -> U
+
+#---- unused_parameter_still_introduces_binding
+#~~~~ R/main.R
+mirror <- function(x, y) x
+#++++
+== R/main.R
+mirror: <T, U> fn(x: T, y: U) -> T
+
+#---- parameter_referenced_after_local_statement
+#~~~~ R/main.R
+mirror <- function(x) {
+  helper <- 1L
+  x
+}
+#++++
+== R/main.R
+mirror: <T> fn(x: T) -> T
+26..32 warning[unused] `helper` is assigned but never used.
+
+#---- parameter_shadows_top_level_binding
+#~~~~ R/main.R
+x <- 1L
+f <- function(x) x
+#++++
+== R/main.R
+x: integer
+f: <T> fn(x: T) -> T
+
+#---- function_body_uses_global_when_parameter_does_not_match
+#~~~~ R/main.R
+x <- 1L
+f <- function(y) x
+#++++
+== R/main.R
+x: integer
+f: <T> fn(y: T) -> integer
+
+#---- parameter_beats_final_package_global_winner
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- 2L
+#~~~~ R/c.R
+f <- function(x) x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/c.R
+f: <T> fn(x: T) -> T

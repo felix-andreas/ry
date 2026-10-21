@@ -3,9 +3,8 @@ title: Structure
 description: What each source file holds in the syntax, semantics, ide, format, ry, and repl crates
 ---
 
-What each source file in the product crates is responsible for. How the crates depend on each
-other, and where one phase hands over to the next, is in [Architecture](/contributing/architecture).
-The frozen `*-legacy` crates are not covered.
+This page lists what each source file in ry's crates is responsible for. How the crates depend on
+each other, and where one phase hands over to the next, is in [Architecture](/contributing/architecture).
 
 ## `syntax`
 
@@ -26,7 +25,9 @@ The crate root is `src/syntax.rs`.
 - **`reparse.rs`**: incremental reparsing by splicing in a single statement. It is purely an
   optimization, and parse correctness never depends on it.
 - **`testing.rs`**: the fixture harness every fixture suite shares, with the `.test` file format,
-  the `RY_BLESS` and `FIXTURE_FILTER` variables, and the rejection of duplicate case ids.
+  the `RY_BLESS` and `FIXTURE_FILTER` variables, the rejection of duplicate case ids, and the
+  `#~~~~` separator that splits one case into several files. It also reads the program corpus in
+  `tests/programs/`, about 2,000 R edge cases that run through the invariant batteries.
 
 ## `semantics`
 
@@ -54,8 +55,9 @@ The crate root is `src/semantics.rs`.
 - **`metadata.rs`**: the `PackageMetadata` input. It parses `NAMESPACE` and `DESCRIPTION` and
   resolves imports and dependencies.
 - **`lints.rs`**: the style lints and their configuration types.
-- **`testing.rs`**: the invariant battery for the semantic pipeline, shared by the fuzz harness and
-  the coverage-guided targets.
+- **`testing.rs`**: test support that other crates share. It holds the invariant battery for the
+  semantic pipeline, which the fuzz harness and the coverage-guided targets run, the shared fixture
+  database, and `ProbeDatabase`, which logs query executions for the incrementality tests.
 - **`diagnostics.rs`**: where diagnostics leave the crate. It produces the parse-stage set and the
   full per-file set, renders strict output, and holds `TypeRenderer`, the one place types are turned
   into user-facing text.

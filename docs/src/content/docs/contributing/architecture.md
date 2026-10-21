@@ -39,10 +39,6 @@ illegal dependency unrepresentable.
   `run`, and `debug` commands. It owns configuration, conversion between position encodings, assembling and publishing
   diagnostics, and suppression comments.
 
-The `*-legacy` crates (`roughly-legacy`, `analysis-legacy`, and `engine-legacy`) are the previous
-stack. They stay frozen in the tree as the baseline the performance benchmarks measure against, and
-by design the two stacks share no code.
-
 ## The semantics database
 
 Analysis runs on salsa and is incremental at the granularity of an *item*: one top-level statement
@@ -128,6 +124,13 @@ slots. Both are tiny tracked queries whose values survive an edit that only shif
 typical keystroke therefore leaves them unchanged, and the project-wide graph walks stay green
 instead of running again.
 
+A check never reads a project-wide map either. Each lookup it makes across items goes through a
+firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
+writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
+binder that an immediate or script read sees. A structural edit re-runs each firewall that a check
+read, and an unchanged answer is backdated, so a new definition re-checks only the items that read
+its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+
 Types are interned, so type equality is id equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
 decision log records that design.
@@ -180,12 +183,9 @@ and all the documents, and the database handle deliberately never leaves it.
 ## Correctness and performance instruments
 
 The fixture suites, described on the [testing page](/contributing/testing), are the correctness
-contract. The parity program that once compared every finding against the frozen legacy stack is
-complete and retired, so the new stack's fixtures stand on their own and no change needs the old
-implementation to agree.
-
-What remains in `legacy/differential` is the benchmark harness. Its performance and memory
-witnesses, in `test_stats`, assert measured budgets for wall time, resident memory, and the
-linearity of resolve steps against a corpus of real files, so a regression in any of the three
-fails a test instead of being noticed later. The corpus is fetched on demand, so these tests
-run locally rather than in CI.
+contract. Two more instruments guard what fixtures cannot see. `crates/semantics/tests/test_incremental.rs`
+pins the incrementality contracts by counting how often each query executes after an edit. The
+performance and memory witness, `crates/semantics/tests/test_perf.rs`, asserts measured budgets for
+wall time, resident memory, the linearity of resolve steps, and keystroke latency against a corpus of
+real files, so a regression in any of them fails a test instead of being noticed later. The corpus is
+fetched on demand, so the witness runs locally rather than in CI.

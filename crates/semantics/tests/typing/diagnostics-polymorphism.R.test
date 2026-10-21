@@ -1,0 +1,91 @@
+#==== calls
+#---- polymorphic_identity_multiple_types
+mirror <- function(x) x
+mirror(1L)
+mirror("oops")
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+character
+
+#---- polymorphic_assignment_multiple_types
+mirror <- function(x) x
+first <- mirror(1L)
+second <- mirror("ok")
+#++++
+mirror: <T> fn(x: T) -> T
+first: integer
+second: character
+
+#---- polymorphic_repeated_independent_uses
+mirror <- function(x) x
+first <- mirror(1L)
+second <- mirror("ok")
+third <- mirror(2L)
+#++++
+mirror: <T> fn(x: T) -> T
+first: integer
+second: character
+third: integer
+
+#---- polymorphic_arity_after_valid_use
+mirror <- function(x) x
+mirror(1L)
+mirror(1L, 2L)
+#++++
+mirror: <T> fn(x: T) -> T
+integer
+integer
+46..48 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- call_arity_after_polymorphic_assignment
+mirror <- function(x) x
+first <- mirror(1L)
+mirror("ok", "extra")
+#++++
+mirror: <T> fn(x: T) -> T
+first: integer
+character
+57..64 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- polymorphic_higher_order_apply
+invoke <- function(f) function(x) f(x)
+mirror <- function(x) x
+int_apply <- invoke(mirror)
+first <- int_apply(1L)
+second <- int_apply("ok")
+#++++
+invoke: <T, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
+mirror: <T> fn(x: T) -> T
+int_apply: <T> fn(x: T) -> T
+first: integer
+second: character
+
+#---- polymorphic_higher_order_conflict
+invoke <- function(f) function(x) f(x + 1L)
+mirror <- function(x) x
+mixed_apply <- invoke(mirror)
+mixed_apply("ok")
+#++++
+invoke: <T: numeric, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
+mirror: <T> fn(x: T) -> T
+mixed_apply: <T: numeric> fn(x: T) -> T
+T
+110..114 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- numeric_polymorphic_accepts_integer_and_double
+increment <- function(x) x + 1L
+a <- increment(2L)
+b <- increment(2.5)
+#++++
+increment: <T: numeric> fn(x: T) -> T
+a: integer
+b: double
+
+#---- numeric_polymorphic_rejects_character
+increment <- function(x) x + 1L
+bad <- increment("oops")
+#++++
+increment: <T: numeric> fn(x: T) -> T
+bad: Unknown
+49..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`

@@ -1,0 +1,83 @@
+#==== incremental_edits
+#---- interface_change_creates_dependent_error
+#~~~~ R/a.R
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+#~~~~ R/b.R
+result <- double_count(2L)
+#++++
+== R/a.R
+double_count: fn(count: integer) -> integer
+== R/b.R
+result: integer
+
+#---- interface_change_creates_dependent_error_then_v1
+#~~~~ R/a.R
+#: fn(count: character) -> integer
+count_letters <- function(count) 1L
+double_count <- count_letters
+#~~~~ R/b.R
+result <- double_count(2L)
+#++++
+== R/a.R
+count_letters: fn(count: character) -> integer
+double_count: fn(count: character) -> integer
+== R/b.R
+result: Unknown
+23..25 error[type-mismatch] expected `character`, found `integer`
+
+#---- body_edit_keeps_dependents_clean_then_v1
+#~~~~ R/a.R
+#: fn(count: integer) -> integer
+double_count <- function(count) {
+  count + count
+}
+#~~~~ R/b.R
+result <- double_count(2L)
+#++++
+== R/a.R
+double_count: fn(count: integer) -> integer
+== R/b.R
+result: integer
+
+#---- edit_fixes_dependent_error
+#~~~~ R/a.R
+#: fn(count: integer) -> integer
+double_count <- function(count) count + count
+#~~~~ R/b.R
+result <- double_count("two")
+#++++
+== R/a.R
+double_count: fn(count: integer) -> integer
+== R/b.R
+result: Unknown
+23..28 error[type-mismatch] expected `integer`, found `character`
+
+#---- deleting_definition_breaks_dependent_then_v1
+#~~~~ R/b.R
+result <- double_count(2L)
+#++++
+== R/b.R
+result: Unknown
+10..22 warning[unresolved] I could not resolve `double_count` in this package, its imports, or builtins.
+
+#---- new_type_definition_resolves_forward_reference
+#~~~~ R/a.R
+#: Person
+value <- list(name = "bob")
+#++++
+== R/a.R
+value: Person
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- new_type_definition_resolves_forward_reference_then_v1
+#~~~~ R/a.R
+#: Person
+value <- list(name = "bob")
+#~~~~ R/b.R
+#: @type Person {list{name: character}}
+#++++
+== R/a.R
+value: Person
+19..37 error[type-mismatch] expected `Person`, found `list{name: character}`
+== R/b.R

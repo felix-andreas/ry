@@ -1,0 +1,49 @@
+#==== local_scope
+#---- assignment_inside_local_does_not_leak
+local({
+  a <- 1L
+  a
+})
+a
+#++++
+# <statement>
+  b0 a local 10..11
+  10..11 a <- b0
+  20..21 a -> b0
+# <statement>
+  0..1 a -> non-local
+
+#---- local_sees_enclosing_local_binding
+x <- 1L
+local({
+  x
+})
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  10..11 x -> non-local
+
+#---- local_of_bare_expression
+local(1L + 2L)
+#++++
+# <statement>
+
+#---- local_binding_shadows_enclosing_binding
+x <- 1L
+local({
+  x <- "inner"
+  x
+})
+x
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# <statement>
+  b0 x local 10..11
+  10..11 x <- b0
+  25..26 x -> b0
+# <statement>
+  0..1 x -> non-local

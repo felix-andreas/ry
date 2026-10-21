@@ -1,0 +1,91 @@
+#==== for_loops
+#---- for_variable_introduces_fresh_binding
+#~~~~ R/main.R
+for (x in list(1L)) {
+  x
+}
+#++++
+== R/main.R
+NULL
+
+#---- loop_body_resolves_other_outer_binding
+#~~~~ R/main.R
+y <- 1L
+for (x in list(1L)) {
+  y
+}
+#++++
+== R/main.R
+y: integer
+NULL
+
+#---- assignment_inside_loop_rhs_sees_loop_binding
+#~~~~ R/main.R
+x <- 0L
+for (x in list(1L)) {
+  x <- x
+  x
+}
+x
+#++++
+== R/main.R
+x: integer
+NULL
+integer
+
+#---- assignment_inside_loop_rhs_can_use_other_outer_binding
+#~~~~ R/main.R
+y <- 0L
+for (x in list(1L)) {
+  y <- y
+  y
+}
+y
+#++++
+== R/main.R
+y: integer
+NULL
+integer
+
+#---- nested_closure_inside_loop_captures_loop_binding
+#~~~~ R/main.R
+for (x in list(1L)) {
+  g <- function() x
+}
+#++++
+== R/main.R
+NULL
+
+#---- for_variable_shadows_outer_top_level_binding
+#~~~~ R/main.R
+x <- 1L
+for (x in list(1L)) {
+  x
+}
+x
+#++++
+== R/main.R
+x: integer
+NULL
+integer
+
+#---- for_variable_beats_final_package_global_winner
+#~~~~ R/a.R
+x <- 1L
+#~~~~ R/b.R
+x <- 2L
+#~~~~ R/c.R
+for (x in list(1L)) {
+  x
+}
+x
+#++++
+== R/a.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+== R/b.R
+x: integer
+0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+== R/c.R
+NULL
+integer

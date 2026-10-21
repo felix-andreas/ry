@@ -307,8 +307,7 @@ only by name, and it wrongly reports a `stop()` guard such as the one in `money(
 A plain `#:` annotation gives an `Unknown` value a type, and every later use is checked against it.
 `#: @if-unknown TYPE` does the same, but becomes an error once ry can infer the value's type, so it
 cannot go stale. `#: @trust TYPE` overrides a type ry did infer, for the cases where you know
-better. In strict mode none of them clears the finding yet, which is a known bug;
-`# ry: allow(strict)` on the line does.
+better. Any of them clears the strict finding, since the value now has a type.
 
 A `# typing: strict`, `# typing: on`, or `# typing: off` comment in a file overrides the project
 setting, so you can adopt type checking one file at a time.

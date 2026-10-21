@@ -1,0 +1,189 @@
+#==== unused_locals
+#---- unused_local_is_reported
+f <- function() {
+  x <- 1L
+  2L
+}
+#++++
+f: fn() -> integer
+20..21 warning[unused] `x` is assigned but never used.
+
+#---- used_local_is_not_reported
+f <- function() {
+  x <- 1L
+  x
+}
+#++++
+f: fn() -> integer
+
+#---- only_final_reassignment_is_kept
+f <- function() {
+  x <- 1L
+  x <- 2L
+  x
+}
+#++++
+f: fn() -> integer
+20..21 warning[unused] `x` is assigned but never used.
+
+#==== reaching_writes
+#---- conditional_update_before_read_is_used
+f <- function(flag) {
+  x <- 1L
+  if (flag) {
+    x <- 2L
+  }
+  x
+}
+#++++
+f: fn(flag: logical) -> integer
+
+#---- loop_accumulator_is_used
+g <- function() {
+  total <- 0L
+  for (i in 1:3) {
+    total <- total + i
+  }
+  total
+}
+#++++
+g: fn() -> integer
+
+#---- dead_store_before_rewrite_is_reported
+f <- function() {
+  x <- 1L
+  x <- 2L
+  y <- x
+  y
+}
+#++++
+f: fn() -> integer
+20..21 warning[unused] `x` is assigned but never used.
+
+#---- write_read_only_on_loop_back_edge_is_used
+f <- function(n) {
+  while (n > 0L) {
+    y <- x
+    x <- 1L
+    n <- n - 1L
+  }
+}
+#++++
+f: <T: numeric> fn(n: T) -> NULL
+42..43 warning[unused] `y` is assigned but never used.
+47..48 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+
+#---- conditional_write_never_read_is_reported
+f <- function(flag) {
+  if (flag) {
+    x <- 1L
+  }
+  2L
+}
+#++++
+f: fn(flag: logical) -> integer
+40..41 warning[unused] `x` is assigned but never used.
+
+#---- read_before_conditional_introduction_warns
+f <- function(flag) {
+  if (flag) {
+    x <- 1L
+  }
+  x
+}
+#++++
+f: fn(flag: logical) -> integer
+54..55 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+
+#---- multiple_unused_locals_each_reported
+f <- function() {
+  a <- 1L
+  b <- 2L
+  3L
+}
+#++++
+f: fn() -> integer
+20..21 warning[unused] `a` is assigned but never used.
+30..31 warning[unused] `b` is assigned but never used.
+
+#---- local_used_only_in_nested_function_is_not_reported
+f <- function() {
+  outer <- 1L
+  function() outer
+}
+#++++
+f: fn() -> fn() -> integer
+
+#---- nested_unused_local_is_reported
+f <- function() {
+  inner <- function() {
+    helper <- 1L
+    2L
+  }
+  inner
+}
+#++++
+f: fn() -> fn() -> integer
+46..52 warning[unused] `helper` is assigned but never used.
+
+#==== conventions
+#---- dot_prefixed_local_is_ignored
+f <- function() {
+  .ignored <- 1L
+  2L
+}
+#++++
+f: fn() -> integer
+
+#---- underscore_prefixed_local_is_ignored
+f <- function() {
+  `_ignored` <- 1L
+  2L
+}
+#++++
+f: fn() -> integer
+
+#==== excluded_kinds
+#---- top_level_assignment_is_not_reported
+unused_global <- 1L
+#++++
+unused_global: integer
+
+#---- unused_parameter_is_not_reported
+f <- function(unused_param) 1L
+#++++
+f: <T> fn(unused_param: T) -> integer
+
+#---- unused_for_variable_is_not_reported
+f <- function() {
+  for (item in 1:3) {
+    1L
+  }
+}
+#++++
+f: fn() -> NULL
+
+#---- local_used_in_expression_is_not_reported
+f <- function() {
+  value <- 1L
+  value + 1L
+}
+#++++
+f: fn() -> integer
+
+#---- local_read_through_a_slot_access_counts
+f <- function() {
+  config <- list()
+  config@port
+}
+#++++
+f: fn() -> Unknown
+
+#---- slot_replacement_write_is_exempt
+f <- function() {
+  config <- list()
+  config@port <- 8080L
+  config
+}
+#++++
+f: fn() -> list{}

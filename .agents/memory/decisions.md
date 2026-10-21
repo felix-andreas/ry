@@ -1,63 +1,3 @@
-# Decision record: the analysis core is a memoized query framework
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-The analysis core uses a memoized query framework with automatic,
-dependency-tracked invalidation. The substrate is salsa, and `crates/semantics`
-is the database.
-
-The alternative was to hand-roll incrementality per structure, with a
-reverse-dependency index, an incremental package naming pass, an incremental
-type index, and debug-only drift assertions that compared each incremental
-result against a full rebuild. That model shipped first and was then replaced.
-
-Four reasons decided it, and they still apply to anything proposed in this area.
-
-- Hand-rolling the invalidation core is empirically error-prone, independent of
-  how simple R's dependency graph is. The hand-rolled model produced several
-  silent-stale bugs, where analysis served an answer computed from text the user
-  had already changed.
-- The safety net was structurally incomplete. The drift assertions ran under
-  `cfg(debug_assertions)` only, so release-path correctness was unverified. They
-  were also blind to a shared-rule bug, because the incremental path and the
-  oracle shared the membership predicate, so a wrong rule was invisible to both.
-- The real dividing line is automatic dependency-tracked invalidation against
-  hand-maintained mirrored invalidation. In a framework the tracked path is the
-  default, and an untracked read is the exception. Hand-rolling inverts that, so
-  every new read is a chance to reintroduce staleness.
-- A framework delivers cancellation, parallelism, and eviction structurally. The
-  live-as-you-type model below needs all three, and hand-rolling provides none
-  of them without large additional machinery.
-
-Only salsa's core is wanted, which is memoized queries with automatic
-invalidation. Its heavier machinery, for macro expansion, a trait and coherence
-solver, and a multi-crate graph, is aimed at a deep, dynamic dependency graph.
-R's graph is shallow and static, so that machinery stays unused.
-
-`docs/src/content/docs/contributing/architecture.md` is the contract for what
-the core does today. Read it before touching the analysis core or the server's
-scheduling.
-
-# Decision record: diagnostics are live as you type, not on save
-
-Diagnostics publish while the user types rather than only on save.
-
-rust-analyzer runs two diagnostic streams. It publishes its own type and name
-diagnostics live as you type, debounced and cancellable, and it runs
-`cargo check` on save for the authoritative full error set. ry has no second
-stream, because it is the only static type checker for R. Publishing on save
-alone would therefore give a user zero type feedback while typing, which is
-strictly worse than what rust-analyzer does.
-
-The interactive queries, which are hover, completion, goto, and signature help,
-answer on demand rather than on a schedule.
-
-The architecture page records how the server implements this today, through a
-fast first wave and a settled wave at idle time.
-
-
 # Decision record: the standard library ships as declaration-only stub files
 
 Standard-library type information ships as dedicated declaration-only files with
@@ -537,59 +477,6 @@ only, because exports stay byte-equal across the flip and early cutoff does the 
 analysis: typing inside a construct is the highest-churn edit state, and it now has the smallest
 blast radius.
 
-# Decision record: durability tiers and a memoized IDE read path
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-The red-green engine used to validate every memo by deep-walking its recorded dependencies once per
-revision. The first read after any keystroke therefore re-walked every unopened file's parse,
-lower and naming chain. That is work proportional to the number of files times the chain depth, and
-it cost about 108 ms at 281k lines of code across 30k files before any real work started.
-
-Two more costs sat on top. Every hover, definition and completion request rebuilt a package-sized
-`NamesGlobal` map from the symbol index. Completion additionally primed every exporting file's
-`Lower` and `LocalNaming` to compute item kinds, which is a package-sized prime per
-keystroke-completion and cost 95 ms at rest. Separately, the idle-preemption token pairing could
-lose a preemption and stall a read behind a full idle unit, because the frontend stored the token
-and then sent, while the worker reset it inside the idle unit.
-
-The shape now has four parts.
-
-- **Durability lives in the core**, in `engine.rs`. An input declares `LOW` for an open document
-  and `HIGH` for everything else. A memo records the minimum durability its last recompute read,
-  and validation greens in constant time when `last_change[durability] <= verified_at`. One
-  subtlety is load-bearing. A durability transition must stay truthful even on a memo whose value
-  never changes, so the deep-validation walk re-records each visited memo's durability minimum at
-  the early-cutoff bump. Without that, opening a file is an equal-value downgrade from HIGH to LOW
-  that re-records only the recomputing bottom of the chain. Every value-stable ancestor would keep
-  its stale HIGH record, the next keystroke would be invisible to its fast path, and a stale read
-  would be served as green. A live probe caught this during implementation, and
-  `durability_downgrade_flushes_through_cutoff_nodes` pins it.
-- **The winner index is the IDE shape.** The value of `PackageSymbolIndex` is a `NamesGlobal`,
-  borrowed per request through a `Shared` clone and never rebuilt. `DefiningItem` projects through
-  it.
-- **Completion reads one fold.** A per-file `CompletionExports` holds label, kind and callability
-  entries that stay value-equal across body edits, and they fold into `PackageCompletionIndex`.
-  `generic::completion` takes the entries as an explicit parameter, so the engine passes the memo
-  and the from-scratch path builds them per request.
-- **Preemption pairing is lossless.** The worker resets `idle_interrupt` before each empty poll and
-  the frontend flags after it sends. Every interleaving either delivers the job to the poll or
-  leaves the flag set for the unit's next cancellation check.
-
-Correctness: behavior is unchanged, the IDE differential is green, and the downgrade staleness
-class is structurally closed and unit-pinned. Simplicity: one new concept in the core, two new
-queries, and one deleted per-request synthesis path. Performance at 281k lines of code across 30k
-files, given at rest and then after a keystroke: hover went from 5.3 ms to 0.010 ms and from 142 ms
-to 44 ms, completion from 95 ms to 26.5 ms and from 228 ms to 90 ms, definition from 5.4 ms to
-0.032 ms and from 108 ms to 20 ms. Per-edit diagnostics went from 121 ms to 91 ms and a cold run
-from 13.5 s to 9.0 s, which also removed the per-inference clone of the type definition
-environment. Incremental analysis: the per-keystroke walk no longer touches an unopened file's
-chain at all. The committed witnesses bound an at-rest read to 32 memos and a post-keystroke walk
-to 12 per file. `backlog.md` records the deferred lever, which is a durable sub-fold plus an
-open-file overlay to drop the fold-edge walk to the number of open files.
-
 # Decision record: `is.null` shapes an unconstrained inference variable
 
 At an `if (is.null(x)) fallback else x` join where `x` and `fallback` are both unbound inference
@@ -769,321 +656,6 @@ finalization and a shared member map. Performance: a per-module candidate scan b
 size, which is negligible. The backlog records the open remainder, which is strict attribution for
 the deliberately `Unknown` self-recursive schemes.
 
-# Decision record: a parse tree is not a memo value
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-The `SourceText(f)` engine input used to be the parsed document, holding a rope and a tree-sitter
-tree, for every workspace file. A `Parse(f)` query projected it. Measured at 302k lines of code
-with `ry debug analysis-stats`, which reports per-phase resident-set growth for exactly this kind
-of diagnosis, about 398 MiB of the roughly 1 GiB peak was trees retained for files nobody edits.
-That is about sixty times the source bytes. The server also parsed the whole workspace
-synchronously at load.
-
-A tree is a pure function of the text, so it never lives in an engine value. `SourceText` carries
-the rope plus an optional tree. An open document carries the host's incrementally maintained tree,
-so a keystroke still never re-parses, and the corpus is rope-only. `Key::Parse` is gone. A
-tree-consuming body, such as lowering or lint, and a host alike call `RoughlyQueries::document_for`,
-which uses the input's tree or parses on demand into a small LRU of sixteen entries. The LRU serves
-an entry only when the cached rope equals the input's rope, so staleness is unrepresentable. A
-text-only consumer reads the rope and never materializes a tree, which covers LSP range encoding,
-annotation re-lexing and suppression scanning.
-
-A whole-project IDE scan stays fast without resident trees through two `IdeDatabase` seams.
-`document_rope` lets an annotation scan re-lex text only. `candidate_document_ids` is a
-conservative rope-substring prefilter, because an identifier or S4 string spelled `name` implies
-`name` appears in the text. References, rename and S4 navigation therefore parse only documents
-that textually mention the target. The engine IDE view primes ropes and candidate trees per
-feature, and a point query keeps its constant at-rest prime scope, which a benchmark witnesses.
-
-Two memory fixes landed with it. `LoweringResult` holds its module behind an `Rc` and the engine's
-`Lower` projects that pointer through `Stored::from_shared`, so each HIR is retained once instead
-of twice. `Expression` boxes its rare attached annotation, which took an arena node from 256 bytes
-to 136.
-
-Correctness: unchanged, and all differential suites stayed byte-exact. Simplicity: one query fewer,
-and one honest ownership story for trees. Performance: the peak resident set went from 1014 MiB to
-294 MiB at 302k lines of code, workspace load parses nothing because parsing spreads into the
-background prime, and per-keystroke behavior is unchanged. Incremental analysis: dependencies are
-unchanged, because bodies record the same `SourceText` read. The known cost is that the first
-workspace-symbols query, and a cold `references` on an extremely common name, re-parse candidates
-on demand. The LRU bounds that, and per-file symbol items stay cached across requests.
-
-# Decision record: an all-files fold splits into a durable sub-fold and an open-file overlay
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-Every all-files fold recorded one dependency edge per package file. That covers the symbol index,
-the completion index, declared globals, type definitions, the type index and both candidate orders.
-Each keystroke's validation therefore deep-walked every fold, which measured about 11,200 memo
-visits per keystroke at 1248 files and grew linearly. The analysis-stats typing probe measured it,
-and it now prints per-keystroke recompute counts and walk attribution.
-
-A new `OpenFiles` input holds sorted file ids. It is a defaulted input, so an unset input executes
-to the empty set and a headless host or a test needs no change. Each fold splits in two.
-
-- A durable sub-fold runs over non-open files, keyed by `ProjectFiles` position. It reads no LOW
-  input, so it greens in constant time per keystroke through the durability fast path.
-- The public fold merges the durable half with the open files' per-file values by position. It
-  replays path-order last-writer-wins byte-identically.
-
-The split is value-identical for any contents of `OpenFiles`, because a misclassified file merely
-lands in the other half. It is therefore a pure performance seam. The host invariant is that
-`OpenFiles` lists exactly the LOW-durability `SourceText` files, and the server derives both from
-`open_documents` in one funnel. The engine memo table and cycle set hash with FxHash, because query
-keys are small integers and the walk hashes twice per visited slot.
-
-Correctness: unchanged. The differential suites cover it, and fold values are byte-identical by
-construction. Performance: the per-keystroke validation walk went from 11,244 slots to 278 and is
-now size-independent. It is equal at 1248 and 2496 files, and the benchmark witness pins equality
-at 100 against 300 files. The keystroke median went from 6.7 ms to 4.9 ms at 302k lines of code
-with recompute counts unchanged. Simplicity: seven mechanical durable and public pairs sharing one
-pattern. Incremental analysis: an open or close transition is a rare HIGH change that revalidates
-once, exactly like the existing durability downgrade.
-
-# Decision record: a same-file backward reference never routes through the interface
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-A real 697k-line workspace report through `analysis-stats` found this. Typecheck was 95% of a
-300-second cold pass, one 170-line file took 4.9 s, and a keystroke in an 18.5k-line class file
-took 16 s.
-
-`infer_file` imported an interface scheme for every referenced package global, including a symbol
-defined in the very file being inferred, and `InterfaceDeps` edges were file-granular. But the
-typecheck walk's winner path rebinds a symbol's global environment entry with the freshly inferred
-scheme at its defining assignment. For any reference that first reads after that assignment ends,
-the imported scheme was provably shadowed dead weight. Its only observable effect was the
-dependency edge, and that edge made every same-file reference chain a fake mutual strongly
-connected component. A chain where `h1` calls `h0` and `h2` calls `h1` is the dominant shape of a
-real R package. The cost was per-symbol Tarjan over a clique, plus a fixed point that re-inferred
-the whole file per round. A 150-line chain file cost 387 ms, and a large hub file scaled worse than
-quadratically.
-
-Each referenced same-file-winner symbol is now classified by byte order.
-
-- **Walk-shadowed.** Its last top-level assignment, which is the export and winner site, ends
-  before its earliest non-local read starts.
-- **Forward.** Everything else: self-recursion inside the defining range, a forward reference from
-  an earlier body, and a read between repeated writes.
-
-A walk-shadowed symbol is not imported and contributes no `InterfaceDeps` edge.
-`walk_shadowed_definitions` in the engine's query layer decides it, and `infer_file` and
-`interface_deps` use it identically. The edge set must mirror the fetch set exactly, or a genuine
-cycle would slip past the SCC routing into the accidental-cycle guard. A forward symbol keeps
-today's exact interface path, including the deliberate self-recursion tolerance and the
-mutual-group letrec semantics. Semantics are unchanged by construction, because a walk-shadowed
-import could never be observed: every read happens after the rebinding. Production therefore needs
-no change and the differential stays byte-exact. The full suite verified it, and the counter
-witness `backward_reference_chain_stays_off_the_interface_scc` pins it.
-
-One related fix landed with it. A script's type-definition environment now overlays its own
-declarations on the memoized `PackageTypeDefinitions` clone, through
-`TypeDefinitionEnvironment::extend_from_module`, instead of rebuilding from every package module's
-view. The rebuild recorded one edge per package file per script, which is a cold cost and a
-revalidation walk proportional to scripts times package files. The reporting workspace had 2057
-scripts and 503 files.
-
-Correctness: no change, by the shadowed-import argument, and all 36 suites are green. Performance:
-the chain-file pathology drops about a hundredfold, from 387 ms to 3.9 ms at 150 lines. A
-hub-shaped 59k-line workspace, meaning a 1500-function hub with 300 chained files and 1500 scripts,
-cold-passes in 3.8 s. A keystroke in a hub file costs about one authoritative re-inference of that
-file. Simplicity: one classification helper and two consumers. Incremental analysis: the
-`InterfaceDeps` and `SymbolScc` graphs shrink to genuine cycles, which collapses the per-keystroke
-deep validation of interface memos on a hub file.
-
-# Decision record: one inference per file per revision, and a memoized typo hint
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-Re-profiling the cold pass with `analysis-stats` after the interface-routing fix found this. The
-staged diagnostics phase was 66% of a 10-second cold pass at 302k lines of code, and stack sampling
-attributed nearly all of it to the could-not-resolve typo hint.
-
-Four pieces of work were duplicated.
-
-1. `Typecheck(f)` and `ExportedSchemes(f)` each ran `infer_file`. That is the same whole-file
-   inference, once with expression-type recording for diagnostics and once without for the exports.
-   Every file whose exports were demanded paid two full inferences per revision, and a keystroke in
-   an open file paid both on its demand path.
-2. `unresolved_reference_diagnostic` recomputed the did-you-mean hint per reference occurrence.
-   That is a full stub-corpus scan over about 530 candidates, with four fresh `Vec` allocations per
-   candidate inside the edit-distance dynamic program. A workspace that references many unmodelled
-   library names is the normal case for any codebase using packages without stubs, and it paid a
-   multi-second cold cost and re-paid it per keystroke per edited file.
-3. `bind_module_letrec_placeholders` computed candidate reference edges by scanning the whole arena
-   once per candidate. That is quadratic in file size, on every inference of every file.
-4. `Diagnostics(f)` fetched `Typecheck` before the file-local tree readers. Inference's cross-file
-   scheme chains then evicted the file's tree from the bounded parse cache and `Lint` re-parsed the
-   file, which is a hidden second parse per file on the server's cold prime.
-
-The shape now is this. `Key::Typecheck` stores a
-`FileInference { check: ModuleCheck, exports: Shared<Vec<ExportedValue>> }` from a single recording
-inference. Recording is collection-only and branches no inference outcome, so folding the exports
-run into the recording run is safe by construction. `Key::ExportedSchemes` becomes a shared-pointer
-projection through `Stored::from_shared` and keeps its role as the value-equality firewall that
-referrers cut off on. When the whole `FileInference` compares equal, which happens on a same-shape
-body edit, propagation now stops one level earlier at `Typecheck` itself.
-
-The typo hint splits in two. `unresolved_suggestion` is memoized per unresolved symbol in the query
-group, because its value depends only on the name and the set-once stub corpus.
-`unresolved_reference_with_suggestion` renders, and both pipelines share it verbatim.
-`nearest_name` reuses its dynamic-programming rows and its candidate buffer across the whole
-candidate scan. The letrec edge scan is one arena pass with a binary search over the disjoint
-candidate value ranges. `Diagnostics` fetches the tree-reading file-local queries adjacently,
-before `Typecheck`.
-
-Correctness: unchanged, and all differential and fixture suites stayed byte-exact. Performance: the
-cold pass at 302k lines of code went from 10.1 s to 3.7 s, with the package-naming stage from
-3.75 s to 0.06 s, one parse per file instead of two, and one inference per file instead of up to
-two. The keystroke median went from 5.4 ms to 1.7 ms. Memory: 4 MiB more at 302k lines of code,
-because each file's exports are now retained once behind the shared pointer, where the same data
-previously lived in the `ExportedSchemes` memo. Simplicity: one inference body instead of two call
-modes on the demand path. Incremental analysis: the `ExportedSchemes` seam's dependencies collapse
-to one edge, which is `Typecheck`. `analysis-stats` now stages lint adjacently and splits the old
-diagnostics phase into lint, package naming with folds, and diagnostics rendering, so the next
-regression of this kind is visible at a glance.
-
-# Decision record: the inference-state data model
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-Callgrind over a 7.5k-line hub file, run after the demand-path fixes, drove this. Inference itself
-cost about 25 microseconds per line, and nearly all of it was allocator and tree churn rather than
-typing work.
-
-Five weaknesses were structural.
-
-1. `free_type_variables` materialized the resolved form of a type, calling `resolve` on a clone at
-   every recursion level, and allocated a fresh set per node. The per-check constraint sweep also
-   cloned every recorded expression type into a `Vec` first.
-2. The union-find `entries` table was a `BTreeMap` keyed by a densely allocated id, so it paid a
-   tree search per resolve step.
-3. `bind_module_letrec_placeholders` answered whether a candidate sits on a mutual cycle with a
-   transitive walk per candidate, which is quadratic over reference chains.
-4. The winner test ran two linear scans per top-level assignment, which are
-   `top_level_expression_ids.contains` and `find_exported_binding`, and `exported_value_schemes`
-   re-scanned the module per exported symbol.
-5. The environment, recorded-type and overload-selection maps were ordered maps whose order nothing
-   reads.
-
-The shape now is this. Free variables are collected by a read-only walker,
-`visit_unbound_variables`, which follows redirect chains without materializing the resolved form
-and mirrors union normalization, so a member resolving to `Any` or `Unknown` absorbs the union.
-`entries` is a plain vector indexed by id, as an `EntryTable`. Probe rollback truncates the tail,
-and the id counter is the length, so a dangling id is unrepresentable. Letrec mutual-cycle
-membership is one iterative Tarjan pass over components of size two or more, and a self-edge alone
-never qualifies, which leaves semantics unchanged. `ResolutionContext` carries the precomputed
-top-level id set and exported-binding map, and `exported_value_schemes` batch-collects bindings in
-one walk. `environment`, `recorded_expression_types` and `selected_overloads` are FxHash maps,
-because nothing iterates them in state. The public `ModuleCheck` fields stay ordered maps and are
-converted once at assembly.
-
-Correctness: nothing observable changed. All fixture, differential and witness suites stayed
-byte-exact, and free-variable ordering is preserved by sort-and-dedup where quantifier order
-matters. Performance: whole-file inference on the hub file went from 190 ms to about 50 ms, and a
-hub keystroke from 308 ms to 168 ms, measured alongside the demand-path work. Simplicity: one
-free-variable implementation instead of two, and one dense table instead of a map plus a counter.
-Incremental analysis: unchanged, because all of this is inside one query body. The backlog holds
-the remaining follow-up, which is that whole-file inference and re-lowering are still the keystroke
-floor for a huge file. The per-definition granularity design addresses it.
-
-# Decision record: interface SCC rounds run per definition, and skip on unchanged reads
-
-This decision shaped the in-house engine that preceded the salsa stack, so the code it names lives
-under `legacy/`. It is recorded because the query decomposition itself transferred, and the
-architecture record says which parts did.
-
-A 700k-line user workspace still spent 95% of a 179-second cold pass in typecheck after the
-demand-path and constant-factor rounds, with a 10-second keystroke in an 18.5k-line file. A
-synthetic reproduction of ten mutually referencing files with sixty chained functions each, which
-is 3k lines, cost 3.6 s of typecheck.
-
-Interface edges are file-granular. They must mirror `infer_file`'s import set exactly, or a genuine
-cycle slips past the SCC routing into the accidental-cycle guard. Real packages reference each
-other's files both ways, so whole file clusters collapse into a single interface SCC.
-`resolve_interface_scc` re-inferred every member file per Jacobi round, and rounds grow with the
-in-SCC scheme-chain depth. The cost per fixed point is chain depth times cluster size, and it was
-re-paid on every keystroke into a member file. Two pieces of bookkeeping were quadratic in cluster
-size as well: the per-round full-table clone plus a `render_type_scheme` of every member every round
-for the oscillation guard, and a per-symbol `SymbolScc` Tarjan that cloned every visited node's edge
-list.
-
-The shape now has three parts.
-
-- **A file that provably decomposes is re-inferred per member definition.** `scc_definition_plan`
-  admits a file when every top-level binding is a single-assignment function or a scalar literal,
-  so schemes are fixed at their defining site, and when the file has no letrec members, no
-  captured-write re-pass, and no other statement writing the top-level frame. Each member
-  definition is checked by `check_definition_scheme` against three sources: the round's table for
-  in-SCC reads, memoized `GlobalScheme`s for out-of-SCC reads, and locally resolved same-file
-  helper definitions. The out-of-SCC reads are provably acyclic, because a cross-file symbol whose
-  file reaches back into the cycle is itself a member. The same-file helpers must resolve locally,
-  because fetching their `GlobalScheme` would re-enter the fixed point through the file's own
-  `Typecheck`. Under the plan's conditions this environment equals the whole-file walk's at every
-  read, so results match up to inference-variable identity. An ineligible file keeps whole-file
-  rounds, which covers S4 blocks, monotype accumulation and letrec groups.
-- **Both granularities skip on unchanged reads.** A unit re-infers in round k only if one of its
-  in-SCC reads changed in round k-1, counting reads transitively through local helpers. The round
-  function is pure in those reads, so the previous output is reused verbatim and the trajectory is
-  identical. Contributions are per file and are merged in ascending file order each round, so a
-  symbol exported by several member files keeps the exact last-writer-wins value. A single
-  symbol-keyed map let a stale exporter overwrite the winner. The differential caught that, and
-  `test_interface_scc.rs` pins it.
-- **One inference state serves the whole fixed point.** A definition check snapshots and rolls back
-  completely, which keeps per-definition variable ids deterministic. This replaces a stub-seeded
-  template clone per definition. The oscillation-guard history records value changes only, because
-  a consecutive duplicate render affected nothing. A pure-oscillation pin can therefore land one
-  round later, which the round-cap slack covers and which converges to the same table. `SymbolScc`'s
-  Tarjan uses dense indices and borrows fetched edge lists.
-
-Correctness: the differential suites stayed byte-exact, including the multi-exporter regression the
-first cut introduced. Performance: the cluster reproduction's typecheck went from 3.6 s to 0.2 s
-and its member-file keystroke from 359 ms to 34 ms. The hub workspace keystroke went from 168 ms to
-136 ms, and a big flat workspace was unchanged. Simplicity: the fixed point gains a planning phase,
-and the convergence and pinning contract is unchanged. Incremental analysis: a keystroke into a
-cluster file re-runs the fixed point at frontier cost instead of cluster cost.
-
-Three follow-ups are in the backlog. The per-symbol `SymbolScc` is still quadratic for a very large
-cluster, and a file-level quotient-graph SCC would fix it. The `InterfaceScc` key carries the member
-list, which is heavy for a huge component. The authoritative whole-file `Typecheck` remains the
-keystroke floor, which the per-definition incremental inference design addresses.
-
-# Decision record: `ry check` runs on the query engine
-
-The CLI used to run production's from-scratch `Analysis` and `run_full`. That path's whole-file
-package-interface loop has the same file-cluster blowup the engine's fixed point fixed, so
-`ry check` on a real mutually referencing package stayed slow after the server got fast. Every
-future engine performance win would also have needed a production twin.
-
-The CLI now builds the same query graph the server uses. It creates one `Engine` per check target
-and feeds inputs in the server's `ProjectFiles` order, which is package files first and then
-ascending root-relative path, so last-writer-wins winners are identical. It honors the config as
-is. It renders each file through `assemble_engine_file_diagnostics` in `crates/ry/src/diagnostics.rs`,
-which holds the class assembly, config gating and type-error rendering extracted from the server so
-the two surfaces cannot drift. A suppression applies against the source the CLI read. `run_full`
-remains purely the differential oracle, which is the one consumer that must stay engine-independent.
-
-Correctness: the differential already asserts that the engine and `run_full` agree byte-exactly on
-rendered diagnostics, so the CLI's output set is covered by construction. All 146 CLI crate tests
-pass unchanged, including the full CLI contract suite, and a diagnostic-heavy workspace produces
-the exact count the engine stats report. Performance: the CLI inherits every engine property, which
-covers per-symbol firewalls, per-definition SCC rounds, memoized typo hints and one parse per file.
-The cluster reproduction went from 1.34 s to 0.28 s, and a hub-shaped workspace from 2.95 s to
-1.90 s, which is now parse-bound. The gap grows with workspace size. Simplicity: one fast path
-instead of two, and one shared diagnostics assembly. Incremental analysis: unaffected, because the
-CLI engine is one-shot.
-
 # Decision record: the shipping stack is a hand-written parser, rowan trees, and salsa
 
 `docs/src/content/docs/contributing/architecture.md` describes the architecture as it stands. This
@@ -1246,13 +818,6 @@ construct never poisons the file; and, because annotations are first-class gramm
 errors with exact token spans inside a `#:` comment, such as "expected a type after `|`". The
 golden error-message suite pins the wording, and the diagnostics goal in `AGENTS.md` sets the bar.
 
-## The legacy stack shares no code
-
-The legacy crates under `legacy/` are frozen. They take bug fixes only. No code is ever shared or
-abstracted between the two stacks, which is a user directive. The duplication is deliberate, and
-introducing an abstraction to share code with legacy is a mistake even where the duplication is
-verbatim.
-
 # Decision record: every pipeline stage is fuzzed from its first commit
 
 This is a user directive. The testing doctrine made fuzzing mandatory for the `syntax` crate from
@@ -1288,14 +853,6 @@ cycle, where a growing self-referential type rode the iteration cap into a panic
 inference variables leaking through exported schemes into foreign tables. Both are of the class
 that only surfaces in the large, which is exactly what per-stage fuzzing exists to catch early.
 
-# Decision record: diagnostic wording follows the project's own bar
-
-This is a user directive. A message does not have to copy any other implementation, and improving
-one is welcome.
-
-Wording follows the diagnostics bar in `AGENTS.md`, which is the Rust and Elm standard. The golden
-fixture suites are the wording contract, and they render the stack's own messages.
-
 # Decision record: deep resolve is memoized per binding epoch and cuts a cycle to `Unknown`
 
 `InferenceTable::resolve`, the deep resolver in `crates/semantics/src/infer.rs`, walked the interned
@@ -1304,7 +861,7 @@ acyclic graph, so a shared subtree appears once in memory but was re-resolved on
 A self-referential binding, meaning a variable whose binding transitively contains itself or a
 self-referential alias, expanded as a tree up to the cap. On the real-file corpus of about 507k
 lines this measured 397 million inner resolve steps, and resolve alone cost more wall time than the
-legacy stack's entire pipeline. The depth cap also truncated meaning. Past depth 64 a type silently
+previous stack's entire pipeline. The depth cap also truncated meaning. Past depth 64 a type silently
 stayed unexpanded, which is a position-dependent semantics that no cache can be layered onto.
 
 Deep resolve is now a memoized walk over the interned graph with explicit cycle detection.
@@ -1330,36 +887,6 @@ Resolve wall time went from 30.8 s to 0.3 s, and a whole corpus pass from 53.2 s
 `RESOLVE_CALLS` stays as a standing instrument, because a near-linear step count is now an
 invariant the performance harness can watch.
 
-# Decision record: the server threads one worker, and publishes diagnostics in two waves
-
-The server runs one async-lsp frontend thread and one worker thread that owns the database.
-
-**Cancellation rides the database's own token.** `notify_edit` cancels before it enqueues. A flip
-is consumed by whichever in-flight query it kills, and every subsequent job starts on a fresh
-storage-handle clone, so the latest edit wins. This was chosen over a hand-rolled cooperative flag
-because the database checks its token at every operation, which means no query body needs
-instrumenting.
-
-**The publish waves gate on a real query split.** `parse_stage_diagnostics` covers the syntax and
-annotation classes and exists as its own query precisely so the first wave never computes naming or
-type checking. Filtering the full set afterwards would pay the whole cost and only hide it.
-`file_diagnostics` builds on the same query, which keeps the first wave a faithful subset by
-construction.
-
-**The host assembly is shared**, in `crates/ry/src/diagnostics.rs`. Config gating, per-file typing
-modes, strict escalation, lints and suppression comments run identically for the server's publish
-path and for `ry check`, so the two surfaces cannot drift.
-
-Two smaller decisions sit alongside. The `missing-comma` lint is retired, because the hand parser
-rejects `f(1 2)` as R does and the lint only compensated for tree-sitter over-accepting it. Its
-config key stays accepted and inert. Per-diagnostic related locations, such as the note on a
-duplicate top-level binding, are not implemented, because `Diagnostic` has no related-location
-model yet. That is recorded as open work rather than silently dropped.
-
-The CLI contract suite and the LSP behavioral suite pin the surface. The LSP suite drives the real
-binary over stdio. `stats_witness` asserts the performance and memory budgets as CI-checkable
-thresholds.
-
 # Decision record: the interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order
 
 A corpus-scale finding from the multi-core instrument drove this. Pre-forcing the per-file phases
@@ -1373,7 +900,7 @@ cycle head, the fixpoint iterated from that head, and a group still changing at 
 pinned from that head's perspective. Which items lost their types to `Unknown` therefore depended
 on which query happened to arrive first. Every individual forcing order was deterministic, but
 hover-then-check, check-then-hover and differently ordered cold passes could disagree with each
-other. The legacy stack's whole-package rounds were entry-order-independent. Per-item cycle heads
+other. The previous stack's whole-package rounds were entry-order-independent. Per-item cycle heads
 were not.
 
 The shape now lives in `crates/semantics/src/semantics.rs` and has three parts.
@@ -1874,27 +1401,6 @@ native windows or clipboard integration, or pressure to sign and notarize. At th
 mac artifact on a real macOS runner, which is the only fully license-clean way to use Apple's SDK.
 That is also the natural home for running the REPL end-to-end suite against a real R in CI.
 
-# Decision record: the identity-parity program is retired
-
-The user decided this.
-
-The differential suites that proved the rewrite equivalent to the frozen oracle are deleted. That
-covers the typing, scripts and strict arms, the seeded fuzz differential, the legacy-corpus sweep,
-the real-file corpus arm, and the per-position IDE comparison, together with their adjudicated
-divergence ledgers. The rewrite's own fixture suites are the semantics contract, and an improvement
-lands on its own terms with no oracle renegotiation. The legacy IDE fixture inputs worth keeping
-were ported first, which is 81 cases, and the port surfaced two real defects that the backlog
-records.
-
-`legacy/differential` is benchmark-only now. `test_stats.rs` times and memory-measures the same
-corpus through both stacks. It, and the legacy crates it depends on, stay until the deletion sweep
-the user will call for. The performance witnesses migrate to a home in the new stack as part of
-that sweep.
-
-Every future semantic improvement now costs one fixture bless, instead of a fixture bless plus
-per-arm adjudication entries. The battery loses its slowest suites. The deletion sweep's only
-remaining prerequisite is the witness migration.
-
 # Decision record: a vendored export manifest carries the name-level truth beside the typed stubs
 
 The typed stub corpus, at about 530 declarations, was also the resolution universe. Any real
@@ -1989,3 +1495,32 @@ All three consumers read it, and the heuristics are deleted.
 **Impact.** Item identity and the name site cannot disagree about which name a statement binds.
 Unused warnings, goto, hover, and the outline land on the name for every definition shape. Nothing
 new is stored and no query is added: the lookup is a hash probe plus a descent into one statement.
+
+# Decision record: a check reads per-name firewalls, never project-wide maps
+
+`item_check` used to resolve cross-item reads against three whole maps that it read eagerly:
+`package_definitions`, which holds every winner in the project, the membership of
+`interface_sccs`, and its own file's item positions. A new or renamed definition anywhere changed
+those maps, so every check in the project re-ran on its next demand, even a check that reads no
+name at all. The previous engine had per-symbol firewalls and the salsa stack had lost them. Nothing
+measured the loss, because the keystroke probe edits one file and demands only that file.
+
+Each of those reads now goes through a small tracked projection. After a structural edit, each
+projection re-runs once per read and is backdated when its answer is unchanged, so a check that
+depends on it does not re-run.
+
+- `package_name(files, name)` answers with the name's winner and its conditional writers.
+- `interface_group(files, item)` answers with the item's cyclic group, if it has one.
+- `frame_binder(item, name, deferred)` answers with the file-local binder that an immediate or
+  script read sees. A package function body, which is the common item, never consults it.
+
+`SalsaGlobals` holds no map any more. `item_check` also grows its stack on demand through
+`stacker`, because demand recursion goes as deep as the longest chain of definitions that each
+read the next one.
+
+Correctness is unchanged, and every fixture suite is byte-identical. A new definition now re-checks
+only its readers, and an inserted statement re-checks only the reads it intercepts, which
+`crates/semantics/tests/test_incremental.rs` pins. Resident memory grew 3.5% at 794K lines, from
+1,270 to 1,314 bytes per line, and cold time is unchanged. One gap remains: a salsa-level cycle
+through statement items, which `interface_sccs` does not model, re-iterates on every structural
+edit. `backlog.md` tracks it.

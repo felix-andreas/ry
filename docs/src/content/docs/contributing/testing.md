@@ -32,6 +32,9 @@ which `syntax`, `semantics`, `format`, and `ide` all share. A `.test` file holds
   rejected rather than allowed to shadow the other case silently.
 - What the expected output shows (schemes, diagnostics, a tree dump, hover text) is up to the suite's
   runner. Behavior specific to one suite belongs in its runner, never in the fixture syntax.
+- A typing or IDE case may hold several files. Each `#~~~~ <path>` line starts one (see
+  `syntax::testing::split_files`), and a path under `R/` is a package file while anything else is a
+  script. A typing case renders each file's output under an `== <path>` line.
 - The runner loads only `.test` files, so anything else in a suite directory is ignored.
 
 ### Running one case
@@ -88,10 +91,12 @@ only when the behavior or the wording improved on purpose.
   or a diagnostic that does or does not fire, and consequences cannot see a read that resolves to
   the wrong binding while still producing the same type.
 - **`crates/semantics/tests/typing`**: the typing suite. Each case runs the full semantic pipeline on
-  one package file, with the shipped stubs installed, and renders the exported scheme of every named
-  top-level definition (`name: <T: numeric> fn(x: T) -> T`) followed by the file's diagnostics
-  (`start..end severity[code] message`, in byte offsets). Cases are grouped by feature, with one
-  exception: `programs.R.test` holds whole small programs written the way real projects are
+  one package file, or on several, with the shipped stubs installed. It renders the exported scheme
+  of every top-level definition (`name: <T: numeric> fn(x: T) -> T`), the type of every other
+  top-level statement as a bare line, and then the file's diagnostics
+  (`start..end severity[code] message`, in byte offsets). Each test thread reuses one database across
+  cases (`semantics::testing::with_fixture_project`), because parsing the stub corpus costs far more
+  than checking a case. Cases are grouped by feature, with one exception: `programs.R.test` holds whole small programs written the way real projects are
   written. A case earns its place there by exercising several features at once, and a clean case
   with an empty diagnostics block is a promise of zero false positives for that style of code.
 - **`crates/semantics/tests/lowering`**: the HIR each item lowers to, dumped as an indented tree
@@ -105,7 +110,17 @@ only when the behavior or the wording improved on purpose.
   it should have, so fixing the defect turns the case red. `.agents/memory/backlog.md` lists the open
   ones.
 - **`crates/semantics/tests/typing-scripts`**: the same pipeline over script documents, which have
-  one sequential, top-down scope.
+  one sequential, top-down scope. Besides script semantics, this suite holds the rules for single
+  expressions (literals, operators, indexing, lists, and calls to stubbed functions), rendered one
+  line per statement.
+- **`crates/semantics/tests/annotations`**: one `#:` block per case, where the case's lines are the
+  block. It renders what the block lowers to (the kind of coercion, the declared type, the `@new`
+  target, and each `@type` or `@alias` definition), followed by its grammar and lowering errors. This
+  is the compact contract for the type notation, while the `syntax` suite pins the trees and the
+  `errors` suite the wording.
+- **`crates/semantics/tests/stubs`**: `.Rtypes` declarations. Each case renders the declarations it
+  loads, with overload candidates in order, and the problems that make the loader drop a line, in
+  the wording the editor and the override report show.
 - **`crates/semantics/tests/typing-strict`**: the strict stream. After the ordinary rendering, each
   case appends the file's typing mode and its `strict` diagnostics.
 - **`crates/semantics/tests/typing-imports`**: package metadata. A leading `#namespace ` line supplies
@@ -215,28 +230,21 @@ here, the harness only asserts that each label is non-empty, and what completion
 the syntactic context rather than the exact byte, so a full sweep would compute the same list over
 and over. Sampling by context halves the harness's running time and keeps the assertion.
 
-### The mined legacy corpus
+### The program corpus
 
-`crates/syntax/tests/corpus-legacy/*.R.corpus` holds 1,967 distinct R programs extracted from the
-frozen stack's fixture suites, read through `syntax::testing::legacy_corpus_sources`. The `syntax`,
-`format`, and `semantics` batteries each run the whole set.
+`crates/syntax/tests/programs/*.R.corpus` holds 1,967 distinct R programs mined from an earlier
+implementation's fixture suites, read through `syntax::testing::program_corpus_sources`. The
+`syntax`, `format`, and `semantics` batteries each run the whole set. What those suites tested has
+been ported into the fixture suites above, so the corpus keeps each program only as an input, with
+no expected output.
 
-The programs are kept for their inputs only. Their expected output uses an older notation and
-cannot be ported, and regenerating it from today's output would declare current behavior correct
-instead of checking it.
-
-What makes the inputs usable on their own is that the invariants need no expected output: nothing
+The inputs are usable on their own because the invariants need no expected output: nothing
 panics, `syntax` checks the lossless reprint and the tree geometry, `format` checks preservation,
 and `semantics` checks that every diagnostic range lies inside its file. The semantics arm shares
 one database across the whole corpus instead of using the per-input battery, because a fresh
 database re-parses the stubs every time. It therefore asserts only what a shared database can, and
 leaves determinism and incremental equivalence to the generated inputs. Every arm also asserts that
 the corpus is non-empty, so deleting it fails loudly instead of passing on zero cases.
-
-To regenerate the corpus from `legacy/analysis-legacy/tests/**/*.test`, take each case's source
-between its `#---- <id>` header and its `#++++` expectation, strip the per-file headers that
-multi-file cases use, and deduplicate. The result is committed rather than derived at test time, so
-it will survive the eventual deletion of that directory.
 
 ### The annotation round trip
 
@@ -270,8 +278,8 @@ any kind fails the test instead of blending into a known category.
 
 - `corpus_acceptance` runs over the fetched `corpus/` and gates the direction where *we* reject what
   tree-sitter accepts, which means a gap in our grammar.
-- `in_tree_acceptance` runs over inputs that are always present (the mined legacy corpus plus every
-  fixture case source) and gates the other direction, where we accept what tree-sitter rejects.
+- `in_tree_acceptance` runs over inputs that are always present (the program corpus plus every fixture
+  case source) and gates the other direction, where we accept what tree-sitter rejects.
 
 That second direction is the only thing in the project that bounds the number of parse errors from
 below. Every other parser invariant bounds it from above: the cascade guard caps how many errors we
@@ -359,25 +367,38 @@ cancellation provably lands while the pull is in flight, and the retryable `SERV
 response and the successful retry after it can be asserted without sleeping and hoping. These
 variables exist only for this test; a production run never sets them.
 
+## Incrementality
+
+A fixture checks what an edit produces, but not how much work it took to get there.
+`crates/semantics/tests/test_incremental.rs` checks the work: `semantics::testing::ProbeDatabase`
+logs every query execution, and `checked_since` names the items whose `item_check` ran. The tests
+pin these contracts:
+
+- A body edit that keeps the item's scheme re-checks the edited item alone.
+- A body edit that changes the scheme also re-checks the items that read it.
+- A new definition re-checks only the items that read its name.
+- An inserted statement re-checks only the reads it intercepts.
+
+The same file checks that a chain of re-exports resolves to its base, that a cycle of them pins to
+`Unknown`, and that a chain of 4,096 links resolves without overflowing the analysis thread's stack.
+In the IDE harness, `point_queries_recheck_only_what_an_edit_changed` holds the features that run on
+every keystroke to the same rule.
+
 ## Performance and memory
 
-`legacy/differential/tests/test_stats.rs` holds the measurement instruments. They are ignored by
-default because they need the fetched corpus and a release build. Each instrument runs one process
-per stack and writes wall time, a split by phase, and resident and peak memory into
-`target/stats-{new,legacy}.txt`.
+`crates/semantics/tests/test_perf.rs` asserts performance budgets over the real-file corpus. It is
+ignored by default, because it needs the fetched corpus and a release build, and CI does not fetch
+the corpus:
 
-The same file carries `stats_witness`, the assertion form, which runs locally wherever the corpus
-has been fetched (CI does not fetch it). It asserts the cold-pass wall time per line, resident bytes
-per line, and resolve steps per line (the tripwire for a regression in resolve memoization), against
-budgets taken from measured numbers plus headroom.
+```sh
+cargo test -p semantics --release --test test_perf -- --ignored --nocapture
+```
 
-## The legacy stack
-
-`legacy/` holds the frozen previous implementation. Its suites still run in the workspace battery
-(`cargo test -p analysis-legacy`, `-p engine-legacy`, `-p roughly-legacy`), and
-`legacy/differential/tests/test_stats.rs` benchmarks both stacks on the same corpus until the legacy
-code is deleted. Never extend its fixtures or harnesses, and never share code between the two
-stacks: the new stack's own fixtures are the contract.
+`just perf` runs the same command. Its budgets are measured numbers plus headroom, and cover the
+cold-pass wall time per line, resolve steps per line (the tripwire for a regression in resolve
+memoization), resident bytes per line, and the p50 and p95 latency from a keystroke to fresh
+diagnostics on the corpus's largest package. It prints what it measured, so it doubles as the
+corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace phase by phase.
 
 ## Guidelines
 

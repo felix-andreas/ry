@@ -1,0 +1,153 @@
+#==== universal_binders
+#---- simple_polymorphic_list
+<T> list[T]
+#++++
+<T> list[T]
+
+#---- simple_polymorphic_record
+<T> list{value: T}
+#++++
+<T> list{value: T}
+
+#---- simple_polymorphic_function
+<T> fn(T) -> T
+#++++
+<T> fn(T) -> T
+
+#---- polymorphic_function_with_nullable_return
+<T> fn(T) -> T | NULL
+#++++
+<T> fn(T) -> T | NULL
+
+#---- polymorphic_function_with_multiple_parameters
+<T, U> fn(T, U) -> T
+#++++
+<T, U> fn(T, U) -> T
+
+#---- multiline_polymorphic_function
+<T> fn(
+    value: T,
+    label: character
+) -> T | NULL
+#++++
+<T> fn(value: T, label: character) -> T | NULL
+
+#==== constrained_binders
+#---- numeric_constrained_binder
+<T: numeric> fn(values: T) -> T
+#++++
+<T: numeric> fn(values: T) -> T
+
+#---- atomic_constrained_binder
+<T: atomic> fn(x: T[]) -> T[]
+#++++
+<T: atomic> fn(x: T[]) -> T[]
+
+#---- constrained_and_unconstrained_binders_mix
+<T: numeric, U> fn(x: T, y: U) -> T
+#++++
+<T: numeric, U> fn(x: T, y: U) -> T
+
+#---- expanded_forall_with_constraint
+@forall T: numeric
+@param value {T}
+@return {T}
+#++++
+<T: numeric> fn(value: T) -> T
+
+#==== generic_named_types
+#---- generic_alias_definition
+@alias Box<T> {list{value: T}}
+#++++
+alias Box<T> = list{value: T}
+
+#---- generic_nominal_definition
+@type Person<T> {list{value: T}}
+#++++
+type Person<T> = list{value: T}
+
+#---- generic_alias_definition_multiple_parameters
+@alias Pair<T, U> {list{left: T, right: U}}
+#++++
+alias Pair<T, U> = list{left: T, right: U}
+
+#---- generic_nominal_definition_nested_structural_type
+@type Result<T> {list{value: T | NULL}}
+#++++
+type Result<T> = list{value: T | NULL}
+
+#---- generic_alias_application
+Box<integer>
+#++++
+Box<integer>
+
+#---- generic_alias_application_multiple_arguments
+Pair<integer, character>
+#++++
+Pair<integer, character>
+
+#---- generic_nominal_application
+Person<integer>
+#++++
+Person<integer>
+
+#---- generic_nominal_nullable_application
+Person<integer> | NULL
+#++++
+Person<integer> | NULL
+
+#---- generic_named_type_inside_structural_type
+list{owner: Person<integer>}
+#++++
+list{owner: Person<integer>}
+
+#==== generic_expanded_function_annotations
+#---- expanded_single_forall
+@forall T
+@param value {T}
+@return {T}
+#++++
+<T> fn(value: T) -> T
+
+#---- expanded_multiple_forall_lines
+@forall T
+@forall U
+@param left {T}
+@param right {U}
+@return {T}
+#++++
+<T, U> fn(left: T, right: U) -> T
+
+#---- expanded_single_forall_multiple_names
+@forall T,U
+@param left {T}
+@param right {U}
+@return {U}
+#++++
+<T, U> fn(left: T, right: U) -> U
+
+#---- expanded_generic_nullable_return
+@forall T
+@param condition {logical}
+@param value {T}
+@return {T | NULL}
+#++++
+<T> fn(condition: logical, value: T) -> T | NULL
+
+#---- expanded_generic_structural_parameter
+@forall T
+@param values {list[T]}
+@return {list[T]}
+#++++
+<T> fn(values: list[T]) -> list[T]
+
+#==== generic_vector_suffixes
+#---- generic_atomic_array_suffix
+<T> fn(x: T[]) -> T[]
+#++++
+<T> fn(x: T[]) -> T[]
+
+#---- generic_atomic_named_suffix
+<T> fn(x: T[named]) -> T[]
+#++++
+<T> fn(x: T[named]) -> T[]

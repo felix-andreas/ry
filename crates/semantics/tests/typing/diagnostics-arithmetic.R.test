@@ -1,0 +1,21 @@
+#==== arithmetic
+#---- string_plus_integer
+"foo" + 4L
+#++++
+Unknown
+0..5 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- vector_plus_scalar
+c(1L, 2L) + 3L
+#++++
+integer[]
+
+#---- scalar_plus_vector
+1L + c(2L, 3L)
+#++++
+integer[]
+
+#---- double_vector_plus_integer_scalar
+c(1.5, 2.5) + 1L
+#++++
+double[]

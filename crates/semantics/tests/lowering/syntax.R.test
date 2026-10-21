@@ -1,0 +1,213 @@
+#==== parser_syntax
+#---- braced_expression_missing_closing_delimiter
+{
+  1L
+#++++
+# <statement>
+  Block
+    Literal Integer("1L")
+
+#---- parameters_missing_closing_delimiter
+function(value value
+#++++
+# <statement>
+  Function(value, value)
+    Missing
+
+#---- parenthesized_expression_missing_closing_delimiter
+(1L
+#++++
+# <statement>
+  Paren
+    Literal Integer("1L")
+
+#---- for_head_missing_closing_delimiter
+for (x in a {
+}
+#++++
+# <statement>
+  For x
+    NameRef a
+    Block
+
+#---- if_head_missing_closing_delimiter
+if (TRUE
+  1L
+else 2L
+#++++
+# <statement>
+  If
+    Literal Logical(true)
+    Literal Integer("1L")
+# <statement>
+  Missing
+
+#---- while_head_missing_closing_delimiter
+while (TRUE
+  print(value)
+#++++
+# <statement>
+  While
+    Literal Logical(true)
+    Call
+      NameRef print
+      NameRef value
+
+#---- if_missing_body
+if (TRUE)
+#++++
+# <statement>
+  If
+    Literal Logical(true)
+    Missing
+
+#---- while_missing_body
+while (TRUE)
+#++++
+# <statement>
+  While
+    Literal Logical(true)
+    Missing
+
+#---- for_missing_body
+for (item in values)
+#++++
+# <statement>
+  For item
+    NameRef values
+    Missing
+
+#---- if_missing_condition
+if () 1L
+#++++
+# <statement>
+  If
+    Literal Integer("1L")
+    Missing
+
+#---- for_missing_sequence
+for (item in ) 1L
+#++++
+# <statement>
+  For item
+    Literal Integer("1L")
+    Missing
+
+#---- bare_open_paren
+(
+#++++
+# <statement>
+  Paren
+    Missing
+
+#---- bare_open_brace
+{
+#++++
+# <statement>
+  Block
+
+#---- bare_open_bracket
+[
+#++++
+# <statement>
+  Missing
+
+#---- bare_open_double_bracket
+[[
+#++++
+# <statement>
+  Missing
+
+#---- bare_close_paren
+)
+#++++
+# <statement>
+  Missing
+
+#---- bare_close_brace
+}
+#++++
+# <statement>
+  Missing
+
+#---- bare_close_bracket
+]
+#++++
+# <statement>
+  Missing
+
+#---- bare_close_double_bracket
+]]
+#++++
+# <statement>
+  Missing
+
+#---- generic_unexpected_token
+,
+#++++
+# <statement>
+  Missing
+
+#==== typing_comments
+#---- missing_type_expression_with_following_expression
+#:
+value <- 1L
+#++++
+# value
+  Assign Local
+    NameRef value
+    Literal Integer("1L")
+
+#---- missing_following_expression
+#: integer
+#++++
+
+#---- missing_following_expression_at_end_of_block
+{
+  #: integer
+}
+#++++
+# <statement>
+  Block
+
+#---- comment_after_typing_comment
+#: integer
+# regular comment
+value <- 1L
+#++++
+# value
+  Assign Local
+    NameRef value
+    Literal Integer("1L")
+
+#---- empty_line_after_typing_comment
+#: integer
+
+value <- 1L
+#++++
+# value
+  Assign Local
+    NameRef value
+    Literal Integer("1L")
+
+#---- empty_line_before_normal_comment
+#: integer
+
+# regular comment
+value <- 1L
+#++++
+# value
+  Assign Local
+    NameRef value
+    Literal Integer("1L")
+
+#---- empty_line_before_typing_comment
+#: integer
+
+#: character
+value <- 1L
+#++++
+# value
+  Assign Local
+    NameRef value
+    Literal Integer("1L")

@@ -1,0 +1,419 @@
+#==== lists
+#---- empty_list
+list()
+#++++
+list{}
+
+#---- single_unnamed
+list(1L)
+#++++
+list{integer}
+
+#---- multi_unnamed_homogeneous
+list(1L, 2L, 3L)
+#++++
+list{integer, integer, integer}
+
+#---- heterogeneous_tuple
+list(1L, "foo")
+#++++
+list{integer, character}
+
+#---- tuple_with_double_and_int
+list(1L, 2.5)
+#++++
+list{integer, double}
+
+#---- tuple_bare_numbers_default_double
+list(1, 2)
+#++++
+list{double, double}
+
+#---- tuple_with_logical
+list(TRUE, 1L, "x")
+#++++
+list{logical, integer, character}
+
+#---- tuple_with_null_element
+list(1L, NULL)
+#++++
+list{integer, NULL}
+
+#---- nested_tuple
+list(list(1L), list("x"))
+#++++
+list{list{integer}, list{character}}
+
+#---- single_named
+list(foo = 1L)
+#++++
+list{foo: integer}
+
+#---- record_two_fields
+list(foo = 1L, bar = "foo")
+#++++
+list{foo: integer, bar: character}
+
+#---- record_homogeneous_fields
+list(foo = 1L, bar = 2L)
+#++++
+list{foo: integer, bar: integer}
+
+#---- record_with_null_field
+list(foo = 1L, bar = NULL)
+#++++
+list{foo: integer, bar: NULL}
+
+#---- nested_record
+list(server = list(port = 8080L))
+#++++
+list{server: list{port: integer}}
+
+#---- record_containing_tuple
+list(point = list(1L, 2L))
+#++++
+list{point: list{integer, integer}}
+
+#---- mixed_named_and_unnamed
+list(1L, bar = "foo")
+#++++
+list[integer | character]
+
+#---- mixed_named_first
+list(foo = 1L, "bar")
+#++++
+list[integer | character]
+
+#---- list_with_function_element
+list(function(x) x)
+#++++
+list{fn(x: T) -> T}
+
+#---- tuple_coerce_to_array_annotation
+#: list[integer]
+value <- list(1L, 2L, 3L)
+value
+#++++
+value: list[integer]
+list[integer]
+
+#---- record_coerce_to_array_annotation
+#: list[integer]
+value <- list(foo = 1L, bar = 2L)
+value
+#++++
+value: list[integer]
+list[integer]
+
+#---- record_coerce_to_map_annotation
+#: list[named: integer]
+value <- list(foo = 1L, bar = 2L)
+value
+#++++
+value: list[named: integer]
+list[named: integer]
+
+#---- tuple_explicit_tuple_annotation
+#: list{integer, character}
+value <- list(1L, "foo")
+value
+#++++
+value: list{integer, character}
+list{integer, character}
+
+#---- record_explicit_record_annotation
+#: list{foo: integer, bar: character}
+value <- list(foo = 1L, bar = "foo")
+value
+#++++
+value: list{foo: integer, bar: character}
+list{foo: integer, bar: character}
+
+#---- heterogeneous_tuple_to_array_rejected
+#: list[integer]
+value <- list(1L, "foo")
+#++++
+value: list[integer]
+17..22 warning[unused] `value` is assigned but never used.
+26..41 error[type-mismatch] expected `list[integer]`, found `list{integer, character}`
+
+#---- record_heterogeneous_to_map_rejected
+#: list[named: integer]
+value <- list(foo = 1L, bar = "x")
+#++++
+value: list[named: integer]
+24..29 warning[unused] `value` is assigned but never used.
+33..58 error[type-mismatch] expected `list[named: integer]`, found `list{foo: integer, bar: character}`
+
+#---- empty_list_coerce_to_array
+#: list[integer]
+value <- list()
+value
+#++++
+value: list[integer]
+list[integer]
+
+#---- empty_list_coerce_to_map
+#: list[named: integer]
+value <- list()
+#++++
+value: list[named: integer]
+24..29 warning[unused] `value` is assigned but never used.
+
+#---- tuple_null_member_coerce_to_nullable_array
+#: list[integer | NULL]
+value <- list(1L, NULL)
+value
+#++++
+value: list[integer | NULL]
+list[integer | NULL]
+
+#---- array_does_not_coerce_back_to_tuple
+#: @trust list[integer]
+value <- list(1L, 2L)
+#: list{integer, integer}
+copy <- value
+#++++
+value: list[integer]
+copy: list{integer, integer}
+72..76 warning[unused] `copy` is assigned but never used.
+80..85 error[type-mismatch] expected `list{integer, integer}`, found `list[integer]`
+
+#---- map_does_not_coerce_back_to_record
+#: @trust list[named: integer]
+value <- list(foo = 1L, bar = 2L)
+#: list{foo: integer, bar: integer}
+copy <- value
+#++++
+value: list[named: integer]
+copy: list{foo: integer, bar: integer}
+101..105 warning[unused] `copy` is assigned but never used.
+109..114 error[type-mismatch] expected `list{foo: integer, bar: integer}`, found `list[named: integer]`
+
+#---- nested_tuple_coerce_to_nested_array
+#: list[list[integer]]
+value <- list(list(1L), list(2L, 3L))
+value
+#++++
+value: list[list[integer]]
+list[list[integer]]
+
+#---- array_to_array_identity
+#: @trust list[integer]
+value <- list(1L)
+#: list[integer]
+copy <- value
+copy
+#++++
+value: list[integer]
+copy: list[integer]
+list[integer]
+
+#---- array_coerce_to_nullable_array
+#: @trust list[integer]
+value <- list(1L)
+#: list[integer | NULL]
+copy <- value
+copy
+#++++
+value: list[integer]
+copy: list[integer | NULL]
+list[integer | NULL]
+
+#---- record_field_order_preserved
+list(z = 1L, a = 2L, m = 3L)
+#++++
+list{z: integer, a: integer, m: integer}
+
+#---- duplicate_field_name
+list(a = 1L, a = 2L)
+#++++
+list{a: integer, a: integer}
+
+#---- double_tuple_coerce_to_double_array
+#: list[double]
+value <- list(1.0, 2.0)
+value
+#++++
+value: list[double]
+list[double]
+
+#---- backtick_named_field
+list(`a b` = 1L, c = 2L)
+#++++
+list{`a b`: integer, c: integer}
+
+#---- list_of_vectors
+list(c(1L, 2L), c("a", "b"))
+#++++
+list{integer[], character[]}
+
+#---- list_containing_named_vector
+list(counts = c(foo = 1L))
+#++++
+list{counts: integer[named]}
+
+#---- deeply_nested_record
+list(a = list(b = list(c = 1L)))
+#++++
+list{a: list{b: list{c: integer}}}
+
+#---- record_coerce_to_array_with_nullable
+#: list[integer | NULL]
+value <- list(a = 1L, b = NULL)
+value
+#++++
+value: list[integer | NULL]
+list[integer | NULL]
+
+#---- tuple_too_few_for_record_annotation
+#: list{integer, integer, integer}
+value <- list(1L, 2L)
+#++++
+value: list{integer, integer, integer}
+35..40 warning[unused] `value` is assigned but never used.
+44..56 error[type-mismatch] expected `list{integer, integer, integer}`, found `list{integer, integer}`
+
+#---- record_missing_field_annotation
+#: list{a: integer, b: integer}
+value <- list(a = 1L)
+#++++
+value: list{a: integer, b: integer}
+32..37 warning[unused] `value` is assigned but never used.
+41..53 error[type-mismatch] expected a field `b` here, which this list does not have
+
+#---- record_field_name_mismatch_annotation
+#: list{a: integer, b: integer}
+value <- list(a = 1L, c = 2L)
+#++++
+value: list{a: integer, b: integer}
+32..37 warning[unused] `value` is assigned but never used.
+41..61 error[type-mismatch] expected a field `b` here, which this list does not have
+
+#---- single_null_named
+list(x = NULL)
+#++++
+list{x: NULL}
+
+#---- tuple_does_not_coerce_to_map_annotation
+#: list[named: integer]
+value <- list(1L, 2L)
+#++++
+value: list[named: integer]
+24..29 warning[unused] `value` is assigned but never used.
+33..45 error[type-mismatch] expected `list[named: integer]`, found `list{integer, integer}`
+
+#---- nested_record_coerce_to_record_annotation
+#: list{server: list{port: integer}}
+value <- list(server = list(port = 8080L))
+value
+#++++
+value: list{server: list{port: integer}}
+list{server: list{port: integer}}
+
+#---- list_of_lists_heterogeneous_to_array_rejected
+#: list[list[integer]]
+value <- list(list(1L), list("x"))
+#++++
+value: list[list[integer]]
+23..28 warning[unused] `value` is assigned but never used.
+32..57 error[type-mismatch] expected `list[list[integer]]`, found `list{list{integer}, list{character}}`
+
+#---- record_coerce_to_map_ignores_field_names
+#: list[named: integer]
+value <- list(alpha = 1L, beta = 2L, gamma = 3L)
+value
+#++++
+value: list[named: integer]
+list[named: integer]
+
+#---- list_single_null
+list(NULL)
+#++++
+list{NULL}
+
+#---- list_two_nulls
+list(NULL, NULL)
+#++++
+list{NULL, NULL}
+
+#---- record_field_function_type
+list(f = function(x) x)
+#++++
+list{f: fn(x: T) -> T}
+
+#---- single_tuple_coerce_to_array
+#: list[integer]
+value <- list(1L)
+value
+#++++
+value: list[integer]
+list[integer]
+
+#---- map_coerce_to_array
+#: @trust list[named: integer]
+m <- list(a = 1L)
+#: list[integer]
+arr <- m
+arr
+#++++
+m: list[named: integer]
+arr: list[integer]
+list[integer]
+
+#---- record_to_array_heterogeneous_rejected
+#: list[integer]
+value <- list(a = 1L, b = "x")
+#++++
+value: list[integer]
+17..22 warning[unused] `value` is assigned but never used.
+26..47 error[type-mismatch] expected `list[integer]`, found `list{a: integer, b: character}`
+
+#---- deeply_nested_array_coercion
+#: list[list[list[integer]]]
+value <- list(list(list(1L)), list(list(2L, 3L)))
+value
+#++++
+value: list[list[list[integer]]]
+list[list[list[integer]]]
+
+#---- tuple_int_double_widens_to_double_array
+#: list[double]
+value <- list(1L, 2.0)
+value
+#++++
+value: list[double]
+list[double]
+
+#---- tuple_double_to_integer_array_still_rejected
+#: list[integer]
+value <- list(1L, 2.5)
+value
+#++++
+value: list[integer]
+list[integer]
+26..39 error[type-mismatch] expected `list[integer]`, found `list{integer, double}`
+
+#---- list_of_named_vectors_to_array
+#: list[integer[named]]
+value <- list(c(a = 1L), c(b = 2L))
+value
+#++++
+value: list[integer[named]]
+list[integer[named]]
+
+#---- list_of_vectors_to_array_of_arrays
+#: list[integer[]]
+value <- list(c(1L), c(2L, 3L))
+value
+#++++
+value: list[integer[]]
+list[integer[]]
+
+#---- scalar_elements_coerce_to_array_of_arrays
+#: list[integer[]]
+value <- list(1L, 2L)
+value
+#++++
+value: list[integer[]]
+list[integer[]]

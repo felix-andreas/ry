@@ -38,7 +38,10 @@ unresolved names to errors, but it does not turn on type errors: set `typing` as
 
 ry walks up from the file you check, or from the editor's workspace folder, and uses the first
 `ry.toml` it finds. Nothing is merged, and there is no home-directory file or environment variable.
-The language server reloads the file when it changes. A `roughly.toml` from before the rename is
+Each path you pass on the command line finds its own file, so two paths can use two different
+configurations. A `..` in a path is resolved before the search, so `project/ry.toml` does not apply
+to `project/../outside.R`. The language server re-reads the file whenever it changes, and deleting
+it falls back to an ancestor's file or to the defaults. A `roughly.toml` from before the rename is
 still read.
 
 The project root is a separate question: it decides which files see each other's definitions. It is

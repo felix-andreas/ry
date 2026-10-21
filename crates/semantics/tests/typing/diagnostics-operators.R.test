@@ -1,0 +1,55 @@
+#==== comparisons
+#---- logical_compared_to_numeric
+TRUE > 1L
+#++++
+logical
+
+#---- list_comparison
+list(1L) == list(1L)
+#++++
+Unknown
+0..8 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `list{integer}`
+
+#==== negation
+#---- not_on_character
+!"foo"
+#++++
+Unknown
+1..6 error[type-mismatch] expected a `logical` value, found `character`
+
+#==== ranges
+#---- range_with_character_operand
+"a":2L
+#++++
+Unknown
+0..3 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`
+
+#==== union_operands
+#---- conditional_retype_makes_arithmetic_unsound
+f <- function(flag) {
+  x <- 1L
+  if (flag) x <- "two"
+  x + 1L
+}
+#++++
+f: Unknown
+57..58 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | character`
+
+#---- numeric_union_arithmetic_is_clean
+f <- function(flag) {
+  x <- 1L
+  if (flag) x <- 2.5
+  x + 1L
+}
+#++++
+f: fn(flag: logical) -> integer | double
+
+#---- union_with_character_member_fails_comparison
+f <- function(flag) {
+  x <- 1L
+  if (flag) x <- "two"
+  x > 0L
+}
+#++++
+f: Unknown
+61..63 error[type-mismatch] expected `integer | character`, found `integer`

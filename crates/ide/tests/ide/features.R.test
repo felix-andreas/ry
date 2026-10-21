@@ -230,7 +230,18 @@ hint @30: fn() -> double
 #---- stub_name_not_renameable
 f <- function() pri$0nt(1)
 #++++
-hover 16..21: print: fn(x: double, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double
+hover 16..21: print: fn(
+hover 16..21:   x: double,
+hover 16..21:   ...: Any,
+hover 16..21:   [digits]: Any,
+hover 16..21:   [quote]: logical,
+hover 16..21:   [right]: logical,
+hover 16..21:   [max]: Any,
+hover 16..21:   [width]: Any,
+hover 16..21:   [n]: Any,
+hover 16..21:   [na.print]: Any,
+hover 16..21:   [row.names]: Any,
+hover 16..21: ) -> double
 hover-definition: package base (1 declaration(s), declared in stub source 0 at `print`)
 definition: stub source 0 at `print`
 references: none
@@ -354,7 +365,7 @@ hover 46..53: T
 definition: none
 references: none
 rename: none
-signature: fn(x: T, [y]: T) -> T
+signature: <T: numeric> fn(x: T, [y]: T) -> T
 parameters: x: T | [[y]: T]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T, [y]: T) -> T\n"

@@ -14,9 +14,9 @@ The quality bar is four things.
   on an idiomatic call form.
 - **Keystroke to diagnostics at a median of 30 ms or less and a 95th percentile of 100 ms or less,
   at 300k lines.** Read those against the raw-parse floor the instrument prints, because a latency
-  number swings by about 1.4 times with machine load. `stats_witness` pins the budgets, as per-line
-  ceilings on wall time, memory and resolve steps, and the measurement instruments live in
-  `legacy/differential/tests/test_stats.rs`.
+  number swings by about 1.4 times with machine load. `crates/semantics/tests/test_perf.rs` pins
+  the budgets, as per-line ceilings on wall time, memory and resolve steps plus keystroke latency,
+  and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
 ## Open: false reports and gaps found by the documentation review
@@ -328,6 +328,21 @@ no ordering requirement, and `BTreeMap::get` showed up under `infer_read`. Switc
 only. Measure before switching, and check iteration order wherever any of these is walked to build
 diagnostics.
 
+### Cycles through statement items re-iterate on every structural edit
+
+`interface_sccs` has nodes for named definitions only. A reference cycle that runs through a
+statement item, such as a conditional top-level write read back through `statement_binding_scheme`,
+is therefore resolved by salsa's cycle backstop rather than by `scc_schemes`. Salsa cannot verify a
+cycle's memos without re-running it, so every structural edit (a new or renamed definition anywhere)
+re-iterates each such cycle twice once something demands it.
+
+Measured on data.table, a new top-level binding re-runs 72 `item_check`s, 13 of them twice, for the
+edited file's diagnostics. That costs about 50 ms against 12 ms for a body edit. The members are
+ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycle by a statement in
+`utils.R`. The fix is to make conditional writers nodes of the static graph, with an edge from a
+reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
+any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
+
 ### Judged fast enough, so do not invent work here
 
 Single-package cold analysis is 1.9 s and 88 MiB peak for ggplot2's 68k lines, 1.3 s and 72 MiB for
@@ -484,7 +499,7 @@ hand-written seeds.
 ### The generators cannot express most of the type system
 
 Normalizing diagnostics to message shapes, all three semantics fuzz arms reach 60 shapes, of which
-33 are parser errors, 9 are distinct `type-mismatch` shapes and none are lints. The legacy corpus
+33 are parser errors, 9 are distinct `type-mismatch` shapes and none are lints. The program corpus
 reaches 110 and the typing fixtures reach 80.
 
 In 250 generated programs the annotation grammar produces `TYPE_REF`, `TYPE_FUNCTION` and
@@ -522,7 +537,7 @@ through the semantic pipeline reach 86.92% of `check.rs` and 80 shapes, against 
 battery's 54.35% and 60. Wire it into `syntax`, `semantics` and `ide`, and use both corpora as
 mutation seeds rather than only as fixed inputs.
 
-The legacy-corpus arm as landed deserves one fair criticism. It runs one shared database over all
+The program-corpus arm as landed deserves one fair criticism. It runs one shared database over all
 1,967 files, calls `file_diagnostics` only, and asserts never-panic plus range geometry. That shared
 project changes what is tested: `unresolved` collapses from 284 to 148 while `duplicate` explodes
 from 20 to 2,182, because 1,967 unrelated files redeclare each other's names. Run per file with the
@@ -579,8 +594,8 @@ A third independent review asked what protection each hour of compute and each m
 time actually buys. Every number came from a 4-vCPU machine, in the debug profile unless stated.
 
 The headline is that fuzzing is 327.3 s of a 672 s local gate, which is 49%, and CI runs none of it.
-The rest of the gate is `legacy/` at 249.0 s, the shipping crates' fixture suites at 68.8 s, and
-`crates/ry`, which is the only thing CI runs, at 22.4 s.
+The rest of the gate was the since-deleted `legacy/` at 249.0 s, the shipping crates' fixture suites
+at 68.8 s, and `crates/ry`, which is the only thing CI runs, at 22.4 s.
 
 This review disagrees with the input-generation review above, and the disagreement is real. That one
 wants the generated arms shrunk across the board. This one measures per-arm cost and wants `syntax`
@@ -601,11 +616,9 @@ against the workspace's 712. Every fuzz arm lives in another crate. The second j
 lower it, which is the bug. Measured in release on that exact input shape, which is 1 to 12
 concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms. Five
 thousand sweeps is 55.4 minutes on 4 cores, against the job's 45-minute timeout on a 2-to-4 vCPU
-runner. That is before `semantics::fuzz_deep`, projected at about 4 minutes, and before the
-`test_stats.rs` instruments, which hard-assert on a corpus CI never fetches.
+runner. That is before `semantics::fuzz_deep`, projected at about 4 minutes.
 
-Fix the floor, make the stats instruments skip on an unfetched corpus the way `test_corpus.rs` does,
-and raise the timeout with measured headroom. All three come before the human moves
+Fix the floor and raise the timeout with measured headroom. Both come before the human moves
 `.github/pending-ci.yml` into place.
 
 ### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
@@ -670,7 +683,7 @@ not happened.
 `scripts/seed-fuzz-corpus.rs` writes 1,416 files and 5.7 MB into each of three corpora in 2 s, but
 it globs `.Rtypes` under `crates/`, where there are none. All 11 `.Rtypes` files, and 33 `.exports`
 files, live in the top-level `types/`. It therefore seeds no stub files, none of the 1,967 mined
-`corpus-legacy/*.R.corpus` programs, and it never looks at `corpus/`. Its own doc comment claims it
+`programs/*.R.corpus` programs, and it never looks at `corpus/`. Its own doc comment claims it
 adds the shipped stubs, and the testing page repeats that. Both are false.
 
 `fuzz/corpus`, `fuzz/artifacts` and `fuzz/Cargo.lock` are gitignored and no job persists them, so
@@ -679,13 +692,18 @@ exists in `format` with 21 entries and in `semantics` with 2, and in neither `sy
 Both constants were last modified about 60 commits ago, so the pinning path works, at 0.12 s for
 `format` and 0.94 s for `semantics`, and is simply not being fed.
 
-In value order: persist the corpus, fix the seeder to read `types/` and `corpus-legacy/`, and add
-the 1.6 s `cargo check` of `fuzz/` to the gate.
+In value order: persist the corpus, fix the seeder to read `types/` and
+`crates/syntax/tests/programs/`, and add the 1.6 s `cargo check` of `fuzz/` to the gate.
+
+The gitignored `fuzz/Cargo.lock` is also a trap. A fresh resolution can pick a `salsa-macro-rules`
+that does not match the exactly pinned `salsa`, and `semantics` then fails to compile inside `fuzz/`
+with "missing hash in implementation" on every interned struct. Commit that lockfile, or seed it
+with `cargo update --precise` from the workspace lock.
 
 ### The one failure mode fuzzing exists to catch is the one that prints no input
 
 `catch_unwind` appears once in `syntax`, once in `format`, twice in `semantics` and not at all in
-`ide`. In `syntax` and `format` the single wrapper is on the legacy-corpus arm only.
+`ide`. In `syntax` and `format` the single wrapper is on the program-corpus arm only.
 
 Every `assert!` in `check_parse_invariants` and `check_format_invariants` embeds `{input:?}`, so an
 assertion failure replays fine. A genuine panic inside a generative arm prints a backtrace with no
@@ -724,8 +742,7 @@ covers on the same generator. Drop it and give the budget to `fuzz_seed_mutation
 
 An agent can land all of these today: completion sampling, the release profile in `just gate`, the
 syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
-type-check guard, the `fuzz_deep` floor and the stats-instrument skip that unblock the CI move, and
-the dead-arm cleanup.
+type-check guard, the `fuzz_deep` floor that unblocks the CI move, and the dead-arm cleanup.
 
 A human is required for three things: the `git mv` of `.github/pending-ci.yml`, which needs workflow
 scope and must not happen before the `fuzz_deep` floor is fixed, any scheduled fuzz job and its
@@ -789,8 +806,7 @@ one, and it is not a new abstraction.
 
 ### Seeds are hand-maintained while 1,183 fixture sources sit unused
 
-`syntax::testing::parse_fixture_files` is public with no callers. Its doc comment advertises the
-cross-stack differential harness, which retired with the identity-parity program.
+`syntax::testing::parse_fixture_files` is public with no callers outside its module.
 
 Meanwhile the batteries seed from 81 hand-written strings and never see the 1,183 fixture cases,
 which are the richest R corpus in the repo and the one that grows with every change. Seed the
@@ -841,7 +857,7 @@ Nothing observable exists for it today.
 
 ### No witness measures one file with many top-level items
 
-`stats_witness` is corpus-wide, meaning many files. The shape that hid the known quadratic, which is
+The `test_perf.rs` witness is corpus-wide, meaning many files. The shape that hid the known quadratic, which is
 one file with many annotated items, is measured by nothing.
 
 It is linear today: 100, 400 and 1,600 items cost 0.24 s, 0.65 s and 3.36 s, which is 2.43, 1.62 and
@@ -1393,11 +1409,13 @@ an annotatable position. That stays the one genuine expressiveness argument for 
 which `contributing/design/inline-type-syntax.md` records. The message says to lift the function to
 its own binding, rather than to move it up a line, which would annotate the wrong thing.
 
-### Cross-file navigation coverage rests on the LSP tests
+### `Unknown` is both the gradual top and the recursion fixpoint's seed
 
-81 legacy IDE fixture cases are ported into `crates/ide/tests/ide/*_ported.R.test`. Fifteen more were
-skipped as genuinely multi-file, because the harness takes one `SourceFile` per case. Consider
-extending the fixture harness to multiple files if that surface grows.
+The fixpoint starts every member at `Unknown`, so a join must keep the other side of an `Unknown`
+branch, or recursion never sharpens. That is why `if (c) 1L else untyped()` is `integer` rather than
+`integer | Unknown`, and the reference says so. Absorbing `Unknown` at joins, which is the gradual
+reading, broke recursion convergence when it was tried. The clean fix is a separate bottom for the
+seed, so a join can absorb a genuine `Unknown` while the fixpoint starts from nothing.
 
 ### Overload candidates worth adding when the area is touched
 
@@ -1483,7 +1501,7 @@ stays green.
 
 The method was injected-bug experiments against a byte copy of `crates/` built as its own workspace,
 so the shipping `test_fuzz` targets ran verbatim against mutated code. The baseline and the restored
-copy were both green. The oracle corpus was 1,967 mined legacy-corpus programs plus 1,192 fixture
+copy were both green. The oracle corpus was 1,967 mined program-corpus programs plus 1,192 fixture
 sources.
 
 Five oracles it proposed are now implemented, and the ledger records them. Three of them caught a
@@ -1742,44 +1760,6 @@ Three things are left for the user, because an agent should not decide them.
   does not redirect an identifier, so publishing under it creates a new listing and starts installs
   and ratings from zero. Revert that one field if keeping the listing matters more.
 - **Registering `ry-lang` on crates.io, and `ry-lang.org`.**
-
-## Open: what is left before the legacy tree can be deleted
-
-Every crate under `legacy/` needs its own explicit go from the user and stays in-tree until then.
-The `rofy` deletion is not a precedent, and the reason is measured. `rofy` was a predecessor of a
-shipped component with a 266-line surface that could be read in full. `analysis-legacy` is different
-in kind. It holds 2,830 fixture cases against the new stack's 1,192, and the new code runs none of
-them. `legacy/fixtures` is a harness-only crate, and `analysis-legacy/tests/test_fixtures.rs` drives
-those cases against the frozen oracle, with no new-stack test reading those directories. Case-name
-overlap is 15 of 138 for the IDE suite and 1 for the whole typecheck suite, so the corpus was
-reimplemented rather than ported. Name overlap understates behavioral overlap, so do not read it as
-2,830 cases of missing coverage. It does establish that nothing has shown the new suites cover what
-those do.
-
-The inputs are mined already, and that is the part that transfers. 1,967 distinct sources live in
-`crates/syntax/tests/corpus-legacy/` and run in the `syntax`, `format` and `semantics` invariant
-batteries. The testing page describes them. Expectations deliberately did not come with them,
-because the naming suite renders binding-resolution trees and the type suites use an older notation,
-so bulk-blessing would encode today's behavior as the contract. What runs was measured rather than
-assumed: all 2,447 extracted sources through `ry check`, with zero crashes and zero non-clean exits,
-and the invariants pass on all of them. This arm is therefore a regression net rather than a
-bug-finder today.
-
-Two findings from the mining are worth keeping. The frozen `type_syntax` suite stores bare
-annotation bodies without the `#:` marker, because that stack parsed the type grammar standalone.
-287 of its 303 cases therefore read as "expected a statement, found @" until the marker is
-prepended, which is a format difference and not a parser gap. Automated semantic mining also has a
-high noise floor, because the sources are fragments whose declaring context lives in the case's
-other files, so `@new Person` alone reports an unknown type. Adjudicating the type suites needs
-per-case context rather than a bulk pass.
-
-**What is left is the expectation half.** Write a triage that emits, for each case, its id, its
-source, its frozen expectation and its new rendering. Bucket the output by shape, and adjudicate it
-per suite against the type-system reference. Start with `naming`, which has 513 cases and no new-stack counterpart at all, then
-typecheck, `type_syntax`, diagnostics and IDE.
-
-The performance witnesses that apply to the new stack alone move out of `legacy/differential` before
-the deletion sweep. That is the sweep's only other prerequisite.
 
 ## Open: a size bound on a constructed type, and a decision on recursion widening
 
@@ -2385,3 +2365,4 @@ The end-to-end guard rests on the corpus suites.
 - **Editor features.** Hover quality, rendering `name : TYPE` with overload notes and constraint display. Annotation cursor features through re-lexing, giving hover, goto-definition and completion inside a `#:` comment. An insert-annotation code action that round-trips. Unused fade-outs. The formatter rewrite with `#:` block handling.
 - **The engine and its scheduling.** A red-green core with per-symbol interface firewalls, an SCC fixed point, tombstones, eviction and a stacker-grown validation spine. Durability tiers, with open documents LOW and the corpus HIGH, and a sound downgrade that re-mins through cutoff nodes. Memoized completion.
 - **The docs site.** Getting started leads with a real bug, installation is its own page, the typing guide and reference are contracts, and the architecture, structure and testing contributor pages are current.
+- **`legacy/` is deleted after a full port.** Every case of the previous implementation's suites was rendered on the shipping stack, bucketed by agreement and adjudicated against the typing reference, which fixed 18 real bugs and ported the distinct cases into the fixture suites. Its incrementality contracts became `crates/semantics/tests/test_incremental.rs`, which surfaced and fixed the missing per-name firewalls, its performance instruments became the one `test_perf.rs` witness, and its 1,967 programs stay as inputs in `crates/syntax/tests/programs/`.

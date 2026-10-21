@@ -216,9 +216,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                     "trust" => {
                         annotation.trusted = true;
                         if let Some(ty) = child.children().find(|c| is_type_kind(c.kind())) {
-                            lowering.definition_type = true;
                             let lowered = lowering.lower_type(&ty);
-                            lowering.definition_type = false;
                             annotation.declared = Some(TypeScheme {
                                 binders: Vec::new(),
                                 body: lowered,
@@ -247,9 +245,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                     "if-unknown" => {
                         annotation.if_unknown = true;
                         if let Some(ty) = child.children().find(|c| is_type_kind(c.kind())) {
-                            lowering.definition_type = true;
                             let lowered = lowering.lower_type(&ty);
-                            lowering.definition_type = false;
                             annotation.declared = Some(TypeScheme {
                                 binders: Vec::new(),
                                 body: lowered,
@@ -313,11 +309,23 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
         ));
     }
     // A violating block keeps only its errors: applying half-understood
-    // typing payload would cascade follow-on findings from one mistake.
+    // typing payload would cascade follow-on findings from one mistake. The
+    // type names it declares stay declared, with `Unknown` bodies, or every
+    // use of one would add an unknown-type finding to the one already made.
     if !lowering.errors.is_empty() || !annotation.typing_errors.is_empty() {
+        let definitions = annotation
+            .definitions
+            .iter()
+            .map(|definition| NamedDefinition {
+                body: unknown(db),
+                ..definition.clone()
+            })
+            .collect();
         return Annotation {
             errors: lowering.errors,
             typing_errors: std::mem::take(&mut annotation.typing_errors),
+            definitions,
+            definition_sites: std::mem::take(&mut annotation.definition_sites),
             range: annotation.range,
             ..Annotation::default()
         };
@@ -542,12 +550,14 @@ struct Lowering<'db> {
     depth: usize,
     beyond_check_depth: bool,
     beyond_parse_depth: bool,
-    /// Lowering the annotated definition's own declared type (a compact or
-    /// `@trust` annotation): only there an elided `->` on the OUTERMOST
-    /// function type means "inferred from the body". Everywhere else an elided
-    /// return means `NULL`, which is R's default for a function that returns
-    /// nothing declared. A nested function type, a `@param` or `@return`
-    /// payload, and a `@type` or `@alias` body are all such places.
+    /// Lowering the annotated definition's own checked declared type (the
+    /// compact form): only there an elided `->` on the OUTERMOST function type
+    /// means "inferred from the body". Everywhere else an elided return means
+    /// `NULL`, which is R's default for a function that returns nothing
+    /// declared. A nested function type, a `@param` or `@return` payload, a
+    /// `@type` or `@alias` body, and the `@trust` and `@if-unknown` coercions
+    /// (which adopt the written type without consulting the body) are all such
+    /// places.
     definition_type: bool,
 }
 
@@ -714,6 +724,16 @@ impl<'db> Lowering<'db> {
                     Ty::new(self.db, TyKind::List(element))
                 }
             }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
+                if node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD)
+                    && node.children().any(|c| is_type_kind(c.kind())) =>
+            {
+                self.errors.push((
+                    "a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them".to_owned(),
+                    node.text_range(),
+                ));
+                unknown(self.db)
+            }
             SyntaxKind::TYPE_TUPLE => {
                 let items = node
                     .children()
@@ -723,6 +743,24 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, TyKind::Tuple(items))
             }
             SyntaxKind::TYPE_RECORD => {
+                let mut seen = rustc_hash::FxHashSet::default();
+                for field in node
+                    .children()
+                    .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
+                {
+                    if let Some(name) = field
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::NAME)
+                        .and_then(syntax::ast::Name::cast)
+                        .and_then(|name| name.text())
+                        && !seen.insert(name.clone())
+                    {
+                        self.errors.push((
+                            format!("the field `{name}` appears twice in this `list{{...}}` type"),
+                            field.text_range(),
+                        ));
+                    }
+                }
                 let fields = node
                     .children()
                     .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -849,6 +887,16 @@ impl<'db> Lowering<'db> {
                     .children()
                     .find(|c| is_type_kind(c.kind()))
                     .map(|ty| self.lower_type(&ty));
+                if variadic.is_some() && (has_dots || name.is_none()) {
+                    self.errors.push((
+                        if has_dots {
+                            "a function type has at most one `...` rest parameter".to_owned()
+                        } else {
+                            "a parameter after `...` is matched by name only, so it needs a name: write `name: TYPE`".to_owned()
+                        },
+                        parameter.text_range(),
+                    ));
+                }
                 if has_dots {
                     variadic = Some(RestParameter {
                         element: ty.unwrap_or_else(|| any(self.db)),

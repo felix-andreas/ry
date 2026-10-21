@@ -4,16 +4,14 @@ ry is a language tool for R, shipped as a language server and a command-line too
 
 No static type checker exists for R, so ry defines its own typing semantics, and the typing reference at `docs/src/content/docs/reference/type-system.md` is their contract. R has no syntax for type annotations either, so annotations live in `#:` comments written in a JSDoc-like notation. Annotated code therefore stays ordinary R that every other tool can read.
 
-The workspace has two crate directories:
+The crates live in `crates/`:
 
-- `crates/` is the shipping product.
-  - `syntax`: the lexer and parser, which build lossless rowan trees.
-  - `semantics`: the salsa-based analysis core and the type checker.
-  - `format`: the formatter, which reads syntax only.
-  - `ide`: editor features, implemented as pure reads.
-  - `ry`: the LSP server and the CLI.
-  - `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
-- `legacy/` is the frozen previous implementation: `analysis-legacy`, `engine-legacy`, `roughly-legacy`, and their `fixtures` harness. It also holds `differential`, which is now only the cross-stack benchmark. The identity-parity program that once compared the two stacks is complete and retired by user decision, so the new stack's fixtures are the contract and no change needs the old stack to agree. Everything legacy lives in one directory because every dependency edge points into it: deleting the old stack will be a single directory removal, once the performance witnesses that only measure the new stack have moved out.
+- `syntax`: the lexer and parser, which build lossless rowan trees.
+- `semantics`: the salsa-based analysis core and the type checker.
+- `format`: the formatter, which reads syntax only.
+- `ide`: editor features, implemented as pure reads.
+- `ry`: the LSP server and the CLI.
+- `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
 
 AI agents drive development here, with light human steering. They keep two written homes current. The docs site in `docs/` holds the specs for users and contributors, and because those specs are contracts, keeping them accurate is mandatory. The knowledge base in `.agents/memory/MEMORY.md` holds engineering state, priorities, debt, and the non-obvious reasons behind designs, so that no agent has to rediscover them. Update both in the same session as the work that changes them.
 
@@ -51,7 +49,7 @@ These rules apply to everything an agent writes.
 - Keep answers short. The user asks for details when they want them.
 - Cut everything from a recommendation that does not change the choice.
 - When two options seem to conflict, look for the third option that resolves the conflict, and name it instead of presenting a false choice.
-- Do not use the interactive multiple-choice picker. Ask with a numbered list instead.
+- Never use the interactive question tool (`AskUserQuestion`); ask in plain text in your reply, with a numbered list for options (user directive).
 
 ## Example
 
@@ -73,7 +71,7 @@ The user has delegated full technical ownership to the agents: empty the backlog
 
 Design decisions that once needed a user check-in are now yours to make. Decide, implement, and record the decision and its rationale in `.agents/memory/decisions.md` (or in the docs page it belongs to) in the same session.
 
-Two constraints stand, both user directives: work directly on `main`, and do not open new pull requests.
+Work lands through pull requests (user directive).
 
 # Do not think like a human (user directive)
 
@@ -89,6 +87,8 @@ Human engineers de-risk work: they stage it, keep diffs small and reviewable, an
 The analysis core is incremental. `semantics` is a salsa database, so queries are memoized and an edit cooperatively cancels analysis that is still in flight. Per-item interface firewalls keep an edit inside one item from invalidating the rest of the project, and the LSP server publishes a fast diagnostics wave first and schedules the slower semantic wave for idle time.
 
 The architecture page at `docs/src/content/docs/contributing/architecture.md` is the contract. Read it before you touch the analysis core or the server's scheduling, and keep it accurate. Deferred performance work lives in `.agents/memory/backlog.md`.
+
+A check must never read a project-wide map directly, because then every edit anywhere would invalidate it. Go through a per-name or per-item tracked projection instead, and pin the property in `crates/semantics/tests/test_incremental.rs`.
 
 # Working autonomously
 
@@ -195,17 +195,16 @@ The recorded decision must state the previous source of truth, what was duplicat
 
 - Prefer fixtures. They are the primary way to validate analysis behavior, they read well in a diff, and they make it cheap to write many tests quickly.
 - Fuzz the whole pipeline from day one (user directive). Every stage (parsing, lowering, naming, inference, diagnostics, incrementality, formatting, the IDE layer) gets fuzz and property coverage the day it exists, never as a later add-on, and a bounded pass belongs in the default test suite. The fuzzing decision record in `decisions.md` has the details.
-- Add or tighten a fixture before writing a parser-local or engine-local unit test, unless the behavior is genuinely awkward to express as a fixture.
+- Add or tighten a fixture before writing a parser-local or crate-local unit test, unless the behavior is genuinely awkward to express as a fixture.
 - Favor fixture renderers that expose semantic facts over ones that expose implementation detail.
 - When adding a new phase or module, add or extend a fixture suite for it before relying on ad hoc unit tests.
 - Use the lightest fixture change that captures the failing shape.
 - Read the testing page (`docs/src/content/docs/contributing/testing.md`) before you change the fixture harness or add a fixture suite.
-- Run a single fixture case with `FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures`. The other fixture targets are `test_naming_fixtures`, `test_lowering_fixtures`, and `test_lint_fixtures` in `semantics`; `test_syntax_fixtures` and `test_error_messages` in `syntax`; `test_ide_fixtures` in `ide`; and `test_format_fixtures` in `format`.
-- While iterating, prefer focused crate tests; `cargo test -p semantics` is the default crate test command.
+- Run a single fixture case with `just fixture group__case [test-binary] [package]`, which defaults to `test_typing_fixtures` in `semantics`. The testing page lists every suite's test target.
+- While iterating, prefer focused crate tests such as `cargo test -p semantics`. `just gate` is the full check to run before a change lands.
 - A fixture's `group__case` name is its test identity, so keep it stable, and reject a duplicate name across the suite instead of letting one case silently shadow another.
 - Treat fixtures as the desired semantics contract, not as a regression suite that preserves known-wrong behavior. Review every expectation change deliberately, update an expectation only when wording or behavior improves on purpose, and never commit an intentionally wrong outcome just to keep the suite green.
 - Some fixture cases are unreasonable or no longer worth keeping. Clean such a case up rather than treating it as authoritative by default.
-- Do not reintroduce end-to-end named-argument mismatch fixtures until function-parameter lowering can represent the semantics they need.
 
 # Rules hygiene
 

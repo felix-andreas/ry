@@ -82,4 +82,4 @@ These are known bugs, not design decisions:
   even then. In a package, the same report for a package missing from `DESCRIPTION` is correct,
   because R CMD check warns about it too.
 - **Strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an undetermined type.
-  No annotation on a binding clears a strict finding yet; `# ry: allow(strict)` does.
+  `# ry: allow(strict)` on the line silences it.

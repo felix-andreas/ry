@@ -1240,6 +1240,106 @@ async fn did_close_survives_a_failing_disk_reread() {
     context.shutdown().await;
 }
 
+fn report_messages(report: DocumentDiagnosticReportResult) -> Vec<String> {
+    match report {
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) => full
+            .full_document_diagnostic_report
+            .items
+            .into_iter()
+            .map(|item| item.message)
+            .collect(),
+        other => panic!("expected a full report, got: {other:?}"),
+    }
+}
+
+fn mentions_unresolved_helper(messages: &[String]) -> bool {
+    messages.iter().any(|message| message.contains("`helper`"))
+}
+
+#[tokio::test]
+async fn watched_file_create_and_delete_change_cross_file_resolution() {
+    let mut context = setup_test_with_pull_diagnostics(&[]).await;
+    let consumer = context.open("R/consumer.R", "value <- helper()\n").await;
+    let before = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(mentions_unresolved_helper(&before), "{before:?}");
+
+    let helper = context.workspace_dir.join("R/helper.R");
+    std::fs::write(&helper, "helper <- function() 1L\n").expect("write helper");
+    context.notify_watched_file_changed("R/helper.R", FileChangeType::CREATED);
+    let created = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(!mentions_unresolved_helper(&created), "{created:?}");
+
+    std::fs::remove_file(&helper).expect("delete helper");
+    context.notify_watched_file_changed("R/helper.R", FileChangeType::DELETED);
+    let deleted = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(mentions_unresolved_helper(&deleted), "{deleted:?}");
+
+    context.shutdown().await;
+}
+
+// The open buffer is authoritative: a change on disk underneath it is not
+// read, and closing the buffer discards unsaved edits for the on-disk text.
+#[tokio::test]
+async fn an_open_buffer_shadows_the_disk_until_closed() {
+    let mut context = setup_test_with_pull_diagnostics(&[
+        ("R/helper.R", "helper <- function() 1L\n"),
+        ("R/consumer.R", "value <- helper()\n"),
+    ])
+    .await;
+    let helper = context
+        .open("R/helper.R", "helper <- function() 1L\n")
+        .await;
+    let consumer = context.open("R/consumer.R", "value <- helper()\n").await;
+
+    std::fs::write(
+        context.workspace_dir.join("R/helper.R"),
+        "renamed_on_disk <- 1L\n",
+    )
+    .expect("rewrite helper on disk");
+    context.notify_watched_file_changed("R/helper.R", FileChangeType::CHANGED);
+    let disk_changed = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(
+        !mentions_unresolved_helper(&disk_changed),
+        "{disk_changed:?}"
+    );
+
+    std::fs::write(
+        context.workspace_dir.join("R/helper.R"),
+        "helper <- function() 1L\n",
+    )
+    .expect("restore helper on disk");
+    context.replace_file_full(&helper, 2, "renamed_in_buffer <- 1L\n");
+    let edited = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(mentions_unresolved_helper(&edited), "{edited:?}");
+
+    context.close_file(&helper);
+    let closed = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(!mentions_unresolved_helper(&closed), "{closed:?}");
+
+    context.shutdown().await;
+}
+
+// A transiently malformed keystroke reports its syntax error alone, and the
+// next well-formed edit restores the semantic findings.
+#[tokio::test]
+async fn a_malformed_edit_suppresses_then_restores_semantic_diagnostics() {
+    let mut context = setup_test_with_pull_diagnostics(&[]).await;
+    let file = context.open("R/main.R", "value <- helper()\n").await;
+    let clean = report_messages(context.document_diagnostic(&file, None).await);
+    assert!(mentions_unresolved_helper(&clean), "{clean:?}");
+
+    context.replace_file_full(&file, 2, "value <- helper(\n");
+    let malformed = report_messages(context.document_diagnostic(&file, None).await);
+    assert!(!mentions_unresolved_helper(&malformed), "{malformed:?}");
+    assert!(!malformed.is_empty(), "the syntax error is reported");
+
+    context.replace_file_full(&file, 3, "value <- helper()\n");
+    let restored = report_messages(context.document_diagnostic(&file, None).await);
+    assert!(mentions_unresolved_helper(&restored), "{restored:?}");
+
+    context.shutdown().await;
+}
+
 #[tokio::test]
 async fn completion() {
     let mut context = setup_test(&[]).await;
@@ -2021,15 +2121,6 @@ async fn pull_diagnostics_match_pushed_across_files() {
         .map(|diagnostic| diagnostic.message.clone())
         .collect();
 
-    let report_messages = |report: DocumentDiagnosticReportResult| match report {
-        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) => full
-            .full_document_diagnostic_report
-            .items
-            .iter()
-            .map(|item| item.message.clone())
-            .collect::<Vec<_>>(),
-        other => panic!("expected a full report, got: {other:?}"),
-    };
     let pulled_a = report_messages(context.document_diagnostic(&file_a_uri, None).await);
     let pulled_b = report_messages(context.document_diagnostic(&file_b_uri, None).await);
 

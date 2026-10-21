@@ -1,0 +1,194 @@
+#==== loops
+#---- for_body_introduction_might_be_undefined_after_loop
+#~~~~ R/main.R
+f <- function() {
+  for (item in list(1L)) {
+    value <- 1L
+  }
+  value
+}
+#++++
+== R/main.R
+f: fn() -> integer
+67..72 warning[maybe-undefined] `value` is only assigned on some paths here, so this read can find nothing.
+
+#---- while_body_introduction_might_be_undefined_after_loop
+#~~~~ R/main.R
+f <- function() {
+  while (TRUE) {
+    x <- 1L
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn() -> integer
+53..54 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+
+#---- repeat_body_introduction_is_defined_after_loop
+#~~~~ R/main.R
+f <- function() {
+  repeat {
+    x <- 1L
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn() -> integer
+
+#==== within_branch_resolves_locally
+#---- reference_within_if_body_resolves_to_local_binding
+#~~~~ R/main.R
+f <- function() {
+  if (TRUE) {
+    x <- 1L
+    x
+  }
+}
+#++++
+== R/main.R
+f: fn() -> integer | NULL
+
+#---- reference_within_for_body_resolves_to_local_binding
+#~~~~ R/main.R
+f <- function() {
+  for (item in list(1L)) {
+    x <- 1L
+    x
+  }
+}
+#++++
+== R/main.R
+f: fn() -> NULL
+
+#---- reference_within_while_body_resolves_to_local_binding
+#~~~~ R/main.R
+f <- function() {
+  while (TRUE) {
+    x <- 1L
+    x
+  }
+}
+#++++
+== R/main.R
+f: fn() -> NULL
+
+#==== conditionals
+#---- if_branch_introduction_might_be_undefined_after_conditional
+#~~~~ R/main.R
+f <- function(cond) {
+  if (cond) {
+    x <- 1L
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> integer
+54..55 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+
+#---- else_branch_introduction_might_be_undefined_after_conditional
+#~~~~ R/main.R
+f <- function(cond) {
+  if (cond) {
+    1L
+  } else {
+    x <- 2L
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> integer
+72..73 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+
+#---- nested_if_introduction_might_be_undefined_after_outer_conditional
+#~~~~ R/main.R
+f <- function(cond) {
+  if (cond) {
+    if (cond) {
+      x <- 1L
+    }
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> integer
+78..79 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+
+#---- nested_loop_introduction_might_be_undefined_after_conditional
+#~~~~ R/main.R
+f <- function(cond) {
+  if (cond) {
+    for (item in list(1L)) {
+      x <- 1L
+    }
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> integer
+91..92 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+
+#---- no_warning_when_existing_name_is_assigned_in_all_branches
+#~~~~ R/main.R
+f <- function(cond) {
+  x <- 0L
+  if (cond) {
+    x <- 1L
+  } else {
+    x <- 2L
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> integer
+24..25 warning[unused] `x` is assigned but never used.
+
+#---- no_warning_when_fresh_name_is_assigned_in_all_branches
+#~~~~ R/main.R
+f <- function(cond) {
+  if (cond) {
+    x <- 1L
+  } else {
+    x <- 2L
+  }
+  x
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> integer
+
+#---- else_branch_cannot_read_then_branch_introduction
+#~~~~ R/main.R
+f <- function(cond) {
+  if (cond) {
+    x <- 1L
+  } else {
+    x
+  }
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> integer
+40..41 warning[unused] `x` is assigned but never used.
+63..64 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+
+#---- while_body_read_sees_write_around_back_edge
+#~~~~ R/main.R
+f <- function(cond) {
+  while (cond) {
+    y <- x
+    x <- 1L
+  }
+  y
+}
+#++++
+== R/main.R
+f: fn(cond: logical) -> Unknown
+48..49 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+68..69 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing.

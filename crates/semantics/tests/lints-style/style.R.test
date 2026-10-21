@@ -45,6 +45,13 @@ f <- function(count) count + 1
 #++++
 clean
 
+#---- dot_prefixed_parameters_are_throwaway
+shout <- function(text, volume, .ignored) {
+  toupper(text)
+}
+#++++
+24..30 warning[unused-parameter] parameter `volume` is never used.
+
 #---- dots_never_reported
 f <- function(...) 1
 #++++

@@ -1,0 +1,62 @@
+#==== locals
+#---- local_assignment_introduces_fresh_binding
+f <- function() {
+  value <- 1L
+  value
+}
+#++++
+# f
+  b0 value local 20..25
+  b1 f top-level 0..1
+  0..1 f <- b1
+  20..25 value <- b0
+  34..39 value -> b0
+
+#---- local_assignment_shadows_top_level_binding
+x <- 1L
+f <- function() {
+  x <- "ok"
+  x
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 x local 20..21
+  b1 f top-level 0..1
+  0..1 f <- b1
+  20..21 x <- b0
+  32..33 x -> b0
+
+#---- local_assignment_rebinds_parameter_name
+f <- function(x) {
+  x <- "ok"
+  x
+}
+#++++
+# f
+  b0 x parameter 14..15
+  b1 f top-level 0..1
+  0..1 f <- b1
+  21..22 x <- b0
+  33..34 x -> b0
+
+#---- assignment_rhs_can_use_other_outer_binding_while_rebinding_different_name
+x <- 1L
+f <- function(y) {
+  x <- y
+  x
+}
+#++++
+# x
+  b0 x top-level 0..1
+  0..1 x <- b0
+# f
+  b0 y parameter 14..15
+  b1 x local 21..22
+  b2 f top-level 0..1
+  0..1 f <- b2
+  21..22 x <- b1
+  26..27 y -> b0
+  30..31 x -> b1
