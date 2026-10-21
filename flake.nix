@@ -82,9 +82,8 @@
             strictDeps = true;
           };
 
-          commonArgsLinux = commonArgs // {
+          commonArgsNative = commonArgs // {
             cargoExtraArgs = "-p ry-lang";
-            CARGO_BUILD_TARGET = "x86_64-unknown-linux-gnu";
           };
 
           # The dep-only build stubs out every local .rs file, but chrono compiles against the
@@ -94,16 +93,17 @@
             cp -r --no-preserve=mode ${./patches} "$out"/patches
           '';
 
-          cargoArtifactsLinux = craneLib.buildDepsOnly (
-            commonArgsLinux
+          # For NixOS and flake users; the only build the sandbox can run, so it carries the tests.
+          cargoArtifactsNative = craneLib.buildDepsOnly (
+            commonArgsNative
             // {
               extraDummyScript = keepPatchesInDummySrc;
             }
           );
-          packageLinux = craneLib.buildPackage (
-            commonArgsLinux
+          packageNative = craneLib.buildPackage (
+            commonArgsNative
             // {
-              cargoArtifacts = cargoArtifactsLinux;
+              cargoArtifacts = cargoArtifactsNative;
               # Stub materialization writes to the user cache; the sandbox's HOME is read-only.
               preCheck = ''
                 export XDG_CACHE_HOME="$TMPDIR/.cache"
@@ -111,13 +111,14 @@
             }
           );
 
-          # zig bundles libSystem stubs only; the graph stays framework-free (see
-          # patches/iana-time-zone), so no macOS SDK is needed.
+          # Release binaries are cross-linked by zig and cannot run in the sandbox, so they skip
+          # tests. Linux targets glibc 2.17 with the standard /lib64 loader, so it can load R. zig
+          # has only libSystem stubs for macOS, so the graph stays framework-free (patches/iana-time-zone).
           makeCrossArgs =
             target:
             commonArgs
             // {
-              CARGO_BUILD_TARGET = target;
+              CARGO_BUILD_TARGET = builtins.head (pkgs.lib.splitString "." target);
 
               nativeBuildInputs = [
                 pkgs.cargo-zigbuild
@@ -156,7 +157,7 @@
               (makeCrossArgs target)
               // {
                 extraDummyScript = keepPatchesInDummySrc;
-                buildPhaseCargoCommand = "cargo zigbuild --release -p ry-lang";
+                buildPhaseCargoCommand = "cargo zigbuild --release --target ${target} -p ry-lang";
                 checkPhaseCargoCommand = "true";
               }
             );
@@ -169,13 +170,16 @@
                 cargoArtifacts = makeCrossArtifacts target;
                 buildPhaseCargoCommand = ''
                   cargoBuildLog=$(mktemp cargoBuildLogXXXX.json)
-                  cargo zigbuild --release --message-format json-render-diagnostics -p ry-lang >"$cargoBuildLog"
+                  cargo zigbuild --release --target ${target} --message-format json-render-diagnostics -p ry-lang >"$cargoBuildLog"
                 '';
+                # A store path in a release binary (ELF interpreter, RUNPATH) fails the build.
+                allowedReferences = [ ];
               }
             );
         in
         {
-          ry-linux-x86_64 = packageLinux;
+          default = packageNative;
+          ry-linux-x86_64 = buildCrossPackage "x86_64-unknown-linux-gnu.2.17";
           ry-macos-aarch64 = buildCrossPackage "aarch64-apple-darwin";
           ry-windows-x86_64 = buildCrossPackage "x86_64-pc-windows-gnu";
         }

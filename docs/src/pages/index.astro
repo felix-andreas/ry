@@ -365,6 +365,7 @@ const year = new Date().getFullYear();
         </header>
 
         <main>
+            <!-- ---------- hero ---------- -->
             <section id="hero">
                 <div class="hero-viewport" id="hero-viewport">
                     <canvas id="hero-canvas" aria-hidden="true"></canvas>
@@ -1052,19 +1053,32 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
         </footer>
 
         <script>
+            // ======================================================================
+            // Hero particle field. On load the field opens as fine sharp particles
+            // streaming on a flow current, which then fly in and assemble into the R logo
+            // leaving soft light trails. Stirring the gathered shape with the pointer
+            // charges it — it shivers, then seethes — until it detonates into the
+            // swarm and re-gathers as the other shape (logo <-> "ry"). As you then scroll
+            // the hero, the same particles are constrained into the headline "Modern
+            // developer tooling for R." — the letters are drawn by the particles
+            // themselves; there is no separate DOM heading laid on top.
+            // ======================================================================
             type Particle = {
                 x: number;
                 y: number;
                 vx: number;
                 vy: number;
-                // Logo, "ry" wordmark and headline points; unclaimed, the particle flows freely.
+                // The three shapes a particle can lock onto, in scroll order: its logo
+                // point (assembled during the intro), its "ry" wordmark point, and its
+                // headline point. When claimed by none it flows freely on the field.
                 lx: number;
                 ly: number;
                 rx: number;
                 ry: number;
                 hx: number;
                 hy: number;
-                // ~1 settles onto the shapes, 0 is a pure drifter.
+                // How strongly this particle joins the shapes: ~1 = settles onto the glyph
+                // and then the letters, 0 = a pure drifter that only ever flows.
                 logoness: number;
                 depth: number;
             };
@@ -1073,11 +1087,15 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             const heroCanvas = document.getElementById(
                 "hero-canvas",
             ) as HTMLCanvasElement | null;
-            // The field fills the sticky 100svh pin, not the tall scroll stage that drives the morph.
+            // The particle field fills the sticky viewport pin (100svh), not the tall
+            // scroll stage (#hero) that drives the scroll morph.
             const heroEl = document.getElementById(
                 "hero-viewport",
             ) as HTMLElement | null;
 
+            // As you scroll, the particles resolve through two text shapes: first the
+            // "ry" wordmark, then the headline (wrapped to two lines so the particle
+            // text roughly matches the hidden <h1>).
             const WORDMARK_LINES = ["ry"];
             const HEADING_LINES = ["Modern developer", "tooling for R."];
 
@@ -1090,18 +1108,31 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     "(prefers-reduced-motion: reduce)",
                 ).matches;
 
-                // Seconds: the field streams for INTRO_DELAY, then assembles onto the logo and holds.
+                // Load intro (seconds): the field streams free on the flow current for
+                // INTRO_DELAY so the hero opens as a living swarm, then particles fly in and
+                // assemble onto the logo. `intro` (below) rises 0->1 over the assemble window
+                // and then stays 1 — the logo holds rather than dispersing.
                 const INTRO_DELAY = 0.8;
                 const ASSEMBLE = 1.4;
-                // Stirring the shape charges it; at full charge it bursts and re-gathers as the other shape.
-                // Charge drains when stirring stops, so a parked pointer never fires; clicks charge too,
-                // for touch. A deliberate stir (~600-800 px/s) fires in two to three seconds.
+                // Stir-to-burst: parked at the top, the gathered shape holds until the
+                // reader agitates it. Pointer travel across the glyph (or a click on it)
+                // builds charge and the shape grows visibly more turbulent; at full
+                // charge it detonates into the streaming swarm, which then re-gathers
+                // onto the other shape — logo, then the "ry" wordmark, back and forth.
+                // Charge drains whenever the stirring stops, so a parked pointer never
+                // fires. The rates are set against the drain so gentle motion only
+                // simmers while a deliberate stir (~600-800 px/s) fires in roughly two
+                // to three seconds; clicks charge too, mainly for touch, where there is
+                // no hover to stir with.
                 const CHARGE_PER_PX = 1 / 700;
-                // A third of the charge plus headroom for the drain, so three unhurried clicks fire.
+                // A click is a third of the charge with headroom for the drain between
+                // clicks, so three unhurried clicks fire (and two rapid ones just do).
                 const CHARGE_CLICK = 0.5;
                 const CHARGE_DRAIN = 1 / 2.5;
-                // Detonating while the spring still holds snaps the shrapnel back to the glyph and reads
-                // as an implosion; a longer release makes the logo sag before the bang.
+                // The release is near-instant, and the burst fires only once it has completed.
+                // Detonating while the shape still holds its spring would snap the shrapnel
+                // straight back to the glyph — it reads as an implosion, not an explosion. Too
+                // long a release and the logo visibly sags before the bang.
                 const RELEASE = 0.15;
                 const STREAM = 4.5;
                 const RISE = 2;
@@ -1118,7 +1149,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 let clock = 0;
                 let lastTime = 0;
                 let progress = 0;
-                // Scrolling resets the stir state, so returning to the top restarts calm, on the logo.
+                // Stir state: the shape currently gathered (or gathering), how far the
+                // reader has charged it, and where the release -> stream -> gather
+                // sequence stands after a detonation. Scrolling resets all of it, so
+                // returning to the top always restarts calm, on the logo.
                 let shapeIndex = 0;
                 let charge = 0;
                 let burstState:
@@ -1144,7 +1178,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 function particleCount() {
                     return cssW < 720 ? 3900 : cssW < 1100 ? 6300 : 8600;
                 }
-                // One dot size: depth reads as brightness alone, so the field is one population.
+                // Every dot is this one size — depth reads as brightness alone, never as size,
+                // so the field is one population rather than near dots and far dots. Fractional
+                // on purpose: the grain sits a touch above a hairline without going chunky, and
+                // positions are fractional anyway, so nothing gets sharper by rounding it.
                 const GRAIN = 1.6;
                 function sampleStride() {
                     return cssW < 720 ? 4 : 3;
@@ -1187,7 +1224,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     );
                 }
 
-                // The adaptive stride lands the point count near the particle budget.
+                // Shared alpha>128 stride sampler over an already-rendered offscreen
+                // canvas. `place` maps a sampled pixel to a CSS-space target; the
+                // adaptive stride lands the point count near the particle budget.
                 function sampleAlpha(
                     data: Uint8ClampedArray,
                     w: number,
@@ -1218,7 +1257,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     return pts;
                 }
 
-                // Also fixes the shared centroid the whole loop reuses.
+                // Logo target: draw /logo.svg into an offscreen canvas at SS=2 and
+                // sample its alpha. Also fixes the shared centroid the whole loop reuses.
                 function buildLogoTarget(): Target[] {
                     const SS = 2;
                     const logoH = Math.min(cssH * 0.42, 320);
@@ -1256,7 +1296,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     );
                 }
 
-                // Centered on the shared centroid so it lines up with the hidden <h1>.
+                // Headline target: render the wrapped headline (matching the <h1>'s sans
+                // font and weight) into an offscreen canvas, then run the same alpha
+                // sampler. Centered on the shared centroid so it lines up with the DOM copy.
                 function buildTextTarget(
                     lines: string[],
                     widthFrac = 0.7,
@@ -1327,8 +1369,12 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     const count = particleCount();
                     particles = [];
                     for (let i = 0; i < count; i++) {
-                        // Spread evenly with velocity taken from the current, so the first frame already streams
-                        // instead of easing out of a blob.
+                        // Spread evenly over the whole field: released particles flow on the
+                        // current and wrap at the edges, so an even field is what the swarm
+                        // settles back to and the hero opens already streaming rather than as a
+                        // blob that has to spread. Starting velocity is taken from the current
+                        // itself rather than a random direction, so the very first frame is
+                        // already streaming coherently instead of easing out of a freeze.
                         const x = Math.random() * cssW;
                         const y = Math.random() * cssH;
                         const ang = flowAngle(x, y, 0);
@@ -1343,8 +1389,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                             ry: 0,
                             hx: 0,
                             hy: 0,
-                            // ~80% settle onto the glyph, with a small residual so the strokes do not look stamped;
-                            // the rest never join a shape and keep the field alive.
+                            // ~80% of particles settle (almost) fully onto the glyph so the R
+                            // reads clearly at rest — a small residual keeps the strokes from
+                            // looking mechanically stamped; the other ~20% never join a shape and
+                            // keep flowing across the field so it always feels alive.
                             logoness:
                                 Math.random() < 0.8
                                     ? 0.96 + Math.random() * 0.04
@@ -1354,8 +1402,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     }
                 }
 
-                // All targets are ordered left to right and paired by fractional index, so particles flow
-                // sideways between shapes instead of crossing each other.
+                // Give every particle its logo, "ry", and headline points. All three
+                // target sets are ordered left-to-right and paired by fractional index, so
+                // particles flow horizontally between the shapes rather than crossing over
+                // each other. The point counts differ from the particle count, so a few
+                // points are shared — the drift hides the slight overlap.
                 function pairTargets() {
                     if (
                         !logoTargets.length ||
@@ -1412,8 +1463,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     heroCanvas!.style.width = cssW + "px";
                     heroCanvas!.style.height = cssH + "px";
                     context.setTransform(dpr, 0, 0, dpr, 0, 0);
-                    // The transparent <h1> keeps its layout box, so anchoring on it puts the particle letters
-                    // exactly where the subhead expects the heading.
+                    // Anchor the particle headline on the invisible <h1>'s laid-out box, so
+                    // the particle letters land exactly where the heading would sit and the
+                    // subhead below flows under them without overlap. The <h1> is fully
+                    // transparent (a screen-reader label) but keeps its layout box.
                     const headline = heroEl!.querySelector(
                         ".hero-copy h1",
                     ) as HTMLElement | null;
@@ -1426,7 +1479,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         centroidY = cssH * 0.44;
                     }
                     logoTargets = buildLogoTarget();
-                    // The wordmark is two letters, so the shared font-size cap, not the width cap, binds.
+                    // The wordmark is two letters, so the width cap barely binds — the
+                    // shared font-size cap keeps its cap height near the headline's.
                     wordmarkTargets = buildTextTarget(
                         WORDMARK_LINES,
                         0.34,
@@ -1437,6 +1491,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     pairTargets();
                 }
 
+                // Logo-assembly amount for the load intro: 0 before it starts, eases up to 1
+                // as particles fly onto the glyph, then stays 1 — the logo holds instead of
+                // dispersing. The idle cycle and scroll morph take the shape from there.
                 function introAmount() {
                     if (clock <= INTRO_DELAY) return 0;
                     if (clock < INTRO_DELAY + ASSEMBLE)
@@ -1444,7 +1501,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     return 1;
                 }
 
-                // 1 = parked on its points, 0 = exploded into the swarm.
+                // How gathered the current shape is (1 = parked on its points, 0 =
+                // exploded into the streaming swarm) across the burst sequence.
                 function burstClaim() {
                     if (burstState === "releasing")
                         return 1 - smooth01(stateClock / RELEASE);
@@ -1454,16 +1512,22 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     return 1;
                 }
 
-                // The speed spread is wide on purpose: the flow current moves neighbours in lockstep, so
-                // without it the released shape would slide off as one lump.
+                // One outward impulse, fired the instant the release completes, so the
+                // shape bursts into radial streaks rather than just fading into the
+                // swarm. The speed spread is wide on purpose: the flow current moves
+                // neighbours in lockstep, so without it the released shape would slide
+                // off as one lump instead of thinning out into a swarm.
                 function detonate() {
                     const wellRadius = Math.min(cssW, cssH) * 0.85;
                     for (const particle of particles) {
                         const dx = particle.x - centroidX;
                         const dy = particle.y - centroidY;
                         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                        // Squaring the roll sends most shrapnel drifting and a thin fast fraction across the field;
-                        // the free field takes a distance-decaying shock wave so the blast visibly travels.
+                        // The shape becomes shrapnel: squaring the roll sends most of it drifting
+                        // out while a thin fast fraction is thrown clear across the field, which
+                        // is what makes it read as a burst rather than a uniform expanding ring.
+                        // The free field is not a bystander — it takes a shock wave that falls
+                        // off with distance, so the blast visibly travels outward through it.
                         const speed =
                             particle.logoness > 0
                                 ? 9 + Math.random() * Math.random() * 46
@@ -1478,7 +1542,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     }
                 }
 
-                // The target swap happens while nothing is gathered, so there is no visible jump.
+                // Advances the stir sequence: a fully charged shape releases, detonates,
+                // streams, and gathers as the other shape. The target swap happens while
+                // nothing is gathered, so there is no visible jump.
                 function advanceBurst(dt: number) {
                     if (burstState === "held") {
                         if (charge >= 1) {
@@ -1511,44 +1577,72 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     }
                 }
 
-                // Fading toward black instead of clearing leaves light trails; the trail vanishes as the
+                // One frame. Every particle sits on one axis: how strongly a shape claims it.
+                // Unclaimed, it rides the flow current and wraps at the field edges; claimed,
+                // it springs onto its point in the current shape. So the field streams before
+                // the first assembly and again between shapes, and the ~20% that never join a
+                // shape stream the whole time. Parked at the top the shape holds until the
+                // reader stirs it into detonating (alternating between the logo and the "ry"
+                // wordmark), and scrolling slides it into the headline (scrolling back up
+                // returns it to the logo).
+                // Rather than clearing, the frame is faded toward black so moving
+                // particles leave soft light trails; the trail vanishes to a full clear as the
                 // scroll text locks in so the letters read crisp.
                 function render(now: number) {
-                    // The morph completes well before the end of the scroll track; the rest just holds it.
+                    // The morph completes well before the end of the scroll track so the text
+                    // resolves quickly; the remaining scroll just holds it.
                     const morph = smooth01(clamp01(progress / 0.72));
                     const intro = introAmount();
                     const claim = burstClaim();
                     const shapeSel = shapeIndex;
-                    // What the free particles orbit: fades in with the intro and out with each burst.
+                    // How much of a shape is actually standing there right now — it is what the
+                    // free particles orbit, so it fades in with the load intro and out with each
+                    // burst.
                     const presence = claim * intro;
                     const wellCore = Math.min(cssW, cssH) * 0.19;
                     const wellRadius = Math.min(cssW, cssH) * 0.85;
+                    // How strongly the scroll text is claimed — ramps in fast so the headline
+                    // reads crisp. Drives the trail crispening below.
                     const textForm = smooth01(clamp01(morph / 0.32));
                     context.globalAlpha = 1;
-                    // Charging lengthens the trails, so the boil reads as energy before the dots travel far.
+                    // Fade toward black for motion trails; the trail vanishes to a full clear
+                    // as the scroll text locks in so the letters read crisp, not smeared.
+                    // Charging lengthens the trails, so the boil reads as energy even
+                    // before the dots have travelled far.
                     context.fillStyle = `rgba(0,0,0,${(0.13 + 0.86 * textForm) * (1 - 0.6 * charge)})`;
                     context.fillRect(0, 0, cssW, cssH);
                     context.fillStyle = "#fff";
+                    // Looseness peaks mid-transition so the field breathes as it reshapes.
                     const settle = Math.max(
                         intro < 1 ? Math.sin(Math.PI * intro) : 0,
                         Math.sin(Math.PI * morph),
                     );
                     for (let i = 0; i < particles.length; i++) {
                         const p = particles[i];
+                        // `shaped` = does this dot take part in shapes (1 after the intro), vs a
+                        // pure drifter (0). `form` = how gathered onto a shape it is right now
+                        // (drops to 0 as the cycle scatters it into the swarm).
                         const shaped = p.logoness * intro;
                         const form = shaped * claim;
                         let pullX = 0;
                         let pullY = 0;
                         if (form > 0.0001) {
+                            // The shape it gathers onto (logo or "ry" by the cycle), slid
+                            // across to the headline as you scroll.
                             const shapeX = p.lx + (p.rx - p.lx) * shapeSel;
                             const shapeY = p.ly + (p.ry - p.ly) * shapeSel;
                             const gx = shapeX + (p.hx - shapeX) * morph;
                             const gy = shapeY + (p.hy - shapeY) * morph;
-                            // The pull scales with the claim, so a dot eases out of the flow as the shape gathers.
+                            // Nothing holds a released particle in place — the pull exists only in
+                            // proportion to how claimed the shape is, so a dot eases out of the flow
+                            // as the shape gathers and back into it as the shape lets go.
                             const springK = (0.045 + 0.07 * form) * form;
                             pullX = (gx - p.x) * springK;
                             pullY = (gy - p.y) * springK;
-                            // The spring loosens as charge rises, so the shape shivers, seethes, then strains.
+                            // Stirring heats the glyph: the charge drives a per-dot boil plus
+                            // a fine shared current, and the spring loosens as it rises, so
+                            // the shape shivers at first touch, seethes and swells as the
+                            // charge builds, and visibly strains before it blows.
                             if (charge > 0.001) {
                                 const heat = charge * form;
                                 const swirl = flowAngle(
@@ -1566,16 +1660,29 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                                     Math.sin(swirl) * 1.8 * heat;
                             }
                         }
-                        // One shared flow angle makes neighbours travel together in currents; a per-particle angle
-                        // degenerates into jitter. Speed varies by depth so clumps stretch into ribbons.
+                        // Flow current: whatever the shape has not claimed rides the current, so
+                        // the field streams before the first assembly and again after each burst,
+                        // and only the gathered dots hold still.
+                        // Flow direction is shared — every dot reads the same noise field, so
+                        // neighbours travel together and the swarm streams in visible currents and
+                        // eddies. (Offsetting the *angle* per particle would scatter the
+                        // directions and the field would degenerate into individual jitter.) Only
+                        // the speed varies, by depth, so a clump stretches along the current into a
+                        // ribbon rather than sliding as a rigid lump.
                         const flow =
                             0.055 * (1 - form) * (0.55 + 0.95 * p.depth);
                         const angle = flowAngle(p.x, p.y, clock);
                         p.vx += pullX + Math.cos(angle) * flow;
                         p.vy += pullY + Math.sin(angle) * flow;
-                        // Free particles orbit the gathered shape; inside its radius the pull inverts into a push
-                        // so the field skims the glyph instead of piling up. Weighted by `1 - shaped`, not
-                        // `form`, so a dot joining the glyph is not shoved back out by it.
+                        // A gathered shape has mass: everything still loose in the field is drawn
+                        // toward it and swept around it, so the free particles read as the same
+                        // swarm reacting to the logo rather than as a second, unrelated layer.
+                        // Inside the shape's own radius the pull inverts into a push, so the field
+                        // orbits and skims the glyph instead of collapsing into a pile at its
+                        // centre. The well fades out with the shape, and during the burst there is
+                        // nothing left to orbit — the whole field just streams. Weighted by
+                        // `1 - shaped`, not by `form`: a dot on its way onto the glyph must not be
+                        // shoved back out by the very shape it is joining.
                         const wellPull = 0.15 * presence * (1 - shaped);
                         if (wellPull > 0.0005) {
                             const wx = centroidX - p.x;
@@ -1589,7 +1696,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                                 Math.min(1, 1 - wellCore / dist),
                             );
                             const acc = wellPull * falloff;
-                            // A stronger radial term would vacuum the field into a ring and empty the corners.
+                            // Mostly swirl, only a little draw: a stronger radial term would vacuum
+                            // the outer field into a ring and leave the corners empty.
                             p.vx +=
                                 ((wx / dist) * radial * 0.45 -
                                     (wy / dist) * 0.9) *
@@ -1610,19 +1718,26 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                                 p.vy += mdy * inv * push;
                             }
                         }
+                        // Drifters keep their momentum so the flow streams; assembled shape dots
+                        // damp harder so the shape settles crisp.
                         const damp = 0.92 - 0.05 * form;
                         p.vx *= damp;
                         p.vy *= damp;
                         p.x += p.vx;
                         p.y += p.vy;
-                        // No wrapping once a shape claims the dot: a teleport mid-gather reads as a glitch.
+                        // A released dot wraps the field so the stream is endless in every
+                        // direction. Wrapping is suppressed the moment a shape starts claiming it,
+                        // because a teleport mid-gather reads as a glitch rather than as flow.
                         if (form < 0.01) {
                             if (p.x < -4) p.x += cssW + 8;
                             else if (p.x > cssW + 4) p.x -= cssW + 8;
                             if (p.y < -4) p.y += cssH + 8;
                             else if (p.y > cssH + 4) p.y -= cssH + 8;
                         }
-                        // Gathered dots clamp at full white: text that is only mostly opaque reads washed out.
+                        // Bright while sitting on a shape, dim while flowing, so the streaming
+                        // field stays quiet behind the letters. The gathered term is generous
+                        // enough that most dots clamp at full white: the shapes are read as text,
+                        // and text that is only mostly opaque reads as washed out.
                         const base = 0.26 + p.depth * 0.32;
                         let alpha = base + form * (0.72 + p.depth * 0.4);
                         alpha *= 1 - settle * 0.22;
@@ -1633,7 +1748,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     context.globalAlpha = 1;
                 }
 
-                // Scroll only updates progress; the rAF loop renders so the spring advances on a real timestep.
+                // Scroll only updates progress and the nav/copy/hint reveal. The rAF loop
+                // owns rendering so the spring integration advances on a real timestep.
                 const stage = document.getElementById("hero");
                 const nav = document.getElementById("nav");
                 const copy = heroEl!.querySelector(
@@ -1656,6 +1772,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                             "--reveal",
                             String(clamp01((y - vh * 0.12) / (vh * 0.16))),
                         );
+                    // The subhead and buttons fade in right after the particles resolve into
+                    // the headline (which completes at progress 0.72). The headline itself is
+                    // never shown as DOM text — the particles are the heading.
                     const copyP = smooth01(clamp01((progress - 0.6) / 0.22));
                     if (copy)
                         copy.style.setProperty("--copy-op", String(copyP));
@@ -1673,7 +1792,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     lastTime = now;
                     if (dt > 0.05) dt = 0.05;
                     clock += dt;
-                    // A shape still flying in cannot be charged.
+                    // Advance the stir sequence only while parked at the very top, and only
+                    // once the load intro has finished assembling — a shape still flying in
+                    // cannot be charged. Any scroll resets the sequence so returning to the
+                    // top restarts calm, on the logo.
                     if (progress < 0.02) {
                         if (clock > INTRO_DELAY + ASSEMBLE) advanceBurst(dt);
                     } else {
@@ -1708,7 +1830,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 window.addEventListener("scroll", syncScroll, {
                     passive: true,
                 });
-                // Per-event travel is capped, so one fast swipe cannot detonate on its own.
+                // Stirring, not presence, charges the shape: only pointer travel over the
+                // gathered glyph counts (capped per event, so a single fast swipe cannot
+                // detonate on its own), and a click lands a solid kick. A parked pointer
+                // adds nothing, and the charge it built drains away.
                 function stir(amount: number, x: number, y: number) {
                     if (burstState !== "held" || progress >= 0.02) return;
                     if (clock <= INTRO_DELAY + ASSEMBLE) return;
@@ -1751,6 +1876,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     relayout();
                     syncScroll();
                     if (reduceMotion) {
+                        // No animation: show the crisp DOM headline and copy. The particles rest
+                        // as a faint static scatter behind the text (intro never runs, so nothing
+                        // assembles) so nothing competes with the legible <h1>.
                         progress = 0;
                         clock = 0;
                         render(0);
@@ -2477,6 +2605,13 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 window.addEventListener("scroll", onScroll, { passive: true });
             }
 
+            // ======================================================================
+            // Hero reveal: the first viewport shows only the pinned particle field;
+            // scrolling through the tall stage slides the header in and parallaxes
+            // the hero copy into place. Drives transform/opacity via CSS variables
+            // from a single rAF-coalesced scroll handler — no layout reads per frame
+            // beyond scrollY / innerHeight, no layout thrash.
+            // ======================================================================
             initHero();
             document
                 .querySelectorAll("[data-tabs]")
@@ -2613,7 +2748,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 }
             }
 
-            /* .hero-viewport is the 100svh pin inside the tall #hero scroll track. */
+            /* ---------- hero (experiment: tall scroll stage + pinned canvas) ---------- */
+            /* #hero is a tall scroll track; .hero-viewport is the 100svh pin that the
+         particle field fills and the header/copy reveal over as a parallax overlay. */
             #hero {
                 position: relative;
                 height: 160svh;
@@ -2639,6 +2776,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 will-change: transform, opacity;
             }
 
+            /* ultra-subtle scroll affordance, only in the dynamic reveal mode */
             .scroll-hint {
                 position: absolute;
                 left: 50%;
@@ -2672,7 +2810,10 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 }
             }
 
-            /* Only the chrome fades in, so the brand and Get started float over the animation. */
+            /* dynamic reveal mode: the bar chrome + nav links + copy + hint start hidden
+         (brand logo + Get started pill stay visible from the top), driven by JS vars */
+            /* The bar itself stays in place; only its chrome fades in with --reveal, so
+         the brand and Get started float over the animation while the bar is invisible. */
             .hero-reveal .nav {
                 background: oklch(0.145 0 0 / calc(0.6 * var(--reveal, 0)));
                 backdrop-filter: blur(calc(8px * var(--reveal, 0)));
@@ -2688,6 +2829,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .hero-reveal .brand .logo {
                 filter: drop-shadow(0 1px 8px oklch(0 0 0 / 0.5));
             }
+            /* Only the non-CTA links hide at the top; the Get started pill (.cta) and the
+         brand stay at full opacity from scrollTop 0. */
             .hero-reveal .nav-links a:not(.cta) {
                 opacity: var(--reveal, 0);
                 transform: translateY(calc((1 - var(--reveal, 0)) * 6px));
@@ -2713,14 +2856,17 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .hero-reveal .scroll-hint {
                 opacity: var(--hint-op, 1);
             }
-            /* The particles draw the heading; the transparent <h1> keeps its layout box for the
-               subhead and its text for screen readers. */
+            /* In the animated hero the heading is drawn by the particles themselves, so
+         the real <h1> is never painted — no crisp text is laid over the particle
+         letters. It keeps its layout box (so the subhead sits below the particle
+         heading) and stays readable to screen readers, but is fully transparent. */
             .hero-reveal .hero-heading {
                 opacity: 0;
                 pointer-events: none;
                 user-select: none;
             }
 
+            /* static / reduced-motion mode: a normal single-viewport hero */
             .hero-static #hero {
                 height: auto;
             }

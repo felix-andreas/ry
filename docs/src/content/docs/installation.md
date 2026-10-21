@@ -53,6 +53,11 @@ curl -sSL https://github.com/felix-andreas/ry/releases/download/0.3.0-alpha/ry-x
 sudo mv ry /usr/local/bin/
 ```
 
+The Linux binary runs on any x86_64 distribution with glibc 2.17 or newer. It does not run on NixOS
+(use the flake below) or on musl-based distributions such as Alpine (build from source). Releases
+up to 0.3.1-beta shipped a Linux binary that loads its C library from a Nix store path and does not
+start outside Nix.
+
 Name the tag explicitly. Every release so far is marked a pre-release, so `releases/latest/`
 resolves to an older stable tag rather than the newest build.
 
@@ -66,6 +71,14 @@ The package is `ry-lang` because the name `ry` was already taken on crates.io; t
 installs is `ry`.
 
 This is also the route for architectures without a prebuilt binary.
+
+**With Nix**, the flake's default package is a native build, and the route on NixOS:
+
+```bash
+nix profile install github:felix-andreas/ry
+```
+
+Newer Nix versions name the command `nix profile add`; `install` still works there.
 
 **Planned:** a one-line installer, so neither a manual download nor a Rust toolchain is needed. It
 is not scheduled.

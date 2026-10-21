@@ -7,6 +7,7 @@ Companion files: `backlog.md` (open work, plus a one-line shipped ledger at the 
 ## Short-term
 
 - **Cleanup program (user-directed, one PR per step):** (1) DONE: legacy ported and deleted. (2) DONE: comments cut to short non-obvious "why" comments; agent docs trimmed. (3) NEXT: Shrink code in several passes: simple, data-oriented, duplication acceptable. (4) Docs passes for density, one concept after another (style reference: vxlang.org/docs/tour.html). (5) At the local maximum, consider a green-field rewrite. Keep `roughly.toml` support and the REPL (user directives); other old-name fallbacks, perf/debug probes and fuzz scaffolding may shrink.
+- **Next release: bump the pinned install examples.** `installation.md` and `guides/continuous-integration.md` pin `0.3.0-alpha`, whose assets are still named `roughly-*`, so the URLs are dead; 0.3.1-beta's Linux binary needs Nix. Point them at the first release built with the glibc 2.17 binary.
 - **Next fixes come from the adoption reviews** heading `backlog.md`, each with a minimal repro. Re-run a filed finding before ranking work off it: two of four claims in one entry were already stale. Always add a control in the same file (an obviously undefined name), so "no finding" cannot mean "check is off".
 - The landing-page hero animation is user-owned; `NOTES.md` is human-maintained. Never edit either.
 
@@ -79,6 +80,7 @@ Companion files: `backlog.md` (open work, plus a one-line shipped ledger at the 
 ### REPL and environment
 
 - **The REPL never feeds R input through the console to set state.** Startup work goes through `RApi::eval` between `setup_Rmainloop()` and `run_Rmainloop()`. Details, including the Windows recipe (`GA_initapp` lives in `Rgraphapp.dll`), are in `contributing/design/repl.md`.
+- **The Linux release binary links glibc 2.17 through zig** (standard `/lib64` loader, so it can `dlopen` R); the flake's `default` is a native nixpkgs build for Nix users. The sandbox has no `/lib64` loader, so release derivations run no tests and the native package carries the suite; `allowedReferences = [ ]` fails a release build that keeps a store path. Rationale, including why not static musl: `decisions.md`.
 - **R installs in agent containers** (`apt-get install -y --no-install-recommends r-base-core`, or the CRAN apt repo for current R). `fs` needs `libuv1-dev`; the tidyverse needs `libcurl4-openssl-dev libharfbuzz-dev libfribidi-dev libfreetype-dev libpng-dev libjpeg-dev`. Free disk first (`target/debug/incremental`).
 - **Export manifests** (`types/*.exports`) come from a live session (`Rscript scripts/export-manifests.R`) on an R at least as new as the recorded one; a hand-written or older-R manifest turns real exports into false `unresolved`. Meta-packages expand via `stubs::META_PACKAGE_MEMBERS`.
 - **Stubs** are declaration-only `.Rtypes` files in `types/` (the `#:` grammar, loader in `semantics/src/stubs.rs`), a set-once salsa input; project `stubs/*.Rtypes` override. An overload set ends with an `Any` fallback.
