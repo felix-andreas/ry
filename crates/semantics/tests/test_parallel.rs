@@ -97,7 +97,7 @@ fn concurrent_cycle_queries_agree_with_the_baseline() {
     });
     assert!(
         started.elapsed() < std::time::Duration::from_secs(60),
-        "parallel fixpoint took implausibly long — treat as a hang"
+        "parallel fixpoint took implausibly long, so treat it as a hang"
     );
 
     let mut single = all_diagnostics(&db, &files);

@@ -36,7 +36,7 @@ broken <- function() {
 #++++
 ratio: fn(numerator: double, denominator: double) -> double
 broken: Unknown
-153..158 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+153..158 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
 
 #---- unguarded_nullable_use
 #: fn(x: integer | NULL) -> integer
@@ -54,7 +54,7 @@ broken <- function() {
 }
 #++++
 broken: Unknown
-40..45 error[type-mismatch] this has type `integer`, which is not a function — it cannot be called
+40..45 error[type-mismatch] this has type `integer`, which is not a function, so it cannot be called
 
 #---- post_dots_option_cannot_be_filled_positionally
 join_fields <- function(..., strict) {

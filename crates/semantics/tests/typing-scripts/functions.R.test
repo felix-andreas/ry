@@ -39,7 +39,7 @@ double_count(1L, "units")
 double_count: fn(count: integer, [label]: character) -> integer
 integer
 integer
-117..121 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+117..121 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #---- higher_order_function_annotation
 #: @param render_count {fn(integer) -> character}
@@ -85,7 +85,7 @@ mirror()
 #++++
 mirror: <T> fn(x: T) -> T
 T
-24..30 error[type-mismatch] this call supplies 0 arguments, but the function requires 1 — a required argument is missing
+24..30 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
 
 #---- extra_argument
 mirror <- function(x) x
@@ -119,7 +119,7 @@ value(2L)
 #++++
 value: integer
 Unknown
-12..17 error[type-mismatch] this has type `integer`, which is not a function — it cannot be called
+12..17 error[type-mismatch] this has type `integer`, which is not a function, so it cannot be called
 
 #==== named_argument_calls
 #---- inferred_function_accepts_named_argument
@@ -143,7 +143,7 @@ mirror(y = 1L)
 #++++
 mirror: <T> fn(x: T) -> T
 T
-31..32 error[type-mismatch] this function has no parameter `y` — its named parameter is `x`
+31..32 error[type-mismatch] this function has no parameter `y`. Its named parameter is `x`
 
 #==== optional_parameters
 #---- inferred_default_makes_parameter_optional
@@ -167,7 +167,7 @@ double_count(1L, label = "units")
 #++++
 double_count: fn(count: integer, [label]: character) -> integer
 integer
-93..97 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+93..97 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #---- omitting_required_parameter_is_rejected
 #: fn(count: integer, label: character) -> integer
@@ -176,8 +176,8 @@ double_count(1L)
 #++++
 double_count: fn(count: integer, [label]: character) -> integer
 integer
-67..110 error[type-mismatch] this annotation declares `label` as required, but the function gives it a default — write `[label]` to declare it optional, or drop the default
-91..95 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+67..110 error[type-mismatch] this annotation declares `label` as required, but the function gives it a default. Write `[label]` to declare it optional, or drop the default
+91..95 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #---- expected_optional_requires_actual_default
 #: fn(count: integer, [label]: character) -> integer
@@ -364,7 +364,7 @@ f <- function(n) n
 #++++
 f: fn(n: integer) -> integer
 33..34 warning[unused] `f` is assigned but never used.
-38..51 error[type-mismatch] this annotation names a parameter `count`, but the function does not define one — annotation parameter names must match the function's parameter names
+38..51 error[type-mismatch] this annotation names a parameter `count`, but the function does not define one. An annotation parameter name must match the function's parameter name
 
 #---- positional_annotation_needs_no_names
 #: fn(integer) -> integer

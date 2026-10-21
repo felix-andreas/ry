@@ -2,7 +2,7 @@
 #---- missing_following_expression
 #: integer
 #++++
-0..10 error[annotation] A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block.
+0..10 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
 
 #---- empty_line_after_typing_comment
 #: integer
@@ -18,7 +18,7 @@ value: integer
 value <- 1L
 #++++
 value: integer
-0..23 error[annotation] only one compact annotation fits in a `#:` block — separate the annotations with a blank line so each gets its own block.
+0..23 error[annotation] only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
 
 #---- invalid_type_syntax
 #: list{length:
@@ -59,7 +59,7 @@ value: user_id
 #---- expanded_missing_following_expression
 #: @param count {integer}
 #++++
-0..25 error[annotation] A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block.
+0..25 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
 
 #---- expanded_invalid_type_syntax
 #: @param count {list{length:}
@@ -90,7 +90,7 @@ render: fn(count: user_id) -> user_id
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both — separate the two forms with a blank line.
+0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
 
 #---- expanded_followed_by_compact
 #: @param count {integer}
@@ -98,7 +98,7 @@ render: <T> fn(count: T) -> T
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both — separate the two forms with a blank line.
+0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
 
 #==== type_definitions
 #---- definition_can_reference_previous_definition

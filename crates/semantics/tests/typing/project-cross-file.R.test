@@ -156,7 +156,7 @@ b <- tag(1L, "x")
 #++++
 == R/a.R
 tag: fn(count: integer, [label]: character) -> integer
-84..88 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+84..88 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 == R/b.R
 a: integer
 b: integer
@@ -243,9 +243,9 @@ r: integer
 #: @alias Shape {character}
 #++++
 == R/a.R
-3..24 error[annotation] the type name `Shape` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+3..24 error[annotation] the type name `Shape` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
 == R/b.R
-3..27 error[annotation] the type name `Shape` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+3..27 error[annotation] the type name `Shape` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
 
 #==== cross_file_scripts
 #---- script_polymorphic_package_function

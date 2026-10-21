@@ -157,7 +157,7 @@ pub enum ItemKind {
     Statement,
 }
 
-/// Structure and identity only — no spans, no bodies — so an edit inside one body
+/// Structure and identity only, with no spans or bodies, so an edit inside one body
 /// leaves it equal and cuts off. Borrowed: per-item work reads it once per item.
 #[salsa::tracked(returns(ref))]
 pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {

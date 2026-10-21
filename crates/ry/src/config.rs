@@ -281,7 +281,10 @@ const TABLE_KEYS: [(&str, &[&str]); 3] = [
             "shadows-namespace",
         ],
     ),
-    ("check", &["unused", "typing", "strict", "exclude"]),
+    (
+        "check",
+        &["unused", "maybe-undefined", "typing", "strict", "exclude"],
+    ),
 ];
 
 /// Lexical, so an ancestor walk visits only true ancestors; when `..` crosses a
@@ -478,6 +481,20 @@ mod tests {
         assert_eq!(suggested_table("naming-style"), Some("lint"));
         assert_eq!(suggested_table("typng"), None);
         assert_eq!(suggested_table("check.typing"), None);
+    }
+
+    #[test]
+    fn every_check_field_has_a_placement_hint() {
+        // Guards the direction `table_keys_match_the_config_structs` cannot
+        // see: a field added to `CheckConfig` but not to TABLE_KEYS. Written
+        // out because serde cannot enumerate the struct's fields.
+        for key in ["unused", "maybe-undefined", "typing", "strict", "exclude"] {
+            assert_eq!(
+                suggested_table(key),
+                Some("check"),
+                "`{key}` is a `[check]` field with no placement hint"
+            );
+        }
     }
 
     #[test]

@@ -61,7 +61,7 @@ pub fn run(api: RApi, options: crate::RunOptions) -> Result<(), ReplError> {
     }
     if interactive {
         eprintln!(
-            "ry R console — R at {} (q() or Ctrl-D quits)",
+            "ry R console, R at {}. Type q() or Ctrl-D to quit.",
             api.r_home.display()
         );
     }
@@ -479,7 +479,7 @@ mod tests {
             "",
             "  ",
             "# just a comment",
-            "return x", // broken, but FINISHED — R gets to report it
+            "return x", // broken, but FINISHED, so R gets to report it
             "]",        // stray closer: R's error, not an endless prompt
         ] {
             assert!(input_is_complete(text), "expected complete: {text:?}");

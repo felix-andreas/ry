@@ -141,11 +141,11 @@ syntax error: unexpected text after the `@type` definition
 @type Person {list{name: character}}
 integer
 #++++
-error: `@type` and `@alias` declarations need their own `#:` block — separate them from other annotations with a blank line.
+error: `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.
 
 #---- mixed_definition_and_expanded_annotation_block
 @type Person {list{name: character}}
 @param count {integer}
 @return {Person}
 #++++
-error: `@type` and `@alias` declarations need their own `#:` block — separate them from other annotations with a blank line.
+error: `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.

@@ -191,7 +191,7 @@ character
 f <- function(x) NULL
 #++++
 f: fn(x: Person[]) -> NULL
-51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person` — for a list of these, write `list[Person]`
+51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
 69..70 warning[unused] `f` is assigned but never used.
 
 #---- numeric_binder_authorizes_body_arithmetic

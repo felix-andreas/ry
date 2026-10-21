@@ -3,63 +3,57 @@ title: Installation
 description: Every way to install ry, including the cases the quick path does not cover
 ---
 
-The common paths are on the install section of
-[getting started](/getting-started#install). This page covers the remaining cases.
-
 ## VS Code
 
-The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly)
-bundles the binary for **Linux x86_64, macOS aarch64, and Windows x86_64**.
+The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) bundles the
+binary for **Linux x86_64, macOS on Apple silicon, and Windows x86_64**. On any other platform,
+install the [command-line binary](#command-line) and set `ry.path` to it, or put `ry` on your
+`PATH`.
 
-On any other architecture the extension installs but has no binary to run. Install the CLI
-separately and point the extension at it:
+On Linux, build ry from source for now and set `ry.path` to it. The Linux extension up to 0.3.1
+bundles a binary that starts only under Nix, as [Command line](#command-line) explains, and the
+extension prefers its bundled binary to `ry` on your `PATH`.
 
-```json
-// settings.json
-{
-  "ry.path": "/absolute/path/to/ry"
-}
-```
+Positron and VSCodium install extensions from Open VSX, where ry is not published (an unrelated
+extension there is also called "ry"). Download the `.vsix` for your platform from
+[Releases](https://github.com/felix-andreas/ry/releases) and run **Extensions: Install from VSIX...**
+instead.
 
-Every extension setting is listed under
-[editor settings](/reference/configuration#editor-settings).
+Every extension setting is listed under [editor settings](/reference/configuration#editor-settings).
 
 ## Zed
 
-Not in Zed's extension registry yet. Until it is, install it from the repository as a dev extension:
+The Zed extension is not in Zed's registry yet, so install it from the repository as a dev extension:
 
-1. Install a [Rust toolchain](https://rustup.rs) — Zed compiles dev extensions to WebAssembly itself.
+1. Install a [Rust toolchain](https://rustup.rs), which Zed uses to compile dev extensions to
+   WebAssembly.
 2. Clone the repository.
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 
-Zed has no built-in R support, so install the [R extension](https://zed.dev/extensions/r) first. Full
-instructions, including how the extension finds the binary, are in
-[`editors/zed`](https://github.com/felix-andreas/ry/tree/main/editors/zed).
+Zed has no built-in R support, so install the [R extension](https://zed.dev/extensions/r) first. Put
+the [command-line binary](#command-line) on your `PATH` too: the extension's automatic download
+looks only at releases not marked pre-release, and the newest of those is 0.1.1, from before the
+rename, so the download fails.
 
 ## Command line
 
-**Prebuilt binary.** Download from
-[Releases](https://github.com/felix-andreas/ry/releases). Assets are named by Rust target triple
-and each archive holds a single `ry` binary:
-
-| Platform | Asset |
-| --- | --- |
-| Linux x86_64 | `ry-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS aarch64 | `ry-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `ry-x86_64-pc-windows-gnu.zip` |
+**Prebuilt binary.** Each [release](https://github.com/felix-andreas/ry/releases) has an archive per
+platform, named after its Rust target, and holding a single `ry` binary:
+`ry-x86_64-unknown-linux-gnu.tar.gz`, `ry-aarch64-apple-darwin.tar.gz`, and
+`ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL, because every release since 0.1.1 is marked
+a pre-release, so GitHub's `releases/latest` still points at 0.1.1. On a Mac:
 
 ```bash
-curl -sSL https://github.com/felix-andreas/ry/releases/download/0.3.0-alpha/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.3.1-beta/ry-aarch64-apple-darwin.tar.gz | tar xz
 sudo mv ry /usr/local/bin/
+ry --version
 ```
 
-The Linux binary runs on any x86_64 distribution with glibc 2.17 or newer. It does not run on NixOS
-(use the flake below) or on musl-based distributions such as Alpine (build from source). Releases
-up to 0.3.1-beta shipped a Linux binary that loads its C library from a Nix store path and does not
-start outside Nix.
-
-Name the tag explicitly. Every release so far is marked a pre-release, so `releases/latest/`
-resolves to an older stable tag rather than the newest build.
+On Linux, build from source until a newer release is out. The Linux binary in 0.3.1-beta and
+earlier loads its C library from the Nix store, so outside Nix it fails with
+`cannot execute: required file not found`. Later releases link it against glibc 2.17, so it runs on
+any x86_64 distribution with that version or newer, except NixOS (use the flake below) and
+musl-based distributions such as Alpine (build from source).
 
 **From source**, if you have a [Rust toolchain](https://www.rust-lang.org/tools/install):
 
@@ -67,38 +61,25 @@ resolves to an older stable tag rather than the newest build.
 cargo install --git https://github.com/felix-andreas/ry ry-lang
 ```
 
-The package is `ry-lang` because the name `ry` was already taken on crates.io; the binary it
-installs is `ry`.
+The crate is `ry-lang`, and the command it installs is `ry`. This also works on platforms without a
+prebuilt binary.
 
-This is also the route for architectures without a prebuilt binary.
-
-**With Nix**, the flake's default package is a native build, and the route on NixOS:
+**With Nix**, install the flake's default package, which is built against nixpkgs and is the way to
+install ry on NixOS:
 
 ```bash
 nix profile install github:felix-andreas/ry
 ```
 
-Newer Nix versions name the command `nix profile add`; `install` still works there.
-
-**Planned:** a one-line installer, so neither a manual download nor a Rust toolchain is needed. It
-is not scheduled.
+Newer Nix versions call the command `nix profile add`, and `install` still works there.
 
 ## RStudio
 
 RStudio has no language-server integration, but it can use ry as its external formatter:
 
-1. **Tools → Global Options → Code → Formatting → Format with an External Tool**, and set the reformat
-   command to `path/to/ry fmt`.
-2. For format-on-save, **Tools → Global Options → Code → Saving** and tick **Reformat documents on
-   save**.
+1. Open **Tools → Global Options → Code → Formatting**, set **Code formatter** to **External**, and
+   set **Reformat command** to `path/to/ry fmt`. RStudio appends the file name to that command.
+2. For format-on-save, open **Tools → Global Options → Code → Saving** and tick **Reformat documents
+   on save**.
 
-Type checking and code analysis are not available inside RStudio. Run `ry check` in a terminal, or
-in [CI](/guides/continuous-integration).
-
-## Verifying
-
-```bash
-ry --version
-```
-
-Then run it on a project — [getting started](/getting-started) shows what a first run looks like.
+Diagnostics do not show up inside RStudio; run `ry check` in a terminal or in CI.

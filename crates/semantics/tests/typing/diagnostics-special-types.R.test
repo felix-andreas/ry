@@ -59,7 +59,7 @@ cell <- values[1, 2]
 #++++
 values: list{integer, integer}
 cell: Unknown
-31..43 error[type-mismatch] indexing with 2 indexes is not supported yet — ry does not model matrix and data.frame subsetting
+31..43 error[type-mismatch] indexing with 2 indexes is not supported yet. ry does not model matrix and data.frame subsetting
 
 #---- empty_index_is_reported_as_indexing
 values <- list(1L, 2L)

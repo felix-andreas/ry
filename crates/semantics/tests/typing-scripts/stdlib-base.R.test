@@ -209,7 +209,7 @@ Any
 paste("a", sep = "-", sep = "_")
 #++++
 character
-22..25 error[type-mismatch] this call gives `sep` more than once — R matches each named parameter at most once
+22..25 error[type-mismatch] this call gives `sep` more than once. R matches each named parameter at most once
 
 #==== type_preserving_reductions
 #---- sum_of_integers_is_integer
@@ -853,7 +853,7 @@ join2("a")
 #++++
 join2: <T, U> fn(left: T, right: U) -> character
 character
-57..62 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+57..62 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
 
 #---- negated_missing_test_also_marks_optional
 pick <- function(x) {

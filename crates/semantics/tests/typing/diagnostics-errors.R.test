@@ -14,7 +14,7 @@ add(1L)
 #++++
 add: fn(a: integer, b: integer) -> integer
 integer
-69..72 error[type-mismatch] this call supplies 1 argument, but the function requires 2 — a required argument is missing
+69..72 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
 
 #---- call_named_arg_not_in_interface
 mirror <- function(x) x
@@ -22,7 +22,7 @@ mirror(z = 1L)
 #++++
 mirror: <T> fn(x: T) -> T
 T
-31..32 error[type-mismatch] this function has no parameter `z` — its named parameter is `x`
+31..32 error[type-mismatch] this function has no parameter `z`. Its named parameter is `x`
 
 #---- call_argument_type_mismatch
 #: fn(count: integer) -> integer
@@ -39,7 +39,7 @@ x(2L)
 #++++
 x: integer
 Unknown
-8..9 error[type-mismatch] this has type `integer`, which is not a function — it cannot be called
+8..9 error[type-mismatch] this has type `integer`, which is not a function, so it cannot be called
 
 #---- calling_character
 x <- "foo"
@@ -47,7 +47,7 @@ x()
 #++++
 x: character
 Unknown
-11..12 error[type-mismatch] this has type `character`, which is not a function — it cannot be called
+11..12 error[type-mismatch] this has type `character`, which is not a function, so it cannot be called
 
 #---- unknown_name_reference
 nonexistent
@@ -173,8 +173,8 @@ f: Unknown
 value <- 1L
 #++++
 value: integer
-3..39 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
-43..66 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+3..39 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+43..66 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
 
 #---- recovery_unknown_no_cascade
 #: fn(count: integer) -> integer
@@ -238,7 +238,7 @@ f(1L)
 #++++
 f: fn(count: integer, [label]: character) -> integer
 integer
-82..86 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+82..86 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #---- optional_param_wrong_type
 #: fn(count: integer, [label]: character) -> integer
@@ -247,7 +247,7 @@ f(1L, 2L)
 #++++
 f: fn(count: integer, [label]: character) -> integer
 integer
-82..86 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+82..86 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 100..102 error[type-mismatch] expected `character`, found `integer`
 
 #---- arith_null_operand
@@ -272,7 +272,7 @@ Unknown
 NULL()
 #++++
 Unknown
-0..4 error[type-mismatch] this has type `NULL`, which is not a function — it cannot be called
+0..4 error[type-mismatch] this has type `NULL`, which is not a function, so it cannot be called
 
 #---- comparison_null_operand
 NULL == 1L
@@ -371,7 +371,7 @@ x$foo
 #++++
 x: integer
 Unknown
-8..13 error[type-mismatch] R's `$` operator is invalid on atomic vectors; this value is `integer` — extract an element with `[[` instead.
+8..13 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer`. Extract an element with `[[` instead.
 
 #---- double_bracket_position_does_not_exist
 x <- list(1L, 2L)

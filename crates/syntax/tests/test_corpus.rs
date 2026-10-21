@@ -91,11 +91,11 @@ fn corpus_acceptance() {
     eprintln!("  both-clean:      {both_clean}");
     eprintln!("  both-error:      {both_error}");
     eprintln!(
-        "  ours-only-error: {}  (BAD — we reject what tree-sitter accepts)",
+        "  ours-only-error: {}  (BAD. We reject what tree-sitter accepts)",
         ours_only.len()
     );
     eprintln!(
-        "  ts-only-error:   {}  (interesting — tree-sitter rejects what we accept)",
+        "  ts-only-error:   {}  (interesting. tree-sitter rejects what we accept)",
         ts_only.len()
     );
 

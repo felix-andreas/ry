@@ -66,11 +66,11 @@ x: integer
 #: @alias Person {character}
 #++++
 == R/a.R
-3..25 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
 == R/b.R
-3..24 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+3..24 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
 == R/c.R
-3..28 error[annotation] the type name `Person` is declared more than once — `@type` and `@alias` declarations share one project-global namespace.
+3..28 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
 
 #==== mixed_package_failures
 #---- later_package_winner_does_not_beat_local_shadow

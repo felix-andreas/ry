@@ -21,7 +21,7 @@ pub struct Annotation<'db> {
     /// `@new Name<ARGS>`, with the range of the referenced type.
     pub new_nominal: Option<(Name<'db>, Vec<Ty<'db>>, TextRange)>,
     pub strict: Option<bool>,
-    /// `@trust TYPE` — the declared type applies unchecked.
+    /// `@trust TYPE`, where the declared type applies unchecked.
     pub trusted: bool,
     /// `@if-unknown TYPE`: applies only where the checker has nothing better than `Unknown`.
     pub if_unknown: bool,
@@ -402,14 +402,14 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
             | (Some(BlockForm::Definition), BlockForm::Definition)
             | (Some(BlockForm::Expanded), BlockForm::Expanded) => None,
             (Some(BlockForm::Compact), BlockForm::Compact) => Some(
-                "only one compact annotation fits in a `#:` block — separate the annotations with a blank line so each gets its own block.",
+                "only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.",
             ),
             (Some(BlockForm::Definition), _) | (_, BlockForm::Definition) => Some(
-                "`@type` and `@alias` declarations need their own `#:` block — separate them from other annotations with a blank line.",
+                "`@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.",
             ),
             (Some(BlockForm::Compact), BlockForm::Expanded)
             | (Some(BlockForm::Expanded), BlockForm::Compact) => Some(
-                "a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both — separate the two forms with a blank line.",
+                "a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.",
             ),
         };
         if let Some(message) = mixing {

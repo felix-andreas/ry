@@ -12,7 +12,7 @@ render: <T> fn(count: T) -> character
 double_count <- function(count, label = NULL) count + count
 #++++
 double_count: fn(count: integer, [label]: character) -> integer
-93..97 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+93..97 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #---- latest_function_binding_wins_with_changed_shape
 render <- function(count) "ok"

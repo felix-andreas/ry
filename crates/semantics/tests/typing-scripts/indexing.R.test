@@ -128,7 +128,7 @@ counts$foo
 #++++
 counts: integer[named]
 Unknown
-32..42 error[type-mismatch] R's `$` operator is invalid on atomic vectors; this value is `integer[named]` — extract an element with `[[` instead.
+32..42 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[named]`. Extract an element with `[[` instead.
 
 #---- chained_record_access
 config <- list(server = list(port = 8080L))
