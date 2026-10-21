@@ -28,7 +28,7 @@ error: unknown type-parameter constraint `frobnicate`; the available constraints
 integer
 character
 #++++
-error: only one compact annotation fits in a `#:` block — separate the annotations with a blank line so each gets its own block.
+error: only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
 
 #---- expanded_param_after_return
 @return {integer}

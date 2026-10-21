@@ -2,18 +2,18 @@
 //! type a user can write back.
 //!
 //! `#: TYPE` asserts the annotated value is compatible with `TYPE`, and the
-//! checker has just proved the value *has* the type it rendered — so
-//! re-declaring an inferred scheme above its own definition must add no
+//! checker has just proved the value *has* the type it rendered. Re-declaring
+//! an inferred scheme above its own definition must therefore add no
 //! finding. Anything else means a rendering nobody can copy out of a hover or
 //! a `expected X, found Y` message and paste into an annotation.
 //!
 //! This is the only test that compares the renderer against the annotation
 //! grammar. Every other suite reads the rendering as a *string*, so a type that
 //! prints beautifully and parses back as something else is invisible to all of
-//! them — and that is not hypothetical: an unquoted record field name
-//! containing a comma re-parsed as a different type entirely, producing a bogus
-//! mismatch plus a bogus unknown-type error, and a constraint spelling the
-//! grammar did not accept made every scheme carrying it unwritable.
+//! them. That is not hypothetical. An unquoted record field name containing a
+//! comma re-parsed as a different type entirely, which produced a bogus
+//! mismatch plus a bogus unknown-type error. A constraint spelling the grammar
+//! did not accept also made every scheme carrying it unwritable.
 //!
 //! Run one case with `FIXTURE_FILTER=group__case cargo test -p semantics
 //! --test test_roundtrip -- --nocapture`.
@@ -99,8 +99,8 @@ fn rendered_schemes_are_writable_annotations() {
 }
 
 /// Each named definition's rendered scheme, with the byte offset its
-/// annotation would be inserted at — the start of the line the item begins on,
-/// so the `#:` block attaches to it.
+/// annotation would be inserted at. That offset is the start of the line the
+/// item begins on, so the `#:` block attaches to it.
 fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String, usize)> {
     let text = file.text(db);
     let mut schemes = Vec::new();
@@ -115,9 +115,9 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
         let Some(scheme) = check.scheme else {
             continue;
         };
-        // An item already carrying an annotation is not a rendering the checker
-        // chose — it is the user's text echoed back — and inserting a second
-        // block above it stacks two annotations on one definition.
+        // An item already carrying an annotation is not a rendering the
+        // checker chose. It is the user's text echoed back, and inserting a
+        // second block above it stacks two annotations on one definition.
         let start = usize::from(span.range.start());
         let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
         if already_annotated(text, line_start) {

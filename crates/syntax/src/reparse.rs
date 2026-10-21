@@ -10,9 +10,9 @@
 //! One construct can join statements across a newline: consecutive `#:` lines
 //! stitch into a single annotation region, so anchors never sit against an
 //! annotation. Anything unanchorable (no clean newline boundary, tiny files)
-//! falls back to a full parse — the splice is an optimization, never a
-//! correctness dependency, and the edit-stream fuzzer holds it byte- and
-//! structure-equal to the from-scratch parse.
+//! falls back to a full parse. The splice is an optimization and never a
+//! correctness dependency, and the edit-stream fuzzer holds it equal to the
+//! from-scratch parse, in both bytes and structure.
 
 use crate::Parse;
 use crate::kind::SyntaxKind;
@@ -119,8 +119,8 @@ fn try_splice(
     }
     // Kind-matched delimiter stack: a closer only closes its own opener. A
     // mismatched or stray closer is consumed locally by recovery either way
-    // and never closes the group (`( ]` leaves the paren open — a flat
-    // counter would wrongly call that balanced). Anything still open at the
+    // and never closes the group. `( ]` leaves the paren open, and a flat
+    // counter would wrongly call that balanced. Anything still open at the
     // middle's end would swallow the suffix in a from-scratch parse.
     let mut open_delimiters: Vec<SyntaxKind> = Vec::new();
     for token in &middle_tokens {
@@ -148,11 +148,12 @@ fn try_splice(
         return None;
     }
     let middle = crate::parse(middle_text);
-    // A parse error touching the middle's end means the parser is mid-
-    // construct at the boundary — a trailing `$` or infix operator, a
-    // dangling `else` — and a from-scratch parse of the whole text would
-    // continue across the suffix newline, giving a different statement
-    // split and different error positions. Refuse; sound-by-fallback.
+    // A parse error touching the middle's end means the parser is
+    // mid-construct at the boundary. A trailing `$`, a trailing infix
+    // operator, and a dangling `else` all leave it there. A from-scratch parse
+    // of the whole text would continue across the suffix newline, giving a
+    // different statement split and different error positions. Refuse and fall
+    // back.
     if middle
         .errors()
         .iter()
@@ -185,7 +186,7 @@ fn try_splice(
         } else if suffix_start < children.len() && error.range.start() >= old_suffix_start {
             // With an empty suffix a zero-width end-of-file error would
             // satisfy the start bound too, but it belongs to the replaced
-            // region — the middle's own parse re-derives the end state.
+            // region, and the middle's own parse re-derives the end state.
             let start = (i64::from(u32::from(error.range.start())) + delta) as u32;
             let end = (i64::from(u32::from(error.range.end())) + delta) as u32;
             let mut rebased = error.clone();
@@ -207,8 +208,8 @@ fn try_splice(
 
 /// A child index is a valid anchor when it is a top-level NEWLINE token and no
 /// non-whitespace neighbor on either side is (or contains) an annotation
-/// region — consecutive `#:` lines stitch across newlines, so an anchor next
-/// to one is not a real statement boundary.
+/// region. Consecutive `#:` lines stitch across newlines, so an anchor next to
+/// one is not a real statement boundary.
 fn anchor_ok(children: &[rowan::SyntaxElement<crate::RLanguage>], index: usize) -> bool {
     let Some(child) = children.get(index) else {
         return false;

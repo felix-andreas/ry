@@ -1,7 +1,7 @@
 //! The REPL's analysis-backed Tab completion: the session's accepted lines
 //! form a script document, so completions see the standard-library corpus
 //! (typed stubs and export manifests) plus every binding the session itself
-//! defined — `ide::completion` over the session-as-script.
+//! defined. It runs `ide::completion` over the session as a script.
 
 use repl::reedline::{Span, Suggestion};
 use salsa::Setter;

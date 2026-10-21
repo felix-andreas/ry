@@ -9,18 +9,18 @@
 //!
 //! - body edit: the first numeric literal after the first `function`
 //!   keyword alternates `1` <-> `11`. Ranges inside that one item shift, so
-//!   its naming value changes, but no read name or top-level binding does —
-//!   the representative typing case. Whole-project walks should not
+//!   its naming value changes, but no read name or top-level binding does.
+//!   This is the representative typing case. Whole-project walks should not
 //!   re-execute for it.
 //! - new item: a `probe_binding <- 0L` statement appended at the end. The
 //!   item set and name projections genuinely change, so the project walks
-//!   must re-execute — the bounded worst case for comparison.
+//!   must re-execute. This is the bounded worst case, for comparison.
 //!
 //! Each edit reports wall time, total queries executed, and whether the
 //! whole-project graph walks (`interface_sccs`, `conditional_slot_items`,
 //! `package_definitions`) re-executed, via a salsa event listener. Wall
-//! times on shared/throttled vCPUs are noisy — the execution counts are the
-//! trustworthy signal.
+//! times on shared or throttled vCPUs are noisy, so the execution counts are
+//! the trustworthy signal.
 
 use salsa::Setter as _;
 use semantics::{DocumentKind, ProjectFiles, SourceFile};
@@ -100,8 +100,8 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
     sources
 }
 
-/// The byte offset of the first `1` after the first `function` keyword —
-/// a literal to lengthen so ranges shift inside one item without any name
+/// The byte offset of the first `1` after the first `function` keyword: a
+/// literal to lengthen so ranges shift inside one item without any name
 /// changing.
 fn body_literal_offset(source: &str) -> Option<usize> {
     let function = source.find("function")?;

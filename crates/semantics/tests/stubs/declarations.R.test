@@ -69,7 +69,7 @@ filter : @masked fn(.data: Any, ...: Any) -> Any
 f : @masked fn(x: Any) -> Any
 #++++
 f : fn(x: Any) -> Any
-line 0: `@masked` on `f` requires a variadic function type — the mask covers the arguments the `...` rest parameter absorbs.
+line 0: `@masked` on `f` requires a variadic function type. The mask covers the arguments the `...` rest parameter absorbs.
 
 #==== malformed
 #---- missing_colon

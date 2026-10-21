@@ -3,19 +3,21 @@
 //!
 //! Invariants, checked on every input:
 //!   1. never panic (any panic fails the test);
-//!   2. lossless — the tree reprints byte-for-byte to the input;
-//!   3. the lexed token lengths cover the input exactly, no zero-length tokens;
-//!   4. tree geometry — every node's children tile its range exactly (ranges
-//!      nest, are contiguous, and cover);
-//!   5. determinism — parsing the same input twice yields structurally equal
-//!      green trees.
+//!   2. the parse is lossless, so the tree reprints byte-for-byte to the
+//!      input;
+//!   3. the lexed token lengths cover the input exactly, with no zero-length
+//!      token;
+//!   4. the tree geometry holds, so every node's children tile its range
+//!      exactly, meaning the ranges nest, are contiguous, and cover;
+//!   5. parsing is deterministic, so parsing the same input twice yields
+//!      structurally equal green trees.
 //!
 //! Generators: random bytes, token soup from an R-shaped alphabet, byte-level
 //! seed mutations, token-level structure-aware mutations (delete/duplicate/
 //! swap whole tokens of a real parse), corpus-seeded mutations (real R files
 //! from the fetched corpus, when present), and a sequential edit-stream fuzzer
-//! (one buffer, hundreds of random edits, invariants at every step — the
-//! foundation the future splice-reparse equivalence check plugs into).
+//! (one buffer, hundreds of random edits, and the invariants at every step,
+//! which is the foundation the splice-reparse equivalence check plugs into).
 //!
 //! `FUZZ_ITERS` scales the per-generator budget (default 1500); runs are
 //! deterministic per seed. `fuzz_deep` multiplies everything for nightly/manual
@@ -385,9 +387,10 @@ fn run_seed_mutations(budget: usize) {
     }
 }
 
-/// Structure-aware mutation: operate on whole lexed tokens of a real seed —
-/// delete, duplicate, or swap token spans, so inputs stay token-plausible and
-/// reach deep parser paths that byte noise rarely finds.
+/// Structure-aware mutation operates on whole lexed tokens of a real seed. It
+/// deletes, duplicates, or swaps a token span, so an input stays
+/// token-plausible and reaches a deep parser path that byte noise rarely
+/// finds.
 fn run_token_level_mutations(budget: usize) {
     let mut rng = SplitMix64(0x70C3_2015);
     for _ in 0..budget {

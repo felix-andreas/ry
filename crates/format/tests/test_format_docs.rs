@@ -16,7 +16,7 @@ fn documentation_examples() {
 
     let code_blocks = Regex::new(r"(?m)```r\n([\s\S]*?)```").expect("valid regex");
     const BEFORE: &str = "R CODE IN THIS FILE IS FORMATTED AND SAVED TO docs/src/content/docs/reference/formatting-rules.md";
-    const AFTER: &str = "THIS FILE IS GENERATED AUTOMATICALLY.\
+    const AFTER: &str = "THIS FILE IS GENERATED AUTOMATICALLY. \
 MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD";
 
     let formatted = code_blocks
@@ -44,8 +44,8 @@ MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD";
                 })
                 .map(|content| format!("```r\n{content}```"))
                 // Falling back to the input here would publish unformatted R on
-                // the page as if the formatter had produced it — the one failure
-                // this generator exists to prevent.
+                // the page as if the formatter had produced it. That is the
+                // one failure this generator exists to prevent.
                 .unwrap_or_else(|| {
                     panic!(
                         "template block has no `# name: directive` header line, so it would be \

@@ -10,9 +10,10 @@ use std::collections::BTreeSet;
 use syntax::{SyntaxKind, TextRange};
 
 /// One error per `importFrom(pkg, name)` whose namespace the export table knows
-/// but whose name it does not list — the same fact `pkg::name` validation
-/// checks, surfaced at the import site. Unknown namespaces produce nothing:
-/// without stubs there is no export set to check against.
+/// but whose name it does not list. This is the same fact `pkg::name`
+/// validation checks, surfaced at the import site. An unknown namespace
+/// produces nothing, because without stubs there is no export set to check
+/// against.
 ///
 /// An error, not a warning, for the same reason its `export()` sibling below is
 /// one: R refuses to *load* the package (`object 'x' is not exported by
@@ -45,8 +46,8 @@ pub fn namespace_import_problems(
 }
 
 /// One error per `export(name)` in the NAMESPACE naming something the package
-/// defines nowhere at top level — `R CMD check`'s "undefined exports", which
-/// otherwise surfaces only at install time. `defines` is the package's whole
+/// defines nowhere at top level. This is `R CMD check`'s "undefined exports",
+/// which otherwise surfaces only at install time. `defines` is the package's whole
 /// top-level name set, so a name bound by any file (in any order) counts.
 pub fn namespace_export_problems(
     exports: &[(String, TextRange)],
@@ -68,8 +69,8 @@ pub fn namespace_export_problems(
 }
 
 /// The `unused-import` lint findings: one per `importFrom(pkg, name)` whose
-/// `name` appears nowhere in `used_tokens` — the set of every token text used
-/// across the package's R sources. Default-off because a package may import a
+/// `name` appears nowhere in `used_tokens`, which is the set of every token
+/// text used across the package's R sources. Default-off because a package may import a
 /// name only to re-export it or for a side effect, and usage is a
 /// deliberately conservative token scan (any token equal to the name counts,
 /// including `pkg::name` and operator spellings), so it under-reports rather

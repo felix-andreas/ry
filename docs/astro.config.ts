@@ -12,17 +12,25 @@ export default defineConfig({
 		'/linter': '/reference/diagnostic-codes',
 		'/diagnostics': '/reference/diagnostic-codes',
 		'/configuration': '/reference/configuration',
-		'/language-server': '/features',
+		'/language-server': '/type-checking/tour#editors',
+		'/features': '/type-checking/tour',
+		'/type-checking/concepts': '/type-checking/tour',
 		'/limitations': '/type-checking/limitations',
 		'/stdlib-stubs': '/type-checking/stubs',
-		'/typing': '/type-checking/tutorial',
-		'/typing/guide': '/type-checking/tutorial',
+		'/typing': '/type-checking/tour',
+		'/typing/guide': '/type-checking/tour',
+		'/type-checking/tutorial': '/type-checking/tour',
 		'/typing/reference': '/reference/type-system',
 		'/typing-reference': '/reference/type-system',
 		'/development': '/contributing/development',
 		'/architecture': '/contributing/architecture',
 		'/structure': '/contributing/structure',
 		'/testing': '/contributing/testing',
+		'/guides/adopting': '/getting-started',
+		'/tour': '/type-checking/tour',
+		'/type-checking/domain-modeling': '/type-checking/tour#structural-and-nominal-types',
+		'/guides/continuous-integration': '/reference/cli#exit-codes',
+		'/guides/r-console': '/reference/cli#server-repl-and-run',
 	},
 	integrations: [
 		starlight({
@@ -32,8 +40,15 @@ export default defineConfig({
 				replacesTitle: true,
 			},
 			favicon: '/favicon.svg',
+			// Diagnostic output is shown in `text` blocks, and a cut-off message is
+			// unreadable, so those wrap; code keeps its lines.
+			expressiveCode: {
+				defaultProps: {
+					overridesByLang: { text: { wrap: true } },
+				},
+			},
 			social: [
-				{ label: "Visual Studio Marketplace", icon: "vscode", href: 'https://marketplace.visualstudio.com/items?itemName=felix-andreas.roughly' },
+				{ label: "Visual Studio Marketplace", icon: "vscode", href: 'https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry' },
 				{ label: "GitHub", icon: "github", href: 'https://github.com/felix-andreas/ry' },
 			],
 			// The installation page is deliberately absent: getting started closes with
@@ -45,25 +60,14 @@ export default defineConfig({
 					items: [
 						{ slug: 'getting-started' },
 						{ slug: 'why-ry' },
-						{ slug: 'features' },
 					],
 				},
 				{
 					label: 'Type checking',
 					items: [
-						{ slug: 'type-checking/tutorial' },
-						{ slug: 'type-checking/concepts' },
-						{ slug: 'type-checking/domain-modeling' },
+						{ slug: 'type-checking/tour' },
 						{ slug: 'type-checking/stubs' },
 						{ slug: 'type-checking/limitations' },
-					],
-				},
-				{
-					label: 'Guides',
-					items: [
-						{ slug: 'guides/adopting' },
-						{ slug: 'guides/continuous-integration' },
-						{ slug: 'guides/r-console' },
 					],
 				},
 				{

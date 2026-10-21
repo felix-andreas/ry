@@ -129,13 +129,13 @@
           # None of them can run in the build sandbox, so they skip the tests
           # the native package runs.
           #
-          # - Linux links against glibc 2.17 — cargo-zigbuild reads the
-          #   version suffix off the target — with the standard loader at
+          # - Linux links against glibc 2.17 (cargo-zigbuild reads the
+          #   version suffix off the target), with the standard loader at
           #   /lib64/ld-linux-x86-64.so.2. It runs on any distribution with
           #   glibc 2.17 or newer and can load R for the console. NixOS has no
           #   loader there; its users install the native package.
-          # - macOS: zig bundles link stubs for libSystem only — no Apple
-          #   frameworks. The dependency graph is kept framework-free on
+          # - macOS: zig bundles link stubs for libSystem only, not for the
+          #   Apple frameworks. The dependency graph is kept framework-free on
           #   purpose (see patches/iana-time-zone and the preflight in the
           #   justfile's release recipe), so no macOS SDK is needed here.
           makeCrossArgs =

@@ -116,7 +116,7 @@ for (item in items) item
 flag: logical
 items: integer[] | (fn(x: Unknown) -> Unknown)
 NULL
-74..79 error[type-mismatch] this `for` sequence is `integer[] | (fn(x: Unknown) -> Unknown)`, which cannot be iterated — expected a vector or list.
+74..79 error[type-mismatch] this `for` sequence is `integer[] | (fn(x: Unknown) -> Unknown)`, which cannot be iterated. Expected a vector or list.
 
 #==== fields_and_elements
 #---- shared_field_over_union_of_records

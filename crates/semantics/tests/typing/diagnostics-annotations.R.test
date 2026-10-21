@@ -96,14 +96,14 @@ value: integer
 value <- 1L
 #++++
 value: Unknown
-32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
 
 #---- if_unknown_on_known_matching_type
 #: @if-unknown integer
 value <- 5L
 #++++
 value: Unknown
-32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
 
 #==== annotations_new
 #---- new_compatible
@@ -176,7 +176,7 @@ log_count: fn(count: integer) -> NULL
 render <- function(count, label = NULL) count
 #++++
 render: fn(count: integer, [label]: character) -> integer
-111..115 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit — a caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+111..115 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #---- forall_identity
 #: @forall T
@@ -312,7 +312,7 @@ boxed: Unknown
 1L
 #++++
 integer
-23..25 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer` — drop the annotation, or use `#:` to check the type or `@trust` to override it
+23..25 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
 
 #---- compact_fn_explicit_null_return_is_enforced
 #: fn(count: integer) -> NULL

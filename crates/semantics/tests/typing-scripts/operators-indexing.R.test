@@ -218,7 +218,7 @@ integer | NULL
 c(foo = 1L, bar = 2L)$foo
 #++++
 Unknown
-0..25 error[type-mismatch] R's `$` operator is invalid on atomic vectors; this value is `integer[named]` — extract an element with `[[` instead.
+0..25 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[named]`. Extract an element with `[[` instead.
 
 #---- double_bracket_on_function_rejected
 f <- function(x) x
@@ -335,7 +335,7 @@ x$foo
 #++++
 x: integer
 Unknown
-8..13 error[type-mismatch] R's `$` operator is invalid on atomic vectors; this value is `integer` — extract an element with `[[` instead.
+8..13 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer`. Extract an element with `[[` instead.
 
 #---- map_like_vector_bracket_by_name
 #: integer[named]

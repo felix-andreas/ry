@@ -36,7 +36,7 @@ if (TRUE) {
   1L;
 }
 #++++
-NULL
+integer | NULL
 
 #---- if_else_double_branches
 if (TRUE) 1.5 else 2.5
@@ -446,7 +446,7 @@ NULL
 for (item in function(x) x) item
 #++++
 NULL
-13..26 error[type-mismatch] this `for` sequence is `fn(x: T) -> T`, which cannot be iterated — expected a vector or list.
+13..26 error[type-mismatch] this `for` sequence is `fn(x: T) -> T`, which cannot be iterated. Expected a vector or list.
 
 #---- for_over_null_runs_zero_iterations
 for (item in NULL) item

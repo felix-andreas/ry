@@ -25,8 +25,8 @@ fn render_as(source: &str, kind: DocumentKind) -> String {
 }
 
 /// Renders every file of the case: one unnamed file, or each `#~~~~ path`
-/// section of a multi-file case under an `== path` line — package files under
-/// `R/`, scripts elsewhere.
+/// section of a multi-file case under an `== path` line. Files under `R/` are
+/// package files, and every other file is a script.
 fn render_case(
     source: &str,
     kind: DocumentKind,
@@ -188,7 +188,7 @@ fn typing_strict_fixtures() {
 }
 
 /// A stub source's declarations, overload candidates in declaration order,
-/// then the problems the loader drops lines for — the wording the editor and
+/// then the problems the loader drops lines for, in the wording the editor and
 /// the override report show.
 fn render_stub_source(source: &str) -> String {
     let db = RootDatabase::default();
@@ -234,9 +234,9 @@ fn stub_source_fixtures() {
 }
 
 /// One `#:` block on its own: the case's lines become the block, and the
-/// expectation is what it lowers to — the coercion kind, the declared type,
-/// the `@new` target, each `@type`/`@alias` definition — then the grammar's
-/// and the lowering's errors.
+/// expectation is what it lowers to (the coercion kind, the declared type, the
+/// `@new` target, and each `@type` or `@alias` definition), followed by the
+/// grammar's and the lowering's errors.
 fn render_annotation_block(source: &str) -> String {
     let text: String = source.lines().map(|line| format!("#: {line}\n")).collect();
     let db = RootDatabase::default();

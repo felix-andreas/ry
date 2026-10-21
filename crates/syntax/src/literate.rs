@@ -4,8 +4,9 @@
 //! Analysis reads one of these as the R program it contains, by blanking
 //! everything that is not R: every prose byte becomes a space and every newline
 //! stays a newline. That keeps the converted text **byte-for-byte the same
-//! length** as the original, so every range a diagnostic reports — and every
-//! position the editor sends — needs no translation at either end. It also makes
+//! length** as the original, so no range needs translating at either end.
+//! That covers every range a diagnostic reports and every position the editor
+//! sends. It also makes
 //! the whole document one R script, which is what it is at knit time: a chunk
 //! sees the bindings earlier chunks created.
 
@@ -51,11 +52,12 @@ pub fn r_source_of_literate(text: &str) -> String {
     out
 }
 
-/// One prose line, blanked to spaces — except for inline R, which is code.
+/// One prose line, blanked to spaces. Inline R is the exception, because it is
+/// code.
 ///
 /// A character becomes as many spaces as it occupies BYTES: every range
 /// downstream is a byte offset, so anything else shifts each diagnostic after a
-/// non-ASCII prose character. Exotic whitespace is blanked with the rest — a
+/// non-ASCII prose character. Exotic whitespace is blanked with the rest. A
 /// non-breaking space is whitespace to Rust and an unexpected character to R's
 /// lexer, so keeping it verbatim reports a syntax error in prose no chunk
 /// contained.

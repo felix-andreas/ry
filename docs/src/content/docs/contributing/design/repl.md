@@ -3,343 +3,293 @@ title: REPL design
 description: "How the R console loads R at runtime with no build-time linking"
 ---
 
-**Status: v1 SHIPPED and e2e-VERIFIED against real R** as `crates/repl`
-behind `ry repl` (user decisions: subcommand packaging, reedline +
-nu-ansi-term kept). The predecessor experiment has since been deleted, parity
-having been established and exceeded. Implemented: discovery, the
-typed runtime-binding layer, the ReadConsole-hosted reedline console with
-lexer highlighting and conservative completeness, SIGINT interrupt routing,
-pty e2e tests (skip-if-no-R) in the ry crate, the headless runner
-(`ry run` / `repl --file`), vi keybindings, and the Windows embedding
-(verified on real Windows + R — see its section). The full pty suite runs
-green against a real R on Unix ptys AND Windows ConPTY (interactive
-evaluation, multiline, error stream, Ctrl-C interruption, both batch
-directions) — R installs in agent containers via apt + the CRAN repository,
-so the suite is runnable anywhere, not just on a developer machine. Two harness facts a rewrite must keep: the pty driver
-must *answer* reedline's cursor-position query (`ESC[6n` → `ESC[1;1R`) or
-the editor blocks before its first prompt, and interactive sessions must
-run serialized (in-session `SESSION_LOCK`) — concurrent R sessions on a
-loaded machine are flaky while serial runs are stable. **Analysis-backed
-Tab completion SHIPPED** (the first analysis rung): the repl crate exposes
-a `SessionCompleter` seam (accept + complete; the console feeds accepted
-lines back, an `Arc<Mutex>` shares the object between reedline's menu and
-the accept path) so the crate stays syntax-only, and the host implements
-`AnalysisCompleter` (`crates/ry/src/repl_completer.rs`) —
-`ide::completion` over the session-as-script (one salsa `SourceFile`
-updated per request; stubs + export manifests installed), so the menu
-shows typed signatures for stdlib names, session bindings, `pkg::`
-exports, and manifest names; Tab is bound in both emacs and vi-insert
-modes. E2e caveat: menu interactions over a pty are stateful — the e2e
-pins one menu render + accept; the completer's behavior is pinned by its
-unit tests. Not yet: live-session facts (the R environment listing
-unioned in), pre-eval diagnostics, hover on the input line, graphics
-devices.
+The R console has shipped. It lives in `crates/repl`, behind `ry repl`, and has been verified end to
+end against a real R. This page records the architecture that lets ry embed R without linking
+against it at build time, and what is still open.
 
-User-initiated: integrate a first-class REPL into ry — the successor to an
-earlier `extendr`-based experiment — **without any build-time link dependency on
-R**. This
-document records the architecture that makes that possible (verified against a
-production-grade Rust R kernel's source; techniques described on their own
-terms) and how ry's analysis stack turns a console into something more
-than an echo loop.
+## What ships
 
-## Why build-time linking was a dead end
+All of the following ship: discovering R, the typed runtime-binding layer, the console hosted inside
+R's ReadConsole hook, lexer-based highlighting, conservative checking of whether input is complete,
+routing of SIGINT interrupts, the headless runner behind `ry run` and `ry repl --file`, vi
+keybindings, and embedding on Windows. The pseudo-terminal end-to-end suite runs green against a real
+R, both on a Unix pty and on Windows ConPTY, covering interactive evaluation, multiline input, the
+error stream, Ctrl-C interruption, and both batch directions. R installs in an agent container
+through apt and the CRAN repository, so the suite can run anywhere, not only on a developer machine.
 
-The predecessor embedded R through `extendr`/libR-sys: bindgen ran at build time
-against a local R's headers and the binary carried a load-time dynamic dependency
-on libR. Consequences: the build machine needed a matching R, which is why that
-crate was excluded from CI and every gate; the artifact was bound to the R it was
-built against; and a missing symbol was a loader failure rather than a
-recoverable fact. Deleting it is what removed `--exclude rofy` from every gate
-command and dropped `extendr` from the workspace.
+Tab completion is backed by the analysis stack. The `repl` crate itself stays syntax-only and exposes
+a `SessionCompleter` seam with two methods, one to accept a line and one to complete. The console
+feeds every accepted line back through it, and an `Arc<Mutex>` shares the completer between
+reedline's menu and the accept path. The host implements it as `AnalysisCompleter` in
+`crates/ry/src/repl_completer.rs`, which runs `ide::completion` over the session treated as a script:
+one salsa `SourceFile`, updated per request, with the stubs and export manifests installed. The menu
+therefore shows typed signatures for standard-library names, session bindings, `pkg::` exports, and
+manifest names. Tab is bound in both emacs mode and vi insert mode.
 
-## The core technique: bind R at runtime, per symbol
+Two facts about the test harness must survive any rewrite. The pty driver must answer reedline's
+cursor-position query, replying `ESC[1;1R` to `ESC[6n`, or the editor blocks before its first prompt.
+And interactive sessions must run one at a time, through the in-session `SESSION_LOCK`, because
+concurrent R sessions on a loaded machine are flaky while serial runs are stable.
 
-Do not link. `dlopen` R's shared library at startup and resolve every needed
-symbol by name, with per-symbol optionality:
+Four things are not built: merging live-session facts (the listing of R's global environment) into
+completion, diagnostics before evaluation, hover on the input line, and graphics devices.
 
-- **A hand-curated binding surface, not bindgen.** One declaration list of the
-  C-API functions, variadic functions (`Rf_error`, `Rprintf` — stored with real
-  `...` types, exposed at fixed arity), mutable globals
-  (`R_interrupts_pending`, `R_Interactive`, the `ptr_R_ReadConsole` /
-  `ptr_R_WriteConsoleEx` hook pointers, `R_PolledEvents`, `R_SignalHandlers`),
-  and value-snapshotted constants (`R_GlobalEnv`, `R_NilValue`, …). Declarative
-  macros expand each declaration into a `static Option<fn ptr>` plus a
-  passthrough wrapper; resolution is **eager and batched** at init (one dlsym
-  sweep), not lazy per call.
-- **A missing symbol is `None`, not a crash.** Every binding gets a
-  `has::name()` probe; call sites branch on it to provide fallbacks on older
-  R (e.g. a newer accessor when present, the classic macro-equivalent
-  otherwise). This is the version-compatibility story: resolve optimistically,
-  degrade per symbol. A hard version floor (parse
-  `{R_HOME}/library/base/DESCRIPTION`) keeps the fallback matrix small —
-  R >= 4.2 mirrors current ecosystem practice.
-- **Two-phase init, load-bearing order.** Functions + mutable globals bind
-  BEFORE `Rf_initialize_R`; the constant globals are copied by value only
-  AFTER `setup_Rmainloop()` (R initializes them there). The library handle is
-  leaked — held for the process lifetime.
-- **Loader flags matter.** Unix: `RTLD_LAZY | RTLD_GLOBAL`, so compiled
-  package `.so`s that link libR resolve R symbols as if the host had linked R
-  itself; additionally set `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` to
-  `{R_HOME}/lib` so those packages can *find* a libR at their own dlopen time
-  (the `RTLD_GLOBAL` symbols then shadow it). macOS needs the
-  dyld-environment entitlement on the binary. Windows: open `R.dll` plus its
-  sibling DLLs (`Rblas`, `Rlapack`, `Riconv`, `Rgraphapp`) so the loaded-module
-  list satisfies package imports; per-module symbol lookup means no
-  `RTLD_GLOBAL` equivalent is needed.
-- **Keep ABI-drifting structs off the surface.** R's `DevDesc`/`Rstart` change
-  layout across versions; the reference approach mirrors them per engine
-  version and casts at runtime. v1 of our REPL simply avoids those surfaces
-  (no custom graphics device); the technique is recorded for when plots come.
+## Why linking at build time was a dead end
+
+The predecessor embedded R through `extendr` and libR-sys: bindgen ran at build time against a local
+R's headers, and the binary carried a load-time dependency on libR. That had three consequences. The
+build machine needed a matching R, which is why that crate was excluded from CI and from every gate.
+The artifact was bound to the R it was built against. And a missing symbol was a loader failure
+rather than something the program could handle. Deleting that crate removed the exclusion from every
+gate command and dropped `extendr` from the workspace.
+
+## The core technique: bind R at runtime, one symbol at a time
+
+Do not link. Open R's shared library with `dlopen` at startup, and resolve every needed symbol by
+name, each one individually optional.
+
+The declarations here are original, written from R's public headers. The design was checked against
+the source of a production-grade Rust R kernel, which served as study material, not something to
+copy.
+
+- **The binding surface is written by hand, not generated.** One declaration list covers the C API
+  functions, variadic functions such as `Rf_error` and `Rprintf`, the mutable globals, and the
+  constants whose values are snapshotted. A variadic is stored with its real `...` type and exposed
+  at a fixed arity. The mutable globals are `R_interrupts_pending`, `R_Interactive`, the
+  `ptr_R_ReadConsole` and `ptr_R_WriteConsoleEx` hook pointers, `R_PolledEvents`, and
+  `R_SignalHandlers`; the constants are `R_GlobalEnv`, `R_NilValue`, and the like. Declarative
+  macros expand each declaration into a `static Option<fn ptr>` plus a passthrough wrapper.
+  Resolution happens eagerly, in one batched dlsym sweep at init, rather than lazily per call.
+- **A missing symbol is `None`, not a crash.** Every binding gets a `has::name()` probe, and a call
+  site branches on it to fall back on an older R, using a newer accessor when it is present and the
+  classic macro equivalent otherwise. That is the entire version-compatibility story: resolve
+  optimistically, and degrade one symbol at a time. A hard version floor keeps the matrix of
+  fallbacks small. It is read by parsing `{R_HOME}/library/base/DESCRIPTION`, and R 4.2 matches
+  current ecosystem practice.
+- **Init has two phases, and their order matters.** Functions and mutable globals are bound before
+  `Rf_initialize_R`. Constant globals are copied by value only after `setup_Rmainloop()`, because
+  that is where R initializes them. The library handle is leaked and held for the life of the
+  process.
+- **The loader flags matter.** On Unix, open the library with `RTLD_LAZY | RTLD_GLOBAL`, so that a
+  compiled package whose shared object links libR resolves R's symbols as if the host had linked R
+  itself. Also set `LD_LIBRARY_PATH` (or `DYLD_LIBRARY_PATH`) to `{R_HOME}/lib`, so that such a
+  package can find a libR when it is itself opened; the `RTLD_GLOBAL` symbols then shadow it. macOS
+  needs the dyld-environment entitlement on the binary. On Windows, open `R.dll` together with its
+  sibling DLLs (`Rblas`, `Rlapack`, `Riconv`, and `Rgraphapp`), so that the list of loaded modules
+  satisfies a package's imports. Windows looks symbols up per module, so it needs no equivalent of
+  `RTLD_GLOBAL`.
+- **Keep structs whose layout drifts off the surface.** R's `DevDesc` and `Rstart` change layout
+  between versions. The reference approach mirrors them per engine version and casts at runtime. The
+  console avoids these surfaces entirely, since it has no custom graphics device, and the technique
+  is recorded here for when plots arrive.
 
 ## Discovery
 
-1. `R_HOME` env var when set (editor/CI can pin the version).
-2. Else run `R RHOME` from `PATH` (`R.exe`/`R.bat` on Windows) and read stdout;
-   re-export `R_HOME` so R's own `R_HomeDir()` agrees.
-3. Shared library at `{R_HOME}/lib/libR.{so,dylib}` (the macOS framework's
-   R_HOME already points into `Resources/`), `{R_HOME}/bin/x64/R.dll` on
-   Windows. Fail with an actionable message naming `--enable-R-shlib` when the
-   shared library is absent.
-4. Secondary vars (`R_SHARE_DIR`, `R_INCLUDE_DIR`, `R_DOC_DIR`) are exported
-   by R's shell wrapper (`{R_HOME}/bin/R`), which embedding bypasses; on
-   layouts that relocate those directories (Fedora, RHEL) `R.home("share")`
-   would otherwise resolve to nonexistent `{R_HOME}/<dir>` paths. Recovered
-   by parsing the wrapper's plain `VAR=value` lines (values are substituted
-   literally at R's install time; a subprocess asking R directly would cost
-   a few hundred milliseconds of startup). Unix-only — Windows R derives
-   them from `R_HOME` internally.
+1. Use the `R_HOME` environment variable when it is set, so an editor or CI can pin the version.
+2. Otherwise, run `R RHOME` from the `PATH` (`R.exe` or `R.bat` on Windows) and read its output.
+   Re-export the result as `R_HOME`, so that R's own `R_HomeDir()` agrees.
+3. Find the shared library at `{R_HOME}/lib/libR.so` or `{R_HOME}/lib/libR.dylib`, or at
+   `{R_HOME}/bin/x64/R.dll` on Windows. On macOS, the framework's `R_HOME` already points into
+   `Resources/`. When the shared library is missing, fail with a message that names
+   `--enable-R-shlib`.
+4. Recover the secondary variables `R_SHARE_DIR`, `R_INCLUDE_DIR`, and `R_DOC_DIR`. R's shell
+   wrapper at `{R_HOME}/bin/R` exports them, and embedding bypasses the wrapper, so on a layout that
+   relocates those directories, as Fedora and RHEL do, `R.home("share")` would otherwise point at a
+   path under `{R_HOME}` that does not exist. The console parses the wrapper's plain `VAR=value` lines
+   instead: R substitutes those values literally at install time, and asking a separate R process
+   would add a few hundred milliseconds to startup. This is Unix-only, because Windows R derives the
+   variables from `R_HOME` internally.
 
 ## Process shape and the console loop
 
-- **R owns the process main thread** (its stack checks and signal expectations
-  assume it); everything else — protocol threads, the analysis engine, output
-  capture — is background threads of the same process. R initializes once per
-  process; tests therefore run one-process-per-test (exactly why the test
-  harness choice matters; see Testing).
-- Init: suppress R's signal handlers (`R_SignalHandlers = 0`, install our
-  own), `Rf_initialize_R` with `--interactive --no-save --no-restore-data`,
-  hook `ptr_R_ReadConsole` / `ptr_R_WriteConsoleEx` / `ptr_R_Busy` /
-  `ptr_R_Suicide`, set `R_PolledEvents` + `R_wait_usec` so long-running R code
-  polls us, then `setup_Rmainloop()` and `run_Rmainloop()` — drive R's REAL
-  REPL through the console hooks (not `R_ReplDLLdo1`), which keeps browser
-  prompts, `readline()`, and nested REPLs honest.
-- **The ReadConsole callback is the scheduler.** When R asks for input, we are
-  at a safe idle point: classify the prompt (top-level vs `browser()` vs
-  `readline()` input request), then park in a channel-select over: user input,
-  eval requests, and idle work — with a periodic tick that runs R's input
-  handlers so background R machinery (help server, event-loop packages) stays
-  live. Feed R **one expression per read**, parsed and split by US first.
-- **One thread touches R — by construction.** The editor runs inside the
-  ReadConsole hook, so the console and R share the main thread and no
-  cross-thread marshaling layer exists. The analysis rung keeps it that way:
-  analysis may run on background threads, but live-session facts (loaded
-  namespaces, `ls()` of the global env, frame columns) are fetched only while
-  R is parked at a prompt, on the main thread, between reads — background
-  threads never call into R.
-- **Terminal width is ours to set.** R's `width` option defaults to 80 columns
-  whatever the terminal is, and R exports no setter, so a table with room on
-  screen still wrapped. The width is measured once and applied with
-  `R_ParseEvalString` in the window between `setup_Rmainloop()` and
-  `run_Rmainloop()` — the profiles have been sourced, so a profile that chose a
-  width of its own is left alone (only R's untouched default is replaced), and
-  nothing the console does can be perturbed because no prompt has run yet.
-  Feeding `options(width = …)` through the ReadConsole hook instead is what the
-  first attempt did and it is wrong twice over: it costs a main-loop round
-  trip, and a round trip taken before the editor's first prompt leaves the
-  terminal in the state R found it in, which desynchronises the next read. A
-  **resize is not tracked** — a stock terminal session handles `SIGWINCH` by
-  calling `R_SetOptionWidth`, which is not exported, and the console is the
-  only other way in.
-- **Interrupts:** block SIGINT everywhere except the R thread; an interrupt
-  request sets `R_interrupts_pending` (Unix via the signal, Windows via
-  `UserBreak`) and R honors it at its next check; while waiting on input we
-  poll the flag and long-jump via `Rf_onintr` ourselves.
-- **Errors never cross Rust frames.** Every C→Rust callback body is a
-  plain-old-frame guarded by `R_ToplevelExec` (+
-  `R_withCallingErrorHandler` for structured condition capture);
-  `extern "C-unwind"` throughout. Output capture is two-layer: the
-  WriteConsoleEx hook for R-level output, plus fd-level dup/pipe capture for
-  C `printf` output that bypasses R's console.
+- **R owns the process's main thread**, because its stack checks and its expectations about signals
+  assume it does. Everything else (the protocol threads, the analysis engine, output capture) runs on
+  background threads of the same process. R initializes once per process, so tests run one process
+  per test.
+- **Init runs in this order.** Suppress R's signal handlers by setting `R_SignalHandlers = 0` and
+  installing our own. Call `Rf_initialize_R` with `--interactive --no-save --no-restore-data`. Hook
+  `ptr_R_ReadConsole`, `ptr_R_WriteConsoleEx`, `ptr_R_Busy`, and `ptr_R_Suicide`. Set
+  `R_PolledEvents` and `R_wait_usec`, so that long-running R code polls us. Then call
+  `setup_Rmainloop()` and `run_Rmainloop()`. This drives R's *real* REPL through the console hooks,
+  rather than through `R_ReplDLLdo1`, which keeps `browser()` prompts, `readline()` calls, and nested
+  REPLs honest.
+- **The ReadConsole callback is the scheduler.** When R asks for input, the process is at a safe idle
+  point. Classify the prompt as top-level, a `browser()` prompt, or a `readline()` request, then park
+  in a channel select over user input, evaluation requests, and idle work. A periodic tick runs R's
+  input handlers, so background R machinery such as the help server or an event-loop package stays
+  alive. R is fed one expression per read, which we parse and split first.
+- **Exactly one thread touches R, by construction.** The editor runs inside the ReadConsole hook, so
+  the console and R share the main thread, and there is no layer for marshaling work across threads.
+  Analysis keeps it that way: it may run on a background thread, but a live-session fact, such as a
+  loaded namespace, the `ls()` of the global environment, or a data frame's columns, is fetched only
+  while R is parked at a prompt, on the main thread, between reads. A background thread never calls
+  into R.
+- **The terminal width is ours to set.** R's `width` option defaults to 80 columns whatever the
+  terminal is, and R exports no setter for it, so a table that had room on screen still wrapped. The
+  console measures the width once and applies it with `R_ParseEvalString`, in the window between
+  `setup_Rmainloop()` and `run_Rmainloop()`. The profiles have been sourced by then, so a profile that
+  chose its own width is left alone and only R's untouched default is replaced, and nothing the
+  console does can be disturbed, because no prompt has run yet. The first attempt fed
+  `options(width = …)` through the ReadConsole hook instead, which is wrong twice over: it costs a
+  round trip through the main loop, and a round trip taken before the editor's first prompt leaves
+  the terminal in whatever state R found it, which desynchronizes the next read. Resizing is not
+  tracked. A stock terminal session handles `SIGWINCH` by calling `R_SetOptionWidth`, which R does not
+  export, and the console is the only other way in.
+- **Interrupts.** SIGINT is blocked everywhere except on the R thread. An interrupt sets
+  `R_interrupts_pending` (through the signal on Unix, through `UserBreak` on Windows), and R honors it
+  at its next check. While waiting for input, the console polls the flag and long-jumps through
+  `Rf_onintr` itself.
+- **An R error never crosses a Rust frame.** Every callback from C into Rust has a plain frame,
+  guarded by `R_ToplevelExec`, uses `R_withCallingErrorHandler` to capture structured conditions, and
+  is declared `extern "C-unwind"`. Output is captured in two layers: the WriteConsoleEx hook captures
+  R-level output, and a dup of the file descriptor into a pipe captures C-level `printf` output that
+  bypasses R's console.
 
-## Windows implementation (VERIFIED on real Windows + R 4.5.2: the full pty
-e2e suite runs green over ConPTY, plus `ry run` exit codes, `system()`,
-`~` expansion, and `.Platform$GUI`)
+## The Windows implementation
 
-Windows R embedding does NOT use the Unix `ptr_R_ReadConsole` globals — it
-wires callbacks through the `Rstart` struct. The working recipe (now
-machine-verified end to end):
+This has been verified on real Windows against R 4.5.2. The full pty end-to-end suite runs green over
+ConPTY, and so do `ry run`'s exit codes, `system()`, `~` expansion, and `.Platform$GUI`.
 
-- **Load**: `{R_HOME}\bin\x64\R.dll` (plain `bin\` on ARM64) via
-  `LoadLibrary`, after preloading the sibling DLLs (`Rblas`, `Rlapack`,
-  `Riconv` best-effort) so compiled-package imports resolve; Windows'
-  per-module symbol lookup means no `RTLD_GLOBAL` equivalent is needed.
-  **`Rgraphapp.dll` is a hard requirement, not a best-effort preload: it —
-  not `R.dll` — exports `GA_initapp`, and skipping the call leaves graphapp
-  uninitialized, which crashes `readconsolecfg()` with an access violation**
-  (this exact miss was the original Windows-crash root cause: resolving
-  `GA_initapp` against `R.dll`, finding nothing, and treating it as
-  optional).
-- **Discovery**: `R_HOME` env, else `R.exe RHOME` from `PATH` (registry
-  lookup can come later).
-- **Init order (load-bearing)**: `cmdlineoptions(1, [name])` →
-  `R_DefParamsEx(&rstart, RSTART_VERSION)` (the version handshake makes R
-  validate the struct layout — this replaces per-R-version struct
-  mirroring) → fill the callbacks (`ReadConsole`, `WriteConsoleEx` with
-  plain `WriteConsole` NULLed, `ShowMessage`, `YesNoCancel`, `CallBack`,
-  `Busy`, `Suicide`), `R_Interactive = 1`, `rhome` from discovery and
-  `home` from R's own `getRUser()` (NOT `USERPROFILE`: R's `~` is the
-  Documents folder, and the `R_LIBS_USER` default hangs off it — the wrong
-  `home` silently loses the user's installed packages) →
-  `CharacterMode = RGui` so `R_SetParams` wires the callback set →
-  `GA_initapp(0, NULL)` (from `Rgraphapp.dll`, required) →
-  `readconsolecfg()` → only then switch `CharacterMode` to `LinkDLL`,
-  BEFORE `setup_Rmainloop`: keeps the RGui callback wiring while avoiding
-  `do_system`'s `SetStdHandle` invalidation (which hangs `system()` calls;
-  verified un-hung) → `setup_Rmainloop()` → `run_Rmainloop()`.
-- **`.Platform$GUI`**: RGui-mode init stamps it `"Rgui"`, and the LinkDLL
-  flip does not retroactively update it — packages take `"Rgui"` as license
-  to call Rgui-only GUI functions (menus, dialogs) that fail here. The
-  console feeds a first hidden line that rebinds it to `"ry"` in
-  `baseenv()` (unlock/relock `.Platform`) before any user input. Known gap:
-  R sources the startup profiles before the first console read, so profile
-  code still sees `"Rgui"`; fixing that would mean suppressing native
-  profile loading and sourcing them manually after init — deliberately not
-  taken on.
-- **Encoding**: `ry.exe` embeds a Windows application manifest
-  declaring UTF-8 as the active code page (`crates/ry/build.rs`, MSVC
-  linker `/MANIFESTINPUT` — no build dependency). Embedded R (4.2+, UCRT)
-  takes its native encoding from the host process's code page and `R.exe`
-  declares UTF-8 the same way; without the manifest R runs in the system
-  ANSI code page on any machine that has not enabled UTF-8 system-wide, and
-  text handling silently diverges from stock R. Machines WITH the
-  system-wide UTF-8 option mask the gap — verify encoding claims on a
-  default-locale machine (`l10n_info()` must report codepage 65001).
-- **Line endings**: every path into the console feed normalizes CRLF (and
-  lone CR) to `\n` — R's parser reports a raw `\r` as "unexpected invalid
-  token". Two real carriers: script files on Windows, and the editor's
-  multiline buffer, which joins continuation lines with `\r\n` there
-  (single-line interactive input never carries one).
-- **Interrupt**: a `SetConsoleCtrlHandler` handler sets BOTH `UserBreak`
-  (the front-end break flag) and `R_interrupts_pending` (the deferred
-  flag); clear both when handling. Ctrl-C over ConPTY reaches the handler
-  only while R evaluates (raw editor mode disables `ENABLE_PROCESSED_INPUT`),
-  exactly as intended; the e2e interrupt test passes.
-- **Editor**: reedline runs on Windows terminals; the field carries a
-  crossterm patch for VT input handling — expect that caveat at the editor
-  layer.
-- **E2e**: the pty suite drives the same harness through ConPTY
-  (`portable-pty`'s native pty), so REPL-touching changes are verifiable on
-  Windows machines with R exactly like on Unix.
+Embedding R on Windows does not use the Unix `ptr_R_ReadConsole` globals; the callbacks are wired
+through the `Rstart` struct instead. This is the recipe that works:
 
-## Console UX backlog (surveyed against the field)
+- **Load.** Open `{R_HOME}\bin\x64\R.dll` (or the plain `bin\` path on ARM64) with `LoadLibrary`,
+  after preloading the sibling DLLs so that a compiled package's imports resolve. `Rblas`, `Rlapack`,
+  and `Riconv` are preloaded on a best-effort basis, but `Rgraphapp.dll` is required, because it
+  exports `GA_initapp` and `R.dll` does not. Skipping that call leaves graphapp uninitialized, and
+  `readconsolecfg()` then crashes with an access violation. That exact miss caused the original
+  Windows crash: `GA_initapp` was looked up in `R.dll`, not found, and treated as optional.
+- **Discovery.** Use the `R_HOME` environment variable, or else `R.exe RHOME` from the `PATH`. A
+  registry lookup can come later.
+- **Init order, which matters.** Call `cmdlineoptions(1, [name])`. Call
+  `R_DefParamsEx(&rstart, RSTART_VERSION)`; the version handshake makes R validate the struct's
+  layout, which saves mirroring the struct for each R version. Fill in the callbacks: `ReadConsole`,
+  `WriteConsoleEx` (with plain `WriteConsole` set to NULL), `ShowMessage`, `YesNoCancel`,
+  `CallBack`, `Busy`, and `Suicide`. Set `R_Interactive = 1`. Set `rhome` from discovery, and `home`
+  from R's own `getRUser()`, *not* from `USERPROFILE`: R's `~` is the Documents folder, the default
+  `R_LIBS_USER` hangs off it, and the wrong `home` silently loses the user's installed packages. Set
+  `CharacterMode` to `RGui`, so that `R_SetParams` wires up the callbacks. Call `GA_initapp(0, NULL)`
+  from `Rgraphapp.dll`, then `readconsolecfg()`. Only then switch `CharacterMode` to `LinkDLL`, before
+  `setup_Rmainloop`. That keeps the RGui callback wiring while avoiding the `SetStdHandle`
+  invalidation in `do_system`, which otherwise makes a `system()` call hang; the fixed behavior is
+  verified. Finally, call `setup_Rmainloop()` and `run_Rmainloop()`.
+- **`.Platform$GUI`.** Initializing in RGui mode stamps it as `"Rgui"`, and switching to `LinkDLL`
+  does not update it after the fact. Packages take `"Rgui"` as permission to call Rgui-only GUI
+  functions, such as menus and dialogs, which fail here. So before any user input, the console feeds
+  a hidden first line that rebinds it to `"ry"` in `baseenv()`, unlocking and relocking `.Platform`.
+  One gap is known: R sources the startup profiles before the first console read, so profile code
+  still sees `"Rgui"`. Fixing that would mean suppressing R's own profile loading and sourcing the
+  profiles by hand after init, which is deliberately not taken on.
+- **Encoding.** `ry.exe` embeds a Windows application manifest that declares UTF-8 as the active code
+  page. `crates/ry/build.rs` writes it, and the MSVC linker takes it through `/MANIFESTINPUT`, so it
+  adds no build dependency. An embedded R 4.2 or newer, on UCRT, takes its native encoding from the
+  host process's code page, and `R.exe` declares UTF-8 the same way. Without the manifest, R runs in
+  the system's ANSI code page on any machine that has not enabled UTF-8 system-wide, and text handling
+  silently diverges from stock R. A machine with the system-wide UTF-8 option hides the problem, so
+  verify any encoding claim on a machine with the default locale, where `l10n_info()` must report
+  code page 65001.
+- **Line endings.** Every path into the console normalizes CRLF, and a lone CR, to `\n`, because R's
+  parser reports a raw `\r` as "unexpected invalid token". Two sources really produce them: a script
+  written on Windows, and the editor's multiline buffer, which joins continuation lines with `\r\n`
+  there. Single-line interactive input never contains one.
+- **Interrupts.** A `SetConsoleCtrlHandler` handler sets both `UserBreak`, the front end's break
+  flag, and `R_interrupts_pending`, the deferred flag, and both are cleared when one is handled.
+  Over ConPTY, Ctrl-C reaches the handler only while R is evaluating, because the editor's raw mode
+  disables `ENABLE_PROCESSED_INPUT`. That is exactly what is wanted, and the end-to-end interrupt test
+  passes.
+- **Editor.** reedline runs fine in a Windows terminal. The ecosystem carries a crossterm patch for
+  handling VT input, so expect that caveat at the editor layer.
+- **End-to-end tests.** The pty suite drives the same harness through ConPTY, using `portable-pty`'s
+  native pty, so a change that touches the console can be verified on a Windows machine with R exactly
+  as on Unix.
 
-Parity items observed in production Rust R consoles, all compatible with our
-architecture; none block the analysis rung:
+## Console backlog
 
-- **Line-editor upgrade** (we pin an old reedline): newer versions add an
-  idle-callback hook — the natural seam for running analysis between
-  keystrokes — plus vi mode and configurable keybindings that come for free.
-  Note the editor's chrono dependency is unwanted baggage (only its default
-  prompt clock and sqlite-history timestamps use it); see the Apple-framework
-  decision record for why that matters at release time.
-- **History**: sqlite backend (an editor feature flag) and import from
-  `.Rhistory`/radian history formats — low cost, removes a migration step.
-- **E2e assertions**: parse pty output through a vt100 screen model instead
-  of grepping raw transcripts — robust against redraws and cursor movement.
-- **Help**: a fuzzy help browser over installed packages, which comparable
-  consoles provide; ours should come from the analysis stack (hover docs already
-  exist) rather than a parallel Rd pipeline.
-- **Reprex mode**, rendered through our own formatter.
-- Auto-matching brackets / smart quotes; TOML-config for colors and prompts
-  once a console config story exists.
+These parity items come from production Rust R consoles. All of them fit this architecture, and none
+blocks the analysis work.
 
-## No kernel protocol (settled)
+- **Upgrade the line editor.** The console pins an old reedline. A newer version adds an idle
+  callback, the natural seam for running analysis between keystrokes, and brings vi mode and
+  configurable keybindings for free. The editor's chrono dependency is unwanted baggage, since only
+  its default prompt clock and the timestamps in its sqlite history use it; the decision record on
+  Apple frameworks explains why that matters at release time.
+- **History.** Add the sqlite backend, an editor feature flag, and import the `.Rhistory` and radian
+  history formats. That is cheap, and removes a migration step.
+- **End-to-end assertions.** Parse the pty output through a vt100 screen model instead of grepping a
+  raw transcript, which is robust against redraws and cursor movement.
+- **Help.** Add a fuzzy help browser over the installed packages, as comparable consoles have. It
+  should come from the analysis stack, where hover documentation already exists, not from a separate
+  Rd pipeline.
+- **A reprex mode**, rendered through ry's own formatter.
+- **Auto-matching brackets, smart quotes, and a TOML configuration for colors and prompts**, once the
+  console has a configuration story.
 
-The reference architecture this design was verified against is a notebook
-kernel: its frontend lives in another process, so it carries a wire protocol
-(message sockets, serialization, signing, ordering, heartbeats), comm
-channels for UI surfaces, and — the structural consequence — a marshaling
-layer that ships work from protocol threads onto the R thread at safe
-points. None of that applies here, and dropping it is a settled decision,
-not a v1 gap: the frontend is in-process (the editor runs inside the
-ReadConsole hook), so exactly one thread ever touches R and the "protocol"
-is a function call. If a remote or GUI frontend is ever wanted, it becomes a
-second frontend over the runtime layer (`libr.rs`) with its own process
-shape — IPC does not get threaded through the console. Editor integration
-is already the LSP's job.
+## No kernel protocol: settled
 
-## Headless runner (v1 SHIPPED) and file pre-loading
+The reference architecture this design was checked against is a notebook kernel. Its front end lives
+in another process, so it needs a wire protocol (message sockets, serialization, signing, ordering,
+heartbeats), comm channels for its UI surfaces, and, as a structural consequence, a layer that ships
+work from a protocol thread onto the R thread at a safe point.
 
-`ry run script.R` executes a file through the embedded runtime and
-exits at its end; `ry repl --file script.R` (also `-f`) feeds the same
-script and then hands over to the interactive prompt. Mechanism (decided):
-the ReadConsole frontend feeds the script bytes exactly like accepted
-console input, and in batch mode answers end-of-input once they are
-consumed — no second driver, identical parse/eval/autoprint semantics to
-the console. Exit-code propagation without new C surface: batch mode
-prepends `options(error = function() q(status = 1, save = "no"))`, so a
-top-level error halts the script and the process exits 1 (plain-Command e2e
-tests pin exit 0 + output and exit 1 + halt; skip-if-no-R like the rest).
-Vi keybindings shipped alongside: `ry repl --keybindings vi` (emacs
-default) — the editor's built-in vi mode, no console config story needed
-yet. Still ahead for the runner: run TypedR files directly (typecheck,
-compile in memory, execute — see [Inline type syntax](/contributing/design/inline-type-syntax/)).
+None of that applies here, and dropping it is a settled decision, not a gap. The front end is in the
+same process, since the editor runs inside the ReadConsole hook, so exactly one thread ever touches R
+and the "protocol" is a function call. If a remote or GUI front end is ever wanted, it will be a
+second front end over the runtime layer in `libr.rs`, with its own process shape, rather than IPC
+threaded through the console. Editor integration is already the language server's job.
 
-## What makes it better than the previous integration
+## The headless runner
 
-The REPL is not a goal in itself — the point is a console with the analyzer in
-the same process:
+`ry run script.R` executes a file through the embedded runtime and exits at its end. `ry repl --file
+script.R` (or `-f`) feeds the same script and then hands over to the interactive prompt.
 
-- **Our parser drives input.** Continuation ("is this input complete?") comes
-  from `crates/syntax`, not from feeding R and watching for parse state; we
-  can syntax-highlight and error-squiggle the input line as it is typed.
-- **Typed completions**: `crates/ide` completions over the script-so-far,
-  UNIONED with live-session facts (loaded namespaces, `ls()` of the global
-  env, column names of in-memory frames) fetched through the idle-task seam.
-  The session becomes another resolution layer on top of the stub corpus.
-- **Diagnostics before evaluation**: run the checker on the pending input
-  against the accumulated session "document" (the REPL history is a script
-  document; the engine already models script scoping top-down).
-- **A runtime type bridge (later)**: observed classes/types of session values
-  can seed or validate stubs — the CRAN-introspection idea from the backlog
-  gets an interactive on-ramp.
-- **Formatter on history**, hover on the input line, and `#:` annotations
-  usable interactively.
+The ReadConsole front end feeds the script's bytes exactly as it feeds accepted console input, and in
+batch mode it answers "end of input" once they are used up. There is no second driver, so parsing,
+evaluation, and autoprinting behave exactly as in the console. Propagating the exit code needs no new
+C surface: batch mode prepends `options(error = function() q(status = 1, save = "no"))`, so a
+top-level error halts the script and the process exits with status 1. End-to-end tests that run the
+plain command pin exit 0 with output and exit 1 with a halt, and skip when no R is installed, like
+the rest.
 
-## Plan sketch (when scheduled)
+Vi keybindings shipped alongside the runner. `ry repl --keybindings vi` selects the editor's built-in
+vi mode, with emacs as the default, so the console needs no configuration story yet.
 
-1. A runtime-binding crate of our own (hand-curated minimal surface — only
-   what the console needs; grows on demand). Original declarations, written
-   from R's public headers; the reference implementation is study material,
-   not a source to copy.
-2. A console host crate: discovery, init, the ReadConsole select loop,
-   interrupt/output plumbing. TUI line editing reuses the predecessor's
-   front-end experience where it fits.
-3. Wire `semantics`/`ide` in behind the idle-task seam (completions first,
-   then pre-eval diagnostics).
-4. Retire the predecessor once parity is reached. **Done** — its whole surface
-   (multiline editing, history with reverse search, vi mode, highlighting, a
-   hinter, a vi-aware prompt) is covered here, and exceeded by Tab completion and
-   history persisted to a file rather than held for the session.
+One thing is still ahead for the runner: running typed `.ry` sources directly, which means
+type-checking them, compiling them in memory, and executing the result (see
+[inline type syntax](/contributing/design/inline-type-syntax/)).
+
+## What makes this better than the previous integration
+
+The REPL is not a goal in itself. The point is a console with the analyzer in the same process:
+
+- **Our parser drives the input.** Whether the input is complete is decided by `crates/syntax`, not
+  by feeding R and watching its parse state. That also lets the console highlight the input line, and
+  underline an error in it while you type.
+- **Completions are typed.** `crates/ide` completes over the script so far. The plan is to combine
+  that with live-session facts (loaded namespaces, the `ls()` of the global environment, and the
+  column names of a data frame in memory), fetched through the idle-task seam, which would make the
+  session one more resolution layer on top of the stub corpus.
+- **Diagnostics can run before evaluation.** Run the checker on the pending input against the session
+  so far. The REPL history is a script document, and the engine already models script scoping from
+  the top down.
+- **A runtime type bridge, later.** The class or type actually observed for a session value could
+  seed or validate a stub, giving the idea of introspecting CRAN packages an interactive on-ramp.
+- **The rest of the toolchain comes along**: the formatter can run on history, hover can work on the
+  input line, and `#:` annotations become usable interactively.
 
 ## Testing
 
-R initializes once per process: embedded-R tests need one-process-per-test
-execution and a one-shot init fixture (raise `R_CStackLimit` when R runs off
-the main thread in tests). CI has no R, so embedded tests stay excluded from
-the workspace gates — but the binding layer's
-declaration list and discovery logic are plain Rust, testable everywhere; keep
-the R-requiring surface as thin as possible.
+R initializes once per process, so a test that embeds R needs a process of its own and a one-shot
+init fixture, and a test that runs R off the main thread must raise `R_CStackLimit`. CI has no R, so
+the embedded tests stay out of the workspace gates. The binding layer's declaration list and the
+discovery logic are plain Rust that can be tested anywhere, so keep the surface that needs R as thin
+as possible.
 
-## Constraints and costs (accepted with eyes open)
+## Constraints and costs, accepted with eyes open
 
-- No subprocess isolation: an R crash kills the REPL process (mitigate with
-  trap handlers + frontend restart, not in-process recovery).
-- The dyld entitlement on macOS, the `LD_LIBRARY_PATH` arrangement, and the
-  Windows DLL preload set are distribution obligations that come with runtime
-  loading.
-- Env-var mutation on Windows must go through R (`Sys.setenv`) once R is up —
-  the C and Win32 environment spaces diverge.
-- The binding list is hand-maintained; the `has::` probes and a version floor
-  keep that honest.
+- There is no subprocess isolation, so an R crash kills the REPL process. Mitigate that with a trap
+  handler and a front-end restart, not with in-process recovery.
+- The dyld entitlement on macOS, the `LD_LIBRARY_PATH` arrangement, and the set of preloaded DLLs on
+  Windows are distribution obligations that come with loading R at runtime.
+- On Windows, once R is up, environment variables must be changed through R, with `Sys.setenv`,
+  because the C environment and the Win32 environment diverge.
+- The binding list is maintained by hand, and the `has::` probes and the version floor keep it honest.

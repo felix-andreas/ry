@@ -3,49 +3,43 @@ title: Design drafts
 description: "Working documents for features that are not settled: proposals, open questions, and designs in progress"
 ---
 
-These are working documents, not contracts. Everything else in the documentation
-describes what ry does today and is kept accurate; the pages below describe what
-it might do, what is still undecided, and why. They are deliberately absent from
-the sidebar — this page is the way in.
+These are working documents, not contracts. Every other page of this documentation describes what
+ry does today and is kept accurate; the pages below describe what ry *might* do, what is still
+undecided, and why. They are deliberately left out of the sidebar, so this page is the way in.
 
-Read them for the reasoning, not for current behaviour. Where a draft and the
-rest of the documentation disagree, the rest of the documentation is correct. The
-authoritative typing contract is the [type system reference](/reference/type-system/),
-and what the checker cannot do yet is listed under
-[limitations](/type-checking/limitations/).
+Read a draft for its reasoning, not as a description of current behavior. Where a draft and the rest
+of the documentation disagree, the rest of the documentation is right. The typing contract is the
+[type system reference](/reference/type-system/), and [limitations](/type-checking/limitations/)
+lists what the checker cannot do yet.
 
-A draft leaves this folder in one of two directions: its design gets built and
-graduates into the reference pages, or it gets declined and the reasoning stays
-here as the record of why.
+A draft leaves this folder in one of two ways: either its design is built and graduates into the
+reference pages, or it is declined and stays here as the record of why.
 
 ## Drafts
 
 ### [Open type-system questions](/contributing/design/open-questions/)
 
-Type-system questions with no settled answer yet, each with the options on the
-table and the current stopgap. Tagged unions, S3 dispatch, data frame and matrix
-modelling, the variadic `...` body, and the import model. Traits are here too as
-a closed entry: declined rather than deferred, with the reasoning recorded.
+The type-system questions that have no settled answer yet: tagged unions, S3 dispatch, modeling
+data frames and matrices, the body of a variadic `...` function, and the import model. Each entry
+lays out the options and the stopgap in place today. Traits are here too, as a closed entry, since
+they were declined rather than deferred and the page records why.
 
 ### [Data masking](/contributing/design/data-masking/)
 
-Checking non-standard evaluation, where a bare name inside `dt[...]` or a dplyr
-verb is a column reference no lexical scope can see. Part of this has shipped and
-is described in the reference; this page is the sketchpad for the rung that has
-not, which needs column vocabularies and depends on the data frame row-type
-design.
+How to check non-standard evaluation, where a bare name inside `dt[...]` or a dplyr verb is a
+column reference that no lexical scope can see. Part of this has shipped, and the reference
+describes that part. The page is the sketchpad for the next step, which needs column vocabularies
+and depends on how data frame row types are designed.
 
 ### [Inline type syntax](/contributing/design/inline-type-syntax/)
 
-A proposal for writing types inline instead of in `#:` comments, as a compiled
-dialect with its own file extension. **Its own recommendation is not to build it**
-for inline typing alone — the ergonomic case does not survive scrutiny. It is kept
-because the machinery it would need is also what checked record constructors and
-tagged unions would need, so the costing is reusable if those are ever wanted.
+A proposal to write types inline instead of in `#:` comments, as a compiled dialect with its own
+file extension. The page's own conclusion is not to build it for inline types alone, because the
+ergonomic case does not survive scrutiny. It is kept because checked record constructors and tagged
+unions would need the same machinery, so the costing is worth having if those are ever wanted.
 
 ### [REPL design](/contributing/design/repl/)
 
-How `ry repl` loads R at runtime rather than linking against it at build time,
-which is what keeps the rest of the workspace free of an R dependency. The console
-is shipped, so most of this page is a design record; the open part is wiring the
-analysis stack into it.
+How `ry repl` loads R at runtime instead of linking against it at build time, which is what keeps
+the rest of the workspace free of any dependency on R. The console has shipped, so most of the page
+is now a design record; the open part is wiring the analysis into it.

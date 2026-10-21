@@ -34,11 +34,12 @@ pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> V
     rendered
 }
 
-/// The cheap per-file classes that are pure functions of the parse — syntax
-/// errors, annotation problems, and lints — published immediately on an edit
-/// so typing never waits on naming or type checking. A faithful subset of
-/// [`document_diagnostics`] for identical text: the settled wave only adds
-/// findings, never moves or removes one.
+/// The cheap per-file classes that are pure functions of the parse. They are
+/// the syntax errors, the annotation problems, and the lints, and they publish
+/// immediately on an edit so typing never waits on naming or type checking.
+/// They are a faithful subset of [`document_diagnostics`] for identical text,
+/// because the settled wave only adds findings and never moves or removes
+/// one.
 pub fn first_wave_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
     let mut rendered = semantics::diagnostics::parse_stage_diagnostics(db, file);
     rendered.extend(lint_file(db, file, &config.lint));
