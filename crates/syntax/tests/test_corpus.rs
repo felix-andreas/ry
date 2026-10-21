@@ -1,23 +1,5 @@
-//! Corpus tests over real R sources, and the tree-sitter acceptance oracle.
-//!
-//! `scripts/fetch-corpus.rs` populates a gitignored `corpus/` directory with the
-//! R base library and a set of CRAN packages. These tests run the hand-written
-//! parser over every `.R` file there:
-//!
-//!   * `corpus_round_trip` checks the lossless invariant. The tree must
-//!     reprint byte-for-byte to its input.
-//!   * `corpus_acceptance` compares our "has errors" verdict against tree-sitter-r
-//!     as an oracle, bucketing agreement, and gates the ours-only-error bucket
-//!     (we reject what tree-sitter accepts) against an adjudicated allowlist.
-//!
-//! Both skip cleanly when the corpus is absent (CI may run without a fetch).
-//! Read files with lossy UTF-8 decoding: some R sources are latin1, not UTF-8.
-//!
-//! `in_tree_acceptance` runs the same differential over sources that are always
-//! present, and gates the *other* direction. Its own comment says why that is
-//! the direction nothing else in the project can see.
-//!
-//! Run with `cargo test -p syntax --test test_corpus -- --nocapture`.
+//! The `corpus_*` tests read a gitignored `corpus/` of real R sources (see
+//! `scripts/fetch-corpus.rs`) and skip when it is absent.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -87,8 +69,6 @@ fn corpus_acceptance() {
         }
         let parse = syntax::parse(&text);
         let ours_error = !parse.errors().is_empty();
-        // A `None` tree means tree-sitter could not parse at all, so treat it
-        // as an error.
         let ts_error = parser
             .parse(text.as_str(), None)
             .is_none_or(|tree| tree.root_node().has_error());
@@ -132,10 +112,6 @@ fn corpus_acceptance() {
         !files.is_empty(),
         "corpus present but no .R files found under r-base/ or cran/"
     );
-    // HARD GATE: zero acceptance divergence is the measured baseline over the
-    // full corpus. Rejecting a file tree-sitter accepts means a real grammar
-    // gap; a legitimate divergence (tree-sitter itself being wrong, R as
-    // referee) earns an entry in tests/acceptance-allowlist.txt instead.
     let allowlist = allowlisted_paths();
     let unexplained: Vec<_> = ours_only
         .iter()
@@ -152,22 +128,9 @@ fn corpus_acceptance() {
     );
 }
 
-/// The acceptance differential over in-tree sources, gating the direction the
-/// rest of the project cannot see: **we accept what tree-sitter rejects**.
-///
-/// Every other parser invariant bounds errors from *above*. The cascade guard
-/// caps how many we report, and nothing at all asserts that a broken file
-/// reports anything. That matters because the parser carries a lot of dedup and
-/// first-wins suppression, so over-suppression is the live regression risk, and
-/// a silently dropped syntax error passes determinism, round-trip, range
-/// geometry and the whole fuzz battery. tree-sitter is the second opinion.
-///
-/// Only the theirs-only direction is gated here. The ours-only direction is
-/// noise on this input set: the fixture suites are full of `#:` annotations,
-/// which tree-sitter reads as comments and we parse as types, plus deliberately
-/// broken sources. The fetched-corpus test above gates ours-only over real
-/// packages, where it is meaningful; between the two, both directions are
-/// covered.
+/// Every other invariant bounds errors from above, so only this catches a
+/// silently dropped syntax error. The reverse direction is noise here: fixtures
+/// carry `#:` annotations and deliberately broken sources.
 #[test]
 fn in_tree_acceptance() {
     let mut parser = tree_sitter::Parser::new();
@@ -217,10 +180,7 @@ fn in_tree_acceptance() {
     );
 }
 
-/// Phase 1 speed gate: ≥5× tree-sitter batch parse over the real corpus.
-/// Run in release (`cargo test -p syntax --release --test test_corpus -- --ignored --nocapture`):
-/// tree-sitter's C is compiled optimized even in debug profiles, so a debug
-/// run would compare unoptimized Rust against optimized C.
+/// Release only: tree-sitter's C is compiled optimized even in debug profiles.
 #[test]
 #[ignore = "perf gate; run explicitly in release"]
 fn corpus_parse_speed() {
@@ -240,7 +200,6 @@ fn corpus_parse_speed() {
     let total_bytes: usize = sources.iter().map(String::len).sum();
     let total_lines: usize = sources.iter().map(|s| s.lines().count()).sum();
 
-    // Warm both parsers once.
     for source in sources.iter().take(50) {
         let _ = syntax::parse(source);
     }
@@ -280,12 +239,6 @@ fn corpus_parse_speed() {
     );
 }
 
-/// Incremental (per-keystroke) comparison: our full reparse per edit vs
-/// tree-sitter's true incremental reparse, over a typing simulation in large
-/// real files. The comparison is honest by construction. tree-sitter gets its
-/// old tree plus an `InputEdit`, and we reparse from scratch, because `parse`
-/// is a pure per-file query and sub-file incrementality lives one level down in
-/// the per-item cutoffs. Run this in release.
 #[test]
 #[ignore = "perf measurement; run explicitly in release"]
 fn corpus_incremental_speed() {
@@ -297,8 +250,6 @@ fn corpus_incremental_speed() {
     for base in ["r-base", "cran"] {
         collect_r_files(&root.join(base), &mut files);
     }
-    // The largest corpus file plus a synthetic ~20K-LoC concatenation
-    // (the pathological huge-file shape).
     let mut sources: Vec<(String, String)> = Vec::new();
     let mut largest = String::new();
     for path in &files {
@@ -330,8 +281,6 @@ fn corpus_incremental_speed() {
 
     const EDITS: usize = 100;
     for (label, source) in &sources {
-        // Typing simulation: insert one character at a time in the middle of
-        // the file (a body position), then delete them again.
         let middle = {
             let mut at = source.len() / 2;
             while at > 0 && !source.is_char_boundary(at) {
@@ -340,7 +289,6 @@ fn corpus_incremental_speed() {
             at
         };
 
-        // Ours: full reparse per edit.
         let mut text = source.clone();
         let ours_start = std::time::Instant::now();
         for step in 0..EDITS {
@@ -350,7 +298,6 @@ fn corpus_incremental_speed() {
         }
         let ours = ours_start.elapsed() / EDITS as u32;
 
-        // Ours: statement-splice incremental reparse per edit.
         let mut text = source.clone();
         let mut previous = syntax::parse(&text);
         let splice_start = std::time::Instant::now();
@@ -371,7 +318,6 @@ fn corpus_incremental_speed() {
         }
         let splice = splice_start.elapsed() / EDITS as u32;
 
-        // Tree-sitter: incremental reparse with the previous tree + InputEdit.
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&tree_sitter_r::LANGUAGE.into())
@@ -410,14 +356,10 @@ fn corpus_incremental_speed() {
     }
 }
 
-/// Committed, adjudicated divergences (one corpus-relative path suffix per
-/// line, with `#` starting a comment). It is currently empty, because the
-/// measured baseline is zero.
 fn allowlisted_paths() -> Vec<String> {
     read_allowlist("tests/acceptance-allowlist.txt").collect()
 }
 
-/// The in-tree counterpart, keyed by fixture case id rather than path.
 fn allowlisted_in_tree_ids() -> std::collections::HashSet<String> {
     read_allowlist("tests/in-tree-acceptance-allowlist.txt").collect()
 }
@@ -434,9 +376,6 @@ fn read_allowlist(relative: &str) -> impl Iterator<Item = String> {
         .into_iter()
 }
 
-/// Resolve the corpus root: `RY_CORPUS_DIR` if set, else `<workspace>/corpus`
-/// (this crate is `<workspace>/crates/syntax`). `None` when the directory is
-/// absent, so the tests can skip.
 fn corpus_dir() -> Option<PathBuf> {
     if let Some(dir) = syntax::testing::env_var("CORPUS_DIR") {
         let path = PathBuf::from(dir);
@@ -448,9 +387,6 @@ fn corpus_dir() -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
-/// Every `.R` file under the parseable corpus subtrees (`r-base`, `cran`), sorted
-/// for stable reporting. The tree-sitter grammar-test corpus is `.txt` and lives
-/// elsewhere, so it is naturally excluded.
 fn corpus_r_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for subtree in ["r-base", "cran"] {
@@ -478,8 +414,7 @@ fn collect_r_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// R sources are usually UTF-8 but some are latin1; decode lossily and report
-/// whether any byte had to be replaced.
+/// Some R sources are latin1; the flag reports whether decoding was lossy.
 fn read_lossy(path: &Path) -> (String, bool) {
     let bytes =
         std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));

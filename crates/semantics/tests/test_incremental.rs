@@ -1,7 +1,3 @@
-//! Incrementality contracts, observed through which queries salsa executes
-//! after an edit: an edit re-checks the edited item and, only when its
-//! exported scheme changed, the items that read it.
-
 use semantics::diagnostics::file_diagnostics;
 use semantics::testing::ProbeDatabase;
 use semantics::types::{Atomic, scalar, unknown};
@@ -105,9 +101,6 @@ fn defining_a_missing_name_rechecks_its_readers() {
     assert_eq!(db.checked_since(), ["later", "use_later"]);
 }
 
-// Inserting a statement shifts every later position, but a read whose
-// resolution is unchanged keeps its check; a read the insertion intercepts
-// re-checks.
 #[test]
 fn inserting_a_statement_rechecks_only_the_reads_it_intercepts() {
     for kind in [DocumentKind::Package, DocumentKind::Script] {
@@ -145,8 +138,6 @@ fn a_reexport_chain_follows_its_base() {
     assert_eq!(global_scheme(&db, definition(&db, "a")).body, character);
 }
 
-// Nothing concrete enters the cycle, so the fixpoint pins it to Unknown
-// rather than spinning to the round cap.
 #[test]
 fn a_reexport_cycle_pins_to_unknown() {
     let db = ProbeDatabase::default();
@@ -156,10 +147,7 @@ fn a_reexport_cycle_pins_to_unknown() {
     }
 }
 
-// Each link resolves through the next one's scheme, so both demand and
-// revalidation recurse as deep as the chain. On the stack the shipped binary
-// gives analysis threads that must neither overflow nor be cut short to a
-// stale Unknown.
+// Demand and revalidation recurse as deep as the chain, on the shipped analysis stack size.
 #[test]
 fn a_deep_reexport_chain_resolves_fully() {
     const LINKS: usize = 4096;
@@ -173,7 +161,6 @@ fn a_deep_reexport_chain_resolves_fully() {
         let head = definition(&db, "link_0");
         assert_eq!(global_scheme(&db, head).body, scalar(&db, Atomic::Integer));
 
-        // Revalidated without re-executing: nothing the chain reads changed.
         db.edit(
             files[0],
             format!("{chain}link_{LINKS} <- 1L\n# trailing comment\n"),
@@ -181,7 +168,6 @@ fn a_deep_reexport_chain_resolves_fully() {
         let head = definition(&db, "link_0");
         assert_eq!(global_scheme(&db, head).body, scalar(&db, Atomic::Integer));
 
-        // Re-executed end to end: the base's type changed.
         db.edit(files[0], format!("{chain}link_{LINKS} <- 1.5\n"));
         let head = definition(&db, "link_0");
         assert_eq!(global_scheme(&db, head).body, scalar(&db, Atomic::Double));

@@ -1,8 +1,3 @@
-//! Golden formatter fixtures: each case's source formats to the expected
-//! block. `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case`
-//! runs one case. Every case also checks idempotence: formatting the output
-//! again must reproduce it.
-
 use format::{Config, format};
 use std::path::Path;
 

@@ -1,7 +1,3 @@
-//! Coverage-guided fuzzing of `syntax::parse`: every UTF-8 input must hold
-//! the full parse invariant battery (lossless round-trip, token cover, tree
-//! geometry, bounded well-formed errors, determinism).
-
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

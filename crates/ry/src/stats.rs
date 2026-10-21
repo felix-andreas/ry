@@ -1,10 +1,5 @@
-//! `ry debug analysis-stats`: a workspace performance diagnosis. Runs
-//! the full analysis pipeline over a workspace through the same queries the
-//! language server uses. It prints where the time goes, as per-phase totals,
-//! the slowest files, and an incremental typing probe. It also prints where the
-//! memory goes, as per-phase resident-set growth. A slow or memory-hungry
-//! workspace can then be diagnosed, and reported, with one command instead of
-//! guesswork.
+//! `ry debug analysis-stats`: where time and memory go across a workspace,
+//! measured through the same queries the language server uses.
 
 use crate::cli::CommandError;
 use crate::config::Config;
@@ -34,8 +29,6 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     })?;
     let root = crate::cli::analysis_root_for_target(&target);
 
-    // A diagnosis with the type checker off measures nothing interesting;
-    // force it on and say so.
     let typing_was_off = !config.check.typing;
     config.check.typing = true;
 
@@ -68,19 +61,13 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         .map(|(rank, name)| (name.as_str(), rank))
         .collect();
 
-    // Discover and order files exactly as the CLI and the server do. Package
-    // files come first, in Collate order when it is declared, then by
-    // root-relative path. Scripts follow. The `[check] exclude` scope applies
-    // identically.
+    // File order and the `[check] exclude` scope must match the CLI and server.
     let exclude = crate::cli::exclude_matcher(&config, &target)?;
     let r_path = root.join("R");
     let mut entries: Vec<(bool, bool, usize, String, PathBuf)> = Vec::new();
     for path in crate::cli::collect_r_files(&target, exclude.as_ref())? {
-        // Sorting and classification are different questions, and collapsing
-        // them into one flag is what made this instrument measure a different
-        // program than `check`: package files sort ahead of scripts by
-        // `R/`-membership, while sharing a namespace also covers
-        // `tests/testthat/`.
+        // Sorting and namespace sharing differ: package files sort first by `R/`
+        // membership, but `tests/testthat/` also shares the namespace.
         let sorts_first = path.starts_with(&r_path);
         let is_package = crate::cli::shares_a_namespace(&path, &root);
         let rank = path
@@ -107,8 +94,6 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         return Err(CommandError);
     }
 
-    // Phase 1: load. Reading the sources and building the rope-backed salsa
-    // inputs, exactly as the server loads a workspace from disk.
     let rss_baseline = resident_set_bytes();
     let mut db = RootDatabase::default();
     semantics::stubs::StubSources::new(
@@ -158,12 +143,8 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     ProjectFiles::new(&db, records.iter().map(|record| record.file).collect());
     let rss_after_load = resident_set_bytes();
 
-    // The remaining phases are staged fetches. Memoization makes the
-    // attribution honest, because each stage reuses everything the stages
-    // before it computed, so its wall time is its own marginal cost. Package-wide folds and per-symbol
-    // interface schemes have no line of their own: they run on demand inside
-    // the first stage that needs them, which is exactly where an editor pays
-    // for them.
+    // Memoization makes each stage's wall time its own marginal cost; package-wide
+    // folds run inside the first stage that needs them, as in an editor.
     let total_loc: usize = records.iter().map(|record| record.loc).sum();
     let mut parse_total = Duration::ZERO;
     for record in &records {
@@ -172,9 +153,8 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         parse_total += start.elapsed();
     }
     let rss_after_parse = resident_set_bytes();
-    // Attach facts ride the parse memos just warmed; they must land before
-    // the naming stage so conditional stub namespaces resolve exactly as the
-    // real hosts see them.
+    // Must land before naming so conditional stub namespaces resolve as the real
+    // hosts see them.
     let attached =
         semantics::metadata::attached_union(&db, records.iter().map(|record| record.file));
     if !attached.is_empty() {
@@ -203,10 +183,6 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         typecheck_total += record.typecheck;
     }
     let rss_after_typecheck = resident_set_bytes();
-    // The diagnostics phase split by marginal cost: the semantic render
-    // (unresolved/unused/type findings and their messages), then the lints,
-    // then the final assembly document_diagnostics adds on top (config
-    // gating, severity escalation, sorting) riding the memos just warmed.
     let mut semantic_render_total = Duration::ZERO;
     for record in &records {
         let start = Instant::now();
@@ -318,11 +294,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         );
     }
 
-    // The incremental probe: a burst of appended keystrokes on
-    // representative files. The slowest file gets the detailed attribution;
-    // a median-sized and a small file get one line each, so a workspace
-    // whose largest file dominates still shows what ordinary files feel
-    // like.
+    // Also probe a median and a small file: the largest file can dominate.
     let mut probe_indexes: Vec<usize> = Vec::new();
     if let Some(&slowest) = by_typecheck.first() {
         probe_indexes.push(slowest);
@@ -344,10 +316,8 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// One typing burst on the record at `index`: appended `#` keystrokes (each
-/// revision differs by one byte, so item identity holds and the burst
-/// measures steady-state revalidation). `detailed` adds the recompute
-/// attribution and the workspace revalidate sweep.
+/// Appended `#` keystrokes keep item identity, so the burst measures
+/// steady-state revalidation.
 fn typing_burst(
     db: &mut RootDatabase,
     records: &[FileRecord],
@@ -415,9 +385,7 @@ fn typing_burst(
             "  resolve steps             {:>10.1} per keystroke",
             (resolves_after_burst - resolves_before) as f64 / TYPING_BURST as f64,
         );
-        // The raw from-scratch parse of the edited text, to attribute the
-        // keystroke latency: everything above this line is item-tree rebuild
-        // plus revalidation.
+        // Everything above this is item-tree rebuild plus revalidation.
         let parse_start = Instant::now();
         let parses = 5;
         for _ in 0..parses {
@@ -428,7 +396,6 @@ fn typing_burst(
             parse_start.elapsed().as_secs_f64() * 1e3 / parses as f64
         );
     }
-    // Restore the original text so the next probe measures in isolation.
     record.file.set_text(db).to(record.source.clone());
     let _ = document_diagnostics(db, record.file, config);
 }
@@ -443,11 +410,8 @@ struct FileRecord {
 
 const MEBIBYTE: f64 = 1024.0 * 1024.0;
 
-// The current resident set, so each phase's growth attributes the retained
-// memory (memoized values dominate; the resident set also keeps
-// allocator-held freed pages, so a phase with heavy transient allocation
-// reads slightly high). It is `None` where the kernel does not expose it, and
-// the memory column is then simply omitted.
+// Includes allocator-held freed pages, so a phase with heavy transient
+// allocation reads slightly high.
 fn resident_set_bytes() -> Option<u64> {
     proc_status_field("VmRSS:")
 }

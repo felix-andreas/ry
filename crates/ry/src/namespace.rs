@@ -1,7 +1,4 @@
-//! Host-side NAMESPACE validation: warnings at the import site and the
-//! `unused-import` lint. Parsing lives in `semantics::metadata` (the same
-//! parse also feeds the `PackageMetadata` input so imports resolve bare
-//! reads); this module renders the problems a host reports.
+//! NAMESPACE problem diagnostics; parsing lives in `semantics::metadata`.
 
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::LintLevel;
@@ -9,16 +6,8 @@ pub use semantics::metadata::{NamespaceImport, parse_namespace_imports};
 use std::collections::BTreeSet;
 use syntax::{SyntaxKind, TextRange};
 
-/// One error per `importFrom(pkg, name)` whose namespace the export table knows
-/// but whose name it does not list. This is the same fact `pkg::name`
-/// validation checks, surfaced at the import site. An unknown namespace
-/// produces nothing, because without stubs there is no export set to check
-/// against.
-///
-/// An error, not a warning, for the same reason its `export()` sibling below is
-/// one: R refuses to *load* the package (`object 'x' is not exported by
-/// 'namespace:pkg'`), so the code cannot run at all. As a warning it shipped
-/// through a `--min-severity error` gate.
+/// Unknown namespaces produce nothing: without stubs there is no export set. An
+/// error, not a warning, because R refuses to load the package.
 pub fn namespace_import_problems(
     imports: &[NamespaceImport],
     knows_namespace: &dyn Fn(&str) -> bool,
@@ -45,10 +34,8 @@ pub fn namespace_import_problems(
         .collect()
 }
 
-/// One error per `export(name)` in the NAMESPACE naming something the package
-/// defines nowhere at top level. This is `R CMD check`'s "undefined exports",
-/// which otherwise surfaces only at install time. `defines` is the package's whole
-/// top-level name set, so a name bound by any file (in any order) counts.
+/// `R CMD check`'s "undefined exports". `defines` is the package's whole
+/// top-level name set, so a name bound by any file counts.
 pub fn namespace_export_problems(
     exports: &[(String, TextRange)],
     defines: &dyn Fn(&str) -> bool,
@@ -68,14 +55,9 @@ pub fn namespace_export_problems(
         .collect()
 }
 
-/// The `unused-import` lint findings: one per `importFrom(pkg, name)` whose
-/// `name` appears nowhere in `used_tokens`, which is the set of every token
-/// text used across the package's R sources. Default-off because a package may import a
-/// name only to re-export it or for a side effect, and usage is a
-/// deliberately conservative token scan (any token equal to the name counts,
-/// including `pkg::name` and operator spellings), so it under-reports rather
-/// than risk a false positive. Whole-namespace `import(pkg)` directives are
-/// not checked.
+/// `used_tokens` is every token text across the package's sources: a conservative
+/// scan that under-reports rather than risk a false positive. Whole-namespace
+/// `import(pkg)` directives are not checked.
 pub fn unused_import_diagnostics(
     imports: &[NamespaceImport],
     used_tokens: &BTreeSet<String>,
@@ -107,12 +89,8 @@ pub fn unused_import_diagnostics(
         .collect()
 }
 
-/// Every token's text across an R source, for the conservative
-/// `unused-import` usage scan. Uses the real parser so it sees exactly the
-/// tokens R does (identifiers, operators like `%>%`, string contents), never
-/// a hand-rolled scanner that could drift. String tokens contribute their
-/// unquoted content (a NAMESPACE import may name an operator that sources
-/// spell as a plain token).
+/// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
+/// string tokens contribute their unquoted content.
 pub fn collect_used_tokens(source: &str, out: &mut BTreeSet<String>) {
     let parse = syntax::parse(source);
     for element in parse.syntax_node().descendants_with_tokens() {
@@ -187,7 +165,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["`medain` is not exported by `stats`, so this package will not load."]
         );
-        // R refuses to load the package, so this is not survivable advice.
         assert!(
             problems
                 .iter()

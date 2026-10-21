@@ -1,17 +1,9 @@
-//! Parallel-read stress tests: salsa storage-handle clones let several
-//! threads force the same queries concurrently. The dangerous shape is the
-//! package-interface fixpoint, where concurrent threads enter the same
-//! `global_scheme` cycle from different heads. That shape historically hung
-//! parallel salsa fixpoints upstream. These tests gate any multi-core use of
-//! the database: no deadlock (bounded wall time), no panic, and answers
-//! byte-equal to the single-threaded ones.
+//! Threads racing the package-interface fixpoint from different heads must not deadlock or
+//! panic, and must answer byte-equal to a single thread.
 
 use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 
-/// A project whose files form mutually recursive cross-file definition
-/// cycles (each file's functions call the neighbours'), so every thread's
-/// query enters the interface fixpoint.
 fn cyclic_project(db: &RootDatabase, files: usize, functions_per_file: usize) -> Vec<SourceFile> {
     let mut sources = Vec::new();
     for file_index in 0..files {
@@ -60,9 +52,7 @@ fn all_diagnostics(db: &RootDatabase, files: &[SourceFile]) -> Vec<String> {
     rendered
 }
 
-/// Eight threads race the same cyclic interface fixpoint; every thread's
-/// answer must equal the single-threaded baseline, within a hard wall-time
-/// bound (a hang here is a real parallel-fixpoint bug, never load).
+/// The wall-time bound is generous: a hang here is a parallel-fixpoint bug, never load.
 #[test]
 fn concurrent_cycle_queries_agree_with_the_baseline() {
     let db = RootDatabase::default();
@@ -81,8 +71,7 @@ fn concurrent_cycle_queries_agree_with_the_baseline() {
             let db = db.clone();
             let files = files.clone();
             workers.push(scope.spawn(move || {
-                // Stagger entry points so threads enter the cycle from
-                // different heads.
+                // Stagger entry points so threads enter the cycle from different heads.
                 let mut ordered = files.clone();
                 ordered.rotate_left(worker % files.len());
                 all_diagnostics(&db, &ordered)
@@ -121,8 +110,6 @@ fn concurrent_cycle_queries_agree_with_the_baseline() {
     );
 }
 
-/// Concurrent cold priming of disjoint files must scale without corrupting
-/// state: the parallel answers equal a fresh sequential database's.
 #[test]
 fn parallel_cold_prime_matches_sequential() {
     let mut sources = Vec::new();
@@ -169,16 +156,10 @@ fn parallel_cold_prime_matches_sequential() {
     }
 }
 
-/// Cyclic-group answers must not depend on which member is queried first:
-/// forward forcing, reverse forcing, and per-item phase pre-forcing must all
-/// render identical diagnostics. (The canonical per-group fixpoint guarantees
-/// this. Before it, the salsa cycle head decided where the round cap pinned,
-/// and the head is whichever query arrives first.)
 #[test]
 fn cyclic_group_answers_are_forcing_order_independent() {
     let cases: Vec<Vec<String>> = vec![
-        // A growing pair: each binding embeds the other, so the group rides
-        // the round cap and every member pins.
+        // Each binding embeds the other, so the group hits the round cap and every member pins.
         vec![
             "a <- list(v = 1, w = b)\nuse_a <- function() a$v + 1\n".to_owned(),
             "b <- list(v = 2, w = a)\nuse_b <- function() b$v + 1\n".to_owned(),

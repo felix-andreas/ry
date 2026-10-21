@@ -1,18 +1,9 @@
-//! Style lints: syntax-level checks over the parse tree plus the
-//! naming-driven unused-parameter and shadow lints.
-//!
-//! There is no `missing-comma` lint: the parser rejects `f(1 2)` with a
-//! syntax error, as R itself does. The config key is still accepted for
-//! compatibility and has no effect.
-
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::{Db, SourceFile, item_naming, item_spans, parse};
 use syntax::ast::AstNode;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
-/// A lint's configured level: keep its built-in severity, force one, or
-/// disable it. The `[lint]` table keys each level by the lint's stable code
-/// (`assignment-operator = "off"`).
+/// `Default` keeps the lint's built-in severity, which is off for opt-in lints.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LintLevel {
@@ -34,32 +25,22 @@ pub enum NameStyle {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct LintConfig {
-    /// `naming-style` is configured by its style value (`None` disables it).
     pub naming_style: Option<NameStyle>,
     pub assignment_operator: LintLevel,
     pub boolean_shorthand: LintLevel,
-    /// Obsolete: a missing argument comma is a parse error on this stack.
-    /// Accepted so existing configs keep loading; never read.
+    /// Accepted so existing configs keep loading; never read (a missing comma is a parse error).
     pub missing_comma: LintLevel,
     pub trailing_comma: LintLevel,
-    /// Default-off: R signatures legitimately carry ignored formals (an S3
-    /// method must match its generic), so a project opts in explicitly.
+    /// Off by default: an S3 method's formals must match its generic, so some go unused.
     pub unused_parameter: LintLevel,
-    /// Default-off: a package may `importFrom` a name for re-export or a side
-    /// effect, and usage detection is a conservative token scan.
+    /// Off by default: an import may exist for re-export or a side effect.
     pub unused_import: LintLevel,
-    /// Default-off: rebinding a `base` name at top level is often deliberate
-    /// (an S3 method like `print <- ...`, masking in a script), so a project
-    /// opts in explicitly.
+    /// Off by default: rebinding a `base` name is often deliberate (an S3 method, script masking).
     pub shadows_builtin: LintLevel,
-    /// Default-off: the same masking rationale for names from the non-`base`
-    /// stub namespaces (`stats::filter`, `utils::head`), which resolve bare
-    /// exactly like builtins.
     pub shadows_namespace: LintLevel,
 }
 
-/// Every lint finding of one file, in position order. Pure syntax walks plus
-/// per-item naming output; cheap enough to run unmemoized per publication.
+/// Sorted by position. Unmemoized: syntax walks plus per-item naming output are cheap.
 pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let root = parse(db, file).syntax_node();
@@ -70,13 +51,8 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
             let Some(naming) = item_naming(db, span.item) else {
                 continue;
             };
-            // An S3 method's formals are R's choice, not the author's: the
-            // method must match its generic, so `format.myclass(x, ...)` that
-            // ignores `x` is correct code and reporting it is noise. The
-            // generic itself is the same case one step earlier. It declares
-            // the argument it dispatches on and hands the call straight to
-            // `UseMethod`, so *every* formal it names is unused by
-            // construction.
+            // An S3 method's formals must match its generic, and a generic only forwards its
+            // formals to `UseMethod`, so unused formals in either are correct code.
             let exempt = span.item.name(db).as_deref().is_some_and(|name| {
                 crate::is_s3_method_name(db, name, &generics) || generics.contains(name)
             });
@@ -102,11 +78,7 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
     diagnostics
 }
 
-/// A top-level binding whose name the stub corpus already resolves bare
-/// wins over the stub for every read in the project: `base` names report
-/// `shadows-builtin`, names declared by another stub namespace report
-/// `shadows-namespace`. Both are off by default, because rebinding is often
-/// deliberate, such as an S3 method or a script masking a name.
+/// A top-level binding wins over a same-named stub export for every bare read in the project.
 fn shadow_lints(
     db: &dyn Db,
     file: SourceFile,
@@ -168,8 +140,7 @@ fn shadow_lints(
 }
 
 fn syntax_lints(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
-    // Inherited state, maintained by an enter/leave depth counter: `#:`
-    // annotation regions are type syntax, not R identifiers.
+    // `#:` annotation regions are type syntax, not R identifiers.
     let mut annotation_depth = 0usize;
     for event in root.preorder_with_tokens() {
         match event {
@@ -231,9 +202,8 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
         return;
     };
     if operator.kind() == SyntaxKind::EQ {
-        // The `=` token alone: the fix is that one character, and several
-        // lints commonly fire on the same statement, so a whole-statement
-        // range would stack three identical squiggles.
+        // Only the `=` token: several lints often fire on one statement, and whole-statement
+        // ranges would stack identical squiggles.
         push_lint(
             diagnostics,
             config.assignment_operator,
@@ -317,12 +287,8 @@ fn parameter_name_lint(
     }
 }
 
-/// The naming-style finding for one identifier, shared by the variable and
-/// parameter sites: `None` when the name already matches the configured style.
 fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option<String> {
-    // `SCREAMING_SNAKE_CASE` is R's universal spelling for a constant, at any
-    // scope, so it conforms under every configured style rather than being
-    // rewritten to the style's default casing.
+    // SCREAMING_SNAKE_CASE is R's conventional constant spelling, so it conforms under every style.
     if actual.chars().all(|character| {
         character.is_ascii_uppercase() || character == '_' || character.is_numeric()
     }) && actual
@@ -370,7 +336,7 @@ fn push_lint(
     });
 }
 
-/// The opted-in severity of a default-off lint: `Default` behaves as `Off`.
+/// `Default` behaves as `Off` for an opt-in lint.
 fn opt_in_severity(level: LintLevel) -> Option<Severity> {
     match level {
         LintLevel::Default | LintLevel::Off => None,
@@ -379,8 +345,7 @@ fn opt_in_severity(level: LintLevel) -> Option<Severity> {
     }
 }
 
-/// A node's range without the trailing trivia some expression nodes swallow
-/// (a trailing comment or newline attaches inside).
+/// Excludes the trailing trivia (a comment or newline) some expression nodes swallow.
 fn expression_range(node: &SyntaxNode) -> TextRange {
     let mut end = node.text_range().end();
     let mut token = node.last_token();

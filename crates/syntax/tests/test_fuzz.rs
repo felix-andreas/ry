@@ -1,27 +1,4 @@
-//! Fuzz + property harness, run against every parser increment from its first
-//! commit.
-//!
-//! Invariants, checked on every input:
-//!   1. never panic (any panic fails the test);
-//!   2. the parse is lossless, so the tree reprints byte-for-byte to the
-//!      input;
-//!   3. the lexed token lengths cover the input exactly, with no zero-length
-//!      token;
-//!   4. the tree geometry holds, so every node's children tile its range
-//!      exactly, meaning the ranges nest, are contiguous, and cover;
-//!   5. parsing is deterministic, so parsing the same input twice yields
-//!      structurally equal green trees.
-//!
-//! Generators: random bytes, token soup from an R-shaped alphabet, byte-level
-//! seed mutations, token-level structure-aware mutations (delete/duplicate/
-//! swap whole tokens of a real parse), corpus-seeded mutations (real R files
-//! from the fetched corpus, when present), and a sequential edit-stream fuzzer
-//! (one buffer, hundreds of random edits, and the invariants at every step,
-//! which is the foundation the splice-reparse equivalence check plugs into).
-//!
-//! `FUZZ_ITERS` scales the per-generator budget (default 1500); runs are
-//! deterministic per seed. `fuzz_deep` multiplies everything for nightly/manual
-//! runs.
+//! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
 use std::path::PathBuf;
 use syntax::testing::check_parse_invariants as check_invariants;
@@ -176,8 +153,6 @@ fn seeds_hold_invariants() {
     }
 }
 
-/// The program corpus: ~2,000 curated R edge cases (see
-/// `syntax::testing::program_corpus_sources`).
 #[test]
 fn program_corpus_holds_invariants() {
     let sources = syntax::testing::program_corpus_sources();
@@ -192,12 +167,6 @@ fn program_corpus_holds_invariants() {
     }
 }
 
-/// Blanking prose out of a literate document must not move a single byte:
-/// every offset the analysis reports is an offset into the *original* file, so
-/// a transform that shortened or lengthened the text by one byte would shift
-/// every diagnostic after it. The unit tests pin that on four hand-written
-/// documents; this pins it over generated ones, which is where a stray
-/// multibyte character or an unterminated fence would show up.
 #[test]
 fn literate_conversion_never_moves_a_byte() {
     const PIECES: &[&str] = &[
@@ -239,9 +208,6 @@ fn literate_conversion_never_moves_a_byte() {
             original_newlines, converted_newlines,
             "newlines moved for {document:?} -> {converted:?}"
         );
-        // The converted text is fed straight to the parser, so it must also be
-        // something the parser can hold: the invariants below are the same ones
-        // every other arm asserts.
         check_invariants(&converted);
     }
 }
@@ -271,8 +237,6 @@ fn fuzz_edit_stream() {
     run_edit_stream(400);
 }
 
-/// Real corpus files (when fetched) as mutation seeds: byte and token-level
-/// mutations over genuine R sources exercise shapes no hand seed covers.
 #[test]
 fn fuzz_corpus_seeded() {
     let Some(files) = corpus_sample(24) else {
@@ -284,8 +248,6 @@ fn fuzz_corpus_seeded() {
     for _ in 0..budget {
         let source = &files[rng.below(files.len())];
         let mut bytes = source.as_bytes().to_vec();
-        // A handful of byte edits, then a truncation half the time (simulates
-        // a file mid-edit).
         for _ in 0..(1 + rng.below(6)) {
             if bytes.is_empty() {
                 break;
@@ -313,8 +275,6 @@ fn fuzz_corpus_seeded() {
     }
 }
 
-/// The everything-at-once deep run for nightly/manual use:
-/// `FUZZ_ITERS=50000 cargo test -p syntax --release --test test_fuzz -- --ignored fuzz_deep`
 #[test]
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]
 fn fuzz_deep() {
@@ -370,7 +330,6 @@ fn run_seed_mutations(budget: usize) {
                     let at = rng.below(text.len());
                     text[at] = (rng.next() & 0x7F) as u8;
                 }
-                // Cross-seed splice: paste a slice of another seed.
                 _ => {
                     let donor = SEEDS[rng.below(SEEDS.len())].as_bytes();
                     let from = rng.below(donor.len());
@@ -387,10 +346,6 @@ fn run_seed_mutations(budget: usize) {
     }
 }
 
-/// Structure-aware mutation operates on whole lexed tokens of a real seed. It
-/// deletes, duplicates, or swaps a token span, so an input stays
-/// token-plausible and reaches a deep parser path that byte noise rarely
-/// finds.
 fn run_token_level_mutations(budget: usize) {
     let mut rng = SplitMix64(0x70C3_2015);
     for _ in 0..budget {
@@ -430,10 +385,6 @@ fn run_token_level_mutations(budget: usize) {
     }
 }
 
-/// One buffer, a long stream of random edits; the invariant battery holds at
-/// every step, and the statement-splice incremental reparse must be byte- and
-/// structure-equal to the from-scratch parse after every edit (doctrine layer:
-/// statement-reparse equivalence).
 fn run_edit_stream(steps: usize) {
     let mut rng = SplitMix64(0xED17_57EA);
     let mut buffer = String::from("f <- function(x, y) {\n  total <- x + y\n  total * 2\n}\n");
@@ -467,8 +418,6 @@ fn run_edit_stream(steps: usize) {
         };
         check_invariants(&buffer);
 
-        // Splice-reparse equivalence: identical green tree AND identical
-        // errors versus the from-scratch parse.
         let deleted_range = rowan::TextRange::new(
             rowan::TextSize::from(deleted.start as u32),
             rowan::TextSize::from(deleted.end as u32),
@@ -493,8 +442,7 @@ fn run_edit_stream(steps: usize) {
         );
         previous = scratch;
 
-        // Keep the buffer bounded so the stream stays fast; resync the
-        // baseline parse when truncating (an out-of-band "edit").
+        // Truncation is an out-of-band edit, so the baseline is reparsed.
         if buffer.len() > 4096 {
             let cut = buffer.floor_char_boundary(2048);
             buffer.truncate(cut);
@@ -503,7 +451,6 @@ fn run_edit_stream(steps: usize) {
     }
 }
 
-/// Deep nesting must be refused gracefully (diagnostic, no stack overflow).
 #[test]
 fn deep_nesting_is_refused_not_fatal() {
     let deep = "(".repeat(2000) + "1" + &")".repeat(2000);
@@ -521,7 +468,6 @@ fn deep_nesting_is_refused_not_fatal() {
     assert_eq!(parse.text(), deep_annotation);
 }
 
-/// A bounded sample of real corpus files for corpus-seeded fuzzing.
 fn corpus_sample(count: usize) -> Option<Vec<String>> {
     let root = {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -547,7 +493,6 @@ fn corpus_sample(count: usize) -> Option<Vec<String>> {
         }
     }
     files.sort();
-    // Deterministic spread across the corpus.
     let step = (files.len() / count.max(1)).max(1);
     let sample: Vec<String> = files
         .iter()

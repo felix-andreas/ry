@@ -99,10 +99,6 @@ export async function deactivate(): Promise<void> {
   await stopClient()
 }
 
-//
-// SERVER
-//
-
 async function restartClient(): Promise<void> {
   const newClient = createClient()
   try {
@@ -116,8 +112,7 @@ async function restartClient(): Promise<void> {
   }
 }
 
-/// Reads a setting from the `ry.*` namespace, falling back to the project's
-/// former `ry.*` name so settings written before the rename keep working.
+// Falls back to the settings of the project's former name, `roughly`.
 function setting<T>(key: string): T | null {
   return workspace.getConfiguration("ry").get<T | null>(key)
     ?? workspace.getConfiguration("roughly").get<T | null>(key)
@@ -180,15 +175,10 @@ async function stopClient(): Promise<void> {
   const oldClient = client
   client = null
 
-  // The `stop` call will send the "shutdown" notification to the LSP
+  // `stop` sends "shutdown"; only `dispose`'s "exit" makes the server process exit.
   await oldClient.stop()
-  // The `dipose` call will send the "exit" request to the LSP which actually tells the child process to exit
   await oldClient.dispose()
 }
-
-//
-// STATUS BAR
-//
 
 type ServerStatus = {
   health: "started" | "stopped"
@@ -239,6 +229,5 @@ function updateStatusBarItem() {
     '[$(stop-circle) Stop server](command:ry.stopServer "Stop the server")',
   ].join("\n\n"))
 
-  // if (true) icon = "$(loading~spin) "
   statusBar.text = `${icon}ry`
 }

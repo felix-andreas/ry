@@ -1,15 +1,11 @@
-//! The final diagnostic set for one file: every class the analysis computes,
-//! gated by config exactly the same way for the language server's publish
-//! path and `ry check`, so the two surfaces can never drift.
+//! Shared by the language server and `ry check` so their gating cannot drift.
 
 use crate::config::{CheckConfig, Config};
 use semantics::diagnostics::{Diagnostic, Severity, file_diagnostics, strict_diagnostics};
 use semantics::lints::lint_file;
 use semantics::{Db, SourceFile, TypingMode, file_typing_mode};
 
-/// The published diagnostics of `file` under `config`, in position order.
-/// Suppression comments are the caller's step (applied against the source
-/// text it holds).
+/// In position order. Suppression comments are the caller's step.
 pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
     let (typing_enabled, strict_enabled) = effective_typing(db, file, &config.check);
     let mut rendered: Vec<Diagnostic> = file_diagnostics(db, file)
@@ -34,12 +30,8 @@ pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> V
     rendered
 }
 
-/// The cheap per-file classes that are pure functions of the parse. They are
-/// the syntax errors, the annotation problems, and the lints, and they publish
-/// immediately on an edit so typing never waits on naming or type checking.
-/// They are a faithful subset of [`document_diagnostics`] for identical text,
-/// because the settled wave only adds findings and never moves or removes
-/// one.
+/// The parse-only classes, published immediately on edit. For identical text this
+/// is a subset of [`document_diagnostics`]: the settled set only adds findings.
 pub fn first_wave_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
     let mut rendered = semantics::diagnostics::parse_stage_diagnostics(db, file);
     rendered.extend(lint_file(db, file, &config.lint));
@@ -47,9 +39,7 @@ pub fn first_wave_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) ->
     rendered
 }
 
-/// The effective (typing, strict) publication gates: a per-file directive
-/// (`# typing: off|on|strict` or `#: @strict`) overrides the configured
-/// default.
+/// (typing, strict); a per-file directive overrides the configured default.
 pub fn effective_typing(db: &dyn Db, file: SourceFile, check: &CheckConfig) -> (bool, bool) {
     match file_typing_mode(db, file) {
         Some(TypingMode::Off) => (false, false),
@@ -59,17 +49,12 @@ pub fn effective_typing(db: &dyn Db, file: SourceFile, check: &CheckConfig) -> (
     }
 }
 
-/// The suppression comment's prefixes, in precedence order. `roughly:` is the
-/// project's former name and stays valid forever: a suppression lives inside a
-/// user's source file, so retiring the old spelling would silently un-suppress
-/// diagnostics in code nobody edited.
+/// `roughly:` is the former name and must stay valid: retiring it would silently
+/// un-suppress diagnostics in code nobody edited.
 const SUPPRESSION_PREFIXES: [&str; 2] = ["ry:", "roughly:"];
 
-/// Applies `# ry: allow(code, ...)` suppression comments: a diagnostic
-/// is dropped when a suppression naming its code (or `all`) sits on the
-/// diagnostic's own line (a trailing comment) or on the line directly above
-/// it. Applied at assembly, after severity decisions, so a suppressed
-/// escalated error is dropped like any other diagnostic.
+/// Drops a diagnostic when a suppression naming its code (or `all`) sits on its
+/// line or the line directly above.
 pub fn apply_suppressions(diagnostics: Vec<Diagnostic>, source: &str) -> Vec<Diagnostic> {
     if !SUPPRESSION_PREFIXES
         .iter()
@@ -144,9 +129,7 @@ mod tests {
     #[test]
     fn trailing_and_line_above_suppressions_apply() {
         let source = "x <- T # ry: allow(boolean-shorthand)\n# ry: allow(unused)\ny <- 1\nz <- 1\n";
-        // Offsets are derived, not written out: hard-coding them encodes the
-        // length of the suppression prefix, so changing that prefix silently
-        // moves every diagnostic off the line it was meant to sit on.
+        // Derived so a change to the suppression prefix length cannot shift the offsets.
         let suppressed_inline = source.find('T').expect("line 1 has a `T`") as u32;
         let suppressed_below = source.find("y <- 1").expect("line 3") as u32;
         let reported = source.find("z <- 1").expect("line 4") as u32;

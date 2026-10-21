@@ -1,15 +1,6 @@
-//! The ry formatter: a preserving formatter over the lossless syntax
-//! tree.
-//!
-//! The user's layout intent survives. A single-line construct stays single
-//! line, and a multiline construct keeps its line structure, because hug
-//! detection reads the intent off the original bracket placement. Spacing,
-//! indentation, quoting, comment shape, and `#:` annotation blocks normalize.
-//! `# fmt: skip` exempts one node byte-exactly, `# fmt: off` and `# fmt: on`
-//! toggle a whole region, and `# fmt: skip-file` at the head leaves the file
-//! untouched. A file with a syntax error refuses to format. An error inside a
-//! `#:` annotation does not refuse the file, and the affected block is
-//! preserved verbatim instead.
+//! A preserving formatter: single-line constructs stay single-line and
+//! multiline ones keep their line structure. Syntax errors refuse the file,
+//! except inside `#:` annotations, whose block is kept verbatim.
 
 use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
@@ -37,7 +28,7 @@ pub enum LineEnding {
     CrLf,
 }
 
-/// A syntax error refusing the format, at a zero-based line and column.
+/// `line` and `column` are zero-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatError {
     pub message: String,
@@ -64,9 +55,6 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
     let root = parse.syntax_node();
     let line_starts = line_starts(source);
 
-    // Errors from the `#:` annotation grammar do not refuse the file: the
-    // affected block goes down the verbatim path. Any R-grammar syntax error
-    // refuses.
     for error in parse.errors() {
         if !error.in_annotation {
             let offset = u32::from(error.range.start()) as usize;
@@ -79,13 +67,8 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
         }
     }
 
-    // A `#:` region opened mid-line, with the statement CONTINUING past it,
-    // has no meaningful layout, so a line-based join decision cannot be
-    // stable. `f <-#: T ...` is such a region: it swallows the rest of the
-    // line while the expression resumes below. Refuse it like an R-grammar
-    // error. A statement's leading annotation is unaffected, and so is a
-    // TRAILING annotation after a complete statement, where nothing
-    // significant follows within the statement.
+    // A mid-line `#:` region with its statement continuing below (`f <-#: T`)
+    // has no stable line layout, so it refuses like a syntax error.
     for node in root.descendants() {
         if node.kind() != syntax::SyntaxKind::ANNOTATION {
             continue;
@@ -98,9 +81,8 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
         if !mid_line {
             continue;
         }
-        // The statement within the nearest sequence: climb until the parent
-        // is a braced block or the file root (blocks are expressions in R,
-        // so expression-kind alone cannot be the boundary).
+        // Blocks are expressions in R, so the statement boundary is the
+        // nearest brace block or the root, not the nearest expression.
         let statement = |mut candidate: syntax::SyntaxNode| {
             while let Some(parent) = candidate.parent() {
                 if parent.kind() == syntax::SyntaxKind::BRACE_EXPR || parent.parent().is_none() {
@@ -175,29 +157,22 @@ enum Directive {
     Off,
 }
 
-/// A node or token child, with trivia dropped, which is the whitespace and the
-/// newlines. The walk re-derives all layout. A comment, an annotation, and a
-/// semicolon stay, because a container places them.
 type Element = SyntaxElement;
 
 struct Formatter<'a> {
     source: &'a str,
     line_starts: Vec<usize>,
-    /// Ranges of annotation-grammar errors: the blocks containing them render
-    /// verbatim (R-grammar errors refuse the whole file before this point).
+    /// Annotation-grammar errors: the blocks containing them render verbatim.
     error_ranges: Vec<TextRange>,
     indent: String,
     line_ending: &'static str,
     out: String,
-    /// Output length right after the last emitted comment: anything written
-    /// on the same line after a comment would become comment text, so the
-    /// element walk forces a line break first (see `element`).
+    /// Output length right after the last comment: anything written on the
+    /// same line after it would become comment text.
     comment_end: Option<usize>,
 }
 
 impl Formatter<'_> {
-    // ---- layout primitives ----
-
     fn space(&mut self) {
         self.out.push(' ');
     }
@@ -209,8 +184,6 @@ impl Formatter<'_> {
         }
     }
 
-    /// Between-sibling separation preserving the author's blank line (at
-    /// most one): 1 or 2 line endings, then indentation.
     fn newlines_between(&mut self, previous: Option<&Element>, element: &Element, level: usize) {
         let count = previous.map_or(0, |previous| {
             let gap = self
@@ -234,8 +207,7 @@ impl Formatter<'_> {
         self.line(left.end()) == self.line(right.start())
     }
 
-    /// An element's range trimmed to its significant tokens: some nodes
-    /// swallow trailing trivia (an argument keeps the newline after it), and
+    /// Some nodes swallow trailing trivia (an argument keeps its newline), and
     /// line math must never see it.
     fn significant_range(&self, element: &Element) -> TextRange {
         match element {
@@ -263,12 +235,8 @@ impl Formatter<'_> {
         self.out.push_str(&self.source[start..end]);
     }
 
-    // ---- shared walk helpers ----
-
-    /// The last significant (non-whitespace, non-newline) descendant token
-    /// ending at or before `offset`. Comments attach deep inside expression
-    /// nodes, so closer-placement decisions must look at tokens, not
-    /// siblings.
+    /// Comments attach deep inside expression nodes, so closer placement must
+    /// look at tokens, not siblings.
     fn last_token_before(
         &self,
         node: &SyntaxNode,
@@ -288,10 +256,8 @@ impl Formatter<'_> {
         last
     }
 
-    /// Whether the last significant token before `element` (inside `node`) is
-    /// a comment or part of a `#:` annotation. Element-level `previous` checks
-    /// miss comments swallowed into the previous sibling's subtree, and
-    /// anything glued after such a token would become comment text.
+    /// Sibling checks miss a comment swallowed into the previous sibling's
+    /// subtree, and anything glued after it would become comment text.
     fn after_comment(&self, node: &SyntaxNode, element: &Element) -> bool {
         self.last_token_before(node, element.text_range().start())
             .is_some_and(|token| {
@@ -302,7 +268,6 @@ impl Formatter<'_> {
             })
     }
 
-    /// The first significant descendant token starting at or after `offset`.
     fn first_token_after(
         &self,
         node: &SyntaxNode,
@@ -316,8 +281,6 @@ impl Formatter<'_> {
             })
     }
 
-    /// The non-trivia children (nodes, plus comment/semicolon/operator/
-    /// punctuation tokens) in order.
     fn elements(node: &SyntaxNode) -> Vec<Element> {
         node.children_with_tokens()
             .filter(|element| {
@@ -332,11 +295,8 @@ impl Formatter<'_> {
         })
     }
 
-    /// Loop bodies are always brace-wrapped onto their own lines, so a
-    /// `for`/`while`/`repeat` with a non-empty body renders multiline even
-    /// when written on one line. Single-line layout choices must consult
-    /// this: input geometry alone would pick a layout the rendered body
-    /// immediately breaks, and a second pass would then format differently.
+    /// Non-empty loop bodies always render braced and multiline, so single-line
+    /// layout choices must consult this or a second pass formats differently.
     fn forces_multiline(node: &SyntaxNode) -> bool {
         node.descendants().any(|descendant| {
             if !matches!(
@@ -387,11 +347,8 @@ impl Formatter<'_> {
         }
     }
 
-    /// Whether a `# fmt: skip` comment exempts this node: a skip comment
-    /// alone on the line directly above, or one trailing on the node's last
-    /// line. Trailing comments usually attach as the node's own last token
-    /// in this tree, so both the internal and the following-sibling
-    /// attachment count.
+    /// A skip comment alone on the line above, or trailing on the node's last
+    /// line, where it may attach inside the node or as its next sibling.
     fn skip_exempt(&self, node: &SyntaxNode) -> bool {
         let is_skip = |token: &SyntaxToken| {
             token.kind() == SyntaxKind::COMMENT
@@ -447,10 +404,8 @@ impl Formatter<'_> {
         false
     }
 
-    /// `# fmt: skip` preserves the node byte-exactly, including the
-    /// column of its first line: when only whitespace precedes it on its
-    /// line, the indentation just emitted is replaced by the original
-    /// leading whitespace, so column-aligned constructs survive.
+    /// When only whitespace precedes the node on its line, the original
+    /// indentation replaces the emitted one, so column alignment survives.
     fn emit_skipped(&mut self, node: &SyntaxNode) {
         let range = self.significant_range(&SyntaxElement::Node(node.clone()));
         let start = u32::from(range.start()) as usize;
@@ -467,10 +422,8 @@ impl Formatter<'_> {
     }
 
     fn element(&mut self, element: &Element, level: usize, make_multiline: bool) {
-        // Nothing may follow a comment on its line, because it would become
-        // comment text. A walk normally breaks the line itself. This guard
-        // covers the joins that do not know a comment interposed, such as an
-        // operand continuing an operator across a commented line break.
+        // Catches joins that do not know a comment interposed (an operand
+        // continuing an operator across a commented line break).
         if let Some(comment_end) = self.comment_end.take()
             && element.kind() != SyntaxKind::COMMENT
             && !self.out[comment_end..].contains('\n')
@@ -530,22 +483,16 @@ impl Formatter<'_> {
             }
             SyntaxKind::ANNOTATION => {
                 self.annotation(node, level);
-                // Like a comment, nothing may follow an annotation on its
-                // line, because it would become annotation text.
+                // Nothing may follow an annotation on its line either.
                 self.comment_end = Some(self.out.len());
             }
             _ => {
-                // Every other node (argument, parameter, type nodes reached
-                // outside an annotation) prints its children with canonical
-                // single spacing decisions made by the caller.
                 for element in Self::elements(node) {
                     self.element(&element, level, false);
                 }
             }
         }
     }
-
-    // ---- the top level ----
 
     fn source_file(&mut self, root: &SyntaxNode) {
         let elements = Self::elements(root);
@@ -560,16 +507,11 @@ impl Formatter<'_> {
 
         self.item_sequence(&elements, 0);
 
-        // An empty file stays empty; anything else ends with one newline.
         if !elements.is_empty() || !self.source.is_empty() {
             self.newline(0);
         }
     }
 
-    /// A sequence of statements at one level: the top level, or a multiline
-    /// brace body. Handles `# fmt: off` regions, `# fmt: skip`, same-line
-    /// trailing comments, and semicolon-separated statements (normalized to
-    /// newlines).
     fn item_sequence(&mut self, elements: &[Element], level: usize) {
         let mut enabled = true;
         let mut pending_directive = None;
@@ -589,8 +531,7 @@ impl Formatter<'_> {
             }
 
             if !enabled {
-                // A `# fmt: off` region is preserved byte-exactly; only the
-                // directive comments themselves are formatted.
+                // Only the directive comments inside an off region are formatted.
                 let start = previous.map_or_else(
                     || u32::from(element.text_range().start()) as usize,
                     |previous| u32::from(previous.text_range().end()) as usize,
@@ -629,8 +570,6 @@ impl Formatter<'_> {
         }
     }
 
-    // ---- comments and strings ----
-
     fn comment(&mut self, token: &SyntaxToken) {
         self.comment_end = Some(self.out.len());
         let raw = self
@@ -653,8 +592,6 @@ impl Formatter<'_> {
                     self.out.extend(chars);
                 }
             },
-            // `#!` shebangs, `#|` Quarto/knitr cell options, `##`, and
-            // already-spaced comments stay untouched.
             Some('#' | '!' | '|' | ' ') | None => self.out.push_str(&raw),
             Some(other) => {
                 self.out.push_str("# ");
@@ -669,8 +606,6 @@ impl Formatter<'_> {
             let range = token.text_range();
             &self.source[u32::from(range.start()) as usize..u32::from(range.end()) as usize]
         };
-        // Raw strings are preserved byte-for-byte: re-quoting would corrupt
-        // embedded quotes and backslashes.
         if matches!(text.chars().next(), Some('r' | 'R')) {
             self.out.push_str(text);
             return;
@@ -689,8 +624,6 @@ impl Formatter<'_> {
         self.out.push_str(content);
         self.out.push(quote);
     }
-
-    // ---- operators ----
 
     fn binary(&mut self, node: &SyntaxNode, level: usize) {
         let elements = Self::elements(node);
@@ -733,8 +666,7 @@ impl Formatter<'_> {
                         self.element(element, level, false);
                     } else if trailing {
                         // An own-line comment after the last operand belongs
-                        // to the construct around this expression, at its
-                        // level, rather than to the continuation.
+                        // to the enclosing construct's level.
                         self.newline(level);
                         self.element(element, level, false);
                     } else {
@@ -744,9 +676,8 @@ impl Formatter<'_> {
                     }
                 }
                 kind if element.as_token().is_some() && is_operator(kind) => {
-                    // Token-level: the comment may sit as the previous
-                    // operand's own last token, and gluing the operator after
-                    // it would comment the operator out.
+                    // The comment may be the previous operand's own last
+                    // token; gluing the operator after it would comment it out.
                     if self.after_comment(node, element) {
                         self.newline(level);
                         self.out.push_str(&self.indent);
@@ -780,8 +711,8 @@ impl Formatter<'_> {
 
     fn unary(&mut self, node: &SyntaxNode, level: usize) {
         let elements = Self::elements(node);
-        // `...` also parses as a NAME node; the tilde hugs identifiers only
-        // (`~x` but `~ ...`), so look at the wrapped token.
+        // `...` also parses as NAME, but the tilde hugs identifiers only
+        // (`~x` but `~ ...`).
         let operand_is_name = elements
             .iter()
             .rev()
@@ -837,8 +768,7 @@ impl Formatter<'_> {
         let operator = elements
             .iter()
             .position(|element| matches!(element.kind(), SyntaxKind::DOLLAR | SyntaxKind::AT));
-        // The multiline probe must skip comments trailing the operator: the
-        // field name is the element whose line placement matters.
+        // Skip comments trailing the operator: the field name's line decides.
         let is_multiline = operator.is_some_and(|operator_index| {
             elements
                 .get(operator_index + 1..)
@@ -891,8 +821,6 @@ impl Formatter<'_> {
             previous = Some(element);
         }
     }
-
-    // ---- groups ----
 
     fn paren(&mut self, node: &SyntaxNode, level: usize) {
         let elements = Self::elements(node);
@@ -986,10 +914,8 @@ impl Formatter<'_> {
             .filter(|element| !matches!(element.kind(), SyntaxKind::L_BRACE | SyntaxKind::R_BRACE))
             .cloned()
             .collect();
-        // A stray semicolon renders nothing on its own, so a body of only
-        // semicolons is an empty block. Emitting its dropped lines would leave
-        // a bare blank interior line that a second pass collapses, which breaks
-        // idempotence.
+        // A body of only semicolons is empty: emitting its lines would leave a
+        // blank interior line that a second pass collapses.
         let body_elements: Vec<Element> = if body_elements
             .iter()
             .all(|element| element.kind() == SyntaxKind::SEMICOLON)
@@ -1002,7 +928,6 @@ impl Formatter<'_> {
 
         self.out.push('{');
         if is_multiline {
-            // Comments trailing the `{` on its own line stay inline.
             let open_line = self.line(node.text_range().start());
             let mut body_start = 0;
             while body_start < body_elements.len()
@@ -1053,8 +978,6 @@ impl Formatter<'_> {
             self.out.push('}');
         }
     }
-
-    // ---- calls and argument lists ----
 
     fn call_like(&mut self, node: &SyntaxNode, level: usize) {
         let elements = Self::elements(node);
@@ -1113,8 +1036,7 @@ impl Formatter<'_> {
 
     fn argument_list(&mut self, node: &SyntaxNode, level: usize, _skip_first_indent: bool) {
         let elements = Self::elements(node);
-        // `]]` closes with two separate `]` tokens: the FIRST is the
-        // placement anchor, the second glues after it.
+        // For `]]` the first `]` is the placement anchor; the second glues on.
         let close = elements.iter().position(|element| {
             matches!(element.kind(), SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET)
         });
@@ -1130,19 +1052,16 @@ impl Formatter<'_> {
             .iter()
             .all(|argument| argument.text_range().is_empty());
 
-        // Closer placement looks at the last significant token before the
-        // closer (comments attach deep inside argument expressions, and
-        // zero-width hole arguments are invisible).
+        // Tokens, not elements: comments attach deep inside arguments, and hole
+        // arguments are zero-width.
         let close_previous_token = close.and_then(|close_index| {
             self.last_token_before(node, elements[close_index].text_range().start())
         });
         let trailing_space = close_previous_token
             .as_ref()
             .is_none_or(|token| token.kind() == SyntaxKind::COMMA);
-        // Hugged layout: some argument begins on the open line and ends on
-        // the closer's line, chaining the lines together. Parameter lists
-        // never hug, because a multiline signature always expands one per
-        // line.
+        // Hug: some argument starts on the open line and ends on the closer's
+        // line. A multiline signature always expands one parameter per line.
         let hug = node.kind() != SyntaxKind::PARAMETER_LIST
             && close_previous_token.as_ref().is_none_or(|close_previous| {
                 close_previous.kind() != SyntaxKind::COMMENT
@@ -1168,13 +1087,9 @@ impl Formatter<'_> {
                         if is_multiline && !hug && !is_empty {
                             self.newline(level);
                         } else if trailing_space {
-                            // Also with only empty arguments: `alist(, )`
-                            // keeps the space after its comma. This applies
-                            // whenever the closer shares its line with the
-                            // comma. That includes a multiline list that
-                            // collapsed, whether hugged or all-empty, which
-                            // must match what its single-line output reformats
-                            // to.
+                            // Also for all-empty lists (`alist(, )`) and
+                            // collapsed multiline lists, which must match what
+                            // their single-line output reformats to.
                             self.space();
                         }
                         seen_close = true;
@@ -1208,8 +1123,7 @@ impl Formatter<'_> {
                         .last_token_before(node, element.text_range().start())
                         .is_some_and(|token| token.kind() == SyntaxKind::EQ)
                     {
-                        // A fall-through argument (`z = ,`) keeps a space
-                        // between its `=` and the comma.
+                        // A fall-through argument (`z = ,`) keeps its space.
                         self.space();
                     }
                     self.out.push(',');
@@ -1283,11 +1197,8 @@ impl Formatter<'_> {
         }
     }
 
-    // ---- definitions and control flow ----
-
     fn function_definition(&mut self, node: &SyntaxNode, level: usize) {
         let elements = Self::elements(node);
-        // Trailing trivia swallowed into the node must not force multiline.
         let range = self.significant_range(&SyntaxElement::Node(node.clone()));
         let is_multiline = self.line(range.start()) != self.line(range.end());
         let head = elements.first();
@@ -1354,9 +1265,6 @@ impl Formatter<'_> {
 
     fn if_expression(&mut self, node: &SyntaxNode, level: usize, make_multiline: bool) {
         let elements = Self::elements(node);
-        // The node may swallow trailing trivia. An `if` as the last argument
-        // keeps the newline before the closing paren. The choice between
-        // single-line and multiline must not see it.
         let range = self.significant_range(&SyntaxElement::Node(node.clone()));
         let is_multiline = make_multiline
             || self.line(range.start()) != self.line(range.end())
@@ -1439,7 +1347,6 @@ impl Formatter<'_> {
                 }
                 _ if element.as_node().is_some() => {
                     if !seen_close && Some(index) != close {
-                        // The condition.
                         if !hug {
                             self.newline(level);
                             self.out.push_str(&self.indent);
@@ -1448,7 +1355,6 @@ impl Formatter<'_> {
                             self.element(element, level, false);
                         }
                     } else {
-                        // A branch.
                         if previous_is_comment {
                             self.newline(level);
                         } else {
@@ -1720,26 +1626,17 @@ impl Formatter<'_> {
         }
     }
 
-    // ---- `#:` annotations ----
-
-    /// Renders one stitched annotation region. When the block parsed cleanly
-    /// it is re-rendered canonically (author line breaks kept, token spacing
-    /// and bracket hugging normalized); a block with a parse error inside is
-    /// preserved line-by-line verbatim, apart from a single space after
-    /// every `#:`.
+    /// A clean block re-renders canonically, keeping author line breaks; a block
+    /// with an error stays verbatim apart from one space after each `#:`.
     fn annotation(&mut self, node: &SyntaxNode, level: usize) {
         let range = node.text_range();
-        // Inclusive end: an annotation-grammar error reported exactly at the
-        // block's end offset (an unterminated type at end of region) still
-        // belongs to this block.
+        // Inclusive end: an error at the block's end offset still belongs to it.
         let has_error = self
             .error_ranges
             .iter()
             .any(|error| error.start() >= range.start() && error.start() <= range.end());
-        // A head trailing code on its line is its own annotation: the
-        // continuation lines form a separate block rendered from a fresh
-        // delimiter state, so they never indent relative to a head column
-        // the formatter does not control.
+        // A head trailing code renders apart from its continuation lines, so
+        // they never indent relative to a column the formatter does not control.
         let start = u32::from(range.start()) as usize;
         let line_start = self.line_starts[line_of(&self.line_starts, start)];
         let trailing_head = self.source[line_start..start]
@@ -1773,7 +1670,6 @@ impl Formatter<'_> {
         }
     }
 
-    /// The annotation region's original lines, kept verbatim after the `#:`.
     fn verbatim_annotation(&self, node: &SyntaxNode) -> Vec<String> {
         let range = node.text_range();
         let text = &self.source[u32::from(range.start()) as usize..u32::from(range.end()) as usize];
@@ -1793,17 +1689,14 @@ impl Formatter<'_> {
             .collect()
     }
 
-    /// Canonical annotation rendering: tokens re-spaced per the type
-    /// notation's rules, author line breaks kept, bracket hug bits read off
-    /// the original layout (an opener ending its line expands: its closer
-    /// gets its own line at the opener's indent; anything else hugs).
+    /// An opener ending its line expands (its closer gets its own line at the
+    /// opener's indent); anything else hugs.
     fn render_annotation(&self, node: &SyntaxNode) -> Option<Vec<String>> {
         let line_tokens = self.annotation_line_tokens(node)?;
         Some(self.render_annotation_lines(&line_tokens))
     }
 
-    /// The annotation's significant tokens grouped by source line, or `None`
-    /// when a token has no display mapping (the block then goes verbatim).
+    /// `None` when a token has no display mapping; the block then goes verbatim.
     fn annotation_line_tokens(&self, node: &SyntaxNode) -> Option<Vec<Vec<AnnotationToken>>> {
         let mut line_tokens: Vec<Vec<AnnotationToken>> = Vec::new();
         let mut current_line = usize::MAX;
@@ -1830,8 +1723,7 @@ impl Formatter<'_> {
             }
             let kind = annotation_token_kind(token.kind(), token.text())?;
             let last = line_tokens.last_mut().expect("marker precedes tokens");
-            // Directive names lex as `@` plus adjacent word/`-` tokens; glue
-            // them back into one display token.
+            // Directive names lex as `@` plus adjacent tokens; glue them back.
             if kind == AnnotationTokenKind::Word
                 && last.last().is_some_and(|previous| {
                     previous.kind == AnnotationTokenKind::Directive
@@ -1931,12 +1823,9 @@ impl Formatter<'_> {
     }
 }
 
-// ---- free helpers ----
-
 fn line_starts(source: &str) -> Vec<usize> {
-    // A bare `\r` terminates a line exactly like the lexer says it does;
-    // `\r\n` counts once. Diverging from the lexer here makes two tokens
-    // separated by a lone `\r` look same-line and glue into comment text.
+    // A bare `\r` ends a line, as in the lexer; diverging would make tokens
+    // split by a lone `\r` look same-line and glue into comment text.
     let mut starts = vec![0];
     let bytes = source.as_bytes();
     for (index, &byte) in bytes.iter().enumerate() {
@@ -1997,8 +1886,6 @@ fn parse_directive(text: &str) -> Option<Directive> {
         })
 }
 
-// ---- annotation token model ----
-
 struct OpenDelimiter {
     expanded: bool,
     opener_level: usize,
@@ -2047,8 +1934,7 @@ fn annotation_token_kind(kind: SyntaxKind, text: &str) -> Option<AnnotationToken
         SyntaxKind::DOTS => Dots,
         SyntaxKind::AT => Directive,
         SyntaxKind::MINUS => {
-            // Interior of a joined directive name (`@if-unknown`); anything
-            // else is outside the annotation alphabet.
+            // Interior of a joined directive name (`@if-unknown`).
             return Some(Word);
         }
         _ if kind.is_keyword() => Word,
@@ -2064,9 +1950,6 @@ fn annotation_line(level: usize, content: &str, indent: &str) -> String {
     format!("#: {}{content}", indent.repeat(level))
 }
 
-/// The canonical surface-type spacing: `,` and `:` hug their left neighbor,
-/// `|` and `->` are surrounded by spaces, and brackets hug what they apply
-/// to.
 fn annotation_space_between(
     previous: AnnotationTokenKind,
     previous_text: &str,
@@ -2075,10 +1958,8 @@ fn annotation_space_between(
     use AnnotationTokenKind::*;
     match current {
         Comma | Colon | CloseParen | CloseBracket | CloseBrace | CloseAngle => return false,
-        // `(` hugs only what it APPLIES to, as in `fn(` and `Box<T>(`. After
-        // a `:`, a `|`, or a `->` it opens a grouped type, and the
-        // surrounding-space rule for that neighbour governs. That gives
-        // `x: (integer | character)` rather than `x:(integer | character)`.
+        // `(` hugs only what it applies to (`fn(`); after `:`, `|` or `->` it
+        // opens a grouped type: `x: (integer | character)`.
         OpenParen
             if matches!(
                 previous,
@@ -2106,10 +1987,7 @@ fn is_closer(kind: AnnotationTokenKind) -> bool {
     matches!(kind, CloseParen | CloseBracket | CloseBrace | CloseAngle)
 }
 
-/// The fuzz invariant battery for one input: formatting never panics, is
-/// deterministic, preserves the code, and is idempotent whenever it succeeds
-/// (the output formats again, byte-identically). Shared by the in-tree property
-/// fuzzer and the coverage-guided `fuzz/` targets so the contract has one home.
+/// Shared with the coverage-guided `fuzz/` targets so the contract has one home.
 pub fn check_format_invariants(input: &str) {
     let first = format(input, Config::default());
     let again = format(input, Config::default());
@@ -2130,22 +2008,9 @@ pub fn check_format_invariants(input: &str) {
     }
 }
 
-/// The tokens formatting must preserve exactly, in order, as `(kind, spelling)`.
-/// This is the only invariant that can notice the formatter *changing* the
-/// code. Determinism, idempotence, and "the output formats again" all hold for
-/// a formatter that silently drops a statement or misspells a token.
-///
-/// Comparing kinds alone is not enough, and the gap is a miscompile rather than
-/// a cosmetic problem. R is case-sensitive, so a formatter that emits the wrong
-/// bytes for an identifier preserves every kind while renaming the user's
-/// variables. A stale or off-by-one source range produces exactly that.
-///
-/// Two allowances make the spelling comparable. Four kinds are dropped entirely
-/// because the formatter may introduce or move them. It braces a
-/// single-statement body, splits a `;` chain into lines, and re-lays out a `#:`
-/// block across markers. A string is compared by its content rather than by its
-/// text, because the formatter chooses the quote character. A *raw* string is
-/// copied byte for byte, so that one keeps its full spelling.
+/// Spellings, not just kinds: a wrong source range renames identifiers while
+/// keeping every kind. Braces, `;` and `#:` markers may be added or moved, and
+/// non-raw strings compare by content because the formatter picks the quote.
 fn significant_tokens(text: &str) -> Vec<(SyntaxKind, &str)> {
     let mut tokens = Vec::new();
     let mut start = 0usize;
@@ -2173,8 +2038,7 @@ fn comparable_spelling(kind: SyntaxKind, spelling: &str) -> &str {
     if kind != SyntaxKind::STRING || matches!(spelling.chars().next(), Some('r' | 'R')) {
         return spelling;
     }
-    // An unterminated string reaches here as its opening quote plus whatever
-    // followed, so trim the closer only when there is one to trim.
+    // An unterminated string has no closer to trim.
     let inner = spelling.strip_prefix(['"', '\'']).unwrap_or(spelling);
     match spelling.len() >= 2 {
         true => inner.strip_suffix(['"', '\'']).unwrap_or(inner),

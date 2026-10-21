@@ -1,20 +1,12 @@
 ---
-// Structural, not imported: Starlight's package exports map does not expose the
-// sidebar entry types, and this is the whole shape we depend on.
+// Structural: Starlight's exports map does not expose the sidebar entry types.
 type SidebarEntry =
   | { type: 'link'; label: string; isCurrent: boolean }
   | { type: 'group'; label: string; entries: SidebarEntry[] }
 
-// Starlight's own PageTitle, and the theme's override of it, both render a fixed
-// two-level "Docs > {title}" crumb that ignores where the page actually sits. The
-// real trail has to come from the sidebar: walk it for the entry marked current and
-// keep the labels of the groups above it. Deriving from the sidebar rather than the
-// URL is what lets the entry pages sit at the site root while every other page nests
-// under its group — both still get an accurate trail.
-//
-// Registering this component in `astro.config.ts` makes starlight-theme-black skip its
-// own PageTitle override (and log that it did), so the markup and styles below have to
-// carry the theme's look themselves.
+// Starlight and the theme both render a fixed "Docs > {title}" crumb; the trail comes from the
+// sidebar, not the URL, because entry pages sit at the site root. Overriding PageTitle makes
+// starlight-theme-black skip its own, so the markup below carries the theme's look.
 const {
   entry: {
     data: { title, template, links },
@@ -34,8 +26,6 @@ function trailToCurrent(entries: SidebarEntry[], ancestors: string[] = []): stri
   return undefined
 }
 
-// A page missing from the sidebar (the unlisted installation page) still gets the
-// root crumb, just with nothing between it and the title.
 const crumbs = ['Docs', ...(trailToCurrent(sidebar) ?? [])]
 ---
 

@@ -1,20 +1,5 @@
-//! Name-resolution fixtures: which binding every name in an item resolves to.
-//!
-//! This is the only suite that tests naming *directly*. Everywhere else naming
-//! is tested through its consequences, which are a type that comes out right
-//! and a diagnostic that does or does not fire. Those consequences cannot see a
-//! read that resolves to the **wrong** binding while still producing the same
-//! type. That failure is silent in every other suite, and it is a real one. The
-//! rule for which writer an immediate read sees is the nearest earlier one,
-//! rather than the first or the last, and it is invisible unless the bindings
-//! differ in type.
-//!
-//! The rendering is flat and source-ordered rather than a tree of the HIR. The
-//! fact under test is the resolution, not the shape, and a tree renderer would
-//! restate the lowering, which would churn this suite on every HIR change
-//! while adding nothing about names. Sections appear only when they have content, so an
-//! ordinary case stays short.
-//!
+//! Name-resolution fixtures: the only suite that sees a read resolving to the wrong binding
+//! while still producing the same type.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
 use semantics::hir::{ExprId, Module};
@@ -58,9 +43,6 @@ fn render(source: &str) -> String {
     )
 }
 
-/// One item's naming facts. Bindings first, because every resolution below
-/// points at one; then reads in source order; then the sets that are empty in
-/// an ordinary case.
 fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     for binding in naming.bindings.values() {
         let _ = writeln!(
@@ -73,10 +55,7 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
         );
     }
 
-    // A resolution sits on a read or on an assignment target, and telling them
-    // apart is the point of the suite: "this write and that read share a slot"
-    // is the fact, and a rendering that shows only `-> b0` twice does not say
-    // which direction each occurrence goes.
+    // Writes and reads must render differently: two `-> b0` lines would not say which is which.
     let targets = assignment_targets(module);
 
     let mut reads: Vec<(u32, String)> = Vec::new();
@@ -170,8 +149,6 @@ fn render_set<'a>(output: &mut String, label: &str, values: impl Iterator<Item =
     }
 }
 
-/// Every expression that is the target of an assignment, so a resolution on one
-/// renders as a write rather than a read.
 fn assignment_targets(module: &Module) -> std::collections::BTreeSet<ExprId> {
     use semantics::hir::ExpressionKind;
     let mut targets = std::collections::BTreeSet::new();
@@ -183,11 +160,7 @@ fn assignment_targets(module: &Module) -> std::collections::BTreeSet<ExprId> {
     targets
 }
 
-/// The name an expression spells, for the resolution lines. A resolution can
-/// sit on an assignment target as well as a read, and a target is usually a
-/// `NameRef`. A quoted target is the exception: `"x" <- 1` binds `x`, but
-/// lowering keeps the string literal, so the occurrence renders as its
-/// expression kind while the binding line above it carries the stripped name.
+/// A quoted target (`"x" <- 1`) lowers to a string literal, so it renders as its kind.
 fn name_at(module: &Module, expression: ExprId) -> String {
     match &module.expression(expression).kind {
         semantics::hir::ExpressionKind::NameRef(name) => name.clone(),

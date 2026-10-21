@@ -1,16 +1,5 @@
-//! IDE fuzz harness, per the pipeline-wide doctrine. On every input each
-//! feature runs at a sample of byte offsets, which is every token boundary
-//! plus a coarse stride, so an off-boundary position and a mid-character
-//! position stay covered. At each offset a feature must not panic, and it must
-//! keep every range it produces inside the text that range indexes. Hover is additionally checked
-//! for determinism within one database.
-//!
-//! None of these features is memoized, so a second call for its own sake costs
-//! as much as the first; the budget goes on offsets and inputs instead, and the
-//! range checks are free once a result is in hand.
-//!
-//! `FUZZ_ITERS` scales the mutation budget, and the default is 300. Every
-//! iteration sweeps a whole input, so the inputs stay small.
+//! Every feature runs at sampled offsets and must not panic or produce a range outside the text
+//! it indexes. `FUZZ_ITERS` scales the mutation budget.
 
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use syntax::TextSize;
@@ -51,9 +40,6 @@ fn iterations() -> usize {
         .unwrap_or(300)
 }
 
-/// Runs every feature at a sample of positions in `source`, checking that every
-/// range it hands the editor lies inside the text that range indexes. Panics
-/// propagate.
 fn sweep(source: &str) {
     let db = RootDatabase::default();
     semantics::stubs::install_shipped_stubs(&db);
@@ -77,8 +63,6 @@ fn sweep(source: &str) {
 
         let _ = ide::hover_debug(&db, file, offset);
 
-        // The name under the cursor, when there is one: every range the
-        // navigation features return for this position must cover exactly it.
         let cursor_name = name_at(source, offset);
 
         let definition = ide::definition(&db, files, file, offset);
@@ -117,10 +101,8 @@ fn sweep(source: &str) {
             &at("rename edit"),
         );
 
-        // Round trip: if the cursor navigates somewhere, asking for references
-        // from that declaration must find the token the cursor was on. A set of
-        // edits that is internally consistent but collectively shifted passes
-        // every containment check and still corrupts the file.
+        // A consistently shifted set of ranges passes every containment check yet corrupts the
+        // file; the round trip catches it.
         if let Some((target_file, target_range)) = definition_range(definition.as_ref())
             && target_file == file
             && cursor_name.is_some()
@@ -136,8 +118,7 @@ fn sweep(source: &str) {
             );
         }
 
-        // A signature's parameter spans index its own rendered label, not the
-        // file, and the editor slices the label with them.
+        // Parameter spans index the rendered label, not the file.
         for signature in ide::signature_help(&db, file, offset)
             .iter()
             .flat_map(|help| &help.signatures)
@@ -152,15 +133,8 @@ fn sweep(source: &str) {
             }
         }
 
-        // Completion costs about 80% of this harness on its own, which is
-        // three orders of magnitude more per call than any other feature here.
-        // It also asserts the least of any of them, namely that a label is not
-        // empty. What it offers
-        // is decided by the syntactic context (after a `$`, inside an
-        // identifier, at the start of a statement), not by the exact byte, so
-        // sweeping every offset re-derives the same candidate set over and
-        // over. One offset per context visits every candidate source the file
-        // can reach and keeps the assertion intact.
+        // Completion dominates this harness's cost and depends on the syntactic context, not the
+        // exact byte, so one offset per context suffices.
         if completion_offsets.contains(&offset) {
             for item in ide::completion(&db, files, file, offset)
                 .iter()
@@ -200,12 +174,8 @@ fn sweep(source: &str) {
     let _ = ide::workspace_symbols(&db, files, "a");
 }
 
-/// Token boundaries plus a coarse stride over the rest. The boundaries are where
-/// the interesting position decisions happen (end-inclusive containment, the
-/// item-end touch) and the stride keeps the off-boundary and mid-character cases
-/// that have found real panics. It does not pay for every byte, which is what
-/// made this the most expensive test in the repository. The per-call work is
-/// over the shipped stub corpus, so it barely varies with file size.
+/// Token boundaries are where position decisions happen; the stride keeps off-boundary and
+/// mid-character offsets without paying for every byte.
 fn sample_offsets(source: &str) -> Vec<usize> {
     const STRIDE: usize = 7;
     let mut offsets: Vec<usize> = token_boundaries(source)
@@ -220,8 +190,6 @@ fn sample_offsets(source: &str) -> Vec<usize> {
     offsets
 }
 
-/// The start of the file and the end of every token. These are the positions
-/// where what a feature should answer actually changes.
 fn token_boundaries(source: &str) -> std::collections::BTreeSet<TextSize> {
     let mut offsets = std::collections::BTreeSet::from([TextSize::from(0)]);
     let mut at = 0usize;
@@ -232,13 +200,7 @@ fn token_boundaries(source: &str) -> std::collections::BTreeSet<TextSize> {
     offsets
 }
 
-/// One offset per completion context, where the context is the kind of token
-/// the cursor sits in or after. The context is what decides what may be
-/// offered: a field after `$`, an export after `::`, or a binding at the head
-/// of a statement. Completing after the `$` of `a$b` and after the `$` of `c$d`
-/// asks the same question of the same file, so the second call only pays to
-/// re-derive a candidate list the first already checked. The two structural
-/// edges are always kept.
+/// The kind of token the cursor sits after decides what completion may offer.
 fn one_offset_per_context(source: &str) -> std::collections::BTreeSet<TextSize> {
     let mut seen = std::collections::HashSet::new();
     let mut offsets =
@@ -253,15 +215,12 @@ fn one_offset_per_context(source: &str) -> std::collections::BTreeSet<TextSize> 
     offsets
 }
 
-/// The name the cursor is on, or `None` if it is not on one. Names are what the
-/// navigation features are *about*, so this is the only position where their
-/// answers have a spelling to be checked against.
 fn name_at(source: &str, offset: TextSize) -> Option<&str> {
     let offset = usize::from(offset);
     let mut start = 0usize;
     for token in syntax::lex(source).0 {
         let end = start + usize::from(token.len);
-        // A backtick-quoted name lexes as IDENT too, backticks included.
+        // A backtick-quoted name lexes as IDENT, backticks included.
         if (start..end).contains(&offset) && token.kind == syntax::SyntaxKind::IDENT {
             return source.get(start..end);
         }
@@ -270,13 +229,8 @@ fn name_at(source: &str, offset: TextSize) -> Option<&str> {
     None
 }
 
-/// Containment says a range is *somewhere* in the file; this says it is on the
-/// right thing. Every edit a rename hands the editor, and every range navigation
-/// points at, must spell the name the cursor was on. A set of ranges shifted by
-/// one byte is in bounds, is self-consistent, and silently destroys code.
-///
-/// Backtick spelling is normalized because `` `x` `` and `x` name the same
-/// binding and a feature may report either form.
+/// A range shifted by one byte is in bounds and self-consistent yet destroys code, so each range
+/// must spell the cursor's name. Backticks are normalized: `` `x` `` and `x` name one binding.
 fn check_names(
     db: &RootDatabase,
     ranges: impl IntoIterator<Item = (SourceFile, syntax::TextRange)>,
@@ -316,9 +270,6 @@ fn definition_range(
     }
 }
 
-/// Every range a feature returns goes straight to the editor, so it must lie
-/// inside the file it names. A stale or out-of-bounds range is a client-side
-/// error at best and a lost edit at worst.
 fn check_range(db: &RootDatabase, file: SourceFile, range: syntax::TextRange, what: &str) {
     let length = file.text(db).len();
     assert!(
@@ -328,8 +279,7 @@ fn check_range(db: &RootDatabase, file: SourceFile, range: syntax::TextRange, wh
 }
 
 fn check_target(db: &RootDatabase, target: Option<&ide::DefinitionTarget>, what: &str) {
-    // A stub target's range indexes a stub source rather than a project file,
-    // and the harness installs no stub texts to measure it against.
+    // A stub target's range indexes a stub source, not a project file.
     if let Some(ide::DefinitionTarget::Project(navigation)) = target {
         check_range(db, navigation.file, navigation.range, what);
     }
@@ -386,7 +336,6 @@ fn fuzz_seed_mutations() {
     }
 }
 
-/// The everything-at-once deep run for nightly/manual use:
 /// `FUZZ_ITERS=5000 cargo test -p ide --release --test test_fuzz -- --ignored fuzz_deep`
 #[test]
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]

@@ -10,10 +10,8 @@ const navLinks = [
     { label: "News", href: "/news" },
 ];
 
-// Every editor mock, diagnostic and diff on this page is captured from the
-// real binary: hovers, completions and inlay hints from `ry server` over
-// LSP, diagnostics from `ry check`, diffs from `ry fmt --diff`.
-// Re-capture rather than hand-edit them, so the page keeps telling the truth.
+// Editor mocks, diagnostics and diffs are captured from the real binary (`ry server`,
+// `ry check`, `ry fmt --diff`); re-capture them rather than hand-edit.
 const lspFeatures = [
     {
         key: "completion",
@@ -440,7 +438,6 @@ const year = new Date().getFullYear();
                 </div>
             </section>
 
-            <!-- ---------- language server ---------- -->
             <section id="language-server" class="band showband accent-cyan">
                 <div class="band-inner">
                     <header class="band-head">
@@ -450,13 +447,6 @@ const year = new Date().getFullYear();
                         </p>
                     </header>
 
-                    <!--
-            All six features share one editor and one file, so the code is written once and each
-            feature contributes only its own overlay: `data-feature` on the showcase selects which
-            overlays and token decorations are visible. One reused tabpanel therefore backs the
-            whole tablist, and `aria-labelledby` follows the selection so the region is always
-            named by the feature it is showing.
-          -->
                     <div
                         class="showcase ide"
                         data-tabs="ide"
@@ -578,7 +568,6 @@ const year = new Date().getFullYear();
                 </div>
             </section>
 
-            <!-- ---------- code analysis ---------- -->
             <section
                 id="code-analysis"
                 class="band showband band-spotlight accent-violet"
@@ -677,7 +666,6 @@ const year = new Date().getFullYear();
                 </div>
             </section>
 
-            <!-- ---------- formatter ---------- -->
             <section id="formatter" class="band showband accent-emerald dotted">
                 <div class="band-inner">
                     <header class="band-head">
@@ -778,7 +766,6 @@ const year = new Date().getFullYear();
                 </div>
             </section>
 
-            <!-- ---------- get started ---------- -->
             <section id="get-started" class="band band-closer">
                 <canvas id="closer-canvas" aria-hidden="true"></canvas>
                 <div class="closer-scrim" aria-hidden="true"></div>
@@ -1777,15 +1764,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 Promise.all([fontsReady, logoReady]).then(begin).catch(begin);
             }
 
-            // ======================================================================
-            // Showcase controls: an accessible tablist (roving tabindex, arrow keys,
-            // Home/End) over either one reused stage or one stage per tab.
-            //
-            // The language-server showcase reuses a single stage for all six
-            // features — the code is written once and `data-feature` selects the
-            // overlay — so its tabs point at one panel and `aria-labelledby` follows
-            // the selection. The other two showcases have a stage per tab.
-            // ======================================================================
+            // The language-server showcase reuses one stage for all six features (`data-feature`
+            // selects the overlay), so its tabs share one panel and `aria-labelledby` follows the selection.
             const RENAME_FROM = "margin";
             const RENAME_TO = "net_of_fees";
 
@@ -1861,8 +1841,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     if (focusTab) tabs[index].focus();
                 }
 
-                // The formatted pane replays its line-by-line settle whenever the panel
-                // becomes the visible one, so the reader watches the rewrite happen.
                 function playFormat(panel: HTMLElement) {
                     if (reduce || !root.classList.contains("fmt")) return;
                     panel.classList.remove("is-playing");
@@ -1945,12 +1923,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 tabs.forEach((tab, i) =>
                     tab.addEventListener("click", () => activate(i, true)),
                 );
-                // Paint the initial selection through the same path the clicks take, so
-                // the footer note and the shared stage's feature state are never blank.
+                // Through the click path, so the footer note and shared stage state are never blank.
                 activate(selectedIndex(), false);
 
-                // Play the entry animation only once the showcase is actually on
-                // screen, and replay it when the reader scrolls back to it.
                 if (typeof IntersectionObserver !== "undefined" && !reduce) {
                     let wasVisible = false;
                     const observer = new IntersectionObserver(
@@ -1986,11 +1961,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     playRename();
             }
 
-            // ======================================================================
-            // Closer: dot-matrix halftone field with a sweeping wavefront.
-            // Self-contained and namespaced; pauses offscreen; static halftone
-            // fallback under reduced motion. Shares no globals with the hero field.
-            // ======================================================================
             function initCloserMatrix() {
                 const matrixCanvas = document.getElementById(
                     "closer-canvas",
@@ -2447,12 +2417,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 Promise.all([fontsReady, logoReady]).then(setup).catch(setup);
             }
 
-            // ======================================================================
-            // Closer parallax: while the closer scrolls through the viewport, its
-            // copy drifts slower than the page, so the copy and the dot-matrix
-            // background separate into two planes. One passive scroll handler writes
-            // a CSS variable; the transform itself lives in CSS.
-            // ======================================================================
             function initCloserParallax() {
                 const section = document.getElementById("get-started");
                 const col = section?.querySelector(
@@ -2469,9 +2433,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     rafId = 0;
                     const rect = section.getBoundingClientRect();
                     const vh = window.innerHeight || 1;
-                    // 0 while the section is still below the viewport, 1 once it has
-                    // left above; the drift crosses zero with the section centered, so
-                    // the copy sits exactly where static layout would put it.
+                    // The drift crosses zero with the section centered, where static layout puts the copy.
                     const t = Math.min(
                         1,
                         Math.max(0, (vh - rect.top) / (vh + rect.height)),
@@ -2527,17 +2489,14 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 --radius: 0.375rem;
                 --frame: 1080px;
                 --prose: 720px;
-                /* The feature sections' demos are wide artefacts (an editor, a source
-           pane beside a terminal), so they get their own wider measure. */
+                /* The demos are wide (an editor, a source pane beside a terminal). */
                 --stage-frame: 1140px;
 
-                /* engineered capability triad */
                 --cap-cyan: oklch(0.8 0.115 215);
                 --cap-violet: oklch(0.72 0.145 292);
                 --cap-emerald: oklch(0.76 0.135 162);
 
-                /* Terminal palette, matched to the ANSI colors the CLI actually
-           emits: bold red errors, bold yellow warnings, bold blue frames. */
+                /* The ANSI colors the CLI emits. */
                 --d-err: oklch(0.685 0.185 25);
                 --d-warn: oklch(0.845 0.13 88);
                 --d-blue: oklch(0.735 0.115 250);
@@ -2560,8 +2519,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 line-height: 1.6;
                 -webkit-font-smoothing: antialiased;
                 text-rendering: optimizeLegibility;
-                /* clip (not hidden) avoids turning <body> into its own scroll container,
-           so the page keeps the native root scrollbar. */
+                /* `hidden` would make <body> its own scroll container and lose the native scrollbar. */
                 overflow-x: clip;
             }
             a {
@@ -2572,7 +2530,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             pre {
                 font-family: "Geist Mono", ui-monospace, monospace;
             }
-            /* ---------- nav (docs header parity) ---------- */
             .nav {
                 position: fixed;
                 top: 0;
@@ -2823,7 +2780,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 align-items: center;
             }
 
-            /* ---------- buttons (all SOLID) ---------- */
             .cta {
                 display: inline-flex;
                 align-items: center;
@@ -2880,7 +2836,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 color: var(--muted-foreground);
             }
 
-            /* ---------- editorial bands ---------- */
             .band {
                 position: relative;
                 scroll-margin-top: 72px;
@@ -2900,8 +2855,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     transparent 70%
                 );
             }
-            /* The three feature sections get a taller measure and their own
-         internal rhythm: copy, then control, then stage, then footnotes. */
             .showband {
                 padding: clamp(3.6rem, 7vw, 6rem) clamp(1.1rem, 4vw, 2.5rem);
             }
@@ -2929,7 +2882,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 position: relative;
                 z-index: 1;
             }
-            /* subtle dotted backing — shares the closer's dot motif for page rhythm */
             .dotted::after {
                 content: "";
                 position: absolute;
@@ -3023,7 +2975,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 font-size: 0.88em;
             }
 
-            /* ---------- doc links ---------- */
             .doclink {
                 display: inline-flex;
                 align-items: center;
@@ -3054,7 +3005,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 border-bottom-color: var(--foreground);
             }
 
-            /* ---------- code blocks ---------- */
             .codeblock {
                 margin: 1.4rem 0 0;
                 background: var(--code-bg);
@@ -3082,13 +3032,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 );
             }
 
-            /* ==================================================================
-         Showcase: the shared shell behind the three feature sections. Every
-         section is a segmented control over one framed "stage" — a head strip
-         naming the file, a body holding the demo, and a foot strip carrying
-         the one-line explanation. Keeping the geometry identical across the
-         sections is what makes the page read as one design.
-         ================================================================== */
             .showcase {
                 display: grid;
                 grid-template-columns: minmax(0, 1fr);
@@ -3097,8 +3040,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .showcase > .seg {
                 grid-row: 1;
             }
-            /* Every stage shares one grid cell, so the cell is as tall as the
-         tallest panel and switching tabs never shifts the page. */
+            /* One shared grid cell, so switching tabs never shifts the page. */
             .showcase > .stage {
                 grid-row: 2;
                 grid-column: 1;
@@ -3114,7 +3056,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 outline-offset: 3px;
             }
 
-            /* ---------- segmented control ---------- */
             .seg {
                 display: flex;
                 flex-wrap: wrap;
@@ -3130,9 +3071,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     transparent
                 );
             }
-            /* Above this width every pill fits on one row, so the control reads as a
-         single track; below it the pills wrap rather than hiding behind a
-         scroll the reader has to discover. */
+            /* Below this width the pills wrap rather than hide behind a scroll. */
             @media (min-width: 700px) {
                 .seg {
                     flex-wrap: nowrap;
@@ -3176,16 +3115,13 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 outline-offset: 1px;
             }
 
-            /* ---------- stage frame ---------- */
             .stage {
                 --pane-bg: var(--code-bg);
-                /* Unitless on purpose: an `em` here would resolve against the frame's
-           font size, not the code's, and every code block would be too airy. */
+                /* Unitless: an `em` would resolve against the frame's font size, not the code's. */
                 --lh: 1.62;
                 display: flex;
                 flex-direction: column;
-                /* `<-` and `->` must render as the characters you actually type; the
-           mono face would otherwise ligate them into arrows. */
+                /* The mono face would otherwise ligate `<-` and `->` into arrows. */
                 font-variant-ligatures: none;
                 font-feature-settings:
                     "calt" 0,
@@ -3257,8 +3193,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 border-radius: 50%;
                 background: color-mix(in oklch, var(--cap) 85%, transparent);
             }
-            /* Footer slots stack in one grid cell so swapping the active note never
-         changes the frame's height. */
+            /* One shared grid cell, so swapping notes never changes the frame's height. */
             .foot-notes,
             .foot-methods {
                 display: grid;
@@ -3290,8 +3225,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .foot-cmd .sh {
                 color: var(--muted);
             }
-            /* The formatter's footer quotes the CLI's own summary line, so it keeps
-         the terminal's typeface rather than the page's prose face. */
+            /* Quotes the CLI's summary line, so it keeps the terminal typeface. */
             .fmt .foot-note {
                 font-family: "Geist Mono", ui-monospace, monospace;
                 font-size: 11.5px;
@@ -3310,7 +3244,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 visibility: visible;
             }
 
-            /* ---------- code rendering (one palette for the whole page) ---------- */
             .code {
                 font-family: "Geist Mono", ui-monospace, monospace;
                 font-size: var(--code-size);
@@ -3388,13 +3321,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .tok {
                 color: oklch(0.88 0 0);
             }
-            /* Formatter panes visualise leading whitespace, so the indentation
-         example shows what actually changed instead of an invisible shift. */
+            /* Visible leading whitespace, so the indentation example shows what changed. */
             .ws {
                 color: oklch(0.36 0 0);
             }
 
-            /* diagnostic squiggle under the exact reported span */
             .squig {
                 position: relative;
                 text-decoration-line: underline;
@@ -3410,11 +3341,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 text-decoration-color: var(--d-warn);
             }
 
-            /* ==================================================================
-         Language server: one editor, one file, six overlays. `data-feature`
-         on the showcase decides which overlay and which token decorations are
-         visible, so the code itself is written exactly once.
-         ================================================================== */
             .ide-body {
                 position: relative;
                 display: grid;
@@ -3435,7 +3361,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 display: inline;
             }
 
-            /* the cursor's line, and the token the feature is about */
             .ide[data-feature="definition"] .cl[data-line="4"],
             .ide[data-feature="rename"] .cl[data-line="4"] {
                 background: oklch(1 0 0 / 0.035);
@@ -3511,7 +3436,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 border-bottom: 1px solid var(--cap);
             }
 
-            /* floating panels: hover card and completion list */
             .card {
                 position: absolute;
                 z-index: 6;
@@ -3625,7 +3549,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 }
             }
 
-            /* references peek, docked to the bottom of the editor */
             .peek {
                 position: absolute;
                 left: 0;
@@ -3683,7 +3606,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 color: oklch(0.94 0 0);
             }
 
-            /* inlay hints — rendered as the editor renders them: inline, dimmed */
             .inlay {
                 display: none;
                 margin-left: 0.5ch;
@@ -3697,7 +3619,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 display: inline;
             }
 
-            /* the "N edits in M files" the rename response actually reports */
             .renamebadge {
                 margin-left: 1.5ch;
                 padding: 0 5px;
@@ -3709,11 +3630,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     color-mix(in oklch, var(--cap) 26%, var(--border));
             }
 
-            /* ==================================================================
-         Split stages: source next to result. Used by the analysis section
-         (source | `ry check` output) and the formatter section
-         (before | after), so both read with the same geometry.
-         ================================================================== */
             .stage.split .stage-body {
                 display: grid;
                 grid-template-columns: minmax(0, var(--split, 1fr)) minmax(
@@ -3740,8 +3656,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             @media (max-width: 900px) {
                 .stage.split .stage-body {
                     grid-template-columns: minmax(0, 1fr);
-                    /* Stacked panes size to their own content; the leftover height of the
-             shared cell collects once at the bottom instead of twice. */
+                    /* Leftover cell height collects once at the bottom instead of twice. */
                     grid-auto-rows: min-content;
                     align-content: start;
                 }
@@ -3758,8 +3673,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 .stage-foot {
                     gap: 0.4rem;
                 }
-                /* On a phone the stacked footer notes would reserve the tallest note's
-           height on every tab; the small reflow is the better trade there. */
+                /* Stacked notes would reserve the tallest note's height on every tab; reflowing is better. */
                 .foot-notes,
                 .foot-methods {
                     display: block;
@@ -3793,7 +3707,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 padding-top: 7px;
             }
 
-            /* ---------- terminal output, rendered as the CLI prints it ---------- */
             .term {
                 padding: 13px 14px;
                 font-family: "Geist Mono", ui-monospace, monospace;
@@ -3805,8 +3718,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     "liga" 0;
                 color: oklch(0.86 0 0);
             }
-            /* Source and caret lines must never wrap — the caret aligns under the
-         reported column. Message lines are prose and wrap like a terminal's. */
+            /* The caret aligns under the reported column; message lines wrap like a terminal's. */
             .tl {
                 white-space: pre;
             }
@@ -3848,7 +3760,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 color: oklch(0.7 0 0);
             }
 
-            /* ---------- formatter panes ---------- */
             .fmt .cl.is-changed .ln {
                 color: oklch(0.56 0 0);
             }
@@ -3882,9 +3793,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .fmt .pane-src {
                 background: color-mix(in oklab, var(--pane-bg) 88%, #000);
             }
-            /* The formatted pane settles in line by line when the panel becomes
-         visible, so the reader watches the rewrite rather than reading a
-         static after-shot. */
             .fmt .pane-out .cl {
                 opacity: 1;
             }
@@ -3916,7 +3824,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 }
             }
 
-            /* ---------- responsive code sizing ---------- */
             .stage {
                 --code-size: 13px;
             }
@@ -3963,7 +3870,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 }
             }
 
-            /* ---------- closer ---------- */
             .band-closer {
                 position: relative;
                 overflow: hidden;
@@ -3996,9 +3902,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 z-index: 2;
                 max-width: var(--prose);
                 margin: 0 auto;
-                /* Driven by the closer parallax scroll handler: the copy rides a plane
-           that scrolls slower than the page, separating it from the dot-matrix
-           background. Unset (and under reduced motion never set), it is 0. */
+                /* Set by the closer parallax handler; never set under reduced motion. */
                 transform: translateY(calc(var(--closer-parallax, 0) * 1px));
                 will-change: transform;
             }
@@ -4011,7 +3915,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 margin-top: 1.75rem;
             }
 
-            /* ---------- footer ---------- */
             .footer {
                 padding: 2.4rem clamp(1.2rem, 5vw, 2.5rem);
                 background: var(--background);

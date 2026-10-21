@@ -1,15 +1,5 @@
-//! Per-item HIR: the desugared expression tree inference walks.
-//!
-//! Lowered from an item's green subtree (`item_syntax`), never from the whole
-//! file, so every span here is **item-relative** (the subtree's offsets start
-//! at 0). That keeps the HIR position-independent: an edit elsewhere in the
-//! file reproduces an equal `Module`, and salsa's early cutoff stops
-//! recomputation before naming or inference run. Absolute positions are
-//! reintroduced only at the diagnostic-rendering edge.
-//!
-//! Error tolerance mirrors the project contract: a broken region lowers to
-//! `Missing`, which cascades no diagnostic because its syntax error already
-//! marks it. A well-formed sibling lowers normally.
+//! Spans are item-relative, so an edit elsewhere in the file reproduces an
+//! equal `Module` and salsa cuts off before naming or inference rerun.
 
 use syntax::ast::AstNode as _;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
@@ -17,7 +7,6 @@ use syntax::{SyntaxKind, SyntaxNode, TextRange};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
 pub struct ExprId(pub u32);
 
-/// One item's lowered body: an expression arena plus the root.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module {
     pub expressions: Vec<Expression>,
@@ -33,17 +22,14 @@ impl Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expression {
     pub kind: ExpressionKind,
-    /// Item-relative source range.
     pub range: TextRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssignSpelling {
-    /// `<-` / `->` (the HIR normalizes right assignment into left form).
+    /// `<-` and `->`: right assignment is normalized into left form.
     Local,
-    /// `=`
     Equals,
-    /// `<<-` / `->>`
     Super,
 }
 
@@ -65,7 +51,7 @@ pub enum BinaryOperator {
     Power,
     Modulo,
     IntegerDivide,
-    /// Any other `%…%` operator (including user-defined).
+    /// Any `%…%` other than `%%` and `%/%`, including user-defined ones.
     Special,
     Sequence,
     Less,
@@ -85,18 +71,13 @@ pub enum BinaryOperator {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiteralKind {
-    /// Numeric literals keep their source text: the checker needs the value
-    /// for literal index positions (`x[[2L]]`) and the literal-as-integer
-    /// courtesy (`seq_len(10)`).
+    /// Source text is kept for literal index positions and the literal-as-integer courtesy.
     Integer(String),
     Double(String),
     Complex,
     String(String),
     Logical(bool),
     Null,
-    /// `NA` and its typed variants: each is a scalar of a fixed atom (`NA`
-    /// is logical; `NA_integer_`, `NA_real_`, `NA_complex_`, and
-    /// `NA_character_` name theirs).
     Na(NaAtom),
     Inf,
     NaN,
@@ -114,9 +95,6 @@ pub enum NaAtom {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Argument {
     pub name: Option<String>,
-    /// The argument NAME's range, when the argument is tagged. The name is a
-    /// distinct source token, so a finding about it points at the name rather
-    /// than at the value it is attached to, as `Parameter::range` does.
     pub name_range: Option<TextRange>,
     /// `None` is a positional hole (`f(, x)`) or an empty tagged value.
     pub value: Option<ExprId>,
@@ -126,18 +104,15 @@ pub struct Argument {
 pub struct Parameter {
     pub name: String,
     pub default: Option<ExprId>,
-    /// The parameter NAME's range, which is the binding site rather than the
-    /// default, so navigation and rename target the name alone.
+    /// The name's range, excluding the default.
     pub range: TextRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpressionKind {
-    /// A hole from a broken region: types as Unknown, records no strict
-    /// origin, produces no diagnostics of its own.
+    /// A broken region: types as Unknown and reports nothing of its own.
     Missing,
     Literal(LiteralKind),
-    /// A name reference (`x`, backticks stripped, `...`, `..1`, `_`).
     NameRef(String),
     Assign {
         spelling: AssignSpelling,
@@ -150,10 +125,8 @@ pub enum ExpressionKind {
     },
     Binary {
         operator: BinaryOperator,
-        /// A `%…%` operator's spelling, carried for [`BinaryOperator::Special`]
-        /// only. R evaluates `a %op% b` as a call to a function of that name,
-        /// so naming needs the name to keep a user-defined operator's
-        /// definition alive; the checker still treats the construct as opaque.
+        /// Set only for `Special`: R evaluates `a %op% b` as a call to `%op%`,
+        /// so naming needs the name to keep a user-defined operator alive.
         special_name: Option<String>,
         lhs: ExprId,
         rhs: ExprId,
@@ -162,23 +135,17 @@ pub enum ExpressionKind {
         callee: ExprId,
         arguments: Vec<Argument>,
     },
-    /// `x[…]` / `x[[…]]`.
     Index {
         double: bool,
         target: ExprId,
         arguments: Vec<Argument>,
     },
-    /// `x$name` / `x@name`.
     Field {
         at: bool,
         target: ExprId,
         name: Option<String>,
-        /// The name token's own range, so a finding about the FIELD points at
-        /// the field rather than at the whole access chain it ends. Not
-        /// derivable from the expression's range without re-parsing.
         name_range: Option<TextRange>,
     },
-    /// `pkg::name` / `pkg:::name`.
     Namespace {
         internal: bool,
         package: Option<String>,
@@ -206,8 +173,7 @@ pub enum ExpressionKind {
     Repeat {
         body: ExprId,
     },
-    /// `local(expr)`: the body evaluates immediately in a fresh environment.
-    /// Recognized by the bare callee name during lowering (rebinding `local`
+    /// Recognized by the bare callee name; rebinding `local` is not modeled.
     /// is not modeled), like `return` and `stop`.
     Local {
         body: ExprId,
@@ -221,7 +187,7 @@ pub enum ExpressionKind {
 }
 
 impl ExpressionKind {
-    /// The direct child expression ids, in source order.
+    /// Source order.
     pub fn child_ids(&self) -> Vec<ExprId> {
         match self {
             ExpressionKind::Missing
@@ -272,7 +238,6 @@ impl ExpressionKind {
     }
 }
 
-/// Lower one item subtree (rooted at offset 0) into a `Module`.
 pub fn lower_item(root: &SyntaxNode) -> Module {
     let mut lowering = Lowering {
         module: Module::default(),
@@ -297,7 +262,6 @@ impl Lowering {
         self.allocate(ExpressionKind::Missing, range)
     }
 
-    /// Child expressions of a node, trivia and error regions skipped.
     fn child_expressions(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
         node.children()
             .filter(|child| syntax::ast::is_expression_kind(child.kind()))
@@ -455,7 +419,6 @@ impl Lowering {
             }
             SyntaxKind::FOR_EXPR => {
                 let mut children = Self::child_expressions(node);
-                // The loop variable is the first NAME child; sequence and body follow.
                 let variable_node = children.next();
                 let (variable, variable_range) = match &variable_node {
                     Some(node) if node.kind() == SyntaxKind::NAME => (
@@ -515,7 +478,6 @@ impl Lowering {
         }
 
         match operator_token.kind() {
-            // Assignments normalize to target/value regardless of spelling.
             SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => {
                 let spelling = match operator_token.kind() {
                     SyntaxKind::LESS_MINUS => AssignSpelling::Local,
@@ -533,10 +495,8 @@ impl Lowering {
                     range,
                 )
             }
-            // `:=` binds no variable anywhere in R: it is a call to the
-            // `:=` function (data.table defines it for its brackets, rlang
-            // for quoting), spelled as an operator. The callee sits on the
-            // operator token, so an unresolved `:=` reports exactly there.
+            // `:=` binds nothing in R: it is a call to a function named `:=` (data.table,
+            // rlang). The callee sits on the operator token so an unresolved `:=` reports there.
             SyntaxKind::COLON_EQ => {
                 let callee = self.allocate(
                     ExpressionKind::NameRef(":=".to_owned()),
@@ -582,8 +542,6 @@ impl Lowering {
             }
             kind => {
                 let operator = if kind == SyntaxKind::SPECIAL {
-                    // `%%` and `%/%` are arithmetic; any other `%…%` special
-                    // (including user-defined operators) stays opaque.
                     match operator_token.text() {
                         "%%" => Some(BinaryOperator::Modulo),
                         "%/%" => Some(BinaryOperator::IntegerDivide),
@@ -612,15 +570,8 @@ impl Lowering {
         }
     }
 
-    /// `x |> f(y)` is sugar R's own parser rewrites to `f(x, y)` before
-    /// evaluation, so the pipe lowers AS that call and naming, typing, and
-    /// every IDE feature see the real semantics. R accepts only a call on
-    /// the right-hand side, and a `_` placeholder only as the whole value of
-    /// exactly one named argument (which then receives the piped value
-    /// instead of the first positional slot). Anything else is an R error, so
-    /// such a pipe keeps the opaque-operator lowering, which is `None`, rather
-    /// than guessing. A non-call right-hand side and a positional or repeated
-    /// `_` are both errors.
+    /// R's parser rewrites `x |> f(y)` to `f(x, y)`, so the pipe lowers as that call.
+    /// Shapes R rejects return `None` and keep the opaque-operator lowering.
     fn lower_pipe(
         &mut self,
         lhs: Option<SyntaxNode>,
@@ -656,10 +607,7 @@ impl Lowering {
         self.lower_arguments_substituting(node, None)
     }
 
-    /// Argument lowering with an optional pipe-placeholder substitution: the
-    /// argument at `substitute`'s index takes the given (already lowered)
-    /// value instead of lowering its own. The `_` token never becomes an
-    /// expression, so nothing dangles in the arena.
+    /// The `_` placeholder never becomes an expression, so nothing dangles in the arena.
     fn lower_arguments_substituting(
         &mut self,
         node: &SyntaxNode,
@@ -750,10 +698,8 @@ impl Lowering {
     }
 }
 
-/// A node's range without the trailing trivia rowan attaches inside
-/// expression nodes (whitespace, newlines, comments, `#:` annotations):
-/// blame and hover ranges must cover code, not the trivia that happened to
-/// stick to the node.
+/// Excludes the trailing trivia (including `#:` annotations) rowan attaches
+/// inside expression nodes, so ranges cover code only.
 fn significant_range(node: &SyntaxNode) -> TextRange {
     let full = node.text_range();
     let mut end = full.end();
@@ -801,16 +747,12 @@ fn literal_kind(node: &SyntaxNode) -> LiteralKind {
     }
 }
 
-/// A finite whole-number double literal, such as `1` or `2.0`. Such a literal
-/// may fill an integer parameter.
 pub fn is_whole_number_double(text: &str) -> bool {
     text.parse::<f64>()
         .is_ok_and(|value| value.fract() == 0.0 && value.is_finite())
 }
 
-/// The 0-based position of a statically known index literal. R indexes
-/// identically with `x[[2]]` and `x[[2L]]`, so a whole-number double literal
-/// is just as valid a position as an integer literal.
+/// 0-based. Whole-number doubles count: R indexes `x[[2]]` exactly like `x[[2L]]`.
 pub fn integer_literal_position(kind: &ExpressionKind) -> Option<usize> {
     let one_based_index = match kind {
         ExpressionKind::Literal(LiteralKind::Integer(text)) => {
@@ -828,8 +770,7 @@ pub fn integer_literal_position(kind: &ExpressionKind) -> Option<usize> {
     one_based_index.checked_sub(1)
 }
 
-/// The value of a string literal with quotes stripped. Escape *decoding* is a
-/// later slice; raw strings strip their full delimiters.
+/// Escapes are not decoded; raw strings strip their full delimiters.
 fn string_value(text: &str) -> String {
     if let Some(rest) = text.strip_prefix(['r', 'R']) {
         let Some(quote) = rest.chars().next() else {
@@ -882,20 +823,13 @@ fn unary_operator(kind: SyntaxKind) -> Option<UnaryOperator> {
     Some(operator)
 }
 
-/// Where a pipe's piped value goes in the right-hand call.
 enum PipeShape {
     FirstArgument,
-    /// The argument index whose `_` placeholder value the piped value
-    /// replaces.
     NamedPlaceholder(usize),
 }
 
-/// Classifies the right-hand call of a `|>` by R's placeholder rules:
-/// no `_` anywhere means first-argument insertion; exactly one `_`, sitting
-/// as the whole value of a named argument of THIS call, receives the piped
-/// value; every other `_` use (positional, repeated, nested in a
-/// subexpression, or as an argument tag) is an R error. The result is `None`,
-/// and the pipe stays an opaque operator.
+/// R's placeholder rules: `_` may appear exactly once, as the whole value of a
+/// named argument of this call. Any other use is an R error (`None`).
 fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
     let underscores: Vec<syntax::SyntaxToken> = call
         .descendants_with_tokens()
@@ -921,8 +855,7 @@ fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
         .children_with_tokens()
         .filter_map(|element| element.into_token())
         .any(|token| token.kind() == SyntaxKind::EQ);
-    // The `_` must be the argument's VALUE: with a tag present, the value is
-    // the second expression child.
+    // With a tag present, the value is the second expression child.
     let is_value = argument
         .children()
         .filter(|child| syntax::ast::is_expression_kind(child.kind()))

@@ -1,7 +1,4 @@
-//! The REPL's analysis-backed Tab completion: the session's accepted lines
-//! form a script document, so completions see the standard-library corpus
-//! (typed stubs and export manifests) plus every binding the session itself
-//! defined. It runs `ide::completion` over the session as a script.
+//! Completion over the session-as-script: accepted lines form a script document.
 
 use repl::reedline::{Span, Suggestion};
 use salsa::Setter;
@@ -11,9 +8,7 @@ pub struct AnalysisCompleter {
     db: RootDatabase,
     files: ProjectFiles,
     file: SourceFile,
-    /// Accepted input so far, newline-terminated: the prefix of the
-    /// session-as-script document; the line under edit is appended per
-    /// completion request.
+    /// Accepted input so far, newline-terminated; the line under edit is appended per request.
     session: String,
 }
 
@@ -57,9 +52,7 @@ impl repl::SessionCompleter for AnalysisCompleter {
         ) else {
             return Vec::new();
         };
-        // The replacement span is the identifier being typed: scan back over
-        // R name characters (`$`, `@`, and `::` boundaries end it, matching
-        // how the completion query itself is scoped).
+        // `$`, `@`, and `::` end the name, matching how the completion query is scoped.
         let start = line[..position]
             .char_indices()
             .rev()

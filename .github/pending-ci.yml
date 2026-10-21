@@ -1,21 +1,6 @@
-# PENDING HUMAN ACTIVATION — not an active workflow at this path.
-#
-# This is the widened CI pipeline. To activate it, a human replaces the current
-# .github/workflows/ci.yml with this file (e.g. `git mv .github/pending-ci.yml
-# .github/workflows/ci.yml`) and pushes. It could not be written to
-# .github/workflows/ directly from the automated session because that token
-# lacks GitHub `workflow` scope (GitHub 403s workflow-file writes without it).
-#
-# What changed vs the active ci.yml: every cargo command is widened from the
-# default member (crates/ry, the shipping server + CLI) to `--workspace
-# --exclude zed_ry`, so the syntax/semantics/format/ide/repl crates are all
-# linted and tested — the bare commands cover only the product crate's own
-# suites today.
-#
-# Verified locally at authoring time (zed needs a wasm toolchain, so it is excluded):
-#   cargo clippy --workspace --exclude zed_ry --all-targets --all-features -- -D warnings  -> 0 warnings
-#   cargo test   --workspace --exclude zed_ry --all-targets --all-features                 -> all suites pass
-# To be re-verified by a human in CI once activated.
+# Inactive: ci.yml widened to the whole workspace, staged here because agent tokens lack the
+# `workflow` scope. A human activates it with `git mv .github/pending-ci.yml .github/workflows/ci.yml`
+# after the blockers in .agents/memory/backlog.md.
 
 name: CI
 
@@ -24,7 +9,6 @@ on:
     branches: [main, "feat/**"]
   pull_request:
 
-# Cancel superseded runs on the same ref so a fast push does not queue stale jobs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -34,7 +18,6 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # The fast, blocking gate: formatting, lints, build, and the full (non-ignored) test suite.
   check:
     name: fmt + clippy + build + test
     runs-on: ubuntu-latest
@@ -46,8 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all --check
-      # `zed_ry` needs the editor's wasm toolchain, which a stock runner does not
-      # have, so it is excluded from the workspace gate.
+      # `zed_ry` needs a wasm toolchain.
       - name: clippy
         run: cargo clippy --workspace --exclude zed_ry --all-targets --all-features -- -D warnings
       - name: build
@@ -57,10 +39,8 @@ jobs:
       - name: doctests
         run: cargo test --workspace --exclude zed_ry --doc --all-features
 
-  # The heavy, ignored perf / memory / fuzz / blast-radius suites. Their *deterministic* assertions
-  # (exec-counter blast radius, recheck scope, fuzz-robustness invariants) are the regression thresholds;
-  # the wall-clock and resident-memory figures are printed for the record, not gated, so runner variance
-  # cannot flake the build. Runs in a separate job so the fast gate reports first.
+  # Only the deterministic assertions gate; timings and memory are printed, so runner variance
+  # cannot flake the build.
   extended:
     name: ignored benches + fuzz
     runs-on: ubuntu-latest
@@ -69,7 +49,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # `zed_ry` needs the editor's wasm toolchain, which a stock runner does not
-      # have, so it is excluded from the workspace gate.
       - name: ignored suites (release)
         run: cargo test --release --workspace --exclude zed_ry --all-targets --all-features -- --ignored --nocapture

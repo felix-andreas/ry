@@ -1,25 +1,11 @@
-//! Statement-level incremental reparse: splice-parse only the edited region.
-//!
-//! An edit at the top level can only affect the statements it touches: R is
-//! parsed left-to-right, top-level newline boundaries close statements (`else`
-//! never continues across a top-level newline), so the untouched prefix and
-//! suffix children of `SOURCE_FILE` remain exactly as they were and their
-//! green subtrees are **shared by pointer** into the new tree. Only the text
-//! between the chosen newline anchors is reparsed.
-//!
-//! One construct can join statements across a newline: consecutive `#:` lines
-//! stitch into a single annotation region, so anchors never sit against an
-//! annotation. Anything unanchorable (no clean newline boundary, tiny files)
-//! falls back to a full parse. The splice is an optimization and never a
-//! correctness dependency, and the edit-stream fuzzer holds it equal to the
-//! from-scratch parse, in both bytes and structure.
+//! Top-level newlines close statements (`else` never continues across one), so
+//! untouched top-level children are shared and only the edited middle is
+//! reparsed. Anything unanchorable falls back to a full parse.
 
 use crate::Parse;
 use crate::kind::SyntaxKind;
 use rowan::{GreenNode, NodeOrToken, TextRange, TextSize};
 
-/// Reparse after one edit: `deleted` is the replaced range in the OLD text,
-/// `inserted` the length of its replacement in `new_text`.
 pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSize) -> Parse {
     match try_splice(old, new_text, deleted, inserted) {
         Some(parse) => parse,
@@ -42,8 +28,6 @@ fn try_splice(
         return None;
     }
 
-    // Prefix: children entirely before the deleted range, cut back to the last
-    // top-level NEWLINE anchor not adjacent to an annotation.
     let mut prefix_end = 0usize;
     for (index, child) in children.iter().enumerate() {
         if child.text_range().end() <= deleted.start() {
@@ -56,8 +40,6 @@ fn try_splice(
         prefix_end -= 1;
     }
 
-    // Suffix: children entirely after the deleted range, advanced to the first
-    // NEWLINE anchor (the newline stays with the suffix).
     let mut suffix_start = children.len();
     for (index, child) in children.iter().enumerate() {
         if child.text_range().start() >= deleted.end() {
@@ -82,7 +64,6 @@ fn try_splice(
     } else {
         children[suffix_start].text_range().start()
     };
-    // The suffix shifts by the edit delta.
     let delta = i64::from(u32::from(inserted)) - i64::from(u32::from(deleted.len()));
     let new_suffix_start = (i64::from(u32::from(old_suffix_start)) + delta).max(0) as usize;
     let suffix_len = usize::from(root.text_range().end() - old_suffix_start);
@@ -93,23 +74,16 @@ fn try_splice(
         return None;
     }
 
-    // Nothing usable to splice around?
     if prefix_end == 0 && suffix_start == children.len() {
         return None;
     }
 
     let middle_text = &new_text[usize::from(prefix_len)..new_suffix_start];
-    // A middle beginning or ending with an annotation marker could stitch
-    // across the anchors in a from-scratch parse; refuse (rare).
     if middle_touches_annotation(middle_text) {
         return None;
     }
-    // The suffix reparses identically only when the middle leaves the parser
-    // in the same state a top-level statement boundary has: (a) no lexical
-    // construct running off the middle's end (an unterminated string / raw
-    // string / backtick would swallow the suffix in a from-scratch parse) and
-    // (b) no delimiter still open (inside a group, suffix newlines would stop
-    // being significant).
+    // An unterminated string or backtick at the middle's end would swallow the
+    // suffix in a full parse.
     let (middle_tokens, middle_lexer_errors) = crate::lexer::lex(middle_text);
     if middle_lexer_errors
         .iter()
@@ -117,11 +91,8 @@ fn try_splice(
     {
         return None;
     }
-    // Kind-matched delimiter stack: a closer only closes its own opener. A
-    // mismatched or stray closer is consumed locally by recovery either way
-    // and never closes the group. `( ]` leaves the paren open, and a flat
-    // counter would wrongly call that balanced. Anything still open at the
-    // middle's end would swallow the suffix in a from-scratch parse.
+    // Kind-matched, not a counter: recovery never lets a stray closer close
+    // another kind's group (`( ]` leaves the paren open).
     let mut open_delimiters: Vec<SyntaxKind> = Vec::new();
     for token in &middle_tokens {
         match token.kind {
@@ -148,12 +119,8 @@ fn try_splice(
         return None;
     }
     let middle = crate::parse(middle_text);
-    // A parse error touching the middle's end means the parser is
-    // mid-construct at the boundary. A trailing `$`, a trailing infix
-    // operator, and a dangling `else` all leave it there. A from-scratch parse
-    // of the whole text would continue across the suffix newline, giving a
-    // different statement split and different error positions. Refuse and fall
-    // back.
+    // An error at the middle's end (trailing operator, dangling `else`) means a
+    // full parse would continue across the suffix newline.
     if middle
         .errors()
         .iter()
@@ -163,8 +130,6 @@ fn try_splice(
     }
     let middle_root = middle.syntax_node();
 
-    // Assemble the new root: shared prefix greens + reparsed middle greens +
-    // shared suffix greens.
     let mut new_children: Vec<NodeOrToken<GreenNode, rowan::GreenToken>> = Vec::new();
     for child in &children[..prefix_end] {
         new_children.push(to_green(child));
@@ -177,16 +142,13 @@ fn try_splice(
     }
     let green = GreenNode::new(SyntaxKind::SOURCE_FILE.into(), new_children);
 
-    // Errors: prefix errors verbatim, middle errors rebased right, suffix
-    // errors shifted by the delta.
     let mut errors = Vec::new();
     for error in old.errors() {
         if error.range.end() <= prefix_len {
             errors.push(error.clone());
         } else if suffix_start < children.len() && error.range.start() >= old_suffix_start {
-            // With an empty suffix a zero-width end-of-file error would
-            // satisfy the start bound too, but it belongs to the replaced
-            // region, and the middle's own parse re-derives the end state.
+            // The non-empty-suffix guard drops a zero-width end-of-file error:
+            // it belongs to the replaced region, whose parse re-derives it.
             let start = (i64::from(u32::from(error.range.start())) + delta) as u32;
             let end = (i64::from(u32::from(error.range.end())) + delta) as u32;
             let mut rebased = error.clone();
@@ -206,10 +168,8 @@ fn try_splice(
     Some(Parse::new(green, errors))
 }
 
-/// A child index is a valid anchor when it is a top-level NEWLINE token and no
-/// non-whitespace neighbor on either side is (or contains) an annotation
-/// region. Consecutive `#:` lines stitch across newlines, so an anchor next to
-/// one is not a real statement boundary.
+/// A NEWLINE next to an annotation is not a statement boundary: consecutive
+/// `#:` lines stitch across newlines.
 fn anchor_ok(children: &[rowan::SyntaxElement<crate::RLanguage>], index: usize) -> bool {
     let Some(child) = children.get(index) else {
         return false;
@@ -245,11 +205,8 @@ fn anchor_ok(children: &[rowan::SyntaxElement<crate::RLanguage>], index: usize) 
     true
 }
 
-/// Annotations at the middle's edges can stitch across the anchors: refuse
-/// when the first line might continue a prefix annotation or the last line
-/// might continue into a suffix one. A `#:` anywhere on the edge line is
-/// enough (mid-line markers open trailing annotations); a string containing
-/// the characters only costs an unnecessary fallback.
+/// A `#:` anywhere on an edge line counts, since mid-line markers open trailing
+/// annotations.
 fn middle_touches_annotation(text: &str) -> bool {
     let first = text.lines().next().unwrap_or("");
     let last = text.lines().next_back().unwrap_or("");

@@ -81,6 +81,7 @@ Human engineers de-risk work: they stage it, keep diffs small and reviewable, an
 - **Never choose a watered-down design because the full version is a big change.** If the full version is right, build the full version. Starting over after a failed attempt is cheap; shipping the wrong shape is not.
 - **File size is not a problem.** Do not split, reorganize, or flag a file just because it is large (the LSP server module is fine as one file). Split only when a genuinely new logical component appears.
 - **The correctness gates do not move.** The fixture suites, witnesses, clippy, and fmt must be green before a change lands. The point is to reach green in one big pass, not to shrink the change.
+- **Run the gate once, after the whole change.** For an agent, running the gate takes longer than making the change, so do not run it after each edit. Give subagents the same instruction.
 
 # Incremental analysis
 
@@ -93,6 +94,8 @@ A check must never read a project-wide map directly, because then every edit any
 # Working autonomously
 
 When you work autonomously toward a larger goal (a workflow, a multi-step change, anything that spans several logical units), commit and push after each logical step rather than saving everything for one final commit. A single large, invasive redesign counts as one step: commit it once it is green, not in fragments along the way.
+
+Run one subagent at a time (user directive). Commit messages and pull request titles follow Conventional Commits, such as `refactor: drop the legacy resolver` or `docs: rewrite the tour`.
 
 # Knowledge base and documentation
 

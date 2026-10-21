@@ -1,30 +1,6 @@
-//! Cold-pass parallelism probe: where does the wall time go, and how much of
-//! it is serialized inside single project-wide salsa queries?
-//!
-//! Usage: `WORKERS=4 cargo run --release -p ry-lang --example parallel_probe
-//! <package-dir>...`
-//!
-//! Phases, each on a fresh database:
-//!   A. sequential full check (one thread, every file)
-//!   B. demand `interface_sccs` alone. It pulls `item_naming` for every
-//!      item, so computed cold inside that one query it serializes the whole
-//!      parse+naming front half of the pass on one thread
-//!   C. after B, sequential full check (the remainder)
-//!   D. parallel full check (the CLI's fan-out shape, without the warm pass)
-//!   E. the same with a parallel per-item naming warm first, then E1-E4
-//!      decomposing it (warm / interface walk / fan-out / memoized re-check)
-//!   F. the E pipeline on an event-counting database: query executions vs
-//!      cross-thread blocks (blocks ≪ executes means salsa's same-query
-//!      blocking is not the constraint)
-//!   G. interface-graph shape (node count, depth, level widths) plus a
-//!      levelized dependency-first schedule, to separate DAG shape from
-//!      scheduling effects
-//!   H. interner scaling in isolation (hot-value hits vs distinct values)
-//!
-//! Caveat when reading numbers: on shared/throttled cloud vCPUs, verify raw
-//! thread scaling first (phase H, or any lock-free compute loop), because a host
-//! that delivers well under N cores of throughput makes every parallel
-//! phase look serialized regardless of the code under test.
+//! Cold-pass parallelism probe: how much wall time serializes inside single
+//! project-wide salsa queries. On throttled vCPUs check raw thread scaling (H) first.
+//! Usage: `WORKERS=4 cargo run --release -p ry-lang --example parallel_probe <package-dir>...`
 
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::path::PathBuf;
@@ -34,8 +10,8 @@ use std::time::Instant;
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static BLOCKS: AtomicUsize = AtomicUsize::new(0);
 
-/// A RootDatabase twin whose storage counts salsa events, to see how often
-/// parallel workers block on each other's in-flight queries.
+/// Counts salsa events, to see how often parallel workers block on each other's
+/// in-flight queries.
 #[salsa::db]
 #[derive(Clone)]
 struct ProbeDatabase {
@@ -152,8 +128,8 @@ fn parallel_check<D: semantics::Db + Clone + Send>(
     total.into_inner()
 }
 
-/// (utime, stime) of the whole process in clock ticks, from /proc/self/stat
-/// (fields after the parenthesized comm; utime/stime are 12th/13th there).
+/// (utime, stime) in clock ticks, counting /proc/self/stat fields after the
+/// parenthesized comm.
 fn cpu_ticks() -> (u64, u64) {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
     let after_comm = stat.rsplit(')').next().unwrap_or("");
@@ -223,7 +199,6 @@ fn main() {
         start.elapsed()
     );
 
-    // E decomposed: warm, interface, fan-out timed separately.
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
     let chunk = files.len().div_ceil(workers).max(1);
@@ -262,8 +237,6 @@ fn main() {
         start.elapsed()
     );
 
-    // F: the E pipeline on the event-counting database. How many query
-    // executions, against cross-thread blocks, does the parallel check incur?
     let (db, files) = setup::<ProbeDatabase>(&sources);
     let chunk = files.len().div_ceil(workers).max(1);
     std::thread::scope(|scope| {
@@ -291,11 +264,8 @@ fn main() {
         BLOCKS.load(Ordering::Relaxed) - blocks_before,
     );
 
-    // G: is the interface DAG schedulable at all? Build the same item graph
-    // interface_sccs uses, condense cycles, compute topological levels, then
-    // warm `global_scheme` level by level with a parallel fan-out per level.
-    // If this is no faster than the naive fan-out, the critical path (a deep
-    // dependency chain) is the ceiling, not scheduling.
+    // If a levelized schedule is no faster than the naive fan-out, the critical
+    // path, not scheduling, is the ceiling.
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
     let chunk = files.len().div_ceil(workers).max(1);
@@ -337,10 +307,8 @@ fn main() {
             }
         }
     }
-    // Collapse cyclic groups: treat every member of one group as one node by
-    // mapping members to the group's first member for level purposes.
+    // Cycle members all take their group's first member's level.
     let mut level: Vec<usize> = vec![0; nodes.len()];
-    // Longest-path levels via repeated relaxation (bounded by graph depth).
     let mut changed = true;
     let mut rounds = 0usize;
     while changed && rounds < nodes.len() {
@@ -394,10 +362,8 @@ fn main() {
         start.elapsed()
     );
 
-    // H: interner scaling in isolation. H1 hammers one hot value (every
-    // `unknown()` in the checker takes this exact path); H2 interns values
-    // distinct per thread. Ops/s per thread tells whether the interner's
-    // shard locks serialize the check.
+    // H1 hammers one hot value (every `unknown()` in the checker takes this path);
+    // H2 interns values distinct per thread.
     let (db, _files) = setup::<RootDatabase>(&sources);
     const OPS: usize = 2_000_000;
     for (label, distinct) in [

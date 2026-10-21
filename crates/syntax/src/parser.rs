@@ -1,14 +1,6 @@
-//! Hand-written recursive-descent / Pratt parser for R.
-//!
-//! Grammar shape and precedence follow R's own `gram.y`. Newline significance is
-//! tracked with a context stack: inside `(`/`[`/`[[` groups newlines are plain
-//! trivia; at the top level and directly inside `{ }` a newline ends a syntactically
-//! complete statement. `else` may follow a newline only when some group or brace
-//! encloses the `if` (exactly R's rule).
-//!
-//! Every parse produces a lossless tree. Every token is emitted in order,
-//! including trivia and the tokens of a malformed region. Recovery wraps an
-//! unparsable stretch in an `ERROR` node local to the break.
+//! Precedence follows R's `gram.y`. Newlines are trivia inside `(`/`[`/`[[`
+//! groups and end a complete statement at top level and directly inside `{}`;
+//! `else` may follow a newline only when a group or brace encloses the `if`.
 
 use crate::kind::SyntaxKind;
 use crate::lexer::{Token, lex};
@@ -45,54 +37,37 @@ pub(crate) fn parse(text: &str) -> Parse {
     Parse::new(green, parser.errors)
 }
 
-/// Expression nesting beyond this refuses further recursion (with a diagnostic)
-/// instead of overflowing the stack on adversarial input.
+/// Deeper nesting reports an error instead of overflowing the stack.
 const MAX_DEPTH: u32 = 500;
 
 struct Parser<'a> {
     text: &'a str,
     tokens: Vec<Token>,
-    /// Byte offset of every token (one extra entry: total length).
+    /// One extra trailing entry: the total length.
     offsets: Vec<usize>,
     pos: usize,
     builder: GreenNodeBuilder<'static>,
     errors: Vec<SyntaxError>,
-    /// Newline-significance stack: entering `{` pushes 0, `(`/`[`/`[[` increments
-    /// the top, closers undo. Newlines are significant iff the top is 0.
+    /// `{` pushes 0, `(`/`[`/`[[` increment the top, closers undo; newlines are
+    /// significant iff the top is 0.
     groups: Vec<u32>,
     depth: u32,
-    /// Whether errors are currently raised by the `#:` annotation grammar.
     in_annotation: bool,
-    /// Whether the `#:` region being parsed has already reported. The type
-    /// grammar cannot resynchronize the way the statement loop can, because a
-    /// region is one expression with no boundary inside it to restart at. It
-    /// therefore reported every token it could not use, which was nine findings
-    /// for a single mistyped optional parameter, all on one line. The first is
-    /// the mistake, and the rest are its consequences.
+    /// The type grammar cannot resynchronize inside a `#:` region, so only its
+    /// first error is reported; the rest are consequences.
     annotation_reported: bool,
-    /// Whether the `#:` region has already reported an unclosed opener. Those
-    /// are discovered at the END of the construct they name, so the suppression
-    /// above would drop the outermost truth in favour of an inner consequence.
-    /// `@type Point {list{x: double` would say only "expected `,` or `}` in
-    /// this list type" and never that the `@type` brace is open. One such
-    /// structural report gets through regardless.
+    /// Unclosed openers are found only at the end of their construct, after the
+    /// inner consequences, so one such report gets through regardless.
     annotation_unclosed_reported: bool,
-    /// Whether the statement being parsed consumed a lexer `ERROR_TOKEN`.
-    /// The lexer's diagnostic is already precise, so the statement loop
-    /// suppresses its own boundary report on top of it.
+    /// The lexer's diagnostic is already precise, so the statement boundary
+    /// does not report again.
     statement_had_lexer_error: bool,
-    /// Whether the statement being parsed left an argument or parameter list
-    /// open. Its unclosed-opener error is the whole story, and the newline that
-    /// would have ended the statement was consumed inside the list as trivia.
-    /// The boundary check therefore neither reports again nor recovers, and the
-    /// next line is parsed as the statement it is instead of being swallowed
-    /// with its definitions.
+    /// The unclosed-opener error is the whole story and the ending newline was
+    /// eaten as trivia, so the boundary check neither reports nor recovers.
     statement_left_group_open: bool,
 }
 
 impl Parser<'_> {
-    // ---- token access ----
-
     fn current(&self) -> Option<SyntaxKind> {
         self.tokens.get(self.pos).map(|token| token.kind)
     }
@@ -114,8 +89,6 @@ impl Parser<'_> {
         TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32))
     }
 
-    /// The next significant token at or after `pos`, looking through trivia.
-    /// `across_newlines` controls whether newlines are looked through.
     fn peek_significant(
         &self,
         mut pos: usize,
@@ -126,25 +99,21 @@ impl Parser<'_> {
             match token.kind {
                 SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => pos += 1,
                 SyntaxKind::NEWLINE if across_newlines => pos += 1,
-                // An annotation region is trivia for grammar purposes.
                 SyntaxKind::ANNOTATION_MARKER => pos = self.annotation_region_end(pos),
                 kind => return Some((kind, pos)),
             }
         }
     }
 
-    /// Token index just past the stitched annotation region whose marker is at `pos`.
     fn annotation_region_end(&self, mut pos: usize) -> usize {
         debug_assert_eq!(self.tokens[pos].kind, SyntaxKind::ANNOTATION_MARKER);
         loop {
-            // Consume the marker's line.
             while let Some(token) = self.tokens.get(pos) {
                 if token.kind == SyntaxKind::NEWLINE {
                     break;
                 }
                 pos += 1;
             }
-            // Stitch when the next line (past one newline and indentation) is `#:` again.
             let Some(token) = self.tokens.get(pos) else {
                 return pos;
             };
@@ -176,8 +145,6 @@ impl Parser<'_> {
     fn else_allowed_across_newline(&self) -> bool {
         !self.newlines_significant() || self.groups.len() > 1
     }
-
-    // ---- tree building ----
 
     fn bump(&mut self) {
         let kind = self.current().expect("bump at end of input");
@@ -214,8 +181,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    // ---- errors ----
-
     fn error_here(&mut self, message: impl Into<String>) {
         let range = self.token_range(self.pos);
         self.error_at(range, message);
@@ -231,10 +196,6 @@ impl Parser<'_> {
         self.push_error(range, message);
     }
 
-    /// An unclosed opener inside a `#:` region. It is a structural fact about
-    /// the construct it names, so it reports even after the region's first
-    /// finding, as `annotation_unclosed_reported` describes. Outside a region
-    /// this is an ordinary error.
     fn error_unclosed(&mut self, range: TextRange, message: impl Into<String>) {
         if self.in_annotation {
             if self.annotation_unclosed_reported {
@@ -254,16 +215,8 @@ impl Parser<'_> {
         self.errors.push(error);
     }
 
-    /// A blame range never crosses a line break. An error reported *at* the
-    /// current token blames that token. At the end of a line, which is most
-    /// often the end of a `#:` region, the current token is the newline itself,
-    /// whose span runs from the end of one line to the start of the next. An
-    /// editor draws that as a squiggle across the break, pointing at neither
-    /// line.
-    ///
-    /// Such a range collapses onto the last character of code on its own line,
-    /// which is where the reader has to look anyway. Trailing whitespace is
-    /// skipped so the caret lands on the code and not beside it.
+    /// A range crossing a line break (an error at a newline token) collapses onto
+    /// the last code character of its first line.
     fn on_one_line(&self, range: TextRange) -> TextRange {
         let text = &self.text[..usize::from(range.end()).min(self.text.len())];
         let Some(break_offset) = text[usize::from(range.start())..]
@@ -280,10 +233,7 @@ impl Parser<'_> {
         TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32))
     }
 
-    /// The empty range just past the last significant token before the current
-    /// position, which is where a missing separator belongs. Anchoring there
-    /// keeps the report on the line of the element it follows, instead of on
-    /// whatever line the next element starts.
+    /// Anchored after the previous element so the report stays on its line.
     fn separator_gap(&self) -> TextRange {
         let end = (0..self.pos)
             .rev()
@@ -298,7 +248,6 @@ impl Parser<'_> {
         TextRange::empty(end)
     }
 
-    /// Describe the current token for an "expected …, found …" message.
     fn describe_current(&self) -> String {
         match self.current() {
             None => "end of file".to_owned(),
@@ -307,22 +256,9 @@ impl Parser<'_> {
         }
     }
 
-    // ---- trivia ----
-
-    /// Whether the current token opens what is unmistakably a new statement: a
-    /// name bound by `<-`/`<<-`, or a keyword that can only begin one.
-    ///
-    /// This is what separates an unclosed opener from a forgotten separator
-    /// when a list runs onto the next line. A genuine continuation reads as a
-    /// fragment, such as `beta)` or `y) x`. A line that *assigns* is the next
-    /// statement instead, and adopting it into the list swallows its definition
-    /// along with every line after.
-    ///
-    /// `=` is deliberately not an assignment here. Inside an argument or
-    /// parameter list `name = value` is a named argument, which is what a line
-    /// missing its comma looks like. That is the far likelier reading, and it
-    /// is the one R itself takes, because R keeps consuming until the opener
-    /// closes.
+    /// Tells an unclosed opener from a forgotten separator: an assigning line is
+    /// the next statement. `=` is excluded because `name = value` in a list is a
+    /// named argument missing its comma, which is also R's reading.
     fn starts_new_statement(&self) -> bool {
         match self.current() {
             Some(
@@ -340,9 +276,7 @@ impl Parser<'_> {
         }
     }
 
-    /// Whether a line break separates the current token from the significant
-    /// one before it. Scans backwards: the newline is consumed while parsing
-    /// the element that precedes the loop head asking this, not at the head.
+    /// Scans backwards: the newline was already consumed by the preceding element.
     fn crossed_line(&self) -> bool {
         for index in (0..self.pos).rev() {
             match self.tokens[index].kind {
@@ -354,8 +288,6 @@ impl Parser<'_> {
         false
     }
 
-    /// Emit trivia into the tree. Newlines are consumed only when insignificant
-    /// in the current context or explicitly allowed by `across_newlines`.
     fn eat_trivia(&mut self, across_newlines: bool) {
         loop {
             match self.current() {
@@ -369,10 +301,6 @@ impl Parser<'_> {
         }
     }
 
-    /// One stitched `#:` annotation region as a first-class node containing the
-    /// parsed annotation grammar: `@` directives and type expressions, with
-    /// markers, newlines, and comments inside the region acting as trivia (so a
-    /// type may continue across stitched `#:` lines).
     fn annotation(&mut self) {
         self.start(SyntaxKind::ANNOTATION);
         self.in_annotation = true;
@@ -390,7 +318,6 @@ impl Parser<'_> {
             } else {
                 self.ann_type(end, true);
             }
-            // Malformed bodies may consume nothing; never spin in place.
             if self.pos == before {
                 self.bump();
             }
@@ -399,19 +326,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    // ---- annotation grammar ----
-    //
-    // The type-notation grammar inside `#:` regions: an optional outermost
-    // binder list `<T, U: numeric>`, unions `A | B`, `(TYPE)` groups,
-    // `list[...]` / `list{...}`, `fn(...) -> T`, named/generic types with
-    // dotted names, `T[]` / `T[named]` vector suffixes, and the `@` directives
-    // (`@type`, `@alias`, `@param`, `@return(s)`, `@forall`, `@trust`, `@new`,
-    // `@if-unknown`, `@strict`). Structure and spans are the parser's job;
-    // vocabulary semantics (constraint names, duplicate checks) belong to the
-    // semantics layer.
-
-    /// Trivia inside an annotation region: whitespace, newlines, further `#:`
-    /// markers, and comments.
     fn ann_trivia(&mut self, end: usize) {
         while self.pos < end {
             match self.current() {
@@ -426,8 +340,6 @@ impl Parser<'_> {
         }
     }
 
-    /// True when the token at `pos` starts exactly where the previous one ended
-    /// with no interleaving trivia. This joins a multi-token directive name.
     fn adjacent(&self, pos: usize) -> bool {
         pos > 0
             && pos < self.tokens.len()
@@ -438,9 +350,7 @@ impl Parser<'_> {
         self.start(SyntaxKind::ANNOTATION_DIRECTIVE);
         debug_assert!(self.at(SyntaxKind::AT));
         self.bump();
-        // Directive names may span several tokens when adjacent (`@if-unknown`
-        // lexes as `if` `-` `unknown`); every name token must touch its
-        // predecessor (the first one touches the `@`).
+        // `@if-unknown` lexes as `if` `-` `unknown`; adjacent tokens join.
         let name_start = self.pos;
         let mut name = String::new();
         while self.pos < end {
@@ -469,14 +379,13 @@ impl Parser<'_> {
                     self.error_here(format!("expected a type name after `@{name}`"));
                 }
                 self.ann_trivia(end);
-                // Optional `<T, U>` parameter list.
                 if self.at(SyntaxKind::LESS) && self.pos < end {
                     self.ann_binder_list(end);
                 }
                 self.ann_trivia(end);
                 self.ann_braced_type(end, &name);
-                // A definition ends its line; text after it would otherwise
-                // parse as a second annotation and silently refuse the block.
+                // Trailing text would otherwise parse as a second annotation and
+                // silently refuse the block.
                 while self.at(SyntaxKind::WHITESPACE) && self.pos < end {
                     self.bump();
                 }
@@ -499,7 +408,6 @@ impl Parser<'_> {
                         self.wrap_name()
                     }
                     Some(SyntaxKind::L_BRACKET) if self.pos < end => {
-                        // Optional parameter: `[name]`.
                         self.bump();
                         self.ann_trivia(end);
                         if matches!(self.current(), Some(SyntaxKind::IDENT)) && self.pos < end {
@@ -553,7 +461,6 @@ impl Parser<'_> {
             }
             "strict" => {
                 self.ann_trivia(end);
-                // Optional `off`.
                 if matches!(self.current(), Some(SyntaxKind::IDENT))
                     && self.pos < end
                     && self.token_str(self.pos) == "off"
@@ -567,7 +474,6 @@ impl Parser<'_> {
                     self.token_range(self.pos.saturating_sub(1)).end(),
                 );
                 self.error_at(range, format!("unknown annotation directive `@{name}`"));
-                // Preserve the rest of the region inside the directive node.
                 while self.pos < end {
                     self.bump();
                 }
@@ -576,7 +482,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// `{ TYPE }` after a directive head.
     fn ann_braced_type(&mut self, end: usize, directive: &str) {
         if self.at(SyntaxKind::L_BRACE) && self.pos < end {
             let open_range = self.token_range(self.pos);
@@ -587,12 +492,8 @@ impl Parser<'_> {
                     "expected a type inside `{{...}}` of `@{directive}`"
                 ));
             } else {
-                // A directive payload is not the outermost level of the
-                // annotation, so a binder here is refused like any other
-                // higher-rank position: `@forall` is where the expanded form
-                // declares type parameters, and `@type Name<T>` puts them on
-                // the name. Allowing them here accepted `@param f {<T> fn(T) ->
-                // T}` in silence and bound nothing.
+                // Binders are refused here like any higher-rank position; type
+                // parameters belong on `@forall` or `@type Name<T>`.
                 self.ann_type(end, false);
             }
             self.ann_trivia(end);
@@ -609,8 +510,6 @@ impl Parser<'_> {
         }
     }
 
-    /// A full type expression; `allow_binders` permits an outermost
-    /// `<T, U: numeric>` binder list.
     fn ann_type(&mut self, end: usize, allow_binders: bool) {
         if allow_binders && self.at(SyntaxKind::LESS) && self.pos < end {
             self.ann_binder_list(end);
@@ -626,8 +525,7 @@ impl Parser<'_> {
         loop {
             self.ann_trivia(end);
             match self.current() {
-                // Only an empty list or a trailing comma reaches `>` here: an
-                // item consumes the `>` that follows it.
+                // Only an empty list or a trailing comma reaches `>` here.
                 Some(SyntaxKind::GREATER) if self.pos < end => {
                     self.error_here("expected a type parameter name in `<...>`");
                     self.bump();
@@ -655,7 +553,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// `T` or `T: constraint` inside binder lists and `@forall`.
     fn ann_binder(&mut self, end: usize) {
         self.start(SyntaxKind::TYPE_BINDER);
         self.wrap_name();
@@ -664,11 +561,8 @@ impl Parser<'_> {
             self.bump();
             self.ann_trivia(end);
             if matches!(self.current(), Some(SyntaxKind::IDENT)) && self.pos < end {
-                // A constraint may be spelled in more than one word (`scalar
-                // numeric`), so take the whole run. Naming the constraints is
-                // the lowering's job; the grammar only has to deliver them.
-                // Trivia is consumed only *between* words. Taking it after
-                // the last word would pull the block's `#:` continuation
+                // A constraint may span words (`scalar numeric`). Trivia is taken
+                // only between words: after the last it would pull the next `#:`
                 // marker into the binder.
                 while self.ann_next_significant(end) == Some(SyntaxKind::IDENT) {
                     self.wrap_name();
@@ -724,15 +618,9 @@ impl Parser<'_> {
         match self.current() {
             Some(SyntaxKind::LESS) => {
                 self.error_here("higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level");
-                // Recover by reading the type as if the binder were not there:
-                // consuming the binder alone leaves this position with no type
-                // at all, so the enclosing parameter list then fails on the
-                // type that follows and the one real finding arrives buried
-                // under three consequences of it. The refused binder keeps an
-                // `ERROR` wrapper so lowering can tell that this block was
-                // refused. Its names bind nothing, and reporting each as an
-                // unknown type would blame the author twice for one
-                // mistake.
+                // Read the type past the binder so the one finding is not
+                // buried under consequences. The `ERROR` wrapper tells lowering
+                // the binder's names bind nothing, so they are not reported again.
                 self.start(SyntaxKind::ERROR);
                 self.ann_binder_list(end);
                 self.finish();
@@ -787,13 +675,11 @@ impl Parser<'_> {
                 return;
             }
         }
-        // Vector suffixes: `T[]` and `T[named]`, repeatable.
         loop {
             self.ann_trivia(end);
             if !self.at(SyntaxKind::L_BRACKET) || self.pos >= end {
                 break;
             }
-            // Only `[]` and `[named]` are suffixes; anything else is not ours.
             let after = self.peek_significant(self.pos + 1, true);
             let is_suffix = match after {
                 Some((SyntaxKind::R_BRACKET, _)) => true,
@@ -836,9 +722,8 @@ impl Parser<'_> {
         loop {
             self.ann_trivia(end);
             match self.current() {
-                // As in a binder list, only an empty list or a trailing comma
-                // reaches `>` here. An empty list is left to the arity check,
-                // which names the count the type expects.
+                // An empty list is left to the arity check, which names the
+                // expected count.
                 Some(SyntaxKind::GREATER) if self.pos < end => {
                     if arguments > 0 {
                         self.error_here("expected a type in the type argument list");
@@ -869,7 +754,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// `list[T]` / `list[named: T]`.
     fn ann_list_brackets(&mut self, end: usize) {
         self.start(SyntaxKind::TYPE_LIST);
         self.wrap_name();
@@ -878,7 +762,6 @@ impl Parser<'_> {
         let open_range = self.token_range(self.pos);
         self.bump();
         self.ann_trivia(end);
-        // `named:` prefix.
         if matches!(self.current(), Some(SyntaxKind::IDENT))
             && self.pos < end
             && self.token_str(self.pos) == "named"
@@ -902,7 +785,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// `list{A, B}` (tuple) / `list{a: A, b: B}` (record).
     fn ann_list_braces(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
         self.wrap_name();
@@ -964,7 +846,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// `fn(params) -> RET` (the return type is optional).
     fn ann_function_type(&mut self, end: usize) {
         self.start(SyntaxKind::TYPE_FUNCTION);
         self.wrap_name();
@@ -1015,7 +896,6 @@ impl Parser<'_> {
     fn ann_function_parameter(&mut self, end: usize) {
         self.start(SyntaxKind::TYPE_PARAMETER);
         match self.current() {
-            // Rest parameter: `...`, `...name`, `...: TYPE`, `...name: TYPE`.
             Some(SyntaxKind::DOTS) => {
                 self.bump();
                 if matches!(self.current(), Some(SyntaxKind::IDENT))
@@ -1031,7 +911,6 @@ impl Parser<'_> {
                     self.ann_type(end, false);
                 }
             }
-            // Optional named parameter: `[name]: TYPE`.
             Some(SyntaxKind::L_BRACKET) => {
                 self.bump();
                 self.ann_trivia(end);
@@ -1055,7 +934,6 @@ impl Parser<'_> {
                     self.error_here("expected `:` after `[name]` in an optional parameter");
                 }
             }
-            // Named parameter `name: TYPE` or a positional type.
             Some(SyntaxKind::IDENT)
                 if self.ann_next_significant(end) == Some(SyntaxKind::COLON) =>
             {
@@ -1070,12 +948,9 @@ impl Parser<'_> {
         self.finish();
     }
 
-    // ---- statements ----
-
     fn source_file(&mut self) {
         self.start(SyntaxKind::SOURCE_FILE);
         self.statements(None);
-        // Defensive: anything the statement loop could not consume.
         if self.pos < self.tokens.len() {
             self.start(SyntaxKind::ERROR);
             while self.pos < self.tokens.len() {
@@ -1086,8 +961,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// Statement sequence until `terminator` (or end of file). Used for the
-    /// source file (`None`) and brace bodies (`Some(R_BRACE)`).
     fn statements(&mut self, terminator: Option<SyntaxKind>) {
         loop {
             self.eat_trivia(true);
@@ -1117,28 +990,19 @@ impl Parser<'_> {
                         self.error_here(format!("expected a statement, found {description}"));
                     }
                 }
-                // Consume through the end of the line so one broken construct
-                // stays local.
                 self.start(SyntaxKind::ERROR);
                 self.recover_to_statement_boundary(terminator);
                 self.finish();
                 continue;
             }
 
-            // After a complete statement: a newline, `;`, the terminator, or EOF.
             self.eat_trivia(false);
             match self.current() {
                 None | Some(SyntaxKind::NEWLINE | SyntaxKind::SEMICOLON) => {}
                 Some(kind) if Some(kind) == terminator => {}
                 Some(_) if self.statement_left_group_open => continue,
                 Some(kind) => {
-                    // A statement that already contains a lexer error owns
-                    // this whole broken region; re-reporting its tail as
-                    // "unexpected ..." would double up on one mistake.
                     if kind != SyntaxKind::ERROR_TOKEN && !self.statement_had_lexer_error {
-                        // `return x` deserves better than the generic
-                        // boundary error: `return` reads like a keyword but
-                        // is a function in R, and the fix is parentheses.
                         if self.statement_ends_with_bare_return(statement_start)
                             && Self::starts_expression(kind)
                         {
@@ -1158,14 +1022,8 @@ impl Parser<'_> {
         }
     }
 
-    /// Whether the statement whose tokens began at `start` ENDS in the bare
-    /// name `return`, which is the classic missing-parentheses mistake.
-    /// `return x` and `f <- function() return TRUE` are such statements. It
-    /// earns a targeted message because
-    /// `return` reads like a keyword but is a function in R. A `return`
-    /// reached through an access operator (`x$return`, `pkg::return`) is an
-    /// ordinary field or export, not the builtin, and keeps the generic
-    /// error.
+    /// `return x`: `return` reads like a keyword but is a function in R. Reached
+    /// through an access operator (`x$return`) it is an ordinary name.
     fn statement_ends_with_bare_return(&self, start: usize) -> bool {
         let mut last: Option<(usize, SyntaxKind)> = None;
         let mut before: Option<SyntaxKind> = None;
@@ -1208,11 +1066,8 @@ impl Parser<'_> {
         }
     }
 
-    // ---- expressions ----
-
-    /// Pratt loop. It returns false, emitting nothing and consuming nothing,
-    /// when the current token cannot start an expression. The caller reports
-    /// the context-specific error.
+    /// Returns false, consuming nothing, when no expression starts here; the
+    /// caller reports the context-specific error.
     fn expression(&mut self, min_bp: u8) -> bool {
         if self.depth >= MAX_DEPTH {
             self.error_here("expression nesting is too deep");
@@ -1234,7 +1089,6 @@ impl Parser<'_> {
             self.eat_trivia(false);
             let Some(kind) = self.current() else { break };
             match kind {
-                // Postfix: calls and subscripts (highest precedence).
                 SyntaxKind::L_PAREN if CALL_BP >= min_bp => {
                     self.start_at(checkpoint, SyntaxKind::CALL_EXPR);
                     self.argument_list(SyntaxKind::L_PAREN);
@@ -1250,7 +1104,6 @@ impl Parser<'_> {
                     self.argument_list(SyntaxKind::L_BRACKET2);
                     self.finish();
                 }
-                // `$` / `@` and `::` / `:::` take a name (or string) on the right.
                 SyntaxKind::DOLLAR | SyntaxKind::AT if FIELD_BP >= min_bp => {
                     let node = if kind == SyntaxKind::DOLLAR {
                         SyntaxKind::DOLLAR_EXPR
@@ -1295,7 +1148,6 @@ impl Parser<'_> {
         true
     }
 
-    /// A name or string after `$`, `@`, `::`, `:::`.
     fn field_name(&mut self, operator: SyntaxKind) {
         match self.current() {
             Some(SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI) => self.wrap_name(),
@@ -1310,11 +1162,7 @@ impl Parser<'_> {
         }
     }
 
-    /// Prefix operators and primary expressions. Quiet on failure: consumes and
-    /// emits nothing, returns false.
-    /// Whether `kind` can begin an expression. This is kept in lockstep with
-    /// the entry set of `primary`, plus the sign, not, and formula prefixes
-    /// that `primary` dispatches to `unary`.
+    /// Must stay in lockstep with the tokens `primary` accepts.
     fn starts_expression(kind: SyntaxKind) -> bool {
         matches!(
             kind,
@@ -1363,8 +1211,6 @@ impl Parser<'_> {
             SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI | SyntaxKind::UNDERSCORE => {
                 self.wrap_name()
             }
-            // The lexer already diagnosed this token precisely; consume it as
-            // a placeholder atom so no second report stacks on top.
             SyntaxKind::ERROR_TOKEN => {
                 self.statement_had_lexer_error = true;
                 self.start(SyntaxKind::ERROR);
@@ -1480,7 +1326,6 @@ impl Parser<'_> {
                 "expected a branch after the `if` condition, found {description}"
             ));
         }
-        // `else` may follow a newline only inside a group or brace context.
         let across = self.else_allowed_across_newline();
         if let Some((SyntaxKind::ELSE_KW, _)) = self.peek_significant(self.pos, across) {
             self.eat_trivia(across);
@@ -1563,7 +1408,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// `( expr )` after `if` / `while`.
     fn condition_parens(&mut self, construct: &str) {
         if !self.at(SyntaxKind::L_PAREN) {
             let description = self.describe_current();
@@ -1609,12 +1453,8 @@ impl Parser<'_> {
         }
         self.eat_trivia(true);
         if !self.expression(0) && !self.statement_left_group_open {
-            // Blamed on the `function` keyword, not wherever the search for a
-            // body stopped: a header running to end of file left this on the
-            // blank line past the last statement, zero characters wide,
-            // underlining nothing and pointing away from the construct that is
-            // incomplete. A parameter list that never closed is also the whole
-            // story, because a missing body is only its consequence.
+            // Blamed on the keyword: where the body search stopped can be a
+            // zero-width spot past the last statement.
             self.error_at(keyword_range, "expected a function body");
         }
         self.finish();
@@ -1657,10 +1497,6 @@ impl Parser<'_> {
                         self.current(),
                         Some(SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI)
                     ) {
-                        // A parameter name right after a complete parameter:
-                        // the separator was forgotten. Report the missing `,`
-                        // in the gap and let the loop parse the name as the
-                        // next parameter.
                         self.error_at(self.separator_gap(), "missing `,` between these parameters");
                     } else if !matches!(self.current(), None | Some(SyntaxKind::R_PAREN)) {
                         let description = self.describe_current();
@@ -1696,8 +1532,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// Call / subset argument lists. `open` is `(`, `[`, or `[[`; `[[` closes
-    /// with two `]` tokens (as in R's grammar).
     fn argument_list(&mut self, open: SyntaxKind) {
         self.start(SyntaxKind::ARGUMENT_LIST);
         let open_range = self.token_range(self.pos);
@@ -1715,7 +1549,6 @@ impl Parser<'_> {
                 Some(kind) if kind == closer => break,
                 Some(SyntaxKind::COMMA) => {
                     if expect_argument {
-                        // A positional hole: `f(, x)` / `m[, 1]`.
                         self.start(SyntaxKind::ARGUMENT);
                         self.finish();
                     }
@@ -1724,18 +1557,9 @@ impl Parser<'_> {
                 }
                 Some(kind) => {
                     if !expect_argument {
-                        // A token that starts a new argument right after a
-                        // complete one means the separator was forgotten:
-                        // report the missing `,` in the gap and keep parsing
-                        // the list normally.
                         if Self::starts_expression(kind) {
-                            // A new statement on a later line is not a
-                            // forgotten comma: the opener was never closed, and
-                            // reading on adopts that statement and every one
-                            // after it as further arguments. One missing `)`
-                            // put a confident "missing `,`" on every following
-                            // line, scaling with the file, and it cost the
-                            // adopted lines their definitions.
+                            // The opener was never closed; reading on would
+                            // adopt every later statement as an argument.
                             if self.crossed_line() && self.starts_new_statement() {
                                 break;
                             }
@@ -1763,7 +1587,6 @@ impl Parser<'_> {
         if self.at(closer) {
             self.bump();
             if open == SyntaxKind::L_BRACKET2 {
-                // The second `]` of `]]`.
                 self.eat_trivia(true);
                 if self.at(SyntaxKind::R_BRACKET) {
                     self.bump();
@@ -1787,9 +1610,7 @@ impl Parser<'_> {
 
     fn argument(&mut self, closer: SyntaxKind) {
         self.start(SyntaxKind::ARGUMENT);
-        // Tagged argument: `name = value`, `"name" = value`, `... = value`,
-        // and `NULL = value`. R's grammar admits NULL_CONST as a tag, which is
-        // the `switch(x, NULL = , …)` idiom.
+        // R's grammar admits `NULL` as a tag (the `switch(x, NULL = , …)` idiom).
         let tagged = matches!(
             self.current(),
             Some(
@@ -1812,7 +1633,6 @@ impl Parser<'_> {
             self.bump();
             self.eat_trivia(true);
             match self.current() {
-                // `f(x = )` and `f(x = , y)` leave the value empty.
                 Some(SyntaxKind::COMMA) | None => {}
                 Some(kind) if kind == closer => {}
                 _ => {
@@ -1831,10 +1651,8 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// Recovery inside a delimited list, wrapped in an `ERROR` node and
-    /// guaranteed to make progress: a mismatched closing delimiter sitting at
-    /// the recovery point is consumed (it can belong to nothing here), so the
-    /// surrounding list loop can never spin in place.
+    /// Always makes progress: a mismatched closer at the recovery point belongs
+    /// to nothing here and is consumed, so the list loop cannot spin.
     fn recover_argument(&mut self, closer: SyntaxKind) {
         let start = self.pos;
         self.start(SyntaxKind::ERROR);
@@ -1849,8 +1667,6 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// Consume tokens until `,`, the closing delimiter, or end of file, keeping
-    /// broken argument regions local.
     fn recover_in_list(&mut self, closer: SyntaxKind) {
         let mut depth = 0u32;
         while let Some(kind) = self.current() {
@@ -1888,10 +1704,6 @@ impl Parser<'_> {
         }
     }
 }
-
-// Binding powers follow R's `gram.y` precedence declarations, low to high.
-// Left-associative operators parse their right side at `left + 1`; right-
-// associative ones at `left`.
 
 const CALL_BP: u8 = 40;
 const NAMESPACE_BP: u8 = 38;

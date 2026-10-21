@@ -1,20 +1,5 @@
-//! The interactive console: a `reedline` editor living inside R's
-//! `ReadConsole` callback, with ry's lexer driving syntax highlighting
-//! and input-completeness (continuation prompts).
-//!
-//! Control flow: `run` initializes embedded R with our console hooks and
-//! enters R's real main loop. Whenever R wants input it calls the
-//! read-console hook, which runs the editor; finished input is fed back
-//! through R's console buffer (chunked to the buffer size), and R parses,
-//! evaluates, and autoprints exactly as a stock terminal session would.
-//! Output comes back through the write-console hook.
-//!
-//! Completeness is decided CONSERVATIVELY from lexer facts (open
-//! delimiters, a trailing infix operator, an unterminated token at end of
-//! input). When the check wrongly says "complete", nothing breaks: R's own
-//! parser detects the incompleteness and calls the hook again with its `+`
-//! continuation prompt, which runs the editor again. The validator is the
-//! interface layer, and R stays the authority.
+//! A `reedline` editor running inside R's `ReadConsole` callback; R itself still
+//! parses, evaluates, and autoprints the fed input.
 
 use crate::ReplError;
 use crate::libr::{self, RApi};
@@ -33,12 +18,9 @@ use syntax::SyntaxKind;
 
 pub fn run(api: RApi, options: crate::RunOptions) -> Result<(), ReplError> {
     let mut console = Console::new(options.keybindings, options.batch, options.completer);
-    // Windows console setup runs in RGui mode (the callback wiring requires
-    // it), which stamps `.Platform$GUI` as "Rgui". A package takes that as
-    // license to call an Rgui-only GUI function, such as a menu or a dialog,
-    // which fails here. Rebind the honest front-end name before any user input
-    // runs. R sources the startup profiles before the first console read, so
-    // profile code still sees "Rgui", which is an accepted gap.
+    // The Windows callback wiring requires RGui mode, which sets `.Platform$GUI` to
+    // "Rgui" and lets packages call Rgui-only functions that fail here. Startup
+    // profiles run before this and still see "Rgui".
     #[cfg(windows)]
     console.pending.extend(
         b"invisible(local({ e <- baseenv(); locked <- bindingIsLocked(\".Platform\", e); \
@@ -52,9 +34,7 @@ pub fn run(api: RApi, options: crate::RunOptions) -> Result<(), ReplError> {
             .map_err(|error| ReplError(format!("cannot read {}: {error}", path.display())))?;
         let script = normalize_line_endings(&script);
         if options.batch {
-            // Rscript-like halt semantics without any new C surface: a
-            // top-level error quits the session with a failing status, which
-            // becomes this process's exit code.
+            // A top-level error quits with a failing status, which becomes the exit code.
             console
                 .pending
                 .extend(b"options(error = function() q(status = 1, save = \"no\"))\n");
@@ -68,16 +48,9 @@ pub fn run(api: RApi, options: crate::RunOptions) -> Result<(), ReplError> {
     });
     install_sigint_handler();
     api.initialize(read_console, write_console_ex)?;
-    // R's `width` defaults to 80 columns whatever the terminal is, and R
-    // exports no setter, so a table that had room on screen still wrapped.
-    // Evaluated here rather than fed through the console: input arriving that
-    // way costs a main-loop round trip, and one taken before the editor's
-    // first prompt leaves the terminal in the state R found it in.
-    //
-    // `initialize` has already sourced the startup profiles, so a profile that
-    // chose a width of its own has run: only R's untouched default is
-    // replaced. A resize is not tracked, because R has no setter to call from
-    // a signal handler and the console is the only other way in.
+    // R's `width` defaults to 80 whatever the terminal is, and R exports no setter.
+    // Evaluated directly: fed input taken before the first prompt leaves the terminal
+    // in R's state. Profiles have run, so only R's untouched default is replaced.
     if interactive
         && let Ok((columns, _)) = crossterm::terminal::size()
         && columns > 0
@@ -96,17 +69,15 @@ pub fn run(api: RApi, options: crate::RunOptions) -> Result<(), ReplError> {
     Ok(())
 }
 
-// R owns exactly one thread and calls the hooks only there, so the console
-// state is thread-local; the `RefCell` is never borrowed re-entrantly
-// because R never nests read-console calls inside our borrow.
+// R calls the hooks only on its one thread and never nests read-console calls
+// inside our borrow, so a thread-local `RefCell` suffices.
 thread_local! {
     static CONSOLE: RefCell<Option<Console>> = const { RefCell::new(None) };
 }
 
 type SharedSessionCompleter = std::sync::Arc<std::sync::Mutex<Box<dyn crate::SessionCompleter>>>;
 
-/// The editor owns its completer, and the console must also feed accepted lines
-/// back into the same object, so both sides hold a shared handle.
+/// Shared because the console also feeds accepted lines to the editor's completer.
 struct EditorCompleter(SharedSessionCompleter);
 
 impl reedline::Completer for EditorCompleter {
@@ -120,11 +91,9 @@ impl reedline::Completer for EditorCompleter {
 
 struct Console {
     editor: Reedline,
-    /// Bytes of accepted input R has not consumed yet: the read hook hands
-    /// them over in buffer-sized chunks across successive calls.
+    /// Accepted input R has not consumed; handed over in buffer-sized chunks.
     pending: VecDeque<u8>,
-    /// In batch mode the session ends at end of input once `pending` is
-    /// exhausted, rather than prompting. This is what drives `ry run`.
+    /// End the session (EOF) once `pending` is exhausted instead of prompting.
     batch: bool,
     completer: Option<SharedSessionCompleter>,
 }
@@ -185,23 +154,17 @@ impl Console {
     }
 }
 
-/// The console feed must carry only `\n`: a real terminal never sends `\r`,
-/// and R's parser reports a raw one as an invalid token. Script files carry
-/// CRLF on Windows, and so does the editor's multiline buffer there. Normalize
-/// every path into the feed, treating a CRLF, and a classic lone CR, as line
-/// endings exactly as R's own text-mode connections do.
+/// R's parser rejects a raw `\r`, but scripts and the editor buffer carry CRLF on
+/// Windows; CRLF and lone CR are line endings, as in R's text-mode connections.
 fn normalize_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn history_file() -> Option<std::path::PathBuf> {
-    // Per-platform data directory (XDG on Linux, Application Support on
-    // macOS, roaming AppData on Windows). Persistence is best-effort: on
-    // failure the editor falls back to in-memory history for the session.
+    // Best-effort: on failure the editor keeps in-memory history.
     let data = dirs::data_dir()?;
     let directory = data.join("ry");
-    // The project's former name. Move the directory once rather than renaming
-    // the path outright, which would silently discard existing history.
+    // `roughly` is the project's former name; move its history rather than discard it.
     let previous = data.join("roughly");
     if !directory.exists() && previous.is_dir() {
         let _ = std::fs::rename(&previous, &directory);
@@ -210,18 +173,15 @@ fn history_file() -> Option<std::path::PathBuf> {
     Some(directory.join("history.txt"))
 }
 
-/// The `R_ReadConsole` hook. Returns 1 with a chunk of input in `buffer`,
-/// or 0 for end-of-session. Runs the editor when no accepted input is
-/// pending; R's own prompt (top-level `>`, continuation `+`, `Browse[n]>`,
-/// `readline()` questions) is displayed, so nested REPLs stay honest.
+/// The `R_ReadConsole` hook: returns 1 with a chunk of input in `buffer`, or 0
+/// for end-of-session.
 extern "C" fn read_console(
     prompt: *const c_char,
     buffer: *mut c_uchar,
     length: c_int,
     _add_to_history: c_int,
 ) -> c_int {
-    // An unwind must never cross into R: any panic ends the session cleanly
-    // as EOF instead.
+    // An unwind must never cross into R; a panic ends the session as EOF.
     std::panic::catch_unwind(|| read_console_inner(prompt, buffer, length)).unwrap_or(0)
 }
 
@@ -269,9 +229,8 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
     })
 }
 
-/// The `R_WriteConsoleEx` hook: 0 is regular output, anything else the
-/// error and message stream. It writes unbuffered, because prompt interleaving
-/// beats throughput at a console.
+/// The `R_WriteConsoleEx` hook: `output_type` 0 is regular output, anything else
+/// the error stream. Unbuffered so output interleaves correctly with prompts.
 extern "C" fn write_console_ex(text: *const c_char, length: c_int, output_type: c_int) {
     let _ = std::panic::catch_unwind(|| {
         if text.is_null() || length <= 0 {
@@ -290,10 +249,8 @@ extern "C" fn write_console_ex(text: *const c_char, length: c_int, output_type: 
     });
 }
 
-/// Ctrl-C behaves differently in the two states. While the editor runs the
-/// terminal is raw, so no signal arrives and reedline clears the line. While R
-/// evaluates the terminal is restored, so Ctrl-C arrives as SIGINT and the
-/// handler raises R's cooperative interrupt flag.
+/// While the editor runs, the terminal is raw (no signal); while R evaluates,
+/// Ctrl-C arrives as SIGINT and raises R's cooperative interrupt flag.
 #[cfg(unix)]
 fn install_sigint_handler() {
     unsafe {
@@ -304,9 +261,8 @@ fn install_sigint_handler() {
     }
 }
 
-/// Ctrl-C on Windows arrives through the console control handler; it raises
-/// both of R's interrupt flags (`UserBreak` + the deferred
-/// `R_interrupts_pending`), honored at R's next interrupt check.
+/// Raises both of R's interrupt flags (`UserBreak` and `R_interrupts_pending`),
+/// honored at R's next interrupt check.
 #[cfg(windows)]
 fn install_sigint_handler() {
     #[link(name = "kernel32")]
@@ -332,8 +288,7 @@ unsafe extern "system" fn ctrl_c_to_r_flags(ctrl_type: u32) -> i32 {
     }
 }
 
-/// No R session can start on other platforms (`libr::load` refuses), so
-/// there is no evaluation phase whose Ctrl-C would need translating.
+/// No R session can start here (`libr::load` refuses), so there is nothing to interrupt.
 #[cfg(not(any(unix, windows)))]
 fn install_sigint_handler() {}
 
@@ -351,8 +306,7 @@ impl Prompt for RPrompt {
     }
 
     fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<'_, str> {
-        // R's own prompt (`> `, `+ `, `Browse[1]> `) is the indicator, so
-        // debugger and readline() prompts look exactly like stock R.
+        // R's own prompt, so debugger and readline() prompts look exactly like stock R.
         Cow::Borrowed(&self.text)
     }
 
@@ -395,8 +349,6 @@ impl Prompt for RPrompt {
     }
 }
 
-/// Syntax highlighting straight from ry's lexer. These are the same tokens the
-/// whole language tool sees, so there is no second grammar.
 struct LexerHighlighter;
 
 impl Highlighter for LexerHighlighter {
@@ -431,8 +383,6 @@ fn token_style(kind: SyntaxKind) -> Style {
     }
 }
 
-/// The continuation gate: reedline keeps editing (with the `+ ` indicator)
-/// while the input is provably unfinished.
 struct LexerValidator;
 
 impl Validator for LexerValidator {
@@ -445,11 +395,8 @@ impl Validator for LexerValidator {
     }
 }
 
-/// Conservative completeness from lexer facts alone. Input is incomplete only
-/// when it is provably unfinished. An open delimiter, a trailing infix operator
-/// or comma, and a token the lexer flagged as broken at end of input, such as
-/// an unterminated string, all prove it. A false "complete" verdict is safe,
-/// because R's parser asks for continuation itself.
+/// Incomplete only when provably unfinished; a false "complete" is safe because
+/// R's parser asks for continuation itself.
 pub fn input_is_complete(text: &str) -> bool {
     if text.trim().is_empty() {
         return true;

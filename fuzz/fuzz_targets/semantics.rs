@@ -1,7 +1,3 @@
-//! Coverage-guided fuzzing of the full semantic pipeline: never panics,
-//! deterministic across fresh databases, in-bounds diagnostic and lint
-//! ranges, and incremental equivalence under a hash-derived edit.
-
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

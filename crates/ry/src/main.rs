@@ -28,8 +28,7 @@ fn main() -> ExitCode {
             .unwrap_or_default(),
     );
 
-    // Embedded R must run on the MAIN thread: it assumes it owns the thread
-    // it initializes on (stack checking, signal expectations).
+    // Embedded R assumes it owns the thread it initializes on, so it must stay on `main`.
     let embedded_options = match &cli.command {
         Command::Repl { keybindings, file } => Some(repl::RunOptions {
             keybindings: (*keybindings).into(),
@@ -55,10 +54,7 @@ fn main() -> ExitCode {
         };
     }
 
-    // Commands run on a thread with an explicit large stack rather than the
-    // main thread: recursive tree walks need more than a constrained
-    // `ulimit -s` main stack provides on the deepest trees the grammar
-    // produces.
+    // Recursive tree walks can exceed a constrained `ulimit -s` main stack.
     let command = move || match cli.command {
         Command::Check {
             files,
@@ -76,8 +72,6 @@ fn main() -> ExitCode {
             verbose: _,
             debug,
         } => {
-            // The flag wins; the env var is the ambient fallback for setups
-            // where editing server arguments is awkward.
             let debug = debug || matches!(std::env::var("RY_DEBUG").as_deref(), Ok("1"));
             cli::server(experimental_features, debug);
             ExitCode::SUCCESS
@@ -101,9 +95,8 @@ fn main() -> ExitCode {
         .expect("command thread should not panic")
 }
 
-/// The exit codes are a documented contract: 0 clean, 1 findings
-/// (diagnostics, or files a `fmt --check`/`--diff` run would change), 2
-/// usage/configuration/IO errors. Clap's own usage errors also exit 2.
+/// Documented contract: 0 clean, 1 findings, 2 usage/configuration/IO errors
+/// (clap's own usage errors also exit 2).
 fn exit_code(result: Result<Outcome, CommandError>) -> ExitCode {
     match result {
         Ok(Outcome::Clean) => ExitCode::SUCCESS,
@@ -113,9 +106,7 @@ fn exit_code(result: Result<Outcome, CommandError>) -> ExitCode {
 }
 
 #[derive(Parser)]
-// `name` is set explicitly: clap defaults to the Cargo package name, which is
-// `ry-lang` because the registry name `ry` was taken. The command the user
-// typed, and the one every diagnostic and docs page names, is `ry`.
+// Clap defaults to the package name, `ry-lang`; the command is `ry`.
 #[command(name = "ry", version, after_help = experimental_features_help())]
 struct Cli {
     #[command(subcommand)]
@@ -123,9 +114,8 @@ struct Cli {
     /// Ignored ... here only to please VS Code
     #[clap(long, default_value_t = true)]
     stdio: bool,
-    // Accepted anywhere but documented only in the root help's trailing
-    // section (a clap global cannot be hidden from subcommand help
-    // selectively, and repeating it under every subcommand is noise).
+    // Documented only in the root help's trailing section: a clap global cannot be
+    // hidden from subcommand help selectively.
     #[clap(long, global = true, hide = true)]
     experimental_features: Option<Vec<String>>,
 }

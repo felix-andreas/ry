@@ -4,35 +4,9 @@
 edition = "2024"
 ---
 
-//! Convert tree-sitter-r test corpus files into the project fixture format.
-//! Run with `cargo +nightly -Zscript scripts/convert-tsr-corpus.rs`.
-//!
-//! Reads every `corpus/tree-sitter-r/*.txt` file, splits it into the tree-sitter
-//! test sections (name / source / expected S-expression), and emits one project
-//! fixture file per corpus file at `crates/syntax/tests/tsr/<stem>.R.test`. The
-//! original expected S-expression of each section is written alongside to
-//! `corpus/tree-sitter-r-expected/<stem>/<slug>.sexp` (gitignored) so the parser's
-//! output can later be adjudicated against tree-sitter's.
-//!
-//! Tree-sitter corpus grammar (with the robustness rules this converter relies on):
-//!
-//! * A section header is a line of only `=` (>= 3), then one or more name /
-//!   attribute lines (none of which is an all-`=` line), then another line of
-//!   only `=` (>= 3). Attribute lines start with `:` (e.g. `:skip`, `:error`,
-//!   `:language(...)`).
-//! * The source code follows the header, then a divider line of only `-`
-//!   (>= 3), then the expected S-expression, which runs until the next header.
-//! * R source can itself contain lines of `-` or `=`. We disambiguate with two
-//!   facts that always hold for real corpora: a header is only a header when a
-//!   closing `=` fence follows the name block, and the expected S-expression
-//!   never contains a standalone all-`-` line, so the *last* `-` divider in a
-//!   section body is the true source/expected split.
-//!
-//! The expectation body we emit is intentionally empty (a single blank line): these
-//! fixtures stage tree-sitter's cases for the hand-written parser; the parser's
-//! golden trees are filled in later. Sections marked `:skip` are dropped. Sections
-//! whose expected S-expression contains `(ERROR` or `(MISSING` (recovery tests)
-//! are emitted with a `_ts_error` case-name suffix.
+//! Converts corpus/tree-sitter-r/*.txt into crates/syntax/tests/tsr/ fixtures. R source may hold
+//! `-`/`=` lines too: a header needs a closing `=` fence, and the *last* `-` divider splits source
+//! from the S-expression, which never holds an all-`-` line.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -200,7 +174,6 @@ fn parse_sections(text: &str) -> Vec<Section> {
     let mut index = 0;
     while index < lines.len() {
         let Some((close_index, content)) = try_header(&lines, index) else {
-            // Stray content before the first header (or a blank line).
             index += 1;
             continue;
         };
@@ -252,8 +225,6 @@ fn parse_sections(text: &str) -> Vec<Section> {
     sections
 }
 
-/// If a section header opens at `lines[index]`, return the index of its
-/// closing `=` fence and the header content lines between the fences.
 fn try_header<'lines>(lines: &[&'lines str], index: usize) -> Option<(usize, Vec<&'lines str>)> {
     if index >= lines.len() || !is_equals(lines[index]) {
         return None;

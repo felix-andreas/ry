@@ -1,9 +1,3 @@
-//! Typed views over the untyped syntax tree.
-//!
-//! Views are zero-cost wrappers: construction never fails on kind mismatch
-//! (`cast` returns `None` instead), and every accessor is `Option`-returning so
-//! consumers of broken code never carry a parallel error-handling data model.
-
 use crate::kind::SyntaxKind;
 use crate::{SyntaxNode, SyntaxToken};
 
@@ -49,7 +43,7 @@ ast_node!(RepeatExpr, REPEAT_EXPR);
 ast_node!(Annotation, ANNOTATION);
 
 impl SourceFile {
-    /// The top-level expressions, in order (error regions excluded).
+    /// Error regions are skipped.
     pub fn statements(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
         self.0
             .children()
@@ -62,9 +56,8 @@ impl Name {
         self.0.first_token()
     }
 
-    /// The referenced name, as R sees it: backticks stripped and escapes
-    /// resolved, so `` `a\`b` `` and any other spelling of the same name
-    /// compare equal for resolution, rename and completion.
+    /// The name as R sees it (backticks stripped, escapes resolved), so every
+    /// spelling of one name compares equal.
     pub fn text(&self) -> Option<String> {
         let token = self.token()?;
         let text = token.text();
@@ -75,11 +68,8 @@ impl Name {
     }
 }
 
-/// Resolves the escapes R allows inside a backtick-quoted name. Only the
-/// character escapes a name can actually carry are translated; anything else
-/// keeps its backslash, which matches R treating an unknown escape as an error
-/// rather than as a silent deletion. Dropping it here would make two different
-/// names compare equal.
+/// Unknown escapes keep their backslash: R rejects them, and dropping it would
+/// make two different names compare equal.
 fn unescape_name(quoted: &str) -> String {
     let mut out = String::with_capacity(quoted.len());
     let mut characters = quoted.chars();
@@ -92,8 +82,6 @@ fn unescape_name(quoted: &str) -> String {
             Some('n') => out.push('\n'),
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
-            // A backslash before a real newline keeps the newline and drops
-            // the backslash, so the name spans the line break.
             Some(escaped @ ('\\' | '`' | '"' | '\'' | '\n')) => out.push(escaped),
             Some(other) => {
                 out.push('\\');

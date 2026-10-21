@@ -51,9 +51,7 @@ export default defineConfig({
 				{ label: "Visual Studio Marketplace", icon: "vscode", href: 'https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry' },
 				{ label: "GitHub", icon: "github", href: 'https://github.com/felix-andreas/ry' },
 			],
-			// The installation page is deliberately absent: getting started closes with
-			// the two extension links and the one-line install, and the page itself is
-			// only for the awkward cases.
+			// The installation page is unlisted: getting started already covers the common install.
 			sidebar: [
 				{
 					label: 'Introduction',
@@ -88,16 +86,12 @@ export default defineConfig({
 						{ slug: 'contributing/structure' },
 						{ slug: 'contributing/testing' },
 						{ slug: 'contributing/authoring-stubs' },
-						// The drafts under contributing/design/ are deliberately not
-						// listed: they are proposals and open questions, not contracts,
-						// and this index is the single way in.
+						// Drafts under contributing/design/ are proposals, not contracts; their index is the way in.
 						{ slug: 'contributing/design' },
 					],
 				},
 			],
-			// Replaces the theme's own PageTitle, whose breadcrumb is a hardcoded
-			// "Docs > title". starlight-theme-black skips its override when one is
-			// declared here, and warns that it did.
+			// Replaces the theme's hardcoded "Docs > title" breadcrumb.
 			components: {
 				PageTitle: './src/components/PageTitle.astro',
 			},

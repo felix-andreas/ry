@@ -1,26 +1,6 @@
-//! Keystroke-incrementality probe: after a cold prime, what does one edit
-//! cost, and which whole-project queries re-execute for it?
-//!
-//! Usage: `cargo run --release -p ry-lang --example keystroke_probe
-//! <package-dir>...`
-//!
-//! Two edit shapes per probed file, mirroring the language server's settled
-//! wave (re-demand `file_diagnostics` for the edited file):
-//!
-//! - body edit: the first numeric literal after the first `function`
-//!   keyword alternates `1` <-> `11`. Ranges inside that one item shift, so
-//!   its naming value changes, but no read name or top-level binding does.
-//!   This is the representative typing case. Whole-project walks should not
-//!   re-execute for it.
-//! - new item: a `probe_binding <- 0L` statement appended at the end. The
-//!   item set and name projections genuinely change, so the project walks
-//!   must re-execute. This is the bounded worst case, for comparison.
-//!
-//! Each edit reports wall time, total queries executed, and whether the
-//! whole-project graph walks (`interface_sccs`, `conditional_slot_items`,
-//! `package_definitions`) re-executed, via a salsa event listener. Wall
-//! times on shared or throttled vCPUs are noisy, so the execution counts are
-//! the trustworthy signal.
+//! What one edit costs after a cold prime, and which whole-project queries
+//! re-execute for it. Execution counts, not wall times, are the trustworthy signal.
+//! Usage: `cargo run --release -p ry-lang --example keystroke_probe <package-dir>...`
 
 use salsa::Setter as _;
 use semantics::{DocumentKind, ProjectFiles, SourceFile};
@@ -100,9 +80,7 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
     sources
 }
 
-/// The byte offset of the first `1` after the first `function` keyword: a
-/// literal to lengthen so ranges shift inside one item without any name
-/// changing.
+/// A literal to lengthen so ranges shift inside one item without any name changing.
 fn body_literal_offset(source: &str) -> Option<usize> {
     let function = source.find("function")?;
     let relative = source[function..].find('1')?;
@@ -150,7 +128,6 @@ fn main() {
     }
     println!("cold prime: {:?} ({findings} findings)", start.elapsed());
 
-    // The largest file with an editable body literal, plus a mid-size one.
     let mut by_size: Vec<usize> = (0..sources.len()).collect();
     by_size.sort_by_key(|&index| std::cmp::Reverse(sources[index].1.len()));
     let editable: Vec<usize> = by_size

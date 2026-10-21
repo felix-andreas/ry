@@ -1,9 +1,5 @@
-//! IDE feature fixtures: the case source carries one `$0` cursor marker
-//! (stripped before analysis); the expectation renders each feature's result
-//! at that position, then the inlay hints of the file holding the cursor. A
-//! multi-file case (`#~~~~ path` sections) prefixes every location with its
-//! file. `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs
-//! one case.
+//! A case carries at most one `$0` cursor marker; the output renders each feature at it, then
+//! the inlay hints of the file holding it.
 
 use semantics::testing::{ProbeDatabase, with_fixture_project};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
@@ -18,8 +14,6 @@ fn render(source: &str) -> String {
             .map(|(path, text)| (Some(path), text))
             .collect(),
     };
-    // The `$0` cursor marker, stripped from the file holding it. Cases
-    // without one render only the position-independent features.
     let mut cursor = None;
     let mut inputs = Vec::new();
     for (index, (path, text)) in files.iter().enumerate() {
@@ -64,11 +58,8 @@ fn render(source: &str) -> String {
     })
 }
 
-/// The text a stub-source range covers, rendered instead of the absolute byte
-/// offsets. A declaration's offset into the shipped corpus shifts whenever an
-/// unrelated stub is added, so pinning the number made every corpus addition
-/// re-bless these cases while proving nothing; pinning the *token* proves the
-/// range points where it should and survives.
+/// Renders the covered stub text instead of byte offsets, which shift whenever an unrelated stub
+/// is added.
 fn stub_text(db: &RootDatabase, source_index: usize, range: TextRange) -> String {
     let Some(sources) = semantics::stubs::StubSources::try_get(db) else {
         return "<no stub sources>".to_owned();
@@ -244,7 +235,6 @@ fn render_at(
     }
 }
 
-/// Workspace symbols rank by the shared matcher across every project file.
 #[test]
 fn workspace_symbols_ranked() {
     let db = RootDatabase::default();
@@ -274,9 +264,6 @@ fn workspace_symbols_ranked() {
     assert_eq!(subsequence, vec!["alpha_one".to_owned()]);
 }
 
-/// S4 declarations and R6 classes outline with their own kinds; R6 members
-/// nest as children (methods for function values, fields otherwise, active
-/// bindings as fields).
 #[test]
 fn document_symbols_expose_s4_and_r6_hierarchy() {
     let db = RootDatabase::default();
@@ -351,7 +338,6 @@ setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
         "{account:#?}"
     );
 
-    // R6 members are reachable through workspace symbols.
     let files = semantics::ProjectFiles::try_get(&db).expect("project files installed");
     let deposit: Vec<String> = ide::workspace_symbols(&db, files, "deposit")
         .into_iter()
@@ -360,11 +346,8 @@ setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
     assert_eq!(deposit, vec!["deposit".to_owned()]);
 }
 
-// The per-keystroke features read cached checks: repeated on an unchanged
-// workspace they re-check nothing, after an edit elsewhere nothing in the
-// queried file, and after an edit to one queried item that item alone.
-// Completion is the exception that proves the rule: it renders every global
-// candidate's type, so it re-checks the one global the edit changed.
+// Completion renders every global candidate's type, so unlike the point queries it re-checks the
+// one global an edit changed.
 #[test]
 fn point_queries_recheck_only_what_an_edit_changed() {
     let mut db = ProbeDatabase::default();

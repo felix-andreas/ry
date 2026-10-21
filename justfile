@@ -1,7 +1,3 @@
-#
-# DEVELOPMENT
-#
-
 default:
     @just --list
 
@@ -11,12 +7,10 @@ ry *args:
 test *args:
     cargo test -- --nocapture {{ args }}
 
-# The full per-slice gate: the workspace battery, clippy at -D warnings,
-# and a formatting check. Green gate = landable change.
+# The pre-landing check: tests, clippy at -D warnings, and fmt.
 gate: battery clippy fmt-check
 
-# The workspace test battery. `zed_ry` needs a wasm toolchain, so this and CI
-# exclude it.
+# Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
 
@@ -26,44 +20,35 @@ clippy:
 fmt-check:
     cargo fmt --all --check
 
-# One focused fixture case, e.g.
-#   just fixture pipes__pipe_chains_type_end_to_end
-#   just fixture datatable__declared_dependency_activates_the_stub test_typing_fixtures
-# (`binary` is the suite's test target; testing.md lists them per crate.)
+# One fixture case, e.g. `just fixture pipes__pipe_chains_type_end_to_end`.
 fixture case binary="test_typing_fixtures" package="semantics":
     FIXTURE_FILTER={{ case }} cargo test -p {{ package }} --test {{ binary }} -- --nocapture
 
-# Re-bless fixture expectations for the given test selection, e.g.
-#   just bless -p semantics --test test_typing_fixtures
+# Re-bless expectations, e.g. `just bless -p semantics --test test_typing_fixtures`.
 bless *args:
     RY_BLESS=1 cargo test {{ args }}
 
-# Regenerate docs/formatter.md from the template through the shipping formatter.
+# Regenerate docs/formatter.md through the shipping formatter.
 format-docs:
     RY_BLESS=1 cargo test -p format --test test_format_docs
 
-# The seeded deep fuzz run beyond the bounded passes already inside
-# `cargo test -p semantics`; `FUZZ_ITERS` scales the budget.
+# The seeded deep fuzz run; `FUZZ_ITERS` scales the budget.
 fuzz-deep:
     cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture
 
-# Coverage-guided libFuzzer targets (parse | format | semantics) — nightly
-# toolchain; seed the corpus first with
-# `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs`.
+# libFuzzer (parse | format | semantics); seed with `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs`.
 fuzz-run target="semantics" *args:
     cargo +nightly fuzz run {{ target }} {{ args }}
 
-# The workspace performance diagnosis (phase timings, memory, typing bursts).
+# Phase timings, memory and typing bursts for a workspace.
 stats path=".":
     cargo run -q -p ry-lang -- debug analysis-stats {{ path }}
 
-# The corpus-wide perf and memory budgets (fetch the corpus first with
-# `cargo +nightly -Zscript scripts/fetch-corpus.rs`).
+# Corpus perf and memory budgets; fetch with `cargo +nightly -Zscript scripts/fetch-corpus.rs`.
 perf:
     cargo test -p semantics --release --test test_perf -- --ignored --nocapture
 
-# The REPL's end-to-end tests: drive `ry repl` through a pty against the
-# system R. Local-only — they skip (green) on machines without R.
+# Drives `ry repl` through a pty against the system R; skips without R.
 repl-e2e:
     cargo test -p ry-lang --test test_repl_e2e -- --nocapture
 
@@ -77,10 +62,6 @@ install-extension:
     mkdir -p release/dev
     just build-extension pre-release --out ../../release/dev/ry.vsix
     code --install-extension release/dev/ry.vsix
-
-#
-# BUILD
-#
 
 build:
     cargo build
@@ -101,10 +82,6 @@ build-extension $kind *args:
     release_flag=$(just vsce-release-flag $kind)
     cp LICENSE editors/code
     just vsce package $release_flag {{ args }}
-
-#
-# RELEASE
-#
 
 publish $version $notes="":
     #!/usr/bin/env bash
@@ -133,27 +110,17 @@ bump-version $version:
 
     sed -i 's/^version = "[a-zA-Z0-9._-]*"/version = "{{ version }}"/' Cargo.toml
 
-    # Versioning schema, and the marketplace constraint that drives it:
-    #   The VS Marketplace only accepts a plain `X.Y.Z` and REJECTS semver pre-release
-    #   suffixes such as `-alpha.3`. So releases use this schema:
-    #     pre-release : `X.Y.Z-alpha` / `X.Y.Z-beta`  — the PATCH (Z) is a single
-    #                   monotonically increasing counter and the suffix names the
-    #                   channel, e.g. 0.2.1-alpha, 0.2.2-alpha, ..., 0.2.14-beta.
-    #     stable      : a bare `X.Y.Z`.
-    #   The extension version is the CLI version with the channel suffix stripped — a
-    #   valid, monotonic `X.Y.Z` — and the `--pre-release` flag marks the channel on
-    #   the marketplace. Keeping the counter in the PATCH (not the suffix) is what makes
-    #   stripping collision-free: 0.2.1-alpha and 0.2.2-alpha map to distinct 0.2.1 / 0.2.2.
+    # The VS Marketplace rejects pre-release suffixes, so the extension takes the CLI version
+    # without its `-alpha`/`-beta`; the patch number is the one counter across channels, which
+    # keeps stripped versions distinct (0.2.1-alpha and 0.2.2-alpha become 0.2.1 and 0.2.2).
     cli_version="{{ version }}"
     vscode_version="${cli_version%%-*}"
     sed -i "s/\"version\": \"[a-zA-Z0-9._-]*\"/\"version\": \"$vscode_version\"/" editors/code/package.json
 
-    # editors/zed/extension.toml is intentionally NOT version-bumped: the Zed extension
-    # ships no binary — it locates one (settings path, then PATH, then the latest GitHub
-    # release) — so it versions on its own changes, on its own plain-semver line. Bump it
-    # by hand when the extension changes; do not drag it back onto the CLI's number.
+    # The Zed extension ships no binary, so editors/zed/extension.toml is bumped by hand on
+    # its own version line.
 
-    cargo check # bonus: also updates version in lock file
+    cargo check # updates Cargo.lock
     git add Cargo.toml Cargo.lock editors/code/package.json
     git commit -m "chore: Release v{{ version }}"
 
@@ -170,11 +137,9 @@ release $version:
 
     cargo check
 
-    # zig cross-links the macOS binaries without an Apple SDK, so a dependency
-    # that emits `-framework ...` cannot link. Fail fast with a clear message
-    # instead of deep inside the nix build (see patches/iana-time-zone).
-    # Resolved once, so a broken invocation fails the recipe instead of being
-    # mistaken for "the framework crate is absent".
+    # zig cross-links macOS without an Apple SDK, so fail fast on a crate that links an Apple
+    # framework (see patches/iana-time-zone). Resolving the tree once makes a broken `cargo tree`
+    # fail the recipe instead of reading as "no such crate".
     macos_tree=$(cargo tree --target aarch64-apple-darwin -p ry-lang -e normal --prefix none)
 
     for package in core-foundation-sys core-foundation objc objc2 security-framework; do
@@ -193,7 +158,6 @@ release $version:
     just package-tar aarch64-apple-darwin $dir
     just package-zip x86_64-pc-windows-gnu $dir
 
-    # vscode extension (client only)
     rm -rf editors/code/bin
     just build-extension $kind --out ../../$dir/ry.vsix
 
@@ -205,9 +169,6 @@ publish-github $version $notes="":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # `release-kind` is the single source of truth for the channel: alpha/beta
-    # versions (and the bare git revisions `publish-commit` uses) are marked
-    # pre-release on GitHub exactly as they are on the marketplace.
     prerelease_flag=""
     if [ "$(just release-kind $version)" = "pre-release" ]; then
     	prerelease_flag="--prerelease"
@@ -245,10 +206,6 @@ publish-marketplace $version:
     just vsce publish $release_flag --packagePath ../../release/$version/ry-win32-x64.vsix
     just vsce publish $release_flag --packagePath ../../release/$version/ry.vsix
 
-#
-# UTILS
-#
-
 package-tar target dir:
     mkdir -p {{ dir }}/ry-{{ target }}
     cp release/nix/{{ target }}/bin/ry {{ dir }}/ry-{{ target }}/ry
@@ -259,7 +216,7 @@ package-zip target dir:
     cp release/nix/{{ target }}/bin/ry.exe {{ dir }}/ry-{{ target }}/ry.exe
     zip -j {{ dir }}/ry-{{ target }}.zip {{ dir }}/ry-{{ target }}/ry.exe
 
-# use rlib repos to test formatting
+# Clone r-lib repos to test formatting against.
 rlib-clone:
     #!/usr/bin/env bash
     mkdir -p .local/rlib
@@ -276,10 +233,7 @@ rlib *args:
 vsce-release-flag $kind:
     @echo {{ if kind == "release" { "" } else if kind == "pre-release" { "--pre-release" } else { error("kind must be either release or pre-release") } }}
 
-# The release channel implied by a version string: a bare `X.Y.Z` is a stable release; an
-# `X.Y.Z-alpha`/`-beta` postfix (and any other non-`X.Y.Z` form, such as a bare git revision used
-# by `publish-commit`) is a marketplace pre-release. This is the single source of truth for the
-# channel, so `release`/`publish` never take a separate kind argument.
+# The channel: a bare `X.Y.Z` is a release; anything else, a git revision included, is a pre-release.
 release-kind $version:
     #!/usr/bin/env bash
     set -euo pipefail
