@@ -10,6 +10,10 @@ binary for **Linux x86_64, macOS on Apple silicon, and Windows x86_64**. On any 
 install the [command-line binary](#command-line) and set `ry.path` to it, or put `ry` on your
 `PATH`.
 
+On Linux, build ry from source for now and set `ry.path` to it. The Linux extension up to 0.3.1
+bundles a binary that starts only under Nix, as [Command line](#command-line) explains, and the
+extension prefers its bundled binary to `ry` on your `PATH`.
+
 Positron and VSCodium install extensions from Open VSX, where ry is not published (an unrelated
 extension there is also called "ry"). Download the `.vsix` for your platform from
 [Releases](https://github.com/felix-andreas/ry/releases) and run **Extensions: Install from VSIX...**
@@ -37,13 +41,19 @@ rename, so the download fails.
 platform, named after its Rust target, and holding a single `ry` binary:
 `ry-x86_64-unknown-linux-gnu.tar.gz`, `ry-aarch64-apple-darwin.tar.gz`, and
 `ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL, because every release since 0.1.1 is marked
-a pre-release, so GitHub's `releases/latest` still points at 0.1.1:
+a pre-release, so GitHub's `releases/latest` still points at 0.1.1. On a Mac:
 
 ```bash
-curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.3.1-beta/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.3.1-beta/ry-aarch64-apple-darwin.tar.gz | tar xz
 sudo mv ry /usr/local/bin/
 ry --version
 ```
+
+On Linux, build from source until a newer release is out. The Linux binary in 0.3.1-beta and
+earlier loads its C library from the Nix store, so outside Nix it fails with
+`cannot execute: required file not found`. Later releases link it against glibc 2.17, so it runs on
+any x86_64 distribution with that version or newer, except NixOS (use the flake below) and
+musl-based distributions such as Alpine (build from source).
 
 **From source**, if you have a [Rust toolchain](https://www.rust-lang.org/tools/install):
 
@@ -53,6 +63,15 @@ cargo install --git https://github.com/felix-andreas/ry ry-lang
 
 The crate is `ry-lang`, and the command it installs is `ry`. This also works on platforms without a
 prebuilt binary.
+
+**With Nix**, install the flake's default package, which is built against nixpkgs and is the way to
+install ry on NixOS:
+
+```bash
+nix profile install github:felix-andreas/ry
+```
+
+Newer Nix versions call the command `nix profile add`, and `install` still works there.
 
 ## RStudio
 

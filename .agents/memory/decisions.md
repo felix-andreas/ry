@@ -1524,3 +1524,50 @@ only its readers, and an inserted statement re-checks only the reads it intercep
 1,270 to 1,314 bytes per line, and cold time is unchanged. One gap remains: a salsa-level cycle
 through statement items, which `interface_sccs` does not model, re-iterates on every structural
 edit. `backlog.md` tracks it.
+
+# Decision record: the Linux release binary links glibc 2.17 through zig
+
+**Status:** decided and implemented. The user directed one release build per platform, plus a
+native package for Nix users.
+
+**Problem.** The Linux release package was crane's native build against nixpkgs' glibc, so the
+shipped binary's ELF interpreter and RUNPATH were `/nix/store/...` paths. It started only on a
+machine whose store held that exact glibc.
+
+**Shape.** Two Linux derivations, one job each:
+
+- `ry-linux-x86_64`, symmetric with `ry-macos-aarch64` and `ry-windows-x86_64`, is cross-linked by
+  zig through cargo-zigbuild for `x86_64-unknown-linux-gnu.2.17`. It uses the standard loader
+  `/lib64/ld-linux-x86-64.so.2`, needs only `libc`, `libm`, `libpthread`, and `libdl`, and uses no
+  symbol newer than `GLIBC_2.17`, so it runs on every glibc distribution since 2.17 and can `dlopen`
+  R for the console.
+- `default` is the native crane build against nixpkgs, for NixOS and flake users. Its console loads
+  nixpkgs' R.
+
+Every release derivation sets `allowedReferences = [ ]`, so an interpreter, a RUNPATH, or any other
+store path in a release binary fails the build. The allocator is glibc's own, and the release
+binary measured within noise of the native build (0.95 to 1.08 times its time on `ry check` over
+rlang, ggplot2, dplyr, and testthat, and on `fmt --check`).
+
+**Trap: release derivations cannot run their tests.** A release binary uses the FHS loader, which
+the Nix build sandbox lacks, so a test binary linked the same way cannot start there. The native
+package carries the test suite, and the release configuration is exercised outside Nix with
+`cargo-zigbuild test --target x86_64-unknown-linux-gnu.2.17`.
+
+**Rejected: a static musl binary.** It runs everywhere, NixOS and Alpine included, but a static
+binary cannot `dlopen`, so it would lose `ry repl` and `ry run`; keeping the console in the release
+binary decided it. Measurements for whoever revisits this: musl's own `malloc` made `ry check` 2 to
+5 times slower; zig's libc, whose `malloc` is zig's `SmpAllocator`, restored glibc's speed with 13 to
+23% more peak memory; jemalloc was 10 to 32% faster than glibc but compiles C through `configure` and
+`make`; and mimalloc was 24 to 25% slower than glibc on the largest packages.
+
+**Also rejected.** Static glibc, because its `dlopen` runs libR against a second, uninitialized libc
+("Error parsing /proc/self/maps", "R home directory is not defined"). And a glibc download beside a
+musl download, the shape uv and ruff use, because the directive is one release build per platform.
+
+**Accepted cost.** The release binary does not run on musl distributions such as Alpine, or on
+NixOS without nix-ld. NixOS users install the flake's `default`, and Alpine users build from source.
+
+**Field practice.** rust-analyzer's main Linux binary targets glibc 2.28. uv and ruff default to
+glibc builds (2.17 and 2.31) and fall back to static musl only where glibc is missing or too old.
+rustc's Linux toolchain targets glibc 2.17.

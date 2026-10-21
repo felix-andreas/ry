@@ -14,6 +14,8 @@ you already have, with nothing to annotate or configure first.
 - **Command line:** download
   [0.3.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.1-beta), or build it with
   `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
+- **Linux:** the 0.3.1-beta binary, also the one the extension bundles, starts only under Nix, so
+  build from source and point the extension's `ry.path` setting at it.
 - **Zed, RStudio, other platforms:** see [installation](/installation).
 
 ## Run it
