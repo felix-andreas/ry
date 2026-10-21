@@ -68,13 +68,10 @@
             root = unfilteredRoot;
             fileset = pkgs.lib.fileset.unions [
               (craneLib.fileset.commonCargoSources unfilteredRoot)
-              # Non-Rust files pulled in by `include_str!` / tests that
-              # `commonCargoSources` filters out and must be added explicitly.
+              # Non-Rust files read by `include_str!` and tests, which `commonCargoSources` drops.
               ./types
               ./crates/format/tests/format
               ./crates/ry/ry.exe.manifest
-              # The release-metadata test reads the VS Code manifest to check it
-              # carries the workspace version.
               ./editors/code/package.json
             ];
           };
@@ -90,13 +87,8 @@
             CARGO_BUILD_TARGET = "x86_64-unknown-linux-gnu";
           };
 
-          # The dep-only builds compile dependencies against a dummified copy
-          # of the workspace: every local .rs file is replaced by an empty
-          # stub so the dependency cache survives source edits. The
-          # [patch.crates-io] crate in patches/ must keep its REAL sources in
-          # that dummy copy — chrono compiles against it — so it is restored
-          # verbatim. Interpolating only ./patches keeps the dummy source
-          # independent of the rest of the tree, preserving the cache.
+          # The dep-only build stubs out every local .rs file, but chrono compiles against the
+          # patched crate's real sources; interpolating only ./patches keeps the cache stable.
           keepPatchesInDummySrc = ''
             rm -rf "$out"/patches
             cp -r --no-preserve=mode ${./patches} "$out"/patches
@@ -112,20 +104,15 @@
             commonArgsLinux
             // {
               cargoArtifacts = cargoArtifactsLinux;
-              # The LSP tests exercise stub materialization, which writes to
-              # the user cache directory — the sandbox's HOME is not
-              # writable, so give it a real one.
+              # Stub materialization writes to the user cache; the sandbox's HOME is read-only.
               preCheck = ''
                 export XDG_CACHE_HOME="$TMPDIR/.cache"
               '';
             }
           );
 
-          # The macOS binaries cross-link with zig, which bundles link stubs
-          # for libSystem only — no Apple frameworks. The dependency graph is
-          # kept framework-free on purpose (see patches/iana-time-zone and the
-          # preflight in the justfile's release recipe), so no macOS SDK is
-          # needed here.
+          # zig bundles libSystem stubs only; the graph stays framework-free (see
+          # patches/iana-time-zone), so no macOS SDK is needed.
           makeCrossArgs =
             target:
             commonArgs
@@ -141,13 +128,9 @@
                 ''
                   export XDG_CACHE_HOME="$TMPDIR/.cache"
                 ''
-                # The winapi crate (pulled in through reedline → crossterm)
-                # links the Windows "synchronization" API-set import library
-                # (the WaitOnAddress family). cargo-zigbuild disables winapi's
-                # bundled import libraries (they are incompatible with zig's
-                # lld), and zig's bundled mingw-w64 ships no synchronization
-                # import library either — so synthesize one and put it on the
-                # library search path.
+                # winapi (via reedline and crossterm) links the "synchronization" import library;
+                # cargo-zigbuild disables winapi's bundled ones and zig's mingw-w64 lacks it,
+                # so synthesize one.
                 + pkgs.lib.optionalString (target == "x86_64-pc-windows-gnu") ''
                   synchronization_lib_dir="$TMPDIR/synchronization-lib"
                   mkdir -p "$synchronization_lib_dir"
@@ -206,27 +189,21 @@
           pkgs.devshell.mkShell {
             motd = "";
             packages = with pkgs; [
-              # development environment
               just
               evcxr
               (radianWrapper.override {
                 packages = (self.lib.rpkgs pkgs);
                 wrapR = true;
               })
-              # build tools
               (self.lib.rustToolchain pkgs)
               gnumake
               cargo-edit
               cargo-insta
               cargo-nextest
-              # cross compilation
               cargo-zigbuild
               zig
-              # libs
               tree-sitter
-              # website
               bun
-              # for releasing
               zip
             ];
           };

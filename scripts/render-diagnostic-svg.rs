@@ -3,26 +3,9 @@
 [package]
 edition = "2024"
 ---
-//! Renders a real `ry check` run to a theme-aware SVG for the README.
-//!
-//! GitHub strips ANSI escapes from fenced code blocks, so the only way to show
-//! the diagnostics in the colours a terminal shows them is an image. GitHub does
-//! honour a `<style>` block *inside* an embedded SVG, including
-//! `prefers-color-scheme`, so one file serves both the light and the dark theme.
-//!
-//! The point of generating rather than hand-drawing it: the picture is produced
-//! by running the tool, so it cannot drift from what the tool actually prints.
-//! Re-run this whenever diagnostic rendering changes.
-//!
-//! Usage: `scripts/render-diagnostic-svg.rs <fixture.R> <out.svg>`
-//! The fixture's directory needs a `ry.toml`; the binary must be built first.
-//!
-//! The README's image is `.github/diagnostic.svg`, rendered from a file
-//! named `setup.R` holding exactly the snippet the README shows above it,
-//! beside a `ry.toml` (an empty one is enough). Keep the two in step: the
-//! picture is the one thing in that document that cannot be verified by
-//! reading it, so a stale render is invisible until someone notices the
-//! wording no longer matches the tool.
+//! Renders `ry check` on the README's snippet (as `setup.R` beside a `ry.toml`) to
+//! `.github/diagnostic.svg`: GitHub strips ANSI from code blocks but honors
+//! `prefers-color-scheme` inside an SVG. Re-run after any change to diagnostic rendering.
 
 use std::fmt::Write as _;
 use std::process::Command;
@@ -34,8 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     };
 
-    // `script` gives the child a pty, which is what makes the tool colour its
-    // output — piping it would produce plain text, exactly as it should.
+    // `script` gives the child a pty; piped output is plain text.
     let rendered = Command::new("script")
         .args(["-qec", &format!("ry check {fixture}"), "/dev/null"])
         .output()?;
@@ -49,25 +31,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// One SVG holding the rendered lines, styled for both GitHub themes.
 fn svg(text: &str) -> String {
     let lines: Vec<Vec<Span>> = text
         .lines()
         .map(parse_ansi)
         .filter(|spans| !spans.is_empty())
         .filter(|spans| {
-            // The trailing "N problems in M files" run summary is terminal
-            // chrome, not the diagnostic — the image shows only the finding.
-            // The locus line stays: it opens the snippet frame the gutter
-            // hangs from, so dropping it would leave the snippet headless.
+            // Drops the "N problems in M files" summary; the locus line stays because
+            // it opens the snippet frame the gutter hangs from.
             let plain: String = spans.iter().map(|span| span.text.as_str()).collect();
             let plain = plain.trim();
             !(plain.starts_with(|c: char| c.is_ascii_digit()) && plain.contains(" problem"))
         })
         .collect();
 
-    // A monospace advance of 0.6em is the usual approximation and only decides
-    // the viewport, which is padded anyway.
+    // A 0.6em monospace advance only sizes the padded viewport.
     let columns = lines
         .iter()
         .map(|spans| spans.iter().map(|span| span.text.chars().count()).sum())
@@ -75,8 +53,7 @@ fn svg(text: &str) -> String {
         .unwrap_or(0);
     let width = (columns as f32 * 8.4).max(360.0) + 40.0;
     let height = lines.len() as f32 * 22.0 + 30.0;
-    // The description is what a screen reader announces and what search
-    // indexes, so it carries the diagnostic as plain text — escapes stripped.
+    // Screen readers and search read the description, so it carries the plain text.
     let plain: String = lines
         .iter()
         .map(|spans| {
@@ -156,14 +133,8 @@ struct Span {
     underline: bool,
 }
 
-/// Splits one line into coloured spans.
-///
-/// One escape carries several parameters — `\e[36;1;4m` is cyan, bold and
-/// underlined at once — so each is applied in turn rather than matched as a
-/// whole. Handling only the single-parameter forms left every compound one
-/// falling through to the default colour, which is a monochrome picture that
-/// still looks plausible: the reason the render is worth an eye after every
-/// change to the reporter's palette.
+/// One escape carries several parameters (`\e[36;1;4m` is cyan, bold and underlined),
+/// so each applies in turn; missing one renders a plausible-looking monochrome picture.
 fn parse_ansi(line: &str) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
     let (mut class, mut bold, mut underline) = ("fg", false, false);

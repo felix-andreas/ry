@@ -4,9 +4,8 @@
 edition = "2024"
 ---
 
-//! Seeds the coverage-guided fuzz corpora from the fixture suites: every
-//! fixture case source plus the shipped stubs, one file per case. Run
-//! `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs` before `cargo fuzz run`.
+//! Seeds the fuzz corpora with every fixture case source and shipped stub.
+//! Run `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs` before `cargo fuzz run`.
 
 use std::error::Error;
 use std::fs;

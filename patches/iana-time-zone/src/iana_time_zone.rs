@@ -1,20 +1,6 @@
-//! Workspace stub replacing the real `iana-time-zone` crate via
-//! `[patch.crates-io]`.
-//!
-//! The real crate links Apple's CoreFoundation framework on macOS, and the
-//! release pipeline cross-links the macOS binaries with zig on Linux, where
-//! only libSystem stubs exist — any `-framework` argument fails the link.
-//! The sole consumer in the product is chrono (pulled in by reedline, whose
-//! only local-time user is a default prompt clock the REPL does not use),
-//! and chrono consults this crate only as a *fallback* after its primary
-//! timezone sources (the `TZ` variable, `/etc/localtime`) and before its
-//! final UTC default. Always answering "unknown" here keeps chrono on those
-//! primary sources and keeps the shipping binary free of Apple frameworks.
-//!
-//! The stub must stay version- and feature-compatible with what chrono
-//! requests, or cargo silently falls back to the real crate: the release
-//! preflight in the justfile catches that by failing on any
-//! framework-linking crate in the macOS graph.
+//! The real crate links CoreFoundation, which zig cannot cross-link for macOS. chrono only
+//! falls back to it after `TZ` and `/etc/localtime`, so answering "unknown" is safe. Stay
+//! version- and feature-compatible with chrono's request, or cargo silently uses the real crate.
 
 use std::error::Error;
 use std::fmt;

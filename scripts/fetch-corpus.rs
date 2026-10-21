@@ -4,20 +4,9 @@
 edition = "2024"
 ---
 
-//! Populate a gitignored corpus/ directory with real-world R sources used to
-//! exercise the hand-written parser (see crates/syntax/tests/test_corpus.rs) and
-//! to stage tree-sitter's own grammar tests (see scripts/convert-tsr-corpus.rs).
-//! Run with `cargo +nightly -Zscript scripts/fetch-corpus.rs`.
-//!
-//! Idempotent: each subtree is rebuilt from scratch on every run, so re-running
-//! converges to the same state. Downloaded tarballs are deleted after their R
-//! files are extracted (disk is limited). The resolved inventory is written to
-//! scripts/corpus-manifest.txt (committed).
-//!
-//! GitHub is not directly reachable here, so the tree-sitter-r corpus is fetched
-//! through jsDelivr. CRAN is reachable directly. Downloads and extraction shell
-//! out to the `curl` and `tar` binaries (both ship with Windows 10+ too), so the
-//! script needs no dependencies and honors the proxy environment.
+//! Rebuilds the gitignored corpus/ and scripts/corpus-manifest.txt; run with `cargo +nightly
+//! -Zscript scripts/fetch-corpus.rs`. tree-sitter-r comes through jsDelivr because GitHub may be
+//! unreachable; shelling out to `curl` and `tar` honors the proxy environment.
 
 use std::error::Error;
 use std::fs;
@@ -31,8 +20,6 @@ const TSR_REF: &str = "main";
 /// Minimum writable space (KiB) to keep before adding another CRAN package.
 const MIN_FREE_KB: u64 = 2_000_000;
 
-/// Ordered CRAN package list. Adjust names here if any 404; substitutions are
-/// recorded in the manifest by the fetch loop below.
 const CRAN_PACKAGES: &[&str] = &[
     "data.table", "dplyr", "ggplot2", "rlang", "purrr", "tibble", "stringr", "tidyr", "shiny",
     "jsonlite", "curl", "R6", "cli", "glue", "magrittr", "lubridate", "readr", "forcats",
@@ -69,9 +56,6 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     println!("==> corpus root: {}", corpus_dir.display());
 
-    // ----------------------------------------------------------------------
-    // 1. tree-sitter-r test corpus (via jsDelivr)
-    // ----------------------------------------------------------------------
     println!("==> [1/3] tree-sitter-r corpus (ref: {TSR_REF})");
     let tsr_dir = corpus_dir.join("tree-sitter-r");
     remove_dir_all_if_exists(&tsr_dir)?;
@@ -96,9 +80,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         tsr_files.push(base);
     }
 
-    // ----------------------------------------------------------------------
-    // 2. R base-library sources (newest R-4.x tarball)
-    // ----------------------------------------------------------------------
     println!("==> [2/3] R base library sources");
     let r_base_dir = corpus_dir.join("r-base");
     remove_dir_all_if_exists(&r_base_dir)?;
@@ -112,7 +93,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("    newest: {r_tarball}");
     let r_tar = work.join(&r_tarball);
     fetch_required(&format!("https://cran.r-project.org/src/base/R-4/{r_tarball}"), &r_tar)?;
-    // Extract only src/library/<lib>/R/<file>.R (one directory level, as documented).
     let members: Vec<String> = tar_list(&r_tar)?
         .into_iter()
         .filter(|member| r_base_member(member).is_some())
@@ -133,9 +113,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let r_base_files = count_files(&r_base_dir, |name| name.ends_with(".R"))?;
     println!("    extracted {r_base_files} R files across {r_base_libraries} libraries");
 
-    // ----------------------------------------------------------------------
-    // 3. CRAN package sources (current versions from PACKAGES)
-    // ----------------------------------------------------------------------
     println!("==> [3/3] CRAN package sources");
     let cran_dir = corpus_dir.join("cran");
     remove_dir_all_if_exists(&cran_dir)?;
@@ -194,9 +171,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         cran_results.push((package, version, "ok"));
     }
 
-    // ----------------------------------------------------------------------
-    // Manifest
-    // ----------------------------------------------------------------------
     let cran_ok = cran_results.iter().filter(|(_, _, status)| *status == "ok").count();
     let total_r_files =
         count_files(&r_base_dir, |_| true)? + count_files(&cran_dir, |_| true)?;
@@ -240,9 +214,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// `--retry` covers transient proxy/network hiccups; `--fail` turns HTTP errors
-/// into non-zero exits so a 404 is visible rather than silently written to disk.
-/// Returns whether curl succeeded; spawn failures (no curl at all) are errors.
+/// `--fail` turns HTTP errors into non-zero exits so a 404 is visible rather than
+/// silently written to disk.
 fn fetch(url: &str, output: &Path) -> Result<bool, Box<dyn Error>> {
     let status = Command::new("curl")
         .args(["-sS", "--fail", "--location", "--retry", "4", "--retry-delay", "2"])
@@ -297,8 +270,7 @@ fn tar_extract(
     Ok(())
 }
 
-/// Every string value of a `"name"` key, in document order (the jsDelivr flat
-/// listing carries file paths only under `"name"` keys).
+/// The jsDelivr flat listing carries file paths only under `"name"` keys.
 fn json_name_values(json: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let characters: Vec<char> = json.chars().collect();
     let mut names = Vec::new();
@@ -331,8 +303,7 @@ fn json_name_values(json: &str) -> Result<Vec<String>, Box<dyn Error>> {
     Ok(names)
 }
 
-/// Parse the JSON string whose opening quote is at `characters[start]`.
-/// Returns the decoded value and the index just past the closing quote.
+/// Returns the decoded string and the index just past its closing quote.
 fn parse_json_string(characters: &[char], start: usize) -> Result<(String, usize), Box<dyn Error>> {
     let mut value = String::new();
     let mut index = start + 1;
@@ -395,8 +366,6 @@ fn hex4(characters: &[char], start: usize) -> Result<u32, Box<dyn Error>> {
     Ok(code)
 }
 
-/// The newest `R-4.<minor>.<patch>.tar.gz` linked from the CRAN index page
-/// (the equivalent of `grep -oE 'R-4\.[0-9]+\.[0-9]+\.tar\.gz' | sort -uV | tail -1`).
 fn newest_r4_version(index_html: &str) -> Option<String> {
     let mut best: Option<(u64, u64)> = None;
     for (position, _) in index_html.match_indices("R-4.") {
@@ -460,8 +429,7 @@ fn is_cran_member(member: &str, package: &str) -> bool {
         && file.ends_with(['R', 'r', 'S', 's', 'Q', 'q'])
 }
 
-/// The `Version:` field of the first PACKAGES record whose `Package:` field is
-/// `package` (paragraph records separated by blank lines, like awk's `RS = ""`).
+/// PACKAGES records are paragraphs separated by blank lines.
 fn resolve_version(packages_index: &str, package: &str) -> Option<String> {
     let mut name = String::new();
     let mut version = String::new();
@@ -489,8 +457,7 @@ fn resolve_version(packages_index: &str, package: &str) -> Option<String> {
     None
 }
 
-/// Free space at `path` in KiB via `df -Pk`; `None` when that is unavailable
-/// (then the low-disk guard is skipped, as with the shell version's failed `df`).
+/// `None` when `df` is unavailable, which skips the low-disk guard.
 fn available_kb(path: &Path) -> Option<u64> {
     let output = Command::new("df").arg("-Pk").arg(path).output().ok()?;
     if !output.status.success() {
@@ -555,8 +522,7 @@ fn directory_size(root: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-/// Format bytes the way `du -h` does: 1024-based units, rounded up, one decimal
-/// below 10 (note: this sums apparent file sizes, not disk blocks).
+/// Formats like `du -h`, but from apparent file sizes rather than disk blocks.
 fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["K", "M", "G", "T", "P", "E"];
     if bytes < 1024 {
@@ -580,7 +546,6 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// UTC now as `%Y-%m-%dT%H:%M:%SZ`.
 fn utc_timestamp() -> Result<String, Box<dyn Error>> {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let (year, month, day) = civil_from_days((seconds / 86_400) as i64);
@@ -608,8 +573,6 @@ fn civil_from_days(days: i64) -> (i64, u64, u64) {
     (year + i64::from(month <= 2), month, day)
 }
 
-/// A scratch directory removed on drop (the equivalent of `mktemp -d` + a
-/// `trap 'rm -rf ...' EXIT`).
 struct WorkDir(PathBuf);
 
 impl WorkDir {

@@ -1,6 +1,3 @@
-//! Coverage-guided fuzzing of `format::format`: never panics, deterministic,
-//! and idempotent whenever it succeeds.
-
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

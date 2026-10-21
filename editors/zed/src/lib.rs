@@ -33,7 +33,6 @@ impl Extension {
     ) -> Result<Binary> {
         let mut args = None;
 
-        // 1. try get binary path or args from settings
         if let Some(settings) = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
             .ok()
             .and_then(|lsp_settings| lsp_settings.binary)
@@ -44,12 +43,10 @@ impl Extension {
             }
         }
 
-        // 2. try get from path
         if let Some(path) = worktree.which(NAME) {
             return Ok(Binary { path, args });
         }
 
-        // 3. try get from github
         if let Some(path) = &self.cached_binary_path
             && fs::metadata(path).is_ok_and(|stat| stat.is_file())
         {
@@ -119,7 +116,6 @@ impl Extension {
             )
             .map_err(|err| format!("failed to download file: {err}"))?;
 
-            // remove old versions
             let entries = fs::read_dir(".")
                 .map_err(|err| format!("failed to list working directory {err}"))?;
             for entry in entries {
