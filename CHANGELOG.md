@@ -44,4 +44,11 @@ This file starts from the type-checker work; earlier history lives in the git lo
   cancellation; per-edit output is verified byte-identical to a from-scratch rebuild.
 - The R grammar tracks the published `tree-sitter-r` 1.3.0.
 
+### Fixed
+
+- **The prebuilt Linux binary runs on any x86_64 distribution with glibc 2.17 or newer.** It used to
+  load its C library from a Nix store path, so it did not start outside Nix. It is now linked against
+  glibc 2.17 with the standard system loader. On NixOS, install the flake's default package
+  (`nix profile install github:felix-andreas/ry`), a native Nix build.
+
 [Unreleased]: https://github.com/felix-andreas/ry/compare/main...HEAD
