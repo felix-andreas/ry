@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "format"
-version = "0.3.1-beta"
+version = "0.3.2-beta"
 dependencies = [
  "regex",
  "serde",
@@ -771,7 +771,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "ide"
-version = "0.3.1-beta"
+version = "0.3.2-beta"
 dependencies = [
  "semantics",
  "syntax",
@@ -1308,7 +1308,7 @@ checksum = "caf4aa5b0f434c91fe5c7f1ecb6a5ece2130b02ad2a590589dda5146df959001"
 
 [[package]]
 name = "repl"
-version = "0.3.1-beta"
+version = "0.3.2-beta"
 dependencies = [
  "crossterm",
  "dirs",
@@ -1384,7 +1384,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ry-lang"
-version = "0.3.1-beta"
+version = "0.3.2-beta"
 dependencies = [
  "async-lsp",
  "clap",
@@ -1483,7 +1483,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "semantics"
-version = "0.3.1-beta"
+version = "0.3.2-beta"
 dependencies = [
  "rowan",
  "rustc-hash 2.1.3",
@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.3.1-beta"
+version = "0.3.2-beta"
 dependencies = [
  "rowan",
  "tree-sitter",
