@@ -1,17 +1,5 @@
-//! The expression inference walk: Hindley–Milner over one item's HIR.
-//!
-//! The environment is keyed by naming's variable slots and mirrors the mutable
-//! slot model: every write funnels through an undo log so branches roll back
-//! without cloning, and merge points join entries (equal keeps; different
-//! joins as a monotype union). Function-valued assignments generalize at the
-//! binding (level-gated so escaped variables stay monomorphic); reads
-//! instantiate schemes with fresh variables. Arithmetic rides the numeric
-//! constraint; comparisons and logic produce logicals; `if` joins branches by
-//! unify-else-union.
-//!
-//! This is the foundation walk: parameter-position coercions, overload sets,
-//! `#:` annotation enforcement, strict origins, and cross-item schemes layer
-//! on next — each a separate slice over this structure.
+//! Expression inference walk: Hindley–Milner over one item's HIR. Branches roll
+//! back through an undo log instead of cloning the environment.
 
 use crate::Db;
 use crate::hir::{
@@ -27,8 +15,6 @@ use crate::types::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
-/// A structured type finding; rendering to wording happens at the diagnostic
-/// edge.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct TypeError<'db> {
     pub range: TextRange,
@@ -41,112 +27,80 @@ pub enum TypeErrorKind<'db> {
         expected: Ty<'db>,
         found: Ty<'db>,
     },
-    /// Two record types that differ in one field. Its own variant rather than a
-    /// mismatch between the two whole types, because those print as long
-    /// near-identical strings the reader has to diff by eye — and a nested
-    /// difference is never attributed to a path at all.
+    /// Separate from `Mismatch` so the differing field is named instead of printing
+    /// two near-identical record types.
     RecordShape {
         mismatch: Box<RecordMismatch<'db>>,
     },
     NotAFunction {
         found: Ty<'db>,
     },
-    /// A read of a no-default formal on the branch where `missing(name)`
-    /// held — it would fail at run time.
+    /// A read of a no-default formal on the branch where `missing(name)` held.
     MissingFormalRead {
         name: String,
     },
-    /// The call's argument count cannot fill the function's formals (too many
-    /// positionals, or a required formal left unfilled).
     ArityMismatch {
         expected: usize,
         found: usize,
     },
-    /// A named argument matching no declared formal (or duplicating one
-    /// already given). Blamed on the offending name's own token and carrying
-    /// it, so the reader is never left diffing two comma-separated lists to
-    /// find which one the call got wrong.
     NamedArgumentMismatch {
         argument: String,
         duplicate: bool,
         suggestion: Option<String>,
         expected_parameters: Vec<String>,
     },
-    /// A callee that may be `NULL` — callable on every other path, so the
-    /// finding is the nullability rather than "not a function".
     MaybeNullCallee {
         found: Ty<'db>,
     },
-    /// `#: @if-unknown` on a value whose type the checker already knows.
     KnownTypeUnderIfUnknown {
         found: Ty<'db>,
     },
-    /// An annotation declares a parameter the definition has no formal for.
-    /// An annotation declares a parameter required while the function gives it
-    /// a default. R decides optionality, so the annotation is the thing that is
-    /// wrong — and reporting it here rather than at every caller is the
-    /// difference between "my annotation is wrong" and "this tool is broken".
+    /// R decides optionality, so a defaulted formal annotated as required is an
+    /// annotation error, reported once here rather than at every caller.
     AnnotationRequiredButDefaulted {
         name: String,
     },
     AnnotationParameterMismatch {
         name: String,
     },
-    /// A `NULL` default on a parameter whose declared type does not admit
-    /// `NULL`. Its own variant rather than a plain mismatch because it is the
-    /// usual R spelling of an optional argument and the remedy is specific.
     NullDefaultNotAdmitted {
         name: String,
         declared: Ty<'db>,
     },
-    /// An annotation mentions a type alias whose expansion re-enters itself.
     AliasCycle {
         name: String,
     },
-    /// A constraint (numeric, atomic) rejected the value.
     ConstraintViolation {
         constraint: Constraint,
         found: Ty<'db>,
     },
-    /// A function value does not fit an expected function type, and the reason
-    /// is one position in its signature. Its own variant rather than a mismatch
-    /// between the two whole signatures, because those say nothing about which
-    /// position failed — and a constraint does not survive into the rendered
-    /// type, so `fn(s: U) -> U` prints the same whether `U` accepts anything or
-    /// only numbers, which made the plain mismatch read as a call that should
-    /// have fit.
+    /// Separate from `Mismatch` because rendered types drop constraints, so two whole
+    /// signatures can print identically; this names the failing position.
     CallbackShape {
         mismatch: Box<FunctionMismatch<'db>>,
     },
-    /// No candidate of an overloaded stub name accepted the arguments; carries
-    /// the first candidate's failure for a concrete lead.
     NoMatchingOverload {
         name: String,
         candidates: usize,
         first: Option<Box<TypeError<'db>>>,
     },
-    /// `[[` on a value that supports no element extraction.
     NotAList {
         found: Ty<'db>,
     },
-    /// `[` on a value the slice rules do not cover.
     BadVectorIndex {
         index: Ty<'db>,
     },
     UnsupportedSubset {
         found: Ty<'db>,
     },
-    /// Multi-index, empty, or named-index forms (`m[i, j]`) are not modeled.
     UnsupportedIndexShape {
         index_count: usize,
     },
-    /// A literal `[[` position outside a fixed-shape container (1-based).
+    /// `position` is 1-based.
     PositionDoesNotExist {
         position: usize,
         container: Ty<'db>,
     },
-    /// A literal field name absent from a fixed-shape container. The
-    /// candidate set is small and closed, so a near-miss is a certain hint.
     FieldDoesNotExist {
         suggestion: Option<String>,
         field: String,
@@ -156,31 +110,25 @@ pub enum TypeErrorKind<'db> {
     DollarOnAtomicVector {
         found: Ty<'db>,
     },
-    /// An operator operand outside the operator's accepted family.
     InvalidOperand {
         expected: OperandExpectation,
         found: Ty<'db>,
     },
-    /// An operator applied to a class that declares that operator, but to no
-    /// combination of operand types the class accepts (`Date + Date`).
+    /// The class declares the operator, but not for this operand pair (`Date + Date`).
     UnsupportedOperandPair {
         operator: &'static str,
         left: Ty<'db>,
         right: Ty<'db>,
     },
-    /// A `for` sequence that is neither a vector nor a list shape.
     NotIterable {
         found: Ty<'db>,
     },
-    /// The occurs check refused a binding: the variable appears inside the
-    /// type it would be bound to.
     InfiniteType {
         variable: Ty<'db>,
         container: Ty<'db>,
     },
 }
 
-/// What an operator position accepts, for error wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum OperandExpectation {
     Numeric,
@@ -189,44 +137,25 @@ pub enum OperandExpectation {
     Comparable,
 }
 
-/// The result of checking one item.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemCheck<'db> {
-    /// Per-expression resolved types (post-substitution).
     pub expression_types: FxHashMap<ExprId, Ty<'db>>,
     pub errors: Vec<TypeError<'db>>,
-    /// Places the checker genuinely could not determine a type — the strict
-    /// check's input. Inference is untouched; these only become diagnostics
-    /// under `[check] strict` or the per-file directive.
     pub strict_origins: Vec<StrictOrigin>,
-    /// The generalized scheme of the item's top-level binding value, when the
-    /// item is a definition.
     pub scheme: Option<TypeScheme<'db>>,
-    /// The committed candidate of each call whose callee resolved through a
-    /// stub overload set, keyed by the callee expression, as an index into
-    /// the declared set. Absent when no candidate matched. Signature help
-    /// lists the whole declared set with the committed candidate active.
+    /// Index into the declared overload set; absent when no candidate matched.
     pub selected_overloads: FxHashMap<ExprId, usize>,
-    /// Reads inside the index arguments of a bracket whose subject is a
-    /// declared `data.table`: the bracket evaluates them inside the data's
-    /// own frame, where a bare name is a column reference no lexical scope
-    /// can see — the unresolved-name warning skips these expressions.
+    /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
+    /// data's own frame, so bare names are columns and skip the unresolved-name check.
     pub masked_reads: rustc_hash::FxHashSet<ExprId>,
-    /// The settled scheme of every name the item's TOP-LEVEL frame binds
-    /// (variable-erased like the export). For a statement item this is how a
-    /// conditional write (`for (i in 1:3) total <- i`) serves cross-item
-    /// reads of the document slot it creates; a definition item's own name
-    /// keeps resolving through `scheme`. A failed item exports `Unknown`
-    /// here too.
+    /// Settled scheme of every name the top-level frame binds, so a statement item's
+    /// conditional write serves cross-item reads; a definition resolves via `scheme`.
     pub top_level_bindings: Vec<(String, TypeScheme<'db>)>,
 }
 
-/// One `Unknown` origin: where an undetermined type was first introduced
-/// (propagation is never re-reported).
+/// Where an undetermined type was first introduced; propagation is never re-reported.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct StrictOrigin {
-    /// The originating expression (for assignment-value phrasing) and its
-    /// item-relative range.
     pub expression: ExprId,
     pub range: TextRange,
     pub kind: StrictOriginKind,
@@ -234,65 +163,39 @@ pub struct StrictOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub enum StrictOriginKind {
-    /// A syntactically valid construct the checker does not model.
     UnsupportedConstruct,
-    /// A reference that resolved to a binding with no known type.
     UndeterminedReference(String),
-    /// A variable widened to `Unknown` at the loop fixed-point cap.
     LoopWidened(String),
-    /// A recursive definition whose exported scheme still carries `Unknown`
-    /// although its body checked clean: the reference cycle itself is the
-    /// only possible source, so the binding is attributed as a whole.
+    /// A recursive definition that checked clean yet exports `Unknown`: the reference
+    /// cycle is the only possible source.
     RecursiveUnknown(String),
 }
 
-/// Resolver for names that are not item-local: package globals and the stdlib
-/// stub corpus.
-///
-/// **No method has a default body, deliberately.** Every implementor answers
-/// every question, so adding a fact here is a compile error at each one rather
-/// than a silent fallback. A defaulted `arithmetic_classes` was exactly that
-/// silent fallback: the cyclic group's view inherited an empty set, so a
-/// recursive function doing `Date + 1` failed the numeric constraint and
-/// exported `Unknown` while its non-recursive twin typed fine.
+/// No method has a default body: adding a fact must be a compile error at every
+/// implementor rather than a silent fallback.
 pub trait GlobalEnv<'db> {
-    /// The scheme a read of `name` sees. `deferred` marks a read from inside
-    /// a nested function: the closure runs after its document frame settled,
-    /// so in sequential documents the LAST binding of the name wins there,
-    /// while an immediate read sees only bindings earlier than itself.
+    /// `deferred`: a read inside a nested function runs after the document frame
+    /// settled, so the LAST binding wins; an immediate read sees only earlier ones.
     fn scheme(&self, name: &str, deferred: bool) -> Option<TypeScheme<'db>>;
 
-    /// The full ordered overload-candidate set of a name, `None` when the name
-    /// has at most one candidate or a package/local definition wins over the
-    /// stub set. `deferred` as in [`GlobalEnv::scheme`].
+    /// `None` when the name has at most one candidate or a package/local definition
+    /// shadows the stub set.
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<TypeScheme<'db>>>;
 
-    /// Whether the name is defined by an item of THIS project (a script
-    /// statement, a package definition) rather than by a stub or an import.
-    /// A project definition has its own attributable site, so a reference to
-    /// it propagates an `Unknown` instead of re-originating one.
+    /// A project definition has its own attributable site, so a reference propagates
+    /// its `Unknown` instead of re-originating one.
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool;
 
-    /// What a top-level name already holds before this item writes it: an
-    /// earlier writer in the item's own file, or the package's unconditional
-    /// definition. Never a stub, and never the project-wide conditional slot,
-    /// whose join includes this item's own write.
+    /// Never a stub, and never the project-wide conditional slot, whose join includes
+    /// this item's own write.
     fn earlier_binding(&self, name: &str) -> Option<TypeScheme<'db>>;
 
-    /// The `@type` / `@alias` definitions visible to the item being checked.
-    ///
-    /// **Borrowed, and both of these are per-FILE facts.** A check consults them
-    /// once per item, so handing back an owned copy made every item in a project
-    /// pay for the whole project's table: at 2,000 items, typecheck rose from
-    /// 18 ms to 100 ms purely as the declaration count went 0 to 2,400. Neither
-    /// is ever mutated by a caller — both are pure lookups.
+    /// Borrowed: per-file facts consulted once per item; an owned copy would make every
+    /// item pay for the whole table.
     fn type_definitions(
         &self,
     ) -> &'db FxHashMap<Name<'db>, crate::annotations::NamedDefinition<'db>>;
 
-    /// Classes reachable here that declare an arithmetic operator method,
-    /// standard library and project sources alike — the same scope operator
-    /// dispatch resolves a method through.
     fn arithmetic_classes(&self) -> &'db rustc_hash::FxHashSet<String>;
 }
 
@@ -300,8 +203,7 @@ pub fn check_item<'db>(db: &'db dyn Db, module: &Module, naming: &ItemNaming) ->
     check_item_with_annotation(db, module, naming, None, &[], None)
 }
 
-/// Full-check executions since process start — a plain instrument for perf
-/// witnesses (fixpoint re-runs make executions exceed item counts).
+/// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
 pub static CHECK_EXECUTIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -350,9 +252,6 @@ pub fn check_item_with_annotation<'db>(
             .max()
             .unwrap_or(0),
     };
-    // An annotation whose type mentions a cyclically expanding alias is
-    // unusable: report once at the annotated statement and fall back to plain
-    // inference.
     let mut annotation = annotation;
     if let Some(root) = module.root
         && let Some(present) = annotation
@@ -379,10 +278,8 @@ pub fn check_item_with_annotation<'db>(
         }
     }
     let mut scheme = None;
-    // Whether `scheme` is the user's DECLARED contract rather than an inferred
-    // one. A declaration stays trustworthy even when the body fails to honour
-    // it — it is what the author said the function is — so it survives the
-    // failure cut below and every call site keeps being checked.
+    // A declared scheme survives a failing body: it is the author's contract, so call
+    // sites keep being checked.
     let mut scheme_is_declared = false;
     if let Some(root) = module.root {
         let declared_fn = annotation.filter(|a| !a.trusted).and_then(|a| {
@@ -393,10 +290,6 @@ pub fn check_item_with_annotation<'db>(
             }
         });
         match (&module.expression(root).kind, declared_fn) {
-            // A declared function annotation on a function definition: check
-            // the body under the declared parameter types (rigid — they
-            // refuse to bind), and check the result against the declared
-            // return. The declared scheme wins as the export.
             (ExpressionKind::Assign { value, .. }, Some((declared, function)))
                 if matches!(
                     module.expression(*value).kind,
@@ -406,11 +299,8 @@ pub fn check_item_with_annotation<'db>(
                 for (name, constraint) in &declared.binders {
                     context.table.rigid_constraints.insert(*name, *constraint);
                 }
-                // The exported scheme is the reconciled signature, not the
-                // annotation as written: R matches arguments against the
-                // definition's formals, so a shape the annotation got wrong is
-                // reported once at the definition instead of turning every
-                // correct call into a finding.
+                // Export the reconciled signature, not the annotation as written: R matches
+                // arguments against the definition's formals, so annotation mistakes report once.
                 let declared = TypeScheme {
                     binders: declared.binders,
                     body: context.check_declared_function(*value, &function),
@@ -431,22 +321,6 @@ pub fn check_item_with_annotation<'db>(
                     Some(context.check_new_nominal(new_name, &new_arguments, *value, value_ty))
                 } else {
                     match annotation.and_then(|a| a.declared.clone()) {
-                        // A declared non-function type (or a trusted one):
-                        // the declaration is the contract, and the value must
-                        // satisfy it under the directional compatibility
-                        // relation — the value flows into the declared type,
-                        // exactly like an argument into a parameter, so
-                        // member-into-union, scalar-into-vector, and
-                        // nominal-representation projection all apply. A
-                        // declared NOMINAL is deliberately still strict the
-                        // other way: `#: Point` on a structural value errors —
-                        // `@new` is the only nominal introduction. Unknown and
-                        // Any declarations are tolerance floors with nothing
-                        // to check.
-                        // An unknown-only coercion applies exactly where the
-                        // checker has nothing and reports where it has
-                        // something: see the expression-level path for why the
-                        // refusal is the point.
                         Some(declared) if annotation.is_some_and(|a| a.if_unknown) => {
                             let resolved_value = context.table.resolve(db, value_ty);
                             if matches!(resolved_value.kind(db), TyKind::Unknown) {
@@ -461,6 +335,9 @@ pub fn check_item_with_annotation<'db>(
                                 Some(context.generalize(value_ty))
                             }
                         }
+                        // The value flows into the declaration like an argument into a parameter, but a
+                        // declared nominal still rejects a structural value (`@new` is the only nominal
+                        // introduction).
                         Some(declared) => {
                             for (name, constraint) in &declared.binders {
                                 context.table.rigid_constraints.insert(*name, *constraint);
@@ -489,10 +366,6 @@ pub fn check_item_with_annotation<'db>(
                 };
             }
             _ => {
-                // A checked, trusted, or `@new` annotation on a bare
-                // expression statement applies through the same
-                // expression-level path as nested statements; the item still
-                // exports nothing.
                 if let Some(present) = annotation {
                     context.expression_annotations.insert(root, present.clone());
                 }
@@ -505,28 +378,18 @@ pub fn check_item_with_annotation<'db>(
         .iter()
         .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
         .collect();
-    // A failed item exports `Unknown`: a type error means the inferred shape
-    // is not trustworthy, so downstream items must not check against it (they
-    // would cascade). Inference still runs to completion internally —
-    // expression types stay available for IDE surfaces — only the export is
-    // cut. Every error *inside* the item is still reported: a failing
-    // expression records `Unknown`, which is compatible with everything, so
-    // later checks read a poisoned value as an absent fact rather than
-    // cascading off it.
+    // A failed item exports `Unknown` so downstream items do not cascade off an
+    // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
+    // the item read them as absent facts rather than cascading.
     let mut errors = context.errors;
     let scheme = if errors.is_empty() || scheme_is_declared {
-        // Inference variables are table-scoped: a scheme crossing the item
-        // boundary must never carry one (a foreign table cannot resolve it).
-        // At the export edge a residual variable CARRYING A CONSTRAINT
-        // generalizes into a binder — `mixed_apply <- invoke(mirror)` keeps
-        // its `<T: numeric>` so cross-item calls still check — while an
-        // unconstrained one (no information) erases to `Unknown`.
+        // Inference variables are table-scoped: a scheme crossing the item boundary must
+        // never carry one.
         scheme.map(|scheme| close_scheme(db, &mut context.table, scheme))
     } else {
         scheme.map(|_| TypeScheme::monomorphic(unknown(db)))
     };
-    // Speculative paths (overload probing, guard edges) can record the same
-    // failure twice; the report is one finding per site and kind.
+    // Speculative paths (overload probing, guard edges) can record the same failure twice.
     errors.sort_by_key(|error| (error.range.start(), error.range.end()));
     errors.dedup();
     let mut top_level_bindings = Vec::new();
@@ -559,17 +422,9 @@ pub fn check_item_with_annotation<'db>(
     }
 }
 
-/// Closes a scheme at the export edge: bound variables substitute, unbound
-/// CONSTRAINED variables generalize into fresh binders (the constraint is
-/// real information a reader must honor), and unbound unconstrained ones
-/// erase to `Unknown` via [`erase_residual_vars`]. The synthetic binder
-/// names never display — the renderer canonicalizes rigid names to
-/// `T`/`U`/`V` by first occurrence.
-///
-/// This is the only edge a scheme crosses on its way out of the item, so it is
-/// where the table-scoped-variable invariant is asserted: an id that reaches a
-/// reader's table either dangles (an index past the end) or names an unrelated
-/// variable of the reader's own, and the second failure is silent.
+/// Unbound constrained variables generalize into fresh binders; unconstrained ones
+/// erase to `Unknown`. The only exit edge for a scheme, so it asserts the invariant
+/// that no table-scoped variable leaks (a leaked id silently names a foreign variable).
 fn close_scheme<'db>(
     db: &'db dyn Db,
     table: &mut InferenceTable<'db>,
@@ -593,18 +448,14 @@ fn close_scheme<'db>(
     }
 }
 
-/// Accumulates export-edge generalization state for [`close_scheme`].
 struct ResidualCloser<'db> {
     binders: Vec<(Name<'db>, Constraint)>,
     generalized: FxHashMap<crate::types::InferenceVar, Ty<'db>>,
-    /// Variables some function parameter in the scheme abstracts: only these
-    /// generalize. A constrained variable no parameter reaches is a value of
-    /// one fixed type nobody chooses, so it takes the constraint's default.
+    /// Only variables some parameter abstracts generalize; any other constrained
+    /// variable is one fixed type nobody chooses, so it takes the constraint's default.
     abstracted: FxHashSet<crate::types::InferenceVar>,
 }
 
-/// The unbound variables that occur in a parameter position of any function
-/// type inside `ty`.
 fn collect_parameter_vars<'db>(
     db: &'db dyn Db,
     table: &InferenceTable<'db>,
@@ -635,12 +486,8 @@ fn collect_parameter_vars<'db>(
     });
 }
 
-/// Substitutes every bound inference variable and replaces every still-unbound
-/// one with `Unknown` (or, with a closer, generalizes constrained ones — see
-/// [`close_scheme`]). Follows variable bindings only — named types stay
-/// unexpanded (an exported `UserId` must display as `UserId`, not its alias
-/// body). The depth cap guards against variable-linked structures nesting
-/// past reason; a closed scheme is required, so past it the type erases.
+/// Follows variable bindings only: named types stay unexpanded so an exported alias
+/// displays by name.
 fn erase_residual_vars_at<'db>(
     db: &'db dyn Db,
     table: &mut InferenceTable<'db>,
@@ -694,7 +541,6 @@ fn erase_residual_vars_at<'db>(
     rigid
 }
 
-/// The slot environment: an undo-logged map from binding slots to types.
 #[derive(Debug, Default)]
 struct Environment<'db> {
     entries: FxHashMap<BindingId, EnvEntry<'db>>,
@@ -703,15 +549,11 @@ struct Environment<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvEntry<'db> {
-    /// A monotype slot value.
     Mono(Ty<'db>),
-    /// A generalized (let-bound function) scheme, stored by index to keep the
-    /// entry `Copy`; schemes live in the checker's arena.
+    /// Index into `scheme_arena`, keeping the entry `Copy`.
     Scheme(u32),
-    /// A no-default formal on the branch where `missing(name)` held: reading
-    /// it would fail at run time ("argument is missing, with no default"), so
-    /// a read errors. Carries the supplied-state type; any write returns the
-    /// slot to an ordinary entry.
+    /// A no-default formal where `missing(name)` held, so a read errors. Carries the
+    /// supplied-state type; any write restores an ordinary entry.
     MissingFormal(Ty<'db>),
 }
 
@@ -743,7 +585,6 @@ impl<'db> Environment<'db> {
         }
     }
 
-    /// The entries written since `mark`, deduplicated to their latest value.
     fn writes_since(&self, mark: usize) -> Vec<(BindingId, Option<EnvEntry<'db>>)> {
         let mut seen = std::collections::BTreeSet::new();
         let mut writes = Vec::new();
@@ -762,16 +603,10 @@ struct Checker<'db, 'a> {
     naming: &'a ItemNaming,
     globals: Option<&'a dyn GlobalEnv<'db>>,
     table: InferenceTable<'db>,
-    /// The inference level of the frame whose slots assignments write: the
-    /// item's top level, or the body of the function being checked. A
-    /// binding's right-hand side infers one level deeper so a function value
-    /// generalizes at its binding; a value stored as a monotype is lowered
-    /// back to this level, or a later generalization in the same frame would
-    /// quantify a variable the environment still holds.
+    /// A binding's right-hand side infers one level deeper so a function generalizes at
+    /// its binding; a stored monotype lowers back to this level, or a later
+    /// generalization in the frame would quantify a variable the environment still holds.
     frame_level: u32,
-    /// Statement-level annotations below the item root, by annotated
-    /// expression (plus the item annotation itself for a non-assignment
-    /// root): applied where the expression infers.
     expression_annotations: FxHashMap<ExprId, crate::annotations::Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
@@ -780,70 +615,46 @@ struct Checker<'db, 'a> {
     masked_reads: rustc_hash::FxHashSet<ExprId>,
     errors: Vec<TypeError<'db>>,
     strict_origins: Vec<StrictOrigin>,
-    /// Non-zero while a strict overload-selection round probes a candidate:
-    /// the literal-as-integer courtesy is off, so it cannot decide which
-    /// candidate wins (exact matches outrank conversions).
+    /// Non-zero while probing an overload candidate: the literal-as-integer courtesy is
+    /// off so it cannot decide the winner (exact matches outrank conversions).
     overload_probe_depth: u32,
-    /// Early-`return` value types per enclosing function frame; a function's
-    /// return type is their union with the body's trailing value.
-    /// Per enclosing function: each early `return` value with the range to
-    /// blame for it, so a declared-return mismatch reports at the `return`
-    /// that is wrong rather than at whichever expression happens to be last.
+    /// Per enclosing function, each early `return` value with its range, so a
+    /// declared-return mismatch blames the offending `return`.
     return_frames: Vec<Vec<(Ty<'db>, TextRange)>>,
-    /// Super-assignment (`<<-`) writes to enclosing slots: re-applied after
-    /// each enclosing body's environment rollback so the join survives at the
-    /// definition site.
+    /// `<<-` writes to enclosing slots, re-applied after each enclosing body's rollback
+    /// so the join survives at the definition site.
     pending_enclosing_writes: Vec<(BindingId, Ty<'db>)>,
-    /// Slots a closure body read before any write reached them (the letrec /
-    /// forward-capture shape: `helper <- function() other(); other <- ...`).
+    /// Slots a closure read before any write reached them (the letrec shape).
     forward_captured: rustc_hash::FxHashSet<BindingId>,
-    /// The running join of every write to a captured slot, variable-erased so
-    /// it survives rollbacks. Forward-capture reads resolve here — sound for
-    /// call-later semantics — instead of the empty definition-point entry.
+    /// Variable-erased join of every write to a captured slot, surviving rollbacks;
+    /// forward-capture reads resolve here instead of the empty definition-point entry.
     capture_joins: FxHashMap<BindingId, Ty<'db>>,
-    /// The current body wrote a forward-captured slot: its closures were
-    /// inferred against an incomplete join, so the body re-checks once.
+    /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
-    /// Top-level slots whose unwritten path resolved to the name's
-    /// cross-item binding: the observed type is the slot's PRE-state, not a
-    /// body write, so loop passes re-establish it after their rollback (a
-    /// loop's first iteration keeps reading the earlier binding).
+    /// Top-level slots whose unwritten path read the cross-item binding: a pre-state
+    /// that loop passes re-establish after their rollback.
     pre_materialized: FxHashMap<BindingId, Ty<'db>>,
-    /// Formal-parameter slots with no default: a `missing(name)` guard on
-    /// one marks its true edge read-erroring.
     no_default_formals: rustc_hash::FxHashSet<BindingId>,
-    /// Slots standing for names this item reads but does not bind — a
-    /// top-level variable another statement assigned, which naming records as
-    /// a non-local because scopes are per-item. A guard needs somewhere to put
-    /// its refinement, and flow state for a name belongs in the environment
-    /// like any other slot's, so the name gets a slot here rather than a
-    /// second place to look. Identity only: the type itself lives in the
-    /// environment, and these ids are minted above every id naming issued so
-    /// they cannot collide with a real binding.
+    /// Slots for names this item reads but another item binds, so guard refinements live
+    /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: FxHashMap<String, BindingId>,
     next_non_local_slot: u32,
 }
 
-/// One call argument, inferred exactly once before any signature matching, so
-/// an overload probe can re-match without re-running expression inference.
+/// Inferred once before signature matching, so an overload probe re-matches without
+/// re-running inference.
 struct CallArgument<'db> {
     name: Option<String>,
-    /// The name token's own range, so a finding about the NAME points at the
-    /// name rather than at the value attached to it.
     name_range: Option<TextRange>,
     /// `None` is a positional hole (`f(, x)`).
     ty: Option<Ty<'db>>,
     range: TextRange,
-    /// The argument's value expression. A type carries no source ranges, so a
-    /// finding about one field of a record has to re-walk the expression that
-    /// produced the record to find that field's own range.
+    /// Types carry no ranges, so a per-field finding re-walks the producing expression.
     value: Option<ExprId>,
-    /// The argument is a whole-number double literal (`1`, `2.0`) — eligible
-    /// for the literal-as-integer courtesy.
+    /// A whole-number double literal (`1`, `2.0`): eligible for the literal-as-integer courtesy.
     whole_double: bool,
-    /// The argument is the enclosing function's bare `...`: it forwards an
-    /// unknown number of arguments (possibly zero), so the call cannot be
-    /// arity-checked and the argument matches no parameter itself.
+    /// The enclosing function's bare `...`: forwards an unknown number of arguments, so
+    /// the call cannot be arity-checked.
     forwards_dots: bool,
 }
 
@@ -861,32 +672,24 @@ enum VectorIndexShape {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComparisonFamily {
-    /// `logical`, `integer` and `double`: R promotes a logical operand to
-    /// `integer` before comparing, exactly as it does for arithmetic, so all
-    /// three compare freely (`flags > 0`, `flag == TRUE`).
+    /// R promotes a logical operand to integer before comparing, so `flags > 0` and
+    /// `flag == TRUE` compare freely.
     Numeric,
     Character,
 }
 
-/// How an operand of an arithmetic operator classifies: a concrete numeric
-/// shape, a union whose members all are (accepted member-wise), a
-/// still-flexible variable or declared-numeric rigid, a vector whose element
-/// is not yet concrete, an `Any`/`Unknown` short-circuit, or a hard error.
 enum NumericOperand<'db> {
     Concrete(OperandShape, Atomic),
     ConcreteUnion(Vec<(OperandShape, Atomic)>),
     Flexible(Ty<'db>),
-    /// A vector whose element is a generic variable/rigid (carried, to
-    /// constrain) or statically untracked (`Any`/`Unknown`, carrying `None`).
-    /// The shape is known — vector — even though the atomic is not.
+    /// Vector shape known, element not: a generic variable/rigid to constrain, or `None`
+    /// for `Any`/`Unknown`.
     FlexibleVector(Option<Ty<'db>>),
     AnyUnknown,
     Invalid,
 }
 
 impl NumericOperand<'_> {
-    /// The operand's member shapes: one for a concrete operand, all of them
-    /// for a union.
     fn concrete_parts(&self) -> Option<Vec<(OperandShape, Atomic)>> {
         match self {
             NumericOperand::Concrete(shape, atomic) => Some(vec![(*shape, *atomic)]),
@@ -896,12 +699,10 @@ impl NumericOperand<'_> {
     }
 }
 
-/// One recognized type-guard condition: the tested slot and the refined type
-/// on each `if` edge (`None` = no refinement on that edge).
+/// A recognized type-guard condition; a `None` edge carries no refinement.
 struct GuardRefinement<'db> {
-    /// The true edge marks the slot as a read-erroring missing formal
-    /// (`missing(name)` on a no-default parameter) instead of refining its
-    /// type.
+    /// `missing(name)` on a no-default formal: the true edge marks the slot
+    /// read-erroring instead of refining it.
     missing_on_true: bool,
     slot: BindingId,
     true_edge: Option<Ty<'db>>,
@@ -939,7 +740,6 @@ fn guard_kind(name: &str) -> Option<GuardKind> {
     })
 }
 
-/// A non-union type narrows as its own one-member union.
 fn guard_members<'db>(db: &'db dyn Db, resolved: Ty<'db>) -> Vec<Ty<'db>> {
     match resolved.kind(db) {
         TyKind::Union(members) => members.clone(),
@@ -947,10 +747,7 @@ fn guard_members<'db>(db: &'db dyn Db, resolved: Ty<'db>) -> Vec<Ty<'db>> {
     }
 }
 
-/// Whether a member belongs to a guard family: `Some(bool)` when statically
-/// decidable, `None` (kept on both edges) otherwise. A family membership test
-/// covers the scalar and the vector of the atomic; `is.list` covers every
-/// list shape; `is.function` covers function types.
+/// `None` when not statically decidable; the member then stays on both edges.
 fn family_membership<'db>(db: &'db dyn Db, member: Ty<'db>, family: GuardFamily) -> Option<bool> {
     match member.kind(db) {
         TyKind::Null => Some(false),
@@ -978,24 +775,17 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
     }
 }
 
-/// Where R's argument matcher sends one supplied argument.
 enum ArgumentTarget {
-    /// A fixed positional parameter, by index into `positional`.
     Positional(usize),
-    /// A named formal, by index into `named` — whether it was claimed by name
-    /// or filled positionally.
+    /// Index into `named`, whether claimed by name or filled positionally.
     Named(usize),
-    /// Absorbed by the rest parameter.
     Rest,
-    /// A name no parameter declares on a non-variadic function, or one that
-    /// duplicates a formal already supplied.
+    /// A name no formal declares on a non-variadic function, or a duplicate of one
+    /// already supplied.
     UnmatchedName,
-    /// A positional argument with nowhere left to go.
     Overflow,
 }
 
-/// A comparison operand whose family is not yet known: a bare variable or
-/// rigid, or a vector whose element is still generic or untracked.
 enum FlexibleComparisonOperand<'db> {
     Bare(Ty<'db>),
     VectorElement(Option<Ty<'db>>),
@@ -1010,11 +800,6 @@ impl<'db> FlexibleComparisonOperand<'db> {
     }
 }
 
-/// An arithmetic operand's shape and the atomic it computes in. R promotes a
-/// logical operand to `integer` before arithmetic (`TRUE + TRUE` is `2L`), so
-/// a logical operand reports `integer` and the result rules below need no
-/// logical case of their own.
-/// An operator's R spelling, used to build its S3 method name (`+.Date`).
 fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
     use BinaryOperator::*;
     Some(match operator {
@@ -1035,12 +820,8 @@ fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
     })
 }
 
-/// The operators R groups as `Arith`. **One list, two consumers**: this decides
-/// what [`operator_group`] calls arithmetic, and the method-name prefixes the
-/// numeric constraint admits are built from it by
-/// [`arithmetic_method_prefixes`]. Restating the set instead let `^`, `%%` and
-/// `%/%` be dispatched here while the constraint refused the very class that
-/// declared them.
+/// The single source for both `operator_group`'s `Arith` and the method prefixes
+/// the numeric constraint admits; restating it lets the two drift apart.
 const ARITHMETIC_OPERATORS: [BinaryOperator; 7] = [
     BinaryOperator::Add,
     BinaryOperator::Subtract,
@@ -1051,9 +832,8 @@ const ARITHMETIC_OPERATORS: [BinaryOperator; 7] = [
     BinaryOperator::IntegerDivide,
 ];
 
-/// The method names that make a class arithmetic, in the order
-/// [`Checker::operator_method_result`] tries them: each operator's own method,
-/// then the group generic, then `Ops`.
+/// In the order [`Checker::operator_method_result`] tries them: the operator's own
+/// method, then the group generic, then `Ops`.
 pub fn arithmetic_method_prefixes() -> impl Iterator<Item = String> {
     ARITHMETIC_OPERATORS
         .iter()
@@ -1062,8 +842,6 @@ pub fn arithmetic_method_prefixes() -> impl Iterator<Item = String> {
         .chain(["Arith.".to_owned(), "Ops.".to_owned()])
 }
 
-/// R's S3 operator group for an operator: a class may declare one method for
-/// the whole group instead of one per operator.
 fn operator_group(operator: BinaryOperator) -> Option<&'static str> {
     use BinaryOperator::*;
     if ARITHMETIC_OPERATORS.contains(&operator) {
@@ -1077,6 +855,7 @@ fn operator_group(operator: BinaryOperator) -> Option<&'static str> {
 
 fn numeric_operand_parts<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(OperandShape, Atomic)> {
     let arithmetic_atomic = |atomic: &Atomic| match atomic {
+        // R promotes logical to integer before arithmetic (`TRUE + TRUE` is `2L`).
         Atomic::Logical => Some(Atomic::Integer),
         Atomic::Integer | Atomic::Double => Some(*atomic),
         _ => None,
@@ -1091,9 +870,6 @@ fn numeric_operand_parts<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(OperandSh
     }
 }
 
-/// A comparison operand's member shapes: one for a concrete operand, all of
-/// them for a union (member-wise acceptance); `None` when any member is not
-/// comparable.
 fn comparison_operand_parts_list<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
@@ -1146,13 +922,8 @@ fn flexible_comparison_operand<'db>(
 
 impl<'db> Checker<'db, '_> {
     fn record(&mut self, id: ExprId, ty: Ty<'db>) -> Ty<'db> {
-        // A self-referential value builds a type that grows by a factor of its
-        // field count per level, and every consumer downstream pays the tree it
-        // denotes rather than the graph it shares, so one such expression can
-        // stall the whole check. Past the ceiling the expression takes
-        // `Unknown` — sound by refusal, and the same move a loop makes for a
-        // variable whose type keeps growing structurally. Only composites are
-        // measured; a scalar cannot be oversized and must not pay for the ask.
+        // A self-referential value can grow its type exponentially; past the ceiling the
+        // expression takes `Unknown`. Only composites are measured so scalars pay nothing.
         let ty = if matches!(
             ty.kind(self.db),
             TyKind::Record(_) | TyKind::Function(_) | TyKind::Union(_) | TyKind::Tuple(_)
@@ -1170,8 +941,7 @@ impl<'db> Checker<'db, '_> {
         crate::types::unknown(self.db)
     }
 
-    /// Record where an undetermined type was introduced (idempotent: loop
-    /// re-walks and re-passes must not duplicate an origin).
+    /// Idempotent: loop re-walks and re-passes must not duplicate an origin.
     fn record_strict_origin(&mut self, expression: ExprId, kind: StrictOriginKind) {
         let range = self.module.expression(expression).range;
         let origin = StrictOrigin {
@@ -1194,14 +964,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// A whole-type mismatch, narrowed to the one field when both sides are
-    /// records — in the message *and* in the range. Every site that reports two
-    /// types side by side goes through here, so the narrowing cannot be present
-    /// at one and missing at another.
-    ///
-    /// `value` is the expression the `found` type came from, when the caller
-    /// has it. A type carries no source ranges, so pointing at the field means
-    /// re-walking that expression alongside the field path.
+    /// Every two-type report goes through here so record mismatches narrow to the field
+    /// (message and range) everywhere. `value` is the expression `found` came from.
     fn type_mismatch(
         &mut self,
         range: TextRange,
@@ -1228,13 +992,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Where the field a record mismatch names was written. A record type is
-    /// produced by a `list(...)` call and its fields are that call's tagged
-    /// arguments, so the path is walked against the expression that produced
-    /// the type.
-    ///
-    /// `None` whenever the expression is not that shape — a variable holding a
-    /// record has no field to point at — and the whole value stays the blame.
+    /// Walks the path against the `list(...)` call that produced the record; `None`
+    /// when the expression is not that shape, leaving the whole value as the blame.
     fn record_field_range(
         &self,
         value: ExprId,
@@ -1249,14 +1008,10 @@ impl<'db> Checker<'db, '_> {
             current = self.tagged_argument(current, segment)?.value?;
         }
         match mismatch {
-            // Nothing at the path to point at, so the innermost list that
-            // should have carried the field is the finding.
             RecordMismatch::Missing { .. } => Some(self.blame_range(current)),
             RecordMismatch::Field { .. } => {
                 Some(self.blame_range(self.tagged_argument(current, last)?.value?))
             }
-            // This message is about the NAME being one the type does not
-            // declare, so the name is what it underlines.
             RecordMismatch::Unexpected { .. } => {
                 let argument = self.tagged_argument(current, last)?;
                 argument
@@ -1266,8 +1021,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The tagged argument of a call with this name — a record's field as the
-    /// `list(...)` that built it wrote it.
     fn tagged_argument(&self, call: ExprId, name: &str) -> Option<&Argument> {
         let ExpressionKind::Call { arguments, .. } = &self.module.expression(call).kind else {
             return None;
@@ -1318,9 +1071,6 @@ impl<'db> Checker<'db, '_> {
                     )
                 });
                 let value_ty = match declares_function {
-                    // A declared function annotation on a function definition
-                    // checks the body under the declared parameter types,
-                    // exactly as at the item root.
                     Some(declared) => {
                         for (name, constraint) in &declared.binders {
                             self.table.rigid_constraints.insert(*name, *constraint);
@@ -1346,8 +1096,6 @@ impl<'db> Checker<'db, '_> {
                         if binds_name {
                             self.table.level -= 1;
                         }
-                        // A statement-level annotation on the assignment applies
-                        // before the write so the binding takes the annotated type.
                         self.apply_expression_annotation(id, value, value_ty)
                     }
                 };
@@ -1394,11 +1142,8 @@ impl<'db> Checker<'db, '_> {
                 let name_range = name_range.unwrap_or(range);
                 self.infer_field(id, range, name_range, at, target, name)
             }
-            // `pkg::name` resolves only through a namespace the stub corpus
-            // knows (and, for `::`, actually exports the name); the scheme
-            // itself still comes from the global environment, so a project
-            // override winning a stub name's type keeps working. `:::`
-            // reaches unexported names, so it skips the export check.
+            // Validated against the stub namespaces (`:::` skips the export check), but the
+            // scheme comes from globals so a project override of a stub name keeps working.
             ExpressionKind::Namespace {
                 internal,
                 package,
@@ -1412,8 +1157,6 @@ impl<'db> Checker<'db, '_> {
                 {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
                     None => {
-                        // An unvalidated qualified read: Unknown, and a
-                        // strict origin.
                         if let Some(name) = name {
                             self.record_strict_origin(
                                 id,
@@ -1424,21 +1167,11 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
             }
-            // R parameters are always matchable by name and by position, so
-            // inferred function types carry every formal as a named parameter
-            // (optional when it defaults); a `...` formal becomes a rest
-            // parameter with element `Any` at its formal position. Defaults
-            // are inferred but do not pin an unannotated parameter's type —
-            // that comes from the parameter's uses.
+            // R formals are matchable by name and position, so every formal is a named
+            // parameter. Defaults are inferred but do not pin an unannotated parameter's type.
             ExpressionKind::Function { parameters, body } => {
-                // A statement-level `#:` declaring a function type checks this
-                // definition the way the item root does: parameter types push
-                // INTO the body (rigid, so they refuse to bind) and the result
-                // checks against the declared return. Inferring the body freely
-                // and comparing afterwards would report a shape mismatch —
-                // `expected fn(x: character) -> integer, found fn(x: T) -> T` —
-                // while the real error inside the body went unreported, which
-                // leaves every closure-factory body unchecked.
+                // Declared parameter types push into the body; inferring freely and comparing
+                // afterwards would report a shape mismatch and miss the real error inside the body.
                 if let Some(declared) = self.declared_function_annotation(id) {
                     for (name, constraint) in &declared.binders {
                         self.table.rigid_constraints.insert(*name, *constraint);
@@ -1455,8 +1188,8 @@ impl<'db> Checker<'db, '_> {
                     std::mem::replace(&mut self.frame_level, self.table.level);
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
-                // A formal the body tests with `missing(name)` is optional at
-                // call sites — R's optional-without-default idiom.
+                // `missing(name)` in the body makes a formal optional (R's optional-without-default
+                // idiom).
                 let mut missing_tested = rustc_hash::FxHashSet::default();
                 self.collect_missing_tested(*body, &mut missing_tested);
                 let mut named = Vec::new();
@@ -1491,9 +1224,7 @@ impl<'db> Checker<'db, '_> {
                             self.no_default_formals.insert(slot);
                         }
                     }
-                    // The default is inferred here rather than above because
-                    // it may read this parameter's own slot and the ones
-                    // before it, which are in the environment only now.
+                    // Inferred only now: a default may read its own and earlier parameters' slots.
                     if let Some(default) = parameter.default {
                         let default_ty = self.infer(default);
                         named[entry].default = Some(default_ty);
@@ -1538,24 +1269,16 @@ impl<'db> Checker<'db, '_> {
                 let (variable_range, sequence, body) = (*variable_range, *sequence, *body);
                 self.infer_for(id, variable_range, sequence, body)
             }
-            // The condition re-evaluates before every iteration, so its reads
-            // also see the loop's joined state — it checks inside the fixed
-            // point.
             ExpressionKind::While { condition, body } => {
                 let (condition, body) = (*condition, *body);
                 self.check_loop_body(id, Some(condition), body, false, None);
                 crate::types::null(self.db)
             }
-            // `repeat` runs at least once, so the body's exit state applies
-            // after the loop (back edges still join inside it).
             ExpressionKind::Repeat { body } => {
                 let body = *body;
                 self.check_loop_body(id, None, body, true, None);
                 crate::types::null(self.db)
             }
-            // `local(expr)` evaluates its body in a fresh environment: the
-            // bindings vanish afterwards (only super-assignment joins
-            // survive), and the value is the body's value.
             ExpressionKind::Local { body } => {
                 let body = *body;
                 let pending_mark = self.pending_enclosing_writes.len();
@@ -1594,10 +1317,8 @@ impl<'db> Checker<'db, '_> {
         self.record(id, ty)
     }
 
-    /// The function type a statement-level annotation declares for this
-    /// expression, when it declares one to check against. `@trust` and
-    /// `@if-unknown` are deliberately excluded: neither checks the value, and
-    /// `@new` mints a nominal instead of declaring a signature.
+    /// `@trust` and `@if-unknown` do not check the value, and `@new` mints a nominal
+    /// rather than declaring a signature.
     fn declared_function_annotation(&self, annotated: ExprId) -> Option<TypeScheme<'db>> {
         let annotation = self.expression_annotations.get(&annotated)?;
         if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
@@ -1607,11 +1328,6 @@ impl<'db> Checker<'db, '_> {
         matches!(declared.body.kind(self.db), TyKind::Function(_)).then_some(declared)
     }
 
-    /// Applies a statement-level annotation to the annotated expression's
-    /// value: `@new` checks the representation and mints the nominal,
-    /// `@trust` overrides unchecked, and a checked declared type enforces
-    /// directional compatibility — the same contract as at the item root,
-    /// minus the export.
     fn apply_expression_annotation(
         &mut self,
         annotated: ExprId,
@@ -1634,12 +1350,8 @@ impl<'db> Checker<'db, '_> {
         if annotation.trusted {
             return declared.body;
         }
-        // An unknown-only coercion fills an inference gap without overriding
-        // knowledge: it applies exactly where the checker has nothing, and
-        // says so when it has something. That refusal is the whole reason to
-        // reach for it over `@trust` — an annotation that silently stayed in
-        // place as the inferred type changed underneath it would be
-        // indistinguishable from a stale one.
+        // `@if-unknown` must report when the type is known: an annotation that silently
+        // outlived a changed inferred type would be indistinguishable from a stale one.
         if annotation.if_unknown {
             let resolved_value = self.table.resolve(self.db, value_ty);
             if matches!(resolved_value.kind(self.db), TyKind::Unknown) {
@@ -1671,9 +1383,7 @@ impl<'db> Checker<'db, '_> {
         declared.body
     }
 
-    /// An annotation gives `value` its type, so an undetermined type there is
-    /// no longer a strict origin: annotating is exactly what the strict
-    /// finding asks for.
+    /// Annotating is exactly what a strict finding asks for, so it clears the origin.
     fn annotation_covers(&mut self, value: ExprId) {
         self.strict_origins
             .retain(|origin| origin.expression != value);
@@ -1703,13 +1413,8 @@ impl<'db> Checker<'db, '_> {
 
     fn infer_read(&mut self, id: ExprId) -> Ty<'db> {
         let Some(&slot) = self.naming.resolutions.get(&id) else {
-            // A non-local read resolves through the package interface and the
-            // stub corpus. Unresolved reads stay silent Unknown (naming owns
-            // the unresolved diagnostic); a read that RESOLVES to a binding
-            // with no known type is a strict origin.
-            // A guard narrowed this name earlier in the same expression, so the
-            // refinement is the observed type here — reading through to the
-            // binding again would discard it.
+            // Unresolved reads stay a silent `Unknown` (naming owns that diagnostic). A guard
+            // may have refined this name earlier; reading the binding again would discard it.
             if let Some(name) = self.naming.non_locals.get(&id)
                 && let Some(&slot) = self.non_local_slots.get(name)
                 && let Some(EnvEntry::Mono(refined)) = self.environment.get(slot)
@@ -1722,10 +1427,8 @@ impl<'db> Checker<'db, '_> {
                 })
             {
                 let instantiated = self.instantiate(&scheme);
-                // Origins, not propagation: a name this project defines owns
-                // its `Unknown` at its own defining site, so reading it here
-                // propagates. Re-originating turned one untyped binding into
-                // one diagnostic per line that touched it.
+                // A project-defined name owns its `Unknown` at its defining site, so reading it
+                // propagates rather than re-originating.
                 let deferred = self.naming.deferred_non_locals.contains(&id);
                 if matches!(
                     self.table.resolve(self.db, instantiated).kind(self.db),
@@ -1760,17 +1463,9 @@ impl<'db> Checker<'db, '_> {
                 });
                 self.unknown()
             }
-            // A read before any write reached the slot. A captured slot
-            // resolves to the running join of the frame's writes — the
-            // closure runs later, when they have happened (the letrec shape);
-            // the enclosing body re-checks once when the join completes
-            // after this read. A top-level slot's unwritten path reaches the
-            // enclosing frame instead: the read observes the name's
-            // cross-item binding (a loop's first iteration, a rebinding
-            // statement's right-hand side), same as the unused check's
-            // cross-item-read rule. The observed type is materialized as the
-            // slot's entry so a loop join keeps it as the pre-loop state.
-            // Everything else tolerates as Unknown.
+            // A read before any write: a captured slot reads the running join of the frame's
+            // writes (the closure runs later); a top-level slot reads the cross-item binding,
+            // materialized so a loop join keeps it as the pre-state.
             None => {
                 if self.naming.captured_slots.contains(&slot) {
                     self.forward_captured.insert(slot);
@@ -1785,10 +1480,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The type a top-level slot holds before this item writes it: the
-    /// name's cross-item binding, materialized as the slot's entry so a
-    /// branch or loop join keeps it as the pre-state. `None` for a slot that
-    /// is not top-level or has no informative earlier binding.
     fn materialize_top_level_pre_state(&mut self, slot: BindingId) -> Option<Ty<'db>> {
         let binding = self.naming.bindings.get(&slot)?;
         if binding.kind != crate::naming::BindingKind::TopLevel {
@@ -1798,10 +1489,8 @@ impl<'db> Checker<'db, '_> {
         self.materialize_pre_state(slot, &scheme)
     }
 
-    /// Like [`Self::materialize_top_level_pre_state`] for the path of a branch
-    /// or loop that did not write the slot. A name only this item and other
-    /// conditional statements write has no earlier value to join: that path is
-    /// `maybe-undefined`, not a read of a builtin or of the item's own write.
+    /// For a branch or loop path that did not write the slot. A name only conditional
+    /// statements write has no earlier value: that path is maybe-undefined.
     fn materialize_earlier_binding(&mut self, slot: BindingId) -> Option<Ty<'db>> {
         let binding = self.naming.bindings.get(&slot)?;
         if binding.kind != crate::naming::BindingKind::TopLevel {
@@ -1817,9 +1506,8 @@ impl<'db> Checker<'db, '_> {
         scheme: &TypeScheme<'db>,
     ) -> Option<Ty<'db>> {
         let instantiated = self.instantiate(scheme);
-        // An Unknown cross-item binding (or a self-cycle's recovery value)
-        // adds nothing over the tolerant read, and materializing it would
-        // absorb the real body writes at the loop join.
+        // An `Unknown` binding adds nothing over the tolerant read, and materializing it
+        // would absorb the real body writes at the loop join.
         if matches!(
             self.table.resolve(self.db, instantiated).kind(self.db),
             TyKind::Unknown
@@ -1842,17 +1530,12 @@ impl<'db> Checker<'db, '_> {
         if let ExpressionKind::NameRef(_) = target_expression.kind {
             if let Some(&slot) = self.naming.resolutions.get(&target) {
                 if spelling == AssignSpelling::Super {
-                    // `<<-` mutates an *enclosing* slot: the write joins into
-                    // the entry as a monotype and is recorded so it survives
-                    // the enclosing body's environment rollback.
                     let written = self.table.resolve(self.db, value_ty);
                     self.join_enclosing_write(slot, written);
                     self.pending_enclosing_writes.push((slot, written));
                     self.note_captured_write(slot, value_ty);
                 } else {
-                    // Function values generalize at the binding
-                    // (let-polymorphism); everything else stays a monotype
-                    // slot write.
+                    // Let-polymorphism: only function values generalize.
                     let resolved = self.table.shallow_resolve(self.db, value_ty);
                     if matches!(resolved.kind(self.db), TyKind::Function(_)) {
                         let scheme = self.generalize(value_ty);
@@ -1872,10 +1555,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Maintain the call-later join for a captured slot's writes (erased, so
-    /// the value survives rollbacks) and trigger the enclosing body's
-    /// capture re-pass when the write completes a join some closure already
-    /// read.
     fn note_captured_write(&mut self, slot: BindingId, value_ty: Ty<'db>) {
         if !self.naming.captured_slots.contains(&slot) {
             return;
@@ -1886,13 +1565,6 @@ impl<'db> Checker<'db, '_> {
             Some(&existing) => existing,
             None => written,
         };
-        // A value that refers to itself grows this join by a factor of its own
-        // field count every pass instead of settling — measured climbing 877,
-        // 8823, 104655, 1046623 on a record whose fields all return that
-        // record. Nothing downstream can afford a type that size, since every
-        // walk over it pays the tree rather than the shared graph, so past the
-        // ceiling the join widens to `Unknown`: the same sound-by-refusal a
-        // loop makes for a variable whose type keeps growing structurally.
         let changed = self.capture_joins.get(&slot) != Some(&joined);
         self.capture_joins.insert(slot, joined);
         if changed && self.forward_captured.contains(&slot) {
@@ -1900,9 +1572,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Join a super-assignment's written type into an environment entry as a
-    /// monotype (an absent entry takes the written type directly; a
-    /// scheme-holding entry contributes its instantiated body).
     fn join_enclosing_write(&mut self, slot: BindingId, written: Ty<'db>) {
         let entry = match self.environment.get(slot) {
             Some(EnvEntry::Mono(existing)) if existing != written => {
@@ -1923,10 +1592,7 @@ impl<'db> Checker<'db, '_> {
         self.environment.set(slot, entry);
     }
 
-    /// Super-assignments in a body mutate *enclosing* slots, so their joins
-    /// survive the body's environment rollback: re-apply them at the
-    /// definition site. They stay recorded so each further enclosing scope
-    /// re-applies them too (the join is idempotent).
+    /// Kept recorded so each further enclosing scope re-applies them too (the join is idempotent).
     fn reapply_enclosing_writes(&mut self, mark: usize) {
         let writes: Vec<(BindingId, Ty<'db>)> = self.pending_enclosing_writes[mark..].to_vec();
         for (slot, written) in writes {
@@ -1934,15 +1600,11 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// A replacement-form assignment (`x$field <- v`, `x[["name"]] <- v`,
-    /// `x[[key]] <- v`, `names(x) <- v`) reads the base variable, applies the
-    /// write, and writes the result back to the base's slot.
     fn write_replacement_target(&mut self, target: ExprId, value: ExprId, value_ty: Ty<'db>) {
         let base = self.replacement_base(target);
         self.infer_replacement_spine(target, base);
         let Some(base) = base else {
-            // The accessor spine has no variable at its root (`f(x)$a <- v`);
-            // R rejects this shape at run time, so refuse rather than guess.
+            // No variable at the spine's root (`f(x)$a <- v`): R rejects this at run time.
             self.record_strict_origin(target, StrictOriginKind::UnsupportedConstruct);
             return;
         };
@@ -1955,10 +1617,7 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Reports a field write that a nominal's representation does not admit:
-    /// a value the declared field type refuses, or a field the representation
-    /// does not carry. An opaque nominal (no representation) and a
-    /// non-record representation admit nothing statically, so both stay quiet.
+    /// An opaque nominal or a non-record representation admits nothing statically.
     fn check_nominal_field_write(
         &mut self,
         nominal: Ty<'db>,
@@ -1975,8 +1634,6 @@ impl<'db> Checker<'db, '_> {
             .iter()
             .find(|field| field.name.text(self.db) == field_name)
         {
-            // An `Unknown` value is an absent fact, not a wrong one — the same
-            // tolerance every other check applies.
             Some(field) => {
                 if !matches!(value.kind(self.db), TyKind::Unknown)
                     && !self.table.compatible(self.db, value, field.ty)
@@ -1999,9 +1656,7 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The root variable of a replacement target's accessor spine: through
-    /// index and field accessors and through a replacement call's first
-    /// argument (`names(x) <- v` calls `names<-` on `x`).
+    /// `names(x) <- v` calls `names<-` on `x`, so a call's first argument continues the spine.
     fn replacement_base(&self, id: ExprId) -> Option<ExprId> {
         match &self.module.expression(id).kind {
             ExpressionKind::NameRef(_) => Some(id),
@@ -2016,11 +1671,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The pieces of a replacement target that are ordinary reads: index and
-    /// surplus-argument expressions, and — when the spine has no variable
-    /// root — the base position itself. The callee of a replacement call is
-    /// skipped (`names(x) <- v` calls `names<-`, not `names`), and the base
-    /// variable is skipped (its read supplies the prior type separately).
+    /// Skips a replacement call's callee (`names<-` is called, not `names`) and the base
+    /// variable, whose read supplies the prior type separately.
     fn infer_replacement_spine(&mut self, id: ExprId, base: Option<ExprId>) {
         if Some(id) == base {
             return;
@@ -2058,12 +1710,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The base slot's type after a replacement write: a known-field write
-    /// (`$field` / `[["literal"]]`) on a record-like base sets that field
-    /// (adding it if absent; an empty `list()` starts a record); a
-    /// computed-key `[[<-` refines the reachable list shapes' element type;
-    /// everything else (a `[<-`, an `@slot<-`, a multi-index form, or a
-    /// replacement-function call) keeps the prior type.
     fn replacement_written_type(
         &mut self,
         lhs: ExprId,
@@ -2123,15 +1769,8 @@ impl<'db> Checker<'db, '_> {
                         optional: false,
                     }]),
                 ),
-                // A nominal's representation is fixed — that is what makes
-                // `@type` an invariant instead of a label — so this write is
-                // checked against it rather than applied to it, and the value
-                // keeps its nominal type either way. Retyping the field would
-                // leave a value still claiming the nominal while no longer
-                // matching its representation; leaving it alone silently (what
-                // the fall-through below used to do) left the checker believing
-                // the old field type and answering from it in both directions,
-                // accepting a call that must fail and rejecting one that cannot.
+                // A nominal's representation is fixed (that makes `@type` an invariant), so the
+                // write is checked against it and the value keeps its nominal type.
                 TyKind::Named(..) => {
                     self.check_nominal_field_write(prior, &field_name, value_expression, value);
                     prior
@@ -2161,12 +1800,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `if`/`else` with guard narrowing and diverging-branch flow: a
-    /// type-guard condition refines the tested slot along each edge, and a
-    /// branch that never falls through (ends in `return`/`stop`/`break`/
-    /// `next`) contributes neither its value nor its slot state — which also
-    /// makes the surviving edge's refinement persist after the `if` (the
-    /// idiomatic early-exit guard).
+    /// A diverging branch contributes neither its value nor its slot state, so the
+    /// surviving edge's refinement persists after the `if` (the early-exit guard idiom).
     fn infer_if(
         &mut self,
         condition: ExprId,
@@ -2192,8 +1827,8 @@ impl<'db> Checker<'db, '_> {
         let then_writes = self.environment.writes_since(mark);
         self.environment.rollback(mark);
 
-        // The false edge applies to the else branch and — when the then
-        // branch diverges — to everything after the `if`.
+        // The false edge applies to the else branch and, when the then branch diverges,
+        // to everything after the `if`.
         let false_mark = self.environment.mark();
         if let Some(guard) = &guard
             && let Some(false_edge) = guard.false_edge
@@ -2206,12 +1841,7 @@ impl<'db> Checker<'db, '_> {
         };
 
         match (then_diverges, else_diverges) {
-            // Only the else edge survives: its state (including the false-edge
-            // refinement) flows on; the diverging branch contributes nothing.
             (true, false) => else_ty,
-            // Only the then edge survives: discard the else state and re-apply
-            // the then writes (including the true-edge refinement) as the
-            // ongoing state.
             (false, true) => {
                 self.environment.rollback(false_mark);
                 for (slot, entry) in then_writes {
@@ -2225,8 +1855,6 @@ impl<'db> Checker<'db, '_> {
                 self.join_writes(then_writes);
                 self.join_branch_values(then_ty, else_ty)
             }
-            // Nothing falls through; the state after the `if` is unreachable,
-            // so keep the pre-`if` state.
             (true, true) => {
                 self.environment.rollback(false_mark);
                 self.join_branch_values(then_ty, else_ty)
@@ -2234,9 +1862,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `for (name in value) body`: the source is evaluated once and must be
-    /// iterable; the loop variable holds the element type inside the body
-    /// (re-initialized every iteration, invisible after the loop).
     fn infer_for(
         &mut self,
         loop_expression: ExprId,
@@ -2274,12 +1899,8 @@ impl<'db> Checker<'db, '_> {
         crate::types::null(self.db)
     }
 
-    /// What one iteration binds, per source shape; `Err` carries the
-    /// non-iterable type for the error.
     fn iteration_element(&mut self, resolved: Ty<'db>) -> Result<Ty<'db>, Ty<'db>> {
         match resolved.kind(self.db).clone() {
-            // A union of iterables iterates member-wise; a failing member
-            // reports the full union.
             TyKind::Union(members) => {
                 let mut elements = Vec::with_capacity(members.len());
                 for member in members {
@@ -2300,21 +1921,16 @@ impl<'db> Checker<'db, '_> {
             TyKind::Any => Ok(crate::types::any(self.db)),
             // An already-failed source does not produce a second error.
             TyKind::Unknown => Ok(self.unknown()),
-            // An opaque nominal's element shape is not visible.
             TyKind::Named(..) => Ok(crate::types::any(self.db)),
-            // Iteration commits neither vector nor list for the caller, so an
-            // unresolved variable stays unconstrained and the element
-            // degrades to Unknown.
+            // Iteration commits neither vector nor list, so a variable stays unconstrained.
             TyKind::Var(_) | TyKind::Rigid(_) => Ok(self.unknown()),
             _ => Err(resolved),
         }
     }
 
-    /// Check a loop body to a control-flow fixed point: each pass runs from
-    /// the join of the pre-loop state and the previous pass's exit writes;
-    /// diagnostics count only on the final (stable) pass, and a slot still
-    /// changing at the pass cap widens to `Unknown`. `repeat` bodies apply
-    /// their exit state after the loop instead of the zero-iterations join.
+    /// Iterates to a fixed point from the join of the pre-loop state and the previous
+    /// pass's exit writes; diagnostics count only on the final pass, and a slot still
+    /// changing at the cap widens to `Unknown`.
     fn check_loop_body(
         &mut self,
         loop_expression: ExprId,
@@ -2344,10 +1960,8 @@ impl<'db> Checker<'db, '_> {
                 .filter(|(slot, _)| loop_variable.is_none_or(|(loop_slot, _)| *slot != loop_slot))
                 .collect();
             self.environment.rollback(mark);
-            // A read this pass resolved through the name's cross-item
-            // binding discovered the slot's PRE-loop state (the first
-            // iteration's view); establish it before joining so the body's
-            // writes join into it instead of replacing an absent entry.
+            // A read this pass discovered the slot's pre-loop state through the cross-item
+            // binding; establish it so the body's writes join into it.
             for (&slot, &ty) in &self.pre_materialized {
                 if self.environment.get(slot).is_none() {
                     self.environment.set(slot, EnvEntry::Mono(ty));
@@ -2381,15 +1995,14 @@ impl<'db> Checker<'db, '_> {
                 }
                 return;
             }
-            // Not yet stable: this pass ran under a stale entry state, so its
-            // diagnostics are discarded and the body re-checks.
+            // Not yet stable: this pass ran under a stale entry state, so its diagnostics are
+            // discarded.
             self.errors.truncate(errors_mark);
             self.strict_origins.truncate(origins_mark);
         }
     }
 
-    /// The formal names this body tests with `missing(name)`. Nested function
-    /// bodies are excluded — their tests cover their own formals.
+    /// Nested function bodies are excluded: their tests cover their own formals.
     fn collect_missing_tested(&self, id: ExprId, tested: &mut rustc_hash::FxHashSet<String>) {
         let kind = &self.module.expression(id).kind;
         if matches!(kind, ExpressionKind::Function { .. }) {
@@ -2412,15 +2025,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Whether an expression never falls through to the code after it: it is
-    /// (or is a block ending in) `return(...)`, `stop(...)`, `break`, or
-    /// `next`, or an `if ... else` both of whose branches diverge.
-    /// `return`/`stop` are recognized by their bare names (rebinding them is
-    /// not modeled).
-    /// A copy of `ty` with every in-scope rigid binder replaced by a fresh
-    /// variable carrying that binder's constraint — one arbitrary instantiation
-    /// of the scheme, for asking whether a value could inhabit the declared
-    /// type at *some* choice of its parameters rather than at all of them.
+    /// One arbitrary instantiation of the in-scope rigid binders, to ask whether a value
+    /// inhabits the declared type at *some* choice of its parameters.
     fn instantiate_rigids(&mut self, ty: Ty<'db>) -> Ty<'db> {
         if self.table.rigid_constraints.is_empty() {
             return ty;
@@ -2438,6 +2044,7 @@ impl<'db> Checker<'db, '_> {
         crate::types::substitute_rigid(self.db, ty, &substitution)
     }
 
+    // `return`/`stop` are recognized by bare name; rebinding them is not modeled.
     fn diverges(&self, id: ExprId) -> bool {
         match &self.module.expression(id).kind {
             ExpressionKind::Break | ExpressionKind::Next => true,
@@ -2458,11 +2065,7 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `return(x)` exits the enclosing function with `x` (`return()` with
-    /// `NULL`): the value joins the frame's return union, and the expression
-    /// itself yields no observable value where it stands. A top-level
-    /// `return` (an R runtime error) still checks its value but joins no
-    /// frame.
+    /// A top-level `return` (an R runtime error) still checks its value but joins no frame.
     fn infer_return(&mut self, range: TextRange, arguments: &[Argument]) -> Ty<'db> {
         let value_ty = match arguments.first().and_then(|argument| argument.value) {
             Some(value) => self.infer(value),
@@ -2476,7 +2079,6 @@ impl<'db> Checker<'db, '_> {
         let resolved = self.table.resolve(self.db, value_ty);
         let blamed = match arguments.first().and_then(|argument| argument.value) {
             Some(value) => self.blame_range(value),
-            // A bare `return()` has no value expression; blame the call.
             None => range,
         };
         if let Some(frame) = self.return_frames.last_mut() {
@@ -2485,9 +2087,6 @@ impl<'db> Checker<'db, '_> {
         crate::types::null(self.db)
     }
 
-    /// A condition that is a type-guard predicate applied to a plain local
-    /// variable; `!cond` swaps the edges. `None` when the condition is not a
-    /// recognized guard or the guard cannot refine anything.
     fn recognize_guard(&mut self, condition: ExprId) -> Option<GuardRefinement<'db>> {
         match &self.module.expression(condition).kind {
             ExpressionKind::Unary {
@@ -2495,8 +2094,7 @@ impl<'db> Checker<'db, '_> {
                 operand,
             } => {
                 let inner = self.recognize_guard(*operand)?;
-                // `!missing(x)` has no read-erroring edge to swap into: the
-                // false edge stays the ordinary supplied state.
+                // `!missing(x)` has no read-erroring edge to swap into.
                 Some(GuardRefinement {
                     missing_on_true: false,
                     slot: inner.slot,
@@ -2527,13 +2125,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 let slot = match self.naming.resolutions.get(&value) {
                     Some(&slot) => slot,
-                    // A name this item reads but does not bind: a top-level
-                    // variable an earlier statement assigned. Narrowing it is
-                    // sound for the same reason it is sound for a local — the
-                    // guard and the branches are one expression, evaluated in
-                    // order — but a read from inside a closure is excluded,
-                    // because that body runs later and the test proves nothing
-                    // about the value it will see then.
+                    // A non-local narrows like a local (guard and branches evaluate in order), except
+                    // inside a closure, which runs later and sees a value the test says nothing about.
                     None => {
                         if self.naming.deferred_non_locals.contains(&value) {
                             return None;
@@ -2564,10 +2157,7 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The slot standing for a non-local name in this item, seeded with the
-    /// type the read observed so the guard has a union to filter. `None` when
-    /// the read is not a non-local at all (an unresolved name, which narrows
-    /// nothing).
+    /// Seeded with the observed type so the guard has a union to filter.
     fn non_local_guard_slot(&mut self, read: ExprId, observed: Ty<'db>) -> Option<BindingId> {
         let name = self.naming.non_locals.get(&read)?.clone();
         let slot = match self.non_local_slots.get(&name) {
@@ -2594,8 +2184,7 @@ impl<'db> Checker<'db, '_> {
         match guard {
             GuardKind::Null => {
                 match resolved.kind(self.db) {
-                    // The runtime guarantees the true edge is NULL even when
-                    // the static type is untracked.
+                    // The runtime guarantees the true edge is `NULL` even for an untracked type.
                     TyKind::Any | TyKind::Unknown => {
                         return Some(GuardRefinement {
                             missing_on_true: false,
@@ -2604,12 +2193,8 @@ impl<'db> Checker<'db, '_> {
                             false_edge: None,
                         });
                     }
-                    // A completely unconstrained variable is SHAPED by the
-                    // test: `NULL` is asserted possible, so it becomes
-                    // `T | NULL` for a fresh `T` and the edges narrow as an
-                    // ordinary union — the unannotated coalesce idiom. Never
-                    // on a constrained variable (it cannot hold NULL) or a
-                    // rigid (an annotation's contract is not reshaped).
+                    // An unconstrained variable is shaped by the test into `T | NULL` (the
+                    // unannotated coalesce idiom); a constrained variable or rigid is never reshaped.
                     TyKind::Var(var) => {
                         let Entry::Unbound {
                             constraint: Constraint::Unconstrained,
@@ -2633,8 +2218,6 @@ impl<'db> Checker<'db, '_> {
                     _ => {}
                 }
                 let members = guard_members(self.db, resolved);
-                // The guard cannot fire without a NULL member; dead branches
-                // are not typed specially.
                 if !members
                     .iter()
                     .any(|member| matches!(member.kind(self.db), TyKind::Null))
@@ -2649,10 +2232,8 @@ impl<'db> Checker<'db, '_> {
                 Some(self.filtered_edges(slot, &members, decide))
             }
             GuardKind::Family(family) => {
-                // Family guards do not refine `Any`/`Unknown` (inventing a
-                // concrete shape there would false-positive against
-                // scalar-claim stub signatures) and never touch an
-                // unresolved variable or rigid.
+                // Inventing a concrete shape for `Any`/`Unknown` would false-positive against
+                // scalar-claim stub signatures.
                 if matches!(
                     resolved.kind(self.db),
                     TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_)
@@ -2667,9 +2248,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Narrowing filters union members; an undecidable member is
-    /// conservatively kept on both edges, and an edge that removes nothing
-    /// (or keeps nothing) refines nothing.
+    /// An undecidable member stays on both edges; an edge that removes nothing (or keeps
+    /// nothing) refines nothing.
     fn filtered_edges(
         &self,
         slot: BindingId,
@@ -2704,8 +2284,6 @@ impl<'db> Checker<'db, '_> {
         match operator {
             UnaryOperator::Minus => self.infer_unary_minus(operand),
             UnaryOperator::Not => self.infer_unary_not(operand),
-            // Unary `+`, `~` formulas, and `?` help are unsupported
-            // constructs: sound-by-refusal Unknown.
             UnaryOperator::Plus | UnaryOperator::Tilde | UnaryOperator::Help => {
                 self.infer(operand);
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -2714,15 +2292,12 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Negation is elementwise and type-preserving.
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
         let operand_range = self.blame_range(operand);
         let inferred = self.infer(operand);
         let resolved = self.structural(inferred);
         match self.classify_numeric_operand(resolved) {
             NumericOperand::Concrete(shape, atomic) => self.shaped(shape, atomic),
-            // Member-wise over a union operand: negation preserves each
-            // member's shape and atomic, so the result is the same union.
             NumericOperand::ConcreteUnion(parts) => {
                 let members: Vec<Ty<'db>> = parts
                     .into_iter()
@@ -2734,8 +2309,6 @@ impl<'db> Checker<'db, '_> {
                 self.constrain_numeric_flexible(operand_range, ty);
                 ty
             }
-            // A generic-element vector keeps its element (constrained
-            // numeric); an untracked element stays untracked.
             NumericOperand::FlexibleVector(element) => {
                 if let Some(element) = element {
                     self.constrain_numeric_flexible(operand_range, element);
@@ -2761,8 +2334,7 @@ impl<'db> Checker<'db, '_> {
         let inferred = self.infer(operand);
         let resolved = self.structural(inferred);
         match resolved.kind(self.db) {
-            // `!` coerces a numeric operand exactly as a condition does
-            // (`!0` is TRUE, `!5` is FALSE), and always yields a logical.
+            // `!` coerces a numeric operand as a condition does (`!0` is TRUE).
             TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {
                 scalar(self.db, Atomic::Logical)
             }
@@ -2814,15 +2386,9 @@ impl<'db> Checker<'db, '_> {
         match operator {
             Add | Subtract | Multiply | Modulo | IntegerDivide | Divide | Power | Less
             | Greater | LessEq | GreaterEq | Equal | NotEqual => {
-                // Both operands infer exactly once, here, before any candidate
-                // probe: inference writes environment and recorded-type state
-                // that a probe snapshot does not reverse.
-                //
-                // Inferring them again in the fallback is what made a nested
-                // chain cost 2^operators — each level re-walked both subtrees,
-                // so one machine-written symbolic derivative (they reach 248
-                // operators in a single statement) never finished, and every
-                // finding inside such a chain was reported twice over.
+                // Both operands infer exactly once, before any candidate probe: a probe snapshot
+                // does not reverse environment writes, and re-inferring makes nested chains
+                // exponential.
                 let left = self.infer(lhs);
                 let right = self.infer(rhs);
                 self.operator_method_result(range, operator, lhs, rhs, left, right)
@@ -2843,11 +2409,8 @@ impl<'db> Checker<'db, '_> {
                 self.expect_scalar_logical(rhs);
                 scalar(self.db, Atomic::Logical)
             }
-            // Elementwise `&`/`|`, `%op%` specials, the `|>` pipe, `~`
-            // formulas, and `?` help are unsupported constructs:
-            // sound-by-refusal Unknown. The operands still infer (their types
-            // stay recorded for the IDE) but their diagnostics are discarded —
-            // the construct is opaque, so nothing inside it is judged.
+            // Opaque constructs: operands still infer for the IDE, but their diagnostics are
+            // discarded because nothing inside the construct is judged.
             And | Or | Special | Pipe | Tilde | Help => {
                 let errors_mark = self.errors.len();
                 let origins_mark = self.strict_origins.len();
@@ -2861,12 +2424,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// A `%…%` operator the STUB CORPUS declares is the call R makes: `a %in% b`
-    /// is `` `%in%`(a, b) ``, so the declaration checks and the result is typed.
-    /// Deliberately corpus-only — a project's own `%op%` may be a
-    /// non-standard-evaluation wrapper whose right operand is quoted rather than
-    /// evaluated (magrittr's `%>%` is the canonical one), and checking that as an
-    /// ordinary call would reject correct code. Those stay opaque.
+    /// Only stub-declared `%op%`s are typed as calls: a project's own may quote its
+    /// right operand (magrittr's `%>%`), and checking it as a call would reject correct code.
     fn infer_declared_operator(
         &mut self,
         range: TextRange,
@@ -2878,7 +2437,6 @@ impl<'db> Checker<'db, '_> {
         if !library.schemes.contains_key(name) {
             return None;
         }
-        // A project definition of the same operator wins, as everywhere else.
         if self
             .globals
             .is_some_and(|globals| globals.defined_in_project(name, false))
@@ -2918,18 +2476,9 @@ impl<'db> Checker<'db, '_> {
         Some(function.ret)
     }
 
-    /// An operator applied to a nominal operand dispatches to that class's
-    /// declared operator method, the way R dispatches `d + 30L` on `Date`
-    /// through `+.Date`. Without this every class that defines arithmetic —
-    /// `Date`, `POSIXct`, `difftime`, and every `+`-based DSL — is a type
-    /// error on its most ordinary use, and there is no way to say otherwise.
-    ///
-    /// Lookup mirrors R's own order: the operator-specific method
-    /// (`+.Date`), then the group generic for the operator's group
-    /// (`Arith.Date` / `Compare.Date`), then `Ops.Date`. Either operand's
-    /// class can supply the method, left first, so `30L + d` works like
-    /// `d + 30L`. `None` means no nominal operand declared anything and the
-    /// ordinary numeric/comparison rules apply unchanged.
+    /// Dispatches as R does: `+.Date`, then the group generic (`Arith.Date`), then
+    /// `Ops.Date`, left operand's class first. `None` when no nominal operand declares
+    /// anything, so the ordinary operator rules apply.
     fn operator_method_result(
         &mut self,
         range: TextRange,
@@ -3003,9 +2552,8 @@ impl<'db> Checker<'db, '_> {
                 }
             }
         }
-        // A class that declares the operator but fits no candidate is a real
-        // mismatch of that operator's contract (`Date + Date` is an error in R
-        // too), reported against the class rather than against "not numeric".
+        // A class that declares the operator but fits no candidate is a real contract
+        // mismatch (`Date + Date` errors in R too).
         if declared_any {
             self.errors.push(TypeError {
                 range,
@@ -3020,9 +2568,6 @@ impl<'db> Checker<'db, '_> {
         None
     }
 
-    /// The range to blame for the value an expression produces:
-    /// parentheses only group, so the innermost non-paren expression
-    /// carries the precise range.
     fn blame_range(&self, mut id: ExprId) -> TextRange {
         while let ExpressionKind::Paren(inner) = &self.module.expression(id).kind {
             id = *inner;
@@ -3030,8 +2575,6 @@ impl<'db> Checker<'db, '_> {
         self.module.expression(id).range
     }
 
-    /// The condition of `if`/`while` and the operands of `&&`/`||` must be
-    /// scalar logicals; a still-flexible operand binds to `logical`.
     fn expect_scalar_logical(&mut self, condition: ExprId) {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);
@@ -3042,15 +2585,9 @@ impl<'db> Checker<'db, '_> {
         self.unify_or_report(condition_range, scalar(self.db, Atomic::Logical), resolved);
     }
 
-    /// Whether R would coerce this condition rather than refuse it. A numeric
-    /// condition is ordinary R — zero is false, anything else true — so
-    /// `if (length(x))` and `while (n)` are idiom, not mistakes. Everything
-    /// else keeps its error: `character` because R accepts only the spellings
-    /// of `TRUE`/`FALSE` there and raises at run time on any other string,
-    /// `complex` and `raw` because R refuses them outright, and a vector
-    /// because a condition of length other than one is an error in R too.
-    /// A still-flexible condition is left to unification, which binds it to
-    /// `logical` — the useful default for an unannotated predicate.
+    /// A numeric condition is ordinary R (`if (length(x))`); character, complex, raw,
+    /// and non-scalar conditions keep their error as in R. A flexible condition is left
+    /// to unification, which binds it to `logical`.
     fn condition_coerces(&self, ty: Ty<'db>) -> bool {
         match ty.kind(self.db) {
             TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => true,
@@ -3059,11 +2596,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Binary arithmetic over the classified operand shapes: member-wise over
-    /// unions (a vector member makes the pair a vector, both-`integer` pairs
-    /// stay `integer`, any `double` — or an always-`double` operator like `/`
-    /// — promotes the pair), with flexible operands collapsed onto one
-    /// representative so `x + y` ties the two together.
     fn infer_binary_numeric(
         &mut self,
         range: TextRange,
@@ -3100,9 +2632,6 @@ impl<'db> Checker<'db, '_> {
             return self.unknown();
         }
 
-        // Collapse flexible operands (variables and numeric rigids) onto one
-        // representative so `x + y` ties the two operands together; a rigid
-        // pair that cannot unify is a genuine bound violation.
         let mut flexible: Option<Ty<'db>> = None;
         for operand in [&left, &right] {
             if let NumericOperand::Flexible(ty) = operand {
@@ -3120,21 +2649,16 @@ impl<'db> Checker<'db, '_> {
         if let Some(ty) = flexible {
             self.constrain_numeric_flexible(range, ty);
         }
-        // A generic vector element (`T[]`) used arithmetically must be
-        // numeric; joined with the atomic-element bound it already carries,
-        // the element becomes scalar-numeric.
+        // Combined with its existing atomic-element bound, an arithmetic `T[]` element
+        // becomes scalar-numeric.
         for operand in [&left, &right] {
             if let NumericOperand::FlexibleVector(Some(element)) = operand {
                 self.constrain_numeric_flexible(range, *element);
             }
         }
 
-        // A flexible-element vector operand fixes the result shape (vector)
-        // without fixing the atomic: an always-double operation or a concrete
-        // `double` (or union) partner promotes to `double[]`; an integer
-        // partner promotes *into* the element, so the result keeps the
-        // element; two generic elements unify; an untracked element stays
-        // untracked.
+        // A flexible-element vector fixes the result shape but not the atomic: a `double`
+        // (or union) partner promotes to `double[]`; an integer partner promotes into the element.
         let flexible_vector_present = matches!(left, NumericOperand::FlexibleVector(_))
             || matches!(right, NumericOperand::FlexibleVector(_));
         if flexible_vector_present {
@@ -3172,8 +2696,6 @@ impl<'db> Checker<'db, '_> {
         }
 
         match (left.concrete_parts(), right.concrete_parts()) {
-            // Member-wise; a single concrete operand is the one-member case,
-            // so this arm also carries the ordinary concrete/concrete path.
             (Some(left_parts), Some(right_parts)) => {
                 let members =
                     self.member_wise_numeric_results(&left_parts, &right_parts, always_double);
@@ -3187,10 +2709,7 @@ impl<'db> Checker<'db, '_> {
                 if let Some(parts) = &concrete_parts
                     && parts.len() > 1
                 {
-                    // A union operand cannot promote into a variable
-                    // member-wise, so the flexible side pins to the default
-                    // numeric scalar (`double`) and the operation continues
-                    // member-wise.
+                    // A union cannot promote into a variable member-wise, so it pins to `double`.
                     self.unify_or_report(range, flexible, scalar(self.db, Atomic::Double));
                     let members = self.member_wise_numeric_results(
                         &[(OperandShape::Scalar, Atomic::Double)],
@@ -3208,13 +2727,9 @@ impl<'db> Checker<'db, '_> {
                     return self.shaped(result_shape, Atomic::Double);
                 }
                 match result_shape {
-                    // `x + 1L` (and `x + y`) stay polymorphic over the
-                    // numeric operand: integer promotes to whatever it
-                    // resolves to, so the scalar result is the operand
-                    // itself.
+                    // `x + 1L` stays polymorphic: integer promotes into whatever `x` resolves to.
                     OperandShape::Scalar => flexible,
-                    // A vector result cannot carry an unresolved atomic, so
-                    // a flexible operand defaults to `double` here.
+                    // A vector result cannot carry an unresolved atomic, so default to `double`.
                     OperandShape::Vector => {
                         self.unify_or_report(range, flexible, scalar(self.db, Atomic::Double));
                         self.shaped(OperandShape::Vector, Atomic::Double)
@@ -3224,11 +2739,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// R's `:` yields an integer sequence for whole-number endpoints
-    /// (`1:10` counts, via the literal rule); a `double` endpoint — or a
-    /// flexible one, which may resolve to `double` — makes it `double[]`.
-    /// Endpoints must be scalar numbers: the plain numeric bound would admit
-    /// vectors, which R only warns about and truncates.
+    /// Whole-number endpoints give an integer sequence; a `double` or flexible endpoint
+    /// gives `double[]`. Endpoints must be scalar: R only warns about and truncates vectors.
     fn infer_colon(&mut self, lhs: ExprId, rhs: ExprId) -> Ty<'db> {
         let mut result_atomic = Atomic::Integer;
         for operand in [lhs, rhs] {
@@ -3274,11 +2786,6 @@ impl<'db> Checker<'db, '_> {
         Ty::new(self.db, TyKind::Vector(scalar(self.db, result_atomic)))
     }
 
-    /// Comparisons: both sides must share a comparison family (numeric,
-    /// character, logical — member-wise over unions), a flexible operand
-    /// compared against a concrete numeric partner is constrained numeric,
-    /// and the result is `logical` shaped element-wise (a vector member
-    /// compares to `logical[]`).
     fn infer_compare(
         &mut self,
         lhs: ExprId,
@@ -3317,9 +2824,6 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        // Two concrete operands must belong to the same comparison family,
-        // member-wise: every shape the left union can take must be comparable
-        // with every shape of the right.
         if let (Some(left_parts), Some(right_parts)) = (&left_parts, &right_parts)
             && left_parts.iter().any(|(_, left_family)| {
                 right_parts
@@ -3328,10 +2832,7 @@ impl<'db> Checker<'db, '_> {
             })
         {
             self.errors.push(TypeError {
-                // The right operand, not the whole expression: the message
-                // takes the left side as the expectation, so underlining both
-                // leaves the reader unable to tell which type is which. This is
-                // where arithmetic already points.
+                // Blame the right operand: the message takes the left side as the expectation.
                 range: rhs_range,
                 kind: TypeErrorKind::Mismatch {
                     expected: resolved_left,
@@ -3341,9 +2842,8 @@ impl<'db> Checker<'db, '_> {
             return self.unknown();
         }
 
-        // A flexible operand compared against a concrete numeric operand is
-        // constrained numeric; comparison against a non-numeric family leaves
-        // it free (the system has no character-or-logical constraint).
+        // Against a non-numeric family a flexible operand stays free: there is no
+        // character-or-logical constraint.
         let all_numeric = |parts: &Option<Vec<(OperandShape, ComparisonFamily)>>| {
             parts.as_ref().is_some_and(|parts| {
                 parts
@@ -3430,9 +2930,7 @@ impl<'db> Checker<'db, '_> {
         results
     }
 
-    /// Constrain a flexible operand (variable or rigid) to be numeric: a
-    /// variable's constraint joins through the lattice; a rigid satisfies it
-    /// only when its declaration promised numeric-ness.
+    /// A rigid satisfies the numeric constraint only when its declaration promised it.
     fn constrain_numeric_flexible(&mut self, range: TextRange, ty: Ty<'db>) {
         match ty.kind(self.db) {
             TyKind::Var(var) => {
@@ -3458,15 +2956,11 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// How an arithmetic operand classifies once resolved.
     fn classify_numeric_operand(&self, resolved: Ty<'db>) -> NumericOperand<'db> {
         if let Some(parts) = numeric_operand_parts(self.db, resolved) {
             return NumericOperand::Concrete(parts.0, parts.1);
         }
         match resolved.kind(self.db) {
-            // A union operand is numeric when every member is; any
-            // non-numeric member makes the whole operand invalid (the error
-            // then shows the full union type).
             TyKind::Union(members) => {
                 let mut parts = Vec::with_capacity(members.len());
                 for &member in members {
@@ -3502,21 +2996,9 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Check a function definition against its declared annotation type and
-    /// return the signature its callers see.
-    ///
-    /// An annotation declares the *types* of a definition's parameters, never
-    /// the parameter list: R matches a call's arguments against the formals in
-    /// the `function(...)` header, so the returned signature always has the
-    /// definition's parameters, in the definition's order, with the
-    /// definition's optionality and `...` position. Declared types fill them
-    /// name-aware (named declarations match by name, positional declarations
-    /// fill the rest in order; rigid binder types refuse to bind), the body
-    /// infers under them, and the result checks against the declared return.
-    ///
-    /// Every way the two sides can disagree is therefore reported once, here,
-    /// and never again at a call site — a call must not be blamed for an
-    /// annotation's mistake.
+    /// An annotation declares parameter types, never the parameter list: R matches
+    /// arguments against the `function(...)` formals, so the signature keeps their
+    /// names, order, optionality, and `...`. Disagreements report here, never at a call.
     fn check_declared_function(
         &mut self,
         function_id: ExprId,
@@ -3528,10 +3010,6 @@ impl<'db> Checker<'db, '_> {
         };
         let range = expression.range;
 
-        // A formal the body tests with `missing(name)` is optional at call
-        // sites just as one with a default is — R's optional-without-default
-        // idiom — so it counts as optional on the definition's side of every
-        // comparison below.
         let mut missing_tested = rustc_hash::FxHashSet::default();
         self.collect_missing_tested(*body, &mut missing_tested);
         let is_optional = |parameter: &crate::hir::Parameter| {
@@ -3540,10 +3018,8 @@ impl<'db> Checker<'db, '_> {
 
         self.table.level += 1;
         let enclosing_frame_level = std::mem::replace(&mut self.frame_level, self.table.level);
-        // One walk pairs formals with declared types the way R's matcher pairs
-        // a call's arguments with them, and builds the exported signature as
-        // it goes. What the annotation declares and this walk never consumes
-        // is the disagreement.
+        // Pairs formals with declared types as R's matcher pairs arguments; any declared
+        // entry the walk never consumes is a disagreement.
         let mut positional_index = 0usize;
         let mut used_named: Vec<bool> = vec![false; declared.named.len()];
         let mut formal_types: Vec<(Ty<'db>, bool)> = Vec::with_capacity(parameters.len());
@@ -3577,10 +3053,7 @@ impl<'db> Checker<'db, '_> {
                 positional_index += 1;
                 Some(ty)
             } else {
-                // Partial annotation is a supported form, so a formal the
-                // annotation leaves alone infers from its uses exactly as it
-                // would with no annotation at all: the export edge either
-                // generalizes the variable or erases it to `Unknown`.
+                // Partial annotation: an unannotated formal infers from its uses as if unannotated.
                 None
             };
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
@@ -3593,14 +3066,9 @@ impl<'db> Checker<'db, '_> {
             });
         }
 
-        // The declared shape must be one R's argument matcher can honor for
-        // this definition: a declared optional `[name]` needs an actual
-        // default (callers may omit it), the rest parameter must sit at the
-        // same boundary on both sides — including not existing on exactly one
-        // side — and every declared type must have a formal to land on. A
-        // violation reports the two shapes whole; the body still checks under
-        // the declared parameter types so hover and navigation keep their
-        // facts.
+        // A declared optional needs a real default, `...` must sit at the same boundary on
+        // both sides, and every declared type needs a formal. The body still checks under
+        // the declared types so IDE facts survive.
         let dots_index = parameters.iter().position(|p| p.name == "...");
         let declared_preceding = declared.positional.len()
             + declared
@@ -3629,10 +3097,8 @@ impl<'db> Checker<'db, '_> {
                 },
             });
         }
-        // A formal with a default is optional in R whatever the annotation
-        // says, so the signature above already took optionality from the code;
-        // saying so once here is what keeps it from resurfacing as a missing
-        // argument at every caller.
+        // A defaulted formal is optional whatever the annotation says; reporting it once
+        // here keeps it from resurfacing at every caller.
         for field in &declared.named {
             let name = field.name.text(self.db);
             if !field.optional
@@ -3648,7 +3114,6 @@ impl<'db> Checker<'db, '_> {
                 });
             }
         }
-        // Declared named parameters the definition never declares.
         for (index, field) in declared.named.iter().enumerate() {
             if !used_named[index] {
                 self.errors.push(TypeError {
@@ -3677,32 +3142,16 @@ impl<'db> Checker<'db, '_> {
             }
             if let Some(default) = parameter.default {
                 let default_ty = self.infer(default);
-                // A `NULL` default is R's "no value" sentinel for optional
-                // parameters, always allowed regardless of the declared type;
-                // any other default must fit the declared type. An undeclared
-                // formal's type comes from its uses, not its default.
+                // An undeclared formal's type comes from its uses, not its default.
                 let resolved_default = self.table.resolve(self.db, default_ty);
                 if declared {
                     let default_range = self.blame_range(default);
-                    // The default is checked against an *instantiation* of the
-                    // declared type, not against the rigid binder itself. A
-                    // binder is the caller's choice, and omitting the argument
-                    // is the one call where the default makes that choice — so
-                    // `<T> fn([x]: T)` over `function(x = 1)` is honest, and
-                    // was rejected while the comparison used the rigid `T`,
-                    // which is how the checker came to refuse a scheme it had
-                    // inferred itself. A concrete declared type is unaffected:
-                    // `fn(title: character)` still refuses a `NULL` default.
+                    // Check against an instantiation, not the rigid binder: omitting the argument
+                    // is the one call where the default makes the binder's choice, so
+                    // `<T> fn([x]: T)` over `function(x = 1)` is honest.
                     let admissible = self.instantiate_rigids(parameter_ty);
-                    // `function(title = NULL)` is how R spells an optional
-                    // argument, but the caller omitting it puts `NULL` in the
-                    // body, where a declared `character` is a promise the
-                    // function does not keep. Exempting it — which this used
-                    // to do — let the annotation lie: `if (title == "draft")`
-                    // then passed the checker and failed at run time with
-                    // `argument is of length zero`. The remedy is a nullable
-                    // declared type plus a guard, so the message names it
-                    // instead of reporting a bare mismatch.
+                    // `function(title = NULL)` is R's optional argument, but it puts `NULL` in the
+                    // body, breaking a non-nullable declaration; the dedicated finding names the remedy.
                     if matches!(resolved_default.kind(self.db), TyKind::Null)
                         && !self.table.compatible(self.db, resolved_default, admissible)
                     {
@@ -3735,20 +3184,12 @@ impl<'db> Checker<'db, '_> {
             .return_frames
             .pop()
             .expect("return frames stay balanced around body inference");
-        // The body's value only needs to be *compatible* with the declared
-        // return (covariant, like an argument against a parameter), so a body
-        // returning `integer` satisfies a declared `integer | NULL` — and an
-        // alias-typed declaration checks through its expansion. An Unknown
-        // declared return (elided `->`) constrains nothing — it is inferred
-        // from the body instead, exactly as an unannotated definition's is, so
-        // annotating only the parameters does not silently drop the return.
+        // An `Unknown` declared return (elided `->`) is inferred from the body, so
+        // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
             signature.ret = self.join_early_returns(&early_returns, trailing_ty);
         } else {
-            // Each `return` is checked at its OWN site: reporting the union of
-            // every return against the declaration would blame whichever
-            // expression came last and leave the reader to work out which
-            // return is actually wrong.
+            // Each `return` is checked at its own site, not as one union blamed on the tail.
             let mut early_return_failed = false;
             for &(returned, return_range) in &early_returns {
                 if !matches!(returned.kind(self.db), TyKind::Unknown)
@@ -3764,12 +3205,7 @@ impl<'db> Checker<'db, '_> {
                     });
                 }
             }
-            // Blame the expression that produces the value, not the whole
-            // body: a block's tail, and through an `if`/`else` tail, the arm
-            // that is actually wrong. A finding on the whole construct makes
-            // the reader work out which branch it means, and the offending
-            // line is not even rendered when the range is clamped to the
-            // construct's first line.
+            // Blame the value-producing expression (a block's tail, an `if`/`else` arm).
             let mut leaves = Vec::new();
             self.collect_tail_expressions(*body, &mut leaves);
             let blamed = match leaves.as_slice() {
@@ -3777,20 +3213,14 @@ impl<'db> Checker<'db, '_> {
                 _ => *body,
             };
             let body_range = self.blame_range(blamed);
-            // The trailing value alone: the early returns already reported
-            // themselves, so including them here would double-report and
-            // widen the found type past what this expression produces.
+            // The trailing value alone: early returns already reported themselves.
             let resolved_body = self.table.resolve(self.db, trailing_ty);
             if !early_return_failed
                 && !matches!(resolved_body.kind(self.db), TyKind::Unknown)
                 && !self.table.compatible(self.db, resolved_body, declared.ret)
             {
-                // The whole body's type is the verdict; the leaves only decide
-                // where to point, and each one that fails on its own reports at
-                // its own site, exactly as each `return` does. When no single
-                // leaf is at fault — an `if` with no `else` contributes an
-                // implicit `NULL` that belongs to no expression — the tail
-                // keeps the one finding.
+                // The whole body's type is the verdict; leaves only decide where to point. With
+                // no single leaf at fault (an `else`-less `if`), the tail keeps the finding.
                 let culprits: Vec<(ExprId, Ty<'db>)> = leaves
                     .iter()
                     .filter(|&&leaf| leaf != blamed)
@@ -3822,23 +3252,16 @@ impl<'db> Checker<'db, '_> {
         self.reapply_enclosing_writes(pending_mark);
         self.frame_level = enclosing_frame_level;
         self.table.level -= 1;
-        // Not resolved: every type in here came from the annotation, so it
-        // holds no inference variables — and resolving would expand the
-        // aliases and nominals the author wrote, which are the whole point of
-        // declaring the signature.
+        // Not resolved: annotation-sourced types hold no inference variables, and resolving
+        // would expand the aliases and nominals the author wrote.
         Ty::new(self.db, TyKind::Function(signature))
     }
 
-    /// The type already inferred for an expression, `Unknown` when the walk
-    /// never recorded one.
     fn recorded_ty(&self, id: ExprId) -> Ty<'db> {
         self.recorded.get(&id).copied().unwrap_or(unknown(self.db))
     }
 
-    /// Every expression whose value can become the enclosing function's result,
-    /// following a block to its tail and an `if`/`else` into both arms. An `if`
-    /// with no `else` also yields `NULL` on the untaken path, which belongs to
-    /// no expression, so it contributes its branch and nothing else.
+    /// An `else`-less `if` is a leaf itself: its implicit `NULL` belongs to no arm.
     fn collect_tail_expressions(&self, id: ExprId, into: &mut Vec<ExprId>) {
         match &self.module.expression(id).kind {
             ExpressionKind::Block {
@@ -3861,14 +3284,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Check a function body, re-running it once when the walk grew a
-    /// captured-write join some closure had already read (the letrec /
-    /// forward-capture shape): the first run exists to complete the joins and
-    /// is fully discarded — environment, unification, diagnostics, and
-    /// pending super-assign writes all roll back — so the re-run resolves
-    /// forward captures against the completed joins with no stale effects.
-    /// Bodies that never grow such a join (the overwhelming majority) pay
-    /// only the snapshot markers.
+    /// Re-runs the body once when it grew a captured-write join a closure already read;
+    /// the first run is fully discarded (environment, unification, diagnostics, `<<-` writes).
     fn infer_body_with_capture_discovery(&mut self, body: ExprId, pending_mark: usize) -> Ty<'db> {
         let saved_repass = std::mem::replace(&mut self.capture_repass_needed, false);
         let body_mark = self.environment.mark();
@@ -3892,8 +3309,6 @@ impl<'db> Checker<'db, '_> {
         trailing_ty
     }
 
-    /// A function's return type is the union of every early `return` value
-    /// with the body's trailing value.
     fn join_early_returns(
         &self,
         early_returns: &[(Ty<'db>, TextRange)],
@@ -3907,10 +3322,6 @@ impl<'db> Checker<'db, '_> {
         union_of(self.db, members)
     }
 
-    /// The call entry point: shape-constructing builtins (`c`, `list`,
-    /// `switch`) intercept first, an overloaded stub callee resolves per call
-    /// site (each candidate probed in declaration order), and everything else
-    /// infers the callee and dispatches on its type.
     fn infer_call_expression(
         &mut self,
         id: ExprId,
@@ -3936,12 +3347,8 @@ impl<'db> Checker<'db, '_> {
         }
         let callee_range = self.blame_range(callee);
         let callee_ty = self.infer(callee);
-        // A callee typed as literal `Any` is the sanctioned escape hatch
-        // (`stop`, `warning`, `seq` — stubs whose signature is not
-        // expressible yet): the call is uncheckable, so diagnostics from its
-        // argument expressions are noise in a context the checker has
-        // already given up on. Inference still runs — expression types stay
-        // for the IDE — but findings inside the arguments are discarded.
+        // A literal-`Any` callee is the escape hatch for stubs with no expressible
+        // signature: the call is uncheckable, so findings inside its arguments are discarded.
         let resolved_callee = self.table.shallow_resolve(self.db, callee_ty);
         if matches!(resolved_callee.kind(self.db), TyKind::Any) {
             let recorded_errors = self.errors.len();
@@ -3949,9 +3356,7 @@ impl<'db> Checker<'db, '_> {
             self.infer_call_arguments(range, arguments);
             self.errors.truncate(recorded_errors);
             self.strict_origins.truncate(recorded_origins);
-            // This call IS where the `Unknown` enters the program: the callee
-            // has no expressible signature yet, so strict mode attributes it
-            // here rather than at whatever later line first reads the result.
+            // The `Unknown` enters here, so strict mode attributes it to this call.
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return self.unknown();
         }
@@ -3959,13 +3364,7 @@ impl<'db> Checker<'db, '_> {
         self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
     }
 
-    /// `c(...)` follows R's atomic coercion hierarchy (logical < integer <
-    /// double < complex < character; `raw` only combines with itself), drops
-    /// `NULL` arguments (`c(x, NULL)` is `c(x)`, `c()` is `NULL`), and keeps
-    /// names: an all-named call builds a map-like vector.
-    /// `c()` over arguments that are all the same nominal, when that class
-    /// declares a `c.Class` method: the result is that nominal. `None` when the
-    /// arguments are not uniform nominals or the class declares no such method.
+    /// `None` unless every non-`NULL` argument is one nominal whose class declares `c.Class`.
     fn combine_nominal(&mut self, inferred: &[Ty<'db>]) -> Option<Ty<'db>> {
         let mut nominal: Option<Ty<'db>> = None;
         for &ty in inferred {
@@ -4001,10 +3400,8 @@ impl<'db> Checker<'db, '_> {
         if arguments.is_empty() {
             return crate::types::null(self.db);
         }
-        // `c()` over any list-shaped argument concatenates into a LIST, not an
-        // atomic vector — `c(list_a, list_b)` is the standard way to append to
-        // a list in R. The atomic coercion below cannot describe that, so the
-        // list case takes its own path.
+        // `c()` over any list-shaped argument builds a list (`c(list_a, list_b)` appends),
+        // which the atomic coercion cannot describe.
         let values: Vec<ExprId> = arguments.iter().filter_map(|a| a.value).collect();
         let inferred: Vec<Ty<'db>> = values
             .iter()
@@ -4023,13 +3420,8 @@ impl<'db> Checker<'db, '_> {
                 .collect();
             return Ty::new(self.db, TyKind::List(union_of(self.db, elements)));
         }
-        // R dispatches `c()` too, and a class whose `c.Class` method is
-        // declared keeps its class through concatenation — `c(d1, d2)` on two
-        // `Date`s is a `Date` vector, not the integers underneath. Uniform
-        // nominal arguments therefore resolve through that declaration; a
-        // nominal with no such method falls through to the atomic rules below,
-        // where it becomes indeterminate rather than an error, because the
-        // checker does not know what R's default `c()` makes of it.
+        // A class declaring `c.Class` keeps its class through concatenation (`c(d1, d2)`
+        // on two `Date`s is a `Date`).
         if let Some(combined) = self.combine_nominal(&inferred) {
             return combined;
         }
@@ -4049,12 +3441,8 @@ impl<'db> Checker<'db, '_> {
             }
             saw_non_null_argument = true;
             all_arguments_are_named &= argument.name.is_some();
-            // A non-concrete argument whose element atomic is not statically
-            // known — `Any`, `Unknown` (which must never cascade), or an
-            // unresolved variable (`function(x) c(x, 1L)`) — cannot pin the
-            // combined element type: the result is `Unknown` rather than a
-            // rejection or an unsound concrete claim. The variable stays
-            // unconstrained, mirroring `$`/`[[`/`[` on the same subject.
+            // An argument whose atomic is not statically known cannot pin the element type:
+            // the result is `Unknown`, and a variable stays unconstrained.
             match resolved.kind(self.db) {
                 TyKind::Any | TyKind::Unknown => {
                     result_indeterminate = true;
@@ -4067,9 +3455,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 _ => {}
             }
-            // A union argument combines member-wise; its `NULL` members
-            // contribute nothing (the idiomatic accumulator seeded with
-            // `c()` has type `T[] | NULL` at the loop join and is no error).
+            // `NULL` union members contribute nothing (an accumulator seeded with `c()` is
+            // `T[] | NULL` at the loop join).
             let argument_atomics: Option<Vec<Atomic>> = match resolved.kind(self.db).clone() {
                 TyKind::Union(members) => members
                     .iter()
@@ -4080,11 +3467,8 @@ impl<'db> Checker<'db, '_> {
             };
             let Some(argument_atomics) = argument_atomics.filter(|atomics| !atomics.is_empty())
             else {
-                // A nominal with no declared `c.Class` method is not an error:
-                // R's default `c()` strips attributes and returns something the
-                // checker cannot name, so the result is indeterminate. Claiming
-                // a mismatch here reported `expected integer, found gg` on
-                // correct code, an expectation nothing in the call asked for.
+                // R's default `c()` strips a nominal into something the checker cannot name:
+                // indeterminate, not an error.
                 if matches!(resolved.kind(self.db), TyKind::Named(..)) {
                     self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                     result_indeterminate = true;
@@ -4139,9 +3523,6 @@ impl<'db> Checker<'db, '_> {
         )
     }
 
-    /// The element type of a list-shaped type: the declared element for
-    /// `list[T]`/`list[named: T]`, the join of the items or fields for a
-    /// tuple or record shape. `None` for anything that is not a list.
     fn list_element_type(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
         match ty.kind(self.db) {
             TyKind::List(element) | TyKind::NamedList(element) => Some(*element),
@@ -4151,18 +3532,9 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `list(...)` builds the fixed shapes: all-unnamed → tuple-like,
-    /// all-named → record-like, partially named → an array-like list.
-    /// `structure(value, ...)` returns `value` with attributes attached, and
-    /// attributes are not part of a type here — a `class` attribute is data,
-    /// which is why S3 dispatch is not modelled. So the call has the type of
-    /// its first argument, and `structure(list(name = "a"), class = "dog")`
-    /// stays the record it is built from, with its fields checkable.
-    ///
-    /// `dim` is the exception: it turns a vector into an array, and array
-    /// *shape* is untracked, so claiming the vector type would be a claim the
-    /// checker cannot stand behind. Those fall through to the declaration
-    /// (`Any`) and stay a strict origin. `None` means "not intercepted".
+    /// Attributes are not part of a type, so the call has its first argument's type.
+    /// `dim` is the exception: array shape is untracked, so it falls through to the
+    /// declaration. `None` means not intercepted.
     fn infer_structure(&mut self, id: ExprId, arguments: &[Argument]) -> Option<Ty<'db>> {
         let shape_changing = arguments.iter().any(|argument| {
             argument
@@ -4197,11 +3569,8 @@ impl<'db> Checker<'db, '_> {
         let all_named = arguments.iter().all(|argument| argument.name.is_some());
         let all_unnamed = arguments.iter().all(|argument| argument.name.is_none());
         if !(all_named || all_unnamed) {
-            // A partially named list is ordinary R — `do.call(f, list(x, n = 1))`
-            // is the standard spelling. Neither the tuple nor the record shape
-            // can express it, so the names are dropped and the value types join
-            // into an array-like list: less precise than either shape, never a
-            // false rejection of legal code.
+            // A partially named list (`list(x, n = 1)`) fits neither tuple nor record, so the
+            // names drop and the values join into an array-like list.
             let mut items = Vec::with_capacity(arguments.len());
             for argument in arguments {
                 if let Some(value) = argument.value {
@@ -4245,12 +3614,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `switch(subject, a = ..., b = ..., default)` selects one branch by the
-    /// subject's runtime value. Selection cannot be modeled statically, but
-    /// every branch IS checked, and the call's type is the union of the
-    /// branch values. R returns invisible `NULL` when nothing matches, so
-    /// `NULL` joins the union unless a default (unnamed) branch exists; a
-    /// named branch with no value falls through and contributes no type.
+    /// Every branch is checked and the type is the union of their values; R returns
+    /// invisible `NULL` when nothing matches, so `NULL` joins unless a default exists.
     fn infer_switch(&mut self, range: TextRange, arguments: &[Argument]) -> Ty<'db> {
         let Some((subject, branches)) = arguments.split_first() else {
             self.errors.push(TypeError {
@@ -4267,12 +3632,8 @@ impl<'db> Checker<'db, '_> {
         }
         let mut members = Vec::with_capacity(branches.len() + 1);
         let mut has_default = false;
-        // Exactly one alternative runs, so the branches fork and join like the
-        // arms of an `if` — the same shape generalized from two paths to many.
-        // Inferring them in sequence instead let a later branch's write win
-        // outright, so `switch(k, a = { r <- 1L }, { r <- "d" })` left `r` a
-        // plain `character` where the `if` spelling of it correctly joins to
-        // `integer | character`.
+        // Exactly one alternative runs, so branches fork and join like `if` arms; inferring
+        // them in sequence would let a later branch's write win outright.
         let mark = self.environment.mark();
         let mut branch_writes = Vec::with_capacity(branches.len());
         for branch in branches {
@@ -4284,16 +3645,11 @@ impl<'db> Checker<'db, '_> {
             };
             let ty = self.infer(value);
             members.push(self.table.resolve(self.db, ty));
-            // A branch that cannot fall through contributes no state, exactly
-            // as a diverging `if` arm does not.
             if !self.diverges(value) {
                 branch_writes.push(self.environment.writes_since(mark));
             }
             self.environment.rollback(mark);
         }
-        // One branch's writes become the ongoing state and the rest join into
-        // it, which is what `infer_if` does with the else arm's state and the
-        // then arm's writes.
         if let Some((adopted, joined)) = branch_writes.split_last() {
             for &(slot, entry) in adopted {
                 if let Some(entry) = entry {
@@ -4310,11 +3666,8 @@ impl<'db> Checker<'db, '_> {
         union_of(self.db, members)
     }
 
-    /// The caller's own still-open variables among a call's argument types,
-    /// with their current entries. Only a variable from outside the call is
-    /// the caller's: one minted deeper, by a lambda among the arguments, is
-    /// that lambda's to infer, and narrowing it is how
-    /// `lapply(xs, function(v) v + 1L)` types `v`.
+    /// Only a variable from outside the call is the caller's: one minted by a lambda
+    /// among the arguments is that lambda's to infer (`lapply(xs, function(v) v + 1L)`).
     fn caller_open_variables(
         &self,
         arguments: &[CallArgument<'db>],
@@ -4334,25 +3687,15 @@ impl<'db> Checker<'db, '_> {
             .collect()
     }
 
-    /// Whether every captured caller variable is still unbound with the entry
-    /// it was captured with.
     fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
         entries
             .iter()
             .all(|(var, entry)| self.table.find(*var) == *var && self.table.entry(*var) == entry)
     }
 
-    /// Ordered overload probing. Declaration order is the tiebreak, not the
-    /// whole rule: a candidate that accepts the arguments without narrowing
-    /// any of the caller's still-open inference variables is a fact rather
-    /// than a guess, and outranks an earlier-declared candidate that fits
-    /// only by pinning one down. The whole-number-literal courtesy is off in
-    /// the first round and a second round runs only if nothing matched
-    /// strictly, so a literal never steers selection away from a candidate
-    /// the argument's true type would have chosen. Only a plain name resolves
-    /// through an overload set, and a local binding shadowing the name
-    /// disables it (the local wins, as everywhere). `None` means "not an
-    /// overloaded call" — fall through to normal dispatch.
+    /// Declaration order is only the tiebreak: a candidate that fits without narrowing
+    /// the caller's open variables outranks an earlier one that pins one down. The
+    /// literal-as-integer courtesy runs only in a second round so a literal never steers selection.
     fn try_overloaded_call(
         &mut self,
         id: ExprId,
@@ -4382,46 +3725,27 @@ impl<'db> Checker<'db, '_> {
             return None;
         }
 
-        // Arguments are inferred exactly once, before any probe: expression
-        // inference writes state the probe snapshot does not reverse (the
-        // environment, recorded expression types), so running it inside a
-        // probe would leak bindings that reference rolled-back variable ids.
+        // Arguments infer once, before any probe: the probe snapshot does not reverse
+        // environment or recorded-type writes.
         let call_arguments = self.infer_call_arguments(range, arguments);
 
-        // A fit is a FACT when the concrete arguments alone chose the
-        // candidate, and a GUESS when the candidate only fits because
-        // unification narrowed one of the caller's own flexible types —
-        // binding a wrapper's parameter (`function(x) sum(x)`) to whichever
-        // candidate was probed first would reject calls R accepts. So the
-        // caller's open variables are recorded up front, every candidate is
-        // probed, and a fit that left them all untouched beats one that did
-        // not. Among fits of the same kind declaration order decides, which is
-        // the plain first-match rule: the corpus orders every set
-        // most-specific-first and ends it with a general fallback, and a
-        // fallback taking `Any` accepts without binding, so it is a fact and
-        // already outranks any guess above it — `function(x) sum(x)` keeps its
-        // parameter open without needing a last-wins tiebreak.
+        // A fit leaving the caller's open variables untouched beats one that narrows them:
+        // binding `function(x) sum(x)`'s `x` to the first-probed candidate would reject
+        // calls R accepts. Ties go to declaration order.
         let caller_entries = self.caller_open_variables(&call_arguments);
 
-        // Selection runs strict first, then (only if nothing matched and a
-        // whole-number double literal is present) once more with the
-        // literal-as-integer courtesy: `1` is genuinely a double at runtime,
-        // so letting it match an integer candidate in the strict round would
-        // pick a signature whose return misstates what R computes
-        // (`sum(1, 2)` is a double). The courtesy round keeps a name whose
-        // only fitting candidate wants `integer` callable as `foo(1)`.
+        // `1` is a double at runtime, so the integer-literal courtesy round runs only when
+        // the strict one matched nothing (`sum(1, 2)` must stay a double).
         let rounds: &[bool] = if call_arguments.iter().any(|argument| argument.whole_double) {
             &[false, true]
         } else {
             &[false]
         };
 
-        // Every candidate's own first failure, in declaration order, from the
-        // strict round only: the courtesy round is a leniency, so a candidate
-        // it also rejects was already rejected on the honest reading.
+        // Strict round only: a candidate the lenient round also rejects was already
+        // rejected on the honest reading.
         let mut candidate_errors: Vec<TypeError<'db>> = Vec::new();
-        // Each fit: the candidate, whether it left the caller's open
-        // variables untouched, and what it narrowed them to.
+        // (candidate, left caller variables untouched, what it narrowed them to)
         let mut fits: Vec<(usize, bool, Vec<Ty<'db>>)> = Vec::new();
         let mut fitting_courtesy = false;
         for &courtesy in rounds {
@@ -4429,8 +3753,6 @@ impl<'db> Checker<'db, '_> {
                 let snapshot = self.table.snapshot();
                 match self.probe_overload_candidate(callee, scheme, &call_arguments, courtesy) {
                     Ok((resolved, function)) => {
-                        // Nothing flexible to protect: the first fit is the
-                        // answer and the bindings it made stand.
                         if caller_entries.is_empty() {
                             self.recorded.insert(callee, resolved);
                             self.selected_overloads.insert(callee, index);
@@ -4463,14 +3785,8 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        // A free fit is a fact and wins. Without one, a guess is only taken
-        // when every guess narrows the caller's types the same way — a single
-        // fit trivially does. Guesses that disagree would pin a wrapper's
-        // parameter to whichever shape was declared first and reject the
-        // calls that pass another (`function(xs) lapply(xs, f)` given a plain
-        // list). A type the candidates disagree on is one no signature here
-        // can state, so it becomes `Unknown`: an unchecked parameter rather
-        // than a wrong one, and the call's type is undetermined.
+        // Without a free fit, a guess is taken only when every guess narrows the caller's
+        // types alike; disagreeing narrowings make the variable `Unknown` (unchecked, not wrong).
         let winner = fits.iter().find(|(_, free, _)| *free).or_else(|| {
             let (_, _, first) = fits.first()?;
             fits.iter()
@@ -4496,9 +3812,8 @@ impl<'db> Checker<'db, '_> {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return Some(self.unknown());
         }
-        // The winner is re-probed because probing rolls back: the table is in
-        // its pre-probe state again and matching is a pure function of it, so
-        // the fit repeats — and this time it commits.
+        // Re-probe the winner to commit: probing rolled back, and matching is a pure
+        // function of the table.
         if let Some(&(index, _, _)) = winner
             && let Some(scheme) = schemes.get(index)
         {
@@ -4513,26 +3828,9 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        // Naming the set ("no overload matches — I tried all N signatures") is
-        // what the reader needs when the call could plausibly have meant any of
-        // several different shapes and those shapes disagree about what is
-        // wrong: `pick("word")` against `fn(integer)` and `fn(double)` is
-        // rejected at the same argument by both, for different reasons, and
-        // neither reason is *the* answer.
-        //
-        // Two shapes of failure have one answer, which the wrapper would bury —
-        // along with the argument's own range, since the wrapper blames the
-        // whole call:
-        //   - every candidate rejected the call for the very same reason;
-        //   - one candidate got strictly further into the call than any other,
-        //     which makes it the signature the caller meant. A two-parameter
-        //     callback passed to `lapply` is rejected at the callback by the
-        //     candidate that accepted the sequence, and at the sequence by the
-        //     candidate that wanted a named list; the first one is the finding.
-        //
-        // How far a candidate got is the index of the first argument it blamed;
-        // a whole-call verdict (wrong arity, a name no formal declares) blames
-        // no argument and got nowhere.
+        // Report the overload-set finding unless one answer exists: every candidate failed
+        // for the same reason, or exactly one got strictly further into the call (its first
+        // blamed argument is the deepest; a whole-call verdict blames none).
         let blamed: Vec<Option<usize>> = candidate_errors
             .iter()
             .map(|error| {
@@ -4575,19 +3873,13 @@ impl<'db> Checker<'db, '_> {
         };
         self.errors.push(error);
         self.recorded.insert(callee, self.unknown());
-        // A capture-discovery re-pass overwrites recorded state in place; a
-        // call that committed on the first pass but fails on the re-pass
-        // must not keep the stale commitment.
+        // A capture-discovery re-pass must not keep a stale commitment from the first pass.
         self.selected_overloads.remove(&callee);
         Some(self.unknown())
     }
 
-    /// The selected candidate's return type, with a strict-mode origin recorded
-    /// when it is `Any`. The corpus ends an overload set with an `Any` fallback
-    /// for the calls it cannot describe (`min` over a classed value), and `Any`
-    /// satisfies every later check — so the call is a genuine hole, and a user
-    /// who turned strict on to find holes should be told about this one. Strict
-    /// otherwise reports only `Unknown`, which is why these were invisible.
+    /// An `Any` return is the corpus's fallback for calls it cannot describe and passes
+    /// every later check, so strict mode records it as a hole.
     fn committed_overload_return(&mut self, id: ExprId, ret: Ty<'db>) -> Ty<'db> {
         if matches!(
             self.table.shallow_resolve(self.db, ret).kind(self.db),
@@ -4598,10 +3890,8 @@ impl<'db> Checker<'db, '_> {
         ret
     }
 
-    /// One overload probe. `Ok` means the candidate fits and the bindings it
-    /// made are live in the table — the caller keeps or rolls them back. `Err`
-    /// carries the findings that rejected it, empty when the candidate is not
-    /// a function type at all (nothing about the call is wrong then).
+    /// `Ok`: the bindings are live; the caller keeps or rolls them back. `Err` is empty
+    /// when the candidate is not a function type.
     fn probe_overload_candidate(
         &mut self,
         callee: ExprId,
@@ -4682,11 +3972,8 @@ impl<'db> Checker<'db, '_> {
         arguments: &[CallArgument<'db>],
     ) -> Ty<'db> {
         let resolved = self.table.shallow_resolve(self.db, callee);
-        // An alias- or nominal-typed callee calls through its representation:
-        // `#: Formatter` (an alias of a function type) names the same
-        // callable its expansion does. Undeclared names floor to `Unknown`
-        // inside `structural`, so a typo'd callee stays quiet here (the
-        // unknown-type diagnostic owns it).
+        // Alias- or nominal-typed callees call through their representation; an undeclared
+        // name floors to `Unknown` and its diagnostic lives elsewhere.
         let resolved = if matches!(resolved.kind(self.db), TyKind::Named(..)) {
             self.structural(resolved)
         } else {
@@ -4701,8 +3988,6 @@ impl<'db> Checker<'db, '_> {
             }
             TyKind::Any | TyKind::Unknown => self.unknown(),
             TyKind::Var(_) => {
-                // An unresolved callee: constrain it to a function of the
-                // observed shape.
                 let ret = self.fresh(Constraint::Unconstrained);
                 let positional: Vec<Ty<'db>> = arguments
                     .iter()
@@ -4731,19 +4016,8 @@ impl<'db> Checker<'db, '_> {
                 self.unify_or_report(range, expected, resolved);
                 ret
             }
-            // A call through a union of functions — the dispatch-table idiom,
-            // `handlers[[name]](...)` — must be valid for every member, since
-            // the value could be any of them. Each member's signature is
-            // probed against the arguments in an isolated snapshot and the
-            // call's type is the union of the member returns; returns are
-            // variable-erased because the probe bindings that produced them
-            // roll back.
-            // A callee that is functions plus `NULL` — what `switch` without a
-            // default produces, since R returns invisible `NULL` when nothing
-            // matches. The value IS callable on every non-`NULL` path, so
-            // "not a function" would be the wrong complaint: the finding is the
-            // nullability, and the arguments and result still check against the
-            // function members so nothing downstream cascades.
+            // Functions plus `NULL` (a default-less `switch`): callable on every other path, so
+            // the finding is the nullability and the call still checks against the functions.
             TyKind::Union(members)
                 if members
                     .iter()
@@ -4769,6 +4043,8 @@ impl<'db> Checker<'db, '_> {
                 let without_null = union_of(self.db, callable);
                 self.dispatch_call(range, callee_range, without_null, arguments)
             }
+            // A union of functions (`handlers[[name]](...)`) must accept the call for every
+            // member; each probes in an isolated snapshot, so the returns are variable-erased.
             TyKind::Union(members)
                 if members.iter().all(|&member| {
                     matches!(
@@ -4799,11 +4075,9 @@ impl<'db> Checker<'db, '_> {
                         return self.unknown();
                     }
                 }
-                // Each member's match rolls back, so a caller variable a member
-                // only accepted by narrowing would stay open, and the caller's
-                // signature would claim arguments no member takes. No single
-                // signature states what the members demand together, so those
-                // variables become `Unknown`, as a disputed overload guess does.
+                // A caller variable a member accepted only by narrowing would stay open after
+                // the rollback; no single signature states what the members demand together, so
+                // it becomes `Unknown`.
                 if narrowed {
                     for (var, _) in &caller_entries {
                         let var = Ty::new(self.db, TyKind::Var(*var));
@@ -4816,8 +4090,6 @@ impl<'db> Checker<'db, '_> {
                 union_of(self.db, returns)
             }
             _ => {
-                // The defect is the callee, not the whole call: blame
-                // exactly the expression that is not a function.
                 self.errors.push(TypeError {
                     range: callee_range,
                     kind: TypeErrorKind::NotAFunction {
@@ -4829,15 +4101,9 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// R's argument matcher over already-inferred argument types. Every
-    /// argument is checked, so a call with three wrong arguments reports three
-    /// findings rather than forcing a fix-one-recheck loop; a failed
-    /// `compatible` leaves the table untouched, so each argument's verdict is
-    /// independent. Returns the findings in argument order — empty means the
-    /// call matches, which is what an overload probe tests inside a snapshot.
-    /// A *structural* failure (wrong arity, a name no parameter declares)
-    /// describes the call as a whole and is returned alone: per-argument
-    /// mismatches under a mis-shaped call are misleading.
+    /// Checks every argument (a failed `compatible` leaves the table untouched, so
+    /// verdicts are independent); empty means the call matches. A structural failure is
+    /// returned alone: per-argument mismatches under a mis-shaped call mislead.
     fn match_arguments(
         &mut self,
         callee_range: TextRange,
@@ -4854,10 +4120,8 @@ impl<'db> Checker<'db, '_> {
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let targets = self.argument_targets(function, arguments);
 
-        // A function-typed argument earlier in the call may be checked against
-        // the arguments forwarded to it later in the call
-        // (`lapply(x, gsub, pattern = "a")`), so the rest parameter's intake
-        // has to be known before any argument is checked.
+        // A function-typed argument may be checked against arguments forwarded to it later
+        // (`lapply(x, gsub, pattern = "a")`), so the rest intake must be known up front.
         let forwarded_argument_indexes: Vec<usize> = targets
             .iter()
             .enumerate()
@@ -4867,9 +4131,7 @@ impl<'db> Checker<'db, '_> {
 
         let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
         let mut findings = Vec::new();
-        // A name no parameter declares throws off the positional accounting,
-        // so its arity verdict would be noise on top of a finding that already
-        // says what is wrong.
+        // An unknown name throws off positional accounting, so its arity verdict would be noise.
         let mut unknown_name = false;
         for (index, argument) in arguments.iter().enumerate() {
             let Some(target) = targets.get(index).and_then(Option::as_ref) else {
@@ -4937,11 +4199,7 @@ impl<'db> Checker<'db, '_> {
                 ArgumentTarget::Overflow => {
                     if !forwards_dots {
                         return vec![TypeError {
-                            // The first argument with no formal left to take
-                            // it: that is the one the reader has to remove,
-                            // while the callee is the part of the call that is
-                            // right. A missing argument still blames the callee
-                            // — there is no argument to point at.
+                            // The first argument with no formal left is the one to remove.
                             range: argument.range,
                             kind: TypeErrorKind::ArityMismatch {
                                 expected: total,
@@ -4953,15 +4211,9 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        // A formal the call leaves out is filled by its default, evaluated in
-        // the function's own frame — so the parameter holds the default's type
-        // on this call, not whatever the caller might have passed. Without
-        // this the parameter stays a free variable and `f()` for
-        // `f <- function(x = 1) x` yields `Any`, which is compatible with
-        // everything and silences every check downstream of it.
-        //
-        // Skipped when the call forwards `...`: an argument may be arriving
-        // through the dots, so the formal is not known to be omitted.
+        // An omitted formal holds its default's type on this call; left free it would be
+        // `Any` and silence every downstream check. Skipped when `...` is forwarded, since
+        // the formal may arrive through the dots.
         if !forwards_dots {
             for (formal, parameter) in function.named.iter().enumerate() {
                 let supplied = targets.iter().any(
@@ -4970,9 +4222,8 @@ impl<'db> Checker<'db, '_> {
                 if supplied {
                     continue;
                 }
-                // Best effort: a default that cannot fit its own parameter is
-                // the definition's mistake and is reported there, never at a
-                // call that did nothing wrong.
+                // Best effort: a default that does not fit its own parameter is reported at the
+                // definition, never at a call.
                 if let Some(default) = parameter.default {
                     let _ = self.table.unify(self.db, parameter.ty, default);
                 }
@@ -5004,15 +4255,9 @@ impl<'db> Checker<'db, '_> {
         findings
     }
 
-    /// R matches arguments in two passes, and the order matters: an exact name
-    /// claims its formal **before** any positional argument is placed, so
-    /// `vapply(xs, character(1), FUN = f)` sends `character(1)` to `FUN.VALUE`
-    /// rather than colliding with the named `FUN`. Positional arguments then
-    /// fill the fixed parameters, then the unclaimed named formals declared
-    /// before the rest parameter (all of them when the function is not
-    /// variadic), in declaration order; the rest parameter absorbs whatever is
-    /// left. `None` marks an argument that forwards `...`, which every caller
-    /// skips.
+    /// R matches exact names before placing positionals, so `vapply(xs, character(1),
+    /// FUN = f)` sends `character(1)` to `FUN.VALUE`. Positionals then fill fixed
+    /// parameters, then unclaimed named formals before `...`. `None` marks a `...` forward.
     fn argument_targets(
         &self,
         function: &FunctionType<'db>,
@@ -5050,11 +4295,8 @@ impl<'db> Checker<'db, '_> {
                 continue;
             }
             targets[index] = Some(match &argument.name {
-                // A named argument matching no unclaimed formal is absorbed by
-                // the rest parameter (R collects unmatched keywords into
-                // `...`); a name that *duplicates* a formal already supplied
-                // stays an error, as does an unmatched name on a non-variadic
-                // function.
+                // R collects unmatched keywords into `...`; a duplicate of a supplied formal, or
+                // any unmatched name on a non-variadic function, stays an error.
                 Some(name) => {
                     let duplicates_declared = function
                         .named
@@ -5110,19 +4352,9 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// The forwarding retry for a callback argument of a variadic callee.
-    /// R's apply family invokes `FUN(element, ...)`, so a callback with more
-    /// formals than the declared interface is still correct when the caller
-    /// forwards the difference — `lapply(x, gsub, pattern = "a",
-    /// replacement = "o")` calls `gsub(x[[i]], pattern = "a",
-    /// replacement = "o")`, and formals the forwarding leaves unfilled may
-    /// default. When the plain interface check fails, this simulates that
-    /// invocation against the callback's real signature: forwarded named
-    /// arguments consume same-named formals, the interface's parameter types
-    /// then fill the remaining formals in order together with forwarded
-    /// positionals, leftovers must be optional, and the callback's return
-    /// must satisfy the interface's. Runs as a probe: bindings commit only on
-    /// success, and a failed probe reports the original interface mismatch.
+    /// R's apply family calls `FUN(element, ...)`, so a callback with extra formals is
+    /// correct when the caller forwards the difference (`lapply(x, gsub, pattern = "a")`).
+    /// Simulates that invocation as a probe whose bindings commit only on success.
     fn forwarding_callback_probe(
         &mut self,
         expected_parameter: Ty<'db>,
@@ -5168,8 +4400,7 @@ impl<'db> Checker<'db, '_> {
         };
         let actual_rest_element = actual_callback.variadic.as_ref().map(|rest| rest.element);
 
-        // Forwarded named arguments consume the callback's same-named formals
-        // first, as R matches names before positions.
+        // Forwarded names consume same-named formals first, as R matches names before positions.
         let mut forwarded_positionals = Vec::new();
         for &index in forwarded_argument_indexes {
             let argument = &arguments[index];
@@ -5222,9 +4453,8 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        // The interface's parameter types are the elements the callee will
-        // pass; they fill the callback's remaining formals in order, before
-        // the forwarded positionals.
+        // The interface's parameter types are the elements the callee passes; they fill
+        // the remaining formals before the forwarded positionals.
         enum Filled<'db> {
             Element(Ty<'db>),
             Forwarded(usize),
@@ -5275,22 +4505,16 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
-        // Every formal the invocation leaves unfilled must have a default.
         if !open_positionals.is_empty() || open_named.iter().any(|field| !field.optional) {
             return false;
         }
 
-        // The callback's result flows out through the interface's return type
-        // (covariant).
         self.table
             .compatible(self.db, actual_callback.ret, expected_callback.ret)
     }
 
-    /// One argument against one parameter type: compatibility, not
-    /// unification, so parameter-position coercions (scalar-to-vector, `T`
-    /// into `T | NULL`, integer widening) apply. An `Unknown` argument is
-    /// accepted to avoid cascading a second error after the cause was already
-    /// diagnosed where the value became `Unknown`.
+    /// Compatibility, not unification, so parameter-position coercions apply. An
+    /// `Unknown` argument is accepted: its cause was already diagnosed.
     fn check_argument(
         &mut self,
         expected: Ty<'db>,
@@ -5306,12 +4530,8 @@ impl<'db> Checker<'db, '_> {
         if self.table.compatible(self.db, resolved_found, expected) {
             return Ok(());
         }
-        // R programmers write `seq_len(10)`, not `seq_len(10L)`: a
-        // whole-number double literal counts as an integer at a parameter
-        // position. The retry goes through full compatibility, so
-        // integer-expecting unions and vector parameters admit the literal
-        // too. Off during a strict overload probe — the courtesy must not
-        // decide which candidate wins.
+        // R code writes `seq_len(10)`, not `10L`: a whole-number double literal counts as
+        // integer at a parameter, except during a strict overload probe.
         if self.overload_probe_depth == 0
             && matches!(resolved_found.kind(self.db), TyKind::Scalar(Atomic::Double))
             && whole_double
@@ -5321,9 +4541,7 @@ impl<'db> Checker<'db, '_> {
         {
             return Ok(());
         }
-        // A numeric-constrained parameter rejected the argument because it is
-        // not numeric; report that directly rather than rendering the bare
-        // inference variable as the expected type.
+        // Report the numeric constraint rather than render a bare inference variable as expected.
         let resolved_expected = self.table.resolve(self.db, expected);
         if let TyKind::Var(var) = resolved_expected.kind(self.db)
             && let Entry::Unbound {
@@ -5339,12 +4557,6 @@ impl<'db> Checker<'db, '_> {
                 },
             });
         }
-        // A function value rejected by an expected function type: name the
-        // parameter that failed. The two whole signatures leave the reader to
-        // diff them, and the residue a failed unification leaves behind can
-        // describe a call that should have fit — `fn(s: U) -> U` against
-        // `fn(character) -> T` looks satisfiable, because the constraint that
-        // actually refuses `character` is not part of the rendered type.
         if let (TyKind::Function(found_function), TyKind::Function(expected_function)) = (
             resolved_found.kind(self.db).clone(),
             resolved_expected.kind(self.db).clone(),
@@ -5362,11 +4574,8 @@ impl<'db> Checker<'db, '_> {
         Err(self.type_mismatch(range, resolved_expected, resolved_found, value))
     }
 
-    /// `@new Name` — nominal introduction: the value's structural type checks
-    /// against the nominal's representation (binding any type-parameter
-    /// arguments through compatibility, which is how a generic nominal infers
-    /// its arguments from inference-variable fields), and the binding takes
-    /// the nominal type.
+    /// Binds type-parameter arguments through compatibility, which is how a generic
+    /// nominal infers them from inference-variable fields.
     fn check_new_nominal(
         &mut self,
         name: Name<'db>,
@@ -5386,10 +4595,8 @@ impl<'db> Checker<'db, '_> {
         if definition.alias {
             return self.generalize(value_ty);
         }
-        // A fully applied `@new Box<integer>` uses the given arguments; an
-        // unapplied generic falls back to inferring them through the
-        // representation check. Argument variables live one level up so
-        // leftover (undetermined) parameters generalize into the scheme.
+        // An unapplied generic infers its arguments through the representation check;
+        // argument variables live one level up so leftovers generalize into the scheme.
         self.table.level += 1;
         let arguments: Vec<Ty<'db>> = if given_arguments.len() == definition.parameters.len() {
             given_arguments.to_vec()
@@ -5408,9 +4615,6 @@ impl<'db> Checker<'db, '_> {
                 .table
                 .compatible(self.db, resolved_value, representation)
             {
-                // The value is checked against the representation, so the
-                // expected side names the shape the value must have — the
-                // nominal name alone would just restate the `@new` line.
                 let error = self.type_mismatch(range, representation, resolved_value, Some(value));
                 self.errors.push(error);
             }
@@ -5419,13 +4623,8 @@ impl<'db> Checker<'db, '_> {
         self.generalize(nominal)
     }
 
-    /// Resolve, then project non-alias nominals to their representation —
-    /// operators and indexing need a structural shape, and a nominal value is
-    /// compatible with its representation. Opaque nominals (no
-    /// representation) stay `Named`, but an UNDECLARED nominal — a typo the
-    /// unknown-type diagnostic already reports — floors to `Unknown` so the
-    /// operator checks never cascade against it. The loop bound guards
-    /// recursive representations.
+    /// Projects non-alias nominals to their representation. An undeclared nominal (a
+    /// typo reported elsewhere) floors to `Unknown` so operator checks never cascade.
     fn structural(&mut self, ty: Ty<'db>) -> Ty<'db> {
         let mut current = self.table.resolve(self.db, ty);
         for _ in 0..16 {
@@ -5445,9 +4644,8 @@ impl<'db> Checker<'db, '_> {
         current
     }
 
-    /// `x[[i]]` / `x[i]`: the subject and every index infer first regardless
-    /// of shape, so names inside an unsupported form (`m[i, j]`) still
-    /// resolve and get their own diagnostics.
+    /// Every index infers first regardless of shape, so names inside an unsupported
+    /// form (`m[i, j]`) still get diagnostics.
     fn infer_index(
         &mut self,
         id: ExprId,
@@ -5464,12 +4662,8 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let subject = self.structural(target_ty);
-        // A declared `data.table` subject makes a single bracket
-        // `[.data.table`: a query whose index arguments evaluate inside the
-        // data's own frame (their reads are column references — recorded so
-        // the unresolved warning skips them) and whose result CLASS the `j`
-        // argument's syntax decides even with the columns unknown. Shapes the
-        // classifier cannot name keep the sound-refusal Unknown.
+        // A declared `data.table` subject makes `[` a query: index arguments evaluate in
+        // the data's frame (masked column reads), and the `j` syntax decides the result class.
         if !double && is_data_table(self.db, subject) {
             for argument in arguments {
                 if let Some(value) = argument.value {
@@ -5483,41 +4677,27 @@ impl<'db> Checker<'db, '_> {
                 self.unknown()
             };
         }
-        // A bracket the naming walk recognized as data.table syntax without
-        // a data.table-typed subject evaluates its indexes in the data's
-        // frame and returns a shape no base indexing rule covers — silent
-        // Unknown, like the masked column reads inside it.
+        // data.table syntax without a data.table-typed subject returns a shape no base
+        // rule covers: silent `Unknown`.
         if self.naming.masked_subsets.contains(&id) {
             return self.unknown();
         }
-        // An Unknown/Any subject stays Unknown/Any even under an unsupported
-        // index shape — the subject's own gap was already diagnosed, so
-        // `m[i, j]` must not cascade an arity error. A sealed nominal
-        // supports value-dependent indexing of any shape at runtime
-        // (`df[rows, cols]`), none of it modeled — Unknown before the
-        // index-arity check, so idiomatic two-index subsetting is no error.
+        // An `Unknown`/`Any` subject's gap was already diagnosed, so `m[i, j]` must not
+        // cascade an arity error.
         match subject.kind(self.db) {
             TyKind::Unknown => return self.unknown(),
             TyKind::Any => return crate::types::any(self.db),
-            // A subject whose shape the author never wrote down — a sealed
-            // nominal (`df[rows, cols]`), or a parameter still undetermined
-            // (`function(m, i, j) m[i, j]`) — supports value-dependent
-            // indexing of any shape at run time, none of it modelled. It is
-            // sound-by-refusal before the index-arity check below, so
-            // idiomatic two-index subsetting on it is not an error: the whole
-            // point of `function(m, i, j) m[i, j]` is that the caller knows
-            // the shape and the callee does not.
+            // A shape the author never wrote down (a sealed nominal, or `m` in
+            // `function(m, i, j) m[i, j]`) refuses before the index-arity check: the caller
+            // knows the shape, the callee does not.
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 return self.unknown();
             }
             _ => {}
         }
-        // Empty index slots do not count (`m[, i]` and `m[k, ]` each have ONE
-        // index); named arguments do (`m[k, , drop = FALSE]` indexes with 2).
-        // A single index among several slots is matrix-style selection —
-        // unmodeled, so it refuses silently (a strict origin) rather than
-        // erroring on one of R's most idiomatic forms.
+        // Empty slots do not count (`m[, i]` has one index) but named arguments do; a single
+        // index among several slots is unmodeled matrix selection, refused silently.
         let filled = arguments
             .iter()
             .filter(|argument| argument.value.is_some())
@@ -5546,8 +4726,6 @@ impl<'db> Checker<'db, '_> {
             let index = arguments[0]
                 .value
                 .map(|value| self.module.expression(value).kind.clone());
-            // A finding about the KEY points at the key, not at the whole
-            // access chain, which contains the subject too.
             let key_range = arguments[0]
                 .value
                 .map_or(range, |value| self.blame_range(value));
@@ -5564,10 +4742,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Records every read under a data.table bracket's index argument as a
-    /// column reference. Nested function bodies are included: a closure
-    /// written inside `j` is created in the data's frame, so its free names
-    /// also fall back to columns.
+    /// Nested function bodies are included: a closure written inside `j` is created in
+    /// the data's frame.
     fn mask_column_reads(&mut self, id: ExprId) {
         let kind = &self.module.expression(id).kind;
         if matches!(kind, ExpressionKind::NameRef(_)) {
@@ -5578,7 +4754,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `[[` — single-element extraction.
     fn extract_result(
         &mut self,
         origin: ExprId,
@@ -5587,9 +4762,6 @@ impl<'db> Checker<'db, '_> {
         subject: Ty<'db>,
         index: Option<&ExpressionKind>,
     ) -> Result<Ty<'db>, TypeError<'db>> {
-        // Member-wise over a union subject: `[[` must be valid on every shape
-        // the subject can take, and the element's type is the join of the
-        // per-member results; a failing member reports the full union.
         if let TyKind::Union(members) = subject.kind(self.db).clone() {
             let mut results = Vec::with_capacity(members.len());
             for member in members {
@@ -5610,9 +4782,7 @@ impl<'db> Checker<'db, '_> {
             TyKind::Any => Ok(crate::types::any(self.db)),
             TyKind::Scalar(atomic) => Ok(scalar(self.db, atomic)),
             TyKind::Vector(element) | TyKind::List(element) => Ok(element),
-            // A literal name may be absent at runtime (`T | NULL`), while
-            // positional and computed access extract an element like R does
-            // on any vector or list.
+            // A literal name may be absent at runtime (`T | NULL`).
             TyKind::NamedVector(element) | TyKind::NamedList(element) => {
                 Ok(if literal_name.is_some() {
                     union_of(self.db, [element, crate::types::null(self.db)])
@@ -5620,9 +4790,6 @@ impl<'db> Checker<'db, '_> {
                     element
                 })
             }
-            // A computed position could reach any item, so the extraction is
-            // the union of the item types; only a *literal* position is
-            // precise (and still errors when out of range).
             TyKind::Tuple(items) => match literal_position {
                 Some(position) => match items.get(position) {
                     Some(&item) => Ok(item),
@@ -5637,9 +4804,7 @@ impl<'db> Checker<'db, '_> {
                 None => Ok(union_of(self.db, items)),
             },
             TyKind::Record(fields) => {
-                // Record fields are declaration-ordered, so a positional `[[`
-                // extracts the field at that position exactly like a tuple
-                // item.
+                // Record fields are declaration-ordered, so a positional `[[` works like a tuple's.
                 if let Some(position) = literal_position {
                     return match fields.get(position) {
                         Some(field) => Ok(field.ty),
@@ -5653,8 +4818,6 @@ impl<'db> Checker<'db, '_> {
                     };
                 }
                 match literal_name {
-                    // A computed name could reach any field — the
-                    // dispatch-table idiom, `handlers[[name]](...)`.
                     None => Ok(union_of(self.db, fields.iter().map(|field| field.ty))),
                     Some(name) => {
                         match fields.iter().find(|field| field.name.text(self.db) == name) {
@@ -5677,11 +4840,8 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
             }
-            // A sealed nominal and an unresolved inference variable both
-            // support element access the system cannot model — sound-by-
-            // refusal Unknown, never a rejection (idiomatic R walks generic
-            // data this way: `function(x) x[[1L]]`). The variable stays
-            // unconstrained; the refusal is a strict origin.
+            // Unmodeled element access (`function(x) x[[1L]]` is idiomatic): refuse with
+            // `Unknown`, never reject.
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(self.unknown())
@@ -5693,7 +4853,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `[` — the list slice and the vector subset.
     fn subset_result(
         &mut self,
         origin: ExprId,
@@ -5701,7 +4860,6 @@ impl<'db> Checker<'db, '_> {
         subject: Ty<'db>,
         index: Option<Ty<'db>>,
     ) -> Result<Ty<'db>, TypeError<'db>> {
-        // Member-wise over a union subject, like `[[`.
         if let TyKind::Union(members) = subject.kind(self.db).clone() {
             let mut results = Vec::with_capacity(members.len());
             for member in members {
@@ -5715,9 +4873,6 @@ impl<'db> Checker<'db, '_> {
         match subject.kind(self.db).clone() {
             TyKind::Unknown => Ok(self.unknown()),
             TyKind::Any => Ok(crate::types::any(self.db)),
-            // Vector subjects: the index's shape decides between one
-            // position (the scalar-claim element) and a sub-vector; `[`
-            // keeps map-likeness, unlike arithmetic.
             TyKind::Scalar(_) => match self.vector_index_shape(range, index)? {
                 VectorIndexShape::ScalarLike => Ok(subject),
                 VectorIndexShape::VectorLike => Ok(Ty::new(self.db, TyKind::Vector(subject))),
@@ -5731,16 +4886,11 @@ impl<'db> Checker<'db, '_> {
                 VectorIndexShape::VectorLike => Ok(subject),
             },
             TyKind::List(_) | TyKind::NamedList(_) => Ok(subject),
-            // A `[` slice of a fixed-shape list is a sub-list that can
-            // contain any of the item types, so the element type is their
-            // union (collapsing back for a homogeneous list; slicing the
-            // empty list yields `list[NULL]`).
             TyKind::Tuple(items) => Ok(Ty::new(self.db, TyKind::List(union_of(self.db, items)))),
             TyKind::Record(fields) => Ok(Ty::new(
                 self.db,
                 TyKind::NamedList(union_of(self.db, fields.iter().map(|field| field.ty))),
             )),
-            // Sound-by-refusal, as for `[[`.
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(self.unknown())
@@ -5752,12 +4902,8 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// How a `[` index selects from a vector: one position (a scalar-like
-    /// numeric or character index — a deliberate scalar claim, see the
-    /// typing reference) or many (vector-like and logical-mask indexes,
-    /// `NULL`). Undetermined shapes (inference variables, opaque nominals,
-    /// `Unknown`, `Any`) claim scalar and stay unconstrained; non-vector
-    /// indexes are type errors.
+    /// A scalar-like numeric or character index is a deliberate scalar claim (see the
+    /// typing reference); undetermined shapes claim scalar and stay unconstrained.
     fn vector_index_shape(
         &mut self,
         range: TextRange,
@@ -5812,9 +4958,6 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// `x$name` behaves as `[["name"]]` on lists and records — but not on
-    /// atomic vectors, which R rejects outright. `x@name` (S4 slot access) is
-    /// not modeled: sound-by-refusal Unknown.
     fn infer_field(
         &mut self,
         id: ExprId,
@@ -5846,21 +4989,13 @@ impl<'db> Checker<'db, '_> {
         &mut self,
         origin: ExprId,
         range: TextRange,
-        // The field name's own range: a finding about the field points there,
-        // not at the whole access chain, which contains the subject too.
         name_range: TextRange,
         subject: Ty<'db>,
         name: &str,
     ) -> Result<Ty<'db>, TypeError<'db>> {
-        // Member-wise over a union subject. A shape that lacks the field is
-        // not an error on its own: R answers `NULL` for a name a list does
-        // not carry, which is exactly what the accumulator idiom relies on
-        // (`args <- list(); if (flag) args$escape <- TRUE; args$escape`). So a
-        // missing field contributes `NULL` and the read is nullable — while a
-        // field no shape carries at all stays an error, because that is a
-        // typo rather than an absence the program is prepared for. A
-        // *structural* refusal (`$` on an atomic vector) is a hard error from
-        // any member: no shape makes it legal.
+        // R answers `NULL` for a name a list lacks (the accumulator idiom), so a member
+        // missing the field makes the read nullable; a field no member carries is a typo,
+        // and `$` on an atomic member is always an error.
         if let TyKind::Union(members) = subject.kind(self.db).clone() {
             let mut results = Vec::with_capacity(members.len());
             let mut absent: Option<TypeError<'db>> = None;
@@ -5875,9 +5010,7 @@ impl<'db> Checker<'db, '_> {
             }
             return match (results.is_empty(), absent) {
                 (true, Some(mut error)) => {
-                    // The failing member may be the one with no fields at all,
-                    // so a suggestion drawn from it alone would be empty.
-                    // Draw it from every field the union can carry instead.
+                    // The failing member may have no fields at all, so suggest from the whole union.
                     if let TypeErrorKind::FieldDoesNotExist { suggestion, .. } = &mut error.kind {
                         *suggestion = crate::diagnostics::nearest_field_name(
                             name,
@@ -5899,9 +5032,6 @@ impl<'db> Checker<'db, '_> {
         match subject.kind(self.db).clone() {
             TyKind::Unknown => Ok(self.unknown()),
             TyKind::Any => Ok(crate::types::any(self.db)),
-            // R rejects `$` on every atomic vector ("$ operator is invalid
-            // for atomic vectors"), named ones included — element extraction
-            // is `[[`'s job.
             TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) => Err(TypeError {
                 range,
                 kind: TypeErrorKind::DollarOnAtomicVector { found: subject },
@@ -5933,9 +5063,7 @@ impl<'db> Checker<'db, '_> {
                     container: subject,
                 },
             }),
-            // Sound-by-refusal for sealed nominals (`df$col` is the most
-            // idiomatic R there is) and unresolved variables
-            // (`function(node) node$value`).
+            // Refuse rather than reject: `df$col` and `function(node) node$value` are idiomatic.
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(self.unknown())
@@ -5947,26 +5075,9 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Branch-merge join: unify when possible (keeps the chooser idiom linking
-    /// two inference variables), otherwise the union of the branch types; a
-    /// NULL branch joins by pure union so it never binds a variable to NULL.
-    /// The value of an `if`/`else` whose branches both fall through. Branches
-    /// with genuinely different types produce their UNION — never a
-    /// unification — whenever either side still carries an unresolved
-    /// inference variable. Unifying there would let the concrete branch pin
-    /// the other: `function(flag, x) if (flag) x else "s"` would silently
-    /// become `fn(flag, x: character)`, so `f(TRUE, 1)` failed and the error
-    /// blamed the *caller* for a line that is not wrong. It is also what the
-    /// guard rule requires — an unannotated parameter is not pinned by the
-    /// guard that tests it, which is the whole point of
-    /// `if (is.character(x)) x else "other"`.
-    ///
-    /// Two branches that are BOTH still open do tie to each other, because
-    /// neither pins the other and the tie is what makes the coalesce idiom
-    /// `if (is.null(value)) fallback else value` infer
-    /// `<T> fn(value: T | NULL, fallback: T) -> T`. Two concrete branches go
-    /// through `join_types`, where identical types collapse instead of forming
-    /// a one-member union.
+    /// Differing openness joins by union, never unification: the concrete branch would
+    /// pin the other (`function(flag, x) if (flag) x else "s"` would demand
+    /// `x: character`). Two open branches do tie, which types the coalesce idiom.
     fn join_branch_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
         let left_resolved = self.table.resolve(self.db, left);
         let right_resolved = self.table.resolve(self.db, right);
@@ -5978,13 +5089,8 @@ impl<'db> Checker<'db, '_> {
             } else {
                 right_resolved
             };
-            // Only an UNCONSTRAINED variable is protected. One the body has
-            // already restricted — `n * fact(n - 1L)` demands numeric — may
-            // unify with the other branch, because that pin adds nothing the
-            // program did not already require and it is what lets recursion
-            // converge to a precise type. An unconstrained variable is a
-            // parameter the body only passes through, so pinning it would
-            // invent a requirement the code never expressed.
+            // Only an unconstrained variable is protected: pinning an already-restricted one
+            // adds no new requirement and lets recursion converge.
             if self.table.open_constraint(self.db, open) == Some(Constraint::Unconstrained) {
                 return union_of(self.db, [left_resolved, right_resolved]);
             }
@@ -5992,6 +5098,7 @@ impl<'db> Checker<'db, '_> {
         self.join_types(left, right)
     }
 
+    /// Unifies when possible; a `NULL` side joins by union so it never binds a variable.
     fn join_types(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
         let left_resolved = self.table.resolve(self.db, left);
         let right_resolved = self.table.resolve(self.db, right);
@@ -6010,16 +5117,11 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Merge branch writes with the pre-branch state: an entry written in one
-    /// branch joins with its other-path value (or stays, optimistically, when
-    /// the other path had none).
     fn join_writes(&mut self, writes: Vec<(BindingId, Option<EnvEntry<'db>>)>) {
         self.join_writes_reporting(&writes);
     }
 
-    /// One slot entry as a monotype, for joining paths that disagree about
-    /// what the slot holds. A scheme instantiates: its quantified variables
-    /// become fresh ones, which the export edge erases like any other residual.
+    /// A scheme instantiates; its fresh variables erase at the export edge like any residual.
     fn entry_monotype(&mut self, entry: EnvEntry<'db>) -> Ty<'db> {
         match entry {
             EnvEntry::Mono(ty) | EnvEntry::MissingFormal(ty) => ty,
@@ -6030,27 +5132,21 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Like `join_writes`, reporting the slots whose entries actually changed
-    /// (the loop fixed point's stability signal).
+    /// Returns the slots whose entries changed: the loop fixed point's stability signal.
     fn join_writes_reporting(
         &mut self,
         writes: &[(BindingId, Option<EnvEntry<'db>>)],
     ) -> Vec<BindingId> {
         let mut changed = Vec::new();
         for &(slot, branch_entry) in writes {
-            // The missing-formal marker is branch-local: joined back into
-            // the fall-through state it means only "possibly missing", which
-            // reads as the ordinary supplied type.
+            // The missing-formal marker is branch-local: once joined it is the supplied type.
             let branch_entry = match branch_entry {
                 Some(EnvEntry::MissingFormal(ty)) => Some(EnvEntry::Mono(ty)),
                 other => other,
             };
             let mut current = self.environment.get(slot);
-            // The path that did not write a top-level slot still holds the
-            // name's earlier project binding, which only reached this item if
-            // something read it. A name the project never bound keeps the
-            // written type on that path: the read is `maybe-undefined`, not a
-            // read of whatever builtin shares the name.
+            // The path that did not write a top-level slot holds the earlier project binding; a
+            // name the project never bound keeps the written type (the read is maybe-undefined).
             if current.is_none() && branch_entry.is_some() {
                 current = self.materialize_earlier_binding(slot).map(EnvEntry::Mono);
             }
@@ -6059,27 +5155,13 @@ impl<'db> Checker<'db, '_> {
                     Some(EnvEntry::Mono(self.join_types(a, b)))
                 }
                 (None, Some(entry)) => Some(entry),
-                // Identical entries on both paths: nothing joins, and keeping
-                // the entry as-is preserves a function slot's polymorphism.
+                // Keeping identical entries as-is preserves a function slot's polymorphism.
                 (Some(a), Some(b)) if a == b => Some(a),
-                // A function slot conditionally rewritten. The scheme has to
-                // collapse to a monotype union of what each path holds: a slot
-                // that may hold either of two different functions is not
-                // polymorphic, and its honest type is the union. Taking one
-                // side — which this did in both directions, a branch scheme
-                // replacing whatever preceded it and a monotype replacing a
-                // scheme — invented a type belonging to neither path, so the
-                // slot claimed a contract the other path does not satisfy and
-                // reads answered from it in both directions.
+                // A conditionally rewritten function slot is not polymorphic: its honest type is
+                // the monotype union of what each path holds.
                 (Some(a), Some(b)) => {
-                    // Union rather than `join_types`, which unifies first and
-                    // only unions when unification fails. Two instantiated
-                    // schemes are always unifiable through their fresh
-                    // variables — `fn(x: T) -> T` unifies with
-                    // `fn(x: U) -> character` by binding `T := character` — and
-                    // the merged signature describes neither path while linking
-                    // variables that instantiation made independent precisely
-                    // so they would stay separate.
+                    // Union, not `join_types`: two instantiated schemes always unify through their
+                    // fresh variables, yielding a signature that describes neither path.
                     let (a, b) = (self.entry_monotype(a), self.entry_monotype(b));
                     let (a, b) = (
                         self.table.resolve(self.db, a),
@@ -6099,8 +5181,6 @@ impl<'db> Checker<'db, '_> {
         changed
     }
 
-    // ---- schemes ----
-
     fn schemes(&self) -> &Vec<TypeScheme<'db>> {
         &self.scheme_arena
     }
@@ -6110,7 +5190,7 @@ impl<'db> Checker<'db, '_> {
         (self.scheme_arena.len() - 1) as u32
     }
 
-    /// Generalize: quantify unbound variables ABOVE the current level.
+    /// Quantifies unbound variables above the current level.
     fn generalize(&mut self, ty: Ty<'db>) -> TypeScheme<'db> {
         let resolved = self.table.resolve(self.db, ty);
         let mut binders = Vec::new();
@@ -6154,7 +5234,6 @@ impl<'db> Checker<'db, '_> {
         Ty::new(self.db, TyKind::Rigid(name))
     }
 
-    /// Instantiate a scheme with fresh variables carrying its constraints.
     fn instantiate(&mut self, scheme: &TypeScheme<'db>) -> Ty<'db> {
         let mut substitution: FxHashMap<Name<'db>, Ty<'db>> = FxHashMap::default();
         for (name, constraint) in &scheme.binders {
@@ -6165,8 +5244,6 @@ impl<'db> Checker<'db, '_> {
     }
 }
 
-/// The statically known element atomic of a `c(...)` operand: a scalar or a
-/// vector with a concrete scalar element; anything else cannot combine.
 fn combine_operand_atomic<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Atomic> {
     match ty.kind(db) {
         TyKind::Scalar(atomic) => Some(*atomic),
@@ -6178,9 +5255,7 @@ fn combine_operand_atomic<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Atomic> {
     }
 }
 
-/// R's atomic coercion hierarchy for `c(...)`: logical < integer < double <
-/// complex < character (`c(1L, NA)` is `integer`, `c(1L, "a")` is
-/// `character`); `raw` does not participate and only combines with itself.
+/// `raw` sits outside R's coercion hierarchy and only combines with itself.
 fn promote_combine_atomic(left: Atomic, right: Atomic) -> Option<Atomic> {
     if left == right {
         return Some(left);
@@ -6202,10 +5277,6 @@ fn promote_combine_atomic(left: Atomic, right: Atomic) -> Option<Atomic> {
     })
 }
 
-/// A failing union member reports the full union — the subject's actual type —
-/// not the single member that failed.
-/// Every field name any member of a union subject carries, for the
-/// "did you mean" of a field no member carries.
 fn union_field_names<'db>(db: &'db dyn Db, subject: Ty<'db>) -> Vec<String> {
     let mut names = Vec::new();
     let mut collect = |ty: Ty<'db>| {
@@ -6220,6 +5291,7 @@ fn union_field_names<'db>(db: &'db dyn Db, subject: Ty<'db>) -> Vec<String> {
     names
 }
 
+/// A failing union member reports the full union, not the member that failed.
 fn widen_error_container<'db>(mut error: TypeError<'db>, union: Ty<'db>) -> TypeError<'db> {
     match &mut error.kind {
         TypeErrorKind::NotAList { found }
@@ -6232,20 +5304,13 @@ fn widen_error_container<'db>(mut error: TypeError<'db>, union: Ty<'db>) -> Type
     error
 }
 
-/// Whether an index subject resolved to the `data.table` nominal, wherever
-/// it was declared (the shipped conditional stub or a project `@type`).
 fn is_data_table(db: &dyn Db, subject: Ty<'_>) -> bool {
     matches!(subject.kind(db), TyKind::Named(name, _) if name.text(db) == "data.table")
 }
 
-/// Whether a `[.data.table` query's result keeps the subject's class, decided
-/// purely by the bracket's argument syntax. `j` is the second positional slot
-/// (or a `j =` named argument); the class survives when `j` is absent or an
-/// empty slot (row filtering, joins), when a `by =`/`keyby =` grouping is
-/// present (grouped results always assemble into a table), or when `j` is a
-/// `:=` column assignment (the subject returned invisibly) or a
-/// `.()`/`list()` select. Every other `j` — a bare column, a computed value,
-/// `with =` forms — has a result shape only column knowledge could name.
+/// Decided purely by syntax: the class survives when `j` (second positional or
+/// `j =`) is absent, under `by`/`keyby`, or is a `:=`, `.()`, or `list()` call; any
+/// other `j` needs column knowledge.
 fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
     let mut positional = arguments.iter().filter(|argument| argument.name.is_none());
     let j = arguments
@@ -6274,17 +5339,13 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
     )
 }
 
-/// The first alias whose expansion re-enters itself while lowering `ty`, if
-/// any. A proper DFS gray set: a name is "expanding" only while its own body
-/// is walked, so a diamond (two sibling mentions of one alias) is not a
-/// cycle. Nominal (`@type`) definitions may be legitimately recursive and are
-/// not expanded.
+/// A DFS gray set: a name is expanding only while its own body is walked, so a
+/// diamond is not a cycle. Nominal definitions may legitimately recurse.
 fn find_alias_cycle<'db>(
     db: &'db dyn Db,
     definitions: Option<&FxHashMap<Name<'db>, crate::annotations::NamedDefinition<'db>>>,
     ty: Ty<'db>,
 ) -> Option<String> {
-    // No declarations, no alias to cycle through.
     let definitions = definitions?;
     let mut expanding = rustc_hash::FxHashSet::default();
     alias_cycle_walk(db, definitions, ty, &mut expanding)
@@ -6352,10 +5413,7 @@ fn alias_cycle_walk<'db>(
     }
 }
 
-/// The name a `pkg::name` / `pkg:::name` read may resolve under: the stub
-/// corpus must know the namespace, and `::` additionally requires the name to
-/// be declared there (`:::` reaches unexported names). With no stub corpus
-/// installed validation is impossible, so every qualified read resolves.
+/// With no stub corpus installed validation is impossible, so every qualified read resolves.
 fn validated_namespace_name(
     db: &dyn Db,
     internal: bool,
@@ -6366,9 +5424,7 @@ fn validated_namespace_name(
     let Some(package) = package else {
         return Some(name);
     };
-    // The project's own package resolves through the global environment, which
-    // already holds its definitions — and wins over a stub namespace of the
-    // same name, exactly as a package binding shadows a stub name.
+    // The project's own package resolves through globals and wins over a same-named stub namespace.
     if crate::metadata::is_own_package(db, package) {
         return Some(name);
     }
@@ -6407,13 +5463,11 @@ mod tests {
         let check = check_source(&db, "add <- function(x) x + 1L");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = check.scheme.expect("definition scheme");
-        // `<T: numeric> fn(x: T) -> T`.
         assert_eq!(scheme.binders.len(), 1);
         assert_eq!(scheme.binders[0].1, Constraint::Numeric);
         let TyKind::Function(function) = scheme.body.kind(&db) else {
             panic!("expected a function scheme");
         };
-        // Formals carry their names (R matches by name and position).
         assert_eq!(function.named.len(), 1);
         assert_eq!(function.named[0].name.text(&db), "x");
         assert_eq!(function.named[0].ty, function.ret);
@@ -6456,7 +5510,7 @@ mod tests {
     #[test]
     fn if_join_unifies_or_unions() {
         let db = RootDatabase::default();
-        // NULL branch joins by union, never binding the variable.
+        // A `NULL` branch joins by union, never binding the variable.
         let check = check_source(&db, "pick <- function(f) if (f) 1L else NULL");
         assert!(check.errors.is_empty());
         let scheme = check.scheme.expect("scheme");
@@ -6489,14 +5543,12 @@ mod tests {
     #[test]
     fn for_loops_bind_the_element_and_reach_a_fixed_point() {
         let db = RootDatabase::default();
-        // The idiomatic accumulator is clean and stays integer.
         let accumulator = check_source(
             &db,
             "f <- function() {\n  total <- 0L\n  for (i in 1:3) {\n    total <- total + i\n  }\n  total\n}",
         );
         assert!(accumulator.errors.is_empty(), "{:?}", accumulator.errors);
         assert_eq!(scheme_ret(&db, &accumulator), scalar(&db, Atomic::Integer));
-        // A heterogeneous fixed-shape list binds the union of item types.
         let heterogeneous = check_source(
             &db,
             "f <- function() {\n  out <- 1L\n  for (item in list(2L, \"a\")) {\n    out <- item\n  }\n  out\n}",
@@ -6510,7 +5562,6 @@ mod tests {
             scheme_ret(&db, &heterogeneous).kind(&db),
             TyKind::Union(members) if members.len() == 2
         ));
-        // A function is not iterable.
         let bad = check_source(
             &db,
             "f <- function() {\n  g <- function() 1L\n  for (i in g) i\n}",
@@ -6547,28 +5598,24 @@ mod tests {
     #[test]
     fn replacement_writes_update_the_base_slot() {
         let db = RootDatabase::default();
-        // A known-field write replaces the field's type.
         let replaced = check_source(
             &db,
             "f <- function() {\n  p <- list(a = 1L)\n  p$a <- \"s\"\n  p$a\n}",
         );
         assert!(replaced.errors.is_empty(), "{:?}", replaced.errors);
         assert_eq!(scheme_ret(&db, &replaced), scalar(&db, Atomic::Character));
-        // A fresh field is added; an empty list() starts a record.
         let added = check_source(
             &db,
             "f <- function() {\n  p <- list()\n  p$b <- TRUE\n  p$b\n}",
         );
         assert!(added.errors.is_empty(), "{:?}", added.errors);
         assert_eq!(scheme_ret(&db, &added), scalar(&db, Atomic::Logical));
-        // A computed-key write turns an empty list map-like.
         let computed = check_source(
             &db,
             "f <- function(key) {\n  m <- list()\n  m[[key]] <- 1L\n  m[[key]]\n}",
         );
         assert!(computed.errors.is_empty(), "{:?}", computed.errors);
         assert_eq!(scheme_ret(&db, &computed), scalar(&db, Atomic::Integer));
-        // A replacement-function call keeps the base's type.
         let kept = check_source(
             &db,
             "f <- function() {\n  v <- c(1L, 2L)\n  names(v) <- c(\"a\", \"b\")\n  v + 1L\n}",
@@ -6594,15 +5641,11 @@ mod tests {
     #[test]
     fn diverging_branch_contributes_neither_value_nor_state() {
         let db = RootDatabase::default();
-        // The value: `if (c) return(NULL) else 5` is `double`, not
-        // `NULL | double`.
         let value = check_source(
             &db,
             "f <- function(c) {\n  x <- if (c) return(NULL) else 5\n  x + 1\n}",
         );
         assert!(value.errors.is_empty(), "{:?}", value.errors);
-        // The state: a write inside a diverging branch does not join, so the
-        // arithmetic below stays clean.
         let state = check_source(
             &db,
             "f <- function(flag) {\n  x <- 1L\n  if (flag) {\n    x <- \"s\"\n    return(x)\n  }\n  x + 1L\n}",
@@ -6628,7 +5671,6 @@ mod tests {
             "coalesce <- function(value, fallback) if (is.null(value)) fallback else value",
         );
         assert!(check.errors.is_empty(), "{:?}", check.errors);
-        // `<T> fn(value: T | NULL, fallback: T) -> T`.
         let scheme = check.scheme.clone().expect("scheme");
         assert_eq!(scheme.binders.len(), 1, "{scheme:?}");
         let TyKind::Function(function) = scheme.body.kind(&db) else {
@@ -6661,7 +5703,6 @@ mod tests {
     #[test]
     fn arithmetic_ties_two_flexible_operands() {
         let db = RootDatabase::default();
-        // `<T: numeric> fn(a: T, b: T) -> T`: one binder shared by all three.
         let check = check_source(&db, "add <- function(a, b) a + b");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = check.scheme.expect("scheme");
@@ -6686,25 +5727,21 @@ mod tests {
     #[test]
     fn arithmetic_shape_rules_over_vectors() {
         let db = RootDatabase::default();
-        // integer[] + integer stays integer[].
         let vector = check_source(&db, "f <- function() c(1L, 2L) + 1L");
         assert!(vector.errors.is_empty(), "{:?}", vector.errors);
         assert!(matches!(
             scheme_ret(&db, &vector).kind(&db),
             TyKind::Vector(element) if *element == scalar(&db, Atomic::Integer)
         ));
-        // integer[] / integer promotes to double[].
         let divided = check_source(&db, "f <- function() c(1L, 2L) / 2L");
         assert!(divided.errors.is_empty(), "{:?}", divided.errors);
         assert!(matches!(
             scheme_ret(&db, &divided).kind(&db),
             TyKind::Vector(element) if *element == scalar(&db, Atomic::Double)
         ));
-        // `%%` is arithmetic, not an opaque special.
         let modulo = check_source(&db, "f <- function() 7L %% 2L");
         assert!(modulo.errors.is_empty(), "{:?}", modulo.errors);
         assert_eq!(scheme_ret(&db, &modulo), scalar(&db, Atomic::Integer));
-        // A non-numeric operand reports the operand, not the whole range.
         let bad = check_source(&db, "f <- function() \"a\" + 1L");
         assert!(
             bad.errors.iter().any(|error| matches!(
@@ -6728,7 +5765,6 @@ mod tests {
             scheme_ret(&db, &literal).kind(&db),
             TyKind::Vector(element) if *element == scalar(&db, Atomic::Integer)
         ));
-        // A flexible endpoint may resolve to double, so the claim is double[].
         let flexible = check_source(&db, "f <- function(n) 1:n");
         assert!(flexible.errors.is_empty(), "{:?}", flexible.errors);
         assert!(matches!(
@@ -6740,21 +5776,18 @@ mod tests {
     #[test]
     fn comparisons_share_a_family_and_shape_elementwise() {
         let db = RootDatabase::default();
-        // A flexible operand against a numeric partner is constrained.
         let flexible = check_source(&db, "positive <- function(x) x > 0L");
         assert!(flexible.errors.is_empty(), "{:?}", flexible.errors);
         let scheme = flexible.scheme.clone().expect("scheme");
         assert_eq!(scheme.binders.len(), 1);
         assert_eq!(scheme.binders[0].1, Constraint::Numeric);
         assert_eq!(scheme_ret(&db, &flexible), scalar(&db, Atomic::Logical));
-        // A vector member compares element-wise.
         let vector = check_source(&db, "f <- function() c(1L, 2L) > 1L");
         assert!(vector.errors.is_empty(), "{:?}", vector.errors);
         assert!(matches!(
             scheme_ret(&db, &vector).kind(&db),
             TyKind::Vector(element) if *element == scalar(&db, Atomic::Logical)
         ));
-        // Cross-family comparison is a mismatch.
         let mixed = check_source(&db, "f <- function() 1L > \"a\"");
         assert!(
             mixed
@@ -6769,8 +5802,6 @@ mod tests {
     #[test]
     fn conditions_coerce_numerics_and_refuse_everything_else() {
         let db = RootDatabase::default();
-        // R coerces a numeric condition (zero false, anything else true), so
-        // the `if (length(x))` idiom is not a mistake.
         for source in [
             "f <- function() if (1L) 2L",
             "f <- function() 1L && TRUE",
@@ -6780,8 +5811,6 @@ mod tests {
             let ok = check_source(&db, source);
             assert!(ok.errors.is_empty(), "{source}: {:?}", ok.errors);
         }
-        // A character condition is a runtime error in R for every string but
-        // the spellings of TRUE and FALSE, so it stays a type error.
         let bad_condition = check_source(&db, "f <- function() if (\"yes\") 2L");
         assert!(
             bad_condition
@@ -6845,7 +5874,6 @@ mod tests {
             "expected a missing-argument arity error, got {:?}",
             missing.errors
         );
-        // A defaulted formal may stay unfilled.
         let defaulted = check_source(&db, "g <- function() {\n  f <- function(x = 1) x\n  f()\n}");
         assert!(defaulted.errors.is_empty(), "{:?}", defaulted.errors);
     }
@@ -6861,21 +5889,18 @@ mod tests {
     #[test]
     fn list_builds_fixed_shapes_and_extraction_is_precise() {
         let db = RootDatabase::default();
-        // Literal position on a tuple-like list.
         let tuple = check_source(
             &db,
             "f <- function() {\n  x <- list(1L, \"a\")\n  x[[1L]]\n}",
         );
         assert!(tuple.errors.is_empty(), "{:?}", tuple.errors);
         assert_eq!(scheme_ret(&db, &tuple), scalar(&db, Atomic::Integer));
-        // Literal field via `$` on a record-like list.
         let record = check_source(
             &db,
             "f <- function() {\n  p <- list(a = 1L, b = \"s\")\n  p$b\n}",
         );
         assert!(record.errors.is_empty(), "{:?}", record.errors);
         assert_eq!(scheme_ret(&db, &record), scalar(&db, Atomic::Character));
-        // A computed index is the union of the item types.
         let computed = check_source(
             &db,
             "f <- function(i) {\n  x <- list(1L, \"a\")\n  x[[i]]\n}",
@@ -6885,7 +5910,6 @@ mod tests {
             scheme_ret(&db, &computed).kind(&db),
             TyKind::Union(members) if members.len() == 2
         ));
-        // `[` slices into a sub-list of the union.
         let slice = check_source(&db, "f <- function() {\n  x <- list(1L, \"a\")\n  x[1L]\n}");
         assert!(slice.errors.is_empty(), "{:?}", slice.errors);
         assert!(matches!(
@@ -6919,7 +5943,6 @@ mod tests {
             "{:?}",
             missing_field.errors
         );
-        // R rejects `$` on atomic vectors, named ones included.
         let dollar_atomic = check_source(&db, "f <- function() {\n  v <- c(a = 1L)\n  v$a\n}");
         assert!(
             dollar_atomic
@@ -6929,7 +5952,6 @@ mod tests {
             "{:?}",
             dollar_atomic.errors
         );
-        // Multi-index forms are not modeled.
         let matrix = check_source(&db, "f <- function() {\n  x <- list(1L)\n  x[1L, 2L]\n}");
         assert!(
             matrix.errors.iter().any(|error| matches!(
@@ -7005,8 +6027,6 @@ mod tests {
     #[test]
     fn union_of_functions_calls_every_member() {
         let db = RootDatabase::default();
-        // The dispatch-table idiom: the value could be either function, so
-        // the call must be valid for both and types as the union of returns.
         let check = check_source(
             &db,
             "f <- function(flag) {\n  h <- if (flag) function(x) 1L else function(x) \"a\"\n  h(2L)\n}",
@@ -7028,8 +6048,6 @@ mod tests {
     #[test]
     fn conditional_slot_write_joins_types() {
         let db = RootDatabase::default();
-        // The beta-semantics soundness case: a branch write must be visible
-        // after the construct as a union.
         let check = check_source(
             &db,
             "f <- function(flag) {\n  x <- 1L\n  if (flag) x <- \"two\"\n  x\n}",
@@ -7108,13 +6126,11 @@ mod tests {
     #[test]
     fn rigid_binder_refuses_undeclared_bound() {
         let db = RootDatabase::default();
-        // The body adds an arithmetic bound the annotation never declared.
         let bad = check_annotated(&db, "#: <T> fn(x: T) -> T\nbad <- function(x) x + 1L");
         assert!(
             !bad.errors.is_empty(),
             "plain <T> must refuse arithmetic, got no errors"
         );
-        // With the declared numeric constraint the same body is fine.
         let ok = check_annotated(
             &db,
             "#: <T: numeric> fn(x: T) -> T\nok <- function(x) x + 1L",

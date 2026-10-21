@@ -1,25 +1,11 @@
-//! The interned type representation.
-//!
-//! Types are salsa-interned: a `Ty` is a copyable id, equality is id
-//! comparison, and no deep clones exist anywhere in inference.
-//! Inference variables are ordinary interned types (`TyKind::Var`), so there is
-//! exactly one type representation end to end.
-//!
-//! Unions are normalized in exactly one place, `union_of`: flatten, structural
-//! dedupe keeping first occurrence, `NULL` ordered last, `Any` then `Unknown`
-//! absorb the union, a singleton unwraps, and empty collapses to `NULL`. Never
-//! construct `TyKind::Union` directly.
-
 use crate::Db;
 
-/// An interned identifier (variable names, parameter names, type names).
 #[salsa::interned(debug)]
 pub struct Name<'db> {
     #[returns(deref)]
     pub text: String,
 }
 
-/// An interned type: a cheap copyable id; equality is id equality.
 #[salsa::interned(debug)]
 pub struct Ty<'db> {
     #[returns(ref)]
@@ -28,34 +14,28 @@ pub struct Ty<'db> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum TyKind<'db> {
-    /// The sanctioned escape hatch: compatible with everything, silently.
+    /// Compatible with everything, silently.
     Any,
     /// An absent or unmodeled fact; strict mode reports its origins.
     Unknown,
     Null,
     Scalar(Atomic),
-    /// `T[]` — an atomic vector with element type `T`.
     Vector(Ty<'db>),
-    /// `T[named]`.
     NamedVector(Ty<'db>),
-    /// `list[T]`.
     List(Ty<'db>),
-    /// `list[named: T]`.
     NamedList(Ty<'db>),
     /// `list{A, B}`.
     Tuple(Vec<Ty<'db>>),
-    /// `list{a: A, b: B}` — fields keep declaration order.
+    /// `list{a: A, b: B}`; fields keep declaration order.
     Record(Vec<RecordField<'db>>),
     Function(FunctionType<'db>),
-    /// A normalized union; built only through `union_of`.
+    /// Normalized; build only through `union_of`, never directly.
     Union(Vec<Ty<'db>>),
-    /// A named (nominal or alias-expanded) type with its arguments.
     Named(Name<'db>, Vec<Ty<'db>>),
-    /// A unification variable (inference-scoped; resolved through the
-    /// inference table, never stored in exported schemes).
+    /// Inference-scoped: resolved through the table, never stored in exported schemes.
     Var(InferenceVar),
-    /// A rigid (skolem) variable from an explicit `<T>` binder: refuses to
-    /// bind while its scope is checked, generalizes back out afterwards.
+    /// A skolem from an explicit `<T>` binder: refuses to bind while its scope is
+    /// checked, generalizes back out afterwards.
     Rigid(Name<'db>),
 }
 
@@ -79,33 +59,22 @@ pub struct RecordField<'db> {
     pub optional: bool,
 }
 
-/// One named parameter of a function type.
-///
-/// Separate from [`RecordField`] because a parameter carries something a record
-/// field cannot: the type of its **default**. R evaluates the default in the
-/// function's own frame when the caller omits the argument, so that type is
-/// what the parameter holds on the omitted path — without it a call that leaves
-/// the argument out has nothing to instantiate the parameter with and the
-/// result degrades to `Any`, silencing everything downstream.
+/// Unlike a record field, carries the default's type: R evaluates the default
+/// when the argument is omitted, so it is what the parameter holds on that path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct Parameter<'db> {
     pub name: Name<'db>,
     pub ty: Ty<'db>,
-    /// Callers may omit the argument: the formal has a default, or the body
-    /// tests it with `missing()`.
+    /// The formal has a default, or the body tests it with `missing()`.
     pub optional: bool,
-    /// The default's type, when the formal has one that could be inferred.
-    /// `None` for a required parameter, for `missing()`-style optionality with
-    /// no default, and for an annotation that declares `[name]:` without the
-    /// definition being in view.
+    /// Also `None` for `missing()`-style optionality and for an annotated `[name]:`
+    /// whose definition is not in view.
     pub default: Option<Ty<'db>>,
 }
 
 impl<'db> Parameter<'db> {
-    /// Every type this parameter carries. Traversals go through here so a
-    /// variable hiding in a default cannot be missed by one walk and found by
-    /// another — an occurs check or a level adjustment that skipped it would be
-    /// unsound, not merely imprecise.
+    /// Walks must go through here: one that skipped the default would make an
+    /// occurs check or level adjustment unsound.
     pub fn types(&self) -> impl Iterator<Item = Ty<'db>> + '_ {
         std::iter::once(self.ty).chain(self.default)
     }
@@ -113,13 +82,9 @@ impl<'db> Parameter<'db> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct FunctionType<'db> {
-    /// Positional parameters, in order.
     pub positional: Vec<Ty<'db>>,
-    /// Named parameters (declaration order; `optional` marks `[name]:`).
     pub named: Vec<Parameter<'db>>,
-    /// The `...` rest parameter's element type, with the count of named
-    /// parameters written before it (parameters after `...` match by name
-    /// only).
+    /// Parameters after `...` match by name only.
     pub variadic: Option<RestParameter<'db>>,
     pub ret: Ty<'db>,
 }
@@ -130,8 +95,6 @@ pub struct RestParameter<'db> {
     pub preceding_named: usize,
 }
 
-/// The constraint lattice on inference variables and binders. `Numeric` and
-/// `AtomicElement` join to `ScalarNumeric` (a scalar integer/double).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, salsa::SalsaValue)]
 pub enum Constraint {
     #[default]
@@ -142,10 +105,8 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    /// How this bound is written in a `#:` binder list, and read back out of
-    /// one. Rendering and parsing share the table so a constraint the checker
-    /// prints is always a constraint a user can write — a finding's type is
-    /// meant to be copyable straight into an annotation.
+    /// Shared by rendering and parsing, so every constraint the checker prints can
+    /// be written back in an annotation.
     pub const SPELLINGS: [(&'static str, Constraint); 3] = [
         ("numeric", Constraint::Numeric),
         ("atomic", Constraint::AtomicElement),
@@ -178,7 +139,6 @@ impl Constraint {
     }
 }
 
-/// A generalized type: binders with their constraints over a body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct TypeScheme<'db> {
     pub binders: Vec<(Name<'db>, Constraint)>,
@@ -194,9 +154,7 @@ impl<'db> TypeScheme<'db> {
     }
 }
 
-/// Whether a type contains `Unknown` anywhere in its structure. Named types
-/// are opaque here — their representation is a separate declaration, not part
-/// of this value's structure.
+/// Named types are not expanded: their representation is a separate declaration.
 pub fn contains_unknown(db: &dyn Db, ty: Ty<'_>) -> bool {
     match ty.kind(db) {
         TyKind::Unknown => true,
@@ -246,8 +204,6 @@ pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
     Ty::new(db, TyKind::Scalar(atomic))
 }
 
-/// THE union constructor: every builder, resolver, importer, and instantiation
-/// path goes through here, because members can collapse after substitution.
 pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>) -> Ty<'db> {
     let mut flat: Vec<Ty<'db>> = Vec::new();
     let mut saw_null = false;
@@ -280,20 +236,9 @@ pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>
     }
 }
 
-/// Replace rigid variables per the substitution, leaving unmapped ones
-/// intact — how schemes instantiate and how type-definition parameters apply.
-/// How many nodes a type has **as a tree** — counting each path separately —
-/// saturating at [`TYPE_SIZE_CEILING`].
-///
-/// Tree size, not distinct-node count, is the number that matters: interning
-/// makes a type a DAG, so a self-referential record shares its subtrees and its
-/// distinct-node count stays small while the tree it denotes grows by a factor
-/// of the field count per level. Anything walking that type without a memo pays
-/// the tree size, which is why one R file could grow a captured binding through
-/// 877, 8823, 104655 and 1046623 nodes and never finish.
-///
-/// Tracked, so the sum runs once per distinct type; computing it is O(the DAG)
-/// even though the answer describes the tree.
+/// Node count of `ty` as a tree (each path counted separately), saturating at
+/// [`TYPE_SIZE_CEILING`]. Interning makes types DAGs, so a self-referential
+/// record's tree grows exponentially while its distinct nodes stay few.
 #[salsa::tracked(returns(clone))]
 pub fn type_size<'db>(db: &'db dyn Db, ty: Ty<'db>) -> u64 {
     fn sum<'db>(db: &'db dyn Db, types: impl Iterator<Item = Ty<'db>>) -> u64 {
@@ -330,25 +275,12 @@ pub fn type_size<'db>(db: &'db dyn Db, ty: Ty<'db>) -> u64 {
     }
 }
 
-/// The point past which [`type_size`] stops counting. Well above any type real
-/// code produces and well below the sizes a self-referential value reaches.
+/// Far above any type real code produces, far below what a self-referential value reaches.
 pub const TYPE_SIZE_CEILING: u64 = 100_000;
 
-/// Rebuild `ty` with `map` applied to every type it directly contains — the one
-/// place that knows which types a composite is made of, and the mapping
-/// counterpart of [`Parameter::types`].
-///
-/// Every transformation that rewrites types (resolution, substitution,
-/// generalization, variable erasure) goes through here, so a member a
-/// transformation must not skip cannot be skipped by one walk and honored by
-/// another. A parameter's DEFAULT is exactly such a member: five hand-written
-/// walks each re-listed the composites, two of them forgot the default, and an
-/// inference variable riding inside one crossed the item boundary into a table
-/// that could not resolve it.
-///
-/// Leaves — and the variables and rigid binders a caller substitutes — come back
-/// unchanged, so a caller handles the kind it cares about and delegates the rest
-/// to this function.
+/// Rebuild `ty` with `map` applied to each direct child type. Every type rewrite
+/// goes through here so no walk can skip a member such as a parameter default.
+/// Leaves, variables, and rigid binders come back unchanged.
 pub fn map_child_types<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
@@ -401,8 +333,7 @@ pub fn map_child_types<'db>(
                 ret: map(function.ret),
             }),
         ),
-        // Members can collapse into one another once mapped, so the result
-        // re-normalizes instead of keeping a union of equal members.
+        // Members can collapse once mapped, so re-normalize.
         TyKind::Union(members) => union_of(db, members.iter().map(|&member| map(member))),
         TyKind::Named(name, arguments) => Ty::new(
             db,
@@ -414,8 +345,7 @@ pub fn map_child_types<'db>(
     }
 }
 
-/// Visit every type `ty` directly contains — the reading counterpart of
-/// [`map_child_types`], for walks that inspect a type without rebuilding it.
+/// The reading counterpart of [`map_child_types`].
 pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl FnMut(Ty<'db>)) {
     match ty.kind(db) {
         TyKind::Any
@@ -447,11 +377,8 @@ pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl F
     }
 }
 
-/// Whether an inference variable appears anywhere in `ty`. Variables are
-/// indices into ONE table, so a type that outlives the table that minted them —
-/// an exported scheme, a value cached across a table rollback — must carry
-/// none: read in a foreign table the index either dangles or, worse, names an
-/// unrelated variable.
+/// Variables index one table, so a type outliving it (an exported scheme, a
+/// value cached across a rollback) must contain none.
 pub fn contains_inference_var<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
     if matches!(ty.kind(db), TyKind::Var(_)) {
         return true;
@@ -463,6 +390,7 @@ pub fn contains_inference_var<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
     found
 }
 
+/// Unmapped rigid variables are left intact.
 pub fn substitute_rigid<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
@@ -471,13 +399,8 @@ pub fn substitute_rigid<'db>(
     substitute_rigid_memo(db, ty, substitution, &mut rustc_hash::FxHashMap::default())
 }
 
-/// A type is a DAG, not a tree: interning means one subtree is reached by every
-/// path that mentions it, and a record whose fields all return that record is
-/// reached once per field per level. Substituting without a memo re-walks each
-/// shared subtree once per path, which is exponential in depth — measured at 278
-/// million calls in 40 seconds on one R file, where the same walk memoised
-/// finishes. The memo is per top-level call because the substitution is fixed
-/// for its duration, so a node's answer cannot depend on how it was reached.
+/// Memoized because interning makes types DAGs: unmemoized, shared subtrees are
+/// re-walked per path, exponential in depth. Per call, since the substitution is fixed.
 fn substitute_rigid_memo<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
@@ -506,10 +429,8 @@ fn substitute_rigid_uncached<'db>(
     })
 }
 
-/// Replace every inference variable in an (already-resolved) type with
-/// `Unknown`, for values that must survive a later table rollback: a stored
-/// variable id would dangle once the rollback reclaims (and later reuses) the
-/// id.
+/// For values that must survive a table rollback, which reclaims and reuses
+/// variable ids.
 pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     if matches!(ty.kind(db), TyKind::Var(_)) {
         return unknown(db);
@@ -522,10 +443,6 @@ mod size_tests {
     use super::*;
     use crate::RootDatabase;
 
-    /// The ceiling exists to stop a *shared* type whose tree is enormous, so the
-    /// count has to follow paths rather than distinct nodes — a record holding
-    /// one subtree twice costs twice. Counting the graph instead would report a
-    /// self-referential value as small and never fire.
     #[test]
     fn size_counts_the_tree_not_the_shared_graph() {
         let db = RootDatabase::default();
@@ -542,8 +459,6 @@ mod size_tests {
         );
     }
 
-    /// Doubling depth doubles the tree, so a value that refers to itself reaches
-    /// the ceiling quickly and saturates there instead of overflowing.
     #[test]
     fn size_saturates_at_the_ceiling() {
         let db = RootDatabase::default();
@@ -560,10 +475,6 @@ mod tests {
     use super::*;
     use crate::RootDatabase;
 
-    /// A parameter's default is a type like any other, and the walks that
-    /// rewrite or inspect types have to reach it: a variable left there
-    /// travelled out of the item whose table minted it and was read against a
-    /// table that never had it.
     #[test]
     fn a_parameter_default_is_part_of_the_type() {
         let db = RootDatabase::default();
@@ -625,7 +536,6 @@ mod tests {
         let int = scalar(&db, Atomic::Integer);
         let chr = scalar(&db, Atomic::Character);
 
-        // Flatten + dedupe keeping first occurrence + NULL last.
         let inner = union_of(&db, [null(&db), int]);
         let outer = union_of(&db, [inner, chr, int]);
         let TyKind::Union(members) = outer.kind(&db) else {
@@ -633,14 +543,11 @@ mod tests {
         };
         assert_eq!(members, &vec![int, chr, null(&db)]);
 
-        // Any and Unknown absorb.
         assert_eq!(union_of(&db, [int, any(&db)]), any(&db));
         assert_eq!(union_of(&db, [unknown(&db), int]), unknown(&db));
 
-        // Singleton unwraps; empty collapses to NULL.
         assert_eq!(union_of(&db, [int, int]), int);
         assert_eq!(union_of(&db, []), null(&db));
-        // `T | NULL` stays a union with NULL last.
         let optional = union_of(&db, [null(&db), chr]);
         let TyKind::Union(members) = optional.kind(&db) else {
             panic!("expected a union")

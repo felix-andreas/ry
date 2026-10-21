@@ -1,25 +1,13 @@
-//! Loading declaration-only `.Rtypes` stub files onto interned types.
-//!
-//! Each line is `name : <type-expr>` — the type half reuses the `#:`
-//! annotation grammar (parsed by wrapping it as an annotation and running the
-//! ordinary pipeline, so there is no second type parser). `@type NAME`
-//! declares an opaque stub nominal; repeating a name within one source
-//! appends an ordered overload candidate; a later source replaces a name's
-//! whole set. The assembled library is derived from a set-once singleton
-//! input plus the package-metadata input (which activates the conditional
-//! namespaces), so stub text never participates in per-edit invalidation.
+//! `.Rtypes` stubs: `name : <type>` lines whose type half goes through the `#:` annotation
+//! grammar. Stub text is a set-once input, so it never participates in per-edit invalidation.
 
 use crate::Db;
 use crate::annotations::lower_annotation;
 use crate::types::TypeScheme;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// The raw stub sources: `(namespace, text)` pairs in precedence order (later
-/// sources replace earlier declarations of the same name wholesale), plus the
-/// export manifests: `(namespace, text)` pairs listing every name the
-/// namespace exports, one per line (`#` starts a comment). Manifest names
-/// resolve even without a typed declaration — a real export the typed corpus
-/// does not describe reads as `Unknown` instead of warning.
+/// Sources are in precedence order: a later source replaces a name's whole overload set.
+/// Manifest names resolve even without a typed declaration, as `Unknown`.
 #[salsa::input(singleton, debug)]
 pub struct StubSources {
     #[returns(ref)]
@@ -30,52 +18,38 @@ pub struct StubSources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct StubLibrary<'db> {
-    /// Ordered overload candidates per name (single-element for plain names).
     pub schemes: FxHashMap<String, Vec<TypeScheme<'db>>>,
-    /// Opaque nominal type names (`@type data.frame`).
     pub nominals: FxHashSet<String>,
-    /// Variadic functions whose `...` arguments are data-masked, mapped to
-    /// the names of the formals declared BEFORE the `...`: arguments
-    /// matching those formals (by position or name) resolve normally, and
-    /// everything the rest parameter absorbs is masked. An empty list means
-    /// every argument masks (`join_by(...)`-style vocabulary).
+    /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
+    /// empty list masks every argument.
     pub masked: FxHashMap<String, Vec<String>>,
-    /// Declared names per namespace. Declaration-level, not winner-level: a
-    /// later source overriding a name's type does not un-export it from the
+    /// Declaration-level: a later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
     pub exports_by_namespace: FxHashMap<String, FxHashSet<String>>,
-    /// The winning declaration site per name — hover and goto-definition jump
-    /// here. For an overload set this is the first candidate's line.
+    /// The winning declaration site per name; for an overload set, the first candidate.
     pub declarations: FxHashMap<String, StubDeclaration>,
-    /// Every manifest-listed export of the active namespaces, typed or not.
-    /// A read of one of these names always resolves; without a typed
-    /// declaration its type is simply `Unknown`.
+    /// Manifest-listed exports of the active namespaces; these always resolve, untyped ones as
+    /// `Unknown`.
     pub known_exports: FxHashSet<String>,
 }
 
-/// Where a stub name is declared: which installed source (an index into the
-/// `StubSources` order the host fed in — the host knows each index's file)
-/// and the name token's range within that source's text.
+/// `source_index` indexes the `StubSources` order the host fed in.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct StubDeclaration {
     pub source_index: usize,
     pub range: syntax::TextRange,
 }
 
-/// The winning declaration site of `name`, when the corpus declares it.
 pub fn stub_declaration<'db>(db: &'db dyn Db, name: &str) -> Option<&'db StubDeclaration> {
     stubs(db)?.declarations.get(name)
 }
 
-/// Whether the stub corpus knows `package` as a namespace. `None` when no
-/// corpus is installed — callers skip validation entirely then.
+/// `None` when no corpus is installed, so callers skip validation.
 pub fn namespace_known(db: &dyn Db, package: &str) -> Option<bool> {
     stubs(db).map(|library| library.exports_by_namespace.contains_key(package))
 }
 
-/// The namespace whose declaration of `name` currently wins: sources are in
-/// precedence order (later replaces earlier), so the last declaring namespace
-/// owns the name.
+/// The last declaring source in precedence order owns the name.
 pub fn declaring_namespace<'db>(db: &'db dyn Db, name: &str) -> Option<&'db str> {
     let sources = StubSources::try_get(db)?;
     let library = stub_library(db, sources);
@@ -88,8 +62,6 @@ pub fn declaring_namespace<'db>(db: &'db dyn Db, name: &str) -> Option<&'db str>
     })
 }
 
-/// Whether `package` declares `name` (any declaration form, overloads and
-/// nominals included).
 pub fn namespace_exports(db: &dyn Db, package: &str, name: &str) -> bool {
     stubs(db).is_some_and(|library| {
         library
@@ -99,13 +71,8 @@ pub fn namespace_exports(db: &dyn Db, package: &str, name: &str) -> bool {
     })
 }
 
-/// The shipped stdlib corpus (base + default-attached packages, plus the
-/// conditional namespaces), embedded from the repository's top-level
-/// `types/` directory — top-level so the R type declarations are the first
-/// thing a repository visitor finds (the typeshed precedent). NOT `stubs/`:
-/// that name is the project-override convention, and a workspace-root
-/// `stubs/` in this repo would be loaded as overrides when ry analyzes
-/// its own sources.
+/// Embedded from top-level `types/`, not `stubs/`: a workspace-root `stubs/` is the
+/// project-override convention and would load as overrides when ry analyzes this repository.
 pub fn shipped_stub_sources() -> Vec<(String, String)> {
     [
         ("base", include_str!("../../../types/base.Rtypes")),
@@ -128,10 +95,7 @@ pub fn shipped_stub_sources() -> Vec<(String, String)> {
     .collect()
 }
 
-/// The vendored export manifests paired with the shipped corpus: every name
-/// each namespace exports, generated from a real R session by
-/// `scripts/export-manifests.R`. Real exports the typed corpus does not
-/// describe still resolve (as `Unknown`) instead of warning.
+/// Generated from a real R session by `scripts/export-manifests.R`.
 pub fn shipped_export_manifests() -> Vec<(String, String)> {
     [
         ("base", include_str!("../../../types/base.exports")),
@@ -158,9 +122,8 @@ pub fn shipped_export_manifests() -> Vec<(String, String)> {
         ("dplyr", include_str!("../../../types/dplyr.exports")),
         ("ggplot2", include_str!("../../../types/ggplot2.exports")),
         ("testthat", include_str!("../../../types/testthat.exports")),
-        // Manifest-only: no typed declarations, so every name is `Unknown` —
-        // what they buy is a knowable export set, which is what keeps
-        // unresolved-name detection alive in a project that attaches them.
+        // Manifest-only: every name is `Unknown`, but a knowable export set keeps unresolved-name
+        // detection alive in projects that attach them.
         ("tibble", include_str!("../../../types/tibble.exports")),
         ("tidyr", include_str!("../../../types/tidyr.exports")),
         ("readr", include_str!("../../../types/readr.exports")),
@@ -188,18 +151,9 @@ pub fn shipped_export_manifests() -> Vec<(String, String)> {
     .collect()
 }
 
-/// Shipped namespaces R does not attach by default: their declarations join
-/// the library only when the project declares or attaches the package
-/// (`metadata::namespace_active`), so `fread` and `mutate` never resolve —
-/// and never steal a typo warning — in a project that does not use them.
-///
-/// Most of these carry only an [export manifest](`shipped_export_manifests`),
-/// no typed declarations. That is deliberate and it is the point: attaching a
-/// package whose export set the checker cannot see disables unresolved-name
-/// detection for the whole project (the export set is unknowable, so guessing
-/// would cost false positives), and a manifest makes the set knowable. Every
-/// name from a manifest-only namespace types as `Unknown` — no precision
-/// claimed — while a typo beside it is a typo again.
+/// Join the library only when the project declares or attaches the package, so their names never
+/// resolve (or mask a typo) elsewhere. A manifest-only entry still matters: attaching a package
+/// with an unknowable export set disables unresolved-name detection project-wide.
 pub const CONDITIONAL_NAMESPACES: &[&str] = &[
     "data.table",
     "dplyr",
@@ -222,12 +176,8 @@ pub const CONDITIONAL_NAMESPACES: &[&str] = &[
     "tidyverse",
 ];
 
-/// A meta-package and the packages it ATTACHES rather than re-exports.
-/// `library(tidyverse)` puts `mutate` and `read_csv` within bare reach without
-/// exporting either, so activating the members alongside it is what matches R
-/// — and it hands such a project the members' *typed* declarations (dplyr's,
-/// ggplot2's) instead of a manifest's `Unknown`. `scripts/export-manifests.R`
-/// prints the membership a live session reports, so this list is checkable.
+/// Meta-packages and the packages they attach rather than re-export, so `library(tidyverse)`
+/// activates the members' typed declarations. `scripts/export-manifests.R` prints the membership.
 pub const META_PACKAGE_MEMBERS: &[(&str, &[&str])] = &[(
     "tidyverse",
     &[
@@ -243,20 +193,16 @@ pub const META_PACKAGE_MEMBERS: &[(&str, &[&str])] = &[(
     ],
 )];
 
-/// Namespaces R ships but does not put on the default search path: `pkg::`
-/// reads work in every R session (their manifests always validate qualified
-/// access), while bare reads need the package attached or declared first.
+/// Shipped with R but not on the default search path: `pkg::` reads always validate, bare reads
+/// need the package attached or declared.
 pub const QUALIFIED_ONLY_NAMESPACES: &[&str] = &[
     "compiler", "grid", "parallel", "splines", "stats4", "tcltk", "tools",
 ];
 
-/// Parse and lower every stub source into the interned library.
 #[salsa::tracked(returns(ref))]
 pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'db> {
-    // A namespace declared by more than one source carries a PROJECT
-    // override on top of the shipped file — and writing `stubs/dplyr.Rtypes`
-    // is itself the clearest declaration that the project uses the package,
-    // so it activates the conditional namespace like metadata would.
+    // A namespace declared by several sources has a project override, and writing
+    // `stubs/dplyr.Rtypes` declares use of the package, so it activates like metadata would.
     let mut seen_namespaces: FxHashSet<&str> = FxHashSet::default();
     let mut project_overridden: FxHashSet<&str> = FxHashSet::default();
     for (namespace, _) in sources.sources(db) {
@@ -276,8 +222,8 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             .exports_by_namespace
             .entry(namespace.clone())
             .or_default();
-        // Names declared earlier in THIS source append candidates; a name
-        // first seen in this source replaces any earlier source's set.
+        // A name repeated within this source appends candidates; its first occurrence here
+        // replaces any earlier source's set.
         let mut seen_here: FxHashSet<&str> = FxHashSet::default();
         let mut line_start = 0usize;
         for raw_segment in text.split_inclusive('\n') {
@@ -288,8 +234,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if content.is_empty() {
                 continue;
             }
-            // The declared name's first occurrence in the uncommented line is
-            // the name token itself (only whitespace or `@type` precede it).
+            // Only whitespace or `@type` precede the name, so its first occurrence is the name token.
             let name_range = |name: &str| {
                 strip_comment(raw_line).find(name).map(|at| {
                     let start = (this_line_start + at) as u32;
@@ -356,10 +301,8 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         if CONDITIONAL_NAMESPACES.contains(&namespace.as_str()) && !active {
             continue;
         }
-        // R-shipped but unattached namespaces are reachable through `::` in
-        // every session, so their manifests always validate qualified reads —
-        // but their names become bare-visible (`known_exports`) only once the
-        // project attaches or declares the package, exactly as in R.
+        // Qualified-only namespaces always validate `pkg::` reads, but their names become bare
+        // reads only once the project attaches or declares the package, as in R.
         let bare_visible = !QUALIFIED_ONLY_NAMESPACES.contains(&namespace.as_str()) || active;
         let namespace_exports = library
             .exports_by_namespace
@@ -367,10 +310,8 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             .or_default();
         for line in text.lines() {
             let name = strip_comment(line).trim();
-            // R's control keywords are namespace exports (they are
-            // primitives) but can never be referenced as names, so keeping
-            // them would only pollute typo suggestions (`break` for
-            // `fread`).
+            // Control keywords are exported primitives that can never be referenced as names, so
+            // keeping them would only pollute typo suggestions.
             const CONTROL_KEYWORDS: &[&str] = &[
                 "if", "else", "repeat", "while", "function", "for", "next", "break", "in",
             ];
@@ -386,11 +327,8 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
     library
 }
 
-/// The names of a masked declaration's formals before its `...`, in
-/// declaration order — the arguments that resolve normally at a masked call
-/// (the data arguments). `None` when the scheme is not a variadic function
-/// (the declaration-level error `stub_source_problems` reports; the loader
-/// simply skips the mask).
+/// `None` when the scheme is not variadic: `stub_source_problems` reports that, and the loader
+/// skips the mask.
 fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<String>> {
     let crate::types::TyKind::Function(function) = scheme.body.kind(db) else {
         return None;
@@ -405,25 +343,20 @@ fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<St
     )
 }
 
-/// The library assembled from the singleton input (`None` when unset).
 pub fn stubs<'db>(db: &'db dyn Db) -> Option<&'db StubLibrary<'db>> {
     StubSources::try_get(db).map(|sources| stub_library(db, sources))
 }
 
-/// One declaration the stub loader would drop: its zero-based line and the
-/// reason. The editor's `.Rtypes` buffer diagnostics and `ry check`'s
-/// override report both render from this list, so the wording stays
-/// identical everywhere.
+/// `line` is zero-based. Editor diagnostics and `ry check` both render from this, so the wording
+/// stays identical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StubProblem {
     pub line: usize,
     pub message: String,
 }
 
-/// Everything the loader would drop from one stub source, ordered by line.
-/// The nominal vocabulary is the installed corpus's plus this source's own
-/// `@type` declarations — the source may be an unsaved editor buffer whose
-/// declarations are not installed yet.
+/// The vocabulary includes this source's own `@type` declarations: it may be an unsaved buffer
+/// that is not installed yet.
 pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     let mut known_nominals: FxHashSet<String> = stubs(db)
         .map(|library| library.nominals.iter().cloned().collect())
@@ -523,8 +456,6 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     problems
 }
 
-/// Named types the nominal vocabulary does not declare, in first-occurrence
-/// order. Rigid variables (binder-introduced) are not nominals.
 fn collect_unknown_nominals<'db>(
     db: &'db dyn Db,
     ty: crate::types::Ty<'db>,
@@ -582,8 +513,7 @@ fn collect_unknown_nominals<'db>(
     }
 }
 
-/// Parse one type expression by routing it through the annotation pipeline —
-/// the single type grammar in the system.
+/// Routes through the annotation pipeline, the single type grammar.
 fn lower_type_text<'db>(db: &'db dyn Db, type_text: &str) -> Option<TypeScheme<'db>> {
     let parse = syntax::parse(&format!("#: {type_text}"));
     if !parse.errors().is_empty() {
@@ -597,16 +527,14 @@ fn lower_type_text<'db>(db: &'db dyn Db, type_text: &str) -> Option<TypeScheme<'
 }
 
 fn strip_comment(line: &str) -> &str {
-    // `#` cannot occur inside a declaration type, so a line comment starts at
-    // the first `#`.
+    // `#` cannot occur inside a declaration type.
     match line.find('#') {
         Some(at) => &line[..at],
         None => line,
     }
 }
 
-/// The first `:` at delimiter depth zero separates name from type (`list[a: b]`
-/// keeps its interior colon).
+/// Depth-zero only, so `list[a: b]` keeps its interior colon.
 fn top_level_colon(content: &str) -> Option<usize> {
     let mut depth: usize = 0;
     for (byte_index, character) in content.char_indices() {
@@ -620,10 +548,8 @@ fn top_level_colon(content: &str) -> Option<usize> {
     None
 }
 
-/// A declarable name: an R identifier (letters, digits, `.`, `_`, not starting
-/// with a digit), an infix operator (`%in%`, a user `%||%`), or an S3 operator
-/// method (`+.Date`) — the spelling R itself uses to give a class arithmetic
-/// or comparison, and the only way a stub can say a nominal supports `+`.
+/// S3 operator methods (`+.Date`) are declarable: they are how a stub says a nominal supports an
+/// operator.
 fn is_stub_name(name: &str) -> bool {
     let identifier = |name: &str| {
         let mut characters = name.chars();
@@ -649,13 +575,11 @@ fn is_stub_name(name: &str) -> bool {
         .any(|suffix| suffix.strip_prefix('.').is_some_and(identifier))
 }
 
-/// The operator spellings an S3 method name may carry, longest first so
-/// `%/%.difftime` is not read as `%%` followed by a stray `/`.
+/// Longest first, so `%/%.difftime` is not read as `%%` followed by `/`.
 const OPERATOR_METHOD_PREFIXES: [&str; 13] = [
     "%/%", "%%", "<=", ">=", "==", "!=", "+", "-", "*", "/", "^", "<", ">",
 ];
 
-/// Convenience for hosts and tests: feed the shipped corpus into the database.
 pub fn install_shipped_stubs(db: &dyn Db) -> StubSources {
     StubSources::new(db, shipped_stub_sources(), shipped_export_manifests())
 }
@@ -685,9 +609,7 @@ mod tests {
         assert_eq!(library.schemes["length"].len(), 1);
     }
 
-    /// Whether a name is an S3 operator method (`+.Date`) or an operator group
-    /// generic (`Arith.difftime`, `Compare.Date`) — a dispatch target for the
-    /// checker's operator lookup rather than a name a namespace exports.
+    /// A dispatch target for operator lookup (`+.Date`, `Compare.Date`), not an exported name.
     fn is_operator_method_name(name: &str) -> bool {
         const GROUP_GENERICS: [&str; 3] = ["Arith.", "Compare.", "Ops."];
         GROUP_GENERICS
@@ -701,12 +623,8 @@ mod tests {
 
     #[test]
     fn every_declaration_is_a_real_export() {
-        // Each shipped `.Rtypes` value declaration must be an actual export
-        // of its namespace per the vendored manifest (`@type` nominals name
-        // classes, which are not exported bindings). Conditional namespaces
-        // may additionally override base names (data.table's
-        // class-preserving `merge`). Catches declarations added to the wrong
-        // file and names R has moved between namespaces.
+        // `@type` nominals name classes, not exported bindings, and conditional namespaces may
+        // override base names (data.table's class-preserving `merge`).
         let db = RootDatabase::default();
         crate::metadata::PackageMetadata::new(
             &db,
@@ -743,9 +661,7 @@ mod tests {
                 if library.nominals.contains(name) || manifest.contains(name.as_str()) {
                     continue;
                 }
-                // An operator method is a dispatch target, not a name user code
-                // reads: R registers `Compare.Date` in base's namespace without
-                // exporting it, so the manifest cannot vouch for it.
+                // R registers operator methods like `Compare.Date` without exporting them.
                 if is_operator_method_name(name) {
                     continue;
                 }
@@ -788,7 +704,6 @@ mod tests {
     fn qualified_only_namespaces_gate_bare_reads() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        // `tools::file_ext` works in every R session without library(tools)…
         assert!(namespace_exports(&db, "tools", "file_ext"));
         let file = SourceFile::new(
             &db,
@@ -797,7 +712,6 @@ mod tests {
         );
         ProjectFiles::new(&db, vec![file]);
         assert!(file_diagnostics(&db, file).is_empty());
-        // …but the bare name needs the package attached or declared.
         assert!(!crate::package_scheme_exists(&db, "mclapply"));
         let active = RootDatabase::default();
         install_shipped_stubs(&active);
@@ -1003,8 +917,6 @@ mod tests {
     fn strict_round_keeps_doubles_double() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        // `sum(1, 2)` is a double at runtime: the strict round must refuse the
-        // integer candidate and land on the double one.
         let check = first_item_check(&db, "f <- function() sum(1, 2)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
@@ -1024,8 +936,6 @@ mod tests {
             )],
             Vec::new(),
         );
-        // No candidate takes a double, but `1` is a whole number: the
-        // courtesy round admits it and exact declaration order still decides.
         let check = first_item_check(&db, "g <- function() f(1)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
@@ -1064,9 +974,6 @@ mod tests {
     fn unresolved_argument_falls_back_to_the_general_candidate() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        // `x` is a free parameter: selection would let the first candidate
-        // greedily pin it, so the call must use the final (most general)
-        // declaration and leave `x` generic.
         let check = first_item_check(&db, "f <- function(x) sum(x)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = check.scheme.clone().expect("scheme");
@@ -1094,9 +1001,6 @@ mod tests {
             )],
             Vec::new(),
         );
-        // The lambda's parameter is a free variable, but `1L` fits only the
-        // first candidate: selection follows the argument that discriminates
-        // instead of forcing the last declaration.
         let check = first_item_check(&db, "g <- function() f(function(v) v, 1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
@@ -1119,8 +1023,6 @@ mod tests {
             )],
             Vec::new(),
         );
-        // Only the two-parameter candidate can accept two arguments at all, so
-        // the flexible `n` does not make the choice a guess.
         let check = first_item_check(&db, "g <- function(n) f(n, 2L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
@@ -1140,9 +1042,7 @@ mod tests {
             )],
             Vec::new(),
         );
-        // Both candidates fit, but the second only by pinning the caller's
-        // parameter to `integer`. The one that costs nothing wins and the
-        // parameter stays generic.
+        // The second candidate fits only by pinning `n` to `integer`.
         let check = first_item_check(&db, "g <- function(n) f(n)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = check.scheme.clone().expect("scheme");

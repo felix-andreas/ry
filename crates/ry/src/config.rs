@@ -1,11 +1,5 @@
-//! `ry.toml` discovery and parsing. Both the language server (from the
-//! client's workspace root) and the CLI (from each target argument) resolve
-//! configuration through the one nearest-ancestor search here.
-//!
-//! `roughly.toml` is still accepted under the project's former name. Both are
-//! looked for in the SAME directory before walking to the parent, so a
-//! repository that has adopted the new name is never overridden by an old file
-//! left behind further up the tree.
+//! `ry.toml` and the former `roughly.toml` are both looked for in a directory
+//! before walking to its parent, so a stale old-name file higher up never wins.
 
 use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode, SourceSpan};
 use semantics::lints::{LintConfig, NameStyle};
@@ -16,13 +10,9 @@ use thiserror::Error;
 
 pub const CONFIG_FILE_NAME: &str = "ry.toml";
 
-/// The pre-rename spelling, still honoured so existing projects keep working.
-/// Checked after [`CONFIG_FILE_NAME`] within each directory, so the current
-/// name wins a tie.
+/// The project's former config name; [`CONFIG_FILE_NAME`] wins within one directory.
 pub const LEGACY_CONFIG_FILE_NAME: &str = "roughly.toml";
 
-/// Every file name that marks a project root and carries configuration, in
-/// precedence order.
 pub const CONFIG_FILE_NAMES: [&str; 2] = [CONFIG_FILE_NAME, LEGACY_CONFIG_FILE_NAME];
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -30,39 +20,26 @@ pub struct Config {
     pub format: format::Config,
     pub lint: LintConfig,
     pub check: CheckConfig,
-    /// The directory containing the loaded config file — the anchor for
-    /// relative patterns like `[check] exclude`. `None` for the built-in
-    /// default configuration.
+    /// Anchor for relative patterns like `[check] exclude`; `None` for the built-in default.
     pub source_directory: Option<PathBuf>,
-    /// Keys the loaded file set that this version does not know, in file
-    /// order (e.g. `check.excluded`). The config still loads — forward
-    /// compatibility for files written against newer versions — and hosts
-    /// surface these as visible warnings. Wrong TYPES on known keys remain
-    /// hard errors.
+    /// Keys this version does not know, in file order: they warn rather than fail, for
+    /// forward compatibility. Wrong types on known keys remain hard errors.
     pub unknown_keys: Vec<String>,
 }
 
-/// Which diagnostic classes are published. Every class is computed on demand
-/// for IDE features regardless; these gate only what is reported.
+/// Gates only what is reported; IDE features compute every class regardless.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct CheckConfig {
-    /// Surface unused-local-binding warnings (on by default; `unused = false`
-    /// under `[check]` opts out).
     pub unused: bool,
-    /// Surface reads a path can reach with no prior write (off by default).
-    /// Correct by flow but noisy on real code, because two conditions that
-    /// always agree at run time are two independent branches to the analysis.
+    /// Off by default: correct by flow but noisy, since two conditions that always
+    /// agree at run time are independent branches to the analysis.
     pub maybe_undefined: bool,
-    /// Surface type-error diagnostics.
     pub typing: bool,
-    /// Surface strict-mode diagnostics (each site originating a genuine
-    /// `Unknown`), and escalate unresolved-name findings to errors.
+    /// Also escalates unresolved-name findings to errors.
     pub strict: bool,
-    /// Paths `check`'s directory walk skips: gitignore-style patterns
-    /// (`scripts/`, `**/generated`, `!scripts/keep.R`) anchored at the config
-    /// file's directory. Files named explicitly on the command line are
-    /// always checked.
+    /// Gitignore-style patterns anchored at the config file's directory; files named
+    /// explicitly on the command line are always checked.
     pub exclude: Vec<String>,
 }
 
@@ -79,10 +56,7 @@ impl Default for CheckConfig {
 }
 
 impl Config {
-    /// Loads the config file governing `target`: the nearest one found in
-    /// the target's directory (its parent, when `target` is a file) or the
-    /// directory's ancestors, falling back to the default configuration when
-    /// none exists.
+    /// Falls back to the default configuration when no config file governs `target`.
     pub fn discover(target: impl AsRef<Path>) -> Result<Config, ConfigError> {
         match find_config_file(target.as_ref())? {
             Some(path) => Config::from_path(path),
@@ -90,11 +64,8 @@ impl Config {
         }
     }
 
-    /// The path [`discover`](Config::discover) would load for `target`, when
-    /// one exists — the file the language server must watch for live reloads
-    /// (it may sit in an ancestor *above* the workspace root). Resolution
-    /// failures degrade to `None`: the caller is deciding what to watch, and
-    /// `discover` itself reports the error.
+    /// The file the language server watches for reloads (possibly above the workspace
+    /// root). Resolution failures degrade to `None`; `discover` reports them.
     pub fn discover_path(target: impl AsRef<Path>) -> Option<PathBuf> {
         find_config_file(target.as_ref()).ok().flatten()
     }
@@ -118,8 +89,7 @@ impl Config {
         Config::parse(text, None)
     }
 
-    /// The one parse. `path` names the file a failure is reported against —
-    /// `None` for text that came from somewhere other than a file on disk.
+    /// `path` is `None` for text that did not come from a file on disk.
     fn parse(text: &str, path: Option<&Path>) -> Result<Config, ConfigError> {
         let deserializer = toml::de::Deserializer::new(text);
         let mut unknown_keys = Vec::new();
@@ -138,20 +108,15 @@ impl Config {
     }
 }
 
-/// The nearest-ancestor search both `discover` and `discover_path` walk: the
-/// target's own directory (its parent when the target is a file), then each
-/// ancestor, for a `ry.toml` — or a `roughly.toml` under the former name.
 fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
-    // A relative path is made absolute first: its lexical parent chain ends
-    // at the empty path, so walking it directly would never reach the real
-    // filesystem ancestors.
+    // A relative path's lexical parent chain ends at the empty path, never reaching
+    // the real ancestors.
     let target = std::path::absolute(target).map_err(|error| ConfigError::Resolve {
         path: target.to_path_buf(),
         source: error,
     })?;
-    // `std::path::absolute` keeps `..` components, and `parent()` strips them
-    // lexically — a target like `/a/b/../c.R` would walk `/a/b/..` and then
-    // back INTO `/a/b`, which is not an ancestor of the target at all.
+    // `parent()` strips `..` lexically, so `/a/b/../c.R` would walk back into `/a/b`,
+    // which is not an ancestor.
     let target = normalize_lexically(&target);
 
     let mut directory = if target.is_dir() {
@@ -171,9 +136,7 @@ fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
     Ok(None)
 }
 
-/// The underlying I/O failures render as the report's cause rather than as
-/// part of the message, so the reason a file could not be read is not welded
-/// into the sentence that says which file it was.
+/// I/O failures render as the report's cause, not welded into the message.
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("failed to read config file {path}", path = .path.display())]
@@ -185,10 +148,7 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
-    /// The 1-based line and column of a parse or deserialize failure inside
-    /// the config text, when the underlying toml error carries a span. What
-    /// the language server anchors its published diagnostic at; the CLI draws
-    /// the same span as a snippet instead.
+    /// 1-based; `None` when the toml error carries no span.
     pub fn parse_location(&self) -> Option<(usize, usize)> {
         match self {
             ConfigError::Invalid(error) => error
@@ -198,9 +158,7 @@ impl ConfigError {
         }
     }
 
-    /// The config file a failure sits in, as it should be shown to a reader.
-    /// The I/O variants already name their path in the message; a parse
-    /// failure keeps it on the source its snippet is drawn from.
+    /// Only parse failures: the I/O variants already name their path in the message.
     pub fn file(&self) -> Option<&str> {
         match self {
             ConfigError::Invalid(error) => Some(error.source.name()),
@@ -225,8 +183,7 @@ impl Diagnostic for ConfigError {
         let ConfigError::Invalid(error) = self else {
             return None;
         };
-        // A failure toml reports no span for is still shown against the file:
-        // an empty label at its start names it in the snippet header.
+        // An empty label at the start still names the file in the snippet header.
         let span = error.span.unwrap_or_else(|| SourceSpan::from(0..0));
         Some(Box::new(std::iter::once(
             LabeledSpan::new_primary_with_span(None, span),
@@ -234,9 +191,6 @@ impl Diagnostic for ConfigError {
     }
 }
 
-/// A malformed config file: the toml parse or deserialize failure, kept with
-/// the text it happened in so a host can point at the offending key or value
-/// rather than describe where it was.
 #[derive(Debug)]
 pub struct ConfigParseError {
     source: NamedSource<String>,
@@ -258,13 +212,10 @@ impl ConfigParseError {
     }
 }
 
-/// The dotted key whose value sits at `offset` — the `[table]` header above it
-/// joined with the `key =` on its own line.
 fn offending_key(text: &str, offset: usize) -> Option<String> {
     let before = text.get(..offset)?;
     let line_start = before.rfind('\n').map_or(0, |index| index + 1);
-    // The `=` is what makes it a key: a failure inside a table header or a
-    // bare value has no setting to name, and the snippet points at it anyway.
+    // Without `=` (a table header or a bare value) there is no setting to name.
     let (key, _) = before.get(line_start..)?.split_once('=')?;
     let key = key.trim().trim_matches('"');
     if key.is_empty() {
@@ -287,8 +238,6 @@ fn offending_key(text: &str, offset: usize) -> Option<String> {
 impl fmt::Display for ConfigParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "invalid config")?;
-        // The dotted key is what the documentation calls the setting, so it
-        // belongs in the sentence; where it sits is the snippet's job.
         if let Some(key) = self
             .span
             .and_then(|span| offending_key(self.source.inner(), span.offset()))
@@ -301,16 +250,10 @@ impl fmt::Display for ConfigParseError {
 
 impl std::error::Error for ConfigParseError {}
 
-/// The table a bare top-level key belongs under, when its name is a key of a
-/// known table. `typing = true` written outside `[check]` is the easy mistake
-/// to make and by far the most dangerous one: the file still loads, so the run
-/// reports nothing and a project that is not being type-checked is
-/// indistinguishable from one that is clean. A warning that only says "unknown
-/// key" leaves the reader looking for a typo they did not make, so it has to
-/// name the placement instead.
+/// `typing = true` outside `[check]` still loads, so the project silently goes
+/// unchecked; the warning must name the placement, not just "unknown key".
 pub fn suggested_table(unknown_key: &str) -> Option<&'static str> {
-    // A dotted path is already inside a table, so it is a misspelling rather
-    // than a misplacement, and the plain wording is the right answer for it.
+    // A dotted path is already inside a table: a misspelling, not a misplacement.
     if unknown_key.contains('.') {
         return None;
     }
@@ -320,10 +263,8 @@ pub fn suggested_table(unknown_key: &str) -> Option<&'static str> {
         .map(|(table, _)| *table)
 }
 
-/// Which keys each config table accepts. Serde offers no way to enumerate a
-/// struct's field names at run time, so this list is written out; the
-/// `table_keys_match_the_config_structs` test pins every entry to the real
-/// struct so the two cannot drift apart.
+/// Serde cannot enumerate field names at run time;
+/// `table_keys_match_the_config_structs` pins this list to the structs.
 const TABLE_KEYS: [(&str, &[&str]); 3] = [
     ("format", &["indent-width", "line-ending"]),
     (
@@ -343,10 +284,8 @@ const TABLE_KEYS: [(&str, &[&str]); 3] = [
     ("check", &["unused", "typing", "strict", "exclude"]),
 ];
 
-/// Resolves `.` and `..` components lexically (without touching the
-/// filesystem), so an ancestor walk over the result visits only true
-/// ancestors. Lexical resolution can differ from the filesystem view when
-/// `..` crosses a symlink; the walk prefers the path as the user spelled it.
+/// Lexical, so an ancestor walk visits only true ancestors; when `..` crosses a
+/// symlink this prefers the path as the user spelled it.
 fn normalize_lexically(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut normalized = PathBuf::new();
@@ -368,8 +307,6 @@ fn normalize_lexically(path: &Path) -> PathBuf {
     normalized
 }
 
-/// The 1-based line and column of a byte offset within `text`, for rendering
-/// a toml error span.
 fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
     let mut offset = offset.min(text.len());
     while offset > 0 && !text.is_char_boundary(offset) {
@@ -414,10 +351,8 @@ pub struct ExperimentalFeatures {
     pub range_formatting: bool,
 }
 
-/// One experimental feature: its flag name, a one-line description, and the
-/// setter that turns it on. The CLI help, the `--experimental-features`
-/// parser, and `"all"` all derive from [`ExperimentalFeatures::KNOWN`], so a
-/// new feature added there is automatically listed and parseable.
+/// The CLI help, the `--experimental-features` parser, and `"all"` all derive from
+/// [`ExperimentalFeatures::KNOWN`].
 pub struct ExperimentalFeature {
     pub name: &'static str,
     pub description: &'static str,
@@ -431,7 +366,7 @@ impl ExperimentalFeatures {
         enable: |features| features.range_formatting = true,
     }];
 
-    /// Enables the named feature; false when the name is unknown.
+    /// Returns false when the name is unknown.
     pub fn enable(&mut self, name: &str) -> bool {
         match Self::KNOWN.iter().find(|feature| feature.name == name) {
             Some(feature) => {
@@ -541,8 +476,6 @@ mod tests {
         assert_eq!(suggested_table("typing"), Some("check"));
         assert_eq!(suggested_table("indent-width"), Some("format"));
         assert_eq!(suggested_table("naming-style"), Some("lint"));
-        // A genuine misspelling has no placement to suggest, and neither does
-        // a key already inside a table.
         assert_eq!(suggested_table("typng"), None);
         assert_eq!(suggested_table("check.typing"), None);
     }
@@ -551,10 +484,8 @@ mod tests {
     fn table_keys_match_the_config_structs() {
         for (table, keys) in TABLE_KEYS {
             for key in keys {
-                // The value is deliberately arbitrary: a key the struct has
-                // rejects a wrong type as a hard error, while a key it does
-                // not have is skipped and recorded. Only the second outcome
-                // means this list has drifted.
+                // A known key rejects a wrong type as a hard error; only an unknown key is
+                // skipped and recorded, which means the list drifted.
                 let text = format!("[{table}]\n{key} = 0\n");
                 if let Ok(config) = Config::from_toml_str(&text) {
                     assert!(
@@ -596,8 +527,6 @@ mod tests {
         assert_eq!(config.source_directory.as_deref(), Some(directory.path()));
     }
 
-    // The message names the setting; where it sits is carried as a span, for
-    // the CLI to draw as a snippet and the language server to publish.
     #[test]
     fn wrong_value_type_is_rejected_with_location() {
         let error = Config::from_toml_str("[check]\nstrict = \"yes\"\n")
@@ -662,8 +591,6 @@ mod tests {
         assert_eq!(config, Config::default());
     }
 
-    // A `..` in the target must not let the walk wander back into a sibling
-    // directory: a config in `project/` does not govern `project/../outside.R`.
     #[test]
     fn discover_ignores_configs_behind_dot_dot_components() {
         let directory = tempfile::tempdir().expect("temp dir");

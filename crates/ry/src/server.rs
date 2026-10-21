@@ -1,8 +1,5 @@
-//! The language server: an async-lsp frontend on the tokio thread and one
-//! dedicated worker thread owning the salsa database and every document.
-//! Edits cancel in-flight analysis cooperatively (salsa's cancellation
-//! token), so the latest edit always wins; a panic on the worker is a
-//! coherence failure and terminates the process deterministically.
+//! An async-lsp frontend plus one worker thread owning the salsa database. Edits
+//! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
 use crate::config::{CONFIG_FILE_NAME, Config, ConfigError, ExperimentalFeatures};
 use crate::diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics};
@@ -56,10 +53,8 @@ async fn run_async(experimental_features: ExperimentalFeatures, debug: bool) {
             .spawn(move || run_worker(seed, receiver))
             .expect("analysis worker thread should spawn");
 
-        // No ConcurrencyLayer: the serial worker thread is the concurrency
-        // bound, and that layer's backpressure deadlocks pending request
-        // futures against the mainloop's dispatch. The edit-driven
-        // cancellation supersedes `$/cancelRequest` early-abort.
+        // No ConcurrencyLayer: its backpressure deadlocks pending request futures against
+        // the mainloop's dispatch, and the serial worker is the concurrency bound anyway.
         let _ = ConcurrencyLayer::default();
         ServiceBuilder::new()
             .layer(TracingLayer::default())
@@ -90,9 +85,8 @@ async fn run_async(experimental_features: ExperimentalFeatures, debug: bool) {
         .expect("language server main loop failed");
 }
 
-/// The frontend's handle to the worker's salsa cancellation token: the token
-/// only exists once the worker constructs the database, so the flag arrives
-/// late through the shared slot.
+/// The token exists only once the worker builds the database, so it arrives late
+/// through the shared slot.
 #[derive(Clone, Default)]
 struct CancelHandle {
     token: Arc<std::sync::Mutex<Option<salsa::CancellationToken>>>,
@@ -113,8 +107,7 @@ impl CancelHandle {
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Cooperative cancellation is not a fault; everything else prints.
-        // Process death is the worker loop's decision, never the hook's.
+        // Cancellation is not a fault; process death is the worker loop's decision, not the hook's.
         if info.payload().is::<salsa::Cancelled>() {
             return;
         }
@@ -134,10 +127,8 @@ enum Job {
 struct WorkerSeed {
     client: ClientSocket,
     experimental_features: ExperimentalFeatures,
-    /// The developer switch (`ry server --debug`, or `RY_DEBUG=1`):
-    /// surfaces internal analysis facts such as the hover debug sections.
-    /// Deliberately NOT a `ry.toml` key — the config file is user-facing
-    /// contract, and this is an aid for people working on ry itself.
+    /// Surfaces internal analysis facts (hover debug sections). Deliberately not a
+    /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
     idle_interrupt: Arc<AtomicBool>,
@@ -149,9 +140,8 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
     let mut worker: Option<Worker> = None;
     loop {
         let job = if worker.as_ref().is_some_and(Worker::has_idle_work) {
-            // Reset before the poll: a job enqueued before the poll is simply
-            // received; one enqueued after flags the token after this reset,
-            // so the idle unit observes it at its next cancellation check.
+            // Reset before the poll: a job enqueued after it flags the token after this
+            // reset, so the idle unit sees it at its next cancellation check.
             seed_idle_interrupt(&worker).store(false, Ordering::SeqCst);
             match receiver.try_recv() {
                 Ok(job) => Some(job),
@@ -182,8 +172,7 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
                     worker.refresh_cancellation();
                     work(worker);
                 }
-                // LSP allows dropping notifications before initialize;
-                // nothing exists yet to corrupt.
+                // LSP allows dropping notifications before initialize.
                 None => tracing::warn!("dropping a notification before initialize"),
             },
             None => {
@@ -194,9 +183,8 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
             }
         }));
         if outcome.is_err() {
-            // A read catches its own cancellation; anything reaching here is
-            // a coherence panic. Serving a corrupted analysis state is worse
-            // than dying, so terminate deterministically.
+            // A read catches its own cancellation, so this is a coherence panic; serving a
+            // corrupted analysis state is worse than dying.
             tracing::error!("analysis worker panicked; exiting");
             std::process::exit(1);
         }
@@ -233,9 +221,8 @@ impl ServerState {
         Box::pin(async move { receive.await.unwrap_or_else(|_| Err(worker_gone_error())) })
     }
 
-    /// Input-mutating notifications: flip the cancellation token FIRST so an
-    /// in-flight read abandons, then enqueue. A send failure is
-    /// unrecoverable — the analysis state can no longer mirror the client.
+    /// Flips the cancellation token before enqueueing so an in-flight read abandons.
+    /// A send failure is unrecoverable.
     fn notify_edit<F>(&self, build: F) -> ControlFlow<async_lsp::Result<()>>
     where
         F: FnOnce(&mut Worker) + Send + 'static,
@@ -294,7 +281,6 @@ struct Worker {
     current_token: salsa::CancellationToken,
     idle_interrupt: Arc<AtomicBool>,
     experimental_features: ExperimentalFeatures,
-    /// The developer switch (see [`WorkerSeed::debug`]).
     debug: bool,
     encoding: PositionEncoding,
     supports_pull_diagnostics: bool,
@@ -305,31 +291,24 @@ struct Worker {
     config: Config,
     pending_config_error: Option<String>,
     db: RootDatabase,
-    /// Every tracked R document (open buffers and on-disk package files).
     files: HashMap<PathBuf, SourceFile>,
     open_documents: HashSet<PathBuf>,
     stub_documents: HashMap<PathBuf, String>,
-    /// On-disk file per installed stub source, aligned with the `StubSources`
-    /// order: shipped sources point at their materialized cache copies,
-    /// project overrides at their real `stubs/*.Rtypes` files. `None` when
-    /// materialization failed — locations degrade, features never fail.
+    /// Aligned with the `StubSources` order: shipped sources point at materialized
+    /// cache copies, overrides at their real files. `None` when materialization failed.
     stub_source_paths: Vec<Option<PathBuf>>,
     namespace_documents: HashMap<PathBuf, String>,
-    /// The DESCRIPTION `Collate` file names, in declared order.
     collate_order: Vec<String>,
     virtual_document_uris: HashMap<PathBuf, lsp_types::Url>,
-    /// Documents owed a settled (full) diagnostics publish, most recent last.
+    /// Most recent last.
     pending_semantic_publishes: Vec<PathBuf>,
-    /// Workspace files to warm at idle time; results are never published.
+    /// Results are never published.
     prime_queue: VecDeque<PathBuf>,
-    /// Per-file `library()`-family attach facts, non-empty sets only. Kept
-    /// current per synced/primed file — never by a whole-project sweep, so
-    /// keystroke work stays O(open documents); the idle prime fills in the
-    /// rest of the workspace shortly after startup.
+    /// Non-empty sets only. Kept current per synced or primed file, never by a
+    /// whole-project sweep, so keystroke work stays O(open documents).
     attached_by_file: HashMap<PathBuf, std::collections::BTreeSet<String>>,
 }
 
-/// The parsed NAMESPACE/DESCRIPTION facts a workspace currently declares.
 struct WorkspaceMetadata {
     imports: Vec<(String, Option<String>)>,
     dependencies: std::collections::BTreeSet<String>,
@@ -479,9 +458,8 @@ impl Worker {
         );
     }
 
-    /// The current NAMESPACE/DESCRIPTION facts: the open NAMESPACE buffer
-    /// wins over the on-disk file; DESCRIPTION is read from disk (it is not
-    /// a tracked document — saves arrive through the file watcher).
+    /// The open NAMESPACE buffer wins over disk; DESCRIPTION is not a tracked
+    /// document, so it is read from disk.
     fn current_metadata(&self) -> WorkspaceMetadata {
         let namespace_path = self.workspace_root.join("NAMESPACE");
         let namespace_text = self
@@ -537,10 +515,8 @@ impl Worker {
             .collect()
     }
 
-    /// Re-scans ONE file's `library()`-family attach facts (riding the parse
-    /// the surrounding sync or prime work forces anyway) and, when the
-    /// project-wide union moved, updates the metadata input — every file's
-    /// resolution universe changes with it, so all diagnostics refresh.
+    /// When the project-wide attach union moves, every file's resolution universe
+    /// changes, so all diagnostics refresh.
     fn refresh_attached(&mut self, path: &Path) {
         let scanned = match self.files.get(path) {
             Some(&file) => {
@@ -589,9 +565,7 @@ impl Worker {
         self.refresh_all_diagnostics();
     }
 
-    /// Re-derives the metadata input; on a real change every file's
-    /// resolution universe moved, so all diagnostics refresh. A `Collate`
-    /// change reorders the project instead.
+    /// A real change refreshes all diagnostics; a `Collate` change reorders the project.
     fn refresh_metadata(&mut self) {
         let current = self.current_metadata();
         let collate_changed = current.collate != self.collate_order;
@@ -653,11 +627,8 @@ impl Worker {
         self.rebuild_project_files();
     }
 
-    /// Recomputes the `ProjectFiles` input: package documents first — in
-    /// DESCRIPTION `Collate` order when declared (unlisted files after the
-    /// listed ones), then ascending by workspace-relative path — then
-    /// scripts; the order the last-writer-wins symbol index and the CLI
-    /// agree on.
+    /// Package documents first (in `Collate` order when declared, then by path), then
+    /// scripts: the order the last-writer-wins symbol index and the CLI agree on.
     fn rebuild_project_files(&mut self) {
         use salsa::Setter;
         let r_path = self.workspace_root.join("R");
@@ -694,9 +665,8 @@ impl Worker {
         }
     }
 
-    /// An edit's cancellation flip is consumed by whatever query was in
-    /// flight when it happened; every job afterwards starts on a fresh
-    /// uncancelled handle (cloning the storage handle is cheap).
+    /// An edit's cancellation flip is consumed by the query in flight when it
+    /// happened; every later job starts on a fresh uncancelled handle.
     fn refresh_cancellation(&mut self) {
         if self.current_token.is_cancelled() {
             self.db = self.db.clone();
@@ -734,8 +704,7 @@ impl Worker {
             });
             match outcome {
                 Ok(()) => {
-                    // The prime is also how the startup workspace gets its
-                    // attach facts scanned without a blocking sweep.
+                    // Scans the startup workspace's attach facts without a blocking sweep.
                     self.refresh_attached(&path);
                 }
                 Err(_) => self.prime_queue.push_front(path),
@@ -743,8 +712,6 @@ impl Worker {
         }
     }
 
-    /// Runs `body` catching cooperative cancellation; the caller decides the
-    /// per-feature degradation policy.
     fn cancellable<T>(
         &mut self,
         body: impl FnOnce(&mut Worker) -> T,
@@ -757,10 +724,6 @@ impl Worker {
         }))
     }
 
-    //
-    // Paths and URIs
-    //
-
     fn document_path(&mut self, uri: &lsp_types::Url) -> Option<PathBuf> {
         if uri.scheme() == "file" {
             return uri.to_file_path().ok();
@@ -770,8 +733,7 @@ impl Worker {
         Some(path)
     }
 
-    /// A deterministic, injective synthetic path for a non-`file:` URI,
-    /// under the workspace root. A pure table key — never read from disk.
+    /// Deterministic and injective; a pure table key, never read from disk.
     fn virtual_document_path(&self, uri: &lsp_types::Url) -> PathBuf {
         let encoded = uri
             .as_str()
@@ -800,10 +762,6 @@ impl Worker {
     fn is_namespace_document(path: &Path) -> bool {
         path.file_name().is_some_and(|name| name == "NAMESPACE")
     }
-
-    //
-    // Text and positions
-    //
 
     fn text(&self, file: SourceFile) -> String {
         file.text(&self.db).to_owned()
@@ -837,8 +795,6 @@ impl Worker {
         }
     }
 
-    /// A range in another (tracked) document, converted against that
-    /// document's own text.
     fn to_range_in(&self, file: SourceFile, range: TextRange) -> lsp_types::Range {
         let text = self.text(file);
         self.to_range(&text, range)
@@ -851,8 +807,6 @@ impl Worker {
             .map(|(path, _)| path)
     }
 
-    /// The hover's definition summary line: where the hovered name is
-    /// defined, with a workspace-relative `path:line:column` location.
     fn render_hover_definition(&self, definition: &ide::HoverDefinition) -> Option<String> {
         match definition {
             ide::HoverDefinition::Local {
@@ -893,8 +847,7 @@ impl Worker {
         }
     }
 
-    /// `utils.Rtypes:12:1`-style location of a stub declaration — the file
-    /// name is enough for a human; goto-definition does the jumping.
+    /// Just the file name: goto-definition does the jumping.
     fn render_stub_source_location(&self, target: ide::StubTarget) -> Option<String> {
         let path = self.stub_source_paths.get(target.source_index)?.as_ref()?;
         let sources = semantics::stubs::StubSources::try_get(&self.db)?;
@@ -909,7 +862,6 @@ impl Worker {
         ))
     }
 
-    /// A goto response's `Location` for either target kind.
     fn definition_location(&self, target: ide::DefinitionTarget) -> Option<lsp_types::Location> {
         match target {
             ide::DefinitionTarget::Project(target) => {
@@ -923,8 +875,6 @@ impl Worker {
         }
     }
 
-    /// The on-disk `Location` of a stub declaration: the materialized cache
-    /// copy for shipped sources, the real file for project overrides.
     fn stub_location(&self, target: ide::StubTarget) -> Option<lsp_types::Location> {
         let path = self.stub_source_paths.get(target.source_index)?.as_ref()?;
         let sources = semantics::stubs::StubSources::try_get(&self.db)?;
@@ -935,8 +885,6 @@ impl Worker {
         })
     }
 
-    /// `R/main.R:2:1`-style location: workspace-relative path, 1-based line
-    /// and column.
     fn render_source_location(&self, target: &ide::NavigationTarget) -> Option<String> {
         let path = self.path_of(target.file)?;
         let display = path
@@ -952,10 +900,6 @@ impl Worker {
             position.column + 1
         ))
     }
-
-    //
-    // Document sync
-    //
 
     fn did_open(&mut self, params: lsp_types::DidOpenTextDocumentParams) {
         let Some(path) = self.document_path(&params.text_document.uri) else {
@@ -1060,9 +1004,8 @@ impl Worker {
         }
     }
 
-    /// Applies each change against the evolving buffer (each ranged change
-    /// refers to the state after the previous ones; a change without a range
-    /// replaces the whole document).
+    /// Each ranged change refers to the state after the previous ones; a change
+    /// without a range replaces the whole document.
     fn apply_content_changes(
         &self,
         mut text: String,
@@ -1119,8 +1062,7 @@ impl Worker {
             return;
         };
         if !self.open_documents.contains(&path) {
-            // Editors send didSave for config and other buffers; the config
-            // reload runs off the file watcher.
+            // Config reloads run off the file watcher, not didSave.
             return;
         }
         assert!(
@@ -1147,8 +1089,7 @@ impl Worker {
         self.pending_semantic_publishes.retain(|owed| owed != &path);
 
         if self.is_package_path(&path) {
-            // A closed package file reverts to its on-disk text, discarding
-            // unsaved buffer edits.
+            // A closed package file reverts to its on-disk text, discarding unsaved edits.
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Some(&file) = self.files.get(&path) {
@@ -1190,8 +1131,7 @@ impl Worker {
                 .file_name()
                 .is_some_and(|name| name == CONFIG_FILE_NAME)
             {
-                // Re-discover rather than read the changed file: a deleted
-                // workspace config falls back to an ancestor or defaults.
+                // Re-discover: a deleted workspace config falls back to an ancestor or defaults.
                 match Config::discover(&self.workspace_root) {
                     Ok(config) => {
                         config_changed |= config != self.config;
@@ -1240,8 +1180,6 @@ impl Worker {
             self.refresh_attached(path);
         }
         if metadata_changed {
-            // No-op when the parsed facts are unchanged; refreshes all
-            // diagnostics itself otherwise.
             self.refresh_metadata();
         }
         if config_changed {
@@ -1323,10 +1261,6 @@ impl Worker {
         });
     }
 
-    //
-    // Diagnostics
-    //
-
     fn publish(
         &self,
         uri: lsp_types::Url,
@@ -1361,7 +1295,6 @@ impl Worker {
         self.pending_semantic_publishes.push(path.to_path_buf());
     }
 
-    /// The full (settled) diagnostic set for one tracked document.
     fn settled_diagnostics(&mut self, path: &Path) -> Option<Vec<lsp_types::Diagnostic>> {
         let &file = self.files.get(path)?;
         let config = self.config.clone();
@@ -1369,7 +1302,6 @@ impl Worker {
         Some(self.finish_diagnostics(file, rendered))
     }
 
-    /// The shared rendering tail: suppression comments, then LSP encoding.
     fn finish_diagnostics(
         &self,
         file: SourceFile,
@@ -1384,8 +1316,7 @@ impl Worker {
     }
 
     fn convert_diagnostic(&self, text: &str, diagnostic: Diagnostic) -> lsp_types::Diagnostic {
-        // The unnecessary tag lets editors render dead code faded — the
-        // conventional presentation for a value no read uses.
+        // The unnecessary tag lets editors fade a value no read uses.
         let tags = matches!(
             diagnostic.code,
             "unused" | "unused-parameter" | "unused-import"
@@ -1423,8 +1354,6 @@ impl Worker {
         }
     }
 
-    /// Whole-line errors for the declarations a `.Rtypes` buffer's loader
-    /// would drop.
     fn stub_diagnostics(&self, text: &str) -> Vec<lsp_types::Diagnostic> {
         let index = LineIndex::new(text);
         semantics::stubs::stub_source_problems(&self.db, text)
@@ -1459,8 +1388,7 @@ impl Worker {
             .collect()
     }
 
-    /// A malformed config file is published as a diagnostic on the config
-    /// file itself; `None` clears it.
+    /// Published on the config file itself; `None` clears it.
     fn publish_config_diagnostics(&self, error: Option<&ConfigError>) {
         let config_path = self.workspace_root.join(CONFIG_FILE_NAME);
         let Ok(uri) = lsp_types::Url::from_file_path(&config_path) else {
@@ -1491,9 +1419,8 @@ impl Worker {
         self.publish(uri, diagnostics, None);
     }
 
-    /// Cross-file diagnostics move even on a save or config change: pull
-    /// clients with refresh support are asked to re-pull, push clients get
-    /// every open document re-published at idle time.
+    /// Pull clients with refresh support re-pull; push clients get every open
+    /// document re-published at idle time.
     fn refresh_all_diagnostics(&mut self) {
         if self.supports_pull_diagnostics {
             if self.supports_diagnostic_refresh {
@@ -1523,9 +1450,6 @@ impl Worker {
         });
     }
 
-    /// Unknown config keys warn visibly but never block startup or a reload:
-    /// the rest of the file is honored (forward compatibility for configs
-    /// written against newer versions).
     fn report_unknown_config_keys(&self) {
         if self.config.unknown_keys.is_empty() {
             return;
@@ -1540,8 +1464,7 @@ impl Worker {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        // Name the file that was actually loaded: a project may still be on
-        // the pre-rename `ry.toml`.
+        // Name the file actually loaded: it may be the former `roughly.toml`.
         let file = self
             .config
             .source_directory
@@ -1569,9 +1492,8 @@ impl Worker {
     }
 }
 
-/// A configuration failure as a client message. The CLI draws the offending
-/// line of the file; a popup has no room for a snippet, so it names the file
-/// the published finding is anchored in.
+/// A popup has no room for a snippet, so it names the file the published finding
+/// is anchored in.
 fn config_message(error: &ConfigError) -> String {
     match error.file() {
         Some(file) => format!("{file}: {error}"),
@@ -1653,17 +1575,15 @@ fn initialize_result(
             ..Default::default()
         },
         server_info: Some(lsp_types::ServerInfo {
-            // Not `CARGO_PKG_NAME`: the crate is published as `ry-lang`
-            // because the registry name `ry` was taken, but this string is
-            // what editors show the user, and the product is `ry`.
+            // Not `CARGO_PKG_NAME` (`ry-lang`): editors show this string, and the product is `ry`.
             name: "ry".to_owned(),
             version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }),
     }
 }
 
-/// The semantic-token legend, in index order. `#:` annotation bodies are the
-/// one surface colored here (they are type syntax invisible to R grammars).
+/// In index order. Only `#:` annotation bodies are colored: R grammars cannot see
+/// type syntax.
 fn semantic_token_legend() -> Vec<lsp_types::SemanticTokenType> {
     vec![
         lsp_types::SemanticTokenType::TYPE,
@@ -2168,11 +2088,9 @@ impl LanguageServer for ServerState {
         })
     }
 
-    /// Format the selection, snapped outwards to whole top-level statements
-    /// and whole lines. R's top-level statements are laid out independently —
-    /// each starts at column zero and nothing above it changes its
-    /// indentation — so formatting that slice alone gives exactly what
-    /// formatting the whole file would have given for those lines.
+    /// Snapped outwards to whole top-level statements and lines. R's top-level
+    /// statements are laid out independently, so formatting the slice alone matches
+    /// formatting the whole file.
     fn range_formatting(
         &mut self,
         params: lsp_types::DocumentRangeFormattingParams,
@@ -2194,9 +2112,7 @@ impl LanguageServer for ServerState {
             let mut covered: Option<TextRange> = None;
             for node in root.children() {
                 let node_range = node.text_range();
-                // An empty selection (a bare cursor) still picks the statement
-                // it sits in, so "format selection" with nothing selected
-                // formats the statement under the caret rather than nothing.
+                // An empty selection (a bare cursor) still picks the statement it sits in.
                 let intersects = node_range.start() < selection.end()
                     && selection.start() < node_range.end()
                     || node_range.contains(selection.start());
@@ -2208,8 +2124,6 @@ impl LanguageServer for ServerState {
                     None => node_range,
                 });
             }
-            // A selection holding no statement (blank lines, comments only)
-            // has nothing to lay out.
             let Some(covered) = covered else {
                 return Ok(None);
             };
@@ -2242,8 +2156,7 @@ impl LanguageServer for ServerState {
                         new_text: formatted,
                     }]))
                 }
-                // A refusal (syntax errors) surfaces as "no edits", exactly as
-                // whole-document formatting does.
+                // A refusal (syntax errors) surfaces as "no edits".
                 Err(error) => {
                     tracing::error!("range formatting failed: {error:?}");
                     Ok(None)
@@ -2376,12 +2289,9 @@ impl LanguageServer for ServerState {
                 // A pull may legitimately target an untracked document.
                 return Ok(empty_full_diagnostic_report());
             }
-            // Fault injection for the cancelled-pull test: announce the
-            // in-flight pull through the marker file, then hold until the
-            // edit's cancellation flip lands (bounded by the configured
-            // delay). The marker lets the test order its edit strictly after
-            // the pull has started — the flip provably targets this pull's
-            // token, not one a queued job would refresh away.
+            // Fault injection for the cancelled-pull test: the marker file lets the test
+            // order its edit strictly after this pull started, so the cancellation flip
+            // targets this pull's token rather than one a queued job would refresh away.
             if let Some(delay) = std::env::var("RY_TEST_DELAY_PULL_MS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
@@ -2408,8 +2318,7 @@ impl LanguageServer for ServerState {
     }
 }
 
-/// Recursive outline conversion; entries with empty names are dropped (the
-/// protocol forbids them).
+/// Entries with empty names are dropped: the protocol forbids them.
 #[allow(deprecated)] // `deprecated` is a required field of `DocumentSymbol`
 fn to_lsp_document_symbol(
     worker: &Worker,
@@ -2536,9 +2445,8 @@ fn empty_full_diagnostic_report() -> lsp_types::DocumentDiagnosticReportResult {
     ))
 }
 
-/// A content hash of the serialized diagnostics — correct under inter-file
-/// dependencies, where a document's own version does not move but its
-/// diagnostics do.
+/// A content hash, not the document version: inter-file dependencies move
+/// diagnostics without moving the version.
 fn diagnostics_result_id(diagnostics: &[lsp_types::Diagnostic]) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
@@ -2634,9 +2542,8 @@ fn is_valid_r_identifier(name: &str) -> bool {
         .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
 }
 
-/// Region folds for multi-line brace/paren/argument-list nodes (keeping the
-/// closing delimiter visible) and comment folds for consecutive comment runs
-/// (`#:` blocks fold as one region).
+/// Brace/paren/argument-list folds keep the closing delimiter visible;
+/// consecutive comments (including `#:` blocks) fold as one region.
 fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_types::FoldingRange> {
     let index = LineIndex::new(text);
     let parse = semantics::parse(db, file);
@@ -2660,7 +2567,6 @@ fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_ty
             }
         }
     }
-    // Comment runs: consecutive lines whose first token is a comment.
     let mut run_start: Option<u32> = None;
     let mut previous_line: Option<u32> = None;
     let mut comment_lines: Vec<u32> = Vec::new();
@@ -2712,9 +2618,6 @@ fn comment_fold(start: u32, end: u32) -> lsp_types::FoldingRange {
     }
 }
 
-/// Delta-encoded semantic tokens for the `#:` annotation regions: type names
-/// color as types, `<T>` binders as type parameters, record/parameter names
-/// as parameters, punctuation as operators, `@` directives as decorators.
 fn annotation_semantic_tokens(
     db: &RootDatabase,
     file: SourceFile,
@@ -2742,9 +2645,8 @@ fn annotation_semantic_tokens(
     delta_encode_tokens(spans, text, encoding)
 }
 
-/// The semantic-token class of one token inside an annotation region, per
-/// the advertised legend: type names 0, `<T>` binders 1, field/parameter
-/// names 2, punctuation 3, `@` directives 4.
+/// Indices into the advertised legend: type names 0, `<T>` binders 1,
+/// field/parameter names 2, punctuation 3, `@` directives 4.
 fn classify_annotation_token(token: &syntax::SyntaxToken) -> Option<u32> {
     let parent_kind = token.parent().map(|parent| parent.kind());
     match token.kind() {
@@ -2772,9 +2674,8 @@ fn classify_annotation_token(token: &syntax::SyntaxToken) -> Option<u32> {
     }
 }
 
-/// Tokens for a `.Rtypes` stub buffer: each declaration's type half runs
-/// through the annotation grammar (offset back into the buffer), `@type` and
-/// `@masked` color as directives, and declared type names as types.
+/// Each declaration's type half runs through the annotation grammar, offset back
+/// into the buffer.
 fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types::SemanticToken> {
     let index = LineIndex::new(text);
     let mut spans: Vec<(TextRange, u32)> = Vec::new();
@@ -2885,12 +2786,9 @@ fn delta_encode_tokens(
     data
 }
 
-/// Goto for a type name inside a `.Rtypes` buffer: the `@type NAME`
-/// Writes the embedded shipped stubs to a per-version cache directory so
-/// hover locations and goto-definition have real files to land in (the
-/// sources are compiled into the binary — rust-analyzer materializes sysroot
-/// sources the same way). Any failure degrades that source to "no location";
-/// analysis itself never depends on these files.
+/// Gives hover locations and goto-definition real files for the compiled-in
+/// stubs. A failure degrades that source to "no location"; analysis never reads
+/// these files.
 fn materialize_shipped_stubs(shipped: &[(String, String)]) -> Vec<Option<PathBuf>> {
     let Some(cache) = dirs::cache_dir() else {
         return vec![None; shipped.len()];
@@ -2922,7 +2820,8 @@ fn materialize_shipped_stubs(shipped: &[(String, String)]) -> Vec<Option<PathBuf
         .collect()
 }
 
-/// declaration line in the same file (stub files are self-contained).
+/// Stub files are self-contained: a type name resolves to its `@type NAME` line in
+/// the same file.
 fn stub_type_definition(text: &str, offset: TextSize) -> Option<TextRange> {
     let is_name_char =
         |character: char| character.is_alphanumeric() || character == '.' || character == '_';

@@ -1,29 +1,5 @@
-//! Fuzz + property harness for the semantic pipeline, run against every
-//! stage from its first commit — fuzzing is pipeline-wide, never a
-//! parser-only afterthought.
-//!
-//! Invariants, checked on every input:
-//!   1. never panic — parse, item tree, HIR, naming, inference, diagnostics,
-//!      and the strict stream all run to completion (salsa fixpoint cycles
-//!      must converge, never hit the iteration cap);
-//!   2. determinism — a fresh database on the same text produces the
-//!      identical rendering (schemes + diagnostics + every lint under an
-//!      everything-on configuration);
-//!   3. geometry — every diagnostic and lint range lies inside the file
-//!      with start <= end;
-//!   4. incremental equivalence — after editing the file through the salsa
-//!      setter, the re-checked output equals a fresh database built on the
-//!      edited text, and editing back restores the original output.
-//!
-//! The generator biases toward semantically live shapes: small programs
-//! assembled from templates over a tiny name pool, so definitions, uses,
-//! shadowing, self references, mutual reference cycles, closures,
-//! annotations (checked, definitions, invalid mixes), and typing-mode
-//! directives arise constantly. A token-soup arm keeps robustness against
-//! syntactically broken input.
-//!
-//! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic per
-//! seed. `fuzz_deep` multiplies everything for nightly/manual runs.
+//! Fuzz harness for the semantic pipeline. `FUZZ_ITERS` scales the per-generator budget;
+//! runs are deterministic per seed.
 
 use salsa::Setter as _;
 use semantics::testing::{check_semantics_invariants, render_semantics as render};
@@ -51,8 +27,7 @@ impl SplitMix64 {
 
 const NAMES: &[&str] = &["a", "b", "f", "g", "x", "helper"];
 
-/// Item templates; `{n}` is the defined name, `{m}` an arbitrary (often
-/// different) name from the pool — the collisions are the point.
+/// `{n}` is the defined name, `{m}` another from the pool; the collisions are the point.
 const TEMPLATES: &[&str] = &[
     "{n} <- {m}",
     "{n} <- {n} + 1L",
@@ -136,10 +111,7 @@ fn generate_soup(rng: &mut SplitMix64) -> String {
     source
 }
 
-/// The canonical rendering of one file's full pipeline output; running it is
-/// the never-panic check, its string is the determinism/equivalence witness.
-/// Attaches the failing inputs to any panic escaping the pipeline — a bare
-/// salsa or checker panic names no source, which makes a fuzz find useless.
+/// Prints the failing inputs on panic: a bare salsa or checker panic names no source.
 fn check_pipeline_reporting(rng: &mut SplitMix64, source: &str) {
     let kind = if rng.chance(1, 4) {
         DocumentKind::Script
@@ -169,14 +141,10 @@ fn run_soup(budget: usize, seed: u64) {
     let mut rng = SplitMix64(seed);
     for _ in 0..budget {
         let source = generate_soup(&mut rng);
-        // Broken input still must not panic or misbehave; the incremental
-        // arm runs too (an edit from a broken file to a live one).
         check_pipeline_reporting(&mut rng, &source);
     }
 }
 
-/// Two-file projects: cross-file references and cycles through the package
-/// interface, with edits to one file.
 fn run_multi_file(budget: usize, seed: u64) {
     let mut rng = SplitMix64(seed);
     for _ in 0..budget {
@@ -219,21 +187,11 @@ fn run_multi_file(budget: usize, seed: u64) {
     }
 }
 
-/// Inputs the coverage-guided `fuzz/semantics` target once broke an
-/// invariant on, kept verbatim so the failures stay pinned without the
-/// gitignored corpus. `foo$\n`: a splice middle ending in a dangling `$`
-/// must refuse suffix reuse (the fresh parse continues across the newline,
-/// moving the error position).
-/// `f)\nla<- function()`: an appending edit leaves an empty splice suffix,
-/// and the old parse's end-of-file error must not be rebased into the new
-/// text (the middle re-derives the end state).
+/// Inputs that once broke an invariant, pinned without the gitignored fuzz corpus.
 const REGRESSIONS: &[&str] = &["foo$\n", "f)\nla<- function()"];
 
-/// The program corpus through the full pipeline. One shared database over
-/// all of it rather than the per-input battery: the corpus is ~2,000 cases and a
-/// fresh database costs a stub re-parse each, so this arm asserts what a shared
-/// db can — never panic, diagnostic ranges inside their file — and leaves
-/// determinism and incremental equivalence to the generated arms.
+/// One shared database (a fresh one re-parses the stubs per case), so this asserts only
+/// never-panic and range geometry; the generated arms cover determinism and equivalence.
 #[test]
 fn program_corpus_holds_invariants() {
     use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};

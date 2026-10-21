@@ -1,22 +1,5 @@
-//! The annotation round-trip oracle: every type the checker prints must be a
-//! type a user can write back.
-//!
-//! `#: TYPE` asserts the annotated value is compatible with `TYPE`, and the
-//! checker has just proved the value *has* the type it rendered — so
-//! re-declaring an inferred scheme above its own definition must add no
-//! finding. Anything else means a rendering nobody can copy out of a hover or
-//! a `expected X, found Y` message and paste into an annotation.
-//!
-//! This is the only test that compares the renderer against the annotation
-//! grammar. Every other suite reads the rendering as a *string*, so a type that
-//! prints beautifully and parses back as something else is invisible to all of
-//! them — and that is not hypothetical: an unquoted record field name
-//! containing a comma re-parsed as a different type entirely, producing a bogus
-//! mismatch plus a bogus unknown-type error, and a constraint spelling the
-//! grammar did not accept made every scheme carrying it unwritable.
-//!
-//! Run one case with `FIXTURE_FILTER=group__case cargo test -p semantics
-//! --test test_roundtrip -- --nocapture`.
+//! Every type the checker prints must be writable back: re-declaring an inferred scheme
+//! as `#:` above its own definition must add no finding.
 
 use salsa::Setter as _;
 use semantics::diagnostics::TypeRenderer;
@@ -26,20 +9,13 @@ use semantics::{
 };
 use std::fmt::Write as _;
 
-/// Schemes that are known not to round-trip, named individually so that a new
-/// unwritable rendering of any kind fails this test rather than blending into a
-/// category. **Empty, and worth keeping empty**: the last entries were seven
-/// defaulted-parameter schemes the checker inferred and then rejected when they
-/// were written back, which is fixed.
+/// `id :: name` schemes known not to round-trip; keep it empty.
 const KNOWN_UNWRITABLE: [&str; 0] = [];
 
 #[test]
 fn rendered_schemes_are_writable_annotations() {
-    // One database throughout, re-pointed at each probe with the salsa setter.
-    // A fresh database costs a re-parse of the whole shipped stub corpus, which
-    // would be almost the entire runtime of a test that builds a thousand of
-    // them; the semantics fuzz battery already asserts that setting the text
-    // gives what a fresh database would.
+    // One database re-pointed with the salsa setter: a fresh one re-parses the stub corpus,
+    // and the fuzz battery already pins setter-equals-fresh.
     let mut db = RootDatabase::default();
     semantics::stubs::install_shipped_stubs(&db);
     let file = SourceFile::new(&db, String::new(), DocumentKind::Package);
@@ -48,9 +24,7 @@ fn rendered_schemes_are_writable_annotations() {
     let mut checked = 0usize;
     let mut violations = Vec::new();
     for (id, source) in syntax::testing::fixture_case_sources() {
-        // A source that does not check cleanly to begin with has nothing to
-        // round-trip: the oracle is "re-declaring adds no finding", which needs
-        // a baseline with no findings to add to.
+        // The oracle "re-declaring adds no finding" needs a baseline with no findings.
         file.set_text(&mut db).to(source.clone());
         if !file_diagnostics(&db, file).is_empty() {
             continue;
@@ -62,8 +36,7 @@ fn rendered_schemes_are_writable_annotations() {
             redeclared.insert_str(insert_at, &format!("#: {scheme}\n"));
             file.set_text(&mut db).to(redeclared);
             let added = file_diagnostics(&db, file);
-            // Every later scheme in this source is read off the baseline text,
-            // so put it back before moving on.
+            // Later schemes' offsets are read off the baseline text.
             file.set_text(&mut db).to(source.clone());
             if added.is_empty() {
                 continue;
@@ -98,9 +71,7 @@ fn rendered_schemes_are_writable_annotations() {
     );
 }
 
-/// Each named definition's rendered scheme, with the byte offset its
-/// annotation would be inserted at — the start of the line the item begins on,
-/// so the `#:` block attaches to it.
+/// Each named definition's rendered scheme and the start of its line, where `#:` attaches.
 fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String, usize)> {
     let text = file.text(db);
     let mut schemes = Vec::new();
@@ -115,9 +86,7 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
         let Some(scheme) = check.scheme else {
             continue;
         };
-        // An item already carrying an annotation is not a rendering the checker
-        // chose — it is the user's text echoed back — and inserting a second
-        // block above it stacks two annotations on one definition.
+        // An already-annotated item echoes the user's text, and a second block would stack.
         let start = usize::from(span.range.start());
         let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
         if already_annotated(text, line_start) {
@@ -129,9 +98,7 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
     schemes
 }
 
-/// Whether the run of comment lines immediately above `line_start` holds a `#:`
-/// block. A block may be several lines (`@forall` / `@param` / `@return`), and
-/// ordinary comments may be interleaved, so the whole contiguous run counts.
+/// Ordinary comments may interleave with a multi-line `#:` block, so the whole run counts.
 fn already_annotated(text: &str, line_start: usize) -> bool {
     text[..line_start]
         .lines()

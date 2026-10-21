@@ -1,11 +1,3 @@
-//! The diagnostic edge: item-relative findings become file diagnostics with
-//! absolute positions, and structured type errors become wording.
-//!
-//! One type-display policy, one renderer: inference variables and rigid
-//! binders display as `T`/`U`/`V` in first-occurrence order, and one renderer
-//! instance must span everything that shares names (both sides of an
-//! expected/found message), because a fresh renderer restarts the numbering.
-
 use crate::check::{OperandExpectation, TypeError, TypeErrorKind};
 use crate::infer::{FunctionMismatch, RecordMismatch};
 use crate::types::{Atomic, Constraint, FunctionType, Name, Ty, TyKind, TypeScheme};
@@ -18,20 +10,15 @@ pub enum Severity {
     Warning,
 }
 
-/// One rendered finding, file-absolute.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct Diagnostic {
     pub range: TextRange,
     pub severity: Severity,
     pub code: &'static str,
     pub message: String,
-    /// Companion locations for findings whose story spans sites (the sibling
-    /// definition an overwrite warning refers to). Rendered as `note:` lines
-    /// by the CLI and as related information over LSP.
     pub related: Vec<RelatedLocation>,
 }
 
-/// One companion location of a diagnostic, possibly in another file.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct RelatedLocation {
     pub file: SourceFile,
@@ -39,11 +26,8 @@ pub struct RelatedLocation {
     pub message: &'static str,
 }
 
-/// The diagnostics that are pure functions of the parse — syntax errors,
-/// typing-directive errors, and `#:` block-form refusals. A host's fast
-/// publication wave serves exactly these (plus lints) so typing never waits
-/// on naming or type checking; [`file_diagnostics`] starts from the same set,
-/// keeping the fast wave a faithful subset of the settled one.
+/// Pure functions of the parse, served by a host's fast publication wave.
+/// [`file_diagnostics`] starts from the same set, so that wave stays a subset.
 #[salsa::tracked(returns(clone))]
 pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -53,13 +37,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
         diagnostics.push(Diagnostic {
             range: error.range,
             severity: Severity::Error,
-            // The code says whose grammar was broken, not which stage noticed:
-            // `syntax-error` is R the parser could not read, `annotation` is a
-            // `#:` comment that is wrong. Keying it on the stage instead put a
-            // deliberate expressiveness limit like the higher-rank refusal
-            // under `syntax-error` while its siblings — an unknown constraint,
-            // a malformed block — report as `annotation` because lowering, not
-            // parsing, happened to catch them.
+            // The code names whose grammar broke (R or `#:`), not which stage noticed.
             code: if error.in_annotation {
                 "annotation"
             } else {
@@ -112,22 +90,9 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     diagnostics
 }
 
-/// Errors for annotations that promise typing for an expression but have
-/// none: the annotated expression must start on the very next line (see
-/// `statement_annotations` for the association rule). Statement sequences —
-/// the file root and every braced block — are checked; `@type`/`@alias`
-/// definition blocks and `@strict` toggles stand alone, and a block already
-/// refused for its shape reports only that refusal.
-///
-/// A block inside a call's argument list is reported separately, because no
-/// statement can follow it there: the association walk sees an `ARGUMENT` node
-/// next, which is not an expression kind, so the block attaches to nothing —
-/// and the sequence walk never visits an argument list, so it said nothing
-/// either. A deliberately wrong type beside a lambda argument was accepted in
-/// silence. Every other position that looks like it might dangle does attach,
-/// measured against a no-annotation control: a braceless function body, a
-/// braceless `if` branch, and a parenthesised expression all apply their
-/// annotation, so none of them may be reported here.
+/// An annotation must be followed on the next line by the expression it types.
+/// Blocks inside argument lists attach to nothing and are reported separately;
+/// braceless bodies, braceless `if` branches, and parenthesized expressions do attach.
 fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
     let root = parsed.syntax_node();
@@ -147,8 +112,6 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
         }
         let message = match target {
             crate::AnnotationTarget::Attached(_) => {
-                // The association holds; the only remaining shape problem is
-                // a block with no content at all.
                 if node.children().next().is_none() {
                     "A `#:` typing comment must include a type expression."
                 } else {
@@ -159,11 +122,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
                 "A `#:` typing comment cannot be separated from its expression by an empty line."
             }
             crate::AnnotationTarget::Dangling => {
-                // Overwhelmingly this is a `#:` block placed above a roxygen2
-                // block instead of below it, so the message names the fix
-                // rather than only the rule: every documented function in a
-                // package has roxygen above it, and the order is the one thing
-                // a reader cannot guess.
+                // Almost always a `#:` block placed above a roxygen2 block, so name the fix.
                 "A `#:` typing comment must be followed immediately by an expression — put it directly above the definition, below any roxygen2 block."
             }
         };
@@ -182,8 +141,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
         if node.parent().map(|parent| parent.kind()) != Some(syntax::SyntaxKind::ARGUMENT_LIST) {
             continue;
         }
-        // A block that already failed to lower owns its own diagnostic; a
-        // placement error on top would report one mistake twice.
+        // A block that failed to lower already owns a diagnostic.
         let annotation = crate::annotations::lower_annotation(db, &node);
         if !annotation.errors.is_empty() || !annotation.typing_errors.is_empty() {
             continue;
@@ -192,11 +150,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             range: node.text_range(),
             severity: Severity::Error,
             code: "annotation",
-            // Deliberately not "move it up a line": annotating the enclosing
-            // statement types that statement, not the argument the block was
-            // aimed at, and a lambda parameter has no annotatable position at
-            // all. Lifting the function to its own binding is the only thing
-            // that actually types it.
+            // Not "move it up a line": that would type the enclosing statement instead.
             message: "A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.".to_owned(),
             related: Vec::new(),
         });
@@ -204,12 +158,8 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     diagnostics
 }
 
-/// name → the index of the earliest item whose top-level frame writes it.
-/// Conditional writes (inside a top-level `for`/`while`/`if`/`repeat` or a
-/// bare block) create the document's variable slot exactly like an
-/// unconditional `name <- value`, so they participate: a later read in the
-/// same document resolves to the slot even though the name is not
-/// package-visible.
+/// Name → index of the earliest item whose top-level frame writes it. Conditional
+/// writes count: they create the document's slot just like unconditional ones.
 #[salsa::tracked(returns(ref))]
 fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashMap<String, usize> {
     let mut positions = rustc_hash::FxHashMap::default();
@@ -227,16 +177,12 @@ fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashMap<
     positions
 }
 
-/// All diagnostics of one file: syntax errors, naming findings, and type
-/// errors, in position order.
 #[salsa::tracked(returns(clone))]
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = parse_stage_diagnostics(db, file);
 
-    // A broken statement contributes nothing beyond the syntax error covering
-    // it: its names, reads and inferred types are all suspect, so judging them
-    // turns one mistake into a report storm. R-grammar errors only —
-    // annotation-grammar errors leave the R statement intact.
+    // A statement with an R syntax error reports nothing else: its names and types
+    // are suspect. Annotation-grammar errors leave the statement intact.
     let broken_ranges: Vec<TextRange> = parse(db, file)
         .errors()
         .iter()
@@ -249,8 +195,6 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             .any(|error| error.start() <= range.end() && range.start() <= error.end())
     };
 
-    // Walk the spans, not the item tree: they already pair each item with its
-    // absolute range, so the offset needs no per-item lookup.
     for (item_index, span) in crate::item_spans(db, file).iter().enumerate() {
         if is_broken(span.range) {
             continue;
@@ -264,7 +208,6 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let range = TextRange::new(error.range.start() + offset, error.range.end() + offset);
             diagnostics.push(render_type_error(db, range, error));
         }
-        // Naming findings are item-relative too.
         let Some(module) = crate::item_hir(db, item) else {
             continue;
         };
@@ -283,11 +226,8 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         for target in &naming.invalid_assignment_targets {
             let range = TextRange::new(target.range.start() + offset, target.range.end() + offset);
-            // The dominant cause is a trailing operator pulling the next line
-            // in as its right-hand operand. It is that shape only when the
-            // line break falls AFTER the operator: a break before it (`a`
-            // newline `+ b`) is an ordinary continuation, and a multi-line
-            // left operand says nothing about where the operator sits.
+            // A trailing operator pulled the next line in only if the break falls after
+            // the operator; a break before it is an ordinary continuation.
             let dangling_operator = target.operand_gap.is_some_and(|gap| {
                 file.text(db)
                     .get(usize::from(gap.start() + offset)..usize::from(gap.end() + offset))
@@ -311,11 +251,8 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 related: Vec::new(),
             });
         }
-        // A read some path reaches with no prior write. R errors there —
-        // `object 'x' not found` — so the read is worth naming even though it
-        // resolves. Only a *local* slot qualifies: a top-level variable's
-        // unwritten path reaches the enclosing environment at run time, where
-        // the name's cross-item binding answers it.
+        // R errors on a read with no prior write. Local slots only: a top-level
+        // variable's unwritten path falls through to the enclosing environment.
         for expression in &naming.maybe_undefined {
             let Some(binding) = naming
                 .resolutions
@@ -360,15 +297,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 related: Vec::new(),
             });
         }
-        // Scripts resolve reads against the same universe as package files
-        // (their own bindings, the package interface, imports, builtins), so
-        // an unresolved read warns in both document kinds. Document-local
-        // variable slots resolve sequentially: an immediate read sees only
-        // slots created by earlier statements (a use before every definition
-        // is unresolved, matching the top-down run), while a read from
-        // inside a nested function is deferred — the closure runs after the
-        // frame settled, so any slot in the document resolves it, including
-        // the enclosing statement's own target (self-recursion).
+        // Immediate reads see only slots created by earlier statements; reads inside a
+        // nested function run after the frame settled, so any slot in the document
+        // resolves them (including self-recursion).
         for (expression, name) in &naming.non_locals {
             let NonLocalRead::Unresolved { suggestion } =
                 classify_non_local_read(db, file, item_index, &check, naming, expression, name)
@@ -408,26 +339,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// What resolution made of one non-local read.
-///
-/// Two diagnostic streams depend on this and must not disagree, so the
-/// classification lives in one place: the ordinary check reports what nothing
-/// explains, and strict mode reports what an unknowable export set silenced —
-/// which is *exactly* the set the ordinary check let through.
+/// Shared by the ordinary check and strict mode so they cannot disagree.
+/// `Tolerated`: undefined, but silenced by an attached package whose exports
+/// cannot be known; strict mode reports exactly these.
 enum NonLocalRead {
-    /// Something resolves it after all, so it is not a finding at all.
     Resolvable,
-    /// Nothing in the project or the corpus defines it, and an attached package
-    /// whose export set cannot be known earned it silence.
     Tolerated,
-    /// Nothing defines it and nothing excuses it.
     Unresolved { suggestion: Option<String> },
 }
 
-/// Guards ordered cheapest first: the file-local resolutions (masked reads, the
-/// document's own frame slots) before the project- and corpus-wide ones — in a
-/// script-heavy workspace most non-local reads are cross-statement reads that
-/// the frame slots resolve.
+/// Guards run cheapest first: most non-local reads resolve through frame slots.
 fn classify_non_local_read(
     db: &dyn Db,
     file: SourceFile,
@@ -455,15 +376,8 @@ fn classify_non_local_read(
     {
         return NonLocalRead::Resolvable;
     }
-    // A near-miss of a name the project itself binds is reported even under the
-    // blanket tolerance an unknowable export set earns. `library(shiny)` cannot
-    // explain `repositry` in a function whose parameter is `repository`, and
-    // `library(testthat)` cannot explain `validte_url` in a project that defines
-    // `validate_url`: a name one edit away from a binding of your own is a typo,
-    // not somebody else's export. Locals and parameters of the enclosing item
-    // count as well as the project's top-level definitions — a typo of a name in
-    // lexical scope on the same line is the case a user is least willing to see
-    // missed.
+    // A near-miss of a name the project itself binds (including the item's locals
+    // and parameters) is a typo, reported even under the blanket tolerance.
     let project_typo = project_definition_suggestion(db, name).or_else(|| {
         nearest_name(
             name,
@@ -482,12 +396,7 @@ fn classify_non_local_read(
     }
 }
 
-/// Errors for `#:` type references no vocabulary declares: a name in an
-/// annotation must be a built-in type (excluded at lowering already), an
-/// in-scope binder (likewise), a project `@type`/`@alias` declaration, or a
-/// stub-declared class. Anything else is a typo the checker would otherwise
-/// silently treat as an opaque nominal — the classic case is a misspelled
-/// record field type inside a `@type` body.
+/// Without this, a misspelled type name would silently become an opaque nominal.
 fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
     let mut references: Vec<(String, TextRange)> = Vec::new();
@@ -510,8 +419,7 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             known.insert(name.text(db).to_owned());
         }
     }
-    // A script's own declarations shadow the project namespace; for a
-    // package file this adds nothing the project map lacks.
+    // A script's own declarations shadow the project namespace.
     for definition in crate::file_type_definitions(db, file) {
         known.insert(definition.name.text(db).to_owned());
     }
@@ -542,18 +450,14 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// Vocabulary-dependent annotation rules: check-depth refusals, the
-/// atomic-element requirement of `[]` / `[named]` vector types, and `@new`
-/// naming an alias. The depth and vector findings carry the typing code —
-/// like the checks they stand in for, they disappear when typing is off.
+/// The depth and vector findings use the typing code so they vanish when typing is off.
 fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
     let mut diagnostics = Vec::new();
     let mut definitions: std::collections::BTreeMap<String, crate::annotations::NamedDefinition> =
         std::collections::BTreeMap::new();
-    // Names declared more than once across the package have no single
-    // winning definition; alias-based judgments would be arbitrary, and the
-    // duplicate-declaration error already reports the real mistake.
+    // Names declared more than once have no winning definition; the
+    // duplicate-declaration error reports them instead.
     let mut ambiguous: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(files) = crate::ProjectFiles::try_get(db) {
         for (name, definition) in crate::project_type_definitions(db, files) {
@@ -613,10 +517,8 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 related: Vec::new(),
             });
         }
-        // Generic-application arity: an applied name must be a generic with
-        // exactly that many parameters; a BARE reference to a generic must be
-        // applied — except under `@new`, where an unapplied generic infers
-        // its arguments through the representation check (documented).
+        // A bare reference to a generic must be applied, except under `@new`, which
+        // infers its arguments through the representation check.
         let declared_arity = |name: &str| {
             definitions
                 .get(name)
@@ -700,10 +602,8 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     diagnostics
 }
 
-/// Whether a vector element type is atomic: an atomic scalar, a type
-/// parameter (its use adds the atomic bound), tolerance types, or an alias
-/// expanding to one. Nominals are opaque — never atomic — and an undeclared
-/// name stays silent here (the unknown-type error already reports it).
+/// Rigid binders count (their use adds the atomic bound); nominals never do, and
+/// undeclared names stay silent because the unknown-type error reports them.
 fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
@@ -735,9 +635,8 @@ fn vector_element_atomic<'db>(
     }
 }
 
-/// The built-in type names annotations may spell, as typo-suggestion
-/// candidates (lowering resolves them before the unknown-name check, so they
-/// never appear as references).
+/// Typo-suggestion candidates only: lowering resolves these before the
+/// unknown-name check.
 const ANNOTATION_PRIMITIVES: &[&str] = &[
     "Any",
     "Unknown",
@@ -750,8 +649,6 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
     "raw",
 ];
 
-/// The named top-level definition sites of one package file, in item order:
-/// each name with its binding-name range (file-absolute).
 #[salsa::tracked(returns(ref))]
 fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
     let mut sites = Vec::new();
@@ -773,11 +670,8 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
     sites
 }
 
-/// The named top-level definition names of one package file, in item order —
-/// a range-free projection of [`top_level_name_sites`], so the project-wide
-/// duplicate map depends only on which names exist, never on where: a body
-/// edit that shifts ranges leaves this value equal and the map validates
-/// without re-executing.
+/// Range-free, so the project-wide duplicate map depends only on which names
+/// exist and survives body edits unchanged.
 #[salsa::tracked(returns(ref))]
 fn top_level_binding_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
     let mut names = Vec::new();
@@ -795,10 +689,7 @@ fn top_level_binding_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
     names
 }
 
-/// Package names defined at top level more than once, each mapped to its
-/// definition sites' files in project order (a file repeats per site).
-/// Healthy projects keep this near-empty, so the value-equality firewall
-/// holds: per-file diagnostics re-validate cheaply after edits elsewhere.
+/// Near-empty in healthy projects, so its value-equality firewall holds.
 #[salsa::tracked(returns(ref))]
 fn duplicate_binding_map(
     db: &dyn Db,
@@ -818,13 +709,8 @@ fn duplicate_binding_map(
     sites
 }
 
-/// Warnings for a package name defined at top level more than once: per-site
-/// winner semantics make every earlier binding dead, so each site warns, with
-/// a note pointing at its nearest neighbouring definition. Occurrence order
-/// is project order — `ProjectFiles` lists package documents first in
-/// workspace path order — then item order within a file. Ranges are fetched
-/// only for the files actually involved in a duplication, so the common
-/// duplicate-free file never reads another file's positions.
+/// Each site warns: per-site winner semantics make every earlier binding dead.
+/// Ranges are read only for files involved in a duplication.
 fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     if *file.kind(db) != DocumentKind::Package {
         return Vec::new();
@@ -898,9 +784,6 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     diagnostics
 }
 
-/// The `@type` / `@alias` declaration sites of one package file, in
-/// declaration order: each declared name with the range of its declaring
-/// directive.
 #[salsa::tracked(returns(ref))]
 fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
     let parsed = parse(db, file);
@@ -922,9 +805,7 @@ fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRan
     sites
 }
 
-/// The declared type names of one package file, in declaration order — the
-/// range-free projection of [`type_declaration_sites`], for the same
-/// value-equality firewall as [`top_level_binding_names`].
+/// Range-free for the same firewall as [`top_level_binding_names`].
 #[salsa::tracked(returns(ref))]
 fn type_declaration_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
     type_declaration_sites(db, file)
@@ -933,8 +814,6 @@ fn type_declaration_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
         .collect()
 }
 
-/// Project-global type names declared more than once, mapped to their
-/// declaring files in project order (a file repeats per declaration).
 #[salsa::tracked(returns(ref))]
 fn duplicate_type_map(
     db: &dyn Db,
@@ -954,14 +833,8 @@ fn duplicate_type_map(
     sites
 }
 
-/// Errors for a type name declared more than once: `@type` and `@alias` share
-/// one namespace and every declaration participating in a duplicate-name
-/// conflict is erroneous (see the typing reference). A duplicate is judged
-/// against the namespace the declaration lives in, which differs by document
-/// kind — package files share the project-global one, a script's declarations
-/// are its own file only — so the two cases are separate walks. Occurrence
-/// order is project order, then declaration order within a file; each site
-/// points at its nearest neighbouring declaration.
+/// `@type` and `@alias` share one namespace: project-global for package files,
+/// file-local for scripts, hence the separate walks.
 fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     if *file.kind(db) != DocumentKind::Package {
         return script_duplicate_type_diagnostics(db, file);
@@ -1021,13 +894,6 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
     diagnostics
 }
 
-/// Duplicate type names inside one script. A script's type declarations reach
-/// only its own file — the next script cannot see them — so two scripts may
-/// each declare a name without conflicting, and the duplicate to report is a
-/// repeat *within* the file. Left unreported, the later declaration silently
-/// won and every diagnostic it produced was unfalsifiable from the visible
-/// source: a name declared `double` above and `character` below yields
-/// ``expected `character`, found `double` `` with nothing to explain it.
 fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let sites = type_declaration_sites(db, file);
     let mut diagnostics = Vec::new();
@@ -1058,25 +924,17 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
     diagnostics
 }
 
-/// The validation failure of one qualified read, if any: an unknown
-/// namespace, or (for `::` only — `:::` reaches unexported names) a name the
-/// namespace does not declare. No stub corpus means no validation.
+/// `:::` reaches unexported names, so only `::` checks exports. No stub corpus
+/// means no validation.
 fn namespace_read_message(db: &dyn Db, read: &crate::naming::NamespaceRead) -> Option<String> {
-    // A package qualifying its own names reads definitions the checker already
-    // holds, so the stub corpus has no say — and neither does validation. A
-    // package's export set is not the set of names its sources bind: a
-    // re-export (`importFrom(htmltools, validateCssUnit)` beside
-    // `export(validateCssUnit)`), an S4 generic from `setGeneric`, a lazy-
-    // loaded dataset under `data/`, and a binding installed by `.onLoad` are
-    // all exported without a definition in view. Every candidate report
-    // measured across a CRAN corpus was one of those, so this stays silent
-    // rather than guessing at the difference.
+    // A package's export set is not the names its sources bind (re-exports, S4
+    // generics, lazy-loaded data, `.onLoad` bindings), so its own qualified reads
+    // are never validated.
     if crate::metadata::is_own_package(db, &read.package) {
         return None;
     }
     match crate::stubs::namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is a real package the corpus
-        // simply does not describe — its reads stay quiet, not "unknown".
+        // A declared dependency without stubs is real, just undescribed.
         false if crate::metadata::declared_dependency(db, &read.package) => None,
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
@@ -1103,12 +961,8 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> std::collections::BTreeSet<St
     names
 }
 
-/// Names declared via top-level `globalVariables(c("a", "b"))` /
-/// `utils::globalVariables(...)` calls in one file — the ecosystem-standard
-/// escape hatch for names bound dynamically (non-standard evaluation,
-/// generated bindings). Reads of them resolve nowhere lexically on purpose,
-/// so the unresolved check skips them package-wide. Only direct top-level
-/// calls with literal string arguments are recognized.
+/// Names declared via top-level `globalVariables(...)`, the escape hatch for
+/// NSE. Only direct top-level calls with literal strings are recognized.
 #[salsa::tracked(returns(ref))]
 fn file_global_variable_declarations(
     db: &dyn Db,
@@ -1139,8 +993,6 @@ fn file_global_variable_declarations(
         let Some(first) = arguments.first().and_then(|argument| argument.value) else {
             continue;
         };
-        // A single string, or a `c(...)` of strings — only what is
-        // statically knowable is declared; other entries are skipped.
         let mut collect = |id| {
             if let ExpressionKind::Literal(LiteralKind::String(value)) = &module.expression(id).kind
                 && !value.is_empty()
@@ -1171,10 +1023,7 @@ fn file_global_variable_declarations(
     declared
 }
 
-/// Every name any project file declares via `globalVariables`, unioned once
-/// per project revision. The per-read guard is a single set lookup — a
-/// per-file scan here multiplies by every non-local read in the project and
-/// dominated whole-workspace diagnostics at real scale.
+/// Unioned once per project so the per-read guard is a single lookup.
 #[salsa::tracked(returns(ref))]
 fn project_global_variable_declarations(
     db: &dyn Db,
@@ -1187,16 +1036,11 @@ fn project_global_variable_declarations(
     declared
 }
 
-/// The bindings R6 injects into every method's enclosing environment. They
-/// resolve nowhere lexically — R6 builds them at construction — so a read of
-/// one inside a class that defines methods is not an unresolved name, exactly
-/// as `this` is not one in a JavaScript class.
+/// R6 injects these into every method's environment at construction, so they
+/// resolve nowhere lexically.
 const R6_INJECTED_BINDINGS: [&str; 3] = ["self", "private", "super"];
 
-/// Whether a file constructs an R6 class, and so injects `self`/`private`/
-/// `super` into the method bodies it contains. Purely syntactic, like the
-/// other escape hatches here: a local binding shadowing `R6Class` is not
-/// honored.
+/// Purely syntactic: a local binding shadowing `R6Class` is not honored.
 #[salsa::tracked]
 fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
     use crate::hir::ExpressionKind;
@@ -1220,14 +1064,11 @@ fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
     })
 }
 
-/// Whether any package file declares `name` via `globalVariables`.
 fn declared_global_variable(db: &dyn Db, name: &str) -> bool {
     crate::ProjectFiles::try_get(db)
         .is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
 }
 
-/// A name as R source spells it: non-syntactic names need backticks (a
-/// leading dot must not be followed by a digit — `.2way` is not syntactic).
 fn display_name(name: &str) -> String {
     let mut characters = name.chars();
     let syntactic = matches!(characters.next(), Some(first) if first.is_alphabetic() || first == '.')
@@ -1240,10 +1081,6 @@ fn display_name(name: &str) -> String {
     }
 }
 
-/// The nearest name in a small, closed candidate set — a container's fields, a
-/// function's named parameters. Same budget as the corpus-wide hint, but here
-/// the set is the declaration itself, so a near-miss is all but certainly the
-/// intent.
 pub(crate) fn nearest_field_name<'a>(
     name: &str,
     candidates: impl Iterator<Item = &'a str>,
@@ -1251,18 +1088,15 @@ pub(crate) fn nearest_field_name<'a>(
     nearest_name(name, candidates).map(str::to_owned)
 }
 
-/// The nearest of the project's own top-level definitions — checked before
-/// the stub corpus, because a near-miss of a name this project defines is far
-/// more likely the intent than a same-distance name from the standard library.
+/// Checked before the stub corpus: a near-miss of the project's own name is the
+/// likelier intent.
 fn project_definition_suggestion(db: &dyn Db, name: &str) -> Option<String> {
     let files = crate::ProjectFiles::try_get(db)?;
     let definitions = crate::package_definitions(db, files);
     nearest_name(name, definitions.keys().map(String::as_str)).map(str::to_owned)
 }
 
-/// The nearest stub name for a typo hint on an unresolved reference.
-/// Memoized per name: the same unresolved name recurs across a project and
-/// the candidate scan over the whole stub corpus is the expensive part.
+/// Memoized per name: the scan over the whole stub corpus is the expensive part.
 fn unresolved_suggestion(db: &dyn Db, name: &str) -> Option<String> {
     typo_suggestion(db, crate::types::Name::new(db, name.to_owned()))
 }
@@ -1281,15 +1115,9 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: crate::types::Name<'db>) -> Optio
     .map(str::to_owned)
 }
 
-/// The closest candidate within an edit-distance budget scaled to the name's
-/// length; distance ties break to the lexicographically smallest candidate so
-/// the hint is deterministic.
-///
-/// The budget is deliberately tight — one edit below eight characters, two at
-/// or above. A wrong guess is worse than no guess (`ggplot` is not a typo of
-/// `biplot`, and `aes` is not a typo of `abs`), and on a short name two edits
-/// change a third of it. Transposition counts as one edit, which is what
-/// keeps the real typos inside that budget: `lenght` for `length`.
+/// Ties break lexicographically for determinism. The budget is deliberately
+/// tight (a wrong guess is worse than none); transposition counts as one edit
+/// so `lenght` still finds `length`.
 fn nearest_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     let name_characters: Vec<char> = name.chars().collect();
     if name_characters.len() < 4 {
@@ -1327,13 +1155,8 @@ fn nearest_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Op
     best.map(|(_, candidate)| candidate)
 }
 
-/// Optimal string alignment distance — Levenshtein plus adjacent
-/// transposition as a single edit, because swapping two letters is the most
-/// common real typo and counting it as two edits would push it outside the
-/// budget above. `None` when the distance exceeds `budget` (with a length
-/// pre-check and an early bail once a whole DP row exceeds it). The caller
-/// lends the DP rows so a scan over many candidates allocates nothing per
-/// candidate.
+/// Optimal string alignment distance, or `None` past `budget`. The caller lends
+/// the DP rows so a scan allocates nothing per candidate.
 fn edit_distance_within(
     left: &[char],
     right: &[char],
@@ -1344,8 +1167,7 @@ fn edit_distance_within(
     if left.len().abs_diff(right.len()) > budget {
         return None;
     }
-    // Transposition reads the row two above, so the rows rotate through three
-    // buffers; the third lives here because only this function needs it.
+    // Transposition reads the row two above, hence a third buffer.
     let mut before_previous: Vec<usize> = Vec::new();
     previous.clear();
     previous.extend(0..=right.len());
@@ -1373,9 +1195,6 @@ fn edit_distance_within(
         if row_minimum > budget {
             return None;
         }
-        // Rotate: the row just computed becomes `previous`, the old
-        // `previous` becomes `before_previous`, and the buffer they displace
-        // is recycled as the next `current`.
         std::mem::swap(&mut before_previous, previous);
         std::mem::swap(previous, current);
         current.clear();
@@ -1384,14 +1203,9 @@ fn edit_distance_within(
     (previous[right.len()] <= budget).then_some(previous[right.len()])
 }
 
-/// A script's top level is one frame executed in order, so its bindings are
-/// subject to the unused check across items: an assignment is dead when no
-/// later item reads it before the next rebinding, and no nested function
-/// reads the name at all (a deferred read runs after the frame is built, so
-/// it keeps every write to the name observable — the captured-slot rule).
+/// A script's top level is one frame run in order, so the unused check spans
+/// items. A read inside a nested function keeps every write to the name live.
 fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    // A broken statement reports its syntax error and nothing else, so a
-    // definer inside an R-grammar error region never warns as unused.
     let error_ranges: Vec<TextRange> = crate::parse(db, file)
         .errors()
         .iter()
@@ -1403,16 +1217,10 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         name: String,
         range: TextRange,
         used: bool,
-        /// A conditionally executed write (inside a top-level loop or `if`):
-        /// it rebinds the slot only on some runs, so it does not end the
-        /// liveness of earlier definers of the name.
+        /// Rebinds only on some runs, so it does not end earlier definers' liveness.
         conditional: bool,
     }
     let mut definers: Vec<Definer> = Vec::new();
-    // Every item participates as a reader — a bare `print(x)` statement keeps
-    // `x` alive. Definers are the item's own named definition plus any other
-    // top-level frame slot the item creates (a conditional write inside a
-    // top-level `for`/`while`/`if` binds the frame like any assignment).
     let mut reads: Vec<(usize, String, bool)> = Vec::new();
     for (index, span) in crate::item_spans(db, file).iter().enumerate() {
         let item = span.item;
@@ -1439,10 +1247,8 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let root_range = module.expression(root).range;
             let statement_range =
                 TextRange::new(root_range.start() + offset, root_range.end() + offset);
-            // The finding belongs on the assigned name, not on the whole
-            // statement: the value being computed is fine, the binding is what
-            // is dead. `broken` still consults the whole statement, because a
-            // syntax error anywhere in it suppresses the finding.
+            // The finding goes on the name, but a syntax error anywhere in the statement
+            // suppresses it.
             if !broken(statement_range) {
                 definers.push(Definer {
                     item_index: index,
@@ -1466,8 +1272,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     item_index: index,
                     name: binding.name.clone(),
                     range,
-                    // A read within the item itself (a loop reading its own
-                    // carried variable) already keeps the definer alive.
+                    // A read within the item itself already keeps it alive.
                     used: naming.used_top_level_names.contains(&binding.name),
                     conditional: true,
                 });
@@ -1477,24 +1282,18 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let deferred = naming.deferred_non_locals.contains(expression);
             reads.push((index, name.clone(), deferred));
         }
-        // A quiet read (data masking, an opaque operator) is never reported
-        // as unresolved, but at runtime it falls back to enclosing bindings,
-        // so it keeps definers alive like any other read.
+        // Quiet reads are never reported unresolved, but at run time they fall back to
+        // enclosing bindings, so they keep definers alive.
         for (expression, name) in &naming.quiet_reads {
             let deferred = naming.deferred_quiet_reads.contains(expression);
             reads.push((index, name.clone(), deferred));
         }
-        // An operator use keeps every definition of that operator alive: R
-        // resolves `%op%` when the expression runs, and a helper operator is
-        // typically defined in one file and used across the project, so the
-        // read is treated as deferred (order-independent).
+        // R resolves `%op%` when the expression runs and helper operators are used
+        // project-wide, so operator reads count as deferred.
         for name in &naming.quiet_operator_reads {
             reads.push((index, name.clone(), true));
         }
-        // A maybe-undefined read of the item's own top-level slot (a loop
-        // reading its carried variable) reaches the enclosing frame on the
-        // unwritten path — its first iteration reads the earlier binding, so
-        // it counts as a cross-item read too.
+        // A loop's first iteration reads the earlier binding of its carried variable.
         for expression in &naming.maybe_undefined {
             let Some(slot) = naming.resolutions.get(expression) else {
                 continue;
@@ -1509,16 +1308,12 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     }
     for (read_index, name, deferred) in &reads {
         if *deferred {
-            // A read from inside a function: the function may run any time
-            // after the frame exists, so every write to the name is live.
+            // The function may run any time after the frame exists, so every write is live.
             for definer in definers.iter_mut().filter(|d| d.name == *name) {
                 definer.used = true;
             }
         } else {
-            // An immediate read sees the binding current at its item: the
-            // nearest earlier definer — but a conditional definer rebinds
-            // only on some runs, so marking continues past it until the
-            // nearest unconditional one.
+            // Continue past conditional definers: they rebind only on some runs.
             for definer in definers
                 .iter_mut()
                 .rev()
@@ -1531,11 +1326,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             }
         }
     }
-    // An S3 method is reached by dispatch, not by a read of its name, so the
-    // liveness walk above cannot see the use: `speak.dog` is called by every
-    // `speak(x)` on a dog. Reporting it dead is a false positive on code that
-    // works, and the ecosystem's own answer — export it — is unavailable in a
-    // script.
+    // S3 methods are reached by dispatch, not by a read of their name.
     let generics = crate::s3_generics(db, file);
     definers
         .into_iter()
@@ -1555,24 +1346,16 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// Strict-mode diagnostics: reports at `Unknown` origins, assembled
-/// separately so hosts publish them only under `[check] strict` or the
-/// per-file directive. An origin that is an assignment's value is phrased
-/// against the assigned name (that is where the annotation goes); any other
-/// origin is phrased against the expression itself.
+/// Published by hosts only under `[check] strict` or the per-file directive. An
+/// origin that is an assignment's value is phrased against the assigned name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     use crate::check::StrictOriginKind;
     use crate::hir::ExpressionKind;
 
     let mut diagnostics = Vec::new();
-    // The blanket tolerance is the one hole strict mode used to leave open: an
-    // attached package whose export set cannot be known silences every name
-    // nothing defines, so a whole class of checking switched off project-wide
-    // and the run still read as "I understood everything". Such a read IS
-    // undetermined, which is what strict mode is for. The classification is
-    // shared with the ordinary check, so this reports exactly the reads that
-    // one let through.
+    // Reads silenced by an unknowable export set are undetermined, which is what
+    // strict mode reports.
     let broken_ranges: Vec<TextRange> = parse(db, file)
         .errors()
         .iter()
@@ -1639,8 +1422,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             }
         }
         for origin in &check.strict_origins {
-            // A loop-widened or recursive origin is about the named binding,
-            // never about the expression it happens to be the value of.
+            // Loop-widened and recursive origins are about the named binding.
             let assignment_target = match &origin.kind {
                 StrictOriginKind::LoopWidened(_) | StrictOriginKind::RecursiveUnknown(_) => None,
                 _ => assignment_targets.get(&origin.expression),
@@ -1787,11 +1569,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             constraint_description(*constraint),
             renderer.render(db, *found)
         ),
-        // A constrained position has no type to show — the constraint is what
-        // refuses the value, so the message says what the body needs instead.
-        // Two record types differ in one field. Naming it, and printing only
-        // the two types at that position, is the whole point of the variant —
-        // the alternative is a pair of long strings to diff by eye.
         TypeErrorKind::RecordShape { mismatch } => match mismatch.as_ref() {
             RecordMismatch::Field {
                 path,
@@ -1963,7 +1740,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     }
 }
 
-/// The user-facing type renderer: `T`/`U`/`V`… in first-occurrence order.
+/// Names variables `T`/`U`/`V` in first-occurrence order. Share one renderer
+/// across every type in a message: a fresh one restarts the numbering.
 #[derive(Default)]
 pub struct TypeRenderer<'db> {
     names: Vec<RenderedVar<'db>>,
@@ -1975,13 +1753,8 @@ enum RenderedVar<'db> {
     Rigid(Name<'db>),
 }
 
-/// A record field name as the `#:` grammar would have to spell it.
-///
-/// R lets a list carry any string as a name, so `list(\`max size\` = 10L)` is an
-/// ordinary record — but rendering that field bare produces a type nobody can
-/// write back, and one shape is worse than an error: `list{a,b: integer}` parses
-/// as a *different* type rather than failing. Every rendered type is copyable
-/// into an annotation, so the renderer quotes what the grammar needs quoted.
+/// Rendered types must be copyable into annotations, and an unquoted
+/// non-syntactic name can even parse as a different type (`list{a,b: integer}`).
 fn spell_field_name(name: &str) -> String {
     match syntax::is_syntactic_name(name) {
         true => name.to_owned(),
@@ -2022,12 +1795,8 @@ impl<'db> TypeRenderer<'db> {
                 let members: Vec<String> = members
                     .iter()
                     .map(|&member| {
-                        // `->` extends over a whole union, so a function member
-                        // needs its grouping parentheses back or the rendered
-                        // type is a different type: without them
-                        // `(fn(A) -> B) | NULL` and `fn(A) -> (B | NULL)` print
-                        // the same, and copying one out of a finding into an
-                        // annotation silently changes it.
+                        // `->` extends over a whole union, so a function member needs its
+                        // parentheses or the rendered type means something else.
                         let rendered = self.render(db, member);
                         match member.kind(db) {
                             TyKind::Function(_) => format!("({rendered})"),
@@ -2060,9 +1829,8 @@ impl<'db> TypeRenderer<'db> {
         }
     }
 
-    /// The `<T, U: numeric>` binder prefix of a scheme, registering each
-    /// binder's display name so the body rendered afterwards through the same
-    /// renderer reuses them. `None` for an empty binder list.
+    /// Registers each binder's display name so the body rendered afterwards through
+    /// this renderer reuses them.
     pub fn render_binder_prefix(&mut self, binders: &[(Name<'db>, Constraint)]) -> Option<String> {
         if binders.is_empty() {
             return None;
@@ -2086,9 +1854,8 @@ impl<'db> TypeRenderer<'db> {
             parameters.push(self.render(db, *ty));
         }
         for (index, field) in function.named.iter().enumerate() {
-            // The rest parameter sits at its declared boundary among the
-            // named parameters, not always last — the position is part of
-            // the shape (R matches remaining positional arguments into it).
+            // The rest parameter sits at its declared position: R matches remaining
+            // positional arguments into it.
             if let Some(rest) = &function.variadic
                 && rest.preceding_named == index
             {
@@ -2128,7 +1895,6 @@ impl<'db> TypeRenderer<'db> {
     }
 }
 
-/// What a constraint admits, in the same words wherever it is reported.
 fn constraint_description(constraint: Constraint) -> &'static str {
     match constraint {
         Constraint::Unconstrained => "a value",
@@ -2202,7 +1968,6 @@ mod tests {
                 .any(|line| line.contains("unresolved") && line.contains("nowhere")),
             "expected an unresolved warning for nowhere: {rendered:?}"
         );
-        // The second item's finding is offset into the file (absolute range).
         let missing = rendered
             .iter()
             .find(|line| line.contains("nowhere"))
@@ -2240,8 +2005,7 @@ mod tests {
             )
         };
         let db = RootDatabase::default();
-        // Past the check cap but under the parse cap: a typing-class refusal,
-        // and the payload drop keeps the mismatch from also firing.
+        // Past the check cap but under the parse cap.
         let checked = SourceFile::new(&db, deep(140), DocumentKind::Package);
         ProjectFiles::new(&db, vec![checked]);
         let rendered = render_all(&db, checked);
@@ -2274,7 +2038,6 @@ mod tests {
             &db,
             crate::types::TyKind::Rigid(crate::types::Name::new(&db, "B".to_owned())),
         );
-        // First occurrence order: A -> T, B -> U; A again stays T.
         assert_eq!(renderer.render(&db, t), "T");
         assert_eq!(renderer.render(&db, u), "U");
         assert_eq!(renderer.render(&db, t), "T");

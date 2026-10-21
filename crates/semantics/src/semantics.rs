@@ -1,12 +1,3 @@
-//! Semantic analysis over `syntax` trees: the salsa database and all queries.
-//!
-//! The pipeline is a set of memoized, dependency-tracked queries: parse →
-//! per-item item tree → HIR → naming → inference, with interned types and a
-//! symbol-granular package interface resolved through salsa fixpoint cycles.
-//! Analysis units are *items* (top-level definitions and nested definitions in
-//! class-constructor calls and function bodies), never whole files, so an edit
-//! recomputes only the items whose derived values actually changed.
-
 pub mod annotations;
 pub mod check;
 pub mod diagnostics;
@@ -26,9 +17,7 @@ use syntax::ast::AstNode as _;
 
 #[salsa::db]
 pub trait Db: salsa::Database {
-    /// The splice-reparse acceleration cache consulted by `parse`. Purely an
-    /// acceleration: the spliced tree is byte- and error-identical to a
-    /// from-scratch parse, so cache state never changes any query value.
+    /// Acceleration only: a spliced parse is byte- and error-identical to a fresh one.
     fn splice_cache(&self) -> &SpliceCache;
 }
 
@@ -36,8 +25,7 @@ pub trait Db: salsa::Database {
 #[derive(Clone, Default)]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
-    /// Shared across storage-handle clones so the server's fresh handles
-    /// (cancellation refreshes, worker fan-out) keep the warm entries.
+    /// Shared across storage-handle clones so fresh handles keep the warm entries.
     splice_cache: std::sync::Arc<SpliceCache>,
 }
 
@@ -51,16 +39,12 @@ impl Db for RootDatabase {
     }
 }
 
-/// Whether a file participates in the package interface or is a standalone
-/// script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum DocumentKind {
     Package,
     Script,
 }
 
-/// One source document: the text is the ground-truth input; everything else is
-/// derived.
 #[salsa::input(debug)]
 pub struct SourceFile {
     #[returns(deref)]
@@ -68,28 +52,14 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-/// The lossless parse of a file. Per text revision the query consults the
-/// splice cache: when the file's previous text and tree are at hand, only the
-/// edited statement region is reparsed and the untouched green subtrees are
-/// shared by pointer (`syntax::reparse`); otherwise — and whenever the splice
-/// refuses — it is a full from-scratch parse. The two paths are byte- and
-/// error-identical (the syntax edit-stream fuzzer pins the equivalence, and
-/// the semantics fuzzer's setter-edit-equals-fresh-database invariant crosses
-/// this cache), so the cache is invisible to every downstream query.
 #[salsa::tracked(returns(clone))]
 pub fn parse(db: &dyn Db, file: SourceFile) -> ParseResult {
     ParseResult(db.splice_cache().parse(file, file.text(db)))
 }
 
-/// The previous `(text, parse)` per file, keyed by the salsa input id.
-///
-/// Correctness never depends on an entry: a stale or mismatched text only
-/// yields a larger derived edit region, and `syntax::reparse` falls back to a
-/// full parse whenever splicing is not provably equivalent. The map is
-/// bounded: at capacity, inserting an unknown file clears it wholesale —
-/// crude, but a cold pass cycling thousands of files then costs one clear
-/// instead of an eviction policy, while an editing session's open set stays
-/// resident.
+/// The previous `(text, parse)` per file. At capacity, inserting an unknown file
+/// clears the map wholesale: a cold pass then costs one clear, while an editing
+/// session's open set stays resident.
 #[derive(Default)]
 pub struct SpliceCache {
     entries: std::sync::Mutex<rustc_hash::FxHashMap<SourceFile, (std::sync::Arc<str>, Parse)>>,
@@ -99,8 +69,7 @@ const SPLICE_CACHE_CAPACITY: usize = 64;
 
 impl SpliceCache {
     fn parse(&self, file: SourceFile, new_text: &str) -> Parse {
-        // Clone the entry out and compute unlocked, so parallel workers
-        // parsing different files never serialize on the parse itself.
+        // Parse unlocked so parallel workers never serialize on the parse itself.
         let previous = {
             let entries = self.entries.lock().expect("splice cache lock");
             entries.get(&file).cloned()
@@ -125,10 +94,8 @@ impl SpliceCache {
     }
 }
 
-/// The single edit turning `old` into `new`: the byte range replaced in `old`
-/// and the length of its replacement, from the longest common prefix and
-/// suffix (backed off to character boundaries). Several accumulated edits
-/// collapse into one region spanning them all.
+/// The one edit turning `old` into `new` (replaced range in `old`, replacement
+/// length); several accumulated edits collapse into one region.
 fn derived_edit(old: &str, new: &str) -> (syntax::TextRange, syntax::TextSize) {
     let mut prefix = old
         .as_bytes()
@@ -160,7 +127,6 @@ fn derived_edit(old: &str, new: &str) -> (syntax::TextRange, syntax::TextSize) {
     )
 }
 
-/// Newtype giving `syntax::Parse` the salsa value plumbing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseResult(pub Parse);
 
@@ -172,14 +138,8 @@ impl std::ops::Deref for ParseResult {
     }
 }
 
-/// The analysis unit: one top-level definition or statement (nested
-/// definitions inside class-constructor calls and function bodies become items
-/// in a later slice — the identity scheme already carries `parent` for them).
-///
-/// Identity is **insertion-stable**: kind + name (+ parent + a disambiguator
-/// among same-identity siblings), never a bare position or index — inserting an
-/// unrelated item must not shift the identity of items after it, or every
-/// downstream memo for them would invalidate.
+/// Identity is insertion-stable (kind, name, parent, disambiguator), never a
+/// position: inserting an unrelated item must not invalidate later items' memos.
 #[salsa::interned(debug)]
 pub struct Item<'db> {
     pub file: SourceFile,
@@ -192,22 +152,13 @@ pub struct Item<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum ItemKind {
-    /// `name <- function(...) ...` (any assignment spelling).
     Function,
-    /// `name <- <expr>` for a non-function right-hand side.
     Value,
-    /// Any other top-level statement (an expression statement, a side-effecting
-    /// call, a broken region).
     Statement,
 }
 
-/// The ordered items of a file. This is the invalidation barrier between a
-/// file's text and per-item work: it carries structure and identity only — no
-/// spans, no bodies — so edits inside one body leave it equal and cut off.
-///
-/// Borrowed, not cloned: per-item work consults this once per item, so cloning
-/// the whole vector here allocated a copy of the file's item list for every
-/// item in the file — quadratic in a file's top-level items.
+/// Structure and identity only — no spans, no bodies — so an edit inside one body
+/// leaves it equal and cuts off. Borrowed: per-item work reads it once per item.
 #[salsa::tracked(returns(ref))]
 pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
     let parse = parse(db, file);
@@ -232,30 +183,21 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
     items
 }
 
-/// The current green subtree of an item (with its item-tree position), or
-/// `None` when the item no longer exists in the file.
-///
-/// The green subtree is width-only and therefore **position-independent**: an
-/// edit elsewhere in the file reproduces a structurally equal value here, and
-/// salsa's early cutoff prunes all downstream per-item work. Every consumer of
-/// item innards must read THIS query (never `parse` directly), and every span
-/// it derives must stay item-relative; absolute positions are reintroduced only
-/// at the final rendering edge.
+/// Width-only, so position-independent: an edit elsewhere in the file cuts off
+/// here. Item innards must be read through this (never `parse`), and spans derived
+/// from it stay item-relative until the rendering edge.
 #[salsa::tracked(returns(clone))]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     resolve_item_node(db, item).map(|node| ItemSyntax(node.green().into()))
 }
 
-/// One item's current absolute span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemSpan<'db> {
     pub item: Item<'db>,
     pub range: syntax::TextRange,
 }
 
-/// Every item's current absolute span, in one memoized walk (the per-item
-/// lookup would otherwise re-classify the whole file per item — quadratic on
-/// statement-heavy scripts).
+/// One memoized walk; a per-item lookup would re-classify the file per item.
 #[salsa::tracked(returns(ref))]
 pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> {
     let parse = parse(db, file);
@@ -283,11 +225,8 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
     spans
 }
 
-/// The item's current red node inside the FILE tree (absolute offsets) — an
-/// EDGE-ONLY view: the rendering edge and position-addressed IDE features use
-/// it to convert between absolute and item-relative offsets. Everything that
-/// computes derived per-item values must go through the position-independent
-/// `item_syntax`, or edits elsewhere in the file stop cutting off.
+/// Absolute offsets, for the rendering edge and position-addressed IDE features
+/// only; derived per-item values must use `item_syntax` to keep cutting off.
 pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::SyntaxNode> {
     resolve_item_node(db, item)
 }
@@ -298,9 +237,7 @@ pub(crate) fn resolve_item_node<'db>(
 ) -> Option<syntax::SyntaxNode> {
     let range = item_span_range(db, item)?;
     let parse = parse(db, *item.file(db));
-    // Descend by range rather than scanning the root's children: every
-    // per-item query lands here, so a linear child walk makes a file of many
-    // top-level statements quadratic.
+    // Descend by range: a linear child walk per item is quadratic in statements.
     parse
         .syntax_node()
         .child_or_token_at_range(range)
@@ -308,18 +245,12 @@ pub(crate) fn resolve_item_node<'db>(
         .filter(|node| node.text_range() == range)
 }
 
-/// One item's current absolute span, as a hash probe. Every per-item query
-/// needs it, so scanning `item_spans` here would make a file of many
-/// top-level statements quadratic.
 pub(crate) fn item_span_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::TextRange> {
     let file = *item.file(db);
     let index = *item_span_positions(db, file).get(&item)?;
     item_spans(db, file).get(index).map(|span| span.range)
 }
 
-/// Each item's index in `item_tree` — a lookup index over that one source of
-/// truth, so the per-item read rules can ask where an item sits without
-/// scanning the file's item list once per item.
 #[salsa::tracked(returns(ref))]
 fn item_tree_positions<'db>(
     db: &'db dyn Db,
@@ -332,8 +263,6 @@ fn item_tree_positions<'db>(
         .collect()
 }
 
-/// Each item's index in `item_spans` — a lookup index over that one source of
-/// truth, not a second copy of the spans.
 #[salsa::tracked(returns(ref))]
 fn item_span_positions<'db>(
     db: &'db dyn Db,
@@ -346,35 +275,24 @@ fn item_span_positions<'db>(
         .collect()
 }
 
-/// A position-independent green subtree; equality is structural.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemSyntax(pub rowan::GreenNode);
 
 impl ItemSyntax {
-    /// A fresh red root over the item's subtree (offsets start at 0 —
-    /// item-relative, exactly what per-item consumers must work in).
+    /// Offsets start at 0 (item-relative).
     pub fn syntax_node(&self) -> syntax::SyntaxNode {
         syntax::SyntaxNode::new_root(self.0.clone())
     }
 }
 
-/// The lowered HIR of one item, derived from its position-independent green
-/// subtree only — never from the whole file — so it stays equal (and cuts off)
-/// across edits elsewhere in the file. `None` when the item no longer exists.
-///
-/// Borrowed, not cloned: a check, the diagnostics passes and every IDE read all
-/// fetch this, roughly five times per item over a run, and cloning a `Module`
-/// walks its whole expression arena each time.
+/// Derived from the item's green subtree only, so it cuts off across edits
+/// elsewhere in the file.
 #[salsa::tracked(returns(ref))]
 pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
     let syntax = item_syntax(db, item)?;
     Some(hir::lower_item(&syntax.syntax_node()))
 }
 
-/// The naming facts of one item (position-independent, like the HIR they are
-/// derived from). Borrowed for the same reason as [`item_hir`], and more so:
-/// `ItemNaming` is maps and sets throughout, so a clone is a node-by-node
-/// allocation walk.
 #[salsa::tracked(returns(ref))]
 pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::ItemNaming> {
     let module = item_hir(db, item).as_ref()?;
@@ -387,13 +305,10 @@ pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::Item
     ))
 }
 
-/// Names the checker recognizes structurally rather than through the stub
-/// corpus: the shape-constructing builtins and the control-flow constructs.
+/// Recognized structurally by the checker rather than through the stub corpus.
 const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"];
 
-/// Whether any global definition with this name exists — a package
-/// definition, a stdlib stub declaration, or a checker builtin (used to
-/// silence could-not-resolve on names the interface will serve).
+/// Includes stub declarations and checker builtins, not just package definitions.
 pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
@@ -411,26 +326,15 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     })
 }
 
-/// Where a `#:` annotation's target expression is, if it has one. An
-/// annotation applies only to the expression starting on the very next
-/// line: a blank line, an interposed plain comment, or the end of the
-/// statement sequence break the association (and earn a diagnostic when the
-/// block needed a target).
+/// An annotation applies only to the expression starting on the very next line;
+/// a blank line, a plain comment, or the end of the sequence breaks the association.
 pub enum AnnotationTarget {
     Attached(syntax::SyntaxNode),
-    /// An element follows, but only after one or more blank lines.
     BlankLineSeparated,
-    /// Nothing attachable follows: end of the sequence, or a plain comment
-    /// or another annotation region interposes.
     Dangling,
 }
 
-/// Each `ANNOTATION` child of one statement sequence (the file root, or a
-/// braced block) with its attachment. The single source of the association
-/// rule — annotation application at the top level
-/// (`item_annotation_syntax`), expression-level attachment inside items
-/// (`item_expression_annotations`), and the dangling-annotation diagnostics
-/// all read this.
+/// The single source of the annotation association rule for a statement sequence.
 pub fn statement_annotations(
     parent: &syntax::SyntaxNode,
 ) -> Vec<(syntax::SyntaxNode, AnnotationTarget)> {
@@ -494,17 +398,9 @@ pub fn statement_annotations(
     associations
 }
 
-/// The annotation region attached to an item (see [`statement_annotations`]
-/// for the association rule), as a position-independent green subtree.
-/// Annotations are siblings of the item statement in the file tree, so
-/// attachment happens here, not inside `item_syntax`.
-///
-/// A probe into the file's one association walk: deriving the association per
-/// item instead re-walks every top-level statement and token of the file for
-/// each item, which is quadratic on any file with many top-level statements —
-/// annotated or not. The per-item query survives as the incrementality
-/// firewall: an edit re-runs the file walk once, and every untouched item's
-/// green annotation subtree compares equal, so its dependents cut off.
+/// Annotations are siblings of the item in the file tree, so they attach here, not in
+/// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
+/// annotation subtrees compare equal and cut off.
 #[salsa::tracked(returns(clone))]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
@@ -512,10 +408,7 @@ pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<I
         .cloned()
 }
 
-/// Every item's attached annotation region, from one walk over the file.
-/// Item identity comes from `item_spans` — the association matches an
-/// annotation's attachment target to a span by range, so the top-level
-/// classification rule lives in exactly one place.
+/// Matches targets to `item_spans` by range, so top-level classification lives in one place.
 #[salsa::tracked(returns(ref))]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
@@ -537,16 +430,8 @@ fn file_item_annotations<'db>(
         .collect()
 }
 
-/// Annotations attached to statements BELOW the item root — block statements
-/// and block-final expressions, the constructor idiom's `#: @new` inside a
-/// function body — keyed by the annotated expression's HIR id. The item's
-/// own annotation is a top-level sibling and arrives separately
-/// (`item_annotation_syntax`); the association rule is the same
-/// (`statement_annotations`). Only payload-bearing annotations attach —
-/// definitions, toggles, and refused blocks have their own reporting. A
-/// plain function, not a tracked query: `Annotation` carries `TextRange`s
-/// (no salsa value plumbing), and the callers are tracked queries whose
-/// dependencies flow through `item_syntax`/`item_hir` anyway.
+/// Annotations attached below the item root, keyed by HIR id. Not tracked: `Annotation`
+/// carries `TextRange`s, and callers already depend on `item_syntax`/`item_hir`.
 pub fn item_expression_annotations<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
@@ -592,20 +477,15 @@ pub fn item_expression_annotations<'db>(
     attachments
 }
 
-/// The ordered project file set (package files first, in path order — the
-/// order that decides last-writer-wins winners). A singleton input the host
-/// keeps current.
+/// Package files first, in path order; the order decides last-writer-wins winners.
 #[salsa::input(singleton, debug)]
 pub struct ProjectFiles {
     #[returns(ref)]
     pub files: Vec<SourceFile>,
 }
 
-/// A file's typing mode, set by its own directives: `# typing: off|on|strict`
-/// plain comments and `#: @strict` / `#: @strict off` annotation directives,
-/// the last one in the file winning. `None` when the file sets nothing (the
-/// configured `[check]` switches apply). The mode changes only which
-/// diagnostics a host publishes — inference itself is untouched.
+/// Set by a file's `# typing:` comments and `#: @strict` directives, the last winning.
+/// It changes only which diagnostics a host publishes, never inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum TypingMode {
     Off,
@@ -618,8 +498,7 @@ pub fn file_typing_mode(db: &dyn Db, file: SourceFile) -> Option<TypingMode> {
     file_typing_directives(db, file).0
 }
 
-/// The mode plus the ranges of `typing:` comments with an unrecognized value
-/// (reported as errors rather than silently ignored).
+/// The mode plus the `typing:` comments with an unrecognized value.
 #[salsa::tracked(returns(clone))]
 pub fn file_typing_directives(
     db: &dyn Db,
@@ -640,8 +519,7 @@ pub fn file_typing_directives(
                 else {
                     continue;
                 };
-                // The whole remainder is the value — `typing: on gely` is a
-                // typo'd directive, not `on`.
+                // The whole remainder is the value: `typing: on gely` is a typo, not `on`.
                 match rest.trim() {
                     "off" => mode = Some(TypingMode::Off),
                     "on" => mode = Some(TypingMode::On),
@@ -664,9 +542,6 @@ pub fn file_typing_directives(
     (mode, invalid)
 }
 
-/// All `@type` / `@alias` definitions in a file's top-level annotations.
-/// Definition blocks below the top level are refused (diagnosed at the
-/// block), so they never enter the vocabulary.
 #[salsa::tracked(returns(clone))]
 pub fn file_type_definitions<'db>(
     db: &'db dyn Db,
@@ -684,8 +559,6 @@ pub fn file_type_definitions<'db>(
     definitions
 }
 
-/// The project-wide type-definition environment: `@type` / `@alias` by name,
-/// later files (and later definitions within one file) winning.
 #[salsa::tracked(returns(ref))]
 pub fn project_type_definitions<'db>(
     db: &'db dyn Db,
@@ -703,11 +576,8 @@ pub fn project_type_definitions<'db>(
     definitions
 }
 
-/// Items binding each top-level name other than their own, in project order:
-/// a conditional write at a document's top level (inside a top-level
-/// `if`/`for`/`while`/`repeat` or a bare block) or a nested one
-/// (`y <- (x <- 1L)`) creates the document's variable slot, and cross-item reads of a name with no unconditional
-/// winner resolve here — the slot's type is the join of every writer.
+/// Items writing a top-level name other than their own (conditionally, or nested as in
+/// `y <- (x <- 1L)`); cross-item reads with no unconditional winner join their types.
 #[salsa::tracked(returns(ref))]
 pub fn conditional_slot_items<'db>(
     db: &'db dyn Db,
@@ -731,12 +601,8 @@ pub fn conditional_slot_items<'db>(
     writers
 }
 
-/// What the package namespace binds one name to: its unconditional winner,
-/// and the items writing it conditionally or nested, whose join serves the
-/// name when there is no winner. A per-name projection of the two
-/// project-wide maps, so a check depends on the names it reads rather than
-/// on every definition in the project: a definition added elsewhere re-runs
-/// this for each read name, it compares equal, and the check stays green.
+/// A per-name projection of the project-wide maps, so a check depends only on the names
+/// it reads. `conditional_writers` serve the name when there is no winner.
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct PackageName<'db> {
     pub winner: Option<Item<'db>>,
@@ -759,12 +625,8 @@ pub fn package_name<'db>(
     }
 }
 
-/// The settled scheme a statement item exports for one of its top-level
-/// bindings (see `ItemCheck::top_level_bindings`). A tracked projection so
-/// readers cut off when the binding's scheme is unchanged even though the
-/// item re-checked. Cycle recovery mirrors `global_scheme`: a statement
-/// item reading its own conditionally-written name (`while (b > 0L)
-/// b <- b - 1L`) routes back into its own check.
+/// Tracked so readers cut off when the binding's scheme is unchanged. Cycles arise when a
+/// statement reads its own conditionally-written name (`while (b > 0L) b <- b - 1L`).
 #[salsa::tracked(
     returns(clone),
     cycle_fn = statement_binding_recover,
@@ -810,8 +672,6 @@ fn statement_binding_recover<'db>(
     value
 }
 
-/// The winning definition item per package-exported name: later files (and
-/// later assignments within one file) override earlier ones.
 #[salsa::tracked(returns(ref))]
 pub fn package_definitions<'db>(
     db: &'db dyn Db,
@@ -833,15 +693,9 @@ pub fn package_definitions<'db>(
     winners
 }
 
-/// Whether a name is an S3 method for a known generic: `generic.class`, where
-/// the part before the LAST dot names a generic (so `as.character.myclass`
-/// splits at `as.character`, and an ordinary dotted name like `my.helper` does
-/// not qualify). A generic is one the stub corpus declares or one `generics`
-/// names — a project's own `speak` is as real a generic as `print`.
-///
-/// Dispatch is not a read and not a call the checker can see, so this is what
-/// keeps a method from looking dead (`unused`) and its mandated formals from
-/// looking ignored (`unused-parameter`).
+/// `generic.class` split at the last dot (`as.character.myclass`), the generic being
+/// stub-declared or in `generics`. Dispatch is invisible to the checker, so this keeps
+/// methods and their mandated formals from looking unused.
 pub fn is_s3_method_name(db: &dyn Db, name: &str, generics: &FxHashSet<String>) -> bool {
     let Some((generic, class)) = name.rsplit_once('.') else {
         return false;
@@ -859,9 +713,6 @@ pub fn is_s3_method_name(db: &dyn Db, name: &str, generics: &FxHashSet<String>) 
         })
 }
 
-/// The S3 generics a file can see: every top-level definition whose body hands
-/// the call to `UseMethod`, in the file itself and — since package files share
-/// one namespace — anywhere else in the package.
 pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = file_s3_generics(db, file).clone();
     if let Some(files) = ProjectFiles::try_get(db) {
@@ -874,13 +725,8 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     generics
 }
 
-/// One file's S3 generics: a top-level definition whose body reads `UseMethod`,
-/// which is how R's own generics are written
-/// (`print <- function(x, ...) UseMethod("print")`). The dispatched name is not
-/// read out of the call's argument — a generic naming something other than its
-/// own binding is a bug R reports when the call runs, not a shape to model.
-/// Riding the read-set projection keeps this off item ranges, so editing one
-/// body does not re-derive the set.
+/// Reads the read-set projection so a body edit does not re-derive the set. The
+/// `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
 #[salsa::tracked(returns(ref))]
 fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
@@ -894,11 +740,8 @@ fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     generics
 }
 
-/// The non-local names an item's body reads (bare and `pkg::`-qualified),
-/// as a small per-item projection: whole-project graph walks depend on each
-/// item's read *set* instead of its full naming, so a body edit that shifts
-/// ranges without changing any read name backdates here and the walks stay
-/// green instead of re-executing per keystroke.
+/// A firewall: whole-project walks depend on this read set rather than the full naming,
+/// so a body edit that only shifts ranges backdates here.
 #[salsa::tracked(returns(ref))]
 pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<String> {
     let Some(naming) = item_naming(db, item) else {
@@ -914,9 +757,6 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
     reads
 }
 
-/// An item's top-level binding names — the projection cross-item slot
-/// resolution keys on, with the same backdating firewall as
-/// `item_interface_reads`.
 #[salsa::tracked(returns(ref))]
 pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<String> {
     let Some(naming) = item_naming(db, item) else {
@@ -930,26 +770,19 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         .collect()
 }
 
-/// The interface-reference SCCs of the package's definition items, from the
-/// static name graph: an edge runs from each item to the winner of every
-/// global name its body reads. Only *cyclic* groups are recorded — groups
-/// with several members, or a single member referencing itself — because
-/// those are the ones whose schemes must resolve through one canonical
-/// fixpoint: iterating a cycle from whichever member happened to be queried
-/// first would make the round-cap pins depend on query order.
+/// Only cyclic groups are recorded: their schemes must resolve through one canonical
+/// fixpoint, since iterating from whichever member was queried first would make the
+/// round-cap pins depend on query order.
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct InterfaceSccs<'db> {
-    /// Cyclic-group id per member item.
     pub membership: rustc_hash::FxHashMap<Item<'db>, u32>,
-    /// Each cyclic group's members in canonical order (project file order,
-    /// then item order within the file).
+    /// Members in canonical order: project file order, then item order.
     pub groups: Vec<Vec<Item<'db>>>,
 }
 
 #[salsa::tracked(returns(ref))]
 pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceSccs<'db> {
     let winners = package_definitions(db, files);
-    // Nodes in canonical order, with edges item -> referenced winner.
     let mut nodes: Vec<Item<'db>> = Vec::new();
     let mut position: rustc_hash::FxHashMap<Item<'db>, usize> = rustc_hash::FxHashMap::default();
     for &file in files.files(db) {
@@ -977,7 +810,7 @@ pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceScc
         }
     }
 
-    // Iterative Tarjan (the graph nests as deep as the package is large).
+    // Iterative: recursion depth would scale with package size.
     let mut result = InterfaceSccs::default();
     let mut index_of: Vec<Option<u32>> = vec![None; nodes.len()];
     let mut low: Vec<u32> = vec![0; nodes.len()];
@@ -1040,21 +873,15 @@ pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceScc
     result
 }
 
-/// The cyclic interface group an item belongs to, if any: the per-item
-/// projection a check reads, so an unrelated edit that reshapes the graph
-/// leaves every acyclic item's check green.
+/// A per-item projection, so reshaping the graph elsewhere leaves acyclic items' checks green.
 #[salsa::tracked(returns(copy))]
 fn interface_group<'db>(db: &'db dyn Db, files: ProjectFiles, item: Item<'db>) -> Option<u32> {
     interface_sccs(db, files).membership.get(&item).copied()
 }
 
-/// The canonical fixpoint of one cyclic interface group, independent of which
-/// member was queried first: every member starts at the tolerant `Unknown`
-/// scheme, each round re-checks every member in canonical order against the
-/// *previous* round's table (one propagation hop per round, so within-round
-/// order cannot matter either), and members still changing at the round cap
-/// pin to `Unknown`. Member checks run directly — never through `item_check`
-/// — so no salsa cycle forms.
+/// Independent of which member was queried first: each round re-checks every member
+/// against the previous round's table, and members still changing at the cap pin to
+/// `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
 #[salsa::tracked(
     returns(ref),
     cycle_fn = scc_schemes_recover,
@@ -1070,8 +897,7 @@ pub fn scc_schemes<'db>(
         return rustc_hash::FxHashMap::default();
     };
     let winners = package_definitions(db, files);
-    // Only the winner of a name is reachable through reads, so the overlay
-    // carries one entry per member that IS its name's winner.
+    // Only a name's winner is reachable through reads.
     let member_names: Vec<(String, Item<'db>)> = members
         .iter()
         .filter_map(|&item| {
@@ -1107,17 +933,13 @@ pub fn scc_schemes<'db>(
             return schemes;
         }
     }
-    // Still changing at the cap: sound-by-refusal for every member (the
-    // group's growth or oscillation makes no member's value trustworthy, and
-    // pinning all of them is the only entry-order-free choice).
+    // Pinning every member is the only entry-order-free refusal.
     for scheme in schemes.values_mut() {
         *scheme = unknown_scheme.clone();
     }
     schemes
 }
 
-/// Every member pinned to `Unknown` — the seed the internal fixpoint starts
-/// from, and the answer it settles on when members will not converge.
 fn unknown_group_schemes<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
@@ -1145,14 +967,8 @@ fn scc_schemes_initial<'db>(
     unknown_group_schemes(db, files, group)
 }
 
-/// The backstop the group's own fixpoint cannot provide. `scc_schemes` assumes
-/// its group is maximal, so a member check only ever reads other members
-/// through the overlay — but a reference edge the static graph did not see
-/// (`interface_sccs` builds edges from names that appear in the source, so a
-/// name the checker *constructs*, such as an S3 method, is invisible to it)
-/// sends the check out through `global_scheme` and back into this same group.
-/// Without recovery salsa aborts the process; with it the group settles on the
-/// same `Unknown` the round cap already uses.
+/// Backstop for edges the static graph cannot see (a name the checker constructs, such
+/// as an S3 method), which re-enter this group through `global_scheme`.
 fn scc_schemes_recover<'db>(
     db: &'db dyn Db,
     cycle: &salsa::Cycle,
@@ -1161,11 +977,8 @@ fn scc_schemes_recover<'db>(
     files: ProjectFiles,
     group: u32,
 ) -> rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>> {
-    // Refuse on the first disagreement rather than iterating. The group
-    // already runs its own bounded fixpoint internally, so letting salsa
-    // iterate this query too multiplies those rounds by its own cap — on a
-    // large group that is enough passes to exhaust memory, which is a worse
-    // failure than the panic this recovery exists to prevent.
+    // Refuse on the first disagreement: salsa iterating this query would multiply the
+    // group's own bounded rounds and can exhaust memory.
     if &value == last_provisional {
         return value;
     }
@@ -1173,7 +986,6 @@ fn scc_schemes_recover<'db>(
     unknown_group_schemes(db, files, group)
 }
 
-/// One member's exported scheme under the group's current-round table.
 fn check_member_scheme<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
@@ -1199,11 +1011,7 @@ fn check_member_scheme<'db>(
     .scheme
 }
 
-/// The exported scheme of one definition item — always `item_check`'s
-/// scheme, which for cyclic-group members is the group's canonical fixpoint
-/// value (adopted inside `item_check`, keeping export and hover one source
-/// of truth). The salsa cycle recovery below stays as a backstop for
-/// reference edges the static graph cannot see.
+/// Always `item_check`'s scheme, so export and hover share one source of truth.
 #[salsa::tracked(
     returns(clone),
     cycle_fn = global_scheme_recover,
@@ -1223,9 +1031,7 @@ fn global_scheme_initial<'db>(
     types::TypeScheme::monomorphic(types::unknown(db))
 }
 
-/// Bound fixpoint rounds: a scheme still changing after the cap pins to
-/// `Unknown` (sound-by-refusal) rather than iterating toward salsa's panic
-/// limit.
+/// A scheme still changing after this many rounds pins to `Unknown`.
 const SCHEME_ROUND_CAP: u32 = 16;
 
 fn global_scheme_recover<'db>(
@@ -1244,19 +1050,14 @@ fn global_scheme_recover<'db>(
     value
 }
 
-/// The full per-item check: HIR + naming + annotation lowering + inference,
-/// with cross-item reads resolved through `global_scheme` (the cycle-aware
-/// interface edge). Derived from position-independent per-item values only,
-/// so it cuts off whenever the item (and its annotation) are untouched.
 #[salsa::tracked(
     returns(clone),
     cycle_fn = item_check_recover,
     cycle_initial = item_check_initial
 )]
 pub fn item_check<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<'db>> {
-    // A check demands the schemes it reads, so the recursion is as deep as
-    // the longest chain of definitions each reading the next (a script of
-    // thousands of `df <- step(df)` rebindings); no fixed stack bounds that.
+    // Recursion depth follows the longest chain of definitions each reading the next
+    // (thousands of `df <- step(df)` rebindings), so no fixed stack bounds it.
     stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || check_item(db, item))
 }
 
@@ -1274,18 +1075,15 @@ fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<
         &item_expression_annotations(db, item),
         Some(&globals),
     );
-    // A cyclic-group member's export is the group's canonical fixpoint value,
-    // not the one-step re-derivation this check just computed (which would
-    // run one propagation hop ahead of what every reader sees).
+    // A cyclic-group member exports the group's fixpoint value, not this one-step
+    // re-derivation, which runs one propagation hop ahead of what readers see.
     if check.scheme.is_some()
         && let Some(files) = ProjectFiles::try_get(db)
         && let Some(group) = interface_group(db, files, item)
     {
         check.scheme = scc_schemes(db, files, group).get(&item).cloned();
-        // A member whose body checked clean but whose exported scheme still
-        // carries `Unknown` owes that `Unknown` to the reference cycle itself
-        // — nothing inside the body attributes it, so strict mode marks the
-        // whole binding.
+        // A clean body whose export still carries `Unknown` owes it to the cycle itself, so
+        // strict mode marks the whole binding.
         if check.errors.is_empty()
             && check.strict_origins.is_empty()
             && let Some(scheme) = &check.scheme
@@ -1321,23 +1119,9 @@ fn item_check_recover<'db>(
     if &value == last_provisional {
         return value;
     }
-    // `item_check` — not `global_scheme` — is the head salsa iterates when a
-    // definition's check reads its own exported scheme (the re-entered query
-    // drives the cycle), so the round cap must live here too. A value still
-    // changing at the cap is non-converging — a self-referential definition
-    // whose type grows a level per round (`x <- list(v = x)`), or an
-    // oscillation — so both export surfaces pin to the sound refusal.
-    //
-    // What the pin must NOT do is derive from this round's recomputation. A
-    // check carries six fields besides the scheme, and every one of them keeps
-    // moving while the cycle does: pinning only the scheme and taking the rest
-    // from `value` returns a different check every round, so the equality test
-    // above can never succeed and salsa iterates to its own limit and panics
-    // (`too many cycle iterations`) or exhausts memory first, whichever the
-    // machine reaches. Re-pinning what was already returned is a fixed point by
-    // construction — the next round produces it unchanged and the test passes.
-    // The sibling recoveries are safe from this because a bare `TypeScheme` pin
-    // is already a constant.
+    // `item_check` is the head salsa iterates when a definition reads its own scheme, so the
+    // round cap lives here. Pin from the previous value, never this round's: the check's
+    // other fields keep moving, so the equality test above would never pass.
     if cycle.iteration() >= SCHEME_ROUND_CAP {
         return last_provisional
             .clone()
@@ -1347,14 +1131,8 @@ fn item_check_recover<'db>(
     value
 }
 
-/// A check with both export surfaces cut to `Unknown`: what a non-converging
-/// cycle member exports, so downstream items check against an absent fact
-/// rather than an untrustworthy shape. Findings inside the item are kept.
-///
-/// This must be **idempotent** — `refuse_check(refuse_check(c))` equal to
-/// `refuse_check(c)` — because that is what lets the recovery above terminate:
-/// re-pinning an already-pinned value reproduces it, so the round after the cap
-/// compares equal and the fixpoint stops. `refusal_is_idempotent` pins it.
+/// Both export surfaces cut to `Unknown`; findings inside the item are kept. Must be
+/// idempotent so the recovery above terminates (`refusal_is_idempotent` pins it).
 fn refuse_check<'db>(db: &'db dyn Db, check: check::ItemCheck<'db>) -> check::ItemCheck<'db> {
     let refused = types::TypeScheme::monomorphic(types::unknown(db));
     check::ItemCheck {
@@ -1368,38 +1146,17 @@ fn refuse_check<'db>(db: &'db dyn Db, check: check::ItemCheck<'db>) -> check::It
     }
 }
 
-/// The salsa-backed cross-item resolver handed to the checker. Every lookup
-/// goes through a per-name query, so the check depends on exactly the names
-/// it reads.
+/// Every lookup goes through a per-name query, so a check depends on exactly the names it reads.
 struct SalsaGlobals<'db> {
     db: &'db dyn Db,
     item: Item<'db>,
     files: Option<ProjectFiles>,
-    /// Whether this item's file is a script, which decides the deferred-read
-    /// rule of [`frame_binder`].
     is_script: bool,
-    /// The item's own file, for the facts that are per-file rather than
-    /// per-item: its type declarations and its arithmetic classes.
     file: SourceFile,
 }
 
-/// How many conditional writers of one name still get joined. Past this the
-/// slot is `Unknown`, the sound-by-refusal move used for a loop variable whose
-/// type keeps growing.
-///
-/// Two reasons for a bound. The join costs one item check per writer, and it is
-/// reached from a per-item read, so a name written at many documents' top level
-/// makes every read of it pay for all of them. And the answer stops being worth
-/// paying for: a union of dozens of unrelated types is not a fact any diagnostic
-/// can use. Real conditional slots — a top-level `if`/`else` picking a default —
-/// have a handful of writers.
-/// The `@type` / `@alias` definitions one file sees: the project's, with the
-/// file's own layered on top when it is a script, because a script's
-/// declarations are visible to itself alone and shadow project-global names.
-///
-/// Per file and memoized, so the merge runs once instead of once per item
-/// checked in the file — the caller is a per-item check, and handing it an owned
-/// copy of the project table is what made a heavily annotated project quadratic.
+/// A script's own declarations are visible to itself alone and shadow project names.
+/// Memoized per file so the merge runs once per file, not once per checked item.
 #[salsa::tracked(returns(ref))]
 fn visible_type_definitions<'db>(
     db: &'db dyn Db,
@@ -1416,9 +1173,6 @@ fn visible_type_definitions<'db>(
     definitions
 }
 
-/// The classes with an arithmetic operator method that one file sees: the
-/// shipped stubs, the project's own definitions, and the file's own top level.
-/// Memoized per file for the same reason as [`visible_type_definitions`].
 #[salsa::tracked(returns(ref))]
 fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashSet<String> {
     let mut classes = stub_arithmetic_classes(db);
@@ -1429,18 +1183,11 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHa
     classes
 }
 
+/// Past this many conditional writers a slot is `Unknown`: each writer costs an item
+/// check per read, and a union of dozens of unrelated types helps no diagnostic.
 const CONDITIONAL_SLOT_JOIN_CAP: usize = 8;
 
-/// Every item that binds a name at a file's top level, by name, in file order.
-///
-/// This is the index behind [`SalsaGlobals::frame_definition`], which answers
-/// "which item of this file binds this name" once per name a check looks up.
-/// Scanning the item list for that answer is linear per lookup, so a file with
-/// many items *and* many distinct cross-item references costs their product —
-/// quadratic, and invisible when only one of the two grows. Each axis alone
-/// stays linear, which is why it hid: 20,000 items referencing 200 names cost
-/// 576 ms and 200 items referencing 20,000 cost 245 ms, while 20,000 of each
-/// cost 4,305 ms, five times their sum.
+/// Indexed by name: scanning the item list per lookup is quadratic in items × references.
 #[salsa::tracked(returns(ref))]
 fn file_binders<'db>(
     db: &'db dyn Db,
@@ -1453,9 +1200,6 @@ fn file_binders<'db>(
         if let Some(name) = &own_name {
             binders.entry(name.clone()).or_default().push((index, item));
         }
-        // Any item can bind further names at the top level: a statement item
-        // through a conditional write, a definition through a nested one
-        // (`y <- (x <- 1L)` binds `x` too).
         for name in item_top_level_names(db, item) {
             if own_name.as_ref() != Some(name) {
                 binders.entry(name.clone()).or_default().push((index, item));
@@ -1465,24 +1209,9 @@ fn file_binders<'db>(
     binders
 }
 
-/// The item of `item`'s own file that binds `name` as `item` sees it, ahead
-/// of the project-wide winner. A file is sourced top-down whichever its kind,
-/// so an **immediate** read sees the nearest EARLIER writer in the file. That
-/// covers a top-level statement rewriting a name the file defined above it,
-/// which the project-wide map cannot express: it holds definition items only,
-/// so a later `record$age <- …` was invisible and the read answered from the
-/// pre-write type.
-///
-/// A **deferred** read — from inside a closure — differs by kind, because
-/// what has finished running when the body executes differs. In a script the
-/// closure runs once the file's frame has settled, so it sees the last writer
-/// anywhere in that file, its own binding included (self-recursion). In a
-/// package the function runs after the *whole package* is sourced, so the
-/// answer is the project-wide winner and this file must stand aside — a later
-/// file's override would otherwise be lost; callers skip the query then.
-///
-/// Tracked so that inserting an item shifts positions without re-running the
-/// checks of the items after it: the answer per name compares equal.
+/// An immediate read sees the nearest earlier writer in the file (R sources top-down).
+/// A deferred read (inside a closure) sees the file's last writer in a script; in a
+/// package it sees the project-wide winner instead, so callers skip this query.
 #[salsa::tracked(returns(copy))]
 fn frame_binder<'db>(
     db: &'db dyn Db,
@@ -1495,8 +1224,6 @@ fn frame_binder<'db>(
     let visible = match deferred {
         true => &binders[..],
         false => {
-            // Looked up, not scanned for: a linear search here would be
-            // quadratic in a file's top-level items.
             let index = item_tree_positions(db, file)
                 .get(&item)
                 .copied()
@@ -1530,9 +1257,6 @@ impl<'db> SalsaGlobals<'db> {
         Some(package_name(self.db, self.files?, name))
     }
 
-    /// The joined scheme of a package-level conditional slot: every
-    /// statement item writing the name contributes its settled binding type,
-    /// up to [`CONDITIONAL_SLOT_JOIN_CAP`].
     fn conditional_slot_scheme(&self, name: types::Name<'db>) -> Option<types::TypeScheme<'db>> {
         let writers = &self.package_name(name)?.conditional_writers;
         if writers.len() > CONDITIONAL_SLOT_JOIN_CAP {
@@ -1555,8 +1279,6 @@ impl<'db> SalsaGlobals<'db> {
         }
     }
 
-    /// The scheme a frame binder gives `name`: its own exported scheme when
-    /// it defines the name, else the binding it writes on the way.
     fn binder_scheme(
         &self,
         item: Item<'db>,
@@ -1587,9 +1309,8 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if let Some(scheme) = self.conditional_slot_scheme(interned) {
             return Some(scheme);
         }
-        // Reading an overloaded stub name as a plain value (not a call)
-        // resolves to its last candidate: the corpus orders candidates
-        // specific-first, so the last one is the most general.
+        // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
+        // candidates specific-first, so the last is the most general.
         let library = stubs::stubs(self.db)?;
         library.schemes.get(name)?.last().cloned()
     }
@@ -1611,8 +1332,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
-        // A script-local or package definition wins over the stub set,
-        // disabling per-call overload selection for that name.
+        // A project definition shadows the stub set, disabling per-call overload selection.
         let interned = types::Name::new(self.db, name.to_owned());
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
@@ -1632,8 +1352,6 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 }
 
-/// Classes the standard library gives an arithmetic operator method. Static for
-/// a given corpus, so it is computed once rather than per checked item.
 #[salsa::tracked(returns(clone))]
 fn stub_arithmetic_classes(db: &dyn Db) -> rustc_hash::FxHashSet<String> {
     let Some(library) = stubs::stubs(db) else {
@@ -1642,18 +1360,11 @@ fn stub_arithmetic_classes(db: &dyn Db) -> rustc_hash::FxHashSet<String> {
     arithmetic_classes_among(library.schemes.keys().map(String::as_str))
 }
 
-/// The same, for the project's own sources: a package that defines `+.Money`
-/// makes `Money` arithmetic exactly as a stub would, and operator dispatch
-/// already resolves it through the global scope.
 #[salsa::tracked(returns(clone))]
 fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> rustc_hash::FxHashSet<String> {
     arithmetic_classes_among(package_definitions(db, files).keys().map(String::as_str))
 }
 
-/// The same, for one file's own top-level definitions — a script's are visible
-/// only to itself, and a package file's are already in the project-wide set but
-/// are cheap to include, which keeps this correct even where `ProjectFiles` is
-/// not set. Memoized per file because the caller runs once per checked item.
 #[salsa::tracked(returns(ref))]
 fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashSet<String> {
     arithmetic_classes_among(
@@ -1663,7 +1374,6 @@ fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashS
     )
 }
 
-/// The class each arithmetic method name is declared for.
 fn arithmetic_classes_among<'a>(
     names: impl Iterator<Item = &'a str>,
 ) -> rustc_hash::FxHashSet<String> {
@@ -1681,10 +1391,8 @@ fn arithmetic_classes_among<'a>(
     classes
 }
 
-/// A cyclic group's view of the world during its canonical fixpoint: member
-/// names resolve from the current round table (never through `global_scheme`,
-/// which would re-enter the group), everything else through the ordinary
-/// salsa-backed resolver.
+/// Member names resolve from the round table, never through `global_scheme`, which would
+/// re-enter the group.
 struct SccGlobals<'db, 'a> {
     base: &'a SalsaGlobals<'db>,
     members: &'a rustc_hash::FxHashMap<String, types::TypeScheme<'db>>,
@@ -1722,18 +1430,13 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
         self.base.type_definitions()
     }
 
-    /// Which classes are arithmetic does not depend on the group being solved,
-    /// so this is the base answer — but it has to be *given*, not inherited: an
-    /// empty set here makes `Date + 1` inside any recursive function fail the
-    /// numeric constraint and collapse the whole scheme to `Unknown`.
+    /// Must delegate, not default: an empty set makes `Date + 1` in any recursive function
+    /// collapse the whole scheme to `Unknown`.
     fn arithmetic_classes(&self) -> &'db rustc_hash::FxHashSet<String> {
         self.base.arithmetic_classes()
     }
 }
 
-/// Kind + name of one top-level statement, mirroring R assignment spellings:
-/// `<-`, `=`, `<<-` bind on the left, `->`, `->>` on the right. `:=` binds
-/// nothing — R calls a function of that name (data.table, rlang).
 fn classify_top_level(node: &syntax::SyntaxNode) -> (ItemKind, Option<String>) {
     match top_level_definition(node) {
         Some(definition) => (definition.kind, Some(definition.name)),
@@ -1741,18 +1444,14 @@ fn classify_top_level(node: &syntax::SyntaxNode) -> (ItemKind, Option<String>) {
     }
 }
 
-/// Where a named item spells the name it defines (file-absolute): the
-/// assignment target, or the `setGeneric` name string. An edge-only view like
-/// [`item_node`], for diagnostics and navigation that point at the name rather
-/// than the whole definition.
+/// File-absolute (edge-only, like [`item_node`]): the assignment target or the
+/// `setGeneric` name string.
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::TextRange> {
     let node = item_node(db, item)?;
     top_level_definition(&node).map(|definition| definition.name_range)
 }
 
-/// What a named top-level statement defines. The one reading of a statement's
-/// shape both item identity and the name's source site derive from, so the two
-/// cannot disagree about which name a statement binds.
+/// The single reading of a statement's shape for both item identity and name range.
 struct TopLevelDefinition {
     kind: ItemKind,
     name: String,
@@ -1773,6 +1472,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
     }
     let binary = syntax::ast::BinaryExpr::cast(node.clone())?;
     let operator = binary.operator()?;
+    // `:=` binds nothing: R calls a function of that name (data.table, rlang).
     let (target, value) = match operator.kind() {
         SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => {
             (binary.lhs(), binary.rhs())
@@ -1784,7 +1484,6 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
     let name = syntax::ast::Name::cast(target.clone())
         .and_then(|name| name.text())
         .or_else(|| {
-            // A string target (`"name" <- ...`) defines the unquoted name.
             (target.kind() == SyntaxKind::LITERAL
                 && target
                     .first_token()
@@ -1805,11 +1504,8 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
     })
 }
 
-/// The name a top-level `setGeneric("name", ...)` call binds — the one S4
-/// registration call that creates a bare-name binding in the global
-/// environment (`setClass`/`setMethod` register class metadata under
-/// internal names, referenced through strings, so they bind nothing). Paired
-/// with the range of the name inside its string.
+/// The name a top-level `setGeneric` binds, with its range inside the string: the only S4
+/// registration that creates a bare-name binding (`setClass`/`setMethod` bind nothing).
 fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::TextRange)> {
     use syntax::SyntaxKind;
     if node.kind() != SyntaxKind::CALL_EXPR {
@@ -1839,7 +1535,6 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
                 .is_some_and(|t| t.kind() == SyntaxKind::EQ)
         })
     };
-    // The generic's name: the `name =` argument, else the first positional.
     let argument = arguments
         .children()
         .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
@@ -1865,7 +1560,7 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
         return None;
     }
     let name = text[1..text.len() - 1].to_owned();
-    // The name without its quotes: that is the span a rename rewrites.
+    // Without the quotes: the span a rename rewrites.
     let range = string.text_range();
     let content = syntax::TextRange::new(
         range.start() + syntax::TextSize::from(1),
@@ -1879,12 +1574,6 @@ mod tests {
     use super::*;
     use salsa::Setter as _;
 
-    /// The property the cycle recovery's termination rests on. Pinning a check
-    /// that is already pinned has to reproduce it exactly, or the round after
-    /// the cap compares unequal and salsa iterates to its own limit — which is
-    /// what a whole CRAN package used to hit, panicking with "too many cycle
-    /// iterations" or exhausting memory first. Only the two export surfaces may
-    /// be rewritten; the findings inside the item must survive untouched.
     #[test]
     fn refusal_is_idempotent() {
         let db = RootDatabase::default();
@@ -1937,10 +1626,6 @@ mod tests {
             item_syntax(&db, items[1]).expect("g exists")
         };
 
-        // An edit inside `f`'s body shifts `g` — its item identity (the
-        // interned id re-minted from the same fields) and its green subtree
-        // must both survive unchanged: structural equality across shifted
-        // offsets is what early cutoff rests on.
         file.set_text(&mut db)
             .to("f <- function(x) x + 100\ng <- function(y) y\n".to_owned());
         {
@@ -1952,7 +1637,6 @@ mod tests {
             assert_eq!(g_before, g_after);
         }
 
-        // Deleting `g` resolves its item to nothing.
         file.set_text(&mut db).to("f <- function(x) x\n".to_owned());
         let g = Item::new(&db, file, ItemKind::Function, Some("g".to_owned()), None, 0);
         assert_eq!(item_syntax(&db, g), None);
@@ -1992,8 +1676,6 @@ mod tests {
         };
         assert_eq!(*operator, hir::BinaryOperator::Add);
 
-        // Shifting `add` (an edit in the item before it) reproduces an equal
-        // Module: spans are item-relative, so nothing downstream re-runs.
         file.set_text(&mut db)
             .to("pad <- 100000\nadd <- function(x, y = 2) x + y\n".to_owned());
         let add = Item::new(
@@ -2048,7 +1730,6 @@ mod tests {
             "character into numeric parameter must report"
         );
 
-        // Editing the callee body (same shape) leaves the caller check equal.
         util.set_text(&mut db)
             .to("add <- function(x, y) y + x\n".to_owned());
         let use_item = Item::new(
@@ -2107,7 +1788,6 @@ mod tests {
             None,
             0,
         );
-        // Must not panic; the self-cycle iterates to a stable scheme.
         let check = item_check(&db, item).expect("checks");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
     }

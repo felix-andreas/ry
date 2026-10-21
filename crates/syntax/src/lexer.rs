@@ -1,24 +1,17 @@
-//! Hand-written R lexer.
-//!
-//! Produces a token stream that covers the input exactly (the concatenation of
-//! all token texts equals the source). Never fails: bytes that cannot start a
-//! token become `ERROR_TOKEN`s with a diagnostic. `#:` comments switch the
-//! lexer into annotation mode for the rest of the line, so annotation bodies
-//! arrive as ordinary tokens with real spans instead of an opaque comment.
+//! Tokens cover the input exactly and in order, so offsets are implicit. `#:`
+//! switches to annotation mode for the rest of the line, so annotation bodies
+//! arrive as ordinary tokens.
 
 use crate::SyntaxError;
 use crate::kind::SyntaxKind;
 use rowan::{TextRange, TextSize};
 
-/// One lexed token: its kind and byte length. Offsets are implicit (tokens
-/// cover the input in order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {
     pub kind: SyntaxKind,
     pub len: TextSize,
 }
 
-/// Lex the whole input. The returned tokens always cover `text` exactly.
 pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     let mut lexer = Lexer {
         text,
@@ -36,8 +29,7 @@ struct Lexer<'a> {
     pos: usize,
     tokens: Vec<Token>,
     errors: Vec<SyntaxError>,
-    /// True between a `#:` marker and the next newline: `#` starts a plain
-    /// comment again (annotation bodies cannot nest annotations).
+    /// Inside an annotation, `#` starts a plain comment: annotations do not nest.
     in_annotation: bool,
 }
 
@@ -152,9 +144,7 @@ impl Lexer<'_> {
                 }
             }
             '*' => {
-                // R's parser accepts `**` as a synonym for `^` and translates
-                // it; one CARET-kind token keeps the grammar unchanged while
-                // the text stays lossless.
+                // R accepts `**` as a synonym for `^`.
                 if self.eat('*') { CARET } else { STAR }
             }
             '/' => SLASH,
@@ -244,11 +234,9 @@ impl Lexer<'_> {
         }
     }
 
-    /// Identifiers, keywords, `...`, `..N`, and numbers starting with `.`.
     fn ident_or_number(&mut self, start: usize, first: char) -> SyntaxKind {
         use SyntaxKind::*;
         if first == '.' {
-            // `.5` is a number; `..1` is a dot-dot index; `...` and `..`/`.x` are names.
             if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.pos = start;
                 self.bump();
@@ -257,9 +245,8 @@ impl Lexer<'_> {
             if self.peek() == Some('.') && self.peek_second().is_some_and(|c| c.is_ascii_digit()) {
                 self.bump();
                 self.eat_while(|c| c.is_ascii_digit());
-                // Only a bare `..N` is the dot-dot index. R's lexer has no
-                // dot-dot token at all (`..2` is an ordinary symbol resolved
-                // at evaluation), so a longer `..2dge` is one plain name.
+                // R has no dot-dot token (`..2` is an ordinary symbol), so a
+                // longer `..2dge` is one plain name.
                 if !self.peek().is_some_and(is_ident_continue) {
                     return DOTDOTI;
                 }
@@ -277,7 +264,6 @@ impl Lexer<'_> {
         use SyntaxKind::*;
         let hex = self.text[start..].starts_with("0x") || self.text[start..].starts_with("0X");
         if hex {
-            // `0` already consumed; consume `x`/`X` then hex digits.
             self.bump();
             let digits_start = self.pos;
             self.eat_while(|c| c.is_ascii_hexdigit());
@@ -285,7 +271,7 @@ impl Lexer<'_> {
                 self.error("missing digits after `0x`", start);
                 return ERROR_TOKEN;
             }
-            // C99 hex-float exponent: 0x1Fp3.
+            // Hex-float exponent: `0x1Fp3`.
             if matches!(self.peek(), Some('p' | 'P')) {
                 let before = self.pos;
                 self.bump();
@@ -305,8 +291,7 @@ impl Lexer<'_> {
                 self.eat_while(|c| c.is_ascii_digit());
             }
             if matches!(self.peek(), Some('e' | 'E')) {
-                // Consume the exponent only when digits (optionally signed) follow,
-                // so `1e` lexes as `1` then the name `e`.
+                // `1e` lexes as `1` then the name `e`.
                 let before = self.pos;
                 self.bump();
                 if matches!(self.peek(), Some('+' | '-')) {
@@ -328,16 +313,9 @@ impl Lexer<'_> {
         }
     }
 
-    /// End a quoted token that never closes at its first line break.
-    ///
-    /// R lets a string or a backtick-quoted name span lines, so the scan can
-    /// only give up at end of file — and a token that ran that far would
-    /// otherwise swallow every statement below it, which is what a stray quote
-    /// in a large file does while it is being typed: naming, diagnostics and
-    /// every editor feature go dark from the quote to the end of the file for
-    /// one missing character. Cutting the token at the line break confines the
-    /// damage to the line that is actually wrong, and costs nothing on input
-    /// that closes, which never reaches here.
+    /// R strings may span lines, but an unterminated one would swallow the rest
+    /// of the file; cutting it at its first line break confines a stray quote's
+    /// damage to its own line.
     fn end_unterminated_at_line_break(&mut self, start: usize) {
         if let Some(offset) = self.text[start..self.pos].find(['\n', '\r']) {
             self.pos = start + offset;
@@ -353,8 +331,6 @@ impl Lexer<'_> {
                     break;
                 }
                 Some('\\') => {
-                    // Any escaped character is skipped wholesale; escape validity is
-                    // a semantic concern, termination is the lexer's only job here.
                     self.bump();
                 }
                 Some(c) if c == quote => break,
@@ -364,7 +340,6 @@ impl Lexer<'_> {
         SyntaxKind::STRING
     }
 
-    /// `r"(...)"`, `R"---[...]---"`, and friends. Called with `pos` on the quote.
     fn raw_string(&mut self, start: usize) -> SyntaxKind {
         let quote = self.bump().expect("raw_string called at a quote");
         let dash_start = self.pos;
@@ -418,11 +393,8 @@ impl Lexer<'_> {
                     );
                     break;
                 }
-                // R reads a backtick-quoted name with the same escape rules as
-                // a string, so a name may contain a literal backtick as `` \` ``
-                // and a literal backslash as `\\`. Treating the escaped backtick
-                // as the terminator would end the name early and turn the rest
-                // of the line into a cascade of parse errors.
+                // Backtick names use string escape rules: `` \` `` does not end
+                // the name.
                 Some('\\') => {
                     if self.bump().is_none() {
                         self.end_unterminated_at_line_break(start);
@@ -440,7 +412,6 @@ impl Lexer<'_> {
         SyntaxKind::IDENT
     }
 
-    /// `%…%` operators; a newline before the closing `%` is malformed (as in R).
     fn special(&mut self, start: usize) -> SyntaxKind {
         loop {
             match self.peek() {
@@ -460,9 +431,6 @@ impl Lexer<'_> {
     }
 }
 
-/// Whether `text` is a syntactic R name — usable bare, without backticks.
-/// A name starting with `.` followed by a digit (`.1`) lexes as a number,
-/// and the reserved words are not names.
 pub fn is_syntactic_name(text: &str) -> bool {
     let mut chars = text.chars();
     let Some(first) = chars.next() else {
@@ -508,13 +476,8 @@ fn is_ident_continue(c: char) -> bool {
     c == '.' || c == '_' || c.is_alphanumeric()
 }
 
-/// What to say about a character R's grammar has no use for.
-///
-/// Most of these arrive by paste — from a document, a chat window, an editor
-/// with smart quotes on — and the lexer knows exactly which ASCII character was
-/// meant, so it says so instead of naming the codepoint and stopping. The
-/// invisible ones are named rather than quoted: printing a zero-width space
-/// between backticks shows the reader an empty pair and a caret over nothing.
+/// Invisible characters are named rather than quoted: quoting one shows an
+/// empty pair of backticks.
 fn unexpected_character_message(character: char) -> String {
     let ascii = |what: &str, instead: char| {
         format!("`{character}` is {what}, not R syntax — use `{instead}` instead")
@@ -545,8 +508,6 @@ fn unexpected_character_message(character: char) -> String {
     }
 }
 
-/// Whitespace that is not whitespace to R. Quoting it would show the reader a
-/// blank between backticks.
 fn invisible(what: &str) -> String {
     format!("this is {what}, not an ordinary space — R needs a plain space here")
 }

@@ -1,9 +1,6 @@
-//! Embeds `ry.exe.manifest` into Windows binaries so the process runs
-//! with UTF-8 as its active code page — embedded R takes its native
-//! encoding from the host process's code page (the manifest explains the
-//! full why). Done through MSVC linker flags to avoid a build dependency;
-//! the GNU Windows target is only ever compile-checked, and `cargo check`
-//! never links.
+//! Embeds `ry.exe.manifest` so Windows runs ry with a UTF-8 code page, which embedded R
+//! inherits as its native encoding. MSVC linker flags avoid a build dependency; the GNU
+//! Windows target is only compile-checked, and `cargo check` never links.
 
 fn main() {
     println!("cargo:rerun-if-changed=ry.exe.manifest");

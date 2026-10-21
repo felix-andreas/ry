@@ -6,7 +6,7 @@ Companion files: `backlog.md` (open work, plus a one-line shipped ledger at the 
 
 ## Short-term
 
-- **Cleanup program (user-directed, one PR per step):** (1) DONE: legacy ported and deleted. (2) IN PROGRESS: cut comments to short non-obvious "why" comments; trim agent docs. (3) Shrink code in several passes: simple, data-oriented, duplication acceptable. (4) Docs passes for density, one concept after another (style reference: vxlang.org/docs/tour.html). (5) At the local maximum, consider a green-field rewrite. Keep `roughly.toml` support and the REPL (user directives); other old-name fallbacks, perf/debug probes and fuzz scaffolding may shrink.
+- **Cleanup program (user-directed, one PR per step):** (1) DONE: legacy ported and deleted. (2) DONE: comments cut to short non-obvious "why" comments; agent docs trimmed. (3) NEXT: Shrink code in several passes: simple, data-oriented, duplication acceptable. (4) Docs passes for density, one concept after another (style reference: vxlang.org/docs/tour.html). (5) At the local maximum, consider a green-field rewrite. Keep `roughly.toml` support and the REPL (user directives); other old-name fallbacks, perf/debug probes and fuzz scaffolding may shrink.
 - **Next fixes come from the adoption reviews** heading `backlog.md`, each with a minimal repro. Re-run a filed finding before ranking work off it: two of four claims in one entry were already stale. Always add a control in the same file (an obviously undefined name), so "no finding" cannot mean "check is off".
 - The landing-page hero animation is user-owned; `NOTES.md` is human-maintained. Never edit either.
 

@@ -1,7 +1,3 @@
-//! End-to-end tests for the `ry` binary: diagnostic rendering, JSON
-//! output, and the documented exit-code contract (0 clean, 1 findings, 2
-//! usage/configuration/IO errors).
-
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -38,20 +34,14 @@ fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
     directory
 }
 
-// The unclosed `(` produces a syntax error at the 0-based range 2:5..2:6 (the
-// `(` token on line 2), so the rendered 1-based position is line 2, column 6.
+// The unclosed `(` is reported at 1-based line 2, column 6.
 const SYNTAX_ERROR_SOURCE: &str = "print(1)\ny <- (\n";
 
-/// How the graphical reporter heads one finding: its diagnostic code, a blank
-/// line, then the message behind a severity marker. Stderr is a pipe under
-/// test, so the ASCII theme is in force — `x` for an error, `!` for a warning.
+/// Stderr is a pipe under test, so the ASCII theme is in force: `x` for an
+/// error, `!` for a warning.
 fn heading(code: &str, marker: char, message: &str) -> String {
     format!("{code}\n\n  {marker} {message}")
 }
-
-//
-// CHECK
-//
 
 #[test]
 fn check_clean_file_exits_zero() {
@@ -77,9 +67,6 @@ fn check_renders_one_based_positions() {
     );
 }
 
-// A snippet is a window on the source, not a box: the gutter runs unbroken
-// down every row, the range is underlined with carets, and no rule closes the
-// snippet off — a run of findings would otherwise carry one per finding.
 #[test]
 fn check_draws_the_snippet_as_a_window() {
     let directory = project(&[("bad.R", SYNTAX_ERROR_SOURCE)]);
@@ -96,8 +83,6 @@ fn check_draws_the_snippet_as_a_window() {
     );
 }
 
-// The snippet is a window on the finding, not a printout of the file: the
-// line it sits on, and one line either side to place it.
 #[test]
 fn check_snippet_shows_only_the_lines_around_the_finding() {
     let directory = project(&[("bad.R", "one <- 1\nprint(one)\nprint(one)\ny <- (\n")]);
@@ -114,9 +99,6 @@ fn check_snippet_shows_only_the_lines_around_the_finding() {
     );
 }
 
-// A range that runs over many lines is drawn on its first line, with its
-// reach stated: printing every line of a range that covers a whole item
-// buries the finding in the item that contains it.
 #[test]
 fn check_clamps_a_long_multi_line_range() {
     let directory = project(&[(
@@ -232,8 +214,6 @@ fn check_json_output_maps_warning_severity() {
     assert_eq!(record["severity"], "warning", "got: {record}");
 }
 
-// Two package files overwrite the same top-level binding; each warning
-// carries a note pointing at the sibling binding, on both output surfaces.
 #[test]
 fn check_related_notes_render_on_both_surfaces() {
     let files = &[("R/a.R", "shared <- 1\n"), ("R/b.R", "shared <- 2\n")];
@@ -246,8 +226,7 @@ fn check_related_notes_render_on_both_surfaces() {
             && rendered.contains("> the earlier binding is here."),
         "expected one note per overwrite warning, got: {rendered}"
     );
-    // Each note is drawn from the file it points into, not from the file
-    // being reported, so both siblings appear with their own snippet.
+    // Each note is drawn from the file it points into.
     assert!(
         rendered.contains("[R/a.R:1:1]") && rendered.contains("[R/b.R:1:1]"),
         "expected each note to carry its own snippet, got: {rendered}"
@@ -291,9 +270,6 @@ fn check_related_notes_render_on_both_surfaces() {
     );
 }
 
-// importFrom naming something a stubbed namespace does not export warns on
-// the NAMESPACE file; spelled-right imports and unknown (unstubbed)
-// namespaces stay quiet.
 #[test]
 fn check_validates_namespace_imports_against_stubs() {
     let directory = project(&[
@@ -314,8 +290,7 @@ fn check_validates_namespace_imports_against_stubs() {
         )),
         "an import R refuses to load is an error, not advice: {rendered}"
     );
-    // A name is backticked when it is the subject of a finding; the plain
-    // spelling may still show up in the snippet's context lines.
+    // Backticked names are a finding's subject; the plain spelling may appear in context lines.
     assert!(
         !rendered.contains("`mutate`") && !rendered.contains("`sd`"),
         "unknown namespaces and real exports must stay quiet: {rendered}"
@@ -326,9 +301,6 @@ fn check_validates_namespace_imports_against_stubs() {
     );
 }
 
-// The `unused-import` lint is off by default and fires only when opted in; a
-// name used anywhere in the package (including via `pkg::name`) is not
-// flagged, an unused one is.
 #[test]
 fn check_flags_unused_imports_when_opted_in() {
     let files: &[(&str, &str)] = &[
@@ -362,10 +334,6 @@ fn check_flags_unused_imports_when_opted_in() {
     );
 }
 
-// The shadow lints are off by default and fire only when opted in: a
-// top-level binding over a `base` name reports `shadows-builtin`, one over
-// another stub namespace's name reports `shadows-namespace` naming the
-// shadowed symbol.
 #[test]
 fn check_flags_builtin_shadows_when_opted_in() {
     let files: &[(&str, &str)] = &[("R/main.R", "mean <- function(x) x\nsd <- 1\n")];
@@ -452,8 +420,6 @@ fn check_invalid_config_exits_two() {
         rendered.contains("invalid config for `check.typing`"),
         "expected the offending setting to be named, got: {rendered}"
     );
-    // A configuration failure is drawn like any other finding: the offending
-    // line of the config file, under the position it sits at.
     assert!(
         rendered.contains("ry.toml:2:10") && rendered.contains("2 | typing = 1"),
         "expected the config error to be shown in place, got: {rendered}"
@@ -472,9 +438,6 @@ fn check_missing_target_exits_two() {
 
 #[test]
 fn check_reports_dropped_override_stub_declarations() {
-    // The loader drops an override declaration it cannot harvest; `check`
-    // must say so instead of silently checking against a corpus the author
-    // did not write.
     let directory = project(&[
         ("clean.R", "x <- 1\n"),
         ("stubs/project.Rtypes", "size : Frobnicate\n"),
@@ -509,9 +472,7 @@ fn check_loads_valid_override_stubs_silently() {
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
 }
 
-// Every shipped overload set ends in an `Any` catch-all, so the
-// no-candidate-accepts error is reachable only through a project override
-// whose candidates all constrain; this pins the message.
+// Every shipped overload set ends in an `Any` catch-all, so only an override reaches this.
 #[test]
 fn check_reports_no_matching_overload() {
     let directory = project(&[
@@ -585,11 +546,9 @@ fn check_description_dependencies_quiet_namespace_reads() {
 
 #[test]
 fn check_collate_order_decides_the_package_winner() {
-    // Both files bind `value`; the reader errors only when the character
-    // binding wins. Path order makes `b.R` the later writer; the Collate
-    // order reverses that, so the integer binding wins and the reader is
-    // clean. Duplicate-binding warnings fire either way — the error
-    // severity floor keeps the assertion on the type finding alone.
+    // The reader errors only when the character binding wins: path order makes `b.R`
+    // the later writer and Collate reverses that. The error floor hides the
+    // duplicate-binding warnings that fire either way.
     let base: &[(&str, &str)] = &[
         ("R/a.R", "value <- 1L\n"),
         ("R/b.R", "value <- \"word\"\n"),
@@ -616,8 +575,6 @@ fn check_collate_order_decides_the_package_winner() {
     assert_eq!(exit_code(&output), 0, "stderr: {rendered}");
 }
 
-// Without a configuration typing defaults off; the diagnosis forces it on
-// and says so, so the timings are not mistaken for a typing-off workspace.
 #[test]
 fn analysis_stats_notes_when_it_forces_typing_on() {
     let directory = project(&[("R/a.R", "f <- function(x) x + 1\n")]);
@@ -668,8 +625,6 @@ fn analysis_stats_reports_phases_and_probe() {
 fn check_without_r_files_reports_nothing_and_exits_clean() {
     let directory = project(&[]);
     let output = ry(directory.path(), &["check"]);
-    // A tree with no R in it yet is not a usage error: failing here would fail
-    // a pipeline over a stage that simply has nothing to check.
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
     assert!(
         stdout(&output).contains("0 files checked, no problems"),
@@ -680,10 +635,7 @@ fn check_without_r_files_reports_nothing_and_exits_clean() {
 
 #[test]
 fn testthat_files_share_one_namespace_with_their_helpers() {
-    // testthat sources everything in `tests/testthat/` into one environment,
-    // `helper-*.R` first. Analysing them separately reported the helper as
-    // unused *and* every use of it as unresolved — two findings per helper on a
-    // correct package.
+    // testthat sources `tests/testthat/` into one environment, `helper-*.R` first.
     let directory = project(&[
         (
             "DESCRIPTION",
@@ -731,11 +683,6 @@ fn testthat_files_share_one_namespace_with_their_helpers() {
 
 #[test]
 fn the_analysis_instrument_measures_the_same_program_as_check() {
-    // `analysis-stats` exists to say where `check` spends its time, so it has to
-    // analyse what `check` analyses. It classified documents by `R/` alone while
-    // `check` also counts `tests/testthat/`, and on this project that made the
-    // instrument report three findings where the product reported none — the
-    // helper as unused, and each use of it as unresolved.
     let directory = project(&[
         (
             "DESCRIPTION",
@@ -768,10 +715,6 @@ fn the_analysis_instrument_measures_the_same_program_as_check() {
 
 #[test]
 fn a_configured_exclude_does_not_lose_the_vendored_directory_skip() {
-    // `renv/activate.R` alone is a thousand generated lines, so vendored
-    // directories are always skipped. A project that also configures its own
-    // excludes must not lose that: an `exclude` matching nothing once dragged
-    // a whole renv library into the walk.
     let vendored = &[
         ("a.R", "x = 1\n"),
         ("renv/library/pkg/R/vendored.R", "y = T\n"),
@@ -796,9 +739,6 @@ fn a_configured_exclude_does_not_lose_the_vendored_directory_skip() {
 
 #[test]
 fn check_answer_is_independent_of_how_the_paths_are_named() {
-    // A `#: @alias` declared in one package file, referenced from another: the
-    // reference must resolve however the command spells the paths, or
-    // `check R/` and `check $(git diff --name-only)` cannot gate a pipeline.
     let directory = project(&[
         ("ry.toml", "[check]\ntyping = true\n"),
         (
@@ -851,9 +791,7 @@ fn check_reports_an_export_the_package_does_not_define() {
     );
 }
 
-// A column is what a person counts and an editor shows, so non-ASCII text
-// earlier on the line must not shift it — and the caret has to sit beneath the
-// glyph, which means padding by terminal cells, not by characters.
+// The caret pads by terminal cells, not characters, so it sits beneath the glyph.
 #[test]
 fn check_reports_character_columns_and_aligns_the_caret() {
     let directory = project(&[(
@@ -874,10 +812,8 @@ fn check_reports_character_columns_and_aligns_the_caret() {
         .lines()
         .find(|line| line.contains("résumé"))
         .expect("the snippet line");
-    // Both positions are measured in terminal cells, which is the whole point:
-    // comparing byte offsets would pass on a broken renderer and fail on a
-    // correct one, since only the snippet line carries multibyte text. The
-    // gutter is the same width on both lines, so whole-line offsets compare.
+    // Measured in terminal cells: byte offsets would pass on a broken renderer, since
+    // only the snippet line carries multibyte text.
     let cells_before = |line: &str, index: usize| {
         unicode_width::UnicodeWidthStr::width(line.get(..index).unwrap_or_default())
     };
@@ -903,9 +839,7 @@ fn check_reports_character_columns_and_aligns_the_caret() {
     );
 }
 
-// A generic and its methods routinely live in different files of one package,
-// and dispatch is not a read, so the S3 carve-out has to see the whole
-// namespace rather than one file.
+// Dispatch is not a read, so the S3 carve-out must see the whole namespace.
 #[test]
 fn check_sees_a_generic_declared_in_another_package_file() {
     let directory = project(&[
@@ -930,10 +864,8 @@ fn check_sees_a_generic_declared_in_another_package_file() {
     );
 }
 
-// `usethis` writes `library(yourpkg)` into `tests/testthat.R`, so this shape is
-// in every testthat package. Attaching a package with no shipped stub normally
-// tolerates every otherwise-unresolved bare read, and applying that to the
-// project itself would silence unresolved detection across the whole package.
+// `usethis` writes `library(yourpkg)` into `tests/testthat.R`; tolerating unresolved
+// reads for the project's own package would silence the whole package.
 #[test]
 fn check_still_reports_unresolved_names_when_a_test_file_attaches_the_package() {
     let directory = project(&[
@@ -952,9 +884,6 @@ fn check_still_reports_unresolved_names_when_a_test_file_attaches_the_package() 
 
 #[test]
 fn check_roots_a_nested_package_at_its_own_description() {
-    // An ancestor `ry.toml` must not swallow a package in a
-    // subdirectory: that package's own DESCRIPTION is nearer, so its `R/`
-    // files are package source and their top-level bindings are not unused.
     let directory = project(&[
         ("ry.toml", "[check]\ntyping = true\n"),
         ("pkg/DESCRIPTION", "Package: inner\n"),
@@ -1000,7 +929,6 @@ fn check_analyses_r_chunks_in_a_literate_document() {
         rendered.contains("report.Rmd:10:") && rendered.contains("found `character`"),
         "the chunk error is located in the original document: {rendered}"
     );
-    // The formatter must leave a literate document alone.
     let formatted = ry(directory.path(), &["fmt", "--check", "."]);
     assert!(
         !stdout(&formatted).contains("1 file"),
@@ -1079,8 +1007,7 @@ fn check_invalid_exclude_pattern_exits_two() {
     );
 }
 
-// A suppression applies to its own line and the line directly below it, so
-// the unsuppressed finding needs a blank line in between.
+// A suppression also covers the line below it, hence the blank line.
 #[test]
 fn check_suppression_comments_drop_findings() {
     let directory = project(&[(
@@ -1099,10 +1026,6 @@ fn check_suppression_comments_drop_findings() {
         "the suppressed finding must not render: {rendered}"
     );
 }
-
-//
-// FMT
-//
 
 #[test]
 fn fmt_check_lists_dirty_files_and_writes_nothing() {
@@ -1148,9 +1071,6 @@ fn fmt_rewrites_in_place_and_exits_zero() {
 
 #[test]
 fn fmt_on_a_deliberately_skipped_file_exits_clean() {
-    // The formatter leaves literate documents alone on purpose. A pre-commit
-    // hook passing one changed file at a time therefore hands it a file it will
-    // not touch, and failing there fails the commit over nothing.
     let directory = project(&[("report.Rmd", "# Title\n\n```{r}\nx<-1\n```\n")]);
     for arguments in [
         vec!["fmt", "--diff", "report.Rmd"],
@@ -1165,7 +1085,6 @@ fn fmt_on_a_deliberately_skipped_file_exits_clean() {
             stderr(&output)
         );
     }
-    // The document is untouched: the chunk keeps its unformatted spacing.
     let text = fs::read_to_string(directory.path().join("report.Rmd"))
         .expect("failed to read the document back");
     assert!(
@@ -1187,10 +1106,6 @@ fn fmt_syntax_error_exits_two() {
     );
 }
 
-//
-// USAGE
-//
-
 #[test]
 fn usage_error_exits_two() {
     let directory = project(&[]);
@@ -1198,13 +1113,6 @@ fn usage_error_exits_two() {
     assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
 }
 
-//
-// PER-FILE TYPING DIRECTIVES
-//
-
-// `# typing: off` silences type errors for its file even when the
-// configuration checks types; files without a directive keep the configured
-// behavior.
 #[test]
 fn typing_off_directive_silences_one_file() {
     let directory = project(&[
@@ -1219,9 +1127,6 @@ fn typing_off_directive_silences_one_file() {
     assert!(!report.contains("opted_out.R"), "report:\n{report}");
 }
 
-// `# typing: on` opts a single file into type checking when the
-// configuration has it off, and `# typing: strict` additionally escalates
-// unresolved references — both without touching the rest of the workspace.
 #[test]
 fn typing_on_and_strict_directives_opt_single_files_in() {
     let directory = project(&[
@@ -1245,15 +1150,8 @@ fn typing_on_and_strict_directives_opt_single_files_in() {
     assert!(!report.contains("plain.R"), "report:\n{report}");
 }
 
-// An attached package whose export set cannot be known silences every name
-// nothing defines. That is deliberate — without it a `library()` the corpus has
-// no stubs for turns every one of its exports into a false `unresolved` — but it
-// switched a whole class of checking off project-wide while the run still read
-// as "I understood everything". Strict mode reports those reads, because a
-// tolerated read IS undetermined, and names the remedy the docs give.
-//
-// This cannot be a fixture: the tolerance keys on `PackageMetadata`, a salsa
-// input only a real project sets, so a single-file fixture never triggers it.
+// Strict reports reads tolerated by an attached package with unknown exports. Not a
+// fixture: the tolerance keys on `PackageMetadata`, which only a real project sets.
 #[test]
 fn strict_reports_a_read_the_attached_package_tolerance_silenced() {
     let sources = [
@@ -1282,8 +1180,7 @@ strict = true
         "strict surfaces the tolerated read:\n{report}"
     );
 
-    // Without strict the tolerance still holds: this is the whole reason the
-    // hole existed, and closing it must not start reporting in ordinary runs.
+    // Without strict the tolerance still holds.
     let lenient = project(&[
         sources[0],
         (
@@ -1306,7 +1203,6 @@ typing = true
     assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
 }
 
-// A typo'd directive value is a diagnostic, not a silent no-op.
 #[test]
 fn unknown_typing_directive_value_is_reported() {
     let directory = project(&[("R/a.R", "# typing: strcit\nx <- 1L\n")]);
@@ -1319,10 +1215,7 @@ fn unknown_typing_directive_value_is_reported() {
     );
 }
 
-// data.table's non-standard evaluation: bare column references inside a
-// bracket carrying the data.table signature and inside the base
-// `with`/`subset` family resolve as data-masked columns — no
-// unresolved-name warnings — while base indexing keeps them.
+// Inside data.table brackets and `with`/`subset`; base indexing still warns.
 #[test]
 fn data_masked_column_references_do_not_warn() {
     let directory = project(&[
@@ -1348,10 +1241,6 @@ fn data_masked_column_references_do_not_warn() {
     }
 }
 
-// `utils::globalVariables(c(...))` — the ecosystem-standard escape hatch —
-// declares names as dynamically bound for the whole package:
-// could-not-resolve is suppressed for them everywhere, while undeclared
-// names keep warning.
 #[test]
 fn global_variables_declarations_suppress_unresolved_warnings() {
     let directory = project(&[
@@ -1377,10 +1266,7 @@ fn global_variables_declarations_suppress_unresolved_warnings() {
     }
 }
 
-// A project stub can declare a dplyr-style verb `@masked`: the arguments its
-// `...` rest parameter absorbs evaluate in the data's frame, so bare column
-// references there stop warning — for the bare and the `pkg::name` call
-// forms alike — while a locally shadowed name masks nothing.
+// Both bare and `pkg::name` call forms; a locally shadowed name masks nothing.
 #[test]
 fn masked_stub_verbs_mask_rest_absorbed_arguments() {
     let directory = project(&[
@@ -1408,12 +1294,8 @@ fn masked_stub_verbs_mask_rest_absorbed_arguments() {
 
 #[test]
 fn a_type_name_two_scripts_both_declare_is_not_a_duplicate() {
-    // A duplicate is judged against the namespace the declaration lives in. A
-    // script's type declarations reach only its own file — a name declared in
-    // one script is invisible to the next — so two scripts may each declare
-    // `Thing`. Only a repeat inside one file conflicts, which the fixture
-    // suites cover; this guards the cross-file half, which they cannot express
-    // because a fixture case is one file.
+    // Script type declarations reach only their own file, so two scripts may each
+    // declare `Thing`. Fixture cases are single-file, so they cannot cover this.
     let directory = project(&[
         ("ry.toml", "[check]\ntyping = true\n"),
         (

@@ -1,8 +1,3 @@
-//! Golden error-message suite: renders ONLY the diagnostics (with source
-//! context and carets), so wording and spans are pinned and reviewed as the
-//! product surface they are. Cases with no diagnostics render `no errors` —
-//! useful for pinning that tricky-but-valid inputs stay clean.
-
 use std::fmt::Write as _;
 use std::path::Path;
 

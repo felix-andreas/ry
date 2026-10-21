@@ -1,9 +1,5 @@
-//! The formatter documentation page is generated from
-//! `tests/formatter.template.md`: every ```r example is run through the
-//! shipping formatter and the result rendered into
-//! `docs/src/content/docs/reference/formatting-rules.md`, so the page can never drift from
-//! actual behavior. `RY_BLESS=1` rewrites the page; otherwise the test
-//! fails when it is out of date.
+//! Generates the formatting-rules docs page from `tests/formatter.template.md`
+//! by running every ```r example through the formatter.
 
 use format::{Config, format};
 use regex::{Captures, Regex};
@@ -43,9 +39,6 @@ MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD";
                     }
                 })
                 .map(|content| format!("```r\n{content}```"))
-                // Falling back to the input here would publish unformatted R on
-                // the page as if the formatter had produced it — the one failure
-                // this generator exists to prevent.
                 .unwrap_or_else(|| {
                     panic!(
                         "template block has no `# name: directive` header line, so it would be \
@@ -57,16 +50,13 @@ MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD";
 
     let path = "../../docs/src/content/docs/reference/formatting-rules.md";
     if syntax::testing::env_var("BLESS").as_deref() == Some("1") {
-        // The docs tree is absent under a sandboxed build where the source
-        // tree is read-only; there is nothing to rewrite then.
+        // The docs tree is absent in a sandboxed build.
         if fs::metadata(path).is_ok() {
             fs::write(path, &formatted).expect("write the generated docs page");
         }
         return;
     }
 
-    // When the generated page is available, assert it matches; under a
-    // sandboxed build without the docs tree there is nothing to compare.
     if let Ok(existing) = fs::read_to_string(path) {
         assert_eq!(
             existing, formatted,

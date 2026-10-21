@@ -1,14 +1,6 @@
-//! Performance budgets over the real-world corpus, which
-//! `scripts/fetch-corpus.rs` populates into the gitignored `corpus/`. Ignored
-//! by default because it needs the corpus and a release build:
-//!
-//! ```text
-//! cargo test -p semantics --release --test test_perf -- --ignored --nocapture
-//! ```
-//!
-//! One test, so the resident-set reading is not polluted by a sibling test
-//! thread. `ry debug analysis-stats` is the per-phase diagnosis for one
-//! workspace; this is the regression tripwire across all of them.
+//! Budgets over the gitignored `corpus/` (`scripts/fetch-corpus.rs`); run with
+//! `cargo test -p semantics --release --test test_perf -- --ignored --nocapture`.
+//! One test, so the resident-set reading is not polluted by a sibling test thread.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -19,9 +11,6 @@ use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
 use semantics::infer::RESOLVE_CALLS;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 
-/// Budgets are the measured numbers with headroom: wall ~25 µs and resident
-/// ~1 KiB per line, ~8 resolve steps per line (the memoization tripwire), and
-/// keystroke-to-diagnostics p50 ≤ 30 ms / p95 ≤ 100 ms on the largest package.
 #[test]
 #[ignore = "needs the fetched corpus and a release build"]
 fn corpus_budgets() {
@@ -31,7 +20,7 @@ fn corpus_budgets() {
         return;
     }
 
-    // Every package fully analyzed and retained: the warm worst case.
+    // Retain every database: the resident-set worst case.
     let lines: usize = packages
         .iter()
         .flatten()
@@ -72,9 +61,7 @@ fn corpus_budgets() {
     );
     drop(retained);
 
-    // Typing at the end of the largest file of the largest package: each
-    // keystroke is one setter write plus that file's diagnostics, the server's
-    // per-edit work. A trailing comment shifts no item, so identities hold.
+    // Keystrokes append a trailing comment, which shifts no item, so identities hold.
     let sources = packages
         .iter()
         .max_by_key(|sources| sources.iter().map(String::len).sum::<usize>())
@@ -103,8 +90,7 @@ fn corpus_budgets() {
     latencies.sort();
     let p50 = latencies[latencies.len() / 2];
     let p95 = latencies[latencies.len() * 95 / 100];
-    // The from-scratch parse is the floor every keystroke pays; read the
-    // latencies against it, since machine load swings both.
+    // The raw parse is the per-keystroke floor; machine load swings both.
     let parse_start = Instant::now();
     syntax::parse(&text);
     println!(
@@ -144,8 +130,6 @@ fn proc_status_kb(key: &str) -> Option<u64> {
         .ok()
 }
 
-/// The corpus grouped per package: each directory under `r-base/` and
-/// `cran/` is one package.
 fn corpus_packages() -> Vec<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus");
     let mut packages = Vec::new();

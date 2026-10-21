@@ -1,23 +1,4 @@
-//! Formatter fuzz + property harness, run against every formatter increment
-//! from its first commit.
-//!
-//! Invariants, checked on every input:
-//!   1. never panic — `format` either produces output or refuses with a
-//!      structured error;
-//!   2. idempotence — when `format` succeeds, formatting the output again
-//!      succeeds and reproduces it byte-for-byte;
-//!   3. determinism — the same input formats to the same result;
-//!   4. preservation — the token kinds survive, so lost code is caught.
-//!
-//! Generators mirror the syntax-crate harness: valid-program seeds, byte-level
-//! seed mutations, token soup from an R-shaped alphabet, random bytes, every
-//! fixture case source in the repository, and a corpus arm over real R files
-//! when the corpus is fetched. Byte noise mostly exercises the refusal path;
-//! the seeds, fixture sources and corpus files exercise the formatter body.
-//!
-//! `FUZZ_ITERS` scales the per-generator budget (default 1500); runs are
-//! deterministic per seed. `fuzz_deep` multiplies everything for
-//! nightly/manual runs.
+//! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
 use format::check_format_invariants as check_invariants;
 use format::{Config, format};
@@ -143,11 +124,8 @@ const ALPHABET: &[&str] = &[
     "\r\n",
 ];
 
-/// Inputs found by the coverage-guided `fuzz/` targets, each of which once
-/// broke an invariant (idempotence, or output that no longer parses).
-/// Unlike `SEEDS` these may legitimately refuse — only the invariants must
-/// hold. Kept verbatim so the failures stay pinned without depending on the
-/// gitignored fuzz corpus.
+/// Coverage-guided fuzzer finds. Unlike `SEEDS` these may refuse; only the
+/// invariants must hold.
 const REGRESSIONS: &[&str] = &[
     "{\n  ;\n}\n",
     "{#:\n}\n",
@@ -197,10 +175,6 @@ fn fuzz_regressions_hold_invariants() {
     }
 }
 
-/// Every fixture case source in the repository, run through the battery. The
-/// fixture suites are the richest R corpus here and they grow with every slice,
-/// unlike the hand-written seed list — and they are in-tree, so this arm never
-/// skips the way the fetched-corpus arm does.
 #[test]
 fn fixture_sources_hold_invariants() {
     let sources = syntax::testing::fixture_case_sources();
@@ -214,8 +188,6 @@ fn fixture_sources_hold_invariants() {
     );
 }
 
-/// The program corpus through the formatter, preservation oracle included:
-/// these are the only invariants those ~2,000 cases have ever been run against.
 #[test]
 fn program_corpus_holds_invariants() {
     let sources = syntax::testing::program_corpus_sources();
@@ -245,8 +217,6 @@ fn fuzz_seed_mutations() {
     run_seed_mutations(iterations());
 }
 
-/// Real corpus files (when fetched): every file either refuses with a
-/// structured error or formats idempotently.
 #[test]
 fn fuzz_corpus_seeded() {
     let Some(files) = corpus_sample(48) else {
@@ -256,8 +226,6 @@ fn fuzz_corpus_seeded() {
     for source in &files {
         check_invariants(source);
     }
-    // Byte mutations over real files reach refusal/verbatim edges that clean
-    // sources never hit.
     let mut rng = SplitMix64(0xF0_44_A7);
     let budget = iterations() / 3;
     for _ in 0..budget {
@@ -287,8 +255,6 @@ fn fuzz_corpus_seeded() {
     }
 }
 
-/// The everything-at-once deep run for nightly/manual use:
-/// `FUZZ_ITERS=50000 cargo test -p format --release --test test_fuzz -- --ignored fuzz_deep`
 #[test]
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]
 fn fuzz_deep() {
@@ -358,7 +324,6 @@ fn run_seed_mutations(budget: usize) {
     }
 }
 
-/// A bounded sample of real corpus files, spread deterministically.
 fn corpus_sample(count: usize) -> Option<Vec<String>> {
     let root = {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

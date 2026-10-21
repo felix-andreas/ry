@@ -1,12 +1,6 @@
-//! The VS Code extension ships the CLI binary, so its manifest version is
-//! derived from the workspace `Cargo.toml` — verbatim except for the prerelease
-//! suffix, which is stripped because that manifest's version has to be a plain
-//! `major.minor.patch`. The derivation is mechanical, so a mismatch is always a
-//! stale file rather than a judgement call — and the failure message says what
-//! to write.
-//!
-//! The Zed manifest is deliberately absent here: that extension only locates an
-//! already-installed binary, so it versions on its own changes, not on releases.
+//! The VS Code extension manifest version must equal the workspace version minus
+//! any prerelease suffix (VS Code requires plain `major.minor.patch`). Zed is
+//! absent: its extension only locates an installed binary.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,7 +18,6 @@ fn read(relative: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
-/// The version every shipped artifact derives from.
 fn workspace_version() -> String {
     let manifest: toml::Value = read("Cargo.toml").parse().expect("the workspace manifest");
     manifest["workspace"]["package"]["version"]

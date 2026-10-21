@@ -1,8 +1,4 @@
-//! Typing fixture suite: each case runs the full semantic pipeline on one
-//! package file (shipped stubs installed) and renders every named top-level
-//! definition's exported scheme followed by the file's diagnostics.
-//! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one
-//! case.
+//! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
 use semantics::diagnostics::{Severity, TypeRenderer, file_diagnostics, strict_diagnostics};
 use semantics::testing::with_fixture_project;
@@ -24,9 +20,6 @@ fn render_as(source: &str, kind: DocumentKind) -> String {
     render_case(source, kind, &render_file)
 }
 
-/// Renders every file of the case: one unnamed file, or each `#~~~~ path`
-/// section of a multi-file case under an `== path` line — package files under
-/// `R/`, scripts elsewhere.
 fn render_case(
     source: &str,
     kind: DocumentKind,
@@ -63,9 +56,7 @@ fn render_case(
     })
 }
 
-/// Package-metadata cases: leading `#namespace ` lines form the NAMESPACE
-/// source and `#description ` lines the DESCRIPTION source (both stay in the
-/// analyzed text as ordinary comments, so ranges are honest).
+/// The `#namespace `/`#description ` lines stay in the analyzed text, so ranges stay honest.
 fn render_with_metadata(source: &str) -> String {
     let mut db = RootDatabase::default();
     semantics::stubs::install_shipped_stubs(&db);
@@ -90,9 +81,7 @@ fn render_with_metadata(source: &str) -> String {
     );
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
-    // Attach facts flow exactly as in the hosts: scanned from the analyzed
-    // sources, so `library(data.table)` cases activate the conditional
-    // namespace with no fixture-only side channel.
+    // Attach facts are scanned from the sources exactly as the hosts do.
     let attached = semantics::metadata::attached_union(&db, [file]);
     if !attached.is_empty() {
         use salsa::Setter;
@@ -152,15 +141,12 @@ fn typing_import_fixtures() {
     syntax::testing::run_fixture_suite(&suite, &render_with_metadata);
 }
 
-/// The same pipeline over script documents: one sequential top-down scope.
 #[test]
 fn typing_script_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-scripts");
     syntax::testing::run_fixture_suite(&suite, &render_script);
 }
 
-/// The strict stream: the per-file typing mode (when set) and the
-/// `strict`-code diagnostics appended after the ordinary rendering.
 fn render_with_strict(source: &str) -> String {
     render_case(source, DocumentKind::Package, &|db, file| {
         let mut output = String::new();
@@ -187,9 +173,6 @@ fn typing_strict_fixtures() {
     syntax::testing::run_fixture_suite(&suite, &render_with_strict);
 }
 
-/// A stub source's declarations, overload candidates in declaration order,
-/// then the problems the loader drops lines for — the wording the editor and
-/// the override report show.
 fn render_stub_source(source: &str) -> String {
     let db = RootDatabase::default();
     let sources = semantics::stubs::StubSources::new(
@@ -233,10 +216,7 @@ fn stub_source_fixtures() {
     syntax::testing::run_fixture_suite(&suite, &render_stub_source);
 }
 
-/// One `#:` block on its own: the case's lines become the block, and the
-/// expectation is what it lowers to — the coercion kind, the declared type,
-/// the `@new` target, each `@type`/`@alias` definition — then the grammar's
-/// and the lowering's errors.
+/// Each case line becomes one line of a single `#:` block.
 fn render_annotation_block(source: &str) -> String {
     let text: String = source.lines().map(|line| format!("#: {line}\n")).collect();
     let db = RootDatabase::default();

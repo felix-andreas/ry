@@ -1,39 +1,28 @@
-//! Runtime binding to R's C API: locate the R installation, `dlopen` its
-//! shared library, and resolve the (deliberately minimal) symbol surface the
-//! console needs. No build-time linking anywhere — this crate builds and its
-//! unit tests run on machines with no R at all.
-//!
-//! The surface grows on demand and every addition must stay in one of the
-//! four shapes: a function pointer, a variadic function pointer, a mutable
-//! global (accessed by address), or a constant global (copied by value, only
-//! valid after `setup_Rmainloop`). Symbols are resolved eagerly in one sweep
-//! so a missing required symbol fails at startup with its name, not later
-//! with a null-call crash.
+//! R's C API resolved at runtime via `dlopen`, so nothing links R at build time.
+//! Symbols resolve eagerly so a missing one fails at startup by name; constant
+//! globals are only valid after `setup_Rmainloop`.
 
 use crate::ReplError;
 use std::ffi::{CStr, CString, c_char, c_int, c_uchar, c_void};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// `R_ReadConsole`'s C signature: fill `buffer` (capacity `length`,
-/// NUL-terminated, newline included) and return 1, or return 0 for EOF.
+/// Fill `buffer` (capacity `length`, NUL-terminated, newline included) and
+/// return 1, or return 0 for EOF.
 pub type ReadConsole = unsafe extern "C" fn(*const c_char, *mut c_uchar, c_int, c_int) -> c_int;
-/// `R_WriteConsoleEx`: text, length, output type (0 stdout, 1 stderr).
+/// (text, length, output type: 0 stdout, 1 stderr).
 pub type WriteConsoleEx = unsafe extern "C" fn(*const c_char, c_int, c_int);
 
-/// The resolved API. Function pointers are required (startup fails naming
-/// the first absent one); globals are raw addresses into the loaded library.
+/// Function pointers are required; globals are raw addresses into the loaded library.
 pub struct RApi {
-    /// Held for the process lifetime; symbols above point into it.
+    /// Held for the process lifetime; the symbols point into it.
     _library: &'static libloading::Library,
     pub r_home: PathBuf,
 
     setup_mainloop: unsafe extern "C" fn(),
     run_mainloop: unsafe extern "C" fn(),
-    /// `R_ParseEvalString(text, env)` — parses and evaluates one string. The
-    /// console cannot do this job: input fed through the read hook costs a
-    /// main-loop round trip, and one taken before the editor's first prompt
-    /// leaves the terminal half-configured.
+    /// Used instead of feeding the console: fed input costs a main-loop round trip
+    /// and, before the first prompt, leaves the terminal half-configured.
     parse_eval_string: unsafe extern "C" fn(*const c_char, *mut c_void) -> *mut c_void,
     global_env: *mut *mut c_void,
     interrupts_pending: *mut c_int,
@@ -77,12 +66,9 @@ pub struct RApi {
     user_break: *mut c_int,
 }
 
-/// Windows embedding configures the console through this struct
-/// (`R_SetParams`) instead of the Unix hook globals. The layout mirrors R's
-/// `R_ext/RStartup.h` exactly; `R_DefParamsEx`'s version argument makes R
-/// validate it, replacing per-R-version struct mirroring. `NoRenviron` and
-/// `RstartVersion` are a pair of 16-bit C bitfields packed low-to-high into
-/// one `int` (R on Windows builds with GCC).
+/// Mirrors `R_ext/RStartup.h`; `R_DefParamsEx`'s version argument makes R validate
+/// the layout. `NoRenviron` and `RstartVersion` are 16-bit GCC bitfields packed
+/// low-to-high into one `int`.
 #[cfg(windows)]
 #[repr(C)]
 struct Rstart {
@@ -131,20 +117,16 @@ const SA_NORESTORE: c_int = 0;
 #[cfg(windows)]
 const SA_NOSAVE: c_int = 3;
 
-/// The interrupt flag's address, stashed for the SIGINT handler. Writing an
-/// aligned `c_int` through it is async-signal-safe; the address is set once
-/// before the handler is installed and never changes (the library is leaked).
+/// Stashed for the SIGINT handler: writing an aligned `c_int` is async-signal-safe,
+/// and the address is set once before the handler is installed.
 pub static INTERRUPTS_PENDING: std::sync::atomic::AtomicPtr<c_int> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-/// Windows' front-end break flag (`UserBreak`), set together with the
-/// deferred `R_interrupts_pending` by the console control handler.
+/// R's Windows front-end break flag (`UserBreak`).
 #[cfg(windows)]
 pub static USER_BREAK: std::sync::atomic::AtomicPtr<c_int> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-/// Ctrl-C on Windows: raise both interrupt flags; R honors them at its next
-/// interrupt check.
 #[cfg(windows)]
 pub fn interrupt_r() {
     for flag_slot in [&INTERRUPTS_PENDING, &USER_BREAK] {
@@ -159,9 +141,8 @@ pub fn interrupt_r() {
 pub fn load() -> Result<RApi, ReplError> {
     let r_home = discover_r_home()?;
     let library_path = shared_library_path(&r_home)?;
-    // R packages with compiled code link libR themselves; RTLD_GLOBAL makes
-    // the symbols we load satisfy those packages exactly as launch-time
-    // linking would.
+    // Compiled R packages link libR themselves; RTLD_GLOBAL lets our loaded symbols
+    // satisfy them as launch-time linking would.
     let library = unsafe {
         libloading::os::unix::Library::open(
             Some(&library_path),
@@ -198,10 +179,8 @@ pub fn load() -> Result<RApi, ReplError> {
     Ok(api)
 }
 
-/// Windows: `R.dll` from `{R_HOME}\bin\x64` with its sibling DLLs preloaded
-/// so compiled-package imports resolve (per-module symbol lookup means no
-/// `RTLD_GLOBAL` equivalent is needed). The DLL directory is prepended to
-/// `PATH` first so R.dll's own dependencies resolve from it.
+/// Sibling DLLs are preloaded so compiled-package imports resolve, and the DLL
+/// directory is prepended to `PATH` so R.dll's own dependencies resolve.
 #[cfg(windows)]
 pub fn load() -> Result<RApi, ReplError> {
     let r_home = discover_r_home()?;
@@ -221,9 +200,8 @@ pub fn load() -> Result<RApi, ReplError> {
             Box::leak(Box::new(loaded));
         }
     }
-    // Unlike the best-effort preloads above, graphapp is a hard requirement:
-    // `GA_initapp` is exported here (NOT by R.dll) and console setup crashes
-    // when it never ran.
+    // A hard requirement: `GA_initapp` is exported here, not by R.dll, and console
+    // setup crashes when it never ran.
     let graphapp_path = library_directory.join("Rgraphapp.dll");
     let graphapp = unsafe { libloading::Library::new(&graphapp_path) }.map_err(|error| {
         ReplError(format!(
@@ -259,8 +237,6 @@ pub fn load() -> Result<RApi, ReplError> {
     Ok(api)
 }
 
-/// Loading and discovery exist only where an embedding recipe does; other
-/// platforms report the gap at startup instead.
 #[cfg(not(any(unix, windows)))]
 pub fn load() -> Result<RApi, ReplError> {
     Err(ReplError(
@@ -268,10 +244,8 @@ pub fn load() -> Result<RApi, ReplError> {
     ))
 }
 
-/// Resolves one symbol to the caller's type: a function type yields the
-/// function pointer, a `*mut T` type yields the global's address. The
-/// library reference is `'static` (leaked), so the returned value outliving
-/// the `Symbol` guard is sound.
+/// A function type yields the function pointer, a `*mut T` the global's address.
+/// The library is leaked, so the value outliving the `Symbol` guard is sound.
 fn symbol<T: Copy>(
     library: &'static libloading::Library,
     library_path: &Path,
@@ -289,21 +263,16 @@ fn symbol<T: Copy>(
 }
 
 impl RApi {
-    /// Initializes embedded R and hooks the console callbacks. Must run on
-    /// the thread that will own R (the main thread), exactly once per
-    /// process, BEFORE `run_main_loop`.
-    ///
-    /// Safety contract with R: the hook writes happen between
-    /// `Rf_initialize_R` (which sets R's defaults) and `setup_Rmainloop`
-    /// (which snapshots them).
+    /// Must run once, on the thread that will own R, before `run_main_loop`. Hook
+    /// writes must land between `Rf_initialize_R` (sets R's defaults) and
+    /// `setup_Rmainloop` (snapshots them).
     #[cfg(unix)]
     pub fn initialize(
         &self,
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
     ) -> Result<(), ReplError> {
-        // R re-derives R_HOME through its own lookup; export what we found
-        // so both agree.
+        // R re-derives R_HOME through its own lookup; export ours so both agree.
         unsafe { std::env::set_var("R_HOME", &self.r_home) };
         export_wrapper_path_vars(&self.r_home);
 
@@ -337,12 +306,8 @@ impl RApi {
         Ok(())
     }
 
-    /// Windows initialization goes through the `Rstart` struct: defaults
-    /// from `R_DefParamsEx` (its version argument makes R validate the
-    /// layout), our console callbacks on top, `R_SetParams`, graphapp +
-    /// console configuration, then the `CharacterMode` global flips from
-    /// `RGui` to `LinkDLL` before `setup_Rmainloop` (see the comment at the
-    /// flip).
+    /// Windows configures the console through the `Rstart` struct; `CharacterMode`
+    /// flips from `RGui` to `LinkDLL` before `setup_Rmainloop` (see the flip).
     #[cfg(windows)]
     pub fn initialize(
         &self,
@@ -355,11 +320,9 @@ impl RApi {
 
         let rhome = CString::new(self.r_home.to_string_lossy().into_owned())
             .map_err(|_| ReplError("R_HOME contains a NUL byte".to_owned()))?;
-        // R's `~` is NOT the Win32 profile directory: `getRUser` follows R's
-        // own search order (R_USER, HOME, the Documents folder, then
-        // HOMEDRIVE+HOMEPATH), so `~` and the `R_LIBS_USER` default resolve
-        // exactly as in stock R. The bytes pass through in the native
-        // encoding R hands out and expects back.
+        // R's `~` is not the Win32 profile directory: `getRUser` follows R's own search
+        // order, so `~` and `R_LIBS_USER` resolve as in stock R. The bytes stay in R's
+        // native encoding.
         let r_user = unsafe { (self.get_r_user)() };
         let home = if r_user.is_null() {
             CString::new(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_owned()))
@@ -399,11 +362,8 @@ impl RApi {
             (self.set_params)(&mut start);
             (self.ga_initapp)(0, std::ptr::null_mut());
             (self.readconsolecfg)();
-            // `do_system` checks this mode: under `RGui` it invalidates the
-            // standard handles (`SetStdHandle`) before spawning, which hangs
-            // `system()`. Flipping to `LinkDLL` once the console is
-            // configured keeps the RGui callback wiring and spares the
-            // handles.
+            // Under `RGui`, `do_system` invalidates the standard handles before spawning,
+            // which hangs `system()`; `LinkDLL` keeps the RGui callback wiring.
             *self.character_mode = UI_MODE_LINK_DLL;
             INTERRUPTS_PENDING.store(self.interrupts_pending, std::sync::atomic::Ordering::SeqCst);
             USER_BREAK.store(self.user_break, std::sync::atomic::Ordering::SeqCst);
@@ -412,11 +372,8 @@ impl RApi {
         Ok(())
     }
 
-    /// Evaluates one R statement in the global environment, outside the main
-    /// loop. Call it only between [`Self::initialize`] (which sources the
-    /// startup profiles) and [`Self::run_main_loop`]: R is fully set up, and
-    /// nothing the console does can be perturbed because no prompt has run.
-    /// Errors are R's to report; there is no value to hand back.
+    /// Evaluates in the global environment outside the main loop. Call only between
+    /// [`Self::initialize`] and [`Self::run_main_loop`]; errors are R's to report.
     pub fn eval(&self, statement: &str) {
         let Ok(text) = CString::new(statement) else {
             return;
@@ -424,8 +381,6 @@ impl RApi {
         unsafe { (self.parse_eval_string)(text.as_ptr(), *self.global_env) };
     }
 
-    /// Runs R's real REPL; returns when the session ends (`q()`, or EOF from
-    /// the read-console hook).
     pub fn run_main_loop(&self) {
         unsafe { (self.run_mainloop)() }
     }
@@ -443,8 +398,7 @@ unsafe extern "C" fn show_message_to_stderr(message: *const c_char) {
     eprintln!("{text}");
 }
 
-/// A terminal cannot pose a GUI yes/no/cancel dialog; print the question and
-/// answer "cancel" (-1), which R treats as the safe refusal.
+/// A terminal cannot pose a GUI dialog; answer "cancel" (-1), R's safe refusal.
 #[cfg(windows)]
 unsafe extern "C" fn yes_no_cancel_default(question: *const c_char) -> c_int {
     let text = unsafe { prompt_text(question) };
@@ -452,9 +406,6 @@ unsafe extern "C" fn yes_no_cancel_default(question: *const c_char) -> c_int {
     -1
 }
 
-/// The SIGINT handler installed while R evaluates: translate Ctrl-C into
-/// R's cooperative interrupt flag, honored at the next
-/// `R_CheckUserInterrupt()`.
 pub extern "C" fn sigint_to_r_flag(_signal: c_int) {
     let flag = INTERRUPTS_PENDING.load(std::sync::atomic::Ordering::SeqCst);
     if !flag.is_null() {
@@ -462,8 +413,6 @@ pub extern "C" fn sigint_to_r_flag(_signal: c_int) {
     }
 }
 
-/// `R_HOME` from the environment when set, else `R RHOME` from `PATH` —
-/// the same two-step every R front end uses.
 fn discover_r_home() -> Result<PathBuf, ReplError> {
     if let Ok(home) = std::env::var("R_HOME")
         && !home.is_empty()
@@ -497,15 +446,9 @@ fn discover_r_home() -> Result<PathBuf, ReplError> {
     Ok(path)
 }
 
-/// Launching `R` normally goes through its shell wrapper (`{R_HOME}/bin/R`),
-/// which exports `R_SHARE_DIR`/`R_INCLUDE_DIR`/`R_DOC_DIR`; embedding
-/// bypasses the wrapper. On distributions that relocate those directories
-/// (Fedora, RHEL), `R.home("share")` and friends would then fall back to
-/// nonexistent `{R_HOME}/<dir>` paths — so recover the values from the
-/// wrapper's plain `VAR=value` lines (substituted literally when R was
-/// installed). Best-effort by design: without the wrapper, R's own fallback
-/// is correct on standard layouts. Asking R itself (`R --vanilla -s`) would
-/// cost a few hundred milliseconds of startup; reading the script does not.
+/// Embedding bypasses R's shell wrapper, which exports `R_SHARE_DIR`,
+/// `R_INCLUDE_DIR` and `R_DOC_DIR`; distributions that relocate them (Fedora,
+/// RHEL) need them recovered from its `VAR=value` lines. Faster than asking R.
 #[cfg(unix)]
 fn export_wrapper_path_vars(r_home: &Path) {
     let Ok(wrapper) = std::fs::read_to_string(r_home.join("bin").join("R")) else {
@@ -521,10 +464,8 @@ fn export_wrapper_path_vars(r_home: &Path) {
     }
 }
 
-/// The value of a plain `NAME=value` line in the wrapper script, quotes
-/// stripped. A value still containing `$` is an unsubstituted shell
-/// expression this parser cannot evaluate — skipped rather than exported
-/// verbatim.
+/// Quotes stripped; a value still containing `$` is an unsubstituted shell
+/// expression and is skipped.
 #[cfg(unix)]
 fn wrapper_path_var(script: &str, name: &str) -> Option<String> {
     let value = script.lines().find_map(|line| {
@@ -538,8 +479,7 @@ fn wrapper_path_var(script: &str, name: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
-/// Unix: `{R_HOME}/lib/libR.{so,dylib}`. Absence almost always means an R
-/// built without `--enable-R-shlib`; say so.
+/// Absence almost always means an R built without `--enable-R-shlib`.
 #[cfg(unix)]
 fn shared_library_path(r_home: &Path) -> Result<PathBuf, ReplError> {
     let library_directory = r_home.join("lib");
@@ -556,8 +496,6 @@ fn shared_library_path(r_home: &Path) -> Result<PathBuf, ReplError> {
     )))
 }
 
-/// Windows: `{R_HOME}\bin\x64\R.dll` (plain `bin` on other
-/// architectures' builds).
 #[cfg(windows)]
 fn shared_library_path(r_home: &Path) -> Result<PathBuf, ReplError> {
     for directory in [r_home.join("bin").join("x64"), r_home.join("bin")] {
@@ -572,13 +510,9 @@ fn shared_library_path(r_home: &Path) -> Result<PathBuf, ReplError> {
     )))
 }
 
-/// A copy of the NUL-terminated prompt R hands the read-console hook
-/// (`"> "`, `"+ "`, `Browse[1]> `, …).
-///
 /// # Safety
 ///
-/// `prompt` must be null or a valid NUL-terminated C string — exactly what
-/// R passes its `R_ReadConsole` hook.
+/// `prompt` must be null or a valid NUL-terminated C string.
 pub unsafe fn prompt_text(prompt: *const c_char) -> String {
     if prompt.is_null() {
         return String::new();
@@ -594,8 +528,7 @@ mod tests {
 
     #[test]
     fn missing_r_is_an_actionable_error() {
-        // The test must pass on machines with and without R: force the
-        // env-var path with a directory that cannot exist.
+        // Must pass with and without R: force the env-var path with a nonexistent directory.
         let previous = std::env::var_os("R_HOME");
         unsafe { std::env::set_var("R_HOME", "/nonexistent/ry-test-r-home") };
         let error = discover_r_home().expect_err("a bogus R_HOME must fail");
@@ -621,7 +554,6 @@ mod tests {
             wrapper_path_var(script, "R_INCLUDE_DIR").as_deref(),
             Some("/usr/share/R/include")
         );
-        // An unsubstituted shell expression must not be exported verbatim.
         assert_eq!(wrapper_path_var(script, "R_DOC_DIR"), None);
         assert_eq!(wrapper_path_var(script, "R_LIBS_USER"), None);
     }

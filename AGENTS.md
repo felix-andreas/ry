@@ -24,7 +24,7 @@ De-risking, staging and small reviewable diffs exist because human time is scarc
 - **Go directly to the intended end shape in one change**, however invasive; break the build mid-change and fix everything in one sweep.
 - **Never choose a watered-down design because the full version is big.** Restarting is cheap; shipping the wrong shape is not.
 - **File size is not a problem.** Split only for a genuine new logical component.
-- The gates are unchanged: fixtures, witnesses, clippy and fmt are green before a change lands.
+- The gates are unchanged: fixtures, witnesses, clippy and fmt are green before a change lands. **Run the gate once, after the whole change**, not after each edit: for an agent the gate costs more than the change. Brief subagents the same way.
 
 # Incremental analysis
 
@@ -34,6 +34,8 @@ Analysis is salsa queries at item granularity behind per-name firewalls, with co
 
 - Never use the interactive question tool (`AskUserQuestion`); ask in plain text (user directive).
 - On a multi-step goal, commit and push after each logical step. One invasive redesign is one step: commit it when green.
+- Run one subagent at a time (user directive).
+- Commit messages and PR titles follow Conventional Commits (`refactor: …`, `docs: …`).
 
 # Knowledge base and docs
 

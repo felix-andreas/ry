@@ -1,16 +1,6 @@
-//! End-to-end tests for `ry repl`, driving the real binary through a
-//! pseudo-terminal: type input, watch R evaluate. They need a local R
-//! installation, so they SKIP (loudly, but green) where none exists — CI has
-//! no R, and by decision these run locally before REPL-touching changes:
-//!
-//! ```sh
-//! cargo test -p ry-lang --test test_repl_e2e -- --nocapture
-//! ```
-//!
-//! Runs wherever the console itself runs (Unix ptys and Windows ConPTY,
-//! through the same `portable-pty` seam); on platforms with no embedding
-//! recipe `ry repl` refuses at startup, so an R on `PATH` would only
-//! produce false failures there.
+//! Needs a local R and skips (loudly, but green) without one; CI has no R, so run
+//! these locally: `cargo test -p ry-lang --test test_repl_e2e -- --nocapture`.
+//! Other platforms have no embedding recipe, so `ry repl` refuses at startup there.
 
 #![cfg(any(unix, windows))]
 
@@ -29,9 +19,7 @@ fn r_available() -> bool {
     available
 }
 
-/// One interactive session at a time: concurrent full R sessions on a
-/// loaded machine make the pty timing flaky, while serial runs are stable —
-/// the lock rides in the session so its scope is exactly the session's.
+/// Concurrent full R sessions make pty timing flaky on a loaded machine.
 static SESSION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct ReplSession {
@@ -41,8 +29,7 @@ struct ReplSession {
     chunks: std::sync::mpsc::Receiver<Vec<u8>>,
     writer: Box<dyn Write + Send>,
     seen: String,
-    /// Raw tail kept across chunks so a terminal query split over a read
-    /// boundary is still recognized.
+    /// So a terminal query split over a read boundary is still recognized.
     raw_carry: Vec<u8>,
 }
 
@@ -64,9 +51,8 @@ impl ReplSession {
         let child = pair.slave.spawn_command(command).expect("spawn repl");
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
         let writer = pair.master.take_writer().expect("pty writer");
-        // The pty read is blocking with no timeout, so it lives on its own
-        // thread; `expect` then waits on the channel with a deadline — a
-        // session that goes silent fails loudly instead of hanging the test.
+        // The pty read blocks with no timeout, so it gets its own thread and a silent
+        // session fails instead of hanging.
         let (sender, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
@@ -97,9 +83,8 @@ impl ReplSession {
         self.writer.flush().expect("pty flush");
     }
 
-    /// Waits up to `wait` for one output chunk, answering the terminal
-    /// queries a real terminal would answer (the editor asks for the cursor
-    /// position before drawing its prompt and blocks until the reply comes).
+    /// Answers terminal queries: the editor asks for the cursor position before
+    /// drawing its prompt and blocks until the reply comes.
     fn drain(&mut self, wait: Duration) {
         let Ok(chunk) = self.chunks.recv_timeout(wait) else {
             return;
@@ -123,9 +108,8 @@ impl ReplSession {
             .push_str(&strip_ansi(&String::from_utf8_lossy(&chunk)));
     }
 
-    /// Keeps servicing the session for a fixed duration — used where a test
-    /// must let evaluation *start* (a bare sleep would leave the editor's
-    /// terminal handshake unanswered, so the input would still be queued).
+    /// A bare sleep would leave the editor's terminal handshake unanswered, so
+    /// queued input would never start evaluating.
     fn settle(&mut self, duration: Duration) {
         let deadline = Instant::now() + duration;
         while Instant::now() < deadline {
@@ -133,9 +117,7 @@ impl ReplSession {
         }
     }
 
-    /// Reads until the accumulated (ANSI-stripped) output contains `needle`.
-    /// Panics with everything seen so far on timeout, so a failure names
-    /// what the session actually did.
+    /// Matches ANSI-stripped output; on timeout, panics with everything seen so far.
     fn expect(&mut self, needle: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !self.seen.contains(needle) {
@@ -162,8 +144,6 @@ impl ReplSession {
     }
 }
 
-/// Drops ESC-introduced control sequences so assertions match what a human
-/// reads, not the editor's redraw traffic.
 fn strip_ansi(text: &str) -> String {
     let mut stripped = String::with_capacity(text.len());
     let mut characters = text.chars().peekable();
@@ -252,15 +232,10 @@ fn tab_completes_with_analysis_signatures() {
     let mut session = ReplSession::start();
     session.expect("ry R console");
     session.send("seq_l\t");
-    // The completion menu renders the analysis-backed signature next to the
-    // candidate — the stub corpus reaching the console. (Session-binding
-    // completion is pinned by the completer's own unit tests; driving the
-    // menu through several interactions over a pty is too stateful to
-    // assert reliably.)
+    // Session-binding completion is pinned by the completer's unit tests; menu
+    // interaction over a pty is too stateful to assert reliably.
     session.expect("seq_len");
     session.expect("fn(length.out: Any) -> integer[]");
-    // Enter accepts the highlighted candidate and closes the menu; Ctrl-C
-    // then clears the line for a clean quit.
     session.send("\r");
     session.settle(Duration::from_millis(300));
     session.send("\u{3}");
@@ -276,28 +251,23 @@ fn ctrl_c_interrupts_evaluation() {
     let mut session = ReplSession::start();
     session.expect("ry R console");
     session.send("Sys.sleep(60)\r");
-    // The editor echoes the line once it has consumed it; give evaluation a
-    // moment to actually start (terminal back in cooked mode) so Ctrl-C
-    // arrives as SIGINT, not as an editor keystroke.
+    // Let evaluation start (terminal back in cooked mode) so Ctrl-C arrives as
+    // SIGINT, not as an editor keystroke.
     session.expect("Sys.sleep(60)");
     session.settle(Duration::from_millis(1500));
     session.send("\u{3}");
-    // The session must come back alive well before the sleep could finish.
     session.send("40 + 2\r");
     session.expect("[1] 42");
     session.quit();
 }
-
-// Batch mode (`ry run`) needs no terminal: plain process spawns.
 
 #[test]
 fn the_terminal_width_reaches_r() {
     if !r_available() {
         return;
     }
-    // R's own default is 80 columns whatever the terminal is, and it exports
-    // no setter — so without the console feeding `options(width = …)` in,
-    // every wide table wraps on a terminal that had room for it.
+    // R defaults to 80 columns regardless of the terminal and exports no setter, so
+    // the console must feed `options(width = …)` in.
     let mut session = ReplSession::start();
     session.expect("ry R console");
     session.send("cat(\"WIDTH:\", getOption(\"width\"), \"\\n\")\r");
@@ -310,9 +280,7 @@ fn a_table_that_fits_is_printed_on_one_line() {
     if !r_available() {
         return;
     }
-    // Three columns whose header is 92 characters: over R's default width, so
-    // this is the shape that used to split after the second column, and well
-    // under the 120 the session's terminal actually has.
+    // A 92-character header: over R's default width, under the session terminal's 120.
     let mut session = ReplSession::start();
     session.expect("ry R console");
     session.send(

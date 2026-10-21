@@ -1,34 +1,24 @@
-//! Every token and node kind in the lossless R syntax tree.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
 #[allow(non_camel_case_types)]
 pub enum SyntaxKind {
-    // ---- Tokens: trivia ----
     WHITESPACE,
     NEWLINE,
     COMMENT,
-    /// The `#:` marker opening an annotation line; the annotation body is lexed
-    /// into ordinary tokens and parsed into `TYPE_*` / directive nodes.
+    /// The annotation body after `#:` is lexed into ordinary tokens.
     ANNOTATION_MARKER,
 
-    // ---- Tokens: literals ----
     INTEGER,
     DOUBLE,
     COMPLEX,
     STRING,
     RAW_STRING,
 
-    // ---- Tokens: names ----
     IDENT,
-    /// `...`
     DOTS,
-    /// `..1`, `..2`, …
     DOTDOTI,
-    /// `_` (the native-pipe placeholder)
     UNDERSCORE,
 
-    // ---- Tokens: keywords ----
     FUNCTION_KW,
     IF_KW,
     ELSE_KW,
@@ -49,15 +39,12 @@ pub enum SyntaxKind {
     NA_COMPLEX_KW,
     NA_CHARACTER_KW,
 
-    // ---- Tokens: operators ----
     PLUS,
     MINUS,
     STAR,
     SLASH,
     CARET,
-    /// Any `%…%` operator: `%%`, `%/%`, `%*%`, `%o%`, `%in%`, user `%op%`.
     SPECIAL,
-    /// `|>`
     PIPE_GREATER,
     LESS,
     GREATER,
@@ -72,17 +59,11 @@ pub enum SyntaxKind {
     PIPE2,
     TILDE,
     QUESTION,
-    /// `<-`
     LESS_MINUS,
-    /// `<<-`
     LESS2_MINUS,
-    /// `->`
     MINUS_GREATER,
-    /// `->>`
     MINUS_GREATER2,
-    /// `=`
     EQ,
-    /// `:=` (lexed by R as an operator; data.table gives it meaning)
     COLON_EQ,
     COLON,
     COLON2,
@@ -90,26 +71,21 @@ pub enum SyntaxKind {
     DOLLAR,
     AT,
 
-    // ---- Tokens: punctuation ----
     L_PAREN,
     R_PAREN,
     L_BRACE,
     R_BRACE,
     L_BRACKET,
-    /// `[[` (its close is two separate `]` tokens, as in R's own grammar)
+    /// Closed by two separate `]` tokens, as in R's own grammar.
     L_BRACKET2,
     R_BRACKET,
     COMMA,
     SEMICOLON,
-    /// `\` (lambda shorthand `\(x) …`)
     BACKSLASH,
 
-    /// A byte sequence the lexer cannot form a token from.
     ERROR_TOKEN,
 
-    // ---- Nodes: expressions ----
     SOURCE_FILE,
-    /// An identifier used as an expression (or assignment target).
     NAME,
     LITERAL,
     BINARY_EXPR,
@@ -119,17 +95,11 @@ pub enum SyntaxKind {
     CALL_EXPR,
     ARGUMENT_LIST,
     ARGUMENT,
-    /// `x[…]`
     SUBSET_EXPR,
-    /// `x[[…]]`
     SUBSET2_EXPR,
-    /// `x$field`
     DOLLAR_EXPR,
-    /// `x@slot`
     AT_EXPR,
-    /// `pkg::name` / `pkg:::name`
     NAMESPACE_EXPR,
-    /// `function(…) body` and `\(…) body`
     FUNCTION_DEF,
     PARAMETER_LIST,
     PARAMETER,
@@ -140,37 +110,25 @@ pub enum SyntaxKind {
     BREAK_EXPR,
     NEXT_EXPR,
 
-    // ---- Nodes: `#:` annotations ----
-    /// One annotation region: consecutive `#:` lines stitched into a single node.
+    /// Consecutive `#:` lines stitched into one node.
     ANNOTATION,
-    /// `@type` / `@alias` / `@param` / `@return` / `@forall` / `@strict` / `@trust` …
     ANNOTATION_DIRECTIVE,
-    /// A bare or dotted type name.
     TYPE_REF,
-    /// `list[T]`
     TYPE_APPLY,
-    /// `T[]`
     TYPE_VECTOR,
-    /// `A | B | NULL`
     TYPE_UNION,
-    /// `fn(x: T) -> U`
     TYPE_FUNCTION,
     TYPE_PARAMETER_LIST,
     TYPE_PARAMETER,
-    /// `<T, U: numeric>`
     TYPE_BINDER_LIST,
     TYPE_BINDER,
-    /// `list{a: integer, b: character}`
     TYPE_RECORD,
     TYPE_FIELD,
-    /// `list{integer, character}`
     TYPE_TUPLE,
-    /// `list[T]` / `list[named: T]`
     TYPE_LIST,
     TYPE_PAREN,
     TYPE_ARG_LIST,
 
-    /// Recovery node: covers a region the parser could not form a construct from.
     ERROR,
 }
 
@@ -206,7 +164,7 @@ impl SyntaxKind {
         )
     }
 
-    /// Keyword kind for a bare word, if reserved (a backticked spelling is never a keyword).
+    /// A backticked spelling is never a keyword.
     pub fn from_keyword(word: &str) -> Option<SyntaxKind> {
         let kind = match word {
             "function" => FUNCTION_KW,
@@ -233,7 +191,6 @@ impl SyntaxKind {
         Some(kind)
     }
 
-    /// Human-readable spelling used in error messages ("expected `)` or `,`").
     pub fn display(self) -> &'static str {
         match self {
             WHITESPACE => "whitespace",

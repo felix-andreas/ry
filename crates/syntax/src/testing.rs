@@ -1,11 +1,5 @@
-//! Fixture harness for the syntax crate.
-//!
-//! The file format is the project-wide fixture format: `#==== <group>` opens a
-//! group, `#---- <case>` opens a case, the case source runs until a `#++++`
-//! line, and the expectation body runs until the next directive line (or end of
-//! file). Case identity is `group__case` and must be unique across a whole
-//! suite. `FIXTURE_FILTER=group__case` runs one case; `RY_BLESS=1`
-//! rewrites expectation bodies in place from the rendered output.
+//! Fixture format: `#==== <group>` opens a group, `#---- <case>` a case whose
+//! source runs to `#++++`, then the expectation runs to the next directive.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -16,7 +10,6 @@ pub struct FixtureCase {
     pub id: String,
     pub source: String,
     pub expected: String,
-    /// Byte range of the expectation body inside the fixture file.
     expected_span: Range<usize>,
 }
 
@@ -26,9 +19,6 @@ pub struct FixtureFile {
     pub cases: Vec<FixtureCase>,
 }
 
-/// Parse every `.test` fixture file under `suite_dir` (recursively), without
-/// running anything — for callers that want the corpus rather than a verdict,
-/// such as deciding whether a focused-run filter names a real case.
 pub fn parse_fixture_files(suite_dir: &Path) -> Vec<FixtureFile> {
     let mut paths = Vec::new();
     collect_fixture_files(suite_dir, &mut paths);
@@ -43,13 +33,6 @@ pub fn parse_fixture_files(suite_dir: &Path) -> Vec<FixtureFile> {
         .collect()
 }
 
-/// Every fixture case source in the workspace, as `(case id, source)`.
-///
-/// The hand-written fixture sources are the highest-quality R in the repository
-/// — each one was written to exercise something — so the invariant batteries and
-/// the tree-sitter acceptance test want all of them, not the subset one crate
-/// happens to know about. Listing the suites here rather than in each harness is what
-/// keeps a newly added suite from being silently invisible to every battery.
 pub fn fixture_case_sources() -> Vec<(String, String)> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -65,8 +48,7 @@ pub fn fixture_case_sources() -> Vec<(String, String)> {
     sources
 }
 
-/// Every fixture suite in the workspace, workspace-relative under `crates/`.
-/// A suite missing from this list runs its own expectations and nothing else.
+/// A suite missing from this list is invisible to the invariant batteries.
 const FIXTURE_SUITES: [&str; 13] = [
     "format/tests/format",
     "ide/tests/ide",
@@ -83,14 +65,7 @@ const FIXTURE_SUITES: [&str; 13] = [
     "syntax/tests/tsr",
 ];
 
-/// Every source in the program corpus (`tests/programs/*.R.corpus`): ~2,000
-/// curated R edge cases mined from an earlier implementation's fixture suites,
-/// kept for their inputs. They run through the invariant batteries, where no
-/// expectation is needed: never panic, stay deterministic, keep ranges in
-/// bounds, and do not lose code when formatting.
-///
-/// Each file is `#---- <id>` followed by that case's source, up to the next
-/// header. Sources are deduplicated across suites.
+/// Inputs without expectations, for the invariant batteries.
 pub fn program_corpus_sources() -> Vec<(String, String)> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs");
     let Ok(entries) = std::fs::read_dir(&directory) else {
@@ -134,17 +109,13 @@ pub fn program_corpus_sources() -> Vec<(String, String)> {
     sources
 }
 
-/// Reads an environment variable under its `RY_` name, falling back to the
-/// pre-rename `ROUGHLY_` spelling. Both are honoured so a developer's existing
-/// shell aliases and CI scripts keep working after the rename.
+/// Falls back to the `ROUGHLY_` prefix, which existing scripts still set.
 pub fn env_var(suffix: &str) -> Option<String> {
     std::env::var(format!("RY_{suffix}"))
         .or_else(|_| std::env::var(format!("ROUGHLY_{suffix}")))
         .ok()
 }
 
-/// Run every `.test` fixture under `suite_dir` through `render`, comparing (or
-/// blessing) expectations. Panics with a readable report on mismatch.
 pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     let mut files = Vec::new();
     collect_fixture_files(suite_dir, &mut files);
@@ -227,8 +198,7 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     );
 }
 
-/// Splits a multi-file case at its `#~~~~ <path>` lines; a source without one
-/// is a single file and yields `None`.
+/// `None` for a single-file case (no `#~~~~ <path>` lines).
 pub fn split_files(source: &str) -> Option<Vec<(String, String)>> {
     if !source.lines().any(|line| line.starts_with("#~~~~ ")) {
         return None;
@@ -244,11 +214,8 @@ pub fn split_files(source: &str) -> Option<Vec<(String, String)>> {
     Some(files)
 }
 
-/// Whether a suite next to `suite_dir` holds `id`. One test binary drives
-/// several suites, so a focused run naming one case leaves every other suite
-/// matching nothing — and "this case lives next door" is the only thing that
-/// distinguishes that ordinary skip from a mistyped id, which is otherwise
-/// indistinguishable from a passing run.
+/// One test binary drives several suites, so a focused filter legitimately
+/// matches nothing here when the case lives in a sibling suite.
 fn sibling_suite_holds(suite_dir: &Path, id: &str) -> bool {
     let Some(parent) = suite_dir.parent() else {
         return false;
@@ -283,7 +250,6 @@ fn collect_fixture_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Parse one fixture file.
 pub fn parse_fixture_file(path: &Path, text: String) -> FixtureFile {
     let mut cases = Vec::new();
     let mut group: Option<String> = None;
@@ -372,7 +338,6 @@ pub fn parse_fixture_file(path: &Path, text: String) -> FixtureFile {
     }
 }
 
-/// Trailing-whitespace-insensitive comparison form.
 fn normalize(text: &str) -> String {
     let mut normalized = text
         .lines()
@@ -385,7 +350,6 @@ fn normalize(text: &str) -> String {
     normalized.trim_end().to_owned()
 }
 
-/// The full invariant battery for one input.
 pub fn check_parse_invariants(input: &str) {
     let parse = crate::parse(input);
     let reprinted = parse.text();
@@ -410,10 +374,7 @@ pub fn check_parse_invariants(input: &str) {
 
     check_geometry(&parse.syntax_node(), input);
 
-    // Error-report quality: every diagnostic is renderable (non-empty
-    // message, in-bounds range), and the report count stays linear in the
-    // input — a cascade that fans one mistake into a storm is a bug even
-    // when every individual message is well-formed.
+    // One mistake must not fan out into a storm of errors.
     assert!(
         parse.errors().len() <= 2 * tokens.len() + 16,
         "error cascade: {} errors from {} tokens for input {input:?}",
@@ -431,8 +392,6 @@ pub fn check_parse_invariants(input: &str) {
         );
     }
 
-    // Determinism: a second parse yields a structurally equal tree and the
-    // same errors.
     let again = crate::parse(input);
     assert_eq!(
         parse.green(),
@@ -446,7 +405,6 @@ pub fn check_parse_invariants(input: &str) {
     );
 }
 
-/// Every node's children (nodes and tokens) must tile its range exactly.
 fn check_geometry(node: &crate::SyntaxNode, input: &str) {
     let range = node.text_range();
     let mut cursor = range.start();

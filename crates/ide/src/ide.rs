@@ -1,16 +1,6 @@
-//! IDE features over the semantics crate's salsa queries. Every feature is a
-//! pure read of the database at a byte offset; UTF-16 and editor-protocol
-//! concerns live in the server, not here.
-//!
-//! Positions cross one boundary: per-item query results carry item-relative
-//! ranges (the position-independent unit salsa cutoffs work on), while the
-//! feature API speaks file-absolute offsets. `semantics::item_node` is the
-//! edge that anchors an item at its current absolute position.
-//!
-//! Goto-definition, references, and rename share ONE occurrence engine: the
-//! cursor resolves to a symbol target (a variable slot inside an item, or a
-//! project-defined global name), and every feature is a projection of that
-//! target's occurrence list.
+//! Every feature is a pure read of the database at a byte offset; UTF-16 and protocol concerns
+//! live in the server. Per-item query results carry item-relative ranges, while this API speaks
+//! file-absolute offsets (`semantics::item_node` anchors an item).
 
 use semantics::check::ItemCheck;
 use semantics::diagnostics::TypeRenderer;
@@ -23,8 +13,6 @@ use semantics::{
 };
 use syntax::{TextRange, TextSize};
 
-/// A hover result: the hovered expression's absolute range, the rendered
-/// type lines, and — for a variable use — where the name is defined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hover {
     pub range: TextRange,
@@ -32,21 +20,15 @@ pub struct Hover {
     pub definition: Option<HoverDefinition>,
 }
 
-/// Where a hovered name is defined. Location rendering (paths, line:column)
-/// happens in the host, which owns the file-to-path mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HoverDefinition {
-    /// A slot inside the item: a local assignment, parameter, or loop
-    /// variable. `maybe_undefined` marks reads not dominated by a write.
+    /// `maybe_undefined` marks reads not dominated by a write.
     Local {
         target: NavigationTarget,
         maybe_undefined: bool,
     },
-    /// A project top-level definition (the name's winner).
+    /// The name's winning project top-level definition.
     Global { target: NavigationTarget },
-    /// A stdlib stub name: its declaring namespace, how many overload
-    /// candidates the corpus declares for it, and — when the loader recorded
-    /// one — its declaration site inside the stub corpus.
     Stub {
         namespace: String,
         overloads: usize,
@@ -54,33 +36,25 @@ pub enum HoverDefinition {
     },
 }
 
-/// One phase's internal facts for the hovered position, shown by hosts under
-/// a debug flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugSection {
     pub title: &'static str,
     pub body: String,
 }
 
-/// A navigation target: a file and an absolute range inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NavigationTarget {
     pub file: SourceFile,
     pub range: TextRange,
 }
 
-/// Where goto-definition lands: a project location, or a declaration inside
-/// the installed stub corpus. Stub sources are not project files — the host
-/// maps `source_index` (the position in the `StubSources` order it
-/// installed) to a file on disk.
+/// Stub sources are not project files: the host maps `source_index` to a file on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefinitionTarget {
     Project(NavigationTarget),
     Stub(StubTarget),
 }
 
-/// A declaration site inside one installed stub source: the source's index
-/// in the installed order and the name token's range within its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StubTarget {
     pub source_index: usize,
@@ -94,9 +68,6 @@ fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
     })
 }
 
-/// One occurrence of a symbol: a range plus whether it is a declaration
-/// (an assignment target, a parameter, a for-loop variable, or a top-level
-/// definition's name).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Occurrence {
     pub file: SourceFile,
@@ -110,13 +81,9 @@ pub fn hover(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<Hover> {
-    // A cursor inside a `#:` annotation resolves against the type notation,
-    // not the R expression it decorates.
     if let Some(cursor) = annotation_type_at(db, file, offset) {
         return annotation_type_hover(db, file, &cursor);
     }
-    // Elsewhere inside a `@type`/`@alias` block (the `@`, the keyword, the
-    // braces), the whole declaration hovers.
     if let Some(hover) = annotation_definition_hover(db, file, offset) {
         return Some(hover);
     }
@@ -124,9 +91,8 @@ pub fn hover(
     let position = position_in_item(db, file, offset)?;
     let check = item_check(db, position.item)?;
     let hir = item_hir(db, position.item).as_ref()?;
-    // The smallest containing expression with a recorded type: write targets
-    // and operators record none, so the hover widens to the enclosing typed
-    // expression instead of going silent.
+    // Write targets and operators record no type, so the hover widens to the enclosing typed
+    // expression.
     let (expression, ty) = position
         .expressions_at()
         .into_iter()
@@ -135,28 +101,22 @@ pub fn hover(
     let mut renderer = TypeRenderer::default();
     let (lines, definition) = match &hir.expression(expression).kind {
         ExpressionKind::NameRef(name) => {
-            // The item's own top-level name renders the EXPORTED scheme —
-            // the single exported truth — not the initializer's checked
-            // type: a `#: @new` declaration brands the scheme even when the
-            // initializer's own type is Unknown.
+            // The item's own top-level name renders the exported scheme, not the initializer's
+            // type: `#: @new` brands the scheme even when the initializer is `Unknown`.
             let naming = item_naming(db, position.item).as_ref();
             let exported = naming.and_then(|naming| {
                 let binding = naming.resolutions.get(&expression)?;
                 (naming.bindings.get(binding)?.kind == BindingKind::TopLevel).then_some(())?;
                 check.scheme.clone()
             });
-            // A use of another definition checked against an instantiation,
-            // whose variables carry no binder and have lost their
-            // constraints; the scheme it instantiated says what it accepts.
+            // An instantiated use has lost its binders and constraints; the scheme it
+            // instantiated says what it accepts.
             let referenced = || {
                 naming.filter(|naming| naming.non_locals.contains_key(&expression))?;
                 contains_inference_var(db, ty).then_some(())?;
                 referenced_scheme(db, files, name, &check, expression)
             };
-            // The whole scheme, binders included: rendering only the body
-            // drops the `<T>` prefix, so a polymorphic function hovered as
-            // `fn(x: T) -> T` left `T` unexplained — and disagreed with the
-            // inlay hint for the same binding, which renders the scheme.
+            // Render the whole scheme so the `<T>` prefix explains `T`, matching the inlay hint.
             let scheme = exported
                 .or_else(referenced)
                 .unwrap_or_else(|| TypeScheme::monomorphic(ty));
@@ -168,8 +128,6 @@ pub fn hover(
         _ => (vec![renderer.render(db, ty)], None),
     };
 
-    // Expression nodes may swallow trailing trivia; the hover highlight must
-    // stop at the significant end.
     let range = trim_trailing_trivia(
         file.text(db),
         hir.expression(expression).range + position.item_offset,
@@ -181,8 +139,6 @@ pub fn hover(
     })
 }
 
-/// `name: TYPE`, with a function's parameters one per line once the
-/// signature is too long to read on one.
 fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> {
     const WIDTH: usize = 80;
     let mut renderer = TypeRenderer::default();
@@ -214,8 +170,6 @@ fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> 
     lines
 }
 
-/// Where the hovered name-use is defined: a slot's binding site, the global
-/// name's winner declaration, or a stub's declaring namespace.
 fn hover_definition<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
@@ -226,7 +180,6 @@ fn hover_definition<'db>(
     let naming = item_naming(db, item).as_ref()?;
     if let Some(binding) = naming.resolutions.get(&expression) {
         let info = naming.bindings.get(binding)?;
-        // The item's own top-level binding IS the global definition.
         if info.kind == BindingKind::TopLevel {
             return global_hover_definition(db, files, &info.name, Some(item));
         }
@@ -257,9 +210,6 @@ fn hover_definition<'db>(
     None
 }
 
-/// The global definition site of `name`: the package winner, the first
-/// declaring item across the project, or — for a top-level read of the
-/// defining item itself — that item.
 fn global_hover_definition(
     db: &dyn Db,
     files: ProjectFiles,
@@ -277,8 +227,6 @@ fn global_hover_definition(
     })
 }
 
-/// The project item that defines a global `name`: the package winner, or
-/// the first declaring item across the project.
 fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Option<Item<'db>> {
     package_definitions(db, files)
         .get(name)
@@ -293,9 +241,7 @@ fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Opti
         })
 }
 
-/// The scheme a non-local `name` refers to: the defining item's exported
-/// scheme, or the stub declaration the call committed (the last candidate, by
-/// corpus convention the most general, when none did).
+/// Without a committed overload, the last stub candidate: by corpus convention the most general.
 fn referenced_scheme<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
@@ -315,9 +261,6 @@ fn referenced_scheme<'db>(
     candidates.get(index).cloned()
 }
 
-/// Per-phase internal facts at the cursor, for hosts with debug hover
-/// enabled: the lowered HIR expression, its naming resolution, and the
-/// syntax-node chain under the cursor.
 pub fn hover_debug(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<DebugSection> {
     let mut sections = Vec::new();
     if let Some(position) = position_in_item(db, file, offset)
@@ -380,7 +323,6 @@ pub fn hover_debug(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Debug
     sections
 }
 
-/// Shrinks a range's end past any trailing whitespace/newlines it swallowed.
 fn trim_trailing_trivia(text: &str, range: TextRange) -> TextRange {
     let start = usize::from(range.start()).min(text.len());
     let end = usize::from(range.end()).min(text.len());
@@ -388,8 +330,6 @@ fn trim_trailing_trivia(text: &str, range: TextRange) -> TextRange {
     TextRange::new(range.start(), TextSize::from((start + trimmed) as u32))
 }
 
-/// Goto-definition: a slot goes to its first write; a global goes to the
-/// package winner definition's name (or, in a script, the first declaration).
 pub fn definition(
     db: &dyn Db,
     files: ProjectFiles,
@@ -406,8 +346,7 @@ pub fn definition(
                 range: info.range + item_offset,
             }))
         }
-        // The LAST declaration wins, matching the project definition table's
-        // fold order; a name only the stub corpus declares jumps into it.
+        // The last declaration wins, matching the project definition table's fold order.
         Target::TypeName(name) => type_name_occurrences(db, files, &name)
             .into_iter()
             .rfind(|occurrence| occurrence.is_declaration)
@@ -450,7 +389,6 @@ pub fn definition(
     }
 }
 
-/// All occurrences of the symbol under the cursor, in file/source order.
 pub fn references(
     db: &dyn Db,
     files: ProjectFiles,
@@ -467,9 +405,6 @@ pub fn references(
         .collect()
 }
 
-/// Rename: every occurrence becomes an edit site for the new name. `None`
-/// when the cursor is not on a renameable symbol (stub and unresolved names
-/// have no project declaration to rename).
 pub fn rename(
     db: &dyn Db,
     files: ProjectFiles,
@@ -481,19 +416,14 @@ pub fn rename(
     (!occurrences.is_empty()).then_some(occurrences)
 }
 
-/// One inline type hint: `label` (": TYPE") rendered after `offset`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlayHint {
     pub offset: TextSize,
     pub label: String,
 }
 
-/// Type hints for the file's plain variable bindings (replacement forms
-/// update an existing binding hinted at its own definition; annotated
-/// bindings already show their type). A function type is hinted whenever it
-/// contains no `Unknown` — its variables generalize into binder names — while
-/// any other type must be fully concrete, so partially-inferred values show
-/// nothing rather than noise.
+/// A function type is hinted when it contains no `Unknown`; any other type must be fully
+/// concrete, so partially inferred values show nothing.
 pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -> Vec<InlayHint> {
     let mut hints = Vec::new();
     for &item in item_tree(db, file) {
@@ -513,16 +443,13 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
         let Some(check) = item_check(db, item) else {
             continue;
         };
-        // An annotation types its binding only through surviving payload: a
-        // refused block (form, ordering, duplicate-parameter, depth errors)
-        // drops the payload entirely, and a definitions-only or toggle-only
-        // block types nothing — all of those leave the binding hintable.
+        // Only a surviving payload types the binding: refused, definitions-only, and toggle-only
+        // blocks leave it hintable.
         let annotated = item_annotation_syntax(db, item).is_some_and(|annotation| {
             let lowered = semantics::annotations::lower_annotation(db, &annotation.syntax_node());
             lowered.declared.is_some() || lowered.new_nominal.is_some() || lowered.trusted
         });
-        // Nested statements carry their own annotations; a hint would just
-        // restate the line above.
+        // A hint on an annotated nested statement would restate the line above.
         let annotated_expressions: std::collections::BTreeSet<ExprId> =
             semantics::item_expression_annotations(db, item)
                 .into_iter()
@@ -539,8 +466,6 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             }
             let id = ExprId(index as u32);
             let is_root = hir.root == Some(id);
-            // The item's annotation binds its top-level statement; nested
-            // bindings are unannotated either way.
             if (is_root && annotated) || annotated_expressions.contains(&id) {
                 continue;
             }
@@ -577,19 +502,13 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
     hints
 }
 
-/// The signature list of the call under the cursor. Most calls carry exactly
-/// one entry; a call whose callee committed a candidate of a stub overload
-/// set lists every declared candidate so the editor can page through them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureHelp {
     pub signatures: Vec<SignatureData>,
-    /// Index into `signatures` of the committed overload (0 for
-    /// single-signature calls).
     pub active_signature: usize,
 }
 
-/// A rendered call signature: the label, each parameter's byte span inside
-/// it, and the parameter the cursor's argument targets.
+/// `parameters` are byte spans inside `label`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureData {
     pub label: String,
@@ -597,18 +516,15 @@ pub struct SignatureData {
     pub active_parameter: Option<usize>,
 }
 
-/// The inferred signature of the call under the cursor. The active parameter
-/// follows R's argument matching: a named argument consumes the parameter it
-/// names, a positional argument fills the first open positionally-fillable
-/// slot (parameters after `...` match by name only).
+/// The active parameter follows R's argument matching: a named argument takes the parameter it
+/// names, a positional one the first open slot (parameters after `...` match by name only).
 pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<SignatureHelp> {
     let position = position_in_item(db, file, offset)?;
     let hir = item_hir(db, position.item).as_ref()?;
     let check = item_check(db, position.item)?;
 
-    // Containing calls, smallest first; the innermost whose callee has a
-    // function type wins, so a cursor inside `list(...)` inside `f(...)`
-    // still shows `f`'s signature (call-site builtins have none).
+    // The innermost call whose callee has a function type wins, so a cursor in `list(...)`
+    // inside `f(...)` still shows `f`.
     let mut calls: Vec<(TextRange, ExprId)> = hir
         .expressions
         .iter()
@@ -645,23 +561,15 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
             .then_some((*callee, function, overloads, arguments))
     })?;
 
-    // A call to an overloaded stub name lists the whole declared set with the
-    // committed candidate active — the one checked callee type would otherwise
-    // show a single signature and hide the alternatives the name offers. The
-    // list does not wait for a commitment: an incomplete call matches no
-    // candidate at all, and that is exactly when a reader needs to see the
-    // shapes on offer.
+    // An overloaded stub name lists every candidate, even before a commitment: an incomplete call
+    // matches none, which is exactly when a reader needs the shapes on offer.
     if let Some(schemes) = overloads {
         let mut signatures: Vec<SignatureData> = schemes
             .iter()
             .map(|scheme| overload_signature(db, scheme, arguments, hir, position.relative))
             .collect();
         let selected = check.selected_overloads.get(&callee).copied().unwrap_or(0);
-        // The committed candidate is shown with this call site's types filled
-        // in (`fn(x: list[integer] | integer[], ...)`, not `<T> fn(x: list[T] |
-        // T[], ...)`): the checked callee type is that candidate instantiated,
-        // and a reader comparing the alternatives wants the one in force to
-        // read as their own call.
+        // The committed candidate renders instantiated with this call site's types.
         if let Some(function) = &function
             && let Some(entry) = signatures.get_mut(selected)
         {
@@ -685,8 +593,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     }
 
     let function = &function?;
-    // An open callee renders the scheme it instantiates, binders and
-    // constraints included, rather than variables nothing binds.
+    // An open callee renders the scheme it instantiates rather than variables nothing binds.
     let naming = item_naming(db, position.item).as_ref();
     if let Some(name) = callee_name(hir, callee)
         && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
@@ -725,8 +632,6 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     })
 }
 
-/// The callee's referenced name, when the callee is a name (`sum(...)`,
-/// `base::sum(...)`).
 fn callee_name(hir: &semantics::hir::Module, callee: ExprId) -> Option<String> {
     match &hir.expression(callee).kind {
         ExpressionKind::NameRef(name) => Some(name.clone()),
@@ -735,10 +640,8 @@ fn callee_name(hir: &semantics::hir::Module, callee: ExprId) -> Option<String> {
     }
 }
 
-/// One overload candidate rendered for the signature list. The scheme's own
-/// binders drive the label's `<T: atomic>` prefix; a non-function declaration
-/// (possible in a hand-written override set) still occupies its slot so the
-/// committed index stays aligned with the declared set.
+/// A non-function declaration still occupies its slot, so the committed index stays aligned
+/// with the declared set.
 fn overload_signature(
     db: &dyn Db,
     scheme: &TypeScheme<'_>,
@@ -772,8 +675,7 @@ fn overload_signature(
     }
 }
 
-/// The candidate cap; the result marks itself incomplete past it so clients
-/// re-query as the prefix narrows instead of filtering a truncated list.
+/// Past the cap the result is marked incomplete, so clients re-query as the prefix narrows.
 pub const COMPLETION_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -784,8 +686,7 @@ pub enum CompletionKind {
     Field,
 }
 
-/// Where an item came from; the variant order is the ranking order among
-/// items of equal match quality.
+/// Variant order is the ranking order among items of equal match quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CompletionSource {
     Keyword,
@@ -800,16 +701,12 @@ pub struct CompletionItem {
     pub label: String,
     pub kind: CompletionKind,
     pub source: CompletionSource,
-    /// The rendered scheme for standard-library entries.
     pub detail: Option<String>,
     pub documentation: Option<String>,
-    /// For functions with a known signature: whether it declares any
-    /// parameter. Drives the editor's call-snippet cursor placement.
+    /// `None` for non-functions; drives the editor's call-snippet cursor placement.
     pub takes_arguments: Option<bool>,
 }
 
-/// Whether a scheme is a function that declares at least one parameter;
-/// `None` for non-functions.
 fn scheme_takes_arguments(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<bool> {
     match scheme.body.kind(db) {
         TyKind::Function(function) => Some(
@@ -858,7 +755,6 @@ pub fn completion(
     let text = file.text(db);
     let (context, query) = completion_context(text, offset)?;
 
-    // A cursor inside a `#:` annotation completes type names, not R values.
     {
         let parse = semantics::parse(db, file);
         if parse.syntax_node().descendants().any(|node| {
@@ -868,9 +764,8 @@ pub fn completion(
         }) {
             return annotation_completion(db, files, file, &query);
         }
-        // A cursor inside a string completes typed record fields when the
-        // string subscripts a record (`x[["…"]]`) and is otherwise silent —
-        // R value names never resolve inside string content.
+        // R value names never resolve inside string content; only record-field subscripts
+        // complete there.
         if let Some(string_token) = parse
             .syntax_node()
             .descendants_with_tokens()
@@ -900,8 +795,7 @@ pub fn completion(
         CompletionContext::MaybeNamespace => return None,
         CompletionContext::Default => {
             let mut items = Vec::new();
-            // Keywords are a small fixed set, prefix-completed: no one
-            // searches for `function` by typing `con`.
+            // Keywords are prefix-completed only: no one searches for `function` by typing `con`.
             for keyword in RESERVED_WORDS {
                 if prefix_under_case(keyword, &query, query_is_case_sensitive(&query)) {
                     items.push(CompletionItem {
@@ -923,11 +817,6 @@ pub fn completion(
                     if info.kind == BindingKind::TopLevel {
                         continue;
                     }
-                    // R scoping is function-granular: a local is visible at
-                    // the cursor only when its owning function (the innermost
-                    // FUNCTION_DEF enclosing its definition site) encloses
-                    // the cursor too — enclosing frames stay visible inside
-                    // closures, sibling closures' locals do not leak.
                     if !binding_visible_at(&item_node, info.range.start() + item_offset, offset) {
                         continue;
                     }
@@ -948,9 +837,8 @@ pub fn completion(
                     let kind = match *item.kind(db) {
                         ItemKind::Function => CompletionKind::Function,
                         ItemKind::Value => CompletionKind::Variable,
-                        // A statement item still creates top-level variable
-                        // slots (a conditional write inside a top-level loop
-                        // or `if`), and those names complete like any global.
+                        // A statement item still creates top-level slots (a conditional write
+                        // inside a top-level `if`).
                         ItemKind::Statement => {
                             if let Some(naming) = item_naming(db, item) {
                                 for info in naming.bindings.values() {
@@ -988,9 +876,7 @@ pub fn completion(
                     }
                 }
             }
-            // The standard-library corpus, with each stub's scheme as the
-            // detail. A project global of the same name outranks its stub at
-            // the deduplication step, mirroring how resolution shadows.
+            // A project global outranks a same-named stub at deduplication, mirroring resolution.
             if let Some(library) = semantics::stubs::stubs(db) {
                 for (name, schemes) in &library.schemes {
                     if search_match(name, &query).is_none() {
@@ -1018,12 +904,8 @@ pub fn completion(
                         takes_arguments: scheme_takes_arguments(db, scheme),
                     });
                 }
-                // Manifest-only exports complete too — untyped, so no
-                // detail, and without a scheme the value/function
-                // distinction is unknowable statically. Non-syntactic
-                // names (replacement functions, operators) are skipped: a
-                // bare reference to them needs backticks, so inserting the
-                // raw name would produce different syntax entirely.
+                // Manifest-only exports complete untyped. Non-syntactic names are skipped: a bare
+                // reference needs backticks, so inserting the raw name changes the syntax.
                 for name in &library.known_exports {
                     if library.schemes.contains_key(name)
                         || !syntax::is_syntactic_name(name)
@@ -1056,12 +938,9 @@ pub fn completion(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodeActionKind {
-    /// Replace `@if-unknown` with `@trust` — the directive's one upgrade
-    /// path once the value's type IS determined.
     IfUnknownToTrust,
     RemoveUnusedAssignment,
-    /// Prefix the written name with `.` to keep it (dot-names are exempt
-    /// from the unused check).
+    /// Dot-names are exempt from the unused check.
     PrefixDot,
     InsertInferredAnnotation,
     /// The whole-file source action covering every eligible binding.
@@ -1081,11 +960,7 @@ pub struct CodeAction {
     pub edits: Vec<TextEdit>,
 }
 
-/// The static quickfixes and source actions for a document range: rewriting
-/// `@if-unknown` to `@trust`, removing or dot-prefixing an unused
-/// assignment, and inserting an inferred `#:` annotation above an
-/// unannotated binding (the text the inlay hint shows). All edits are
-/// computed eagerly — no resolve round-trip.
+/// All edits are computed eagerly, with no resolve round-trip.
 pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<CodeAction> {
     let text = file.text(db);
     let mut actions = Vec::new();
@@ -1242,9 +1117,7 @@ fn ranges_overlap(left: TextRange, right: TextRange) -> bool {
     left.start() <= right.end() && right.start() <= left.end()
 }
 
-/// The range removing an assignment deletes: the whole line(s) — trailing
-/// newline included — when the assignment is the only content on them,
-/// otherwise exactly the assignment's own range.
+/// Whole lines, trailing newline included, when the assignment is alone on them.
 fn removal_range(text: &str, range: TextRange) -> TextRange {
     let start = usize::from(range.start()).min(text.len());
     let end = usize::from(range.end()).min(text.len());
@@ -1265,8 +1138,6 @@ fn removal_range(text: &str, range: TextRange) -> TextRange {
     )
 }
 
-/// The `@` + joined directive name span (`@if-unknown` spans the `@` through
-/// `unknown`), for rewrites that replace the directive keyword.
 fn directive_name_range(directive: &syntax::SyntaxNode) -> Option<(String, TextRange)> {
     let name = directive_name(directive)?;
     let at = directive
@@ -1278,8 +1149,6 @@ fn directive_name_range(directive: &syntax::SyntaxNode) -> Option<(String, TextR
     Some((name, TextRange::new(start, end)))
 }
 
-/// Goto type definition: when the expression under the cursor has a named
-/// (nominal or alias) type, the `@type`/`@alias` declaration of that name.
 pub fn type_definition(
     db: &dyn Db,
     files: ProjectFiles,
@@ -1312,32 +1181,21 @@ pub fn type_definition(
 pub enum DocumentSymbolKind {
     Function,
     Value,
-    /// A `#: @type` declaration.
     TypeDefinition,
-    /// A `#: @alias` declaration.
     AliasDefinition,
-    /// Declared by `setClass`.
     S4Class,
-    /// Declared by `setGeneric`.
     S4Generic,
-    /// Declared by `setMethod`; the signature classes render as the detail.
     S4Method,
-    /// An `R6Class(...)` definition; its members are the children.
     R6Class,
-    /// A function-valued `public`/`private` R6 member.
     R6Method,
     /// A non-function R6 member, or an `active` binding.
     R6Field,
 }
 
-/// One outline entry: the whole construct's range plus the name's own range
-/// (the editor highlights the selection range when jumping).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentSymbol {
     pub name: String,
     pub kind: DocumentSymbolKind,
-    /// `fn(parameters)` for functions, the `@type`/`@alias` spelling for
-    /// type declarations, the signature classes for S4 methods.
     pub detail: Option<String>,
     pub range: TextRange,
     pub selection: TextRange,
@@ -1345,10 +1203,7 @@ pub struct DocumentSymbol {
     pub children: Vec<DocumentSymbol>,
 }
 
-/// Document symbols: the file's named top-level definitions (S4/R6
-/// declarations recognized structurally, R6 members as children) plus its
-/// `@type`/`@alias` declarations (invisible to the item tree — they live in
-/// `#:` comments), in source order.
+/// Includes `@type`/`@alias` declarations, which live in `#:` comments outside the item tree.
 pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
     for &item in item_tree(db, file) {
@@ -1361,10 +1216,8 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                 let Some(name) = item.name(db).clone() else {
                     continue;
                 };
-                // A registration-call item (`setGeneric("name", ...)` is a
-                // named Function item without an assignment) presents as its
-                // S4 construct, selecting the string name like the bare
-                // statement form always did.
+                // A registration call (`setGeneric("name", ...)`) is a named item without an
+                // assignment; it selects the string name.
                 if node.kind() == syntax::SyntaxKind::CALL_EXPR {
                     let Some(construct) = classify_symbol_call(&node) else {
                         continue;
@@ -1383,9 +1236,8 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                     continue;
                 }
                 let selection = item_name_range(db, item).unwrap_or(range);
-                // An assigned S4/R6 construction (the call is the assigned
-                // value, a direct child of the assignment) keeps the assigned
-                // name but takes the construct's kind, detail, and members.
+                // An assigned S4/R6 construction keeps the assigned name but takes the
+                // construct's kind, detail, and members.
                 let construct = node
                     .children()
                     .find(|child| child.kind() == syntax::SyntaxKind::CALL_EXPR)
@@ -1409,8 +1261,6 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                     children,
                 });
             }
-            // A bare `setClass(...)`-style statement names itself through its
-            // string argument.
             ItemKind::Statement => {
                 if node.kind() != syntax::SyntaxKind::CALL_EXPR {
                     continue;
@@ -1472,9 +1322,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
     symbols
 }
 
-/// A recognized S4/R6 construction call's outline contribution. `name` is
-/// the construct's own string-literal name (with its selection range) for
-/// bare statements; assigned constructions keep the assigned name instead.
+/// `name` is used only for bare statements; assigned constructions keep the assigned name.
 struct SymbolCall {
     kind: DocumentSymbolKind,
     name: Option<(String, TextRange)>,
@@ -1532,9 +1380,6 @@ fn classify_symbol_call(call: &syntax::SyntaxNode) -> Option<SymbolCall> {
     }
 }
 
-/// The members of an `R6Class` call's `public`/`private`/`active` lists:
-/// function values are methods (fields for `active` bindings), everything
-/// else a field.
 fn r6_members(arguments: &syntax::SyntaxNode) -> Vec<DocumentSymbol> {
     let mut members = Vec::new();
     for (field, position) in [("public", 1), ("private", 2), ("active", 3)] {
@@ -1588,7 +1433,6 @@ fn r6_members(arguments: &syntax::SyntaxNode) -> Vec<DocumentSymbol> {
     members
 }
 
-/// `fn(parameter, ...)` from the first function definition inside `node`.
 fn function_detail(node: &syntax::SyntaxNode) -> Option<String> {
     let function = if node.kind() == syntax::SyntaxKind::FUNCTION_DEF {
         node.clone()
@@ -1618,7 +1462,7 @@ fn function_detail(node: &syntax::SyntaxNode) -> Option<String> {
     Some(format!("fn({})", names.join(", ")))
 }
 
-/// The content text and range (inside the quotes) of a string-literal node.
+/// The content and range inside the quotes of a string-literal node.
 fn string_argument_content(node: Option<syntax::SyntaxNode>) -> Option<(String, TextRange)> {
     let token = node?
         .children_with_tokens()
@@ -1642,7 +1486,6 @@ fn string_argument_content(node: Option<syntax::SyntaxNode>) -> Option<(String, 
     ))
 }
 
-/// One workspace-symbol match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSymbol {
     pub name: String,
@@ -1650,9 +1493,6 @@ pub struct WorkspaceSymbol {
     pub target: NavigationTarget,
 }
 
-/// Workspace symbols: every file's named definitions (R6 members included)
-/// matched and ranked by the shared smart-case matcher, capped like
-/// completion.
 pub fn workspace_symbols(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<WorkspaceSymbol> {
     let mut symbols: Vec<(MatchScore, WorkspaceSymbol)> = Vec::new();
     for &file in files.files(db) {
@@ -1685,21 +1525,13 @@ pub fn workspace_symbols(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<W
     symbols.into_iter().map(|(_, symbol)| symbol).collect()
 }
 
-// ---- annotation type names ----
-
-/// A type-name token under the cursor inside a `#:` annotation.
 struct AnnotationTypeCursor {
     name: String,
     range: TextRange,
-    /// Whether the token can resolve to a project `@type`/`@alias`
-    /// declaration: binder-shadowed names, binder declarations, and `fn`
-    /// cannot — they still hover, showing themselves.
+    /// Binder names, binder declarations, and `fn` hover as themselves but navigate nowhere.
     navigable: bool,
 }
 
-/// The type-name token at the cursor: a `TYPE_REF`'s identifier, a
-/// `TYPE_APPLY`'s name, the declared name of an `@type`/`@alias` directive,
-/// a `<T>` binder name, or the `fn` keyword of a function type.
 fn annotation_type_at(
     db: &dyn Db,
     file: SourceFile,
@@ -1740,12 +1572,9 @@ fn annotation_type_at(
                 }),
                 true,
             ),
-            // Structural keywords (`fn`, `list`, a `<T>` binder) hover as
-            // themselves.
             Some(other) if type_kind(other) => (true, false),
             _ => (false, false),
         },
-        // `NULL` and other bare tokens directly inside a type node.
         other if type_kind(other) => (true, false),
         _ => (false, false),
     };
@@ -1760,30 +1589,23 @@ fn annotation_type_at(
     })
 }
 
-// ---- S4 navigation ----
-//
-// S4 class/generic/method names are written as string literals inside
-// `setClass` / `setGeneric` / `setMethod` / `new` calls, invisible to the
-// naming analysis, so they are recovered structurally from the tree — one
-// recognizer shared by goto-definition, references, and rename.
+// S4 names are string literals inside `setClass`/`setGeneric`/`setMethod`/`new` calls, invisible
+// to naming analysis, so they are recovered structurally.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum S4Kind {
-    /// Declared by `setClass`, referenced by `setMethod` signatures and `new`.
     Class,
-    /// Declared by `setGeneric`, referenced by `setMethod`'s function name.
     Generic,
 }
 
 struct S4Occurrence {
     name: String,
     kind: S4Kind,
-    /// The string CONTENT range (inside the quotes), absolute.
+    /// The content range inside the quotes, absolute.
     range: TextRange,
     is_declaration: bool,
 }
 
-/// Every S4 name occurrence in one file, in tree order.
 fn s4_occurrences_in(db: &dyn Db, file: SourceFile) -> Vec<S4Occurrence> {
     let parse = semantics::parse(db, file);
     let mut occurrences = Vec::new();
@@ -1814,8 +1636,7 @@ fn s4_occurrences_in(db: &dyn Db, file: SourceFile) -> Vec<S4Occurrence> {
                 true,
                 &mut occurrences,
             ),
-            // The generic's body dispatches by name; a rename that skipped
-            // it would leave the generic calling a generic that is gone.
+            // The generic's body dispatches by name, so a rename must cover it.
             "standardGeneric" => push_s4_string(
                 s4_argument(&arguments, "f", 0),
                 S4Kind::Generic,
@@ -1829,7 +1650,6 @@ fn s4_occurrences_in(db: &dyn Db, file: SourceFile) -> Vec<S4Occurrence> {
                     false,
                     &mut occurrences,
                 );
-                // The signature is a class name or a `c(...)` of class names.
                 if let Some(signature) = s4_argument(&arguments, "signature", 1) {
                     for class_string in s4_signature_strings(&signature) {
                         push_s4_string(Some(class_string), S4Kind::Class, false, &mut occurrences);
@@ -1848,7 +1668,6 @@ fn s4_occurrences_in(db: &dyn Db, file: SourceFile) -> Vec<S4Occurrence> {
     occurrences
 }
 
-/// The bare callee name of a call: `f(...)` or `pkg::f(...)`.
 fn s4_callee_name(call: &syntax::SyntaxNode) -> Option<String> {
     let callee = call.children().next()?;
     match callee.kind() {
@@ -1862,8 +1681,7 @@ fn s4_callee_name(call: &syntax::SyntaxNode) -> Option<String> {
     }
 }
 
-/// Resolves a call argument's value by name, falling back to the positional
-/// slot at `index` when unnamed — R's own argument-matching shape.
+/// By name, else the unnamed argument at `index`.
 fn s4_argument(
     arguments: &syntax::SyntaxNode,
     name: &str,
@@ -1886,8 +1704,7 @@ fn s4_argument(
     }
     all.get(index)
         .filter(|argument| {
-            // Positional: no `name =` tag. A NAME child followed by EQ is
-            // the tag; a bare NAME child is the value itself.
+            // A NAME child followed by EQ is a `name =` tag; a bare NAME child is the value.
             !argument
                 .children_with_tokens()
                 .any(|element| element.kind() == syntax::SyntaxKind::EQ)
@@ -1895,9 +1712,6 @@ fn s4_argument(
         .and_then(|argument| argument.children().next())
 }
 
-/// The class-name strings of a `setMethod` signature: a single string, or
-/// the string elements of a `c(...)`, `list(...)` or `signature(...)` call,
-/// named (`x = "Person"`) or not.
 fn s4_signature_strings(signature: &syntax::SyntaxNode) -> Vec<syntax::SyntaxNode> {
     if is_string_literal(signature) {
         return vec![signature.clone()];
@@ -1930,7 +1744,7 @@ fn push_s4_string(
     is_declaration: bool,
     out: &mut Vec<S4Occurrence>,
 ) {
-    // The content between plain quotes; raw strings never carry S4 names.
+    // Raw strings never carry S4 names.
     let Some((name, range)) = string_argument_content(node) else {
         return;
     };
@@ -1942,7 +1756,6 @@ fn push_s4_string(
     });
 }
 
-/// Whether a node kind belongs to the annotation type grammar.
 fn type_kind(kind: syntax::SyntaxKind) -> bool {
     matches!(
         kind,
@@ -1962,8 +1775,6 @@ fn type_kind(kind: syntax::SyntaxKind) -> bool {
     )
 }
 
-/// The directive's joined name (`type`, `alias`, `if-unknown`, …): adjacent
-/// name-ish tokens right after the `@`.
 fn directive_name(directive: &syntax::SyntaxNode) -> Option<String> {
     let mut name = String::new();
     let mut end: Option<TextSize> = None;
@@ -1976,8 +1787,7 @@ fn directive_name(directive: &syntax::SyntaxNode) -> Option<String> {
                 end = Some(token.text_range().end());
             }
             syntax::SyntaxKind::WHITESPACE | syntax::SyntaxKind::NEWLINE => break,
-            // Only tokens touching the previous one join the name
-            // (`@if-unknown` lexes as `if` `-` `unknown`).
+            // Only touching tokens join: `@if-unknown` lexes as `if` `-` `unknown`.
             _ if end.is_some() && Some(token.text_range().start()) == end => {
                 name.push_str(token.text());
                 end = Some(token.text_range().end());
@@ -1988,7 +1798,6 @@ fn directive_name(directive: &syntax::SyntaxNode) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// The `<T>` binder names declared anywhere in one annotation region.
 fn binder_names(annotation: &syntax::SyntaxNode) -> Vec<String> {
     annotation
         .descendants()
@@ -2008,10 +1817,8 @@ fn annotation_type_hover(
     file: SourceFile,
     cursor: &AnnotationTypeCursor,
 ) -> Option<Hover> {
-    // Resolve against the file's own declarations (matching how the
-    // checker's winner table folds files). A builtin or undeclared name has
-    // no definition to expand — show the name itself, confirming what the
-    // cursor is on.
+    // Resolves against the file's own declarations, matching how the checker's winner table
+    // folds files.
     let definition = cursor
         .navigable
         .then(|| {
@@ -2043,9 +1850,6 @@ fn annotation_type_hover(
         }
         None => cursor.name.clone(),
     };
-    // A name the project does not declare but the stub corpus does (a
-    // nominal like `data.table`) hovers with its declaring package and the
-    // declaration site, mirroring the expression path's stub summaries.
     let stub_definition = if !project_declared && cursor.navigable {
         semantics::stubs::stubs(db)
             .is_some_and(|library| library.nominals.contains(&cursor.name))
@@ -2069,9 +1873,7 @@ fn annotation_type_hover(
     })
 }
 
-/// The declaration summary for a cursor anywhere inside an `@type`/`@alias`
-/// declaration (the `@`, the keyword, the braces), spanning the
-/// declaration's own lines — a stitched block may hold several.
+/// The hover range spans only the declaration's own lines: a stitched block may hold several.
 fn annotation_definition_hover(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<Hover> {
     let parse = semantics::parse(db, file);
     let root = parse.syntax_node();
@@ -2084,7 +1886,6 @@ fn annotation_definition_hover(db: &dyn Db, file: SourceFile, offset: TextSize) 
         node.kind() == syntax::SyntaxKind::ANNOTATION_DIRECTIVE
             && matches!(directive_name(node).as_deref(), Some("type" | "alias"))
     }) {
-        // The declaration's display range starts at its line's `#:` marker.
         let start = annotation
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
@@ -2116,9 +1917,6 @@ fn annotation_definition_hover(db: &dyn Db, file: SourceFile, offset: TextSize) 
     None
 }
 
-/// Every occurrence of a type name across the project's annotations:
-/// declarations (`@type`/`@alias` names) and uses (`TYPE_REF` identifiers,
-/// `TYPE_APPLY` names), skipping annotations where a binder shadows it.
 fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Occurrence> {
     let mut result = Vec::new();
     for &file in files.files(db) {
@@ -2185,8 +1983,6 @@ fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Oc
     result
 }
 
-/// Record-field completion inside the string of `x[["…"]]`: the subscripted
-/// value's typed fields matched against the content typed before the cursor.
 fn string_subscript_completion(
     db: &dyn Db,
     file: SourceFile,
@@ -2222,7 +2018,6 @@ fn string_subscript_completion(
         return None;
     };
 
-    // The query is the content typed before the cursor, past the open quote.
     let text = string_token.text();
     let typed = usize::from(offset - string_token.text_range().start());
     let query = text.get(1..typed).unwrap_or_default();
@@ -2243,8 +2038,6 @@ fn string_subscript_completion(
     finish_completions(items, query)
 }
 
-/// Type-name completion inside a `#:` annotation: the primitive vocabulary
-/// plus the project's `@type`/`@alias` declarations.
 fn annotation_completion(
     db: &dyn Db,
     files: ProjectFiles,
@@ -2277,8 +2070,7 @@ fn annotation_completion(
             });
         }
     }
-    // The project table covers package files only; a script's own
-    // declarations complete too.
+    // The project table covers package files only, so a script's own declarations are added.
     let mut definitions: Vec<(String, semantics::annotations::NamedDefinition<'_>)> =
         semantics::project_type_definitions(db, files)
             .iter()
@@ -2307,8 +2099,6 @@ fn annotation_completion(
     finish_completions(items, query)
 }
 
-// ---- completion internals ----
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CompletionContext {
     Default,
@@ -2320,18 +2110,12 @@ enum CompletionContext {
     Namespace {
         package: String,
     },
-    /// A bare trailing `:` — the range operator or half a `::`; undecided,
-    /// so stay silent.
+    /// A bare trailing `:`, either the range operator or half a `::`; stays silent.
     MaybeNamespace,
 }
 
-/// The completion context and query: the identifier chars immediately before
-/// the cursor, and the operator (if any) they follow. Works on raw text so
-/// completion still fires mid-edit inside broken code.
-/// Whether a binding defined at `binding_start` is in scope at `cursor`,
-/// by R's function-granular scoping: the binding's innermost enclosing
-/// `FUNCTION_DEF` must contain the cursor (a binding outside any function is
-/// item-visible).
+/// R scoping is function-granular: a binding is visible only where its innermost enclosing
+/// `FUNCTION_DEF` contains the cursor, so sibling closures' locals do not leak.
 fn binding_visible_at(
     item_node: &syntax::SyntaxNode,
     binding_start: TextSize,
@@ -2357,6 +2141,7 @@ fn binding_visible_at(
     }
 }
 
+/// Works on raw text so completion still fires mid-edit inside broken code.
 fn completion_context(text: &str, offset: TextSize) -> Option<(CompletionContext, String)> {
     let at = usize::from(offset).min(text.len());
     let line_start = text[..at].rfind('\n').map_or(0, |index| index + 1);
@@ -2377,8 +2162,7 @@ fn completion_context(text: &str, offset: TextSize) -> Option<(CompletionContext
                 current_word_start = index;
             }
             query.push(character);
-            // A name after a single `:` is the range operator's operand
-            // (`1:n`), not a pending namespace access.
+            // A name after a single `:` is a range operand (`1:n`), not a pending `::`.
             if context == CompletionContext::MaybeNamespace {
                 context = CompletionContext::Default;
             }
@@ -2413,8 +2197,7 @@ fn completion_context(text: &str, offset: TextSize) -> Option<(CompletionContext
     Some((context, query))
 }
 
-/// Names spelled after the given extract operator anywhere in the project —
-/// the syntactic fallback shared by `@` completion and untyped `$` targets.
+/// The syntactic fallback shared by `@` completion and untyped `$` targets.
 fn spelled_completions(
     db: &dyn Db,
     files: ProjectFiles,
@@ -2429,8 +2212,7 @@ fn spelled_completions(
             if node.kind() != kind {
                 continue;
             }
-            // The rhs name: the LAST name child (the lhs is a child
-            // expression node, so a bare NAME child is the field).
+            // The lhs is an expression node, so the last bare NAME child is the field.
             if let Some(name) = node
                 .children()
                 .filter(|child| child.kind() == syntax::SyntaxKind::NAME)
@@ -2454,9 +2236,6 @@ fn spelled_completions(
         .collect()
 }
 
-/// `$` completion: the record fields of the target's checked type, falling
-/// back to every `$name` spelled in the project when the target's type gives
-/// no fields.
 fn dollar_completions(
     db: &dyn Db,
     files: ProjectFiles,
@@ -2468,8 +2247,6 @@ fn dollar_completions(
         let position = position_in_item(db, file, offset)?;
         let hir = item_hir(db, position.item).as_ref()?;
         let check = item_check(db, position.item)?;
-        // The innermost field access containing the cursor; its target's
-        // record fields are the candidates.
         let target = hir
             .expressions
             .iter()
@@ -2494,8 +2271,7 @@ fn dollar_completions(
             fields
                 .iter()
                 .map(|field| {
-                    // A non-syntactic field name is only insertable after `$`
-                    // in its backtick-quoted spelling.
+                    // A non-syntactic field name is insertable after `$` only backtick-quoted.
                     let name = field.name.text(db);
                     let label = if syntax::is_syntactic_name(name) {
                         name.to_owned()
@@ -2527,8 +2303,6 @@ fn dollar_completions(
     }
 }
 
-/// `pkg::` completion: the namespace's declared exports when the stub corpus
-/// knows the package, otherwise every name spelled after `::` in the project.
 fn namespace_completions(
     db: &dyn Db,
     files: ProjectFiles,
@@ -2555,9 +2329,7 @@ fn namespace_completions(
                         ),
                         None => (CompletionKind::Variable, None, None),
                     };
-                // A non-syntactic export (a replacement function, an
-                // operator) is only referable after `::` in its
-                // backtick-quoted spelling.
+                // A non-syntactic export is referable after `::` only backtick-quoted.
                 let label = if syntax::is_syntactic_name(name) {
                     name.clone()
                 } else {
@@ -2585,8 +2357,6 @@ fn namespace_completions(
     )
 }
 
-/// Dedupe by label, rank by match quality then source/label, cap at
-/// `COMPLETION_LIMIT`.
 fn finish_completions(items: Vec<CompletionItem>, query: &str) -> Option<CompletionResult> {
     let mut seen = std::collections::BTreeSet::new();
     let mut deduplicated = Vec::new();
@@ -2619,8 +2389,6 @@ fn finish_completions(items: Vec<CompletionItem>, query: &str) -> Option<Complet
     })
 }
 
-// ---- search matching (shared by completion and symbol search) ----
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MatchScore {
     tier: u8,
@@ -2632,14 +2400,12 @@ const TIER_PREFIX: u8 = 1;
 const TIER_SUBSTRING: u8 = 2;
 const TIER_SUBSEQUENCE: u8 = 3;
 
-/// Shortest query matched as a subsequence; shorter queries fall back to
-/// prefix matching so one- or two-character inputs do not surface scattered,
-/// low-signal matches (mirrors rust-analyzer).
+/// Shorter queries match by prefix only, so one- or two-character inputs do not surface
+/// scattered matches.
 const MIN_SUBSEQUENCE_QUERY_LEN: usize = 3;
 
-/// Subsequence matching with smart case: every query character must appear
-/// in the candidate in order; case-insensitive unless the query contains an
-/// uppercase character. An empty query matches everything.
+/// Smart case: case-insensitive unless the query has an uppercase character. An empty query
+/// matches everything.
 pub fn search_match(candidate: &str, query: &str) -> Option<MatchScore> {
     if query.is_empty() {
         return Some(MatchScore {
@@ -2720,11 +2486,8 @@ fn substring_under_case(candidate: &str, query: &str, case_sensitive: bool) -> b
     }
 }
 
-// ---- signature help internals ----
-
-/// The signature label with each parameter's byte span. `...` renders at its
-/// formal position (after the variadic's preceding named parameters), so
-/// span indexes line up with `active_parameter`'s display translation.
+/// `...` renders at its formal position, so span indexes line up with `active_parameter`'s
+/// display translation.
 fn render_signature<'db>(
     db: &'db dyn Db,
     renderer: &mut TypeRenderer<'db>,
@@ -2764,9 +2527,8 @@ fn render_signature<'db>(
     (label, parameters)
 }
 
-/// The rendered parameter the cursor's argument targets. Matching works in
-/// slot space — positionals, then named, the rest slot last — and translates
-/// to the display order, which interleaves `...` at its formal position.
+/// Matching works in slot space (positionals, named, rest last) and translates to display order,
+/// which interleaves `...` at its formal position.
 fn active_parameter(
     db: &dyn Db,
     function: &FunctionType<'_>,
@@ -2813,8 +2575,8 @@ fn active_parameter(
             .map(|(slot, _)| slot)
     };
 
-    // Every argument ending before the cursor is complete; the cursor sits on
-    // the next one (possibly not written yet, right after a comma).
+    // Arguments ending before the cursor are complete; the cursor sits on the next, possibly
+    // unwritten, one.
     let cursor_index = arguments
         .iter()
         .filter(|argument| {
@@ -2827,8 +2589,7 @@ fn active_parameter(
     let mut consumed = vec![false; matchable_count];
     for argument in arguments.iter().take(cursor_index) {
         match &argument.name {
-            // A name matching no parameter is a named-argument error (named
-            // arguments are never routed into `...`); it consumes no slot.
+            // Named arguments are never routed into `...`, so an unmatched name consumes no slot.
             Some(name) => {
                 if let Some(slot) = slot_for_name(name) {
                     consumed[slot] = true;
@@ -2842,8 +2603,7 @@ fn active_parameter(
         }
     }
 
-    // The cursor's own named argument targets the parameter it names; a name
-    // matching no declared parameter is absorbed by `...`.
+    // The cursor's own named argument targets the parameter it names, else `...`.
     let named_target = arguments
         .get(cursor_index)
         .and_then(|argument| argument.name.as_deref())
@@ -2859,12 +2619,8 @@ fn active_parameter(
     )
 }
 
-// ---- inlay hint internals ----
-
-/// Variables are presentable only when the hinted type is a function AT THE
-/// TOP — the label generalizes them into binder names. A variable anywhere
-/// else (including inside a function nested in a union) would render an
-/// unanchored type parameter, so those types show nothing.
+/// Variables are presentable only under a top-level function type, whose label generalizes them
+/// into binders; anywhere else they would render as unanchored type parameters.
 fn scheme_is_hintable(db: &dyn Db, scheme: &TypeScheme<'_>) -> bool {
     is_hintable(
         db,
@@ -2873,9 +2629,6 @@ fn scheme_is_hintable(db: &dyn Db, scheme: &TypeScheme<'_>) -> bool {
     )
 }
 
-/// Whether every leaf of the type is presentable in a hint.
-/// `variables_allowed` is true only under a function type, whose variables
-/// the label generalizes into binder names.
 fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
     match ty.kind(db) {
         TyKind::Unknown => false,
@@ -2915,22 +2668,13 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
     }
 }
 
-// ---- the occurrence engine ----
-
-/// What the cursor's name resolves to.
+/// `StubGlobal` names are declared only by the stubs: navigable, but references stay empty and
+/// rename refuses.
 enum Target<'db> {
-    /// A variable slot inside one item (a local, parameter, or loop
-    /// variable).
     Slot { item: Item<'db>, binding: BindingId },
-    /// A project-defined global name: a top-level definition read across
-    /// items and files.
     Global(String),
-    /// A `@type`/`@alias` name inside `#:` annotations.
     TypeName(String),
-    /// A name only the stub corpus declares: navigable into the corpus, but
-    /// with no project occurrences (references stay empty, rename refuses).
     StubGlobal(String),
-    /// An S4 class or generic named in a string literal.
     S4 { name: String, kind: S4Kind },
 }
 
@@ -2941,8 +2685,6 @@ fn target_at<'db>(
     offset: TextSize,
 ) -> Option<Target<'db>> {
     if let Some(cursor) = annotation_type_at(db, file, offset) {
-        // Primitive type names have no declaration to navigate to; project
-        // `@type`/`@alias` declarations and stub-declared nominals do.
         let declared = cursor.navigable
             && (type_name_occurrences(db, files, &cursor.name)
                 .iter()
@@ -2958,8 +2700,8 @@ fn target_at<'db>(
     if let Some(expression) = position.expression_at() {
         if let Some(binding) = naming.resolutions.get(&expression) {
             let info = naming.bindings.get(binding)?;
-            // The item's own top-level binding IS the global: cross-item
-            // reads resolve to the name, not the slot.
+            // Cross-item reads resolve to the name, so the item's own top-level binding is the
+            // global.
             if info.kind == BindingKind::TopLevel {
                 return Some(Target::Global(info.name.clone()));
             }
@@ -2968,18 +2710,13 @@ fn target_at<'db>(
                 binding: *binding,
             });
         }
-        // A quiet read (data masking, an opaque operator) resolves like any
-        // cross-item read for navigation — only the unresolved diagnostic is
-        // withheld for it.
+        // A quiet read (data masking, an opaque operator) navigates like any cross-item read;
+        // only its diagnostic is withheld.
         if let Some(name) = naming
             .non_locals
             .get(&expression)
             .or_else(|| naming.quiet_reads.get(&expression))
         {
-            // Project-defined names have occurrences to offer; a name only
-            // the stub corpus declares navigates into the corpus (goto only —
-            // no occurrences, so references stay empty and rename refuses).
-            // Unresolved names resolve nowhere.
             if global_declaration_exists(db, files, name) {
                 return Some(Target::Global(name.clone()));
             }
@@ -2989,10 +2726,8 @@ fn target_at<'db>(
         }
     }
 
-    // S4 class/generic names live in string literals, invisible to naming.
-    // A generic the project defines is also an ordinary global function —
-    // `setGeneric` binds its name and every call reads it — so its strings
-    // and its calls are one symbol.
+    // A generic the project defines is also an ordinary global function (`setGeneric` binds its
+    // name), so its strings and its calls are one symbol.
     if let Some(occurrence) = s4_occurrences_in(db, file)
         .into_iter()
         .find(|occurrence| occurrence.range.start() <= offset && offset <= occurrence.range.end())
@@ -3008,18 +2743,9 @@ fn target_at<'db>(
         });
     }
 
-    // The cursor sits on a declared name that the expression walk could not
-    // answer for: a parameter or for-loop variable, which is a declaration
-    // with no expression of its own, or a name whose neighbour won the
-    // end-inclusive ranking — where two siblings abut, the expression ENDING
-    // at the cursor is ranked ahead of the declaration STARTING there, and for
-    // an unresolved neighbour it has nothing to offer. Reaching a declaration
-    // from its own first character is what keeps goto-definition reciprocal
-    // with references: a jump lands exactly there.
-    //
-    // Smallest range first (then binding id) so an item whose recovery left
-    // two declarations overlapping still answers deterministically rather than
-    // by hash order.
+    // Parameters and loop variables have no expression, and where siblings abut, the expression
+    // ending at the cursor outranks the declaration starting there; finding the declaration here
+    // keeps goto-definition reciprocal with references. Smallest range first for determinism.
     let (binding, info) = naming
         .bindings
         .iter()
@@ -3036,14 +2762,13 @@ fn target_at<'db>(
     })
 }
 
-/// Whether any item declares `name` as a top-level slot — named definitions
-/// and conditional writes (a `for`-body assignment at the top level) alike,
-/// matching the occurrence walk's notion of a declaration.
+/// Counts conditional top-level writes too, matching the occurrence walk's notion of a
+/// declaration.
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
     files.files(db).iter().any(|file| {
         item_tree(db, *file).iter().copied().any(|item| {
-            // A named definition declares its name even where naming mints no
-            // slot for it: `setGeneric("name", …)` binds through a string.
+            // A named definition declares its name even without a slot: `setGeneric("name", …)`
+            // binds through a string.
             (matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
                 && item.name(db).as_deref() == Some(name))
                 || item_naming(db, item).as_ref().is_some_and(|naming| {
@@ -3095,8 +2820,6 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         }
         Target::Global(name) => {
             for &file in files.files(db) {
-                // A generic's name strings: `setGeneric` declares the global,
-                // `setMethod` refers to it.
                 for occurrence in s4_occurrences_in(db, file) {
                     if occurrence.kind == S4Kind::Generic && occurrence.name == *name {
                         result.push(Occurrence {
@@ -3111,8 +2834,6 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                         continue;
                     };
                     let item_offset = node.text_range().start();
-                    // The defining item's own top-level slot carries the
-                    // declaration target and any internal (recursive) reads.
                     if let Some(naming) = item_naming(db, item) {
                         for (id, info) in &naming.bindings {
                             if info.kind == BindingKind::TopLevel && info.name == *name {
@@ -3131,9 +2852,6 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                                 );
                             }
                         }
-                        // Reads that resolve outside the item — quiet
-                        // (masked, opaque-operator) reads included: the
-                        // global's uses from other definitions.
                         if let Some(hir) = item_hir(db, item) {
                             for (expression, non_local) in
                                 naming.non_locals.iter().chain(&naming.quiet_reads)
@@ -3163,10 +2881,8 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
     result
 }
 
-/// Feeds every occurrence of one slot inside its item to `emit`: the
-/// binding's own site (parameters and loop variables are not expressions, so
-/// resolutions alone would miss their declaration), then every resolved read
-/// and assignment target.
+/// Parameters and loop variables are not expressions, so their declaration site is emitted
+/// explicitly.
 fn slot_occurrences(
     db: &dyn Db,
     item: Item<'_>,
@@ -3206,8 +2922,6 @@ fn slot_occurrences(
     }
 }
 
-/// The set of expressions that are assignment targets — the write sites a
-/// slot counts as declarations.
 fn assignment_targets(hir: &semantics::hir::Module) -> std::collections::BTreeSet<ExprId> {
     let mut targets = std::collections::BTreeSet::new();
     for expression in &hir.expressions {
@@ -3218,9 +2932,6 @@ fn assignment_targets(hir: &semantics::hir::Module) -> std::collections::BTreeSe
     targets
 }
 
-// ---- positions ----
-
-/// The cursor's item and the item-relative cursor offset.
 struct PositionedItem<'db> {
     db: &'db dyn Db,
     item: Item<'db>,
@@ -3229,9 +2940,8 @@ struct PositionedItem<'db> {
 }
 
 impl PositionedItem<'_> {
-    /// The HIR expressions whose range contains the cursor, smallest first —
-    /// end-inclusive, so a cursor sitting immediately after a name still hits
-    /// it (the editor convention). Name references win ties.
+    /// Smallest first and end-inclusive, so a cursor right after a name still hits it; name
+    /// references win ties.
     fn expressions_at(&self) -> Vec<ExprId> {
         let Some(hir) = item_hir(self.db, self.item) else {
             return Vec::new();
@@ -3253,16 +2963,14 @@ impl PositionedItem<'_> {
         containing.into_iter().map(|(_, _, id)| id).collect()
     }
 
-    /// The smallest containing expression.
     fn expression_at(&self) -> Option<ExprId> {
         self.expressions_at().into_iter().next()
     }
 }
 
 fn position_in_item(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<PositionedItem<'_>> {
-    // Strict containment wins; a cursor sitting exactly on an item's end
-    // offset (typing at the end of the last statement) still belongs to it,
-    // unless the next item starts there.
+    // A cursor exactly at an item's end (typing after its last token) belongs to it unless the
+    // next item starts there.
     let mut touching: Option<PositionedItem<'_>> = None;
     for &item in item_tree(db, file) {
         let Some(node) = item_node(db, item) else {

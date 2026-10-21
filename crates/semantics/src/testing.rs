@@ -1,10 +1,5 @@
-//! Test support shared across crates and the coverage-guided `fuzz/` target.
-//!
-//! The fuzz invariant battery, so the contract has one home. On every input:
-//! never panic (salsa fixpoints converge), deterministic rendering across
-//! fresh databases, in-bounds diagnostic and lint ranges, and incremental
-//! equivalence — editing through the salsa setter equals a fresh database on
-//! the edited text, and editing back restores the original output.
+//! Shared test support, including the fuzz invariant battery: no panics, deterministic output
+//! across fresh databases, in-bounds ranges, and incremental equivalence with a fresh build.
 
 use crate::diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics};
 use crate::lints::{LintConfig, LintLevel, NameStyle, lint_file};
@@ -16,10 +11,8 @@ use salsa::Setter as _;
 use salsa::plumbing::AsId as _;
 use std::sync::{Arc, Mutex};
 
-/// One canonical rendering of everything the pipeline produces for a file:
-/// exported schemes, diagnostics (typing and strict), and every lint under
-/// an everything-on configuration — so the determinism and incremental
-/// invariants cover the lint layer too. Asserts range geometry inline.
+/// Renders schemes, diagnostics, and every lint (all enabled) for a file, asserting each range
+/// stays within the file.
 pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
     let mut output = String::new();
     for &item in item_tree(db, file) {
@@ -76,7 +69,6 @@ fn fresh_output(source: &str, kind: DocumentKind) -> String {
     render_semantics(&db, file)
 }
 
-/// The full battery for one (source, edit) pair under one document kind.
 pub fn check_semantics_invariants(source: &str, edited_source: &str, kind: DocumentKind) {
     let first = fresh_output(source, kind);
 
@@ -85,11 +77,7 @@ pub fn check_semantics_invariants(source: &str, edited_source: &str, kind: Docum
     let file = SourceFile::new(&db, source.to_owned(), kind);
     ProjectFiles::new(&db, vec![file]);
     let before = render_semantics(&db, file);
-    // This IS the determinism check: `before` and `first` come from two
-    // independently built databases. A third build only bought a second
-    // comparison of the same pair, and each one costs a full re-parse of the
-    // shipped stubs (~113 ms against ~1.4 ms for the rest of a round), which is
-    // where this battery spends nearly all of its time.
+    // `first` comes from an independent database, so this comparison is the determinism check.
     assert_eq!(
         before, first,
         "non-deterministic pipeline output across fresh databases for:\n{source}"
@@ -109,9 +97,8 @@ pub fn check_semantics_invariants(source: &str, edited_source: &str, kind: Docum
     );
 }
 
-/// Single-input entry for the coverage-guided target: the document kind and
-/// the edited variant derive deterministically from the input bytes, so one
-/// byte stream exercises the whole battery including the incremental arm.
+/// Derives the document kind and the edit from the input bytes, so one byte stream drives the
+/// whole battery.
 pub fn check_semantics_input(input: &str) {
     let hash = input.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3)
@@ -121,8 +108,6 @@ pub fn check_semantics_input(input: &str) {
     } else {
         DocumentKind::Package
     };
-    // The edit truncates at a hash-derived char boundary and continues with
-    // a small live statement, driving the splice cache and re-validation.
     let cut = input.floor_char_boundary((hash as usize >> 8) % (input.len() + 1));
     let edited = format!("{}\nprobe <- 1L\n", &input[..cut]);
     check_semantics_invariants(input, &edited, kind);
@@ -133,11 +118,8 @@ std::thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Runs `render` over a project of `files`, on a database the calling thread
-/// reuses across fixture cases. Parsing the shipped stub corpus costs far more
-/// than checking a typical case, so a case swaps the project's files rather
-/// than building a fresh database; the setter path is the one the incremental
-/// invariants above prove equivalent to a fresh database.
+/// Reuses one database per thread across cases, because parsing the shipped stubs costs far more
+/// than checking a case.
 pub fn with_fixture_project<R>(
     files: Vec<(String, DocumentKind)>,
     render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
@@ -164,8 +146,7 @@ pub fn with_fixture_project<R>(
     })
 }
 
-/// A database that logs every query execution, for asserting what an edit
-/// re-runs.
+/// Logs every query execution, for asserting what an edit re-runs.
 #[salsa::db]
 #[derive(Clone)]
 pub struct ProbeDatabase {
@@ -203,7 +184,6 @@ impl Db for ProbeDatabase {
 }
 
 impl ProbeDatabase {
-    /// A package project of one file per source.
     pub fn project(&self, sources: &[&str]) -> Vec<SourceFile> {
         let files: Vec<SourceFile> = sources
             .iter()
@@ -217,8 +197,7 @@ impl ProbeDatabase {
         file.set_text(self).to(text.into());
     }
 
-    /// The sorted names of the project's items whose `item_check` ran since
-    /// the last call.
+    /// Names of the items whose `item_check` ran since the previous call; drains the log.
     pub fn checked_since(&self) -> Vec<String> {
         let executed = std::mem::take(&mut *self.executed.lock().expect("probe log"));
         let mut names: Vec<String> = ProjectFiles::get(self)

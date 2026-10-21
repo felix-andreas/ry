@@ -1,12 +1,6 @@
-//! Lossless R syntax: a hand-written lexer and recursive-descent parser producing
-//! rowan green/red trees.
-//!
-//! Every byte of the input — including whitespace, comments, and `#:` type
-//! annotations — lives in the tree and reprints exactly (`syntax_node().text()`
-//! equals the input). Annotations are lexed as structured trivia and parsed into
-//! first-class nodes with real spans. Every parse yields a tree; malformed input
-//! produces `ERROR` nodes local to the break plus `SyntaxError`s with precise
-//! ranges.
+//! Lossless R syntax trees: every byte, including trivia and `#:` annotations,
+//! reprints exactly, and malformed input still yields a tree with local `ERROR`
+//! nodes.
 
 pub mod ast;
 pub mod kind;
@@ -23,7 +17,6 @@ pub use kind::SyntaxKind;
 pub use lexer::{Token, is_syntactic_name, lex};
 pub use rowan::{TextRange, TextSize};
 
-/// The rowan language tag for R.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RLanguage {}
 
@@ -36,7 +29,7 @@ impl rowan::Language for RLanguage {
             "invalid syntax kind {}",
             raw.0
         );
-        // Sound: `SyntaxKind` is `repr(u16)` with dense discriminants `0..=ERROR`,
+        // SAFETY: `SyntaxKind` is `repr(u16)` with dense discriminants `0..=ERROR`,
         // and the bound was just checked.
         unsafe { std::mem::transmute::<u16, SyntaxKind>(raw.0) }
     }
@@ -51,15 +44,12 @@ pub type SyntaxToken = rowan::SyntaxToken<RLanguage>;
 pub type SyntaxElement = rowan::SyntaxElement<RLanguage>;
 pub type SyntaxNodeChildren = rowan::SyntaxNodeChildren<RLanguage>;
 
-/// A parse-time diagnostic with a precise source range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxError {
     pub message: String,
     pub range: TextRange,
-    /// Raised by the `#:` annotation type grammar rather than the R grammar.
-    /// Consumers that treat annotation problems more leniently (the formatter
-    /// preserves the block verbatim instead of refusing the file) key on this
-    /// instead of guessing from positions.
+    /// Raised by the `#:` annotation grammar; the formatter keys on this to keep
+    /// the block verbatim instead of refusing the file.
     pub in_annotation: bool,
 }
 
@@ -73,10 +63,6 @@ impl SyntaxError {
     }
 }
 
-/// The result of parsing: a green tree plus its syntax errors.
-///
-/// Cheap to clone; the green tree is the position-independent, structurally
-/// shared representation downstream layers key their early cutoffs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parse {
     green: rowan::GreenNode,
@@ -85,9 +71,7 @@ pub struct Parse {
 
 impl Parse {
     pub fn new(green: rowan::GreenNode, mut errors: Vec<SyntaxError>) -> Parse {
-        // Canonical position order (stable: discovery order breaks ties), so
-        // error lists compare structurally regardless of which pipeline —
-        // lexer vs parser, from-scratch vs splice-reparse — produced them.
+        // Canonical order, so a splice reparse compares equal to a full parse.
         errors.sort_by_key(|error| (error.range.start(), error.range.end()));
         Parse {
             green,
@@ -107,12 +91,10 @@ impl Parse {
         &self.errors
     }
 
-    /// The exact source text the tree reprints to.
     pub fn text(&self) -> String {
         self.syntax_node().text().to_string()
     }
 
-    /// Debug rendering of the tree (and errors), used by golden tests.
     pub fn debug_dump(&self) -> String {
         let mut out = String::new();
         dump_node(&mut out, &self.syntax_node(), 0);
@@ -128,16 +110,12 @@ impl Parse {
     }
 }
 
-/// Parse R source text into a lossless syntax tree.
 pub fn parse(text: &str) -> Parse {
     parser::parse(text)
 }
 
-/// Statement-splice incremental reparse: reuse `old`'s untouched top-level
-/// subtrees (shared by pointer) and reparse only the edited region. `deleted`
-/// is the replaced range in the OLD text, `inserted` the replacement's length
-/// in `new_text`. Falls back to a full parse whenever no clean statement
-/// anchor exists; the result is always equal to `parse(new_text)`.
+/// `deleted` is a range in `old`'s text and `inserted` the replacement's length
+/// in `new_text`; the result always equals `parse(new_text)`.
 pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSize) -> Parse {
     reparse::reparse(old, new_text, deleted, inserted)
 }

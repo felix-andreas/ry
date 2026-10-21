@@ -1,11 +1,5 @@
-//! Lowering `#:` annotation syntax onto interned types.
-//!
-//! The parser already produced first-class `TYPE_*` nodes with real spans;
-//! this module turns them into `Ty`/`TypeScheme` values. Explicit `<T>`
-//! binders lower to rigid (skolem) types that refuse to bind while the
-//! annotated definition's body is checked and generalize back out afterwards.
-//! Lowering is total: malformed pieces lower to `Unknown` (their syntax errors
-//! already mark them), so annotations never cascade.
+//! Lowering is total: malformed pieces lower to `Unknown` (their syntax errors already mark
+//! them), so annotations never cascade.
 
 use crate::Db;
 use crate::types::{
@@ -15,55 +9,34 @@ use crate::types::{
 use syntax::ast::AstNode as _;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
-/// One lowered annotation region.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Annotation<'db> {
-    /// The declared type of the annotated definition: a compact type, or the
-    /// assembly of `@forall` / `@param` / `@return` directives.
     pub declared: Option<TypeScheme<'db>>,
-    /// Named parameter types by name (from `fn(name: T)` or `@param`), for
-    /// name-aware matching against the definition's formals.
+    /// Named parameter types, for name-aware matching against the definition's formals.
     pub parameter_names: Vec<(String, Ty<'db>, bool)>,
-    /// `@type` / `@alias` definitions carried by this annotation.
     pub definitions: Vec<NamedDefinition<'db>>,
-    /// Each definition's declaring directive range, parallel to
-    /// `definitions` — kept out of `NamedDefinition` so the interface maps
-    /// built from definitions stay position-independent.
+    /// Parallel to `definitions`; kept out of `NamedDefinition` so interface maps built from
+    /// definitions stay position-independent.
     pub definition_sites: Vec<TextRange>,
-    /// `@new Name` / `@new Name<ARGS>` — the annotated value checks against
-    /// the nominal's representation and the binding takes the nominal type.
-    /// The range is the referenced type's, for diagnostics about the name.
+    /// `@new Name<ARGS>`, with the range of the referenced type.
     pub new_nominal: Option<(Name<'db>, Vec<Ty<'db>>, TextRange)>,
-    /// A `#: @strict` / `#: @strict off` toggle.
     pub strict: Option<bool>,
     /// `@trust TYPE` — the declared type applies unchecked.
     pub trusted: bool,
-    /// `@if-unknown TYPE` — the declared type applies only where the checker
-    /// has nothing better than `Unknown`; using it on a value whose type is
-    /// already known is an error, so a stale annotation cannot hide.
+    /// `@if-unknown TYPE`: applies only where the checker has nothing better than `Unknown`.
     pub if_unknown: bool,
-    /// Annotation-shape violations: form mixing, directive ordering,
-    /// duplicate or unknown type parameters, a non-nominal `@new` payload,
-    /// nesting beyond the parse cap. A violating block carries no typing
-    /// payload — only its errors — so a broken annotation never cascades.
+    /// Shape violations. A block with any carries no typing payload, so it never cascades.
     pub errors: Vec<(String, TextRange)>,
-    /// Typing-gated violations (reported only when type checking is on):
-    /// today the check-depth cap. Like `errors`, these strip the payload.
+    /// Violations reported only when type checking is on; like `errors`, they strip the payload.
     pub typing_errors: Vec<(String, TextRange)>,
-    /// Every `[]` / `[named]` vector type lowered, as (element type, vector
-    /// node range): vectors hold atomic elements only, but whether a named
-    /// element resolves to an atomic alias needs the project vocabulary, so
-    /// the judgment lives with the diagnostics, not the lowering.
+    /// Judged by the diagnostics, not here: whether a named element resolves to an atomic alias
+    /// needs the project vocabulary.
     pub vector_elements: Vec<(Ty<'db>, TextRange)>,
-    /// Generic applications (`Name<ARGS>`) the block lowers, as (name,
-    /// argument count, name-token range): the vocabulary-side arity check
-    /// lives with the diagnostics, like the vector-element rule.
+    /// `(name, argument count, range)`; the arity check against the vocabulary lives with the
+    /// diagnostics.
     pub applied_references: Vec<(String, usize, TextRange)>,
-    /// Every named-type reference the block lowers (`TyKind::Named` mints),
-    /// with the referencing token's range: primitives and in-scope binders
-    /// are excluded here already, so an entry is exactly a name that must
-    /// resolve through the project's `@type`/`@alias` declarations or the
-    /// stub corpus's nominal vocabulary.
+    /// Excludes primitives and in-scope binders, so each entry must resolve through project
+    /// declarations or the stubs.
     pub nominal_references: Vec<(String, TextRange)>,
     pub range: TextRange,
 }
@@ -77,7 +50,6 @@ pub struct NamedDefinition<'db> {
     pub body: Ty<'db>,
 }
 
-/// Lower one `ANNOTATION` node.
 pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'db> {
     debug_assert_eq!(node.kind(), SyntaxKind::ANNOTATION);
     let mut lowering = Lowering {
@@ -96,8 +68,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
         range: node.text_range(),
         ..Annotation::default()
     };
-    // A refused block carries no typing payload, so a broken annotation never
-    // produces follow-on findings.
     match block_refusal(node) {
         Some(BlockRefusal::FormMixing(message)) => {
             annotation
@@ -109,7 +79,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
         None => {}
     }
 
-    // Expanded-form accumulation.
     let mut forall: Vec<(Name<'db>, Constraint)> = Vec::new();
     let mut params: Vec<(String, Ty<'db>, bool)> = Vec::new();
     let mut rest: Option<Ty<'db>> = None;
@@ -251,7 +220,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                             });
                         }
                     }
-                    // Unknown directives carry no typing payload at this layer.
                     _ => {}
                 }
             }
@@ -276,7 +244,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 }
             }
             kind if is_type_kind(kind) => {
-                // Compact form: the annotation IS the declared type.
                 lowering.definition_type = true;
                 let body = lowering.lower_type(&child);
                 lowering.definition_type = false;
@@ -307,10 +274,8 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             node.text_range(),
         ));
     }
-    // A violating block keeps only its errors: applying half-understood
-    // typing payload would cascade follow-on findings from one mistake. The
-    // type names it declares stay declared, with `Unknown` bodies, or every
-    // use of one would add an unknown-type finding to the one already made.
+    // Declared type names stay declared, with `Unknown` bodies, or every use of one would add an
+    // unknown-type finding to the one already made.
     if !lowering.errors.is_empty() || !annotation.typing_errors.is_empty() {
         let definitions = annotation
             .definitions
@@ -330,15 +295,13 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
         };
     }
 
-    // Assemble the expanded form into a function scheme when directives
-    // declared one and no compact type did.
     annotation.nominal_references = std::mem::take(&mut lowering.nominal_references);
     annotation.applied_references = std::mem::take(&mut lowering.applied_references);
     annotation.vector_elements = std::mem::take(&mut lowering.vector_elements);
 
     if saw_expanded && annotation.declared.is_none() && (!params.is_empty() || ret.is_some()) {
-        // An annotation states the parameter's type, never its default: the
-        // default lives in the definition, which this may not have in view.
+        // An annotation states a parameter's type, never its default: the default lives in the
+        // definition, which may not be in view.
         let named: Vec<Parameter<'db>> = params
             .iter()
             .map(|(name, ty, optional)| Parameter {
@@ -367,10 +330,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
     annotation
 }
 
-/// The three annotation block forms. A block must commit to one: `@type` /
-/// `@alias` definitions, the expanded directives (`@forall` / `@param` /
-/// `@return`), or a single compact annotation (a type, optionally behind
-/// `@trust` / `@new` / `@if-unknown`).
+/// A `#:` block must commit to exactly one form.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockForm {
     Compact,
@@ -378,47 +338,26 @@ enum BlockForm {
     Definition,
 }
 
-/// Why a `#:` block carries no typing payload, from [`block_refusal`].
 pub enum BlockRefusal {
-    /// Two `#:` lines in the block commit to different forms; the wording tells
-    /// the reader which separation to make.
     FormMixing(&'static str),
-    /// A line did not parse as the form it committed to. Silent: the parser has
-    /// already said what was wrong, and a second opinion from here would be
-    /// guessing at a block nobody could read.
+    /// Silent: the parser already reported what was wrong.
     Unparsed,
 }
 
-/// Checks the block's `#:` lines against the form-mixing rules.
-///
-/// **One `#:` line commits to one form, and only whole lines are compared.**
-/// The rules are about lines — every refusal here tells the reader to separate
-/// something with a blank line — and a line's form is the form of the first
-/// item on it.
-///
-/// A line carrying a *second* form item did not parse as the form it committed
-/// to: recovery re-parents the pieces of a type it could not read to the block,
-/// so `#: fn(f: <T> fn(T) -> T) -> integer` leaves three top-level types
-/// behind, and `#: @param count integer` leaves the unbraced type beside the
-/// directive. Reading those as separate block items claimed "only one compact
-/// annotation fits in a `#:` block" against a block holding exactly one, and
-/// prescribed a blank line that would not have helped.
+/// A line's form is that of its first item, and only whole lines are compared. A line with a
+/// second item failed to parse (recovery re-parents an unreadable type's pieces to the block), so
+/// it is `Unparsed`, not form mixing.
 pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
-    // The parser wraps a region it refused in `ERROR`, so the block has no
-    // trustworthy payload — a refused higher-rank binder, for instance, leaves
-    // its type parameters with nothing to bind them, and reporting each as an
-    // unknown type would blame the author twice for one mistake.
+    // A refused region has no trustworthy payload: a refused binder, for instance, leaves type
+    // parameters unbound, which would be blamed a second time as unknown types.
     if node
         .descendants()
         .any(|descendant| descendant.kind() == SyntaxKind::ERROR)
     {
         return Some(BlockRefusal::Unparsed);
     }
-    // Each `#:` keeps its own marker token, so the markers are the line
-    // boundaries. They are collected from every token in the block, not just
-    // its direct children: a stitched line's marker lands inside whatever node
-    // was still open across the break, so `#: fn(x: integer) -> integer` /
-    // `#: @return {integer}` keeps its second marker inside the function type.
+    // Markers come from all descendant tokens, not just direct children: a line continuing a
+    // still-open node puts its marker inside that node.
     let markers: Vec<syntax::TextSize> = node
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
@@ -429,8 +368,7 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
 
     let mut previous: Option<BlockForm> = None;
     let mut current: Option<(usize, BlockForm)> = None;
-    // A `<T, U>` binder list is a prefix of the compact type that follows it,
-    // not an item of its own, so the pair is one item on its line.
+    // A `<T, U>` binder list prefixes the compact type after it, so the pair is one item.
     let mut awaiting_bound_type = false;
     for child in node.children() {
         let line = line_of(child.text_range().start());
@@ -498,8 +436,7 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
     )
 }
 
-/// The joined directive name: adjacent IDENT/keyword/`-` tokens right after
-/// the `@` (`@if-unknown` lexes as `if` `-` `unknown`).
+/// Joins adjacent tokens after `@`: `@if-unknown` lexes as `if` `-` `unknown`.
 fn directive_name(node: &SyntaxNode) -> String {
     let mut name = String::new();
     let mut cursor: Option<rowan::TextSize> = None;
@@ -525,37 +462,23 @@ fn directive_name(node: &SyntaxNode) -> String {
     name
 }
 
-/// The recursion ceiling past which a declared type is refused for checking,
-/// and the deeper ceiling past which the annotation shape itself is refused.
-/// The split mirrors how the two refusals gate: the shape refusal always
-/// reports, the check refusal only when type checking is on.
+// Past the check limit a type is refused only when type checking is on; past the parse limit the
+// annotation shape itself is refused.
 const CHECK_DEPTH_LIMIT: usize = 128;
 const PARSE_DEPTH_LIMIT: usize = 160;
 
 struct Lowering<'db> {
     db: &'db dyn Db,
-    /// In-scope rigid binder names.
     binders: Vec<Name<'db>>,
-    /// Named-type references minted so far, with the referencing token's
-    /// range (see [`Annotation::nominal_references`]).
     nominal_references: Vec<(String, TextRange)>,
-    /// Generic applications (see [`Annotation::applied_references`]).
     applied_references: Vec<(String, usize, TextRange)>,
-    /// Shape violations found while lowering (see [`Annotation::errors`]).
     errors: Vec<(String, TextRange)>,
-    /// Vector element types with their vector node's range (see
-    /// [`Annotation::vector_elements`]).
     vector_elements: Vec<(Ty<'db>, TextRange)>,
     depth: usize,
     beyond_check_depth: bool,
     beyond_parse_depth: bool,
-    /// Lowering the annotated definition's own checked declared type (the
-    /// compact form): only there an elided `->` on the OUTERMOST function type
-    /// means "inferred from the body". Everywhere else — a nested function
-    /// type, `@param`/`@return` payloads, `@type`/`@alias` bodies, and the
-    /// `@trust`/`@if-unknown` coercions, which adopt the written type without
-    /// consulting the body — an elided return means `NULL`, R's default for a
-    /// function that returns nothing declared.
+    /// Set while lowering the definition's own compact type, the only place an elided `->` on the
+    /// outermost function means "inferred from the body"; elsewhere it means `NULL`.
     definition_type: bool,
 }
 
@@ -564,8 +487,7 @@ impl<'db> Lowering<'db> {
         let mut names = node.children().filter(|c| c.kind() == SyntaxKind::NAME);
         let binder = names.next()?;
         let binder_name = syntax::ast::Name::cast(binder)?.text()?;
-        // A constraint may be spelled in several words (`scalar numeric`), so
-        // the whole remaining run of names is one spelling.
+        // A constraint may span several words (`scalar numeric`).
         let constraint_nodes: Vec<SyntaxNode> = names.collect();
         let constraint = match constraint_nodes.split_first() {
             Some((first, rest)) => {
@@ -588,9 +510,7 @@ impl<'db> Lowering<'db> {
                             }
                             _ => available.join(""),
                         };
-                        // The whole spelling is the mistake, so blame all of it
-                        // rather than only the word the reader happened to
-                        // write first.
+                        // Blame the whole spelling, not just its first word.
                         let blamed = rest.last().map_or(first.text_range(), |last| {
                             first.text_range().cover(last.text_range())
                         });
@@ -789,8 +709,6 @@ impl<'db> Lowering<'db> {
                     .and_then(syntax::ast::Name::cast)
                     .and_then(|name| name.text())
                     .unwrap_or_default();
-                // A type parameter is not a generic: applying arguments to
-                // it is a semantic error, not a reference to resolve.
                 if !name.is_empty() && self.binders.contains(&Name::new(self.db, name.clone())) {
                     self.errors.push((
                         format!("`{name}` is a type parameter here and takes no type arguments."),
@@ -923,9 +841,6 @@ impl<'db> Lowering<'db> {
             })
             .map(|ty| self.lower_type(&ty))
             .unwrap_or_else(|| {
-                // The definition's own outermost function type elides to
-                // "inferred from the body"; any other elided return means
-                // `NULL` (see the `definition_type` field).
                 if self.definition_type && self.depth == 1 {
                     unknown(self.db)
                 } else {

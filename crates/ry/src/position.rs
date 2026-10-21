@@ -1,27 +1,15 @@
-//! Line/column addressing over a document's text. Analysis speaks absolute
-//! byte offsets; the CLI renders 1-based line and **character**-column pairs,
-//! and the language server converts to the negotiated LSP encoding (UTF-16 code
-//! units or UTF-8 bytes) at the protocol edge — always against the target
-//! document's own text.
-//!
-//! A reported column is the one a person counts and an editor shows, so it
-//! counts characters: a byte column disagrees with both on any line containing
-//! non-ASCII text, which R source carries as soon as a string holds a name or a
-//! unit. Caret art is a separate question — a glyph can occupy two terminal
-//! cells — so the renderer pads by display width, not by either column unit.
+//! Reported columns count characters, not bytes, so they match what an editor
+//! shows; LSP encodings are converted at the protocol edge.
 
 use syntax::TextSize;
 
-/// Newline table for one document: offset ↔ line/column in O(log lines).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineIndex {
-    /// Byte offset of each line's first byte; index 0 is always 0.
     line_starts: Vec<u32>,
     text_len: u32,
 }
 
-/// A zero-based line paired with a zero-based column in some unit (bytes,
-/// characters, or UTF-16 code units, per the function that produced it).
+/// Zero-based; the column unit depends on the producing function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineColumn {
     pub line: u32,
@@ -46,13 +34,12 @@ impl LineIndex {
         self.line_starts.len() as u32
     }
 
-    /// The byte offset of `line`'s first byte, clamped to the last line.
+    /// Clamps `line` to the last line.
     pub fn line_start(&self, line: u32) -> u32 {
         let line = (line as usize).min(self.line_starts.len() - 1);
         self.line_starts[line]
     }
 
-    /// The byte length of `line`, excluding its terminator.
     pub fn line_length(&self, line: u32, text: &str) -> u32 {
         let start = self.line_start(line);
         let end = self
@@ -64,7 +51,7 @@ impl LineIndex {
         line_text.trim_end_matches(['\n', '\r']).len() as u32
     }
 
-    /// Zero-based line and byte column of a byte offset (clamped to the text).
+    /// Byte column; `offset` is clamped to the text.
     pub fn line_column(&self, offset: TextSize) -> LineColumn {
         let offset = u32::from(offset).min(self.text_len);
         let line = self
@@ -77,8 +64,6 @@ impl LineIndex {
         }
     }
 
-    /// Zero-based line and **character** column of a byte offset — what the CLI
-    /// reports and what an editor's status bar shows.
     pub fn line_column_chars(&self, offset: TextSize, text: &str) -> LineColumn {
         let position = self.line_column(offset);
         let start = self.line_starts[position.line as usize] as usize;
@@ -90,7 +75,6 @@ impl LineIndex {
         }
     }
 
-    /// Zero-based line and UTF-16 column of a byte offset.
     pub fn line_column_utf16(&self, offset: TextSize, text: &str) -> LineColumn {
         let position = self.line_column(offset);
         let start = self.line_starts[position.line as usize] as usize;
@@ -104,12 +88,11 @@ impl LineIndex {
         }
     }
 
-    /// The byte offset of a zero-based line and byte column, both clamped.
+    /// Line and byte column are both clamped.
     pub fn offset(&self, position: LineColumn, text: &str) -> TextSize {
         let line = position.line.min(self.line_count() - 1);
         let start = self.line_start(line);
         let column = position.column.min(self.line_length(line, text));
-        // Never split a UTF-8 sequence: back up to the previous boundary.
         let mut offset = (start + column) as usize;
         while offset > 0 && !text.is_char_boundary(offset) {
             offset -= 1;
@@ -117,7 +100,7 @@ impl LineIndex {
         TextSize::from(offset as u32)
     }
 
-    /// The byte offset of a zero-based line and UTF-16 column, both clamped.
+    /// Line and UTF-16 column are both clamped.
     pub fn offset_utf16(&self, position: LineColumn, text: &str) -> TextSize {
         let line = position.line.min(self.line_count() - 1);
         let start = self.line_start(line) as usize;
@@ -149,8 +132,6 @@ mod tests {
 
     #[test]
     fn character_columns_ignore_utf8_width() {
-        // The reported column of `=` on `x <- "café" ; y = 2L` is what a person
-        // counts, not how many bytes precede it.
         let text = "x <- \"café\" ; y = 2L\n";
         let index = LineIndex::new(text);
         let equals = TextSize::from(text.find("= 2L").expect("the assignment is there") as u32);

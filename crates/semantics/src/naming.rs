@@ -1,27 +1,6 @@
-//! Naming: the R variable model — mutable slots with reaching-write flow.
-//!
-//! Every `<-`/`=` of a name in a frame resolves to one `BindingId` slot (R
-//! assignment mutates the scope's environment); `<<-` walks the lexical chain
-//! to the nearest enclosing slot. A read resolves to a slot only when a write
-//! can reach it — an unassignable slot does not shadow, so lookup falls
-//! outward exactly like R's runtime — and is flagged maybe-undefined when an
-//! unassigned path also reaches. The unused check reports **assignment sites**
-//! whose write no read reaches. Control flow forks and joins per-slot
-//! reaching-write sets; loop bodies iterate to a fixed point with binding
-//! creation made idempotent by site (re-walks mint no new ids) and effects
-//! recorded only on the final pass. `switch` is control flow too, despite
-//! being spelled as a call: exactly one alternative runs, so its branches fork
-//! and join like an `if`'s arms rather than executing in sequence.
-//!
-//! Data-masked evaluation (NSE) is recognized structurally: a `[` carrying an
-//! unambiguous data.table signature masks its index arguments (recorded in
-//! `masked_subsets`), and the base masking family (`with`, `within`,
-//! `subset`, `transform`) masks every argument after the data. Masked reads
-//! that resolve keep their ordinary resolution; ones that do not stay quiet —
-//! column references are not unresolved names.
-//!
-//! Deferred (structure already carries them): the nested-loop region memo and
-//! the unused-parameter lint.
+//! The R variable model: mutable slots with reaching-write flow. A read resolves to a
+//! slot only when a write can reach it; an unassignable slot does not shadow, so lookup
+//! falls outward exactly like R's runtime.
 
 use crate::hir::{
     Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, UnaryOperator,
@@ -37,39 +16,30 @@ pub struct BindingId(pub u32);
 pub struct BindingInfo {
     pub id: BindingId,
     pub name: String,
-    /// The first write's site — the slot's definition site for hover/goto.
+    /// The first write's site.
     pub range: TextRange,
     pub kind: BindingKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingKind {
-    /// The item's own top-level binding (package-visible; never unused).
     TopLevel,
-    /// A variable slot in a function or block scope.
     Local,
-    /// A function parameter's slot (the parameter itself is never reported).
     Parameter,
-    /// A `for (v in …)` loop variable (often intentionally unused).
     ForVariable,
 }
 
-/// What a read found: the slot it resolved to, and whether an unassigned path
-/// also reaches it.
 struct SlotRead {
     slot: BindingId,
     maybe_undefined: bool,
 }
 
-/// A dead store: an assignment whose written value no read reaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnusedAssignment {
     pub name: String,
     pub range: TextRange,
 }
 
-/// A qualified `pkg::name` / `pkg:::name` read, recorded for validation
-/// against the stub corpus's per-namespace exports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceRead {
     pub internal: bool,
@@ -77,86 +47,51 @@ pub struct NamespaceRead {
     pub name: Option<String>,
 }
 
-/// The naming facts of one item, item-relative like all HIR spans.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemNaming {
     pub bindings: BTreeMap<BindingId, BindingInfo>,
-    /// Reads and assignment targets resolved to their slot.
     pub resolutions: BTreeMap<ExprId, BindingId>,
-    /// Reads an unassigned path can reach.
     pub maybe_undefined: BTreeSet<ExprId>,
-    /// Reads no lexical slot resolves — package globals, stubs, or unresolved.
     pub non_locals: BTreeMap<ExprId, String>,
-    /// The subset of `non_locals` read from inside a nested function: the
-    /// read happens when the function is *called*, after the enclosing frame
-    /// finished executing.
+    /// The subset of `non_locals` read inside a nested function, which runs when called.
     pub deferred_non_locals: BTreeSet<ExprId>,
-    /// Reads no lexical slot resolves that sit in a quiet context (data
-    /// masking, an unsupported operator's operands): never reported as
-    /// unresolved, but a read all the same — a masked expression falls back
-    /// to enclosing bindings at runtime, so these keep cross-item bindings
-    /// alive for the unused check.
+    /// Unresolved reads in a quiet context (data masking, opaque operators): never reported,
+    /// but they keep cross-item bindings alive, since masked code falls back to enclosing ones.
     pub quiet_reads: BTreeMap<ExprId, String>,
-    /// The subset of `quiet_reads` read from inside a nested function.
     pub deferred_quiet_reads: BTreeSet<ExprId>,
-    /// Names read as `%…%` operators (`a %||% b`). R calls a function of that
-    /// name, so the read keeps the project's own operator definition alive.
-    /// Held by name rather than by expression id, because the operator is a
-    /// token and not a `NameRef` node; quiet like the other opaque-construct
-    /// reads, so an undeclared operator is never reported unresolved.
+    /// `%op%` names read as operators; by name because the operator is a token, not a `NameRef`.
     pub quiet_operator_reads: BTreeSet<String>,
-    /// Dead stores (surfaced only when the unused check is enabled).
     pub unused_assignments: Vec<UnusedAssignment>,
-    /// Parameters no read resolves to (`...` excluded), for the default-off
-    /// unused-parameter lint: R signatures legitimately carry ignored formals
-    /// (an S3 method must match its generic), so a project opts in.
     pub unused_parameters: Vec<UnusedAssignment>,
-    /// Names of the item's own top-level slots that some read within the item
-    /// resolved to (a loop reading its own carried variable, a capture). The
-    /// cross-item unused check seeds these definers as already used.
+    /// Own top-level slots read within the item; the cross-item unused check seeds them as used.
     pub used_top_level_names: BTreeSet<String>,
-    /// Slots read or super-assigned from inside a function nested below the
-    /// slot's frame: every write to them stays observable.
+    /// Slots read or super-assigned from a nested function: every write stays observable.
     pub captured_slots: BTreeSet<BindingId>,
-    /// `[` expressions recognized as data.table syntax: their indexes
-    /// evaluate in the data's frame, and the whole bracket types `Unknown`.
+    /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: BTreeSet<ExprId>,
-    /// Qualified reads, skipping quieted (opaque-construct) contexts.
+    /// Qualified reads outside quiet contexts.
     pub namespace_reads: BTreeMap<ExprId, NamespaceRead>,
-    /// Names written by `<<-` with no enclosing binding: R creates them in
-    /// the global environment, so they resolve package-wide.
+    /// `<<-` targets with no enclosing binding: R creates them in the global environment.
     pub super_globals: BTreeSet<String>,
-    /// Assignment targets R refuses to assign to — a computed value or a
-    /// number where a name belongs. R parses these and fails at run time
-    /// ("target of assignment expands to non-language object"), so nothing in
-    /// the parse marks them, and the reads inside such a target are suppressed:
-    /// they are the mistake's consequences, not findings of their own.
+    /// Targets R parses but refuses at run time (a computed value or a number); reads inside
+    /// them are suppressed as consequences of the mistake.
     pub invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidAssignmentTarget {
     pub range: TextRange,
-    /// For a computed target, the source between the two operands, which holds
-    /// the operator. A line break *after* the operator means the previous line
-    /// dangled and swallowed the next one — the commonest way to arrive here,
-    /// and worth naming in the message. Deciding that needs the source text,
-    /// which this pass does not have, so it carries the span instead.
+    /// The source between a computed target's operands; a line break after the operator
+    /// means the previous line dangled, which the message names.
     pub operand_gap: Option<TextRange>,
 }
 
-/// Resolve one item's HIR. The item's own top-level assignment target (if any)
-/// becomes a `TopLevel` binding; everything below follows the slot model.
 pub fn resolve_item(module: &Module) -> ItemNaming {
     resolve_item_with_masked_verbs(module, &FxHashMap::default())
 }
 
-/// Like [`resolve_item`], with the stub corpus's `@masked` verbs: a call to
-/// one of them (bare or `pkg::name`, unless locally shadowed) evaluates the
-/// arguments its `...` absorbs in the data's frame, so those reads stay
-/// quiet like the base masking family's. Each verb maps to the names of its
-/// formals declared before the `...` — the data arguments, which resolve
-/// normally by position or name; an empty list masks every argument.
+/// `masked_verbs` maps each stub `@masked` verb to its formals before `...` (the data
+/// arguments, resolved normally); the rest stay quiet. An empty list masks every argument.
 pub fn resolve_item_with_masked_verbs(
     module: &Module,
     masked_verbs: &FxHashMap<String, Vec<String>>,
@@ -188,20 +123,17 @@ pub fn resolve_item_with_masked_verbs(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScopeKind {
-    /// A function body's frame: executes when *called*, so cross-frame reads
-    /// from below are captures.
+    /// Executes when called, so cross-frame reads from below are captures.
     Function,
-    /// A `local({...})` block's environment: writes bind here and vanish with
-    /// it, but execution is immediate, so it is not a capture boundary.
+    /// `local({...})`: writes vanish with it, but it runs immediately, so it is no capture
+    /// boundary.
     Local,
-    /// The item's top level.
     TopLevel,
 }
 
 struct Scope {
-    /// Stable frame identity (per defining expression, so loop re-walks
-    /// reuse it): capture liveness marks writes of the SAME frame only — a
-    /// shadowed outer binding is not what the closure reads.
+    /// Stable per defining expression; capture liveness marks writes of this frame only,
+    /// since a shadowed outer binding is not what the closure reads.
     id: u32,
     kind: ScopeKind,
     slots: BTreeMap<String, BindingId>,
@@ -217,14 +149,12 @@ impl Scope {
     }
 }
 
-/// One element of a slot's reaching-write set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Reach {
-    /// Some path reaches here without any write.
     Unassigned,
     /// A write with no reportable site (parameter, for-variable).
     Implicit,
-    /// An assignment write, by index into `writes`.
+    /// Index into `Context::writes`.
     Assignment(u32),
 }
 
@@ -233,7 +163,6 @@ type FlowState = BTreeMap<BindingId, BTreeSet<Reach>>;
 struct AssignmentWrite {
     name: String,
     range: TextRange,
-    /// The written slot's owning frame (see [`Scope::id`]).
     scope: u32,
     used: bool,
     reportable: bool,
@@ -241,54 +170,32 @@ struct AssignmentWrite {
 
 struct Context<'a> {
     module: &'a Module,
-    /// Stub-declared `@masked` verbs (dplyr-style data-masking `...`),
-    /// mapped to the formal names declared before the `...` — the data
-    /// arguments, which resolve normally.
     masked_verbs: &'a FxHashMap<String, Vec<String>>,
     next_binding: u32,
     scopes: Vec<Scope>,
     /// Loop re-walks must mint no new ids: one binding per (site, name).
     bindings_by_site: FxHashMap<(u32, u32, String), BindingId>,
-    /// Frame ids per defining expression (the top level is 0); loop
-    /// re-walks reuse them like binding ids.
     scope_ids: FxHashMap<ExprId, u32>,
     flow: FlowState,
     writes: Vec<AssignmentWrite>,
     write_by_expression: FxHashMap<ExprId, u32>,
-    /// Parameter slots some read resolved to (like write `used` marking,
-    /// monotone and recorded on every walk).
     read_parameter_slots: BTreeSet<BindingId>,
-    /// Diagnostic-bearing sets are recorded only on a loop region's final walk
-    /// (used-marking is monotone and always on).
+    /// Diagnostic-bearing sets are recorded only on a loop region's final walk.
     emit: bool,
-    /// The reaching-write state at each `break` of the innermost loop being
-    /// walked. A loop that cannot be skipped exits only through these, so the
-    /// state after it is their join with the body's end state — joining the
-    /// loop *head* instead kept the first iteration's unassigned paths alive
-    /// past a loop that always assigns.
+    /// Flow state at each `break` of the innermost loop. A loop that cannot be skipped exits
+    /// only through these; joining the loop head would keep first-iteration paths alive.
     loop_exits: Vec<FlowState>,
-    /// Non-zero inside an unsupported operator's operands: reads resolve but
-    /// unresolved names stay quiet.
     quiet_depth: u32,
-    /// Non-zero while walking an expression R evaluates LATER than this line —
-    /// `on.exit`'s argument, which runs at function exit. A read inside it sees
-    /// the final value of the names it mentions, so it keeps every write of
-    /// those names alive.
+    /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
+    /// they keep every write of the name alive.
     deferred_depth: u32,
-    /// Non-zero inside a quoting form's argument (`quote`, `substitute`,
-    /// `bquote`, `expression`), which R never evaluates — so an assignment
-    /// written there binds NOTHING. Reads are still walked and kept alive,
-    /// because `eval` may run the expression later; only the binding is
-    /// withheld. Treating a quoted assignment as a binding hid real
-    /// `unresolved` findings: `quote(x <- 1)` followed by a read of `x` is an
-    /// `object 'x' not found` error in R and reported clean here.
+    /// Inside a quoting form (`quote`, `substitute`, `bquote`, `expression`): assignments bind
+    /// nothing, but reads are still walked because `eval` may run the expression later.
     quoted_depth: u32,
     naming: ItemNaming,
 }
 
 impl Context<'_> {
-    /// Stable per defining expression, so loop re-walks reuse the id (the
-    /// top-level frame is 0).
     fn stable_scope_id(&mut self, expression: ExprId) -> u32 {
         let next = self.scope_ids.len() as u32 + 1;
         *self.scope_ids.entry(expression).or_insert(next)
@@ -349,12 +256,8 @@ impl Context<'_> {
                 target,
                 value,
             } => {
-                // Value first: `x <- x + 1` reads the previous state. A
-                // replacement-form target instead resolves first — its base
-                // binds before the value is examined, so the value's reads
-                // of the same name land on the fresh binding
-                // (`self$i <- self$i + 1` reports `self` once, at the
-                // target).
+                // Value first: `x <- x + 1` reads the previous state. A replacement target goes
+                // first, so in `self$i <- self$i + 1` the value's reads land on the fresh binding.
                 let name_target = matches!(
                     self.module.expression(*target).kind,
                     ExpressionKind::NameRef(_)
@@ -380,29 +283,16 @@ impl Context<'_> {
                 rhs,
             } => {
                 use crate::hir::BinaryOperator;
-                // `a %op% b` calls a function named `%op%`, so the operator
-                // name is a read like any other — that is what keeps a
-                // project's own `%||%` from being reported unused. It is a
-                // QUIET read: the construct is opaque to the checker, so an
-                // undeclared operator is not a reportable unresolved name.
+                // `a %op% b` calls `%op%`: a quiet read that keeps a project definition alive.
                 if let Some(name) = special_name {
                     self.naming.quiet_operator_reads.insert(name.clone());
-                    // The set above is by name, which is what the cross-item
-                    // check for a package's own operator needs. A `%op%`
-                    // defined as a LOCAL slot needs the slot marked too, or its
-                    // definition reads as a dead store while the calls to it
-                    // sit right below.
+                    // A local `%op%` needs its slot marked too, or it reads as a dead store.
                     self.mark_slot_read(name);
                 }
                 match operator {
-                    // A formula quotes its operands: names inside are model
-                    // syntax, exactly like the unary form.
                     BinaryOperator::Tilde | BinaryOperator::Help => {}
-                    // Operands of operators the checker does not model
-                    // (`&`/`|`, `|>`, user `%op%`s) still resolve — the IDE
-                    // needs goto/references inside pipes — but a non-local
-                    // read there stays quiet: the construct is opaque, so an
-                    // unresolved name in it is not a reportable finding.
+                    // Operands of unmodeled operators still resolve (for IDE navigation), but
+                    // unresolved reads stay quiet: the construct is opaque to the checker.
                     BinaryOperator::And
                     | BinaryOperator::Or
                     | BinaryOperator::Pipe
@@ -420,12 +310,8 @@ impl Context<'_> {
             }
             ExpressionKind::Call { callee, arguments } => {
                 self.resolve(*callee);
-                // `library(pkg)` / `require(pkg)` / `help(topic)` quote a
-                // bare positional first argument: the name is the package or
-                // topic name, not a value reference. The rule is syntactic
-                // (a rebound `library` does not change it), and only the
-                // bare-name first-positional form quotes — a string, a named
-                // first argument, or a qualified callee is an ordinary call.
+                // `library(pkg)`, `require(pkg)` and `help(topic)` quote a bare first positional
+                // name. The rule is syntactic: a rebound `library` does not change it.
                 let quoting_callee = matches!(
                     &self.module.expression(*callee).kind,
                     ExpressionKind::NameRef(name) if matches!(name.as_str(), "library" | "require" | "help")
@@ -446,21 +332,8 @@ impl Context<'_> {
                     }
                     return;
                 }
-                // `on.exit(expr)` does not evaluate `expr` here — R stores it
-                // and runs it when the function returns, so it observes the
-                // LAST value of everything it reads, not the value at this
-                // line. Walking it as an ordinary argument made the canonical
-                // rollback guard a dead store:
-                //
-                //     committed <- FALSE
-                //     on.exit(if (!committed) rollback(con))
-                //     ...
-                //     committed <- TRUE          # "assigned but never used"
-                //
-                // and the obvious response to that warning — deleting the
-                // write — makes every transaction roll back. A read inside the
-                // deferred expression therefore keeps every write of that name
-                // in this frame alive, exactly as a closure capture does.
+                // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
+                // value and keep every write of those names alive.
                 let deferred_callee = matches!(
                     &self.module.expression(*callee).kind,
                     ExpressionKind::NameRef(name)
@@ -476,13 +349,7 @@ impl Context<'_> {
                     self.deferred_depth -= 1;
                     return;
                 }
-                // `switch` is control flow wearing a call's clothes: exactly
-                // one alternative runs, so its branches fork and join like the
-                // arms of an `if` rather than executing one after another.
-                // Walked as an ordinary call, the first branch's write looked
-                // dead the moment a later branch overwrote it — a false
-                // "assigned but never used" on a line that runs whenever its
-                // key is chosen.
+                // `switch` runs exactly one alternative: its branches fork and join like `if` arms.
                 let is_switch = matches!(
                     &self.module.expression(*callee).kind,
                     ExpressionKind::NameRef(name)
@@ -492,16 +359,9 @@ impl Context<'_> {
                     self.resolve_switch(arguments);
                     return;
                 }
-                // A quoting form builds an expression instead of running it,
-                // so nothing inside it binds. Verified against R: `quote`,
-                // `substitute`, `bquote` and `expression` all leave the name
-                // in `quote(x <- 1)` unbound. Reads are still walked, and
-                // walked as deferred, because `eval` may run the expression
-                // later — so a write the quoted code mentions stays alive
-                // rather than turning into a false "assigned but never used".
-                // The rule is syntactic, like the `library`/`on.exit` ones
-                // above: a locally defined function of the same name is an
-                // ordinary call.
+                // A quoting form binds nothing inside it. Reads are still walked, as deferred,
+                // because `eval` may run the expression later. A local function of that name is
+                // an ordinary call.
                 let quoting_form = matches!(
                     &self.module.expression(*callee).kind,
                     ExpressionKind::NameRef(name)
@@ -511,11 +371,7 @@ impl Context<'_> {
                         ) && !self.naming.resolutions.contains_key(callee)
                 );
                 if quoting_form {
-                    // Quiet as well: a name inside a quoted expression need not
-                    // exist yet — `quote(x <- 1)` is how metaprogramming names
-                    // a variable it is about to create — so an unresolved read
-                    // there is not a reportable finding, only the read of it
-                    // afterwards is.
+                    // Quiet too: a quoted name need not exist yet, as in `quote(x <- 1)`.
                     self.quoted_depth += 1;
                     self.deferred_depth += 1;
                     self.quiet_depth += 1;
@@ -525,12 +381,9 @@ impl Context<'_> {
                     self.quoted_depth -= 1;
                     return;
                 }
-                // A masking call evaluates the arguments its `...` absorbs
-                // inside the data's frame; arguments matching the declared
-                // data formals (by position or name) resolve normally. The
-                // base family takes one data argument (`data` for the
-                // `with` pair, `x` for `subset`/`transform`); a locally
-                // defined function of the same name masks nothing.
+                // A masking call evaluates its `...` arguments in the data's frame; arguments
+                // matching the data formals resolve normally. A local function of that name masks
+                // nothing.
                 let masking_family: Option<Vec<&str>> = match &self.module.expression(*callee).kind
                 {
                     ExpressionKind::NameRef(name)
@@ -539,10 +392,7 @@ impl Context<'_> {
                         base_masking_family(name)
                             .or_else(|| declared_masked_verb(self.masked_verbs, name))
                     }
-                    // Namespace access cannot be shadowed by a local binding.
-                    // The base family is recognized only under `base`, since
-                    // another package's `with` is its own function; a
-                    // stub-declared verb is matched by name, as it is bare.
+                    // Only `base::` names the base family; another package's `with` is its own.
                     ExpressionKind::Namespace {
                         package,
                         name: Some(name),
@@ -555,13 +405,8 @@ impl Context<'_> {
                     _ => None,
                 };
                 if let Some(leading) = masking_family {
-                    // R matches named arguments to formals first and fills the
-                    // rest positionally, so a positional argument takes the
-                    // next data formal no name has already claimed. Counting
-                    // positions without that skip made
-                    // `with(data = frame, column_a)` read `column_a` as the
-                    // data and evaluate it in the caller's frame, where a
-                    // column name is not defined.
+                    // R matches named arguments first and fills the rest positionally, so a
+                    // positional argument takes the next data formal no name has claimed.
                     let claimed_by_name = arguments
                         .iter()
                         .filter_map(|argument| argument.name.as_deref())
@@ -689,14 +534,9 @@ impl Context<'_> {
                 self.loop_body(*body, true);
             }
             ExpressionKind::Repeat { body } => {
-                // `repeat` runs at least once: the exit state applies without
-                // joining the never-entered path.
                 self.loop_body(*body, false);
             }
             ExpressionKind::Local { body } => {
-                // Reads fall through to enclosing scopes as ordinary reads
-                // and control flow runs straight through; only the bindings
-                // are scoped.
                 let scope_id = self.stable_scope_id(id);
                 self.scopes.push(Scope::new(ScopeKind::Local, scope_id));
                 self.premint_frame_assignments(*body);
@@ -711,17 +551,9 @@ impl Context<'_> {
         }
     }
 
-    /// `switch(EXPR, ...)` as the branch it is: the subject evaluates in the
-    /// caller's frame, then every alternative runs from the state the switch
-    /// was entered in, and their end states join.
-    ///
-    /// Whether a **default** exists decides what a read afterwards sees. R
-    /// takes a single unnamed alternative as the default; with named
-    /// alternatives only, an unmatched key runs nothing and returns invisible
-    /// `NULL`, so a name introduced in the branches is genuinely undefined on
-    /// that path — R says `object 'r' not found`. The all-unnamed form selects
-    /// positionally and can also match nothing, so it is treated as having no
-    /// default rather than guessing which argument was meant as one.
+    /// R takes a single unnamed alternative among named ones as the default; without one an
+    /// unmatched key runs nothing, so names bound in the branches may be undefined after.
+    /// The all-unnamed positional form can match nothing too, so it never has a default.
     fn resolve_switch(&mut self, arguments: &[Argument]) {
         let subject = arguments
             .iter()
@@ -754,15 +586,12 @@ impl Context<'_> {
         let entry = self.flow.clone();
         let mut joined: Option<FlowState> = None;
         for alternative in alternatives {
-            // `switch(k, a = , b = 2)` — an empty alternative falls through to
-            // the next one, so it contributes no writes of its own.
+            // `switch(k, a = , b = 2)`: an empty alternative falls through to the next.
             let Some(value) = alternative.value else {
                 continue;
             };
             self.flow = entry.clone();
             self.resolve(value);
-            // A branch that cannot fall through never reaches the code after
-            // the switch, so its state is not part of what follows.
             if diverges(self.module, value) {
                 continue;
             }
@@ -791,9 +620,6 @@ impl Context<'_> {
         }
     }
 
-    /// A `[` bracket carrying an unambiguous data.table signature: a `by =` /
-    /// `keyby =` argument, a `:=` column assignment, a `.()` list call, or a
-    /// `.SD`-family special anywhere in its index arguments.
     fn data_table_signature(&self, arguments: &[Argument]) -> bool {
         arguments.iter().any(|argument| {
             if matches!(argument.name.as_deref(), Some("by") | Some("keyby")) {
@@ -830,8 +656,7 @@ impl Context<'_> {
             {
                 true
             }
-            // Markers can sit anywhere inside the index expressions, but a
-            // nested function body is its own evaluation context.
+            // A nested function body is its own evaluation context.
             ExpressionKind::Function { .. } => false,
             _ => kind
                 .child_ids()
@@ -840,10 +665,8 @@ impl Context<'_> {
         }
     }
 
-    /// A loop body re-walks to a fixed point (the reach lattice is finite and
-    /// joins only grow); effects are recorded only on the converged final
-    /// pass. `may_skip` joins the never-entered path back in (`for`/`while`;
-    /// `repeat` runs at least once).
+    /// Re-walks to a fixed point (the reach lattice is finite and joins only grow), then
+    /// records effects on one final pass. `may_skip` joins the never-entered path back in.
     fn loop_body(&mut self, body: ExprId, may_skip: bool) {
         let entry = self.flow.clone();
         let saved_emit = self.emit;
@@ -858,30 +681,21 @@ impl Context<'_> {
             }
         }
         self.emit = saved_emit;
-        // Final pass over the converged state records diagnostics once — and
-        // is the only pass whose `break` states describe the converged loop.
+        // Only the final pass's `break` states describe the converged loop.
         self.loop_exits.clear();
         self.resolve(body);
         let breaks = std::mem::replace(&mut self.loop_exits, enclosing_exits);
 
-        // The loop is left either by falling off the end of the body or
-        // through a `break`, so the state after it is the join of those. A
-        // loop that may be skipped entirely can also be left at its head.
         for exit in &breaks {
             join_flow(&mut self.flow, exit);
         }
-        // A `repeat` with no `break` is never left normally (only `return` or
-        // a condition leaves it), so code after it is unreachable and the
-        // body-end state stands rather than a head state no read can see.
         if may_skip {
             join_flow(&mut self.flow, &entry);
         }
     }
 
-    /// Pre-mint slots for every direct assignment target (and `for` variable)
-    /// of a frame's body, so a closure defined earlier in the frame can
-    /// resolve a name written later — the closure runs after the frame has
-    /// executed. Nested function and `local()` bodies bind their own frames.
+    /// Pre-mints slots for the frame's direct assignment targets, so a closure defined earlier
+    /// can resolve a name written later: it runs after the frame has executed.
     fn premint_frame_assignments(&mut self, id: ExprId) {
         let kind = self.module.expression(id).kind.clone();
         match &kind {
@@ -937,16 +751,9 @@ impl Context<'_> {
             .insert(name.to_owned(), slot);
     }
 
-    /// The slot half of a read: find the name's slot and mark every write that
-    /// reaches it used. Separate from [`Self::resolve_read`] because a `%op%`
-    /// read has a name but no expression node of its own — the operator is a
-    /// token — so it can mark a slot used but has no id to resolve.
-    ///
-    /// A slot resolves when a write can reach the read, or when the read
-    /// crosses a function boundary (a capture: the closure runs after the
-    /// frame has executed, so every frame write is observable). An
-    /// unassignable slot does not shadow — the lookup falls outward, exactly
-    /// like R's runtime.
+    /// Separate from [`Self::resolve_read`] because a `%op%` read is a token with no expression
+    /// id. A slot resolves when a write reaches the read or the read crosses a function
+    /// boundary (a capture); an unassignable slot does not shadow.
     fn mark_slot_read(&mut self, name: &str) -> Option<SlotRead> {
         let function_depth = self.current_function_depth();
         let (depth, slot) = self
@@ -967,8 +774,6 @@ impl Context<'_> {
             }
             _ => {}
         }
-        // Mark every reaching write used; an unassigned reaching path makes the
-        // read maybe-undefined.
         let mut maybe_undefined = false;
         if let Some(reaches) = self.flow.get(&slot) {
             let reaches: Vec<Reach> = reaches.iter().copied().collect();
@@ -983,12 +788,8 @@ impl Context<'_> {
             }
         }
         if depth < self.current_function_depth() || self.deferred_depth > 0 {
-            // A read of an enclosing frame's slot from inside a function: a
-            // capture — every write of the name IN THAT FRAME stays observable
-            // (sequential rebindings are one runtime variable), so none of them
-            // is a dead store. A same-named binding in a DIFFERENT frame is not
-            // what this closure reads — a shadowed outer binding stays
-            // reportably dead.
+            // A capture keeps every write of the name in that frame observable; a same-named
+            // binding in a different frame is shadowed and stays reportably dead.
             self.naming.captured_slots.insert(slot);
             let frame = self.scopes[depth].id;
             for index in 0..self.writes.len() {
@@ -1042,37 +843,21 @@ impl Context<'_> {
         target: ExprId,
         spelling: AssignSpelling,
     ) {
-        // A quoting form's argument is data, not code: R builds the expression
-        // and binds nothing, so neither does this. The target still resolves as
-        // a read where it names something that exists, which is what an editor
-        // needs inside `quote(x <- f(y))`.
+        // Inside a quoting form the target binds nothing but still resolves as an editor read.
         if self.quoted_depth > 0 {
             self.resolve(target);
             return;
         }
         let target_expression = self.module.expression(target).clone();
         match &target_expression.kind {
-            // A string where a name belongs binds that name: `"x" <- 1` is
-            // `x <- 1` in R, and the literal already carries the name it
-            // spells with its quotes stripped. Backticks never reach here —
-            // `` `y` <- 1 `` lowers to a `NameRef` like any other name.
+            // `"x" <- 1` is `x <- 1` in R.
             ExpressionKind::NameRef(name) | ExpressionKind::Literal(LiteralKind::String(name)) => {
                 let range = target_expression.range;
                 match spelling {
                     AssignSpelling::Super => {
-                        // `<<-` binds to the nearest slot in a *strictly
-                        // enclosing* scope; without one it targets the global
-                        // environment (non-local).
-                        //
-                        // The bound is the scope stack minus the current scope,
-                        // not the enclosing function: `local()` opens a scope
-                        // that is not a function, so stopping at the nearest
-                        // function boundary skipped that function's own frame
-                        // and sent `function() { v <- 1; local({ v <<- 2 }) }`
-                        // to the global environment instead of to `v`. Where
-                        // the current scope *is* the function frame the two
-                        // bounds coincide, which is why the closure spelling of
-                        // the same thing was always right.
+                        // `<<-` binds the nearest slot in a strictly enclosing scope, else the
+                        // global environment. Bounded by the scope stack, not the enclosing
+                        // function: `local()` scopes are not functions.
                         let enclosing = (0..self.scopes.len() - 1)
                             .rev()
                             .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(name)?)));
@@ -1080,15 +865,9 @@ impl Context<'_> {
                             Some((depth, slot)) => {
                                 self.naming.resolutions.insert(target, slot);
                                 self.naming.captured_slots.insert(slot);
-                                // The write the slot came from is what makes
-                                // `<<-` find a slot at all: delete it and the
-                                // write escapes to the global environment
-                                // instead. So a super-assignment keeps that
-                                // frame's writes alive exactly as a capturing
-                                // read does — otherwise the initializer of a
-                                // write-only counter reports as a dead store,
-                                // and removing it changes what the program
-                                // does.
+                                // `<<-` finds this slot only because of that frame's writes, so it
+                                // keeps them alive like a capturing read; otherwise a write-only
+                                // counter's initializer looks like a dead store.
                                 let frame = self.scopes[depth].id;
                                 for write in &mut self.writes {
                                     if write.scope == frame && write.name == *name {
@@ -1136,11 +915,8 @@ impl Context<'_> {
                     }
                 }
             }
-            // Replacement forms (`attr(x, "a") <- v`, `x$field <- v`)
-            // read their target's base as a value — an unresolved base is a
-            // reportable read — and then rebind it in the current scope
-            // (R evaluates `x[i] <- v` as `x <- \`[<-\`(x, i, v)`), so
-            // occurrences after the first write resolve silently.
+            // Replacement forms read their base as a value, then rebind it in the current scope
+            // (R evaluates `x[i] <- v` as `x <- `[<-`(x, i, v)`).
             _ => match self.replacement_base(target) {
                 Some((base_expression, name, range)) => {
                     self.resolve(base_expression);
@@ -1172,17 +948,10 @@ impl Context<'_> {
                     self.record_write_site(assignment, base_expression, &name, range, slot, false);
                     self.resolve_replacement_subscripts(target, base_expression);
                 }
-                // R accepts a name, a string (`"x" <- 1` binds `x`), and a
-                // replacement call bottoming out at one. A computed value or a
-                // number is refused — at run time, so the parse looks clean
-                // and the reads inside the target would otherwise be reported
-                // as though the author had written them deliberately. That is
-                // what a dangling operator on the previous line produces: the
-                // line below is swallowed as the target, and its names come
-                // back `unresolved` while nothing mentions the operator.
+                // R refuses a computed or numeric target only at run time, so its reads would be
+                // reported as deliberate. A dangling operator on the previous line produces this.
                 None if self.emit && refuses_assignment(&target_expression.kind) => {
-                    // Recovery can leave the operands out of order or
-                    // overlapping, in which case there is no gap to read.
+                    // Parser recovery can leave the operands out of order.
                     let operand_gap = match &target_expression.kind {
                         ExpressionKind::Binary { lhs, rhs, .. } => {
                             let start = self.module.expression(*lhs).range.end();
@@ -1203,8 +972,6 @@ impl Context<'_> {
         }
     }
 
-    /// The base `NameRef` at the bottom of a replacement target chain
-    /// (`x` in `attr(x$f, "a")[i] <- v`).
     fn replacement_base(&self, target: ExprId) -> Option<(ExprId, String, TextRange)> {
         let expression = self.module.expression(target);
         match &expression.kind {
@@ -1219,8 +986,6 @@ impl Context<'_> {
         }
     }
 
-    /// Resolves everything in a replacement target except the (already
-    /// handled) base name: indexes, further call arguments, callees.
     fn resolve_replacement_subscripts(&mut self, target: ExprId, base: ExprId) {
         if target == base {
             return;
@@ -1243,10 +1008,7 @@ impl Context<'_> {
                 }
             }
             ExpressionKind::Call { callee, arguments } => {
-                // The function actually invoked is the `name<-` replacement
-                // form, a different name from the callee as written —
-                // resolution still runs for the IDE, but an unresolved
-                // callee here is not a reportable finding.
+                // R invokes the `name<-` form, not the callee as written, so it resolves quietly.
                 self.quiet_depth += 1;
                 self.resolve(*callee);
                 self.quiet_depth -= 1;
@@ -1297,7 +1059,6 @@ impl Context<'_> {
                 index
             }
         };
-        // A write to a captured slot stays observable through the closure.
         if self.naming.captured_slots.contains(&slot) {
             self.writes[index as usize].used = true;
         }
@@ -1305,9 +1066,7 @@ impl Context<'_> {
     }
 
     fn collect_unused(&mut self) {
-        // A `.`- or `_`-prefixed name is conventionally an intentional
-        // hold-over (hidden helpers, ignored results, a formal a callback
-        // signature forces); the convention opts it out of unused reporting.
+        // A `.`- or `_`-prefixed name is conventionally an intentional hold-over.
         let throwaway = |name: &str| name.starts_with('.') || name.starts_with('_');
         for write in &self.writes {
             if write.reportable && !write.used && !throwaway(&write.name) {
@@ -1318,8 +1077,7 @@ impl Context<'_> {
             }
         }
         for binding in self.naming.bindings.values() {
-            // `...` is covered by the prefix rule too, which matters because
-            // dots reads never resolve (`resolve_read` skips `...`/`..1`).
+            // The prefix rule also exempts `...`, whose reads never resolve.
             if binding.kind == BindingKind::Parameter
                 && !throwaway(&binding.name)
                 && !self.read_parameter_slots.contains(&binding.id)
@@ -1333,10 +1091,7 @@ impl Context<'_> {
     }
 }
 
-/// A verb the stub corpus declares `@masked`, and the names of the formals it
-/// declares before its `...` — the data arguments, which resolve normally. An
-/// empty list masks every argument. Free rather than a method so the borrowed
-/// names live as long as the corpus map and not as long as the walker.
+/// Free rather than a method so the borrow lives as long as the corpus map, not the walker.
 fn declared_masked_verb<'a>(
     masked_verbs: &'a FxHashMap<String, Vec<String>>,
     name: &str,
@@ -1346,10 +1101,7 @@ fn declared_masked_verb<'a>(
         .map(|leading| leading.iter().map(String::as_str).collect())
 }
 
-/// Whether an expression cannot fall through to what follows it. The same rule
-/// the checker applies, kept in step with it: a branch that ends the call or
-/// leaves the loop contributes no state to the code after the construct it
-/// sits in.
+/// Kept in step with the checker's divergence rule.
 fn diverges(module: &Module, id: ExprId) -> bool {
     match &module.expression(id).kind {
         ExpressionKind::Break | ExpressionKind::Next => true,
@@ -1370,9 +1122,7 @@ fn diverges(module: &Module, id: ExprId) -> bool {
     }
 }
 
-/// The base data-masking verbs, and the names of the formals that hold the
-/// data rather than the masked expression. Every other argument evaluates in
-/// the data's frame, so a name there is a column and not a variable.
+/// The formals that hold the data; every other argument evaluates in the data's frame.
 fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "with" | "within" => Some(vec!["data"]),
@@ -1381,9 +1131,7 @@ fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
     }
 }
 
-/// Join two control-flow paths: union the reaching sets slot-wise. A slot
-/// present on only one path was unassigned on the other, so the missing side
-/// contributes `Unassigned`.
+/// A slot present on only one path was unassigned on the other.
 fn join_flow(into: &mut FlowState, other: &FlowState) {
     for (slot, reaches) in other {
         match into.entry(*slot) {
@@ -1404,13 +1152,8 @@ fn join_flow(into: &mut FlowState, other: &FlowState) {
     }
 }
 
-/// Whether R refuses to assign to a target of this shape. Only the shapes it
-/// certainly refuses: a computed value, or a literal that is not a string. A
-/// parenthesised target is left alone — R's own handling of `(x) <- 1` is odd
-/// enough that refusing it here would be guessing. A `!`-headed target is left
-/// alone too: `!` binds tighter than `<-`, so metaprogramming that *builds* an
-/// assignment with the unquote operator — `expr(!!name <- value)` — parses as
-/// an assignment to `!!name`, and nothing is ever assigned there.
+/// Only shapes R certainly refuses. `(x) <- 1` is left alone (R's handling is odd), and so
+/// is `!`: `expr(!!name <- value)` parses as an assignment to `!!name` that never runs.
 fn refuses_assignment(kind: &ExpressionKind) -> bool {
     match kind {
         ExpressionKind::Binary { .. } => true,
@@ -1436,7 +1179,6 @@ mod tests {
     #[test]
     fn conditional_write_joins_and_read_resolves() {
         let naming = naming_of("f <- function(flag) {\n  x <- 1\n  if (flag) x <- 2\n  x\n}");
-        // Both writes reach the final read: neither is a dead store.
         assert!(naming.unused_assignments.is_empty());
         assert!(naming.maybe_undefined.is_empty());
     }

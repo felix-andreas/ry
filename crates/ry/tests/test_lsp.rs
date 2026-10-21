@@ -1,7 +1,3 @@
-//! Behavioral tests for the language server, driving the real `ry
-//! server` binary over LSP stdio: capability negotiation, document sync,
-//! push/pull diagnostics, position encodings, and the feature endpoints.
-
 use async_lsp::LanguageServer;
 use async_lsp::concurrency::{Concurrency, ConcurrencyLayer};
 use async_lsp::lsp_types::notification::{PublishDiagnostics, ShowMessage};
@@ -86,9 +82,8 @@ fn spawn_server(server_cwd: &Path, envs: &[(&str, &str)], args: &[&str]) -> toki
         .expect("failed to spawn ry server")
 }
 
-/// The push channel plus a stash: deferred semantic publishes for different
-/// documents interleave in idle order, so a wait targeted at one URI must
-/// keep — not drop — the publishes it skips for other URIs.
+/// Deferred publishes for different documents interleave in idle order, so a wait
+/// for one URI must stash, not drop, the others.
 struct DiagnosticsChannel {
     receiver: mpsc::UnboundedReceiver<PublishDiagnosticsParams>,
     stash: Vec<PublishDiagnosticsParams>,
@@ -96,8 +91,7 @@ struct DiagnosticsChannel {
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The SETTLED diagnostics for `uri`: skips (and consumes) the versioned
-/// first-wave publishes and returns the next version-less publish.
+/// Skips (and consumes) the versioned first-wave publishes; returns the next version-less one.
 async fn recv_diagnostics(
     channel: &mut DiagnosticsChannel,
     uri: &Url,
@@ -137,7 +131,6 @@ async fn recv_diagnostics(
     .expect("timed out waiting for diagnostics")
 }
 
-/// The FIRST publish for `uri`, whichever wave it is.
 async fn recv_first_diagnostics(
     channel: &mut DiagnosticsChannel,
     uri: &Url,
@@ -166,7 +159,7 @@ async fn recv_first_diagnostics(
 struct TestContext {
     server: async_lsp::ServerSocket,
     diagnostics_receiver: DiagnosticsChannel,
-    /// Wired for the diagnostic-refresh tests that follow in the full port.
+    /// Read only by the diagnostic-refresh tests.
     #[allow(dead_code)]
     refresh_receiver: mpsc::UnboundedReceiver<()>,
     messages_receiver: mpsc::UnboundedReceiver<ShowMessageParams>,
@@ -228,9 +221,8 @@ async fn setup_test_with_env_and_args(
     args: &[&str],
 ) -> TestContext {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-    // The server process runs with the temp ROOT as its cwd while the client
-    // announces the `workspace` subdirectory as the workspace root, so every
-    // test exercises root-from-initialize rather than root-from-cwd.
+    // The cwd is the temp root while the client announces `workspace/` as the root,
+    // so every test exercises root-from-initialize.
     let server_cwd = temp_dir.path().to_path_buf();
     let workspace_dir = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_dir).expect("failed to create workspace directory");
@@ -328,10 +320,6 @@ fn position_params(uri: &Url, line: u32, character: u32) -> TextDocumentPosition
         position: Position::new(line, character),
     }
 }
-
-//
-// Tests
-//
 
 #[tokio::test]
 async fn initialize_reports_capabilities() {
@@ -471,7 +459,6 @@ async fn burst_of_edits_settles_on_the_final_text() {
             })
             .expect("didChange failed");
     }
-    // Eventually the settled set reflects the final text: one lint warning.
     let deadline = tokio::time::Instant::now() + TIMEOUT;
     loop {
         let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
@@ -657,8 +644,7 @@ async fn range_formatting_snaps_to_whole_statements() {
     let mut context = setup_test(&[]).await;
     let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n").await;
     let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    // A selection covering part of the middle line only: the edit must cover
-    // that whole statement and leave its neighbours alone.
+    // Covers part of the middle line only; the edit must cover that whole statement.
     let edits = context
         .server
         .range_formatting(DocumentRangeFormattingParams {
@@ -792,9 +778,6 @@ async fn pull_capable_client_suppresses_push() {
 
 #[tokio::test]
 async fn workspace_root_comes_from_the_client_not_the_process_cwd() {
-    // setup runs the server with the temp ROOT as cwd and announces
-    // `workspace/` as the root; a package file under `workspace/R` must be
-    // analyzed as part of the package.
     let mut context = setup_test(&[("R/lib.R", "make_count <- function() 1L\n")]).await;
     let uri = context.open("R/use.R", "total <- make_count()\n").await;
     let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
@@ -818,16 +801,11 @@ async fn malformed_config_falls_back_to_defaults_and_reports() {
         "{}",
         message.message
     );
-    // The server still works with default config.
     let uri = context.open("R/clean.R", "x <- 1\n").await;
     let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
     assert!(params.diagnostics.is_empty(), "{:?}", params.diagnostics);
     context.shutdown().await;
 }
-
-//
-// Batch 2: document lifecycle, features, encodings, config, pull/refresh
-//
 
 use async_lsp::lsp_types::{
     CompletionClientCapabilities, CompletionItemCapability, CompletionParams, CompletionResponse,
@@ -985,8 +963,7 @@ async fn deeply_nested_documents_do_not_kill_the_server() {
     let malformed_uri = context.open("R/deep_malformed.R", &malformed).await;
     let _ = recv_diagnostics(&mut context.diagnostics_receiver, &malformed_uri, TIMEOUT).await;
 
-    // Formatting recurses over the tree as well; it must answer or refuse
-    // without dying.
+    // Formatting recurses over the tree too; it must answer or refuse without dying.
     let _ = context
         .server
         .formatting(DocumentFormattingParams {
@@ -1042,7 +1019,6 @@ async fn namespace_buffer_publishes_import_validation() {
         "reports on the importFrom line"
     );
 
-    // Fixing the typo republishes a clean report.
     context.change_file(
         &uri,
         2,
@@ -1121,7 +1097,6 @@ async fn requests_for_unopened_non_file_uris_answer_gracefully() {
         "a pull on an unopened non-file uri returns an empty full report"
     );
 
-    // The server is still alive and serving regular documents.
     let file_uri = context.open("R/main.R", "x <- 1L").await;
     recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
 
@@ -1225,7 +1200,6 @@ async fn did_close_survives_a_failing_disk_reread() {
     drain_diagnostics(&mut context.diagnostics_receiver).await;
     context.close_file(&casualty_uri);
 
-    // The server treated the unreadable file as deleted and keeps serving.
     let file_uri = context.open("R/still_alive.R", "x <- T\n").await;
     let diagnostics = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
     assert!(
@@ -1277,8 +1251,6 @@ async fn watched_file_create_and_delete_change_cross_file_resolution() {
     context.shutdown().await;
 }
 
-// The open buffer is authoritative: a change on disk underneath it is not
-// read, and closing the buffer discards unsaved edits for the on-disk text.
 #[tokio::test]
 async fn an_open_buffer_shadows_the_disk_until_closed() {
     let mut context = setup_test_with_pull_diagnostics(&[
@@ -1319,8 +1291,6 @@ async fn an_open_buffer_shadows_the_disk_until_closed() {
     context.shutdown().await;
 }
 
-// A transiently malformed keystroke reports its syntax error alone, and the
-// next well-formed edit restores the semantic findings.
 #[tokio::test]
 async fn a_malformed_edit_suppresses_then_restores_semantic_diagnostics() {
     let mut context = setup_test_with_pull_diagnostics(&[]).await;
@@ -2177,7 +2147,6 @@ async fn breaking_one_file_leaves_its_dependents_untouched() {
         settled.diagnostics
     );
 
-    // Break the library mid-edit: append an unclosed function definition.
     context.change_file(
         &library_uri,
         2,
@@ -2200,8 +2169,7 @@ async fn breaking_one_file_leaves_its_dependents_untouched() {
         broken.diagnostics
     );
 
-    // Saving while broken refreshes every open document; the consumer must
-    // still be clean — `shared_helper` never stopped resolving.
+    // Saving while broken refreshes every open document; `shared_helper` still resolves.
     context.save_file(&consumer_uri);
     let after_break =
         recv_diagnostics(&mut context.diagnostics_receiver, &consumer_uri, TIMEOUT).await;
@@ -2241,8 +2209,6 @@ async fn pull_client_without_refresh_support_gets_no_refresh() {
 
 #[tokio::test]
 async fn ancestor_config_governs_a_workspace_without_its_own() {
-    // The config sits in the PARENT of the workspace root (the temp root);
-    // discovery walks ancestors from the announced workspace.
     let temp_dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(
         temp_dir.path().join("ry.toml"),
@@ -2479,10 +2445,6 @@ async fn annotation_bodies_get_semantic_tokens() {
     context.shutdown().await;
 }
 
-//
-// Stub (.Rtypes) buffers: served standalone, never entering the database.
-//
-
 #[tokio::test]
 async fn stub_documents_are_served_with_parse_diagnostics() {
     let mut context = setup_test(&[]).await;
@@ -2507,7 +2469,6 @@ async fn stub_documents_are_served_with_parse_diagnostics() {
     );
     assert_eq!(diagnostic.range.start.line, 1, "whole-line on the bad line");
 
-    // Fixing the declaration republishes clean.
     context.replace_file_full(&uri, 2, "good_helper : fn(x: double) -> double\n");
     let published = recv_first_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
     assert!(
@@ -2653,7 +2614,6 @@ async fn hover_shows_definition_summaries() {
     let stub = hover_markdown(&mut context, 3, 11).await;
     assert!(stub.contains("From the `base` package."), "{stub}");
 
-    // Debug sections stay hidden without the developer switch.
     assert!(!global.contains("### Debug"), "{global}");
     context.shutdown().await;
 }
@@ -2744,12 +2704,8 @@ async fn document_symbols_nest_s4_and_r6_declarations() {
     context.shutdown().await;
 }
 
-/// The cancelled-pull contract, made deterministic by the server's
-/// fault-injection seam: the pull announces itself through the marker file
-/// and holds, the edit is sent only after the marker appears — so its
-/// cancellation flip provably lands while the pull is in flight — and the
-/// response must be the retryable SERVER_CANCELLED error, with an immediate
-/// re-pull succeeding on the edited content.
+/// The edit is sent only after the held pull announces itself through the marker
+/// file, so its cancellation provably lands in flight; the retry must succeed.
 #[tokio::test]
 async fn cancelled_pull_is_retryable_and_recovers() {
     let capabilities = ClientCapabilities {
@@ -2774,8 +2730,7 @@ async fn cancelled_pull_is_retryable_and_recovers() {
     .await;
     let uri = context.open("R/cancel.R", "x = 1\n").await;
 
-    // The request is written first (socket sends are eager); the edit waits
-    // for the marker, so it always hits the held pull.
+    // Socket sends are eager, so the request is written before the edit.
     let pending = context
         .server
         .document_diagnostic(DocumentDiagnosticParams {
@@ -2811,7 +2766,6 @@ async fn cancelled_pull_is_retryable_and_recovers() {
         "{data:?}"
     );
 
-    // The retry lands on the edited content.
     let report = context.document_diagnostic(&uri, None).await;
     let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) = report
     else {

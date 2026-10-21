@@ -1,19 +1,5 @@
-//! Lowering fixtures: the HIR an item lowers to.
-//!
-//! Lowering is where R's surface syntax becomes the shape the checker reasons
-//! about, and several of those steps are real rewrites rather than a change of
-//! representation — a native pipe becomes a call with the left side spliced in
-//! as the first argument, a replacement form becomes a read of the base
-//! followed by a write back to it, `local({…})` becomes its own construct. Every
-//! one of those is currently tested only through whatever type falls out the far
-//! end, which cannot distinguish "lowered to the wrong shape but coincidentally
-//! typed the same" from "lowered correctly".
-//!
-//! This is the analogue of the parse-tree dump one layer down: the syntax suite
-//! pins what the parser built, and this pins what lowering made of it. Ranges
-//! are item-relative and printed only where a case needs them, so the tree stays
-//! readable.
-//!
+//! Pins the HIR shape, which typed output cannot tell apart from a wrong lowering that
+//! happens to type the same.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
 use semantics::hir::{Argument, ExprId, ExpressionKind, Module, Parameter};
@@ -211,8 +197,6 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
     }
 }
 
-/// An argument renders its name inline, because argument *matching* is what a
-/// call's lowering has to get right and a bare list of values does not show it.
 fn render_arguments(output: &mut String, module: &Module, arguments: &[Argument], depth: usize) {
     let indent = "  ".repeat(depth);
     for argument in arguments {
