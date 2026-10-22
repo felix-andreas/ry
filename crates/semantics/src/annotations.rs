@@ -6,8 +6,10 @@ use crate::types::{
     Atomic, Constraint, FunctionType, Name, Parameter, RecordField, RestParameter, Ty, TyKind,
     TypeScheme, any, null, scalar, union_of, unknown,
 };
-use syntax::ast::AstNode as _;
-use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use rustc_hash::FxHashSet;
+use std::mem::take;
+use syntax::ast::{self, AstNode as _};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Annotation<'db> {
@@ -83,7 +85,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
     let mut params: Vec<(String, Ty<'db>, bool)> = Vec::new();
     let mut rest: Option<Ty<'db>> = None;
     let mut ret: Option<Ty<'db>> = None;
-    let mut saw_expanded = false;
     let mut saw_param = false;
     let mut saw_return = false;
 
@@ -101,34 +102,15 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                         }
                     }
                     "forall" => {
-                        saw_expanded = true;
                         if saw_param || saw_return {
                             lowering.errors.push((
                                 "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block.".to_owned(),
                                 child.text_range(),
                             ));
                         }
-                        for binder in child
-                            .children()
-                            .filter(|c| c.kind() == SyntaxKind::TYPE_BINDER)
-                        {
-                            if let Some((name, constraint)) = lowering.lower_binder(&binder) {
-                                if forall.iter().any(|(existing, _)| *existing == name) {
-                                    lowering.errors.push((
-                                        format!(
-                                            "duplicate type parameter name `{}` in expanded function annotation.",
-                                            name.text(db)
-                                        ),
-                                        binder.text_range(),
-                                    ));
-                                }
-                                lowering.binders.push(name);
-                                forall.push((name, constraint));
-                            }
-                        }
+                        lowering.lower_binders(&child, &mut forall, "expanded function annotation");
                     }
                     "param" => {
-                        saw_expanded = true;
                         if saw_return {
                             lowering.errors.push((
                                 "`@param` directives must appear before `@return` or `@returns` in the same `#:` block.".to_owned(),
@@ -136,30 +118,17 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                             ));
                         }
                         saw_param = true;
-                        let name = child
-                            .children()
-                            .find(|c| c.kind() == SyntaxKind::NAME)
-                            .and_then(syntax::ast::Name::cast)
-                            .and_then(|name| name.text());
-                        let optional = child
-                            .children_with_tokens()
-                            .filter_map(|element| element.into_token())
-                            .any(|token| token.kind() == SyntaxKind::L_BRACKET);
-                        let ty = child
-                            .children()
-                            .find(|c| is_type_kind(c.kind()))
-                            .map(|ty| lowering.lower_type(&ty))
+                        let optional = has_token(&child, SyntaxKind::L_BRACKET);
+                        let ty = lowering
+                            .lower_child_type(&child)
                             .unwrap_or_else(|| unknown(db));
-                        if let Some(name) = name {
-                            if name == "..." {
-                                rest = Some(ty);
-                            } else {
-                                params.push((name, ty, optional));
-                            }
+                        match name_text(&child) {
+                            Some(name) if name == "..." => rest = Some(ty),
+                            Some(name) => params.push((name, ty, optional)),
+                            None => {}
                         }
                     }
                     "return" | "returns" => {
-                        saw_expanded = true;
                         if saw_return {
                             lowering.errors.push((
                                 "cannot use more than one `@return` or `@returns` directive in the same `#:` block.".to_owned(),
@@ -167,81 +136,40 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                             ));
                         }
                         saw_return = true;
-                        ret = child
-                            .children()
-                            .find(|c| is_type_kind(c.kind()))
-                            .map(|ty| lowering.lower_type(&ty));
+                        ret = lowering.lower_child_type(&child);
                     }
-                    "strict" => {
-                        let off = child
-                            .children_with_tokens()
-                            .filter_map(|element| element.into_token())
-                            .any(|token| {
-                                token.kind() == SyntaxKind::IDENT && token.text() == "off"
-                            });
-                        annotation.strict = Some(!off);
-                    }
-                    "trust" => {
-                        annotation.trusted = true;
-                        if let Some(ty) = child.children().find(|c| is_type_kind(c.kind())) {
-                            let lowered = lowering.lower_type(&ty);
-                            annotation.declared = Some(TypeScheme {
-                                binders: Vec::new(),
-                                body: lowered,
-                            });
+                    "strict" => annotation.strict = Some(!has_word(&child, "off")),
+                    "trust" | "if-unknown" => {
+                        if directive == "trust" {
+                            annotation.trusted = true;
+                        } else {
+                            annotation.if_unknown = true;
+                        }
+                        if let Some(body) = lowering.lower_child_type(&child) {
+                            annotation.declared = Some(TypeScheme::monomorphic(body));
                         }
                     }
                     "new" => {
-                        if let Some(ty_node) = child.children().find(|c| is_type_kind(c.kind())) {
-                            let lowered = lowering.lower_type(&ty_node);
-                            if let TyKind::Named(name, arguments) = lowered.kind(db) {
-                                annotation.new_nominal =
-                                    Some((*name, arguments.clone(), ty_node.text_range()));
-                            } else {
-                                lowering.errors.push((
-                                    "expected a nominal type reference after `@new`.".to_owned(),
-                                    ty_node.text_range(),
-                                ));
+                        let ty_node = child.children().find(|c| is_type_kind(c.kind()));
+                        let range = ty_node
+                            .as_ref()
+                            .map_or(child.text_range(), |ty| ty.text_range());
+                        let lowered = ty_node.map(|ty| lowering.lower_type(&ty));
+                        match lowered.map(|ty| ty.kind(db)) {
+                            Some(TyKind::Named(name, arguments)) => {
+                                annotation.new_nominal = Some((*name, arguments.clone(), range));
                             }
-                        } else {
-                            lowering.errors.push((
+                            _ => lowering.errors.push((
                                 "expected a nominal type reference after `@new`.".to_owned(),
-                                child.text_range(),
-                            ));
-                        }
-                    }
-                    "if-unknown" => {
-                        annotation.if_unknown = true;
-                        if let Some(ty) = child.children().find(|c| is_type_kind(c.kind())) {
-                            let lowered = lowering.lower_type(&ty);
-                            annotation.declared = Some(TypeScheme {
-                                binders: Vec::new(),
-                                body: lowered,
-                            });
+                                range,
+                            )),
                         }
                     }
                     _ => {}
                 }
             }
             SyntaxKind::TYPE_BINDER_LIST => {
-                for binder in child
-                    .children()
-                    .filter(|c| c.kind() == SyntaxKind::TYPE_BINDER)
-                {
-                    if let Some((name, constraint)) = lowering.lower_binder(&binder) {
-                        if forall.iter().any(|(existing, _)| *existing == name) {
-                            lowering.errors.push((
-                                format!(
-                                    "duplicate type parameter name `{}` in `<...>`.",
-                                    name.text(db)
-                                ),
-                                binder.text_range(),
-                            ));
-                        }
-                        lowering.binders.push(name);
-                        forall.push((name, constraint));
-                    }
-                }
+                lowering.lower_binders(&child, &mut forall, "`<...>`");
             }
             kind if is_type_kind(kind) => {
                 lowering.definition_type = true;
@@ -255,7 +183,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                         .collect();
                 }
                 annotation.declared = Some(TypeScheme {
-                    binders: forall.clone(),
+                    binders: take(&mut forall),
                     body,
                 });
             }
@@ -277,32 +205,27 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
     // Declared type names stay declared, with `Unknown` bodies, or every use of one would add an
     // unknown-type finding to the one already made.
     if !lowering.errors.is_empty() || !annotation.typing_errors.is_empty() {
-        let definitions = annotation
-            .definitions
-            .iter()
-            .map(|definition| NamedDefinition {
-                body: unknown(db),
-                ..definition.clone()
-            })
-            .collect();
+        for definition in &mut annotation.definitions {
+            definition.body = unknown(db);
+        }
         return Annotation {
             errors: lowering.errors,
-            typing_errors: std::mem::take(&mut annotation.typing_errors),
-            definitions,
-            definition_sites: std::mem::take(&mut annotation.definition_sites),
+            typing_errors: annotation.typing_errors,
+            definitions: annotation.definitions,
+            definition_sites: annotation.definition_sites,
             range: annotation.range,
             ..Annotation::default()
         };
     }
 
-    annotation.nominal_references = std::mem::take(&mut lowering.nominal_references);
-    annotation.applied_references = std::mem::take(&mut lowering.applied_references);
-    annotation.vector_elements = std::mem::take(&mut lowering.vector_elements);
+    annotation.nominal_references = lowering.nominal_references;
+    annotation.applied_references = lowering.applied_references;
+    annotation.vector_elements = lowering.vector_elements;
 
-    if saw_expanded && annotation.declared.is_none() && (!params.is_empty() || ret.is_some()) {
+    if annotation.declared.is_none() && (!params.is_empty() || ret.is_some()) {
         // An annotation states a parameter's type, never its default: the default lives in the
         // definition, which may not be in view.
-        let named: Vec<Parameter<'db>> = params
+        let named = params
             .iter()
             .map(|(name, ty, optional)| Parameter {
                 name: Name::new(db, name.clone()),
@@ -311,7 +234,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 default: None,
             })
             .collect();
-        annotation.parameter_names = params.clone();
         let function = FunctionType {
             positional: Vec::new(),
             named,
@@ -321,6 +243,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             }),
             ret: ret.unwrap_or_else(|| unknown(db)),
         };
+        annotation.parameter_names = params;
         annotation.declared = Some(TypeScheme {
             binders: forall,
             body: Ty::new(db, TyKind::Function(function)),
@@ -358,13 +281,13 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
     }
     // Markers come from all descendant tokens, not just direct children: a line continuing a
     // still-open node puts its marker inside that node.
-    let markers: Vec<syntax::TextSize> = node
+    let markers: Vec<TextSize> = node
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
         .filter(|token| token.kind() == SyntaxKind::ANNOTATION_MARKER)
         .map(|token| token.text_range().start())
         .collect();
-    let line_of = |start: syntax::TextSize| markers.iter().filter(|&&at| at < start).count();
+    let line_of = |start: TextSize| markers.iter().filter(|&&at| at < start).count();
 
     let mut previous: Option<BlockForm> = None;
     let mut current: Option<(usize, BlockForm)> = None;
@@ -439,7 +362,7 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
 /// Joins adjacent tokens after `@`: `@if-unknown` lexes as `if` `-` `unknown`.
 fn directive_name(node: &SyntaxNode) -> String {
     let mut name = String::new();
-    let mut cursor: Option<rowan::TextSize> = None;
+    let mut cursor: Option<TextSize> = None;
     for element in node.children_with_tokens() {
         let Some(token) = element.into_token() else {
             break;
@@ -460,6 +383,25 @@ fn directive_name(node: &SyntaxNode) -> String {
         cursor = Some(token.text_range().end());
     }
     name
+}
+
+fn name_text(node: &SyntaxNode) -> Option<String> {
+    node.children()
+        .find(|c| c.kind() == SyntaxKind::NAME)
+        .and_then(ast::Name::cast)
+        .and_then(|name| name.text())
+}
+
+fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
+    node.children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .any(|token| token.kind() == kind)
+}
+
+fn has_word(node: &SyntaxNode, word: &str) -> bool {
+    node.children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == word)
 }
 
 // Past the check limit a type is refused only when type checking is on; past the parse limit the
@@ -483,23 +425,35 @@ struct Lowering<'db> {
 }
 
 impl<'db> Lowering<'db> {
-    fn lower_binder(&mut self, node: &SyntaxNode) -> Option<(Name<'db>, Constraint)> {
-        let mut names = node.children().filter(|c| c.kind() == SyntaxKind::NAME);
-        let binder = names.next()?;
-        let binder_name = syntax::ast::Name::cast(binder)?.text()?;
-        // A constraint may span several words (`scalar numeric`).
-        let constraint_nodes: Vec<SyntaxNode> = names.collect();
-        let constraint = match constraint_nodes.split_first() {
-            Some((first, rest)) => {
-                let spelling: Vec<String> = constraint_nodes
-                    .iter()
-                    .filter_map(|node| syntax::ast::Name::cast(node.clone()))
-                    .filter_map(|name| name.text())
-                    .collect();
-                let spelling = spelling.join(" ");
-                match Constraint::from_spelling(&spelling) {
-                    Some(constraint) => constraint,
-                    None => {
+    /// `bound` spans every binder list of the block, so a duplicate across lists is caught too.
+    fn lower_binders(
+        &mut self,
+        list: &SyntaxNode,
+        bound: &mut Vec<(Name<'db>, Constraint)>,
+        place: &str,
+    ) {
+        for binder in list
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::TYPE_BINDER)
+        {
+            let Some(name) = name_text(&binder) else {
+                continue;
+            };
+            let name = Name::new(self.db, name);
+            // A constraint may span several words (`scalar numeric`).
+            let words: Vec<SyntaxNode> = binder
+                .children()
+                .filter(|c| c.kind() == SyntaxKind::NAME)
+                .skip(1)
+                .collect();
+            let constraint = match (words.first(), words.last()) {
+                (Some(first), Some(last)) => {
+                    let spelling = words
+                        .iter()
+                        .filter_map(|word| ast::Name::cast(word.clone())?.text())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    Constraint::from_spelling(&spelling).unwrap_or_else(|| {
                         let available: Vec<String> = Constraint::SPELLINGS
                             .iter()
                             .map(|(spelling, _)| format!("`{spelling}`"))
@@ -511,22 +465,29 @@ impl<'db> Lowering<'db> {
                             _ => available.join(""),
                         };
                         // Blame the whole spelling, not just its first word.
-                        let blamed = rest.last().map_or(first.text_range(), |last| {
-                            first.text_range().cover(last.text_range())
-                        });
                         self.errors.push((
                             format!(
                                 "unknown type-parameter constraint `{spelling}`; the available constraints are {available}."
                             ),
-                            blamed,
+                            first.text_range().cover(last.text_range()),
                         ));
                         Constraint::Unconstrained
-                    }
+                    })
                 }
+                _ => Constraint::Unconstrained,
+            };
+            if bound.iter().any(|(existing, _)| *existing == name) {
+                self.errors.push((
+                    format!(
+                        "duplicate type parameter name `{}` in {place}.",
+                        name.text(self.db)
+                    ),
+                    binder.text_range(),
+                ));
             }
-            None => Constraint::Unconstrained,
-        };
-        Some((Name::new(self.db, binder_name), constraint))
+            self.binders.push(name);
+            bound.push((name, constraint));
+        }
     }
 
     fn lower_named_definition(
@@ -534,35 +495,14 @@ impl<'db> Lowering<'db> {
         node: &SyntaxNode,
         alias: bool,
     ) -> Option<NamedDefinition<'db>> {
-        let name = node
-            .children()
-            .find(|c| c.kind() == SyntaxKind::NAME)
-            .and_then(syntax::ast::Name::cast)
-            .and_then(|name| name.text())?;
+        let name = name_text(node)?;
         let saved = self.binders.len();
         let mut parameters = Vec::new();
         if let Some(list) = node
             .children()
             .find(|c| c.kind() == SyntaxKind::TYPE_BINDER_LIST)
         {
-            for binder in list
-                .children()
-                .filter(|c| c.kind() == SyntaxKind::TYPE_BINDER)
-            {
-                if let Some((binder_name, _)) = self.lower_binder(&binder) {
-                    if parameters.contains(&binder_name) {
-                        self.errors.push((
-                            format!(
-                                "duplicate type parameter name `{}` in named type definition.",
-                                binder_name.text(self.db)
-                            ),
-                            binder.text_range(),
-                        ));
-                    }
-                    self.binders.push(binder_name);
-                    parameters.push(binder_name);
-                }
-            }
+            self.lower_binders(&list, &mut parameters, "named type definition");
         }
         let body = node
             .children()
@@ -573,9 +513,14 @@ impl<'db> Lowering<'db> {
         Some(NamedDefinition {
             alias,
             name: Name::new(self.db, name),
-            parameters,
+            parameters: parameters.into_iter().map(|(name, _)| name).collect(),
             body,
         })
+    }
+
+    fn lower_child_type(&mut self, node: &SyntaxNode) -> Option<Ty<'db>> {
+        let child = node.children().find(|c| is_type_kind(c.kind()))?;
+        Some(self.lower_type(&child))
     }
 
     fn lower_type(&mut self, node: &SyntaxNode) -> Ty<'db> {
@@ -596,10 +541,8 @@ impl<'db> Lowering<'db> {
     fn lower_type_inner(&mut self, node: &SyntaxNode) -> Ty<'db> {
         match node.kind() {
             SyntaxKind::TYPE_REF => self.lower_type_ref(node),
-            SyntaxKind::TYPE_PAREN => node
-                .children()
-                .find(|c| is_type_kind(c.kind()))
-                .map(|inner| self.lower_type(&inner))
+            SyntaxKind::TYPE_PAREN => self
+                .lower_child_type(node)
                 .unwrap_or_else(|| unknown(self.db)),
             SyntaxKind::TYPE_UNION => {
                 let members: Vec<Ty<'db>> = node
@@ -609,38 +552,21 @@ impl<'db> Lowering<'db> {
                     .collect();
                 union_of(self.db, members)
             }
-            SyntaxKind::TYPE_VECTOR => {
-                let element = node
-                    .children()
-                    .find(|c| is_type_kind(c.kind()))
-                    .map(|inner| self.lower_type(&inner))
+            SyntaxKind::TYPE_VECTOR | SyntaxKind::TYPE_LIST => {
+                let element = self
+                    .lower_child_type(node)
                     .unwrap_or_else(|| unknown(self.db));
-                self.vector_elements.push((element, node.text_range()));
-                let named = node
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == "named");
-                if named {
-                    Ty::new(self.db, TyKind::NamedVector(element))
-                } else {
-                    Ty::new(self.db, TyKind::Vector(element))
+                let vector = node.kind() == SyntaxKind::TYPE_VECTOR;
+                if vector {
+                    self.vector_elements.push((element, node.text_range()));
                 }
-            }
-            SyntaxKind::TYPE_LIST => {
-                let element = node
-                    .children()
-                    .find(|c| is_type_kind(c.kind()))
-                    .map(|inner| self.lower_type(&inner))
-                    .unwrap_or_else(|| unknown(self.db));
-                let named = node
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == "named");
-                if named {
-                    Ty::new(self.db, TyKind::NamedList(element))
-                } else {
-                    Ty::new(self.db, TyKind::List(element))
-                }
+                let kind = match (vector, has_word(node, "named")) {
+                    (true, false) => TyKind::Vector(element),
+                    (true, true) => TyKind::NamedVector(element),
+                    (false, false) => TyKind::List(element),
+                    (false, true) => TyKind::NamedList(element),
+                };
+                Ty::new(self.db, kind)
             }
             SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
                 if node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -661,66 +587,52 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, TyKind::Tuple(items))
             }
             SyntaxKind::TYPE_RECORD => {
-                let mut seen = rustc_hash::FxHashSet::default();
-                for field in node
+                let fields: Vec<(String, SyntaxNode)> = node
                     .children()
                     .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
-                {
-                    if let Some(name) = field
-                        .children()
-                        .find(|c| c.kind() == SyntaxKind::NAME)
-                        .and_then(syntax::ast::Name::cast)
-                        .and_then(|name| name.text())
-                        && !seen.insert(name.clone())
-                    {
+                    .filter_map(|field| Some((name_text(&field)?, field)))
+                    .collect();
+                let mut seen = FxHashSet::default();
+                for (name, field) in &fields {
+                    if !seen.insert(name.as_str()) {
                         self.errors.push((
                             format!("the field `{name}` appears twice in this `list{{...}}` type"),
                             field.text_range(),
                         ));
                     }
                 }
-                let fields = node
-                    .children()
-                    .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
-                    .filter_map(|field| {
-                        let name = field
-                            .children()
-                            .find(|c| c.kind() == SyntaxKind::NAME)
-                            .and_then(syntax::ast::Name::cast)
-                            .and_then(|name| name.text())?;
-                        let ty = field
-                            .children()
-                            .find(|c| is_type_kind(c.kind()))
-                            .map(|ty| self.lower_type(&ty))
-                            .unwrap_or_else(|| unknown(self.db));
-                        Some(RecordField {
-                            name: Name::new(self.db, name),
-                            ty,
-                            optional: false,
-                        })
+                let fields = fields
+                    .into_iter()
+                    .map(|(name, field)| RecordField {
+                        name: Name::new(self.db, name),
+                        ty: self
+                            .lower_child_type(&field)
+                            .unwrap_or_else(|| unknown(self.db)),
+                        optional: false,
                     })
                     .collect();
                 Ty::new(self.db, TyKind::Record(fields))
             }
             SyntaxKind::TYPE_APPLY => {
                 let name_node = node.children().find(|c| c.kind() == SyntaxKind::NAME);
-                let name = name_node
+                let text = name_node
                     .clone()
-                    .and_then(syntax::ast::Name::cast)
+                    .and_then(ast::Name::cast)
                     .and_then(|name| name.text())
                     .unwrap_or_default();
-                if !name.is_empty() && self.binders.contains(&Name::new(self.db, name.clone())) {
+                let name = Name::new(self.db, text.clone());
+                let reference = name_node
+                    .filter(|_| !text.is_empty())
+                    .map(|name_node| name_node.text_range());
+                if reference.is_some() && self.binders.contains(&name) {
                     self.errors.push((
-                        format!("`{name}` is a type parameter here and takes no type arguments."),
+                        format!("`{text}` is a type parameter here and takes no type arguments."),
                         node.text_range(),
                     ));
                     return unknown(self.db);
                 }
-                if let Some(name_node) = &name_node
-                    && !name.is_empty()
-                {
-                    self.nominal_references
-                        .push((name.clone(), name_node.text_range()));
+                if let Some(range) = reference {
+                    self.nominal_references.push((text.clone(), range));
                 }
                 let arguments: Vec<Ty<'db>> = node
                     .children()
@@ -732,16 +644,10 @@ impl<'db> Lowering<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
-                if let Some(name_node) = &name_node
-                    && !name.is_empty()
-                {
-                    self.applied_references.push((
-                        name.clone(),
-                        arguments.len(),
-                        name_node.text_range(),
-                    ));
+                if let Some(range) = reference {
+                    self.applied_references.push((text, arguments.len(), range));
                 }
-                Ty::new(self.db, TyKind::Named(Name::new(self.db, name), arguments))
+                Ty::new(self.db, TyKind::Named(name, arguments))
             }
             SyntaxKind::TYPE_FUNCTION => self.lower_function_type(node),
             _ => unknown(self.db),
@@ -786,23 +692,10 @@ impl<'db> Lowering<'db> {
                 .children()
                 .filter(|c| c.kind() == SyntaxKind::TYPE_PARAMETER)
             {
-                let has_dots = parameter
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::DOTS);
-                let optional = parameter
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::L_BRACKET);
-                let name = parameter
-                    .children()
-                    .find(|c| c.kind() == SyntaxKind::NAME)
-                    .and_then(syntax::ast::Name::cast)
-                    .and_then(|name| name.text());
-                let ty = parameter
-                    .children()
-                    .find(|c| is_type_kind(c.kind()))
-                    .map(|ty| self.lower_type(&ty));
+                let has_dots = has_token(&parameter, SyntaxKind::DOTS);
+                let optional = has_token(&parameter, SyntaxKind::L_BRACKET);
+                let name = name_text(&parameter);
+                let ty = self.lower_child_type(&parameter);
                 if variadic.is_some() && (has_dots || name.is_none()) {
                     self.errors.push((
                         if has_dots {
@@ -834,11 +727,7 @@ impl<'db> Lowering<'db> {
             .children()
             .filter(|c| is_type_kind(c.kind()))
             .last()
-            .filter(|_| {
-                node.children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::MINUS_GREATER)
-            })
+            .filter(|_| has_token(node, SyntaxKind::MINUS_GREATER))
             .map(|ty| self.lower_type(&ty))
             .unwrap_or_else(|| {
                 if self.definition_type && self.depth == 1 {

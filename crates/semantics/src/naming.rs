@@ -6,6 +6,7 @@ use crate::hir::{
     Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, UnaryOperator,
 };
 use rustc_hash::FxHashMap;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use syntax::TextRange;
 
@@ -14,7 +15,6 @@ pub struct BindingId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingInfo {
-    pub id: BindingId,
     pub name: String,
     /// The first write's site.
     pub range: TextRange,
@@ -27,11 +27,6 @@ pub enum BindingKind {
     Local,
     Parameter,
     ForVariable,
-}
-
-struct SlotRead {
-    slot: BindingId,
-    maybe_undefined: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,21 +81,18 @@ pub struct InvalidAssignmentTarget {
     pub operand_gap: Option<TextRange>,
 }
 
-pub fn resolve_item(module: &Module) -> ItemNaming {
-    resolve_item_with_masked_verbs(module, &FxHashMap::default())
-}
-
 /// `masked_verbs` maps each stub `@masked` verb to its formals before `...` (the data
 /// arguments, resolved normally); the rest stay quiet. An empty list masks every argument.
-pub fn resolve_item_with_masked_verbs(
-    module: &Module,
-    masked_verbs: &FxHashMap<String, Vec<String>>,
-) -> ItemNaming {
+pub fn resolve_item(module: &Module, masked_verbs: &FxHashMap<String, Vec<String>>) -> ItemNaming {
     let mut context = Context {
         module,
         masked_verbs,
         next_binding: 0,
-        scopes: vec![Scope::new(ScopeKind::TopLevel, 0)],
+        scopes: vec![Scope {
+            id: 0,
+            kind: ScopeKind::TopLevel,
+            slots: BTreeMap::new(),
+        }],
         bindings_by_site: FxHashMap::default(),
         scope_ids: FxHashMap::default(),
         flow: FlowState::new(),
@@ -137,16 +129,6 @@ struct Scope {
     id: u32,
     kind: ScopeKind,
     slots: BTreeMap<String, BindingId>,
-}
-
-impl Scope {
-    fn new(kind: ScopeKind, id: u32) -> Scope {
-        Scope {
-            id,
-            kind,
-            slots: BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -216,7 +198,6 @@ impl Context<'_> {
         self.naming.bindings.insert(
             id,
             BindingInfo {
-                id,
                 name: name.to_owned(),
                 range,
                 kind,
@@ -238,15 +219,30 @@ impl Context<'_> {
         set.insert(reach);
     }
 
-    fn resolve_many(&mut self, ids: &[ExprId]) {
-        for &id in ids {
-            self.resolve(id);
+    fn current_scope(&mut self) -> &mut Scope {
+        self.scopes.last_mut().expect("scope stack is never empty")
+    }
+
+    /// The current frame's slot for `name`, minted at this site if the frame has none yet.
+    fn frame_slot(&mut self, name: &str, range: TextRange, kind: BindingKind) -> BindingId {
+        if let Some(&slot) = self.current_scope().slots.get(name) {
+            return slot;
+        }
+        let slot = self.mint_binding(name, range, kind);
+        self.current_scope().slots.insert(name.to_owned(), slot);
+        slot
+    }
+
+    fn assignment_binding_kind(&mut self) -> BindingKind {
+        match self.current_scope().kind {
+            ScopeKind::TopLevel => BindingKind::TopLevel,
+            ScopeKind::Function | ScopeKind::Local => BindingKind::Local,
         }
     }
 
     fn resolve(&mut self, id: ExprId) {
-        let expression = self.module.expression(id).clone();
-        match &expression.kind {
+        let module = self.module;
+        match &module.expression(id).kind {
             ExpressionKind::Missing | ExpressionKind::Next => {}
             ExpressionKind::Break => self.loop_exits.push(self.flow.clone()),
             ExpressionKind::Literal(_) => {}
@@ -258,11 +254,7 @@ impl Context<'_> {
             } => {
                 // Value first: `x <- x + 1` reads the previous state. A replacement target goes
                 // first, so in `self$i <- self$i + 1` the value's reads land on the fresh binding.
-                let name_target = matches!(
-                    self.module.expression(*target).kind,
-                    ExpressionKind::NameRef(_)
-                );
-                if name_target {
+                if matches!(module.expression(*target).kind, ExpressionKind::NameRef(_)) {
                     self.resolve(*value);
                     self.resolve_assignment_target(id, *target, *spelling);
                 } else {
@@ -310,131 +302,104 @@ impl Context<'_> {
             }
             ExpressionKind::Call { callee, arguments } => {
                 self.resolve(*callee);
+                let callee_name = match &module.expression(*callee).kind {
+                    ExpressionKind::NameRef(name) => Some(name.as_str()),
+                    _ => None,
+                };
                 // `library(pkg)`, `require(pkg)` and `help(topic)` quote a bare first positional
                 // name. The rule is syntactic: a rebound `library` does not change it.
-                let quoting_callee = matches!(
-                    &self.module.expression(*callee).kind,
-                    ExpressionKind::NameRef(name) if matches!(name.as_str(), "library" | "require" | "help")
-                );
-                if quoting_callee
+                if matches!(callee_name, Some("library" | "require" | "help"))
                     && let Some(first) = arguments.first()
                     && first.name.is_none()
                     && let Some(value) = first.value
-                    && matches!(
-                        self.module.expression(value).kind,
-                        ExpressionKind::NameRef(_)
-                    )
+                    && matches!(module.expression(value).kind, ExpressionKind::NameRef(_))
                 {
-                    for argument in arguments.iter().skip(1) {
-                        if let Some(value) = argument.value {
-                            self.resolve(value);
-                        }
+                    self.resolve_arguments(&arguments[1..]);
+                    return;
+                }
+                // The forms below are recognized by name; a local function of that name is an
+                // ordinary call.
+                let builtin_callee =
+                    callee_name.filter(|_| !self.naming.resolutions.contains_key(callee));
+                match builtin_callee {
+                    // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
+                    // value and keep every write of those names alive.
+                    Some("on.exit") => {
+                        self.deferred_depth += 1;
+                        self.resolve_arguments(arguments);
+                        self.deferred_depth -= 1;
+                        return;
                     }
-                    return;
-                }
-                // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
-                // value and keep every write of those names alive.
-                let deferred_callee = matches!(
-                    &self.module.expression(*callee).kind,
-                    ExpressionKind::NameRef(name)
-                        if name == "on.exit" && !self.naming.resolutions.contains_key(callee)
-                );
-                if deferred_callee {
-                    self.deferred_depth += 1;
-                    for argument in arguments {
-                        if let Some(value) = argument.value {
-                            self.resolve(value);
-                        }
+                    // `switch` runs exactly one alternative: its branches fork and join like `if`
+                    // arms.
+                    Some("switch") if !arguments.is_empty() => {
+                        self.resolve_switch(arguments);
+                        return;
                     }
-                    self.deferred_depth -= 1;
-                    return;
-                }
-                // `switch` runs exactly one alternative: its branches fork and join like `if` arms.
-                let is_switch = matches!(
-                    &self.module.expression(*callee).kind,
-                    ExpressionKind::NameRef(name)
-                        if name == "switch" && !self.naming.resolutions.contains_key(callee)
-                );
-                if is_switch && !arguments.is_empty() {
-                    self.resolve_switch(arguments);
-                    return;
-                }
-                // A quoting form binds nothing inside it. Reads are still walked, as deferred,
-                // because `eval` may run the expression later. A local function of that name is
-                // an ordinary call.
-                let quoting_form = matches!(
-                    &self.module.expression(*callee).kind,
-                    ExpressionKind::NameRef(name)
-                        if matches!(
-                            name.as_str(),
-                            "quote" | "substitute" | "bquote" | "expression"
-                        ) && !self.naming.resolutions.contains_key(callee)
-                );
-                if quoting_form {
-                    // Quiet too: a quoted name need not exist yet, as in `quote(x <- 1)`.
-                    self.quoted_depth += 1;
-                    self.deferred_depth += 1;
-                    self.quiet_depth += 1;
-                    self.resolve_arguments(arguments);
-                    self.quiet_depth -= 1;
-                    self.deferred_depth -= 1;
-                    self.quoted_depth -= 1;
-                    return;
+                    // A quoting form binds nothing inside it. Reads are still walked, as deferred,
+                    // because `eval` may run the expression later. Quiet too: a quoted name need
+                    // not exist yet, as in `quote(x <- 1)`.
+                    Some("quote" | "substitute" | "bquote" | "expression") => {
+                        self.quoted_depth += 1;
+                        self.deferred_depth += 1;
+                        self.quiet_depth += 1;
+                        self.resolve_arguments(arguments);
+                        self.quiet_depth -= 1;
+                        self.deferred_depth -= 1;
+                        self.quoted_depth -= 1;
+                        return;
+                    }
+                    _ => {}
                 }
                 // A masking call evaluates its `...` arguments in the data's frame; arguments
-                // matching the data formals resolve normally. A local function of that name masks
-                // nothing.
-                let masking_family: Option<Vec<&str>> = match &self.module.expression(*callee).kind
-                {
-                    ExpressionKind::NameRef(name)
-                        if !self.naming.resolutions.contains_key(callee) =>
-                    {
-                        base_masking_family(name)
-                            .or_else(|| declared_masked_verb(self.masked_verbs, name))
-                    }
+                // matching the data formals resolve normally.
+                let masking_family = match (&module.expression(*callee).kind, builtin_callee) {
+                    (_, Some(name)) => base_masking_family(name)
+                        .or_else(|| declared_masked_verb(self.masked_verbs, name)),
                     // Only `base::` names the base family; another package's `with` is its own.
-                    ExpressionKind::Namespace {
-                        package,
-                        name: Some(name),
-                        ..
-                    } => match package.as_deref() {
-                        Some("base") => base_masking_family(name)
-                            .or_else(|| declared_masked_verb(self.masked_verbs, name)),
-                        _ => declared_masked_verb(self.masked_verbs, name),
-                    },
+                    (
+                        ExpressionKind::Namespace {
+                            package,
+                            name: Some(name),
+                            ..
+                        },
+                        None,
+                    ) => base_masking_family(name)
+                        .filter(|_| package.as_deref() == Some("base"))
+                        .or_else(|| declared_masked_verb(self.masked_verbs, name)),
                     _ => None,
                 };
-                if let Some(leading) = masking_family {
-                    // R matches named arguments first and fills the rest positionally, so a
-                    // positional argument takes the next data formal no name has claimed.
-                    let claimed_by_name = arguments
-                        .iter()
-                        .filter_map(|argument| argument.name.as_deref())
-                        .filter(|name| leading.contains(name))
-                        .count();
-                    let mut unclaimed = leading.len().saturating_sub(claimed_by_name);
-                    for argument in arguments {
-                        let data_argument = match &argument.name {
-                            Some(name) => leading.contains(&name.as_str()),
-                            None => {
-                                let takes_a_data_slot = unclaimed > 0;
-                                unclaimed = unclaimed.saturating_sub(1);
-                                takes_a_data_slot
-                            }
-                        };
-                        let Some(value) = argument.value else {
-                            continue;
-                        };
-                        if data_argument {
-                            self.resolve(value);
-                        } else {
-                            self.quiet_depth += 1;
-                            self.resolve(value);
-                            self.quiet_depth -= 1;
-                        }
-                    }
-                } else {
+                let Some(leading) = masking_family else {
                     self.resolve_arguments(arguments);
+                    return;
+                };
+                // R matches named arguments first and fills the rest positionally, so a
+                // positional argument takes the next data formal no name has claimed.
+                let claimed_by_name = arguments
+                    .iter()
+                    .filter_map(|argument| argument.name.as_deref())
+                    .filter(|name| leading.contains(name))
+                    .count();
+                let mut unclaimed = leading.len().saturating_sub(claimed_by_name);
+                for argument in arguments {
+                    let data_argument = match &argument.name {
+                        Some(name) => leading.contains(&name.as_str()),
+                        None => {
+                            let takes_a_data_slot = unclaimed > 0;
+                            unclaimed = unclaimed.saturating_sub(1);
+                            takes_a_data_slot
+                        }
+                    };
+                    let Some(value) = argument.value else {
+                        continue;
+                    };
+                    if data_argument {
+                        self.resolve(value);
+                    } else {
+                        self.quiet_depth += 1;
+                        self.resolve(value);
+                        self.quiet_depth -= 1;
+                    }
                 }
             }
             ExpressionKind::Index {
@@ -443,7 +408,7 @@ impl Context<'_> {
                 arguments,
             } => {
                 self.resolve(*target);
-                if !*double && self.data_table_signature(arguments) {
+                if !*double && data_table_signature(module, arguments) {
                     self.naming.masked_subsets.insert(id);
                     self.quiet_depth += 1;
                     self.resolve_arguments(arguments);
@@ -474,21 +439,22 @@ impl Context<'_> {
             }
             ExpressionKind::Function { parameters, body } => {
                 let scope_id = self.stable_scope_id(id);
-                self.scopes.push(Scope::new(ScopeKind::Function, scope_id));
+                self.scopes.push(Scope {
+                    id: scope_id,
+                    kind: ScopeKind::Function,
+                    slots: BTreeMap::new(),
+                });
                 let saved_flow = std::mem::take(&mut self.flow);
-                let parameters = parameters.clone();
-                for parameter in &parameters {
+                for parameter in parameters {
                     let slot =
                         self.mint_binding(&parameter.name, parameter.range, BindingKind::Parameter);
-                    self.scopes
-                        .last_mut()
-                        .expect("scope stack is never empty")
+                    self.current_scope()
                         .slots
                         .insert(parameter.name.clone(), slot);
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.premint_frame_assignments(*body);
-                for parameter in &parameters {
+                for parameter in parameters {
                     if let Some(default) = parameter.default {
                         self.resolve(default);
                     }
@@ -520,11 +486,7 @@ impl Context<'_> {
                 self.resolve(*sequence);
                 if let (Some(variable), Some(range)) = (variable, variable_range) {
                     let slot = self.mint_binding(variable, *range, BindingKind::ForVariable);
-                    self.scopes
-                        .last_mut()
-                        .expect("scope stack is never empty")
-                        .slots
-                        .insert(variable.clone(), slot);
+                    self.current_scope().slots.insert(variable.clone(), slot);
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.loop_body(*body, true);
@@ -538,14 +500,19 @@ impl Context<'_> {
             }
             ExpressionKind::Local { body } => {
                 let scope_id = self.stable_scope_id(id);
-                self.scopes.push(Scope::new(ScopeKind::Local, scope_id));
+                self.scopes.push(Scope {
+                    id: scope_id,
+                    kind: ScopeKind::Local,
+                    slots: BTreeMap::new(),
+                });
                 self.premint_frame_assignments(*body);
                 self.resolve(*body);
                 self.scopes.pop();
             }
-            ExpressionKind::Block { statements, .. } => {
-                let statements = statements.clone();
-                self.resolve_many(&statements);
+            ExpressionKind::Block { statements } => {
+                for &statement in statements {
+                    self.resolve(statement);
+                }
             }
             ExpressionKind::Paren(inner) => self.resolve(*inner),
         }
@@ -613,55 +580,10 @@ impl Context<'_> {
     }
 
     fn resolve_arguments(&mut self, arguments: &[Argument]) {
-        for argument in arguments.iter() {
+        for argument in arguments {
             if let Some(value) = argument.value {
                 self.resolve(value);
             }
-        }
-    }
-
-    fn data_table_signature(&self, arguments: &[Argument]) -> bool {
-        arguments.iter().any(|argument| {
-            if matches!(argument.name.as_deref(), Some("by") | Some("keyby")) {
-                return true;
-            }
-            argument
-                .value
-                .is_some_and(|value| self.data_table_marker(value))
-        })
-    }
-
-    fn data_table_marker(&self, id: ExprId) -> bool {
-        let kind = &self.module.expression(id).kind;
-        match kind {
-            ExpressionKind::Call { callee, .. }
-                if matches!(
-                    &self.module.expression(*callee).kind,
-                    ExpressionKind::NameRef(name) if name == ":="
-                ) =>
-            {
-                true
-            }
-            ExpressionKind::NameRef(name) => {
-                matches!(
-                    name.as_str(),
-                    ".SD" | ".N" | ".I" | ".BY" | ".GRP" | ".EACHI"
-                )
-            }
-            ExpressionKind::Call { callee, .. }
-                if matches!(
-                    &self.module.expression(*callee).kind,
-                    ExpressionKind::NameRef(name) if name == "."
-                ) =>
-            {
-                true
-            }
-            // A nested function body is its own evaluation context.
-            ExpressionKind::Function { .. } => false,
-            _ => kind
-                .child_ids()
-                .iter()
-                .any(|&child| self.data_table_marker(child)),
         }
     }
 
@@ -697,19 +619,20 @@ impl Context<'_> {
     /// Pre-mints slots for the frame's direct assignment targets, so a closure defined earlier
     /// can resolve a name written later: it runs after the frame has executed.
     fn premint_frame_assignments(&mut self, id: ExprId) {
-        let kind = self.module.expression(id).kind.clone();
-        match &kind {
+        let module = self.module;
+        let kind = &module.expression(id).kind;
+        match kind {
             ExpressionKind::Function { .. } | ExpressionKind::Local { .. } => {}
             ExpressionKind::Assign {
                 spelling,
                 target,
                 value,
             } => {
+                let target = module.expression(*target);
                 if *spelling != AssignSpelling::Super
-                    && let ExpressionKind::NameRef(name) = &self.module.expression(*target).kind
+                    && let ExpressionKind::NameRef(name) = &target.kind
                 {
-                    let range = self.module.expression(*target).range;
-                    self.premint_slot(name, range, BindingKind::Local);
+                    self.frame_slot(name, target.range, BindingKind::Local);
                 }
                 self.premint_frame_assignments(*value);
             }
@@ -720,7 +643,7 @@ impl Context<'_> {
                 body,
             } => {
                 if let (Some(variable), Some(range)) = (variable, variable_range) {
-                    self.premint_slot(variable, *range, BindingKind::ForVariable);
+                    self.frame_slot(variable, *range, BindingKind::ForVariable);
                 }
                 self.premint_frame_assignments(*sequence);
                 self.premint_frame_assignments(*body);
@@ -733,28 +656,10 @@ impl Context<'_> {
         }
     }
 
-    fn premint_slot(&mut self, name: &str, range: TextRange, kind: BindingKind) {
-        if self
-            .scopes
-            .last()
-            .expect("scope stack is never empty")
-            .slots
-            .contains_key(name)
-        {
-            return;
-        }
-        let slot = self.mint_binding(name, range, kind);
-        self.scopes
-            .last_mut()
-            .expect("scope stack is never empty")
-            .slots
-            .insert(name.to_owned(), slot);
-    }
-
     /// Separate from [`Self::resolve_read`] because a `%op%` read is a token with no expression
     /// id. A slot resolves when a write reaches the read or the read crosses a function
     /// boundary (a capture); an unassignable slot does not shadow.
-    fn mark_slot_read(&mut self, name: &str) -> Option<SlotRead> {
+    fn mark_slot_read(&mut self, name: &str) -> Option<(BindingId, bool)> {
         let function_depth = self.current_function_depth();
         let (depth, slot) = self
             .scopes
@@ -775,33 +680,25 @@ impl Context<'_> {
             _ => {}
         }
         let mut maybe_undefined = false;
-        if let Some(reaches) = self.flow.get(&slot) {
-            let reaches: Vec<Reach> = reaches.iter().copied().collect();
-            for reach in reaches {
-                match reach {
-                    Reach::Assignment(index) => {
-                        self.writes[index as usize].used = true;
-                    }
-                    Reach::Unassigned => maybe_undefined = true,
-                    Reach::Implicit => {}
-                }
+        for reach in self.flow.get(&slot).into_iter().flatten() {
+            match reach {
+                Reach::Assignment(index) => self.writes[*index as usize].used = true,
+                Reach::Unassigned => maybe_undefined = true,
+                Reach::Implicit => {}
             }
         }
-        if depth < self.current_function_depth() || self.deferred_depth > 0 {
+        if depth < function_depth || self.deferred_depth > 0 {
             // A capture keeps every write of the name in that frame observable; a same-named
             // binding in a different frame is shadowed and stays reportably dead.
             self.naming.captured_slots.insert(slot);
             let frame = self.scopes[depth].id;
-            for index in 0..self.writes.len() {
-                if self.writes[index].scope == frame && self.writes[index].name == *name {
-                    self.writes[index].used = true;
+            for write in &mut self.writes {
+                if write.scope == frame && write.name == name {
+                    write.used = true;
                 }
             }
         }
-        Some(SlotRead {
-            slot,
-            maybe_undefined,
-        })
+        Some((slot, maybe_undefined))
     }
 
     fn resolve_read(&mut self, id: ExprId, name: &str) {
@@ -810,10 +707,7 @@ impl Context<'_> {
             return;
         }
         match self.mark_slot_read(name) {
-            Some(SlotRead {
-                slot,
-                maybe_undefined,
-            }) => {
+            Some((slot, maybe_undefined)) => {
                 self.naming.resolutions.insert(id, slot);
                 if maybe_undefined && self.emit {
                     self.naming.maybe_undefined.insert(id);
@@ -848,7 +742,8 @@ impl Context<'_> {
             self.resolve(target);
             return;
         }
-        let target_expression = self.module.expression(target).clone();
+        let module = self.module;
+        let target_expression = module.expression(target);
         match &target_expression.kind {
             // `"x" <- 1` is `x <- 1` in R.
             ExpressionKind::NameRef(name) | ExpressionKind::Literal(LiteralKind::String(name)) => {
@@ -874,7 +769,7 @@ impl Context<'_> {
                                         write.used = true;
                                     }
                                 }
-                                self.record_write_site(assignment, target, name, range, slot, true);
+                                self.record_write_site(assignment, name, range, slot, true);
                             }
                             None => {
                                 if self.emit {
@@ -885,67 +780,23 @@ impl Context<'_> {
                         }
                     }
                     _ => {
-                        let scope_kind =
-                            self.scopes.last().expect("scope stack is never empty").kind;
-                        let kind = match scope_kind {
-                            ScopeKind::TopLevel => BindingKind::TopLevel,
-                            ScopeKind::Function | ScopeKind::Local => BindingKind::Local,
-                        };
-                        let slot = match self
-                            .scopes
-                            .last()
-                            .expect("scope stack is never empty")
-                            .slots
-                            .get(name)
-                        {
-                            Some(&slot) => slot,
-                            None => {
-                                let slot = self.mint_binding(name, range, kind);
-                                self.scopes
-                                    .last_mut()
-                                    .expect("scope stack is never empty")
-                                    .slots
-                                    .insert(name.clone(), slot);
-                                slot
-                            }
-                        };
+                        let kind = self.assignment_binding_kind();
+                        let slot = self.frame_slot(name, range, kind);
                         self.naming.resolutions.insert(target, slot);
                         let reportable = kind == BindingKind::Local;
-                        self.record_write_site(assignment, target, name, range, slot, reportable);
+                        self.record_write_site(assignment, name, range, slot, reportable);
                     }
                 }
             }
             // Replacement forms read their base as a value, then rebind it in the current scope
             // (R evaluates `x[i] <- v` as `x <- `[<-`(x, i, v)`).
-            _ => match self.replacement_base(target) {
+            _ => match replacement_base(module, target) {
                 Some((base_expression, name, range)) => {
                     self.resolve(base_expression);
-                    let scope_kind = self.scopes.last().expect("scope stack is never empty").kind;
-                    let kind = match scope_kind {
-                        ScopeKind::TopLevel => BindingKind::TopLevel,
-                        ScopeKind::Function | ScopeKind::Local => BindingKind::Local,
-                    };
-                    let current = self
-                        .scopes
-                        .last()
-                        .expect("scope stack is never empty")
-                        .slots
-                        .get(&name)
-                        .copied();
-                    let slot = match current {
-                        Some(slot) => slot,
-                        None => {
-                            let slot = self.mint_binding(&name, range, kind);
-                            self.scopes
-                                .last_mut()
-                                .expect("scope stack is never empty")
-                                .slots
-                                .insert(name.clone(), slot);
-                            slot
-                        }
-                    };
+                    let kind = self.assignment_binding_kind();
+                    let slot = self.frame_slot(name, range, kind);
                     self.naming.resolutions.insert(base_expression, slot);
-                    self.record_write_site(assignment, base_expression, &name, range, slot, false);
+                    self.record_write_site(assignment, name, range, slot, false);
                     self.resolve_replacement_subscripts(target, base_expression);
                 }
                 // R refuses a computed or numeric target only at run time, so its reads would be
@@ -954,8 +805,8 @@ impl Context<'_> {
                     // Parser recovery can leave the operands out of order.
                     let operand_gap = match &target_expression.kind {
                         ExpressionKind::Binary { lhs, rhs, .. } => {
-                            let start = self.module.expression(*lhs).range.end();
-                            let end = self.module.expression(*rhs).range.start();
+                            let start = module.expression(*lhs).range.end();
+                            let end = module.expression(*rhs).range.start();
                             (start <= end).then(|| TextRange::new(start, end))
                         }
                         _ => None,
@@ -972,26 +823,12 @@ impl Context<'_> {
         }
     }
 
-    fn replacement_base(&self, target: ExprId) -> Option<(ExprId, String, TextRange)> {
-        let expression = self.module.expression(target);
-        match &expression.kind {
-            ExpressionKind::NameRef(name) => Some((target, name.clone(), expression.range)),
-            ExpressionKind::Field { target: inner, .. }
-            | ExpressionKind::Index { target: inner, .. } => self.replacement_base(*inner),
-            ExpressionKind::Call { arguments, .. } => arguments
-                .first()
-                .and_then(|argument| argument.value)
-                .and_then(|value| self.replacement_base(value)),
-            _ => None,
-        }
-    }
-
     fn resolve_replacement_subscripts(&mut self, target: ExprId, base: ExprId) {
         if target == base {
             return;
         }
-        let expression = self.module.expression(target).clone();
-        match &expression.kind {
+        let module = self.module;
+        match &module.expression(target).kind {
             ExpressionKind::Field { target: inner, .. } => {
                 self.resolve_replacement_subscripts(*inner, base);
             }
@@ -1001,28 +838,19 @@ impl Context<'_> {
                 ..
             } => {
                 self.resolve_replacement_subscripts(*inner, base);
-                for argument in arguments {
-                    if let Some(value) = argument.value {
-                        self.resolve(value);
-                    }
-                }
+                self.resolve_arguments(arguments);
             }
             ExpressionKind::Call { callee, arguments } => {
                 // R invokes the `name<-` form, not the callee as written, so it resolves quietly.
                 self.quiet_depth += 1;
                 self.resolve(*callee);
                 self.quiet_depth -= 1;
-                let mut arguments = arguments.iter();
-                if let Some(first) = arguments.next()
+                if let Some(first) = arguments.first()
                     && let Some(value) = first.value
                 {
                     self.resolve_replacement_subscripts(value, base);
                 }
-                for argument in arguments {
-                    if let Some(value) = argument.value {
-                        self.resolve(value);
-                    }
-                }
+                self.resolve_arguments(arguments.get(1..).unwrap_or_default());
             }
             _ => self.resolve(target),
         }
@@ -1031,7 +859,6 @@ impl Context<'_> {
     fn record_write_site(
         &mut self,
         assignment: ExprId,
-        _target: ExprId,
         name: &str,
         range: TextRange,
         slot: BindingId,
@@ -1047,7 +874,7 @@ impl Context<'_> {
                     .rev()
                     .find(|scope| scope.slots.get(name) == Some(&slot))
                     .map(|scope| scope.id)
-                    .unwrap_or_else(|| self.scopes.last().expect("scope stack is never empty").id);
+                    .unwrap_or_else(|| self.current_scope().id);
                 self.writes.push(AssignmentWrite {
                     name: name.to_owned(),
                     range,
@@ -1076,11 +903,11 @@ impl Context<'_> {
                 });
             }
         }
-        for binding in self.naming.bindings.values() {
+        for (id, binding) in &self.naming.bindings {
             // The prefix rule also exempts `...`, whose reads never resolve.
             if binding.kind == BindingKind::Parameter
                 && !throwaway(&binding.name)
-                && !self.read_parameter_slots.contains(&binding.id)
+                && !self.read_parameter_slots.contains(id)
             {
                 self.naming.unused_parameters.push(UnusedAssignment {
                     name: binding.name.clone(),
@@ -1099,6 +926,55 @@ fn declared_masked_verb<'a>(
     masked_verbs
         .get(name)
         .map(|leading| leading.iter().map(String::as_str).collect())
+}
+
+fn replacement_base(module: &Module, target: ExprId) -> Option<(ExprId, &str, TextRange)> {
+    let expression = module.expression(target);
+    match &expression.kind {
+        ExpressionKind::NameRef(name) => Some((target, name, expression.range)),
+        ExpressionKind::Field { target: inner, .. }
+        | ExpressionKind::Index { target: inner, .. } => replacement_base(module, *inner),
+        ExpressionKind::Call { arguments, .. } => arguments
+            .first()
+            .and_then(|argument| argument.value)
+            .and_then(|value| replacement_base(module, value)),
+        _ => None,
+    }
+}
+
+fn data_table_signature(module: &Module, arguments: &[Argument]) -> bool {
+    arguments.iter().any(|argument| {
+        matches!(argument.name.as_deref(), Some("by" | "keyby"))
+            || argument
+                .value
+                .is_some_and(|value| data_table_marker(module, value))
+    })
+}
+
+fn data_table_marker(module: &Module, id: ExprId) -> bool {
+    let kind = &module.expression(id).kind;
+    match kind {
+        ExpressionKind::Call { callee, .. }
+            if matches!(
+                &module.expression(*callee).kind,
+                ExpressionKind::NameRef(name) if name == ":=" || name == "."
+            ) =>
+        {
+            true
+        }
+        ExpressionKind::NameRef(name) => {
+            matches!(
+                name.as_str(),
+                ".SD" | ".N" | ".I" | ".BY" | ".GRP" | ".EACHI"
+            )
+        }
+        // A nested function body is its own evaluation context.
+        ExpressionKind::Function { .. } => false,
+        _ => kind
+            .child_ids()
+            .into_iter()
+            .any(|child| data_table_marker(module, child)),
+    }
 }
 
 /// Kept in step with the checker's divergence rule.
@@ -1138,10 +1014,10 @@ fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {
 fn join_flow(into: &mut FlowState, other: &FlowState) {
     for (slot, reaches) in other {
         match into.entry(*slot) {
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
+            Entry::Occupied(mut entry) => {
                 entry.get_mut().extend(reaches.iter().copied());
             }
-            std::collections::btree_map::Entry::Vacant(vacant) => {
+            Entry::Vacant(vacant) => {
                 let mut set = reaches.clone();
                 set.insert(Reach::Unassigned);
                 vacant.insert(set);
@@ -1176,7 +1052,7 @@ mod tests {
         let root = parse.syntax_node();
         let item = root.children().next().expect("one top-level item");
         let module = lower_item(&item);
-        resolve_item(&module)
+        resolve_item(&module, &FxHashMap::default())
     }
 
     #[test]

@@ -117,13 +117,12 @@ mod tests {
     use syntax::{TextRange, TextSize};
 
     fn diagnostic(offset: u32, code: &'static str) -> Diagnostic {
-        Diagnostic {
-            range: TextRange::new(TextSize::from(offset), TextSize::from(offset + 1)),
-            severity: Severity::Warning,
+        Diagnostic::new(
+            TextRange::new(TextSize::from(offset), TextSize::from(offset + 1)),
+            Severity::Warning,
             code,
-            message: "test".to_owned(),
-            related: Vec::new(),
-        }
+            "test".to_owned(),
+        )
     }
 
     #[test]

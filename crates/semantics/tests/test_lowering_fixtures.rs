@@ -2,10 +2,9 @@
 //! happens to type the same.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::hir::{Argument, ExprId, ExpressionKind, Module, Parameter};
+use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
 use semantics::testing::with_fixture_project;
-use semantics::{DocumentKind, ItemKind, item_hir, item_tree};
-use std::fmt::Write as _;
+use semantics::{DocumentKind, item_hir, item_tree};
 use std::path::PathBuf;
 
 #[test]
@@ -18,11 +17,9 @@ fn render(source: &str) -> String {
     with_fixture_project(
         vec![(source.to_owned(), DocumentKind::Package)],
         |db, files| {
-            let [file] = files else {
+            let &[file] = files else {
                 panic!("a fixture case is one file");
             };
-            let file = *file;
-
             let mut output = String::new();
             for &item in item_tree(db, file) {
                 let Some(module) = item_hir(db, item).as_ref() else {
@@ -30,14 +27,12 @@ fn render(source: &str) -> String {
                 };
                 let header = match item.name(db).clone() {
                     Some(name) => name,
-                    None => format!("<{}>", item_kind(*item.kind(db))),
+                    None => format!("<{:?}>", item.kind(db)).to_lowercase(),
                 };
-                let _ = writeln!(output, "# {header}");
+                output.push_str(&format!("# {header}\n"));
                 match module.root {
                     Some(root) => render_expression(&mut output, module, root, 1),
-                    None => {
-                        let _ = writeln!(output, "  <no root>");
-                    }
+                    None => output.push_str("  <no root>\n"),
                 }
             }
             output
@@ -46,142 +41,82 @@ fn render(source: &str) -> String {
 }
 
 fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: usize) {
-    let indent = "  ".repeat(depth);
-    let expression = module.expression(id);
-    match &expression.kind {
-        ExpressionKind::Missing => {
-            let _ = writeln!(output, "{indent}Missing");
-        }
-        ExpressionKind::Literal(literal) => {
-            let _ = writeln!(output, "{indent}Literal {literal:?}");
-        }
-        ExpressionKind::NameRef(name) => {
-            let _ = writeln!(output, "{indent}NameRef {name}");
-        }
-        ExpressionKind::Assign {
-            spelling,
-            target,
-            value,
-        } => {
-            let _ = writeln!(output, "{indent}Assign {spelling:?}");
-            render_expression(output, module, *target, depth + 1);
-            render_expression(output, module, *value, depth + 1);
-        }
-        ExpressionKind::Unary { operator, operand } => {
-            let _ = writeln!(output, "{indent}Unary {operator:?}");
-            render_expression(output, module, *operand, depth + 1);
-        }
+    let kind = &module.expression(id).kind;
+    let label = match kind {
+        ExpressionKind::Missing => "Missing".to_owned(),
+        ExpressionKind::Literal(literal) => format!("Literal {literal:?}"),
+        ExpressionKind::NameRef(name) => format!("NameRef {name}"),
+        ExpressionKind::Assign { spelling, .. } => format!("Assign {spelling:?}"),
+        ExpressionKind::Unary { operator, .. } => format!("Unary {operator:?}"),
         ExpressionKind::Binary {
             operator,
-            special_name,
-            lhs,
-            rhs,
-        } => {
-            match special_name {
-                Some(name) => {
-                    let _ = writeln!(output, "{indent}Binary {operator:?} {name}");
-                }
-                None => {
-                    let _ = writeln!(output, "{indent}Binary {operator:?}");
-                }
-            }
-            render_expression(output, module, *lhs, depth + 1);
-            render_expression(output, module, *rhs, depth + 1);
+            special_name: Some(name),
+            ..
+        } => format!("Binary {operator:?} {name}"),
+        ExpressionKind::Binary { operator, .. } => format!("Binary {operator:?}"),
+        ExpressionKind::Call { .. } => "Call".to_owned(),
+        ExpressionKind::Index { double, .. } => {
+            format!("Index {}", if *double { "[[" } else { "[" })
         }
-        ExpressionKind::Call { callee, arguments } => {
-            let _ = writeln!(output, "{indent}Call");
-            render_expression(output, module, *callee, depth + 1);
-            render_arguments(output, module, arguments, depth + 1);
-        }
-        ExpressionKind::Index {
-            double,
-            target,
-            arguments,
-        } => {
-            let bracket = if *double { "[[" } else { "[" };
-            let _ = writeln!(output, "{indent}Index {bracket}");
-            render_expression(output, module, *target, depth + 1);
-            render_arguments(output, module, arguments, depth + 1);
-        }
-        ExpressionKind::Field {
-            at, target, name, ..
-        } => {
-            let accessor = if *at { "@" } else { "$" };
-            let spelled = name.clone().unwrap_or_else(|| "?".to_owned());
-            let _ = writeln!(output, "{indent}Field {accessor}{spelled}");
-            render_expression(output, module, *target, depth + 1);
-        }
+        ExpressionKind::Field { at, name, .. } => format!(
+            "Field {}{}",
+            if *at { "@" } else { "$" },
+            name.as_deref().unwrap_or("?")
+        ),
         ExpressionKind::Namespace {
             internal,
             package,
             name,
-        } => {
-            let separator = if *internal { ":::" } else { "::" };
-            let _ = writeln!(
-                output,
-                "{indent}Namespace {}{separator}{}",
-                package.clone().unwrap_or_else(|| "?".to_owned()),
-                name.clone().unwrap_or_else(|| "?".to_owned())
-            );
+        } => format!(
+            "Namespace {}{}{}",
+            package.as_deref().unwrap_or("?"),
+            if *internal { ":::" } else { "::" },
+            name.as_deref().unwrap_or("?")
+        ),
+        ExpressionKind::Function { parameters, .. } => {
+            let spelled: Vec<String> = parameters
+                .iter()
+                .map(|parameter| match parameter.default {
+                    Some(_) => format!("{} = …", parameter.name),
+                    None => parameter.name.clone(),
+                })
+                .collect();
+            format!("Function({})", spelled.join(", "))
         }
-        ExpressionKind::Function { parameters, body } => {
-            let _ = writeln!(output, "{indent}Function({})", spell(parameters));
-            render_expression(output, module, *body, depth + 1);
+        ExpressionKind::If { .. } => "If".to_owned(),
+        ExpressionKind::For { variable, .. } => {
+            format!("For {}", variable.as_deref().unwrap_or("?"))
         }
-        ExpressionKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            let _ = writeln!(output, "{indent}If");
-            render_expression(output, module, *condition, depth + 1);
-            render_expression(output, module, *then_branch, depth + 1);
-            if let Some(otherwise) = else_branch {
-                render_expression(output, module, *otherwise, depth + 1);
-            }
+        ExpressionKind::While { .. } => "While".to_owned(),
+        ExpressionKind::Repeat { .. } => "Repeat".to_owned(),
+        ExpressionKind::Local { .. } => "Local".to_owned(),
+        ExpressionKind::Block { .. } => "Block".to_owned(),
+        ExpressionKind::Paren(_) => "Paren".to_owned(),
+        ExpressionKind::Break => "Break".to_owned(),
+        ExpressionKind::Next => "Next".to_owned(),
+    };
+    output.push_str(&format!("{}{label}\n", "  ".repeat(depth)));
+    match kind {
+        ExpressionKind::Call {
+            callee: head,
+            arguments,
         }
-        ExpressionKind::For {
-            variable,
-            sequence,
-            body,
+        | ExpressionKind::Index {
+            target: head,
+            arguments,
             ..
         } => {
-            let _ = writeln!(
-                output,
-                "{indent}For {}",
-                variable.clone().unwrap_or_else(|| "?".to_owned())
-            );
-            render_expression(output, module, *sequence, depth + 1);
+            render_expression(output, module, *head, depth + 1);
+            render_arguments(output, module, arguments, depth + 1);
+        }
+        // Parameter defaults are spelled in the label, not rendered as children.
+        ExpressionKind::Function { body, .. } => {
             render_expression(output, module, *body, depth + 1);
         }
-        ExpressionKind::While { condition, body } => {
-            let _ = writeln!(output, "{indent}While");
-            render_expression(output, module, *condition, depth + 1);
-            render_expression(output, module, *body, depth + 1);
-        }
-        ExpressionKind::Repeat { body } => {
-            let _ = writeln!(output, "{indent}Repeat");
-            render_expression(output, module, *body, depth + 1);
-        }
-        ExpressionKind::Local { body } => {
-            let _ = writeln!(output, "{indent}Local");
-            render_expression(output, module, *body, depth + 1);
-        }
-        ExpressionKind::Block { statements } => {
-            let _ = writeln!(output, "{indent}Block");
-            for &statement in statements {
-                render_expression(output, module, statement, depth + 1);
+        _ => {
+            for child in kind.child_ids() {
+                render_expression(output, module, child, depth + 1);
             }
-        }
-        ExpressionKind::Paren(inner) => {
-            let _ = writeln!(output, "{indent}Paren");
-            render_expression(output, module, *inner, depth + 1);
-        }
-        ExpressionKind::Break => {
-            let _ = writeln!(output, "{indent}Break");
-        }
-        ExpressionKind::Next => {
-            let _ = writeln!(output, "{indent}Next");
         }
     }
 }
@@ -191,35 +126,12 @@ fn render_arguments(output: &mut String, module: &Module, arguments: &[Argument]
     for argument in arguments {
         match (&argument.name, argument.value) {
             (Some(name), Some(value)) => {
-                let _ = writeln!(output, "{indent}arg {name} =");
+                output.push_str(&format!("{indent}arg {name} =\n"));
                 render_expression(output, module, value, depth + 1);
             }
-            (Some(name), None) => {
-                let _ = writeln!(output, "{indent}arg {name} = <empty>");
-            }
+            (Some(name), None) => output.push_str(&format!("{indent}arg {name} = <empty>\n")),
             (None, Some(value)) => render_expression(output, module, value, depth),
-            (None, None) => {
-                let _ = writeln!(output, "{indent}<empty>");
-            }
+            (None, None) => output.push_str(&format!("{indent}<empty>\n")),
         }
-    }
-}
-
-fn spell(parameters: &[Parameter]) -> String {
-    parameters
-        .iter()
-        .map(|parameter| match parameter.default {
-            Some(_) => format!("{} = …", parameter.name),
-            None => parameter.name.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn item_kind(kind: ItemKind) -> &'static str {
-    match kind {
-        ItemKind::Function => "function",
-        ItemKind::Value => "value",
-        ItemKind::Statement => "statement",
     }
 }

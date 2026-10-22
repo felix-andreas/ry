@@ -3,8 +3,10 @@
 
 use crate::Db;
 use crate::annotations::lower_annotation;
-use crate::types::TypeScheme;
+use crate::metadata::namespace_active;
+use crate::types::{Ty, TyKind, TypeScheme, for_each_child_type};
 use rustc_hash::{FxHashMap, FxHashSet};
+use syntax::{SyntaxKind, TextRange};
 
 /// Sources are in precedence order: a later source replaces a name's whole overload set.
 /// Manifest names resolve even without a typed declaration, as `Unknown`.
@@ -37,7 +39,7 @@ pub struct StubLibrary<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct StubDeclaration {
     pub source_index: usize,
-    pub range: syntax::TextRange,
+    pub range: TextRange,
 }
 
 pub fn stub_declaration<'db>(db: &'db dyn Db, name: &str) -> Option<&'db StubDeclaration> {
@@ -214,7 +216,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
     for (source_index, (namespace, text)) in sources.sources(db).iter().enumerate() {
         if CONDITIONAL_NAMESPACES.contains(&namespace.as_str())
             && !project_overridden.contains(namespace.as_str())
-            && !crate::metadata::namespace_active(db, namespace)
+            && !namespace_active(db, namespace)
         {
             continue;
         }
@@ -238,7 +240,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             let name_range = |name: &str| {
                 strip_comment(raw_line).find(name).map(|at| {
                     let start = (this_line_start + at) as u32;
-                    syntax::TextRange::new(start.into(), (start + name.len() as u32).into())
+                    TextRange::new(start.into(), (start + name.len() as u32).into())
                 })
             };
             if let Some(rest) = content.strip_prefix("@type") {
@@ -296,8 +298,8 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         }
     }
     for (namespace, text) in sources.manifests(db) {
-        let active = project_overridden.contains(namespace.as_str())
-            || crate::metadata::namespace_active(db, namespace);
+        let active =
+            project_overridden.contains(namespace.as_str()) || namespace_active(db, namespace);
         if CONDITIONAL_NAMESPACES.contains(&namespace.as_str()) && !active {
             continue;
         }
@@ -330,7 +332,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
 /// `None` when the scheme is not variadic: `stub_source_problems` reports that, and the loader
 /// skips the mask.
 fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<String>> {
-    let crate::types::TyKind::Function(function) = scheme.body.kind(db) else {
+    let TyKind::Function(function) = scheme.body.kind(db) else {
         return None;
     };
     let variadic = function.variadic.as_ref()?;
@@ -436,7 +438,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         if masked
             && !matches!(
                 scheme.body.kind(db),
-                crate::types::TyKind::Function(function) if function.variadic.is_some()
+                TyKind::Function(function) if function.variadic.is_some()
             )
         {
             problems.push(StubProblem {
@@ -464,59 +466,19 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
 
 fn collect_unknown_nominals<'db>(
     db: &'db dyn Db,
-    ty: crate::types::Ty<'db>,
+    ty: Ty<'db>,
     known: &FxHashSet<String>,
     out: &mut Vec<String>,
 ) {
-    use crate::types::TyKind;
-    match ty.kind(db) {
-        TyKind::Named(name, arguments) => {
-            let text = name.text(db);
-            if !known.contains(text) && !out.iter().any(|seen| seen == text) {
-                out.push(text.to_owned());
-            }
-            for argument in arguments {
-                collect_unknown_nominals(db, *argument, known, out);
-            }
+    if let TyKind::Named(name, _) = ty.kind(db) {
+        let text = name.text(db);
+        if !known.contains(text) && !out.iter().any(|seen| seen == text) {
+            out.push(text.to_owned());
         }
-        TyKind::Vector(inner)
-        | TyKind::NamedVector(inner)
-        | TyKind::List(inner)
-        | TyKind::NamedList(inner) => collect_unknown_nominals(db, *inner, known, out),
-        TyKind::Tuple(members) => {
-            for member in members {
-                collect_unknown_nominals(db, *member, known, out);
-            }
-        }
-        TyKind::Record(fields) => {
-            for field in fields {
-                collect_unknown_nominals(db, field.ty, known, out);
-            }
-        }
-        TyKind::Function(function) => {
-            for positional in &function.positional {
-                collect_unknown_nominals(db, *positional, known, out);
-            }
-            for named in &function.named {
-                collect_unknown_nominals(db, named.ty, known, out);
-            }
-            if let Some(rest) = &function.variadic {
-                collect_unknown_nominals(db, rest.element, known, out);
-            }
-            collect_unknown_nominals(db, function.ret, known, out);
-        }
-        TyKind::Union(members) => {
-            for member in members {
-                collect_unknown_nominals(db, *member, known, out);
-            }
-        }
-        TyKind::Any
-        | TyKind::Unknown
-        | TyKind::Null
-        | TyKind::Scalar(_)
-        | TyKind::Var(_)
-        | TyKind::Rigid(_) => {}
     }
+    for_each_child_type(db, ty, &mut |child| {
+        collect_unknown_nominals(db, child, known, out)
+    });
 }
 
 /// Routes through the annotation pipeline, the single type grammar.
@@ -528,7 +490,7 @@ fn lower_type_text<'db>(db: &'db dyn Db, type_text: &str) -> Option<TypeScheme<'
     let root = parse.syntax_node();
     let annotation = root
         .children()
-        .find(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)?;
+        .find(|node| node.kind() == SyntaxKind::ANNOTATION)?;
     lower_annotation(db, &annotation).declared
 }
 
@@ -595,8 +557,15 @@ pub fn install_shipped_stubs(db: &dyn Db) -> StubSources {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::{ItemCheck, TypeErrorKind};
     use crate::diagnostics::file_diagnostics;
-    use crate::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+    use crate::metadata::{PackageMetadata, attached_union};
+    use crate::types::Atomic;
+    use crate::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree,
+        package_scheme_exists,
+    };
+    use salsa::Setter;
 
     #[test]
     fn shipped_corpus_loads() {
@@ -652,7 +621,7 @@ mod tests {
         // `@type` nominals name classes, not exported bindings, and conditional namespaces may
         // override base names (data.table's class-preserving `merge`).
         let db = RootDatabase::default();
-        crate::metadata::PackageMetadata::new(
+        PackageMetadata::new(
             &db,
             Vec::new(),
             CONDITIONAL_NAMESPACES
@@ -711,8 +680,8 @@ mod tests {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         // `bitwAnd` (base) and `aggregate` (stats) are manifest-only names.
-        assert!(crate::package_scheme_exists(&db, "bitwAnd"));
-        assert!(crate::package_scheme_exists(&db, "aggregate"));
+        assert!(package_scheme_exists(&db, "bitwAnd"));
+        assert!(package_scheme_exists(&db, "aggregate"));
         let file = SourceFile::new(
             &db,
             "f <- function(x, y) bitwAnd(x, y)\n".to_owned(),
@@ -738,25 +707,25 @@ mod tests {
         );
         ProjectFiles::new(&db, vec![file]);
         assert!(file_diagnostics(&db, file).is_empty());
-        assert!(!crate::package_scheme_exists(&db, "mclapply"));
+        assert!(!package_scheme_exists(&db, "mclapply"));
         let active = RootDatabase::default();
         install_shipped_stubs(&active);
-        crate::metadata::PackageMetadata::new(
+        PackageMetadata::new(
             &active,
             Vec::new(),
             Default::default(),
             ["parallel".to_owned()].into(),
             None,
         );
-        assert!(crate::package_scheme_exists(&active, "mclapply"));
+        assert!(package_scheme_exists(&active, "mclapply"));
     }
 
     #[test]
     fn datasets_objects_are_bare_visible() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        assert!(crate::package_scheme_exists(&db, "iris"));
-        assert!(crate::package_scheme_exists(&db, "state.x77"));
+        assert!(package_scheme_exists(&db, "iris"));
+        assert!(package_scheme_exists(&db, "state.x77"));
         let file = SourceFile::new(
             &db,
             "widths <- function() iris\n".to_owned(),
@@ -771,17 +740,17 @@ mod tests {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         // `setkey` is a data.table manifest name with no typed declaration.
-        assert!(!crate::package_scheme_exists(&db, "setkey"));
+        assert!(!package_scheme_exists(&db, "setkey"));
         let active = RootDatabase::default();
         install_shipped_stubs(&active);
-        crate::metadata::PackageMetadata::new(
+        PackageMetadata::new(
             &active,
             Vec::new(),
             ["data.table".to_owned()].into(),
             Default::default(),
             None,
         );
-        assert!(crate::package_scheme_exists(&active, "setkey"));
+        assert!(package_scheme_exists(&active, "setkey"));
     }
 
     #[test]
@@ -814,7 +783,7 @@ mod tests {
     fn declared_dependency_activates_a_conditional_namespace() {
         let db = RootDatabase::default();
         let sources = install_shipped_stubs(&db);
-        crate::metadata::PackageMetadata::new(
+        PackageMetadata::new(
             &db,
             Vec::new(),
             ["data.table".to_owned()].into(),
@@ -830,7 +799,7 @@ mod tests {
     fn library_call_attaches_a_conditional_namespace() {
         let mut db = RootDatabase::default();
         let sources = install_shipped_stubs(&db);
-        let metadata = crate::metadata::PackageMetadata::new(
+        let metadata = PackageMetadata::new(
             &db,
             Vec::new(),
             Default::default(),
@@ -843,13 +812,12 @@ mod tests {
             DocumentKind::Script,
         );
         ProjectFiles::new(&db, vec![file]);
-        let attached = crate::metadata::attached_union(&db, [file]);
+        let attached = attached_union(&db, [file]);
         assert_eq!(
             attached.iter().collect::<Vec<_>>(),
             ["data.table"],
             "the library() call must be scanned"
         );
-        use salsa::Setter;
         metadata.set_attached(&mut db).to(attached);
         let library = stub_library(&db, sources);
         assert!(library.schemes.contains_key("fread"));
@@ -900,24 +868,21 @@ mod tests {
     fn nominal_names_count_as_resolvable() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
-        assert!(crate::package_scheme_exists(&db, "data.frame"));
-        assert!(crate::package_scheme_exists(&db, "sum"));
-        assert!(!crate::package_scheme_exists(&db, "definitely_not_a_name"));
+        assert!(package_scheme_exists(&db, "data.frame"));
+        assert!(package_scheme_exists(&db, "sum"));
+        assert!(!package_scheme_exists(&db, "definitely_not_a_name"));
     }
 
-    fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> crate::check::ItemCheck<'db> {
+    fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
         let file = SourceFile::new(db, source.to_owned(), DocumentKind::Package);
         ProjectFiles::new(db, vec![file]);
-        let item = crate::item_tree(db, file)[0];
-        crate::item_check(db, item).expect("item check")
+        let item = item_tree(db, file)[0];
+        item_check(db, item).expect("item check")
     }
 
-    fn scheme_return<'db>(
-        db: &'db RootDatabase,
-        check: &crate::check::ItemCheck<'db>,
-    ) -> crate::types::Ty<'db> {
-        let scheme = check.scheme.clone().expect("definition scheme");
-        let crate::types::TyKind::Function(function) = scheme.body.kind(db).clone() else {
+    fn scheme_return<'db>(db: &'db RootDatabase, check: &ItemCheck<'db>) -> Ty<'db> {
+        let scheme = check.scheme.as_ref().expect("definition scheme");
+        let TyKind::Function(function) = scheme.body.kind(db) else {
             panic!("expected a function scheme");
         };
         function.ret
@@ -930,13 +895,10 @@ mod tests {
         let check = first_item_check(&db, "f <- function() cumsum(1L)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let ret = scheme_return(&db, &check);
-        let crate::types::TyKind::Vector(element) = ret.kind(&db) else {
+        let TyKind::Vector(element) = ret.kind(&db) else {
             panic!("expected integer[], got {:?}", ret.kind(&db));
         };
-        assert!(matches!(
-            element.kind(&db),
-            crate::types::TyKind::Scalar(crate::types::Atomic::Integer)
-        ));
+        assert!(matches!(element.kind(&db), TyKind::Scalar(Atomic::Integer)));
     }
 
     #[test]
@@ -947,7 +909,7 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
             scheme_return(&db, &check).kind(&db),
-            crate::types::TyKind::Scalar(crate::types::Atomic::Double)
+            TyKind::Scalar(Atomic::Double)
         ));
     }
 
@@ -966,7 +928,7 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
             scheme_return(&db, &check).kind(&db),
-            crate::types::TyKind::Scalar(crate::types::Atomic::Integer)
+            TyKind::Scalar(Atomic::Integer)
         ));
     }
 
@@ -985,7 +947,7 @@ mod tests {
         assert!(
             check.errors.iter().any(|error| matches!(
                 &error.kind,
-                crate::check::TypeErrorKind::NoMatchingOverload {
+                TypeErrorKind::NoMatchingOverload {
                     name,
                     candidates: 2,
                     first: Some(_),
@@ -1008,10 +970,7 @@ mod tests {
             1,
             "the parameter must stay generic: {scheme:?}"
         );
-        assert!(matches!(
-            scheme_return(&db, &check).kind(&db),
-            crate::types::TyKind::Any
-        ));
+        assert!(matches!(scheme_return(&db, &check).kind(&db), TyKind::Any));
     }
 
     #[test]
@@ -1031,7 +990,7 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
             scheme_return(&db, &check).kind(&db),
-            crate::types::TyKind::Scalar(crate::types::Atomic::Integer)
+            TyKind::Scalar(Atomic::Integer)
         ));
     }
 
@@ -1053,7 +1012,7 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
             scheme_return(&db, &check).kind(&db),
-            crate::types::TyKind::Scalar(crate::types::Atomic::Double)
+            TyKind::Scalar(Atomic::Double)
         ));
     }
 
@@ -1079,7 +1038,7 @@ mod tests {
         );
         assert!(matches!(
             scheme_return(&db, &check).kind(&db),
-            crate::types::TyKind::Scalar(crate::types::Atomic::Character)
+            TyKind::Scalar(Atomic::Character)
         ));
     }
 
@@ -1109,7 +1068,7 @@ mod tests {
         assert!(
             bad.errors
                 .iter()
-                .any(|error| matches!(error.kind, crate::check::TypeErrorKind::Mismatch { .. })),
+                .any(|error| matches!(error.kind, TypeErrorKind::Mismatch { .. })),
             "a fractional double must not pass as integer: {:?}",
             bad.errors
         );
@@ -1123,7 +1082,7 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(matches!(
             scheme_return(&db, &check).kind(&db),
-            crate::types::TyKind::Scalar(crate::types::Atomic::Integer)
+            TyKind::Scalar(Atomic::Integer)
         ));
     }
 

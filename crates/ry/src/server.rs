@@ -1363,13 +1363,12 @@ impl Worker {
                 let end = start + index.line_length(problem.line as u32, text);
                 self.convert_diagnostic(
                     text,
-                    Diagnostic {
-                        range: TextRange::new(start.into(), end.into()),
-                        severity: Severity::Error,
-                        code: "stub",
-                        message: problem.message,
-                        related: Vec::new(),
-                    },
+                    Diagnostic::new(
+                        TextRange::new(start.into(), end.into()),
+                        Severity::Error,
+                        "stub",
+                        problem.message,
+                    ),
                 )
             })
             .collect()

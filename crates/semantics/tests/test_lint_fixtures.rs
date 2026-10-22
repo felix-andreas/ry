@@ -10,11 +10,9 @@ fn render_with(source: &str, config: &LintConfig) -> String {
     with_fixture_project(
         vec![(source.to_owned(), DocumentKind::Package)],
         |db, files| {
-            let [file] = files else {
+            let &[file] = files else {
                 panic!("a fixture case is one file");
             };
-            let file = *file;
-
             let mut output = String::new();
             for diagnostic in lint_file(db, file, config) {
                 let severity = match diagnostic.severity {

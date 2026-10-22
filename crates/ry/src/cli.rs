@@ -148,13 +148,12 @@ pub fn check(
                 n_diagnostics += 1;
                 let start = stub_index.line_start(problem.line as u32);
                 let end = start + stub_index.line_length(problem.line as u32, stub_text);
-                let diagnostic = Diagnostic {
-                    range: TextRange::new(start.into(), end.into()),
-                    severity: Severity::Error,
-                    code: "stub",
-                    message: problem.message,
-                    related: Vec::new(),
-                };
+                let diagnostic = Diagnostic::new(
+                    TextRange::new(start.into(), end.into()),
+                    Severity::Error,
+                    "stub",
+                    problem.message,
+                );
                 match output {
                     OutputFormat::Human => {
                         render_human_diagnostic(stub_path, stub_text, &stub_lines, &diagnostic, &[])

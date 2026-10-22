@@ -1,7 +1,7 @@
 //! NAMESPACE problem diagnostics; parsing lives in `semantics::metadata`.
 
 use semantics::diagnostics::{Diagnostic, Severity};
-use semantics::lints::LintLevel;
+use semantics::lints::{LintLevel, lint_severity};
 pub use semantics::metadata::{NamespaceImport, parse_namespace_imports};
 use std::collections::BTreeSet;
 use syntax::{SyntaxKind, TextRange};
@@ -20,16 +20,15 @@ pub fn namespace_import_problems(
             if !knows_namespace(&import.namespace) || exports(&import.namespace, name) {
                 return None;
             }
-            Some(Diagnostic {
-                range: import.range,
-                severity: Severity::Error,
-                code: "unresolved",
-                message: format!(
+            Some(Diagnostic::new(
+                import.range,
+                Severity::Error,
+                "unresolved",
+                format!(
                     "`{name}` is not exported by `{}`, so this package will not load.",
                     import.namespace
                 ),
-                related: Vec::new(),
-            })
+            ))
         })
         .collect()
 }
@@ -43,14 +42,13 @@ pub fn namespace_export_problems(
     exports
         .iter()
         .filter(|(name, _)| !defines(name))
-        .map(|(name, range)| Diagnostic {
-            range: *range,
-            severity: Severity::Error,
-            code: "unresolved",
-            message: format!(
-                "`{name}` is exported but this package defines no such top-level object."
-            ),
-            related: Vec::new(),
+        .map(|(name, range)| {
+            Diagnostic::new(
+                *range,
+                Severity::Error,
+                "unresolved",
+                format!("`{name}` is exported but this package defines no such top-level object."),
+            )
         })
         .collect()
 }
@@ -63,10 +61,8 @@ pub fn unused_import_diagnostics(
     used_tokens: &BTreeSet<String>,
     level: LintLevel,
 ) -> Vec<Diagnostic> {
-    let severity = match level {
-        LintLevel::Default | LintLevel::Off => return Vec::new(),
-        LintLevel::Warn => Severity::Warning,
-        LintLevel::Error => Severity::Error,
+    let Some(severity) = lint_severity(level, None) else {
+        return Vec::new();
     };
     imports
         .iter()
@@ -75,16 +71,15 @@ pub fn unused_import_diagnostics(
             if used_tokens.contains(name) {
                 return None;
             }
-            Some(Diagnostic {
-                range: import.range,
-                severity: severity.clone(),
-                code: "unused-import",
-                message: format!(
+            Some(Diagnostic::new(
+                import.range,
+                severity,
+                "unused-import",
+                format!(
                     "imported name `{name}` from `{}` is never used.",
                     import.namespace
                 ),
-                related: Vec::new(),
-            })
+            ))
         })
         .collect()
 }

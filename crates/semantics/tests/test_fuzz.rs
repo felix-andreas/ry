@@ -2,8 +2,13 @@
 //! runs are deterministic per seed.
 
 use salsa::Setter as _;
-use semantics::testing::{check_semantics_invariants, render_semantics as render};
+use semantics::diagnostics::file_diagnostics;
+use semantics::stubs::install_shipped_stubs;
+use semantics::testing::{
+    check_semantics_input, check_semantics_invariants, render_semantics as render,
+};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 struct SplitMix64(u64);
 
@@ -112,36 +117,23 @@ fn generate_soup(rng: &mut SplitMix64) -> String {
 }
 
 /// Prints the failing inputs on panic: a bare salsa or checker panic names no source.
-fn check_pipeline_reporting(rng: &mut SplitMix64, source: &str) {
-    let kind = if rng.chance(1, 4) {
-        DocumentKind::Script
-    } else {
-        DocumentKind::Package
-    };
-    let edited_source = generate_program(rng);
-    let result =
-        std::panic::catch_unwind(|| check_semantics_invariants(source, &edited_source, kind));
-    if let Err(payload) = result {
-        eprintln!(
-            "---- pipeline panicked ({kind:?}) ----\n{source}\n---- edited to ----\n{edited_source}\n----"
-        );
-        std::panic::resume_unwind(payload);
-    }
-}
-
-fn run_generated(budget: usize, seed: u64) {
+fn run_single_file(budget: usize, seed: u64, generate: fn(&mut SplitMix64) -> String) {
     let mut rng = SplitMix64(seed);
     for _ in 0..budget {
-        let source = generate_program(&mut rng);
-        check_pipeline_reporting(&mut rng, &source);
-    }
-}
-
-fn run_soup(budget: usize, seed: u64) {
-    let mut rng = SplitMix64(seed);
-    for _ in 0..budget {
-        let source = generate_soup(&mut rng);
-        check_pipeline_reporting(&mut rng, &source);
+        let source = generate(&mut rng);
+        let kind = if rng.chance(1, 4) {
+            DocumentKind::Script
+        } else {
+            DocumentKind::Package
+        };
+        let edited_source = generate_program(&mut rng);
+        let result = catch_unwind(|| check_semantics_invariants(&source, &edited_source, kind));
+        if let Err(payload) = result {
+            eprintln!(
+                "---- pipeline panicked ({kind:?}) ----\n{source}\n---- edited to ----\n{edited_source}\n----"
+            );
+            resume_unwind(payload);
+        }
     }
 }
 
@@ -151,7 +143,7 @@ fn run_multi_file(budget: usize, seed: u64) {
         let first_source = generate_program(&mut rng);
         let second_source = generate_program(&mut rng);
         let mut db = RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
+        install_shipped_stubs(&db);
         let first = SourceFile::new(&db, first_source.clone(), DocumentKind::Package);
         let second = SourceFile::new(&db, second_source.clone(), DocumentKind::Package);
         ProjectFiles::new(&db, vec![first, second]);
@@ -163,7 +155,7 @@ fn run_multi_file(budget: usize, seed: u64) {
         let after_second = render(&db, second);
 
         let fresh_db = RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&fresh_db);
+        install_shipped_stubs(&fresh_db);
         let fresh_first = SourceFile::new(&fresh_db, first_source.clone(), DocumentKind::Package);
         let fresh_second = SourceFile::new(&fresh_db, edited_source, DocumentKind::Package);
         ProjectFiles::new(&fresh_db, vec![fresh_first, fresh_second]);
@@ -194,8 +186,6 @@ const REGRESSIONS: &[&str] = &["foo$\n", "f)\nla<- function()"];
 /// never-panic and range geometry; the generated arms cover determinism and equivalence.
 #[test]
 fn program_corpus_holds_invariants() {
-    use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-
     let sources = syntax::testing::program_corpus_sources();
     assert!(
         sources.len() > 1_000,
@@ -203,7 +193,7 @@ fn program_corpus_holds_invariants() {
         sources.len()
     );
     let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let files: Vec<(String, SourceFile)> = sources
         .iter()
         .map(|(id, source)| {
@@ -216,10 +206,8 @@ fn program_corpus_holds_invariants() {
     ProjectFiles::new(&db, files.iter().map(|(_, file)| *file).collect());
     for (id, file) in &files {
         let length = file.text(&db).len();
-        let diagnostics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            semantics::diagnostics::file_diagnostics(&db, *file)
-        }))
-        .unwrap_or_else(|_| panic!("program corpus case `{id}` panicked the pipeline"));
+        let diagnostics = catch_unwind(AssertUnwindSafe(|| file_diagnostics(&db, *file)))
+            .unwrap_or_else(|_| panic!("program corpus case `{id}` panicked the pipeline"));
         for diagnostic in diagnostics {
             let start = u32::from(diagnostic.range.start()) as usize;
             let end = u32::from(diagnostic.range.end()) as usize;
@@ -234,18 +222,18 @@ fn program_corpus_holds_invariants() {
 #[test]
 fn fuzz_regressions_hold_invariants() {
     for input in REGRESSIONS {
-        semantics::testing::check_semantics_input(input);
+        check_semantics_input(input);
     }
 }
 
 #[test]
 fn fuzz_generated_programs() {
-    run_generated(iterations(), 0xDECA_FBAD);
+    run_single_file(iterations(), 0xDECA_FBAD, generate_program);
 }
 
 #[test]
 fn fuzz_token_soup() {
-    run_soup(iterations() / 2, 0xBEEF_FACE);
+    run_single_file(iterations() / 2, 0xBEEF_FACE, generate_soup);
 }
 
 #[test]
@@ -256,7 +244,7 @@ fn fuzz_multi_file() {
 #[test]
 #[ignore = "long fuzz run for nightly/manual use"]
 fn fuzz_deep() {
-    run_generated(iterations() * 20, 0x5EED_0001);
-    run_soup(iterations() * 10, 0x5EED_0002);
+    run_single_file(iterations() * 20, 0x5EED_0001, generate_program);
+    run_single_file(iterations() * 10, 0x5EED_0002, generate_soup);
     run_multi_file(iterations() * 4, 0x5EED_0003);
 }

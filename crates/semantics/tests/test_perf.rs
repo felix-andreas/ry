@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use salsa::Setter;
 use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
 use semantics::infer::RESOLVE_CALLS;
+use semantics::stubs::install_shipped_stubs;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 
 #[test]
@@ -29,9 +30,7 @@ fn corpus_budgets() {
     let start = Instant::now();
     let mut retained = Vec::new();
     for sources in &packages {
-        let db = RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
-        let files = package_files(&db, sources);
+        let (db, files) = package(sources);
         for &file in &files {
             file_diagnostics(&db, file);
             strict_diagnostics(&db, file);
@@ -66,9 +65,7 @@ fn corpus_budgets() {
         .iter()
         .max_by_key(|sources| sources.iter().map(String::len).sum::<usize>())
         .expect("the corpus is not empty");
-    let mut db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let files = package_files(&db, sources);
+    let (mut db, files) = package(sources);
     for &file in &files {
         file_diagnostics(&db, file);
     }
@@ -110,13 +107,15 @@ fn corpus_budgets() {
     );
 }
 
-fn package_files(db: &RootDatabase, sources: &[String]) -> Vec<SourceFile> {
+fn package(sources: &[String]) -> (RootDatabase, Vec<SourceFile>) {
+    let db = RootDatabase::default();
+    install_shipped_stubs(&db);
     let files: Vec<SourceFile> = sources
         .iter()
-        .map(|source| SourceFile::new(db, source.clone(), DocumentKind::Package))
+        .map(|source| SourceFile::new(&db, source.clone(), DocumentKind::Package))
         .collect();
-    ProjectFiles::new(db, files.clone());
-    files
+    ProjectFiles::new(&db, files.clone());
+    (db, files)
 }
 
 fn proc_status_kb(key: &str) -> Option<u64> {
