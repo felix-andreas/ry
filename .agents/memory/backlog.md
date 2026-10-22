@@ -343,6 +343,15 @@ ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycl
 reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
 any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
 
+### A read waits for the idle job in flight
+
+Only a notification (an open, edit, save or watched-file change) cancels in-flight work; a request
+never does (`ServerState::notify` against `ServerState::read` in `crates/ry/src/server.rs`). A hover
+or completion that arrives while the worker warms a file therefore waits for that one file's
+analysis to finish, because idle work runs one file per job. Measure the
+worst single-file warm-up on a large package before adding read preemption; if it is well under the
+keystroke budget, delete this entry.
+
 ### Judged fast enough, so do not invent work here
 
 Single-package cold analysis is 1.9 s and 88 MiB peak for ggplot2's 68k lines, 1.3 s and 72 MiB for
