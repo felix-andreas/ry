@@ -1,266 +1,168 @@
-use async_lsp::LanguageServer;
-use async_lsp::concurrency::{Concurrency, ConcurrencyLayer};
+use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::notification::{PublishDiagnostics, ShowMessage};
 use async_lsp::lsp_types::request::{RegisterCapability, WorkspaceDiagnosticRefresh};
 use async_lsp::lsp_types::{
-    ClientCapabilities, DiagnosticClientCapabilities, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
+    ClientCapabilities, CompletionClientCapabilities, CompletionItemCapability, CompletionParams,
+    CompletionResponse, DiagnosticClientCapabilities, DiagnosticSeverity,
+    DiagnosticWorkspaceClientCapabilities, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
     DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentRangeFormattingParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, FileChangeType, FileEvent,
     FormattingOptions, GeneralClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse,
-    HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
-    PartialResultParams, Position, PositionEncodingKind, PublishDiagnosticsParams,
-    ShowMessageParams, TextDocumentClientCapabilities, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
-    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceFolder,
+    Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
+    InlayHint, InlayHintParams, InsertTextFormat, Location, NumberOrString,
+    ParameterInformationSettings, ParameterLabel, PartialResultParams, Position,
+    PositionEncodingKind, PublishDiagnosticsParams, Range, ReferenceContext, ReferenceParams,
+    RenameParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult, ShowMessageParams,
+    SignatureHelp, SignatureHelpClientCapabilities, SignatureHelpParams,
+    SignatureInformationSettings, SymbolKind, TextDocumentClientCapabilities,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, Url, VersionedTextDocumentIdentifier,
+    WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceEdit, WorkspaceFolder,
 };
-use async_lsp::panic::{CatchUnwind, CatchUnwindLayer};
+use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
+use async_lsp::{ErrorCode, LanguageServer, MainLoop, ServerSocket};
+use std::fs;
+use std::future::ready;
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tempfile::TempDir;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, timeout};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tower::ServiceBuilder;
 
-struct TestClientState {
-    diagnostics_sender: mpsc::UnboundedSender<PublishDiagnosticsParams>,
-    refresh_sender: mpsc::UnboundedSender<()>,
-    messages_sender: mpsc::UnboundedSender<ShowMessageParams>,
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+struct TestContext {
+    server: ServerSocket,
+    diagnostics: UnboundedReceiver<PublishDiagnosticsParams>,
+    /// Deferred publishes for different documents interleave in idle order, so a
+    /// wait for one URI must stash, not drop, the others.
+    stash: Vec<PublishDiagnosticsParams>,
+    refreshes: UnboundedReceiver<()>,
+    messages: UnboundedReceiver<ShowMessageParams>,
+    mainloop: JoinHandle<()>,
+    init_result: InitializeResult,
+    workspace_dir: PathBuf,
+    _temp_dir: TempDir,
 }
 
-struct Stop;
+struct TestClientState {
+    diagnostics: UnboundedSender<PublishDiagnosticsParams>,
+    refreshes: UnboundedSender<()>,
+    messages: UnboundedSender<ShowMessageParams>,
+}
 
-type TestService = CatchUnwind<Concurrency<Router<TestClientState>>>;
+#[derive(Default)]
+struct Launch<'a> {
+    files: &'a [(&'a str, &'a str)],
+    capabilities: ClientCapabilities,
+    env: &'a [(&'a str, &'a str)],
+    args: &'a [&'a str],
+    without_r_directory: bool,
+}
 
-fn build_test_client(
-    diagnostics_sender: mpsc::UnboundedSender<PublishDiagnosticsParams>,
-    refresh_sender: mpsc::UnboundedSender<()>,
-    messages_sender: mpsc::UnboundedSender<ShowMessageParams>,
-) -> (async_lsp::MainLoop<TestService>, async_lsp::ServerSocket) {
-    async_lsp::MainLoop::new_client(|_server| {
+async fn setup_test(files: &[(&str, &str)]) -> TestContext {
+    setup_with(files, ClientCapabilities::default()).await
+}
+
+async fn setup_with(files: &[(&str, &str)], capabilities: ClientCapabilities) -> TestContext {
+    launch(Launch {
+        files,
+        capabilities,
+        ..Launch::default()
+    })
+    .await
+}
+
+async fn launch(options: Launch<'_>) -> TestContext {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    // The cwd is the temp root while the client announces `workspace/` as the root,
+    // so every test exercises root-from-initialize.
+    let workspace_dir = temp_dir.path().join("workspace");
+    fs::create_dir_all(&workspace_dir).expect("failed to create workspace directory");
+    if !options.without_r_directory {
+        fs::create_dir_all(workspace_dir.join("R")).expect("failed to create R directory");
+    }
+    for (relative, text) in options.files {
+        let path = workspace_dir.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("failed to create parent directory");
+        }
+        fs::write(path, text).expect("failed to write initial test file");
+    }
+
+    let (diagnostics_sender, diagnostics) = mpsc::unbounded_channel();
+    let (refresh_sender, refreshes) = mpsc::unbounded_channel();
+    let (message_sender, messages) = mpsc::unbounded_channel();
+    let (mainloop, mut server) = MainLoop::new_client(|_server| {
         let mut router = Router::new(TestClientState {
-            diagnostics_sender,
-            refresh_sender,
-            messages_sender,
+            diagnostics: diagnostics_sender,
+            refreshes: refresh_sender,
+            messages: message_sender,
         });
-        router.notification::<PublishDiagnostics>(|state, params| {
-            state
-                .diagnostics_sender
-                .send(params)
-                .expect("diagnostics channel closed unexpectedly");
-            ControlFlow::Continue(())
-        });
-        router.request::<RegisterCapability, _>(|_, _| std::future::ready(Ok(())));
-        router.request::<WorkspaceDiagnosticRefresh, _>(|state, _| {
-            let _ = state.refresh_sender.send(());
-            std::future::ready(Ok(()))
-        });
-        router.notification::<ShowMessage>(|state, params| {
-            let _ = state.messages_sender.send(params);
-            ControlFlow::Continue(())
-        });
-        router.event(|_, _: Stop| ControlFlow::Break(Ok(())));
+        router
+            .notification::<PublishDiagnostics>(|state, params| {
+                state
+                    .diagnostics
+                    .send(params)
+                    .expect("diagnostics channel closed unexpectedly");
+                ControlFlow::Continue(())
+            })
+            .notification::<ShowMessage>(|state, params| {
+                state
+                    .messages
+                    .send(params)
+                    .expect("messages channel closed unexpectedly");
+                ControlFlow::Continue(())
+            })
+            .request::<RegisterCapability, _>(|_, _| ready(Ok(())))
+            .request::<WorkspaceDiagnosticRefresh, _>(|state, _| {
+                state
+                    .refreshes
+                    .send(())
+                    .expect("refresh channel closed unexpectedly");
+                ready(Ok(()))
+            });
         ServiceBuilder::new()
             .layer(CatchUnwindLayer::default())
             .layer(ConcurrencyLayer::default())
             .service(router)
-    })
-}
+    });
 
-fn spawn_server(server_cwd: &Path, envs: &[(&str, &str)], args: &[&str]) -> tokio::process::Child {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ry"))
         .arg("server")
-        .args(args)
-        .current_dir(server_cwd)
-        .envs(envs.iter().copied())
+        .args(options.args)
+        .current_dir(temp_dir.path())
+        .envs(options.env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
-        .expect("failed to spawn ry server")
-}
-
-/// Deferred publishes for different documents interleave in idle order, so a wait
-/// for one URI must stash, not drop, the others.
-struct DiagnosticsChannel {
-    receiver: mpsc::UnboundedReceiver<PublishDiagnosticsParams>,
-    stash: Vec<PublishDiagnosticsParams>,
-}
-
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Skips (and consumes) the versioned first-wave publishes; returns the next version-less one.
-async fn recv_diagnostics(
-    channel: &mut DiagnosticsChannel,
-    uri: &Url,
-    timeout_duration: Duration,
-) -> PublishDiagnosticsParams {
-    if let Some(index) = channel
-        .stash
-        .iter()
-        .position(|params| params.uri == *uri && params.version.is_none())
-    {
-        let params = channel.stash.remove(index);
-        let kept_prefix: Vec<_> = channel
-            .stash
-            .drain(..index)
-            .filter(|stashed| stashed.uri != *uri)
-            .collect();
-        channel.stash.splice(..0, kept_prefix);
-        return params;
-    }
-    tokio::time::timeout(timeout_duration, async {
-        loop {
-            let params = channel
-                .receiver
-                .recv()
-                .await
-                .expect("diagnostics channel closed");
-            if params.uri == *uri {
-                if params.version.is_none() {
-                    return params;
-                }
-                continue;
-            }
-            channel.stash.push(params);
-        }
-    })
-    .await
-    .expect("timed out waiting for diagnostics")
-}
-
-async fn recv_first_diagnostics(
-    channel: &mut DiagnosticsChannel,
-    uri: &Url,
-    timeout_duration: Duration,
-) -> PublishDiagnosticsParams {
-    if let Some(index) = channel.stash.iter().position(|params| params.uri == *uri) {
-        return channel.stash.remove(index);
-    }
-    tokio::time::timeout(timeout_duration, async {
-        loop {
-            let params = channel
-                .receiver
-                .recv()
-                .await
-                .expect("diagnostics channel closed");
-            if params.uri == *uri {
-                return params;
-            }
-            channel.stash.push(params);
-        }
-    })
-    .await
-    .expect("timed out waiting for diagnostics")
-}
-
-struct TestContext {
-    server: async_lsp::ServerSocket,
-    diagnostics_receiver: DiagnosticsChannel,
-    /// Read only by the diagnostic-refresh tests.
-    #[allow(dead_code)]
-    refresh_receiver: mpsc::UnboundedReceiver<()>,
-    messages_receiver: mpsc::UnboundedReceiver<ShowMessageParams>,
-    mainloop_handle: tokio::task::JoinHandle<()>,
-    init_result: InitializeResult,
-    _temp_dir: tempfile::TempDir,
-    workspace_dir: PathBuf,
-}
-
-impl TestContext {
-    fn workspace_uri(&self, relative: &str) -> Url {
-        Url::from_file_path(self.workspace_dir.join(relative)).expect("workspace file URI")
-    }
-
-    async fn open(&mut self, relative: &str, text: &str) -> Url {
-        let uri = self.workspace_uri(relative);
-        self.server
-            .did_open(DidOpenTextDocumentParams {
-                text_document: TextDocumentItem {
-                    uri: uri.clone(),
-                    language_id: "r".into(),
-                    version: 1,
-                    text: text.to_owned(),
-                },
-            })
-            .expect("didOpen failed");
-        uri
-    }
-
-    async fn shutdown(mut self) {
-        let _ = self.server.shutdown(()).await;
-        let _ = self.server.exit(());
-        let _ = tokio::time::timeout(TIMEOUT, self.mainloop_handle).await;
-    }
-}
-
-async fn setup_test_inner(
-    create_r_directory: bool,
-    initial_files: &[(&str, &str)],
-    capabilities: ClientCapabilities,
-) -> TestContext {
-    setup_test_with_env(create_r_directory, initial_files, capabilities, &[]).await
-}
-
-async fn setup_test_with_env(
-    create_r_directory: bool,
-    initial_files: &[(&str, &str)],
-    capabilities: ClientCapabilities,
-    envs: &[(&str, &str)],
-) -> TestContext {
-    setup_test_with_env_and_args(create_r_directory, initial_files, capabilities, envs, &[]).await
-}
-
-async fn setup_test_with_env_and_args(
-    create_r_directory: bool,
-    initial_files: &[(&str, &str)],
-    capabilities: ClientCapabilities,
-    envs: &[(&str, &str)],
-    args: &[&str],
-) -> TestContext {
-    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-    // The cwd is the temp root while the client announces `workspace/` as the root,
-    // so every test exercises root-from-initialize.
-    let server_cwd = temp_dir.path().to_path_buf();
-    let workspace_dir = temp_dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace_dir).expect("failed to create workspace directory");
-    if create_r_directory {
-        std::fs::create_dir_all(workspace_dir.join("R")).expect("failed to create R directory");
-    }
-    for (relative_path, text) in initial_files {
-        let path = workspace_dir.join(relative_path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("failed to create parent directory");
-        }
-        std::fs::write(path, text).expect("failed to write initial test file");
-    }
-
-    let (diagnostics_sender, diagnostics_receiver) = mpsc::unbounded_channel();
-    let (refresh_sender, refresh_receiver) = mpsc::unbounded_channel();
-    let (messages_sender, messages_receiver) = mpsc::unbounded_channel();
-    let (mainloop, mut server) =
-        build_test_client(diagnostics_sender, refresh_sender, messages_sender);
-
-    let mut child = spawn_server(&server_cwd, envs, args);
+        .expect("failed to spawn ry server");
     let stdout = child.stdout.take().expect("missing stdout").compat();
     let stdin = child.stdin.take().expect("missing stdin").compat_write();
-    let mainloop_handle = tokio::spawn(async move {
+    let mainloop = tokio::spawn(async move {
         if let Err(error) = mainloop.run_buffered(stdout, stdin).await {
             eprintln!("mainloop error: {error}");
         }
         drop(child);
     });
 
-    let root_uri = Url::from_file_path(&workspace_dir).expect("invalid workspace path");
     let init_result = server
         .initialize(InitializeParams {
             workspace_folders: Some(vec![WorkspaceFolder {
-                uri: root_uri,
+                uri: Url::from_file_path(&workspace_dir).expect("invalid workspace path"),
                 name: "root".into(),
             }]),
-            capabilities,
+            capabilities: options.capabilities,
             ..InitializeParams::default()
         })
         .await
@@ -272,46 +174,377 @@ async fn setup_test_with_env_and_args(
 
     TestContext {
         server,
-        diagnostics_receiver: DiagnosticsChannel {
-            receiver: diagnostics_receiver,
-            stash: Vec::new(),
-        },
-        refresh_receiver,
-        messages_receiver,
-        mainloop_handle,
+        diagnostics,
+        stash: Vec::new(),
+        refreshes,
+        messages,
+        mainloop,
         init_result,
-        _temp_dir: temp_dir,
         workspace_dir,
+        _temp_dir: temp_dir,
     }
 }
 
-async fn setup_test(initial_files: &[(&str, &str)]) -> TestContext {
-    setup_test_inner(true, initial_files, ClientCapabilities::default()).await
-}
+impl TestContext {
+    fn workspace_uri(&self, relative: &str) -> Url {
+        Url::from_file_path(self.workspace_dir.join(relative)).expect("workspace file URI")
+    }
 
-async fn setup_test_with_position_encodings(
-    initial_files: &[(&str, &str)],
-    position_encodings: &[PositionEncodingKind],
-) -> TestContext {
-    let capabilities = ClientCapabilities {
-        general: Some(GeneralClientCapabilities {
-            position_encodings: Some(position_encodings.to_vec()),
-            ..GeneralClientCapabilities::default()
-        }),
-        ..ClientCapabilities::default()
-    };
-    setup_test_inner(true, initial_files, capabilities).await
-}
+    fn open(&mut self, relative: &str, text: &str) -> Url {
+        let uri = self.workspace_uri(relative);
+        self.open_uri(&uri, text);
+        uri
+    }
 
-async fn setup_test_with_pull_diagnostics(initial_files: &[(&str, &str)]) -> TestContext {
-    let capabilities = ClientCapabilities {
-        text_document: Some(TextDocumentClientCapabilities {
-            diagnostic: Some(DiagnosticClientCapabilities::default()),
-            ..TextDocumentClientCapabilities::default()
-        }),
-        ..ClientCapabilities::default()
-    };
-    setup_test_inner(true, initial_files, capabilities).await
+    fn open_uri(&mut self, uri: &Url, text: &str) {
+        self.server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "r".into(),
+                    version: 1,
+                    text: text.to_owned(),
+                },
+            })
+            .expect("didOpen failed");
+    }
+
+    /// A `None` range replaces the whole document.
+    fn change(&mut self, uri: &Url, version: i32, range: Option<Range>, text: &str) {
+        self.server
+            .did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range,
+                    range_length: None,
+                    text: text.to_owned(),
+                }],
+            })
+            .expect("didChange failed");
+    }
+
+    fn save(&mut self, uri: &Url) {
+        self.server
+            .did_save(DidSaveTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                text: None,
+            })
+            .expect("didSave failed");
+    }
+
+    fn close(&mut self, uri: &Url) {
+        self.server
+            .did_close(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            })
+            .expect("didClose failed");
+    }
+
+    fn notify_watched_file_changed(&mut self, relative: &str, typ: FileChangeType) {
+        let uri = self.workspace_uri(relative);
+        self.server
+            .did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![FileEvent { uri, typ }],
+            })
+            .expect("didChangeWatchedFiles failed");
+    }
+
+    fn drain_diagnostics(&mut self) {
+        self.stash.clear();
+        while self.diagnostics.try_recv().is_ok() {}
+    }
+
+    /// Skips (and consumes) the versioned first-wave publishes; returns the next
+    /// version-less one.
+    async fn recv_diagnostics(&mut self, uri: &Url) -> PublishDiagnosticsParams {
+        self.recv_publish(uri, true).await
+    }
+
+    async fn recv_first_diagnostics(&mut self, uri: &Url) -> PublishDiagnosticsParams {
+        self.recv_publish(uri, false).await
+    }
+
+    async fn recv_publish(&mut self, uri: &Url, settled: bool) -> PublishDiagnosticsParams {
+        let wanted = |params: &PublishDiagnosticsParams| {
+            params.uri == *uri && (!settled || params.version.is_none())
+        };
+        if let Some(index) = self.stash.iter().position(wanted) {
+            let params = self.stash.remove(index);
+            let mut seen = 0;
+            self.stash.retain(|stashed| {
+                seen += 1;
+                seen > index || stashed.uri != *uri
+            });
+            return params;
+        }
+        timeout(TIMEOUT, async {
+            loop {
+                let params = self
+                    .diagnostics
+                    .recv()
+                    .await
+                    .expect("diagnostics channel closed");
+                if wanted(&params) {
+                    return params;
+                }
+                if params.uri != *uri {
+                    self.stash.push(params);
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for diagnostics")
+    }
+
+    async fn recv_message(&mut self) -> ShowMessageParams {
+        timeout(TIMEOUT, self.messages.recv())
+            .await
+            .expect("timed out waiting for a message")
+            .expect("messages channel closed")
+    }
+
+    async fn recv_refresh(&mut self) {
+        timeout(TIMEOUT, self.refreshes.recv())
+            .await
+            .expect("timed out waiting for the diagnostic refresh request")
+            .expect("refresh channel closed");
+    }
+
+    async fn hover(
+        &mut self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+    ) -> async_lsp::Result<Option<Hover>> {
+        self.server
+            .hover(HoverParams {
+                text_document_position_params: position_params(uri, line, character),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+    }
+
+    async fn hover_markdown(&mut self, uri: &Url, line: u32, character: u32) -> String {
+        let hover = self
+            .hover(uri, line, character)
+            .await
+            .expect("hover failed")
+            .expect("expected a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markdown hover");
+        };
+        markup.value
+    }
+
+    async fn hover_range(&mut self, uri: &Url, line: u32, character: u32) -> Range {
+        self.hover(uri, line, character)
+            .await
+            .expect("hover failed")
+            .expect("expected a hover")
+            .range
+            .expect("hover should report a range")
+    }
+
+    async fn definition(
+        &mut self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+    ) -> async_lsp::Result<Option<GotoDefinitionResponse>> {
+        self.server
+            .definition(GotoDefinitionParams {
+                text_document_position_params: position_params(uri, line, character),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+    }
+
+    async fn definition_location(&mut self, uri: &Url, line: u32, character: u32) -> Location {
+        let response = self
+            .definition(uri, line, character)
+            .await
+            .expect("definition failed")
+            .expect("expected a definition");
+        let GotoDefinitionResponse::Scalar(location) = response else {
+            panic!("expected a scalar definition");
+        };
+        location
+    }
+
+    async fn references(
+        &mut self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+        include_declaration: bool,
+    ) -> async_lsp::Result<Option<Vec<Location>>> {
+        self.server
+            .references(ReferenceParams {
+                text_document_position: position_params(uri, line, character),
+                context: ReferenceContext {
+                    include_declaration,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+    }
+
+    async fn completion(
+        &mut self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+    ) -> async_lsp::Result<Option<CompletionResponse>> {
+        self.server
+            .completion(CompletionParams {
+                text_document_position: position_params(uri, line, character),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+                context: None,
+            })
+            .await
+    }
+
+    async fn signature_help(
+        &mut self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+    ) -> async_lsp::Result<Option<SignatureHelp>> {
+        self.server
+            .signature_help(SignatureHelpParams {
+                context: None,
+                text_document_position_params: position_params(uri, line, character),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+    }
+
+    async fn rename(
+        &mut self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> async_lsp::Result<Option<WorkspaceEdit>> {
+        self.server
+            .rename(RenameParams {
+                text_document_position: position_params(uri, line, character),
+                new_name: new_name.to_owned(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+    }
+
+    async fn inlay_hints(
+        &mut self,
+        uri: &Url,
+        range: Range,
+    ) -> async_lsp::Result<Option<Vec<InlayHint>>> {
+        self.server
+            .inlay_hint(InlayHintParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                range,
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+    }
+
+    async fn formatting(&mut self, uri: &Url) -> async_lsp::Result<Option<Vec<TextEdit>>> {
+        self.server
+            .formatting(DocumentFormattingParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                options: FormattingOptions::default(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+    }
+
+    /// The text of the first formatting edit.
+    async fn formatted(&mut self, uri: &Url) -> String {
+        self.formatting(uri)
+            .await
+            .expect("formatting failed")
+            .expect("expected formatting edits")
+            .into_iter()
+            .next()
+            .expect("expected a formatting edit")
+            .new_text
+    }
+
+    async fn range_formatting(
+        &mut self,
+        uri: &Url,
+        range: Range,
+    ) -> async_lsp::Result<Option<Vec<TextEdit>>> {
+        self.server
+            .range_formatting(DocumentRangeFormattingParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                range,
+                options: FormattingOptions::default(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+    }
+
+    async fn document_symbols(&mut self, uri: &Url) -> Vec<DocumentSymbol> {
+        let response = self
+            .server
+            .document_symbol(DocumentSymbolParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .expect("document_symbol request failed")
+            .expect("expected document symbols");
+        let DocumentSymbolResponse::Nested(symbols) = response else {
+            panic!("expected nested symbols: {response:?}");
+        };
+        symbols
+    }
+
+    async fn semantic_tokens(&mut self, uri: &Url) -> SemanticTokens {
+        let result = self
+            .server
+            .semantic_tokens_full(SemanticTokensParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .expect("semantic tokens request failed")
+            .expect("expected semantic tokens");
+        let SemanticTokensResult::Tokens(tokens) = result else {
+            panic!("expected a tokens result");
+        };
+        tokens
+    }
+
+    async fn document_diagnostic(
+        &mut self,
+        uri: &Url,
+        previous_result_id: Option<String>,
+    ) -> DocumentDiagnosticReportResult {
+        self.server
+            .document_diagnostic(diagnostic_params(uri, previous_result_id))
+            .await
+            .expect("pull diagnostics failed")
+    }
+
+    async fn shutdown(mut self) {
+        self.server.shutdown(()).await.expect("shutdown failed");
+        self.server.exit(()).expect("exit failed");
+        timeout(TIMEOUT, self.mainloop)
+            .await
+            .expect("timed out waiting for the server to exit")
+            .expect("the client main loop panicked");
+    }
 }
 
 fn position_params(uri: &Url, line: u32, character: u32) -> TextDocumentPositionParams {
@@ -319,6 +552,56 @@ fn position_params(uri: &Url, line: u32, character: u32) -> TextDocumentPosition
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position: Position::new(line, character),
     }
+}
+
+fn diagnostic_params(uri: &Url, previous_result_id: Option<String>) -> DocumentDiagnosticParams {
+    DocumentDiagnosticParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        identifier: Some("ry".into()),
+        previous_result_id,
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    }
+}
+
+fn pull_capabilities(refresh_support: bool) -> ClientCapabilities {
+    ClientCapabilities {
+        text_document: Some(TextDocumentClientCapabilities {
+            diagnostic: Some(DiagnosticClientCapabilities::default()),
+            ..TextDocumentClientCapabilities::default()
+        }),
+        workspace: refresh_support.then(|| WorkspaceClientCapabilities {
+            diagnostic: Some(DiagnosticWorkspaceClientCapabilities {
+                refresh_support: Some(true),
+            }),
+            ..WorkspaceClientCapabilities::default()
+        }),
+        ..ClientCapabilities::default()
+    }
+}
+
+fn messages(published: PublishDiagnosticsParams) -> Vec<String> {
+    published
+        .diagnostics
+        .into_iter()
+        .map(|diagnostic| diagnostic.message)
+        .collect()
+}
+
+fn report_messages(report: DocumentDiagnosticReportResult) -> Vec<String> {
+    match report {
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) => full
+            .full_document_diagnostic_report
+            .items
+            .into_iter()
+            .map(|item| item.message)
+            .collect(),
+        other => panic!("expected a full report, got: {other:?}"),
+    }
+}
+
+fn mentions(messages: &[String], needle: &str) -> bool {
+    messages.iter().any(|message| message.contains(needle))
 }
 
 #[tokio::test]
@@ -337,6 +620,10 @@ async fn initialize_reports_capabilities() {
     assert!(capabilities.semantic_tokens_provider.is_some());
     assert!(capabilities.diagnostic_provider.is_some());
     assert_eq!(
+        capabilities.position_encoding,
+        Some(PositionEncodingKind::UTF16)
+    );
+    assert_eq!(
         context
             .init_result
             .server_info
@@ -348,87 +635,81 @@ async fn initialize_reports_capabilities() {
 }
 
 #[tokio::test]
-async fn initialize_negotiates_utf16_by_default() {
-    let context = setup_test(&[]).await;
-    assert_eq!(
-        context.init_result.capabilities.position_encoding,
-        Some(PositionEncodingKind::UTF16)
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn initialize_negotiates_utf8_when_offered() {
-    let context = setup_test_with_position_encodings(
-        &[],
-        &[PositionEncodingKind::UTF8, PositionEncodingKind::UTF16],
-    )
-    .await;
+async fn utf8_is_negotiated_when_offered_and_positions_count_bytes() {
+    let capabilities = ClientCapabilities {
+        general: Some(GeneralClientCapabilities {
+            position_encodings: Some(vec![
+                PositionEncodingKind::UTF8,
+                PositionEncodingKind::UTF16,
+            ]),
+            ..GeneralClientCapabilities::default()
+        }),
+        ..ClientCapabilities::default()
+    };
+    let mut context = setup_with(&[], capabilities).await;
     assert_eq!(
         context.init_result.capabilities.position_encoding,
         Some(PositionEncodingKind::UTF8)
     );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn diagnostics_on_open() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/bad.R", "x = 1\n").await;
-    let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert_eq!(params.diagnostics.len(), 1, "{:?}", params.diagnostics);
-    assert!(
-        params.diagnostics[0]
-            .message
-            .contains("Use <-, not =, for assignment"),
-        "{:?}",
-        params.diagnostics
+    let uri = context.open("R/utf8_emoji.R", "target <- 1L\ny <- f(\"🦀\", target)\n");
+    // Byte column 17 is inside `target` (bytes 15..21).
+    let range = context.hover_range(&uri, 1, 17).await;
+    assert_eq!(
+        (range.start.character, range.end.character),
+        (15, 21),
+        "expected the UTF-8 byte span of `target` after an emoji, got: {range:?}"
     );
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn no_diagnostics_for_clean_file() {
+async fn push_diagnostics_report_lints_and_syntax_errors() {
     let mut context = setup_test(&[]).await;
-    let uri = context.open("R/clean.R", "x <- 1\n").await;
-    let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert!(params.diagnostics.is_empty(), "{:?}", params.diagnostics);
+    let assignment = context.open("R/assign.R", "x = 1\n");
+    let clean = context.open("R/clean.R", "y <- 1\n");
+    let syntax = context.open("R/syntax.R", "z <- (\n");
+
+    let published = messages(context.recv_diagnostics(&assignment).await);
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert!(
+        published[0].contains("Use <-, not =, for assignment"),
+        "{published:?}"
+    );
+
+    let published = messages(context.recv_diagnostics(&clean).await);
+    assert!(published.is_empty(), "{published:?}");
+
+    let published = messages(context.recv_diagnostics(&syntax).await);
+    assert!(
+        published
+            .first()
+            .is_some_and(|message| message.contains("unclosed `(`")),
+        "expected syntax diagnostics: {published:?}"
+    );
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn diagnostics_on_syntax_error() {
+async fn diagnostics_arrive_in_a_fast_wave_then_a_settled_wave() {
     let mut context = setup_test(&[]).await;
-    let uri = context.open("R/bad.R", "x <- (\n").await;
-    let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert!(
-        !params.diagnostics.is_empty(),
-        "expected syntax diagnostics"
-    );
-    assert!(
-        params.diagnostics[0].message.contains("unclosed `(`"),
-        "{:?}",
-        params.diagnostics
-    );
-    context.shutdown().await;
-}
+    let broken = context.open("R/bad.R", "x <- (\nbad_type <- 1L + \"a\"\n");
+    let unresolved = context.open("R/unresolved.R", "main <- function() missing_helper()\n");
 
-#[tokio::test]
-async fn first_wave_publishes_syntax_errors_before_semantics() {
-    let mut context = setup_test(&[]).await;
-    let uri = context
-        .open("R/bad.R", "x <- (\nbad_type <- 1L + \"a\"\n")
-        .await;
-    let first = recv_first_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
     // The first wave is versioned and carries the cheap classes.
+    let first = context.recv_first_diagnostics(&broken).await;
     assert_eq!(first.version, Some(1));
+    let first = messages(first);
+    assert!(mentions(&first, "unclosed `(`"), "{first:?}");
+
+    let first = messages(context.recv_first_diagnostics(&unresolved).await);
     assert!(
-        first
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("unclosed `(`")),
-        "{:?}",
-        first.diagnostics
+        !mentions(&first, "missing_helper"),
+        "name resolution is not part of the first wave: {first:?}"
+    );
+    let settled = messages(context.recv_diagnostics(&unresolved).await);
+    assert!(
+        mentions(&settled, "missing_helper"),
+        "the settled wave carries the unresolved reference: {settled:?}"
     );
     context.shutdown().await;
 }
@@ -436,1277 +717,95 @@ async fn first_wave_publishes_syntax_errors_before_semantics() {
 #[tokio::test]
 async fn burst_of_edits_settles_on_the_final_text() {
     let mut context = setup_test(&[]).await;
-    let uri = context.open("R/burst.R", "x <- 1\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let uri = context.open("R/burst.R", "x <- 1\n");
+    context.recv_diagnostics(&uri).await;
     for version in 2..=6 {
         let text = if version == 6 {
             "x = 1\n".to_owned()
         } else {
             format!("x <- {version}\n")
         };
-        context
-            .server
-            .did_change(DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: uri.clone(),
-                    version,
-                },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text,
-                }],
-            })
-            .expect("didChange failed");
+        context.change(&uri, version, None, &text);
     }
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + TIMEOUT;
     loop {
-        let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-        if params.diagnostics.len() == 1
-            && params.diagnostics[0]
-                .message
-                .contains("Use <-, not =, for assignment")
-        {
+        let published = messages(context.recv_diagnostics(&uri).await);
+        if published.len() == 1 && published[0].contains("Use <-, not =, for assignment") {
             break;
         }
         assert!(
-            tokio::time::Instant::now() < deadline,
-            "never settled on the final text: {:?}",
-            params.diagnostics
+            Instant::now() < deadline,
+            "never settled on the final text: {published:?}"
         );
     }
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn hover_returns_type() {
+async fn hover_shows_types_and_definition_summaries() {
     let mut context = setup_test(&[]).await;
-    let uri = context.open("R/hover.R", "count <- 1L\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let hover = context
-        .server
-        .hover(HoverParams {
-            text_document_position_params: position_params(&uri, 0, 2),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("hover failed")
-        .expect("expected a hover");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markdown hover");
-    };
-    assert!(markup.value.contains("integer"), "{}", markup.value);
-    context.shutdown().await;
-}
+    let uri = context.open(
+        "R/hover.R",
+        "count <- 1L\nuse <- function() {\n  value <- count + 1\n  value + print(value)\n}\n",
+    );
+    context.recv_diagnostics(&uri).await;
 
-#[tokio::test]
-async fn hover_range_under_utf16_with_non_bmp_emoji() {
-    let mut context = setup_test(&[]).await;
-    // The emoji is 4 UTF-8 bytes / 2 UTF-16 units inside the string.
-    let uri = context
-        .open("R/emoji.R", "s <- \"😀\"\ncount <- 1L\n")
-        .await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let hover = context
-        .server
-        .hover(HoverParams {
-            text_document_position_params: position_params(&uri, 1, 2),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("hover failed")
-        .expect("expected a hover");
-    let range = hover.range.expect("hover range");
-    assert_eq!(range.start, Position::new(1, 0));
-    assert_eq!(range.end, Position::new(1, 5));
-    context.shutdown().await;
-}
+    let declaration = context.hover_markdown(&uri, 0, 2).await;
+    assert!(declaration.contains("integer"), "{declaration}");
 
-#[tokio::test]
-async fn goto_definition() {
-    let mut context = setup_test(&[]).await;
-    let uri = context
-        .open(
-            "R/def.R",
-            "helper <- function(x) x\ncaller <- function() helper(1)\n",
-        )
-        .await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let response = context
-        .server
-        .definition(GotoDefinitionParams {
-            text_document_position_params: position_params(&uri, 1, 22),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("definition failed")
-        .expect("expected a definition");
-    let GotoDefinitionResponse::Scalar(location) = response else {
-        panic!("expected a scalar definition");
-    };
-    assert_eq!(location.uri, uri);
-    assert_eq!(location.range.start, Position::new(0, 0));
-    assert_eq!(location.range.end, Position::new(0, 6));
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn goto_definition_into_stub_corpus() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/stub.R", "sizes <- head(1:9)\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let response = context
-        .server
-        .definition(GotoDefinitionParams {
-            text_document_position_params: position_params(&uri, 0, 10),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("definition failed")
-        .expect("expected a definition into the stub corpus");
-    let GotoDefinitionResponse::Scalar(location) = response else {
-        panic!("expected a scalar definition");
-    };
-    let path = location.uri.path();
+    // A read of the file's own top-level binding is a package global.
+    let global = context.hover_markdown(&uri, 2, 12).await;
     assert!(
-        path.ends_with("utils.Rtypes"),
-        "expected the materialized utils stub, got {path}"
+        global.contains("Package global, defined at `R/hover.R:1:1`"),
+        "{global}"
     );
-    let text = std::fs::read_to_string(
-        location
-            .uri
-            .to_file_path()
-            .expect("stub location is a file path"),
-    )
-    .expect("the materialized stub file exists on disk");
-    let line = text
-        .lines()
-        .nth(location.range.start.line as usize)
-        .expect("the location's line exists");
+
+    // A local read points at its defining write.
+    let local = context.hover_markdown(&uri, 3, 3).await;
     assert!(
-        line.starts_with("head :"),
-        "the location points at head's declaration, got: {line}"
+        local.contains("Local variable, defined at `R/hover.R:3:3`"),
+        "{local}"
     );
+
+    // A stub name reports its declaring namespace.
+    let stub = context.hover_markdown(&uri, 3, 11).await;
+    assert!(stub.contains("From the `base` package."), "{stub}");
+
+    assert!(!global.contains("### Debug"), "{global}");
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn hover_names_the_stub_declaration_site() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/stubhover.R", "sizes <- head(1:9)\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let hover = context
-        .server
-        .hover(HoverParams {
-            text_document_position_params: position_params(&uri, 0, 10),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("hover failed")
-        .expect("expected a hover");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup hover contents");
-    };
-    assert!(
-        markup.value.contains("From the `utils` package")
-            && markup.value.contains("Declared at `utils.Rtypes:"),
-        "expected the stub declaration location in: {}",
-        markup.value
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn formatting() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/fmt.R", "x<-1\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let edits = context
-        .server
-        .formatting(DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("formatting failed")
-        .expect("expected formatting edits");
-    assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "x <- 1\n");
-    assert_eq!(edits[0].range.start, Position::new(0, 0));
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn range_formatting_snaps_to_whole_statements() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    // Covers part of the middle line only; the edit must cover that whole statement.
-    let edits = context
-        .server
-        .range_formatting(DocumentRangeFormattingParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            range: Range::new(Position::new(1, 1), Position::new(1, 2)),
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("range formatting failed")
-        .expect("expected range formatting edits");
-    assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "y <- 2");
-    assert_eq!(edits[0].range.start, Position::new(1, 0));
-    assert_eq!(edits[0].range.end, Position::new(1, 4));
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn range_formatting_ignores_a_selection_holding_no_statement() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/fmt.R", "x <- 1\n\n\ny <- 2\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let edits = context
-        .server
-        .range_formatting(DocumentRangeFormattingParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            range: Range::new(Position::new(1, 0), Position::new(2, 0)),
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("range formatting failed");
-    assert!(edits.is_none(), "{edits:?}");
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn formatting_refuses_on_syntax_errors() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/bad.R", "x <- (\n").await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    let edits = context
-        .server
-        .formatting(DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("formatting failed");
-    assert!(edits.is_none(), "{edits:?}");
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn pull_diagnostics_report_known_diagnostics() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let uri = context.open("R/warn.R", "x = 1\n").await;
-    let report = context
-        .server
-        .document_diagnostic(DocumentDiagnosticParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            identifier: Some("ry".into()),
-            previous_result_id: None,
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("pull diagnostics failed");
-    let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) = report
-    else {
-        panic!("expected a full report");
-    };
-    assert_eq!(full.full_document_diagnostic_report.items.len(), 1);
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn pull_diagnostics_unchanged_on_repeat() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let uri = context.open("R/warn.R", "x = 1\n").await;
-    let params = DocumentDiagnosticParams {
-        text_document: TextDocumentIdentifier { uri: uri.clone() },
-        identifier: Some("ry".into()),
-        previous_result_id: None,
-        work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: PartialResultParams::default(),
-    };
-    let first = context
-        .server
-        .document_diagnostic(params.clone())
-        .await
-        .expect("pull diagnostics failed");
-    let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) = first else {
-        panic!("expected a full report");
-    };
-    let result_id = full
-        .full_document_diagnostic_report
-        .result_id
-        .expect("result id");
-    let second = context
-        .server
-        .document_diagnostic(DocumentDiagnosticParams {
-            previous_result_id: Some(result_id),
-            ..params
-        })
-        .await
-        .expect("repeat pull failed");
-    assert!(
-        matches!(
-            second,
-            DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(_))
-        ),
-        "expected an unchanged report"
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn pull_capable_client_suppresses_push() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let _uri = context.open("R/warn.R", "x = 1\n").await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(
-        context.diagnostics_receiver.receiver.try_recv().is_err(),
-        "push must be suppressed for pull clients"
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn workspace_root_comes_from_the_client_not_the_process_cwd() {
-    let mut context = setup_test(&[("R/lib.R", "make_count <- function() 1L\n")]).await;
-    let uri = context.open("R/use.R", "total <- make_count()\n").await;
-    let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert!(
-        params.diagnostics.is_empty(),
-        "cross-file resolution must succeed: {:?}",
-        params.diagnostics
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn malformed_config_falls_back_to_defaults_and_reports() {
-    let mut context = setup_test(&[("ry.toml", "[check]\ntyping = 1\n")]).await;
-    let message = tokio::time::timeout(TIMEOUT, context.messages_receiver.recv())
-        .await
-        .expect("timed out waiting for the config error message")
-        .expect("messages channel closed");
-    assert!(
-        message.message.contains("invalid config"),
-        "{}",
-        message.message
-    );
-    let uri = context.open("R/clean.R", "x <- 1\n").await;
-    let params = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert!(params.diagnostics.is_empty(), "{:?}", params.diagnostics);
-    context.shutdown().await;
-}
-
-use async_lsp::lsp_types::{
-    CompletionClientCapabilities, CompletionItemCapability, CompletionParams, CompletionResponse,
-    DiagnosticWorkspaceClientCapabilities, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, FileChangeType,
-    FileEvent, InlayHintParams, InsertTextFormat, ParameterInformationSettings, ParameterLabel,
-    Range, ReferenceContext, ReferenceParams, RenameParams, SignatureHelpClientCapabilities,
-    SignatureHelpParams, SignatureInformationSettings, SymbolKind, WorkspaceClientCapabilities,
-};
-
-impl TestContext {
-    fn change_file(&mut self, uri: &Url, version: i32, range: Range, text: &str) {
-        self.server
-            .did_change(DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: uri.clone(),
-                    version,
-                },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: Some(range),
-                    range_length: None,
-                    text: text.to_owned(),
-                }],
-            })
-            .expect("didChange failed");
-    }
-
-    fn replace_file_full(&mut self, uri: &Url, version: i32, text: &str) {
-        self.server
-            .did_change(DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: uri.clone(),
-                    version,
-                },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: text.to_owned(),
-                }],
-            })
-            .expect("didChange failed");
-    }
-
-    fn save_file(&mut self, uri: &Url) {
-        self.server
-            .did_save(DidSaveTextDocumentParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                text: None,
-            })
-            .expect("didSave failed");
-    }
-
-    fn close_file(&mut self, uri: &Url) {
-        self.server
-            .did_close(DidCloseTextDocumentParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-            })
-            .expect("didClose failed");
-    }
-
-    fn notify_watched_file_changed(&mut self, relative: &str, typ: FileChangeType) {
-        let uri = self.workspace_uri(relative);
-        self.server
-            .did_change_watched_files(DidChangeWatchedFilesParams {
-                changes: vec![FileEvent { uri, typ }],
-            })
-            .expect("didChangeWatchedFiles failed");
-    }
-
-    async fn document_diagnostic(
-        &mut self,
-        uri: &Url,
-        previous_result_id: Option<String>,
-    ) -> DocumentDiagnosticReportResult {
-        self.server
-            .document_diagnostic(DocumentDiagnosticParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                identifier: Some("ry".into()),
-                previous_result_id,
-                work_done_progress_params: WorkDoneProgressParams::default(),
-                partial_result_params: PartialResultParams::default(),
-            })
-            .await
-            .expect("pull diagnostics failed")
-    }
-}
-
-async fn drain_diagnostics(channel: &mut DiagnosticsChannel) {
-    channel.stash.clear();
-    while channel.receiver.try_recv().is_ok() {}
-}
-
-async fn setup_test_with_snippet_support(initial_files: &[(&str, &str)]) -> TestContext {
-    let capabilities = ClientCapabilities {
-        text_document: Some(TextDocumentClientCapabilities {
-            completion: Some(CompletionClientCapabilities {
-                completion_item: Some(CompletionItemCapability {
-                    snippet_support: Some(true),
-                    ..CompletionItemCapability::default()
-                }),
-                ..CompletionClientCapabilities::default()
-            }),
-            ..TextDocumentClientCapabilities::default()
-        }),
-        ..ClientCapabilities::default()
-    };
-    setup_test_inner(true, initial_files, capabilities).await
-}
-
-async fn setup_test_with_parameter_label_offsets(initial_files: &[(&str, &str)]) -> TestContext {
-    let capabilities = ClientCapabilities {
-        text_document: Some(TextDocumentClientCapabilities {
-            signature_help: Some(SignatureHelpClientCapabilities {
-                signature_information: Some(SignatureInformationSettings {
-                    parameter_information: Some(ParameterInformationSettings {
-                        label_offset_support: Some(true),
-                    }),
-                    ..SignatureInformationSettings::default()
-                }),
-                ..SignatureHelpClientCapabilities::default()
-            }),
-            ..TextDocumentClientCapabilities::default()
-        }),
-        ..ClientCapabilities::default()
-    };
-    setup_test_inner(true, initial_files, capabilities).await
-}
-
-async fn setup_test_with_pull_and_refresh(initial_files: &[(&str, &str)]) -> TestContext {
-    let capabilities = ClientCapabilities {
-        text_document: Some(TextDocumentClientCapabilities {
-            diagnostic: Some(DiagnosticClientCapabilities::default()),
-            ..TextDocumentClientCapabilities::default()
-        }),
-        workspace: Some(WorkspaceClientCapabilities {
-            diagnostic: Some(DiagnosticWorkspaceClientCapabilities {
-                refresh_support: Some(true),
-            }),
-            ..WorkspaceClientCapabilities::default()
-        }),
-        ..ClientCapabilities::default()
-    };
-    setup_test_inner(true, initial_files, capabilities).await
-}
-
-#[tokio::test]
-async fn deeply_nested_documents_do_not_kill_the_server() {
-    let mut context = setup_test(&[]).await;
-
-    let deep = format!("value <- {}1{}\n", "f(".repeat(900), ")".repeat(900));
-    let deep_uri = context.open("R/deep_valid.R", &deep).await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &deep_uri, TIMEOUT).await;
-
-    let malformed = format!("value <- {}1{}\n", "f(".repeat(2000), ")".repeat(1000));
-    let malformed_uri = context.open("R/deep_malformed.R", &malformed).await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &malformed_uri, TIMEOUT).await;
-
-    // Formatting recurses over the tree too; it must answer or refuse without dying.
-    let _ = context
-        .server
-        .formatting(DocumentFormattingParams {
-            text_document: TextDocumentIdentifier {
-                uri: deep_uri.clone(),
-            },
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await;
-
-    let probe_uri = context.open("R/probe.R", "x <- 1\n").await;
-    let published = recv_diagnostics(&mut context.diagnostics_receiver, &probe_uri, TIMEOUT).await;
-    assert!(
-        published.diagnostics.is_empty(),
-        "the server still answers cleanly after the deep documents: {:?}",
-        published.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn namespace_buffer_publishes_import_validation() {
-    let mut context = setup_test(&[]).await;
-    let uri = context
-        .open(
-            "NAMESPACE",
-            "import(stats)\nimportFrom(stats, sd, medain)\nimportFrom(dplyr, mutate)\n",
-        )
-        .await;
-    let published = recv_first_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert_eq!(
-        published.diagnostics.len(),
-        1,
-        "only the known-namespace typo is reported: {:?}",
-        published.diagnostics
-    );
-    let diagnostic = &published.diagnostics[0];
-    assert!(
-        diagnostic
-            .message
-            .contains("`medain` is not exported by `stats`, so this package will not load."),
-        "unexpected message: {diagnostic:?}"
-    );
-    assert_eq!(
-        diagnostic.severity,
-        Some(async_lsp::lsp_types::DiagnosticSeverity::ERROR),
-        "R refuses to load such a package: {diagnostic:?}"
-    );
-    assert_eq!(
-        diagnostic.range.start.line, 1,
-        "reports on the importFrom line"
-    );
-
-    context.change_file(
-        &uri,
-        2,
-        Range::new(Position::new(1, 22), Position::new(1, 28)),
-        "median",
-    );
-    let published = recv_first_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert!(
-        published.diagnostics.is_empty(),
-        "the corrected NAMESPACE is clean: {:?}",
-        published.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn initialize_without_r_directory() {
-    let mut context = setup_test_inner(false, &[], ClientCapabilities::default()).await;
-    assert!(
-        context
-            .init_result
-            .capabilities
-            .text_document_sync
-            .is_some(),
-        "expected initialize to succeed without an R directory"
-    );
-
-    std::fs::create_dir_all(context.workspace_dir.join("R")).expect("create R directory");
-    std::fs::write(context.workspace_dir.join("R/created_later.R"), "x <- T\n")
-        .expect("write test file");
-    context.notify_watched_file_changed("R/created_later.R", FileChangeType::CREATED);
-
-    let file_uri = context.open("R/created_later.R", "x <- T\n").await;
-    let diagnostics = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        diagnostics
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("TRUE")),
-        "expected diagnostics after creating R directory and file, got: {:?}",
-        diagnostics.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn requests_for_unopened_non_file_uris_answer_gracefully() {
-    let mut context = setup_test(&[("R/main.R", "x <- 1L")]).await;
-    let untitled = Url::parse("untitled:Untitled-9").expect("untitled uri should parse");
-
-    let hover = context
-        .server
-        .hover(HoverParams {
-            text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier {
-                    uri: untitled.clone(),
-                },
-                position: Position::new(0, 0),
-            },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await;
-    assert!(
-        matches!(hover, Err(_) | Ok(None)),
-        "hover on an unopened non-file uri must be answered, got: {hover:?}"
-    );
-
-    let report = context.document_diagnostic(&untitled, None).await;
-    assert!(
-        matches!(
-            report,
-            DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(_))
-        ),
-        "a pull on an unopened non-file uri returns an empty full report"
-    );
-
-    let file_uri = context.open("R/main.R", "x <- 1L").await;
-    recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn untitled_document_is_served_as_a_standalone_script() {
-    let mut context = setup_test(&[]).await;
-    let untitled = Url::parse("untitled:Untitled-1").expect("untitled uri should parse");
-
-    context
-        .server
-        .did_open(DidOpenTextDocumentParams {
-            text_document: TextDocumentItem {
-                uri: untitled.clone(),
-                language_id: "r".into(),
-                version: 1,
-                text: "answer <- 42L\nfinal = answer\n".to_owned(),
-            },
-        })
-        .expect("didOpen failed");
-
-    let diagnostics = recv_diagnostics(&mut context.diagnostics_receiver, &untitled, TIMEOUT).await;
-    assert!(
-        diagnostics
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("<-")),
-        "expected the `=` lint on the untitled buffer, got: {:?}",
-        diagnostics.diagnostics
-    );
-
-    let hover = context
-        .server
-        .hover(HoverParams {
-            text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier {
-                    uri: untitled.clone(),
-                },
-                position: Position::new(1, 10),
-            },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("hover on an untitled document failed")
-        .expect("hover response missing");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup hover contents");
-    };
-    assert!(markup.value.contains("integer"), "{}", markup.value);
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn full_text_did_change_replaces_the_document() {
-    let mut context = setup_test(&[]).await;
-    let file_uri = context.open("R/full_sync.R", "x <- T\n").await;
-
-    let initial = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        initial
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("TRUE")),
-        "expected the T-vs-TRUE lint before the replacement, got: {:?}",
-        initial.diagnostics
-    );
-
-    context.replace_file_full(&file_uri, 2, "y = 1\n");
-
-    let after = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        after
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("<-")),
-        "expected the `=` lint from the replacement text, got: {:?}",
-        after.diagnostics
-    );
-    assert!(
-        !after
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("TRUE")),
-        "the old text must be fully replaced, not merged, got: {:?}",
-        after.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn did_close_survives_a_failing_disk_reread() {
-    let mut context = setup_test(&[]).await;
-    std::fs::create_dir_all(context.workspace_dir.join("R/casualty.R"))
-        .expect("create directory posing as a source file");
-
-    let casualty_uri = context.open("R/casualty.R", "x <- 1\n").await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-    context.close_file(&casualty_uri);
-
-    let file_uri = context.open("R/still_alive.R", "x <- T\n").await;
-    let diagnostics = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        diagnostics
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("TRUE")),
-        "expected the server to survive the failing close-time re-read, got: {:?}",
-        diagnostics.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-fn report_messages(report: DocumentDiagnosticReportResult) -> Vec<String> {
-    match report {
-        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) => full
-            .full_document_diagnostic_report
-            .items
-            .into_iter()
-            .map(|item| item.message)
-            .collect(),
-        other => panic!("expected a full report, got: {other:?}"),
-    }
-}
-
-fn mentions_unresolved_helper(messages: &[String]) -> bool {
-    messages.iter().any(|message| message.contains("`helper`"))
-}
-
-#[tokio::test]
-async fn watched_file_create_and_delete_change_cross_file_resolution() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let consumer = context.open("R/consumer.R", "value <- helper()\n").await;
-    let before = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(mentions_unresolved_helper(&before), "{before:?}");
-
-    let helper = context.workspace_dir.join("R/helper.R");
-    std::fs::write(&helper, "helper <- function() 1L\n").expect("write helper");
-    context.notify_watched_file_changed("R/helper.R", FileChangeType::CREATED);
-    let created = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(!mentions_unresolved_helper(&created), "{created:?}");
-
-    std::fs::remove_file(&helper).expect("delete helper");
-    context.notify_watched_file_changed("R/helper.R", FileChangeType::DELETED);
-    let deleted = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(mentions_unresolved_helper(&deleted), "{deleted:?}");
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn an_open_buffer_shadows_the_disk_until_closed() {
-    let mut context = setup_test_with_pull_diagnostics(&[
-        ("R/helper.R", "helper <- function() 1L\n"),
-        ("R/consumer.R", "value <- helper()\n"),
-    ])
+async fn debug_flag_adds_hover_debug_sections() {
+    let mut context = launch(Launch {
+        args: &["--debug"],
+        ..Launch::default()
+    })
     .await;
-    let helper = context
-        .open("R/helper.R", "helper <- function() 1L\n")
-        .await;
-    let consumer = context.open("R/consumer.R", "value <- helper()\n").await;
+    let uri = context.open("R/debug.R", "count <- 1L\nuse <- count\n");
+    context.recv_diagnostics(&uri).await;
 
-    std::fs::write(
-        context.workspace_dir.join("R/helper.R"),
-        "renamed_on_disk <- 1L\n",
-    )
-    .expect("rewrite helper on disk");
-    context.notify_watched_file_changed("R/helper.R", FileChangeType::CHANGED);
-    let disk_changed = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(
-        !mentions_unresolved_helper(&disk_changed),
-        "{disk_changed:?}"
-    );
-
-    std::fs::write(
-        context.workspace_dir.join("R/helper.R"),
-        "helper <- function() 1L\n",
-    )
-    .expect("restore helper on disk");
-    context.replace_file_full(&helper, 2, "renamed_in_buffer <- 1L\n");
-    let edited = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(mentions_unresolved_helper(&edited), "{edited:?}");
-
-    context.close_file(&helper);
-    let closed = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(!mentions_unresolved_helper(&closed), "{closed:?}");
-
+    let markdown = context.hover_markdown(&uri, 1, 8).await;
+    for marker in ["### Debug", "**Lowering**", "**Naming**", "**Parsing**"] {
+        assert!(markdown.contains(marker), "{markdown}");
+    }
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn a_malformed_edit_suppresses_then_restores_semantic_diagnostics() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let file = context.open("R/main.R", "value <- helper()\n").await;
-    let clean = report_messages(context.document_diagnostic(&file, None).await);
-    assert!(mentions_unresolved_helper(&clean), "{clean:?}");
-
-    context.replace_file_full(&file, 2, "value <- helper(\n");
-    let malformed = report_messages(context.document_diagnostic(&file, None).await);
-    assert!(!mentions_unresolved_helper(&malformed), "{malformed:?}");
-    assert!(!malformed.is_empty(), "the syntax error is reported");
-
-    context.replace_file_full(&file, 3, "value <- helper()\n");
-    let restored = report_messages(context.document_diagnostic(&file, None).await);
-    assert!(mentions_unresolved_helper(&restored), "{restored:?}");
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn completion() {
+async fn positions_count_utf16_units_by_default() {
     let mut context = setup_test(&[]).await;
-    let file_uri = context
-        .open("R/comp.R", "my_function <- function(x) x\nmy_f\n")
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
 
-    let result = context
-        .server
-        .completion(CompletionParams {
-            text_document_position: position_params(&file_uri, 1, 4),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-            context: None,
-        })
-        .await
-        .expect("completion request failed")
-        .expect("expected completions");
-    let CompletionResponse::List(list) = result else {
-        panic!("expected a CompletionList response carrying isIncomplete");
-    };
-    assert!(
-        !list.is_incomplete,
-        "small candidate set should not be marked incomplete"
-    );
-    let labels: Vec<&str> = list.items.iter().map(|item| item.label.as_str()).collect();
-    assert!(
-        labels.contains(&"my_function"),
-        "expected 'my_function' in completions, got: {labels:?}"
-    );
-    let my_function = list
-        .items
-        .iter()
-        .find(|item| item.label == "my_function")
-        .expect("my_function item");
-    assert!(
-        my_function.insert_text.is_none() && my_function.insert_text_format.is_none(),
-        "a non-snippet client must get plain-label insertion"
-    );
+    // The emoji is 4 UTF-8 bytes / 2 UTF-16 units inside the string.
+    let emoji = context.open("R/emoji.R", "s <- \"😀\"\ncount <- 1L\n");
+    context.recv_diagnostics(&emoji).await;
+    let range = context.hover_range(&emoji, 1, 2).await;
+    assert_eq!(range, Range::new(Position::new(1, 0), Position::new(1, 5)));
 
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn completion_inserts_call_snippets_for_functions() {
-    let mut context = setup_test_with_snippet_support(&[]).await;
-    let file_uri = context
-        .open(
-            "R/snip.R",
-            "snip_args <- function(x) x\nsnip_none <- function() 1L\nsn\n",
-        )
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let result = context
-        .server
-        .completion(CompletionParams {
-            text_document_position: position_params(&file_uri, 2, 2),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-            context: None,
-        })
-        .await
-        .expect("completion request failed")
-        .expect("expected completions");
-    let CompletionResponse::List(list) = result else {
-        panic!("expected a list response");
-    };
-    let snip_args = list
-        .items
-        .iter()
-        .find(|item| item.label == "snip_args")
-        .expect("snip_args item");
-    assert_eq!(
-        snip_args.insert_text.as_deref(),
-        Some("snip_args($0)"),
-        "a function taking arguments drops the cursor between the parens"
-    );
-    assert_eq!(
-        snip_args.insert_text_format,
-        Some(InsertTextFormat::SNIPPET)
-    );
-    assert_eq!(
-        snip_args
-            .command
-            .as_ref()
-            .map(|command| command.command.as_str()),
-        Some("editor.action.triggerParameterHints"),
-        "inserting a call asks the editor for parameter hints"
-    );
-    let snip_none = list
-        .items
-        .iter()
-        .find(|item| item.label == "snip_none")
-        .expect("snip_none item");
-    assert_eq!(
-        snip_none.insert_text.as_deref(),
-        Some("snip_none()$0"),
-        "a zero-argument function drops the cursor past the parens"
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn inlay_hints_respect_requested_viewport() {
-    let mut context = setup_test(&[]).await;
-    let file_uri = context
-        .open(
-            "R/hints.R",
-            "count <- 1L\nlabel <- \"hello\"\nratio <- 2L\n",
-        )
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let hints = context
-        .server
-        .inlay_hint(InlayHintParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            range: Range::new(Position::new(1, 0), Position::new(1, 16)),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("inlay hint request failed")
-        .expect("expected inlay hints");
-    let lines: Vec<u32> = hints.iter().map(|hint| hint.position.line).collect();
-    assert_eq!(
-        lines,
-        vec![1],
-        "only the in-viewport hint should be returned"
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn rename_uses_analysis_across_files() {
-    let mut context =
-        setup_test(&[("R/a.R", "value <- 1L\n"), ("R/b.R", "result <- value\n")]).await;
-    let file_uri = context.open("R/a.R", "value <- 1L\n").await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let result = context
-        .server
-        .rename(RenameParams {
-            text_document_position: position_params(&file_uri, 0, 1),
-            new_name: "renamed".into(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("rename request failed")
-        .expect("expected rename edit");
-    let changes = result.changes.expect("expected rename changes");
-
-    let file_b_uri = context.workspace_uri("R/b.R");
-    let file_a_edits = changes.get(&file_uri).expect("missing file A edits");
-    assert_eq!(file_a_edits.len(), 1);
-    assert_eq!(file_a_edits[0].new_text, "renamed");
-    assert_eq!(file_a_edits[0].range.start, Position::new(0, 0));
-    let file_b_edits = changes.get(&file_b_uri).expect("missing file B edits");
-    assert_eq!(file_b_edits.len(), 1);
-    assert_eq!(file_b_edits[0].range.start, Position::new(0, 10));
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn references_use_analysis_across_files() {
-    let mut context =
-        setup_test(&[("R/a.R", "value <- 1L\n"), ("R/b.R", "result <- value\n")]).await;
-    let file_uri = context.open("R/a.R", "value <- 1L\n").await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let reference_params = |include_declaration: bool| ReferenceParams {
-        text_document_position: position_params(&file_uri, 0, 1),
-        context: ReferenceContext {
-            include_declaration,
-        },
-        work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: PartialResultParams::default(),
-    };
-
-    let locations = context
-        .server
-        .references(reference_params(true))
-        .await
-        .expect("references request failed")
-        .expect("expected reference locations");
-    let file_b_uri = context.workspace_uri("R/b.R");
-    assert!(
-        locations
-            .iter()
-            .any(|location| location.uri == file_uri && location.range.start.line == 0),
-        "expected the declaration in file A, got: {locations:?}"
-    );
-    assert!(
-        locations
-            .iter()
-            .any(|location| location.uri == file_b_uri && location.range.start.character == 10),
-        "expected the cross-file use in file B, got: {locations:?}"
-    );
-
-    let without_declaration = context
-        .server
-        .references(reference_params(false))
-        .await
-        .expect("references request failed")
-        .expect("expected reference locations");
-    assert!(
-        without_declaration
-            .iter()
-            .all(|location| location.uri != file_uri),
-        "expected the declaration to be excluded, got: {without_declaration:?}"
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn document_symbols() {
-    let mut context = setup_test(&[]).await;
-    let file_uri = context
-        .open(
-            "R/syms.R",
-            "add <- function(x, y) x + y\nmultiply <- function(a, b) a * b\n",
-        )
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let result = context
-        .server
-        .document_symbol(DocumentSymbolParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("document_symbol request failed")
-        .expect("expected document symbols");
-    let DocumentSymbolResponse::Nested(symbols) = result else {
-        panic!("expected nested symbols");
-    };
-    let names: Vec<&str> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
-    assert!(names.contains(&"add"), "got: {names:?}");
-    assert!(names.contains(&"multiply"), "got: {names:?}");
-    let add = symbols.iter().find(|symbol| symbol.name == "add").unwrap();
-    assert_eq!(add.kind, SymbolKind::FUNCTION);
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn document_symbols_include_type_definitions() {
-    let mut context = setup_test(&[]).await;
-    let file_uri = context
-        .open(
-            "R/typed_syms.R",
-            "#: @type point {list{x: double, y: double}}\n\n#: @alias points {list[point]}\nmake <- function() 1L\n",
-        )
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let result = context
-        .server
-        .document_symbol(DocumentSymbolParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("document_symbol request failed")
-        .expect("expected document symbols");
-    let DocumentSymbolResponse::Nested(symbols) = result else {
-        panic!("expected nested symbols: {result:?}");
-    };
-    let point = symbols
-        .iter()
-        .find(|symbol| symbol.name == "point")
-        .unwrap_or_else(|| panic!("expected `point` in the outline: {symbols:?}"));
-    assert_eq!(point.kind, SymbolKind::STRUCT);
-    assert_eq!(point.detail.as_deref(), Some("@type"));
-    let points = symbols
-        .iter()
-        .find(|symbol| symbol.name == "points")
-        .unwrap_or_else(|| panic!("expected `points` in the outline: {symbols:?}"));
-    assert_eq!(points.kind, SymbolKind::INTERFACE);
-    assert!(
-        symbols.iter().any(|symbol| symbol.name == "make"),
-        "item bindings still appear alongside type definitions"
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn config_indent_width() {
-    let mut context = setup_test(&[("ry.toml", "[format]\nindent-width = 4\n")]).await;
-    let file_uri = context
-        .open("R/indent.R", "f <- function(x) {\nx + 1\n}\n")
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let edits = context
-        .server
-        .formatting(DocumentFormattingParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("formatting request failed")
-        .expect("expected formatting edits");
-    assert!(
-        edits[0].new_text.contains("    x + 1"),
-        "expected 4-space indentation, got:\n{}",
-        edits[0].new_text
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn config_reload_on_change() {
-    let mut context = setup_test(&[("ry.toml", "[format]\nindent-width = 2\n")]).await;
-    let file_uri = context
-        .open("R/reload.R", "f <- function(x) {\nx + 1\n}\n")
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let formatted = |context: &mut TestContext| {
-        let uri = file_uri.clone();
-        let mut server = context.server.clone();
-        async move {
-            server
-                .formatting(DocumentFormattingParams {
-                    text_document: TextDocumentIdentifier { uri },
-                    options: FormattingOptions::default(),
-                    work_done_progress_params: WorkDoneProgressParams::default(),
-                })
-                .await
-                .expect("formatting request failed")
-                .expect("expected formatting edits")[0]
-                .new_text
-                .clone()
-        }
-    };
-
-    let initial = formatted(&mut context).await;
-    assert!(
-        initial.contains("  x + 1"),
-        "expected 2-space indentation before reload, got:\n{initial}"
-    );
-
-    std::fs::write(
-        context.workspace_dir.join("ry.toml"),
-        "[format]\nindent-width = 4\n",
-    )
-    .expect("update config");
-    context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
-
-    let reloaded = formatted(&mut context).await;
-    assert!(
-        reloaded.contains("    x + 1"),
-        "expected 4-space indentation after reload, got:\n{reloaded}"
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn hover_range_under_utf16_with_bmp_non_ascii() {
-    let mut context = setup_test(&[]).await;
     // `é` is one UTF-16 code unit but two UTF-8 bytes, so the byte column of
     // `target` (16) differs from its UTF-16 column (15).
-    let file_uri = context
-        .open("R/bmp.R", "target <- 1L\ny <- f(\"café\", target)\n")
-        .await;
-
-    let hover = context
-        .server
-        .hover(HoverParams {
-            text_document_position_params: position_params(&file_uri, 1, 17),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("hover request failed")
-        .expect("hover response missing");
-    let range = hover.range.expect("hover should report a range");
+    let bmp = context.open("R/bmp.R", "target <- 1L\ny <- f(\"café\", target)\n");
+    let range = context.hover_range(&bmp, 1, 17).await;
     assert_eq!(range.start.line, 1);
     assert_eq!(
         (range.start.character, range.end.character),
@@ -1714,28 +813,9 @@ async fn hover_range_under_utf16_with_bmp_non_ascii() {
         "expected the UTF-16 span of `target`, got: {range:?}"
     );
 
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn goto_definition_range_under_utf16_with_non_ascii() {
-    let mut context = setup_test(&[]).await;
     // `caféx` is five scalars / five UTF-16 units but six UTF-8 bytes.
-    let file_uri = context.open("R/goto.R", "caféx <- 1L\ny <- caféx\n").await;
-
-    let result = context
-        .server
-        .definition(GotoDefinitionParams {
-            text_document_position_params: position_params(&file_uri, 1, 7),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("definition request failed")
-        .expect("expected a definition response");
-    let GotoDefinitionResponse::Scalar(location) = result else {
-        panic!("expected a scalar definition");
-    };
+    let goto = context.open("R/goto.R", "caféx <- 1L\ny <- caféx\n");
+    let location = context.definition_location(&goto, 1, 7).await;
     assert_eq!(location.range.start, Position::new(0, 0));
     assert_eq!(
         location.range.end.character, 5,
@@ -1743,33 +823,9 @@ async fn goto_definition_range_under_utf16_with_non_ascii() {
         location.range
     );
 
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn document_symbol_selection_range_under_utf16_with_non_ascii() {
-    let mut context = setup_test(&[]).await;
     // `café_fn` is seven UTF-16 units but eight UTF-8 bytes.
-    let file_uri = context
-        .open("R/symbol.R", "café_fn <- function() 1\n")
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let result = context
-        .server
-        .document_symbol(DocumentSymbolParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("document_symbol request failed")
-        .expect("expected document symbols");
-    let DocumentSymbolResponse::Nested(symbols) = result else {
-        panic!("expected nested document symbols");
-    };
+    let symbol_uri = context.open("R/symbol.R", "café_fn <- function() 1\n");
+    let symbols = context.document_symbols(&symbol_uri).await;
     let symbol = symbols
         .iter()
         .find(|symbol| symbol.name == "café_fn")
@@ -1781,25 +837,18 @@ async fn document_symbol_selection_range_under_utf16_with_non_ascii() {
         symbol.selection_range
     );
 
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn diagnostics_range_under_utf16_with_non_bmp_emoji() {
-    let mut context = setup_test(&[]).await;
     // `🦀` is 2 UTF-16 units / 4 UTF-8 bytes / 1 scalar; the `T` lint span
     // diverges: UTF-16 = 11..12, UTF-8 byte = 13..14.
-    let file_uri = context.open("R/emoji_diag.R", "\"🦀\"; x <- T\n").await;
-
-    let diagnostics = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    let true_diagnostic = diagnostics
+    let emoji_diagnostic = context.open("R/emoji_diag.R", "\"🦀\"; x <- T\n");
+    let published = context.recv_diagnostics(&emoji_diagnostic).await;
+    let true_diagnostic = published
         .diagnostics
         .iter()
         .find(|diagnostic| diagnostic.message.contains("TRUE"))
         .unwrap_or_else(|| {
             panic!(
                 "expected a T-vs-TRUE diagnostic, got: {:?}",
-                diagnostics.diagnostics
+                published.diagnostics
             )
         });
     assert_eq!(true_diagnostic.range.start.line, 0);
@@ -1817,546 +866,267 @@ async fn diagnostics_range_under_utf16_with_non_bmp_emoji() {
 }
 
 #[tokio::test]
-async fn hover_range_under_utf8_with_non_bmp_emoji() {
-    let mut context = setup_test_with_position_encodings(&[], &[PositionEncodingKind::UTF8]).await;
-    let file_uri = context
-        .open("R/utf8_emoji.R", "target <- 1L\ny <- f(\"🦀\", target)\n")
-        .await;
-
-    let hover = context
-        .server
-        .hover(HoverParams {
-            // Byte column 17 is inside `target` (bytes 15..21).
-            text_document_position_params: position_params(&file_uri, 1, 17),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("hover request failed")
-        .expect("hover response missing");
-    let range = hover.range.expect("hover should report a range");
-    assert_eq!(
-        (range.start.character, range.end.character),
-        (15, 21),
-        "expected the UTF-8 byte span of `target` after an emoji, got: {range:?}"
+async fn goto_definition() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open(
+        "R/def.R",
+        "helper <- function(x) x\ncaller <- function() helper(1)\n",
     );
-
+    context.recv_diagnostics(&uri).await;
+    let location = context.definition_location(&uri, 1, 22).await;
+    assert_eq!(location.uri, uri);
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(0, 0), Position::new(0, 6))
+    );
     context.shutdown().await;
 }
 
-const OOB_DOC: &str = "alpha <- 1\n\nbeta <- 2\n";
+#[tokio::test]
+async fn stub_names_lead_to_their_declaration_site() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/stub.R", "sizes <- head(1:9)\n");
+    context.recv_diagnostics(&uri).await;
 
-fn oob_positions() -> [Position; 2] {
-    // A character past the end of the empty line 1, and a line past the end.
-    [Position::new(1, 50), Position::new(50, 0)]
+    let location = context.definition_location(&uri, 0, 10).await;
+    let path = location.uri.path();
+    assert!(
+        path.ends_with("utils.Rtypes"),
+        "expected the materialized utils stub, got {path}"
+    );
+    let text = fs::read_to_string(
+        location
+            .uri
+            .to_file_path()
+            .expect("stub location is a file path"),
+    )
+    .expect("the materialized stub file exists on disk");
+    let line = text
+        .lines()
+        .nth(location.range.start.line as usize)
+        .expect("the location's line exists");
+    assert!(
+        line.starts_with("head :"),
+        "the location points at head's declaration, got: {line}"
+    );
+
+    let markdown = context.hover_markdown(&uri, 0, 10).await;
+    assert!(
+        markdown.contains("From the `utils` package")
+            && markdown.contains("Declared at `utils.Rtypes:"),
+        "expected the stub declaration location in: {markdown}"
+    );
+    context.shutdown().await;
 }
 
 #[tokio::test]
-async fn out_of_bounds_positions_are_safe_on_every_entry_point() {
+async fn formatting_rewrites_documents_and_refuses_on_syntax_errors() {
     let mut context = setup_test(&[]).await;
-    let file_uri = context.open("R/oob.R", OOB_DOC).await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
+    let uri = context.open("R/fmt.R", "x<-1\n");
+    let broken = context.open("R/bad.R", "y <- (\n");
+    context.recv_diagnostics(&uri).await;
+    context.recv_diagnostics(&broken).await;
 
-    for position in oob_positions() {
-        let _ = context
-            .server
-            .hover(HoverParams {
-                text_document_position_params: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: file_uri.clone(),
-                    },
-                    position,
-                },
-                work_done_progress_params: WorkDoneProgressParams::default(),
-            })
-            .await
-            .expect("hover must not panic the server");
-        let _ = context
-            .server
-            .definition(GotoDefinitionParams {
-                text_document_position_params: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: file_uri.clone(),
-                    },
-                    position,
-                },
-                work_done_progress_params: WorkDoneProgressParams::default(),
-                partial_result_params: PartialResultParams::default(),
-            })
-            .await
-            .expect("definition must not panic the server");
-        let _ = context
-            .server
-            .references(ReferenceParams {
-                text_document_position: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: file_uri.clone(),
-                    },
-                    position,
-                },
-                context: ReferenceContext {
-                    include_declaration: true,
-                },
-                work_done_progress_params: WorkDoneProgressParams::default(),
-                partial_result_params: PartialResultParams::default(),
-            })
-            .await
-            .expect("references must not panic the server");
-        let _ = context
-            .server
-            .completion(CompletionParams {
-                text_document_position: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: file_uri.clone(),
-                    },
-                    position,
-                },
-                work_done_progress_params: WorkDoneProgressParams::default(),
-                partial_result_params: PartialResultParams::default(),
-                context: None,
-            })
-            .await
-            .expect("completion must not panic the server");
-        let signature = context
-            .server
-            .signature_help(SignatureHelpParams {
-                context: None,
-                text_document_position_params: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: file_uri.clone(),
-                    },
-                    position,
-                },
-                work_done_progress_params: WorkDoneProgressParams::default(),
-            })
-            .await
-            .expect("signature help must not panic the server");
-        assert!(signature.is_none(), "OOB signature help should be None");
-        let rename = context
-            .server
-            .rename(RenameParams {
-                text_document_position: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: file_uri.clone(),
-                    },
-                    position,
-                },
-                new_name: "renamed".into(),
-                work_done_progress_params: WorkDoneProgressParams::default(),
-            })
-            .await
-            .expect("rename must not panic the server");
-        assert!(rename.is_none(), "OOB rename should be None");
+    let edits = context
+        .formatting(&uri)
+        .await
+        .expect("formatting failed")
+        .expect("expected formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "x <- 1\n");
+    assert_eq!(edits[0].range.start, Position::new(0, 0));
+
+    let edits = context
+        .formatting(&broken)
+        .await
+        .expect("formatting failed");
+    assert!(edits.is_none(), "{edits:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_snaps_to_whole_statements() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n");
+    let spaced = context.open("R/spaced.R", "a <- 1\n\n\nb <- 2\n");
+    context.recv_diagnostics(&uri).await;
+    context.recv_diagnostics(&spaced).await;
+
+    // Covers part of the middle line only; the edit must cover that whole statement.
+    let edits = context
+        .range_formatting(&uri, Range::new(Position::new(1, 1), Position::new(1, 2)))
+        .await
+        .expect("range formatting failed")
+        .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "y <- 2");
+    assert_eq!(
+        edits[0].range,
+        Range::new(Position::new(1, 0), Position::new(1, 4))
+    );
+
+    // A selection holding no statement is left alone.
+    let edits = context
+        .range_formatting(
+            &spaced,
+            Range::new(Position::new(1, 0), Position::new(2, 0)),
+        )
+        .await
+        .expect("range formatting failed");
+    assert!(edits.is_none(), "{edits:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn pull_diagnostics_report_known_diagnostics_and_unchanged_repeats() {
+    let mut context = setup_with(&[], pull_capabilities(false)).await;
+    let uri = context.open("R/warn.R", "x = 1\n");
+    let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) =
+        context.document_diagnostic(&uri, None).await
+    else {
+        panic!("expected a full report");
+    };
+    assert_eq!(full.full_document_diagnostic_report.items.len(), 1);
+
+    let result_id = full
+        .full_document_diagnostic_report
+        .result_id
+        .expect("result id");
+    let repeat = context.document_diagnostic(&uri, Some(result_id)).await;
+    assert!(
+        matches!(
+            repeat,
+            DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(_))
+        ),
+        "expected an unchanged report"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn pull_diagnostics_are_empty_for_clean_and_untracked_documents() {
+    let mut context = setup_with(&[], pull_capabilities(false)).await;
+    let clean = context.open("R/clean.R", "x <- 1\n");
+    let untracked = context.workspace_uri("R/never_opened.R");
+    for uri in [clean, untracked] {
+        let items = report_messages(context.document_diagnostic(&uri, None).await);
+        assert!(items.is_empty(), "{uri}: {items:?}");
     }
-
-    // Inlay hints over an oversized viewport are clamped, not fatal.
-    let _ = context
-        .server
-        .inlay_hint(InlayHintParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            range: Range::new(Position::new(0, 0), Position::new(99, 99)),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("inlay hints must not panic the server");
-
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn signature_help_sends_label_with_parameter_offsets() {
-    let mut context = setup_test_with_parameter_label_offsets(&[]).await;
-    let file_uri = context.open("R/sig.R", "result <- lapply()\n").await;
-
-    let help = context
-        .server
-        .signature_help(SignatureHelpParams {
-            context: None,
-            text_document_position_params: position_params(&file_uri, 0, 17),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("signature_help request failed")
-        .expect("signature help expected inside the call");
-    // `lapply` is an overload set, so the list carries every declared
-    // candidate; the offsets under test are the active one's.
-    let active = help.active_signature.expect("an active signature") as usize;
-    let signature = &help.signatures[active];
-    let parameters = signature
-        .parameters
-        .as_ref()
-        .expect("signature parameters expected");
-    let parameter_texts: Vec<&str> = parameters
-        .iter()
-        .map(|parameter| match parameter.label {
-            ParameterLabel::LabelOffsets([start, end]) => signature
-                .label
-                .get(start as usize..end as usize)
-                .expect("parameter offsets must slice the label"),
-            ParameterLabel::Simple(_) => {
-                panic!("offset-capable client must receive label offsets")
-            }
-        })
-        .collect();
-    assert_eq!(
-        parameter_texts,
-        ["x: list[named: T]", "f: fn(T) -> U", "...: Any"]
-    );
-    assert_eq!(help.active_parameter, Some(0));
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn signature_help_falls_back_to_substring_parameter_labels() {
-    let mut context = setup_test(&[]).await;
-    let file_uri = context.open("R/sig.R", "result <- lapply()\n").await;
-
-    let help = context
-        .server
-        .signature_help(SignatureHelpParams {
-            context: None,
-            text_document_position_params: position_params(&file_uri, 0, 17),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("signature_help request failed")
-        .expect("signature help expected inside the call");
-    let active = help.active_signature.expect("an active signature") as usize;
-    let signature = &help.signatures[active];
-    let parameters = signature
-        .parameters
-        .as_ref()
-        .expect("signature parameters expected");
-    let parameter_texts: Vec<&str> = parameters
-        .iter()
-        .map(|parameter| match &parameter.label {
-            ParameterLabel::Simple(text) => text.as_str(),
-            ParameterLabel::LabelOffsets(_) => {
-                panic!("client without offset support must receive substring labels")
-            }
-        })
-        .collect();
-    assert_eq!(
-        parameter_texts,
-        ["x: list[named: T]", "f: fn(T) -> U", "...: Any"]
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn pull_diagnostics_empty_for_clean_file() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let uri = context.open("R/clean.R", "x <- 1\n").await;
-    let report = context.document_diagnostic(&uri, None).await;
-    let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) = report
-    else {
-        panic!("expected a full report");
-    };
-    assert!(full.full_document_diagnostic_report.items.is_empty());
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn pull_diagnostics_untracked_document_is_empty() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let uri = context.workspace_uri("R/never_opened.R");
-    let report = context.document_diagnostic(&uri, None).await;
-    let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) = report
-    else {
-        panic!("expected a full report");
-    };
-    assert!(full.full_document_diagnostic_report.items.is_empty());
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn pull_diagnostics_match_pushed_across_files() {
-    let mut context = setup_test(&[]).await;
-    let file_a_uri = context.open("R/match_a.R", "x <- T\n").await;
-    let file_b_uri = context.open("R/match_b.R", "y = 1\n").await;
-
-    let pushed_a = recv_diagnostics(&mut context.diagnostics_receiver, &file_a_uri, TIMEOUT).await;
-    let pushed_b = recv_diagnostics(&mut context.diagnostics_receiver, &file_b_uri, TIMEOUT).await;
-    let pushed_a: Vec<String> = pushed_a
-        .diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.message.clone())
-        .collect();
-    let pushed_b: Vec<String> = pushed_b
-        .diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.message.clone())
-        .collect();
-
-    let pulled_a = report_messages(context.document_diagnostic(&file_a_uri, None).await);
-    let pulled_b = report_messages(context.document_diagnostic(&file_b_uri, None).await);
-
-    assert_eq!(pulled_a, pushed_a);
-    assert_eq!(pulled_b, pushed_b);
-    assert!(!pulled_a.is_empty() && !pulled_b.is_empty());
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn semantic_classes_arrive_with_the_settled_wave() {
-    let mut context = setup_test(&[]).await;
-    let file_uri = context
-        .open("R/unresolved.R", "main <- function() missing_helper()\n")
-        .await;
-
-    let first = recv_first_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        !first
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("missing_helper")),
-        "name resolution is not part of the first wave: {:?}",
-        first.diagnostics
-    );
-
-    let settled = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        settled
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("missing_helper")),
-        "the settled wave carries the unresolved reference: {:?}",
-        settled.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn breaking_one_file_leaves_its_dependents_untouched() {
-    let mut context = setup_test(&[]).await;
-    let library_uri = context
-        .open("R/library.R", "shared_helper <- function() 1L\n")
-        .await;
-    let consumer_uri = context
-        .open("R/consumer.R", "value <- shared_helper()\n")
-        .await;
-    let settled = recv_diagnostics(&mut context.diagnostics_receiver, &consumer_uri, TIMEOUT).await;
-    assert!(
-        settled.diagnostics.is_empty(),
-        "the consumer starts clean: {:?}",
-        settled.diagnostics
-    );
-
-    context.change_file(
-        &library_uri,
-        2,
-        Range::new(Position::new(1, 0), Position::new(1, 0)),
-        "broken <- function() {\n",
-    );
-    let broken = loop {
-        let settled =
-            recv_diagnostics(&mut context.diagnostics_receiver, &library_uri, TIMEOUT).await;
-        if !settled.diagnostics.is_empty() {
-            break settled;
-        }
-    };
-    assert!(
-        broken.diagnostics.iter().all(|diagnostic| diagnostic.code
-            == Some(async_lsp::lsp_types::NumberOrString::String(
-                "syntax-error".to_owned()
-            ))),
-        "the broken file reports its syntax error and nothing else: {:?}",
-        broken.diagnostics
-    );
-
-    // Saving while broken refreshes every open document; `shared_helper` still resolves.
-    context.save_file(&consumer_uri);
-    let after_break =
-        recv_diagnostics(&mut context.diagnostics_receiver, &consumer_uri, TIMEOUT).await;
-    assert!(
-        after_break.diagnostics.is_empty(),
-        "the consumer is untouched while its dependency is mid-edit: {:?}",
-        after_break.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn dependency_affecting_save_requests_diagnostic_refresh() {
-    let mut context = setup_test_with_pull_and_refresh(&[]).await;
-    let uri = context.open("R/dep.R", "x <- 1\n").await;
-    context.save_file(&uri);
-    tokio::time::timeout(TIMEOUT, context.refresh_receiver.recv())
-        .await
-        .expect("timed out waiting for the diagnostic refresh request")
-        .expect("refresh channel closed");
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn pull_client_without_refresh_support_gets_no_refresh() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let uri = context.open("R/dep.R", "x <- 1\n").await;
-    context.save_file(&uri);
+async fn pull_client_without_refresh_support_gets_neither_push_nor_refresh() {
+    let mut context = setup_with(&[], pull_capabilities(false)).await;
+    context.open("R/warn.R", "x = 1\n");
+    let uri = context.open("R/dep.R", "y <- 1\n");
+    context.save(&uri);
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
-        context.refresh_receiver.try_recv().is_err(),
+        context.diagnostics.try_recv().is_err(),
+        "push must be suppressed for pull clients"
+    );
+    assert!(
+        context.refreshes.try_recv().is_err(),
         "a client without refresh support must not receive refresh requests"
     );
     context.shutdown().await;
 }
 
 #[tokio::test]
+async fn dependency_affecting_save_requests_diagnostic_refresh() {
+    let mut context = setup_with(&[], pull_capabilities(true)).await;
+    let uri = context.open("R/dep.R", "x <- 1\n");
+    context.save(&uri);
+    context.recv_refresh().await;
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn workspace_root_comes_from_the_client_not_the_process_cwd() {
+    let mut context = setup_test(&[("R/lib.R", "make_count <- function() 1L\n")]).await;
+    let uri = context.open("R/use.R", "total <- make_count()\n");
+    let published = messages(context.recv_diagnostics(&uri).await);
+    assert!(
+        published.is_empty(),
+        "cross-file resolution must succeed: {published:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_config_falls_back_to_defaults_and_reports() {
+    let mut context = setup_test(&[("ry.toml", "[check]\ntyping = 1\n")]).await;
+    let message = context.recv_message().await;
+    assert!(
+        message.message.contains("invalid config"),
+        "{}",
+        message.message
+    );
+
+    let config = context.workspace_uri("ry.toml");
+    let published = context.recv_first_diagnostics(&config).await.diagnostics;
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(
+        published[0].code,
+        Some(NumberOrString::String("config".to_owned()))
+    );
+    assert!(
+        published[0].message.contains("invalid config"),
+        "{}",
+        published[0].message
+    );
+
+    let uri = context.open("R/clean.R", "x <- 1\n");
+    let published = messages(context.recv_diagnostics(&uri).await);
+    assert!(published.is_empty(), "{published:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
 async fn ancestor_config_governs_a_workspace_without_its_own() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    std::fs::write(
-        temp_dir.path().join("ry.toml"),
-        "[format]\nindent-width = 7\n",
-    )
-    .expect("write ancestor config");
-    let workspace_dir = temp_dir.path().join("workspace");
-    std::fs::create_dir_all(workspace_dir.join("R")).expect("create workspace");
-
-    let (diagnostics_sender, diagnostics_receiver) = mpsc::unbounded_channel();
-    let (refresh_sender, refresh_receiver) = mpsc::unbounded_channel();
-    let (messages_sender, messages_receiver) = mpsc::unbounded_channel();
-    let (mainloop, mut server) =
-        build_test_client(diagnostics_sender, refresh_sender, messages_sender);
-    let mut child = spawn_server(temp_dir.path(), &[], &[]);
-    let stdout = child.stdout.take().expect("missing stdout").compat();
-    let stdin = child.stdin.take().expect("missing stdin").compat_write();
-    let mainloop_handle = tokio::spawn(async move {
-        let _ = mainloop.run_buffered(stdout, stdin).await;
-        drop(child);
-    });
-    let root_uri = Url::from_file_path(&workspace_dir).expect("workspace uri");
-    let init_result = server
-        .initialize(InitializeParams {
-            workspace_folders: Some(vec![WorkspaceFolder {
-                uri: root_uri,
-                name: "root".into(),
-            }]),
-            capabilities: ClientCapabilities::default(),
-            ..InitializeParams::default()
-        })
-        .await
-        .expect("initialize failed");
-    server
-        .initialized(InitializedParams {})
-        .expect("initialized failed");
-    let mut context = TestContext {
-        server,
-        diagnostics_receiver: DiagnosticsChannel {
-            receiver: diagnostics_receiver,
-            stash: Vec::new(),
-        },
-        refresh_receiver,
-        messages_receiver,
-        mainloop_handle,
-        init_result,
-        _temp_dir: temp_dir,
-        workspace_dir,
-    };
-
-    let file_uri = context
-        .open("R/indent.R", "f <- function(x) {\nx + 1\n}\n")
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-    let edits = context
-        .server
-        .formatting(DocumentFormattingParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("formatting request failed")
-        .expect("expected formatting edits");
+    let mut context = setup_test(&[("../ry.toml", "[format]\nindent-width = 7\n")]).await;
+    let uri = context.open("R/indent.R", "f <- function(x) {\nx + 1\n}\n");
+    context.drain_diagnostics();
+    let formatted = context.formatted(&uri).await;
     assert!(
-        edits[0].new_text.contains("       x + 1"),
-        "expected 7-space indentation from the ancestor config, got:\n{}",
-        edits[0].new_text
+        formatted.contains("       x + 1"),
+        "expected 7-space indentation from the ancestor config, got:\n{formatted}"
     );
-
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn config_reload_refreshes_push_diagnostics() {
-    let mut context = setup_test(&[("ry.toml", "[check]\nunused = false\n")]).await;
-    let file_uri = context
-        .open("R/dead.R", "f <- function() {\n  dead <- 1\n  2\n}\n")
-        .await;
-    let settled = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        settled.diagnostics.is_empty(),
-        "unused is off initially: {:?}",
-        settled.diagnostics
-    );
-
-    std::fs::write(
-        context.workspace_dir.join("ry.toml"),
-        "[check]\nunused = true\n",
-    )
-    .expect("update config");
-    context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
-
-    let refreshed = recv_diagnostics(&mut context.diagnostics_receiver, &file_uri, TIMEOUT).await;
-    assert!(
-        refreshed
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("never used")),
-        "the config toggle re-publishes with the unused finding: {:?}",
-        refreshed.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn config_reload_requests_refresh_for_pull_clients() {
-    let mut context =
-        setup_test_with_pull_and_refresh(&[("ry.toml", "[check]\nunused = false\n")]).await;
-    let _uri = context.open("R/dead.R", "f <- function() 1\n").await;
-
-    std::fs::write(
-        context.workspace_dir.join("ry.toml"),
-        "[check]\nunused = true\n",
-    )
-    .expect("update config");
-    context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
-
-    tokio::time::timeout(TIMEOUT, context.refresh_receiver.recv())
-        .await
-        .expect("timed out waiting for the refresh request")
-        .expect("refresh channel closed");
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn config_reload_failure_keeps_previous_config_and_reports() {
+async fn config_reloads_and_a_failed_reload_keeps_the_previous_config() {
     let mut context = setup_test(&[("ry.toml", "[format]\nindent-width = 4\n")]).await;
-    let file_uri = context
-        .open("R/keep.R", "f <- function(x) {\nx + 1\n}\n")
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
+    let uri = context.open("R/indent.R", "f <- function(x) {\nx + 1\n}\n");
+    context.drain_diagnostics();
+    let indented = |width: usize| format!("f <- function(x) {{\n{}x + 1\n}}\n", " ".repeat(width));
+    assert_eq!(
+        context.formatted(&uri).await,
+        indented(4),
+        "the initial config governs"
+    );
 
-    std::fs::write(
+    fs::write(
+        context.workspace_dir.join("ry.toml"),
+        "[format]\nindent-width = 3\n",
+    )
+    .expect("update config");
+    context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
+    assert_eq!(
+        context.formatted(&uri).await,
+        indented(3),
+        "the reloaded config governs"
+    );
+
+    fs::write(
         context.workspace_dir.join("ry.toml"),
         "[check]\ntyping = 1\n",
     )
     .expect("write broken config");
     context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
-
-    let message = tokio::time::timeout(TIMEOUT, context.messages_receiver.recv())
-        .await
-        .expect("timed out waiting for the reload error")
-        .expect("messages channel closed");
+    let message = context.recv_message().await;
     assert!(
         message
             .message
@@ -2364,343 +1134,369 @@ async fn config_reload_failure_keeps_previous_config_and_reports() {
         "{}",
         message.message
     );
-
-    // Formatting still uses the previous (4-space) configuration.
-    let edits = context
-        .server
-        .formatting(DocumentFormattingParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            options: FormattingOptions::default(),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("formatting request failed")
-        .expect("expected formatting edits");
-    assert!(
-        edits[0].new_text.contains("    x + 1"),
-        "expected the previous config to keep governing, got:\n{}",
-        edits[0].new_text
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn malformed_config_publishes_a_diagnostic_on_the_config_file() {
-    let mut context = setup_test(&[("ry.toml", "[check]\ntyping = 1\n")]).await;
-    let config_uri = context.workspace_uri("ry.toml");
-    let published =
-        recv_first_diagnostics(&mut context.diagnostics_receiver, &config_uri, TIMEOUT).await;
     assert_eq!(
-        published.diagnostics.len(),
-        1,
-        "{:?}",
-        published.diagnostics
-    );
-    let diagnostic = &published.diagnostics[0];
-    assert_eq!(
-        diagnostic.code,
-        Some(async_lsp::lsp_types::NumberOrString::String(
-            "config".to_owned()
-        ))
-    );
-    assert!(
-        diagnostic.message.contains("invalid config"),
-        "{}",
-        diagnostic.message
+        context.formatted(&uri).await,
+        indented(3),
+        "the previous config keeps governing"
     );
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn annotation_bodies_get_semantic_tokens() {
+async fn config_reload_refreshes_push_diagnostics() {
+    let mut context = setup_test(&[("ry.toml", "[check]\nunused = false\n")]).await;
+    let uri = context.open("R/dead.R", "f <- function() {\n  dead <- 1\n  2\n}\n");
+    let settled = messages(context.recv_diagnostics(&uri).await);
+    assert!(settled.is_empty(), "unused is off initially: {settled:?}");
+
+    fs::write(
+        context.workspace_dir.join("ry.toml"),
+        "[check]\nunused = true\n",
+    )
+    .expect("update config");
+    context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
+
+    let refreshed = messages(context.recv_diagnostics(&uri).await);
+    assert!(
+        mentions(&refreshed, "never used"),
+        "the config toggle re-publishes with the unused finding: {refreshed:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn config_reload_requests_refresh_for_pull_clients() {
+    let mut context = setup_with(
+        &[("ry.toml", "[check]\nunused = false\n")],
+        pull_capabilities(true),
+    )
+    .await;
+    context.open("R/dead.R", "f <- function() 1\n");
+    fs::write(
+        context.workspace_dir.join("ry.toml"),
+        "[check]\nunused = true\n",
+    )
+    .expect("update config");
+    context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
+    context.recv_refresh().await;
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn deeply_nested_documents_do_not_kill_the_server() {
     let mut context = setup_test(&[]).await;
-    let file_uri = context
-        .open("R/tokens.R", "#: <T> fn(x: T) -> T\nid <- function(x) x\n")
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
 
-    let result = context
-        .server
-        .semantic_tokens_full(async_lsp::lsp_types::SemanticTokensParams {
-            text_document: TextDocumentIdentifier {
-                uri: file_uri.clone(),
-            },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("semantic tokens request failed")
-        .expect("expected semantic tokens");
-    let async_lsp::lsp_types::SemanticTokensResult::Tokens(tokens) = result else {
-        panic!("expected a tokens result");
-    };
+    let deep = format!("value <- {}1{}\n", "f(".repeat(900), ")".repeat(900));
+    let deep_uri = context.open("R/deep_valid.R", &deep);
+    context.recv_diagnostics(&deep_uri).await;
+
+    let malformed = format!("value <- {}1{}\n", "f(".repeat(2000), ")".repeat(1000));
+    let malformed_uri = context.open("R/deep_malformed.R", &malformed);
+    context.recv_diagnostics(&malformed_uri).await;
+
+    // Formatting recurses over the tree too; it must answer or refuse without dying.
+    let formatted = context.formatting(&deep_uri).await;
     assert!(
-        !tokens.data.is_empty(),
-        "the #: annotation body must produce semantic tokens"
+        matches!(formatted, Ok(_) | Err(async_lsp::Error::Response(_))),
+        "{formatted:?}"
     );
 
+    let probe_uri = context.open("R/probe.R", "x <- 1\n");
+    let published = messages(context.recv_diagnostics(&probe_uri).await);
+    assert!(
+        published.is_empty(),
+        "the server still answers cleanly after the deep documents: {published:?}"
+    );
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn stub_documents_are_served_with_parse_diagnostics() {
+async fn namespace_buffer_publishes_import_validation() {
     let mut context = setup_test(&[]).await;
-    let uri = context
-        .open(
-            "stubs/project.Rtypes",
-            "good_helper : fn(x: double) -> double\nsize : Frobnicate\n",
-        )
-        .await;
-    let published = recv_first_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert_eq!(
-        published.diagnostics.len(),
-        1,
-        "{:?}",
-        published.diagnostics
+    let uri = context.open(
+        "NAMESPACE",
+        "import(stats)\nimportFrom(stats, sd, medain)\nimportFrom(dplyr, mutate)\n",
     );
-    let diagnostic = &published.diagnostics[0];
+    let published = context.recv_first_diagnostics(&uri).await.diagnostics;
+    assert_eq!(
+        published.len(),
+        1,
+        "only the known-namespace typo is reported: {published:?}"
+    );
+    let diagnostic = &published[0];
     assert!(
-        diagnostic.message.contains("does not load") && diagnostic.message.contains("Frobnicate"),
-        "{:?}",
         diagnostic
-    );
-    assert_eq!(diagnostic.range.start.line, 1, "whole-line on the bad line");
-
-    context.replace_file_full(&uri, 2, "good_helper : fn(x: double) -> double\n");
-    let published = recv_first_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-    assert!(
-        published.diagnostics.is_empty(),
-        "{:?}",
-        published.diagnostics
-    );
-
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn stub_documents_answer_pull_diagnostics() {
-    let mut context = setup_test_with_pull_diagnostics(&[]).await;
-    let uri = context
-        .open("stubs/project.Rtypes", "size : Frobnicate\n")
-        .await;
-    let report = context.document_diagnostic(&uri, None).await;
-    let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) = report
-    else {
-        panic!("expected a full report");
-    };
-    assert_eq!(full.full_document_diagnostic_report.items.len(), 1);
-    assert!(
-        full.full_document_diagnostic_report.items[0]
             .message
-            .contains("does not load"),
-        "{:?}",
-        full.full_document_diagnostic_report.items
+            .contains("`medain` is not exported by `stats`, so this package will not load."),
+        "unexpected message: {diagnostic:?}"
     );
-    context.shutdown().await;
-}
+    assert_eq!(
+        diagnostic.severity,
+        Some(DiagnosticSeverity::ERROR),
+        "R refuses to load such a package: {diagnostic:?}"
+    );
+    assert_eq!(
+        diagnostic.range.start.line, 1,
+        "reports on the importFrom line"
+    );
 
-#[tokio::test]
-async fn stub_documents_get_semantic_tokens() {
-    let mut context = setup_test(&[]).await;
-    let uri = context
-        .open(
-            "stubs/project.Rtypes",
-            "@type frame\nmake_frame : fn(n: integer) -> frame\n",
-        )
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let result = context
-        .server
-        .semantic_tokens_full(async_lsp::lsp_types::SemanticTokensParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("semantic tokens request failed")
-        .expect("expected semantic tokens");
-    let async_lsp::lsp_types::SemanticTokensResult::Tokens(tokens) = result else {
-        panic!("expected a tokens result");
-    };
+    context.change(
+        &uri,
+        2,
+        Some(Range::new(Position::new(1, 22), Position::new(1, 28))),
+        "median",
+    );
+    let published = context.recv_first_diagnostics(&uri).await.diagnostics;
     assert!(
-        !tokens.data.is_empty(),
-        "a stub buffer must produce semantic tokens"
+        published.is_empty(),
+        "the corrected NAMESPACE is clean: {published:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn initialize_without_r_directory() {
+    let mut context = launch(Launch {
+        without_r_directory: true,
+        ..Launch::default()
+    })
+    .await;
+    assert!(
+        context
+            .init_result
+            .capabilities
+            .text_document_sync
+            .is_some(),
+        "expected initialize to succeed without an R directory"
     );
 
+    fs::create_dir_all(context.workspace_dir.join("R")).expect("create R directory");
+    fs::write(context.workspace_dir.join("R/created_later.R"), "x <- T\n")
+        .expect("write test file");
+    context.notify_watched_file_changed("R/created_later.R", FileChangeType::CREATED);
+
+    let uri = context.open("R/created_later.R", "x <- T\n");
+    let published = messages(context.recv_diagnostics(&uri).await);
+    assert!(
+        mentions(&published, "TRUE"),
+        "expected diagnostics after creating R directory and file, got: {published:?}"
+    );
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn stub_type_name_jumps_to_its_type_declaration() {
-    let mut context = setup_test(&[]).await;
-    let uri = context
-        .open(
-            "stubs/project.Rtypes",
-            "@type frame\nmake_frame : fn(n: integer) -> frame\n",
-        )
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
+async fn requests_for_unopened_non_file_uris_answer_gracefully() {
+    let mut context = setup_test(&[("R/main.R", "x <- 1L")]).await;
+    let untitled = Url::parse("untitled:Untitled-9").expect("untitled uri should parse");
 
-    // The cursor sits on the `frame` return-type reference (line 1, col 32).
-    let result = context
-        .server
-        .definition(GotoDefinitionParams {
-            text_document_position_params: position_params(&uri, 1, 32),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("definition request failed")
-        .expect("expected a definition into the stub file");
-    let GotoDefinitionResponse::Scalar(location) = result else {
-        panic!("expected a scalar definition");
-    };
-    assert_eq!(location.uri, uri);
-    assert_eq!(location.range.start, Position::new(0, 6));
-    assert_eq!(location.range.end, Position::new(0, 11));
+    let hover = context.hover(&untitled, 0, 0).await;
+    assert!(
+        matches!(hover, Err(_) | Ok(None)),
+        "hover on an unopened non-file uri must be answered, got: {hover:?}"
+    );
 
+    let report = context.document_diagnostic(&untitled, None).await;
+    assert!(
+        matches!(
+            report,
+            DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(_))
+        ),
+        "a pull on an unopened non-file uri returns an empty full report"
+    );
+
+    let uri = context.open("R/main.R", "x <- 1L");
+    context.recv_diagnostics(&uri).await;
     context.shutdown().await;
 }
 
 #[tokio::test]
-async fn hover_shows_definition_summaries() {
+async fn untitled_document_is_served_as_a_standalone_script() {
     let mut context = setup_test(&[]).await;
-    let uri = context
-        .open(
-            "R/hover.R",
-            "count <- 1L\nuse <- function() {\n  value <- count + 1\n  value + print(value)\n}\n",
-        )
-        .await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
+    let untitled = Url::parse("untitled:Untitled-1").expect("untitled uri should parse");
+    context.open_uri(&untitled, "answer <- 42L\nfinal = answer\n");
 
-    let hover_markdown = |context: &mut TestContext, line: u32, character: u32| {
-        let params = HoverParams {
-            text_document_position_params: position_params(&uri, line, character),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        };
-        let mut server = context.server.clone();
-        async move {
-            let hover = server
-                .hover(params)
-                .await
-                .expect("hover failed")
-                .expect("expected a hover");
-            let HoverContents::Markup(markup) = hover.contents else {
-                panic!("expected markdown hover");
-            };
-            markup.value
+    let published = messages(context.recv_diagnostics(&untitled).await);
+    assert!(
+        mentions(&published, "<-"),
+        "expected the `=` lint on the untitled buffer, got: {published:?}"
+    );
+
+    let markdown = context.hover_markdown(&untitled, 1, 10).await;
+    assert!(markdown.contains("integer"), "{markdown}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_text_did_change_replaces_the_document() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/full_sync.R", "x <- T\n");
+    let initial = messages(context.recv_diagnostics(&uri).await);
+    assert!(
+        mentions(&initial, "TRUE"),
+        "expected the T-vs-TRUE lint before the replacement, got: {initial:?}"
+    );
+
+    context.change(&uri, 2, None, "y = 1\n");
+    let after = messages(context.recv_diagnostics(&uri).await);
+    assert!(
+        mentions(&after, "<-"),
+        "expected the `=` lint from the replacement text, got: {after:?}"
+    );
+    assert!(
+        !mentions(&after, "TRUE"),
+        "the old text must be fully replaced, not merged, got: {after:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn did_close_survives_a_failing_disk_reread() {
+    let mut context = setup_test(&[]).await;
+    fs::create_dir_all(context.workspace_dir.join("R/casualty.R"))
+        .expect("create directory posing as a source file");
+
+    let casualty = context.open("R/casualty.R", "x <- 1\n");
+    context.drain_diagnostics();
+    context.close(&casualty);
+
+    let uri = context.open("R/still_alive.R", "x <- T\n");
+    let published = messages(context.recv_diagnostics(&uri).await);
+    assert!(
+        mentions(&published, "TRUE"),
+        "expected the server to survive the failing close-time re-read, got: {published:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn watched_file_create_and_delete_change_cross_file_resolution() {
+    let mut context = setup_with(&[], pull_capabilities(false)).await;
+    let consumer = context.open("R/consumer.R", "value <- helper()\n");
+    let before = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(mentions(&before, "`helper`"), "{before:?}");
+
+    let helper = context.workspace_dir.join("R/helper.R");
+    fs::write(&helper, "helper <- function() 1L\n").expect("write helper");
+    context.notify_watched_file_changed("R/helper.R", FileChangeType::CREATED);
+    let created = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(!mentions(&created, "`helper`"), "{created:?}");
+
+    fs::remove_file(&helper).expect("delete helper");
+    context.notify_watched_file_changed("R/helper.R", FileChangeType::DELETED);
+    let deleted = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(mentions(&deleted, "`helper`"), "{deleted:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_open_buffer_shadows_the_disk_until_closed() {
+    let mut context = setup_with(
+        &[
+            ("R/helper.R", "helper <- function() 1L\n"),
+            ("R/consumer.R", "value <- helper()\n"),
+        ],
+        pull_capabilities(false),
+    )
+    .await;
+    let helper = context.open("R/helper.R", "helper <- function() 1L\n");
+    let consumer = context.open("R/consumer.R", "value <- helper()\n");
+
+    fs::write(
+        context.workspace_dir.join("R/helper.R"),
+        "renamed_on_disk <- 1L\n",
+    )
+    .expect("rewrite helper on disk");
+    context.notify_watched_file_changed("R/helper.R", FileChangeType::CHANGED);
+    let disk_changed = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(!mentions(&disk_changed, "`helper`"), "{disk_changed:?}");
+
+    fs::write(
+        context.workspace_dir.join("R/helper.R"),
+        "helper <- function() 1L\n",
+    )
+    .expect("restore helper on disk");
+    context.change(&helper, 2, None, "renamed_in_buffer <- 1L\n");
+    let edited = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(mentions(&edited, "`helper`"), "{edited:?}");
+
+    context.close(&helper);
+    let closed = report_messages(context.document_diagnostic(&consumer, None).await);
+    assert!(!mentions(&closed, "`helper`"), "{closed:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_malformed_edit_suppresses_then_restores_semantic_diagnostics() {
+    let mut context = setup_with(&[], pull_capabilities(false)).await;
+    let uri = context.open("R/main.R", "value <- helper()\n");
+    let clean = report_messages(context.document_diagnostic(&uri, None).await);
+    assert!(mentions(&clean, "`helper`"), "{clean:?}");
+
+    context.change(&uri, 2, None, "value <- helper(\n");
+    let malformed = report_messages(context.document_diagnostic(&uri, None).await);
+    assert!(!mentions(&malformed, "`helper`"), "{malformed:?}");
+    assert!(!malformed.is_empty(), "the syntax error is reported");
+
+    context.change(&uri, 3, None, "value <- helper()\n");
+    let restored = report_messages(context.document_diagnostic(&uri, None).await);
+    assert!(mentions(&restored, "`helper`"), "{restored:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn pull_diagnostics_match_pushed_across_files() {
+    let mut context = setup_test(&[]).await;
+    let file_a = context.open("R/match_a.R", "x <- T\n");
+    let file_b = context.open("R/match_b.R", "y = 1\n");
+
+    let pushed_a = messages(context.recv_diagnostics(&file_a).await);
+    let pushed_b = messages(context.recv_diagnostics(&file_b).await);
+    let pulled_a = report_messages(context.document_diagnostic(&file_a, None).await);
+    let pulled_b = report_messages(context.document_diagnostic(&file_b, None).await);
+
+    assert_eq!(pulled_a, pushed_a);
+    assert_eq!(pulled_b, pushed_b);
+    assert!(!pulled_a.is_empty() && !pulled_b.is_empty());
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn breaking_one_file_leaves_its_dependents_untouched() {
+    let mut context = setup_test(&[]).await;
+    let library = context.open("R/library.R", "shared_helper <- function() 1L\n");
+    let consumer = context.open("R/consumer.R", "value <- shared_helper()\n");
+    let settled = messages(context.recv_diagnostics(&consumer).await);
+    assert!(settled.is_empty(), "the consumer starts clean: {settled:?}");
+
+    context.change(
+        &library,
+        2,
+        Some(Range::new(Position::new(1, 0), Position::new(1, 0))),
+        "broken <- function() {\n",
+    );
+    let broken = loop {
+        let settled = context.recv_diagnostics(&library).await;
+        if !settled.diagnostics.is_empty() {
+            break settled;
         }
     };
-
-    // A read of the file's own top-level binding is a package global.
-    let global = hover_markdown(&mut context, 2, 12).await;
     assert!(
-        global.contains("Package global, defined at `R/hover.R:1:1`"),
-        "{global}"
+        broken
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code
+                == Some(NumberOrString::String("syntax-error".to_owned()))),
+        "the broken file reports its syntax error and nothing else: {:?}",
+        broken.diagnostics
     );
 
-    // A local read points at its defining write.
-    let local = hover_markdown(&mut context, 3, 3).await;
+    // Saving while broken refreshes every open document; `shared_helper` still resolves.
+    context.save(&consumer);
+    let after_break = messages(context.recv_diagnostics(&consumer).await);
     assert!(
-        local.contains("Local variable, defined at `R/hover.R:3:3`"),
-        "{local}"
+        after_break.is_empty(),
+        "the consumer is untouched while its dependency is mid-edit: {after_break:?}"
     );
-
-    // A stub name reports its declaring namespace.
-    let stub = hover_markdown(&mut context, 3, 11).await;
-    assert!(stub.contains("From the `base` package."), "{stub}");
-
-    assert!(!global.contains("### Debug"), "{global}");
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn debug_flag_adds_hover_debug_sections() {
-    let mut context =
-        setup_test_with_env_and_args(true, &[], ClientCapabilities::default(), &[], &["--debug"])
-            .await;
-    let uri = context
-        .open("R/debug.R", "count <- 1L\nuse <- count\n")
-        .await;
-    let _ = recv_diagnostics(&mut context.diagnostics_receiver, &uri, TIMEOUT).await;
-
-    let hover = context
-        .server
-        .hover(HoverParams {
-            text_document_position_params: position_params(&uri, 1, 8),
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        })
-        .await
-        .expect("hover failed")
-        .expect("expected a hover");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markdown hover");
-    };
-    for marker in ["### Debug", "**Lowering**", "**Naming**", "**Parsing**"] {
-        assert!(markup.value.contains(marker), "{}", markup.value);
-    }
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn document_symbols_nest_s4_and_r6_declarations() {
-    let mut context = setup_test(&[]).await;
-    let uri = context
-        .open(
-            "R/classes.R",
-            "setClass(\"Person\", representation(name = \"character\"))\n\
-             Account <- R6Class(\"Account\",\n\
-             \x20 public = list(\n\
-             \x20   balance = 0,\n\
-             \x20   deposit = function(amount) invisible(self)\n\
-             \x20 )\n\
-             )\n",
-        )
-        .await;
-    drain_diagnostics(&mut context.diagnostics_receiver).await;
-
-    let result = context
-        .server
-        .document_symbol(DocumentSymbolParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        })
-        .await
-        .expect("document_symbol request failed")
-        .expect("expected document symbols");
-    let DocumentSymbolResponse::Nested(symbols) = result else {
-        panic!("expected nested symbols");
-    };
-
-    let person = symbols
-        .iter()
-        .find(|symbol| symbol.name == "Person")
-        .expect("setClass declaration in the outline");
-    assert_eq!(person.kind, SymbolKind::CLASS);
-
-    let account = symbols
-        .iter()
-        .find(|symbol| symbol.name == "Account")
-        .expect("R6 class in the outline");
-    assert_eq!(account.kind, SymbolKind::CLASS);
-    let members = account.children.as_ref().expect("R6 members nest");
-    let balance = members
-        .iter()
-        .find(|member| member.name == "balance")
-        .expect("field member");
-    assert_eq!(balance.kind, SymbolKind::FIELD);
-    let deposit = members
-        .iter()
-        .find(|member| member.name == "deposit")
-        .expect("method member");
-    assert_eq!(deposit.kind, SymbolKind::METHOD);
-    assert_eq!(deposit.detail.as_deref(), Some("fn(amount)"));
-
     context.shutdown().await;
 }
 
@@ -2708,56 +1504,38 @@ async fn document_symbols_nest_s4_and_r6_declarations() {
 /// file, so its cancellation provably lands in flight; the retry must succeed.
 #[tokio::test]
 async fn cancelled_pull_is_retryable_and_recovers() {
-    let capabilities = ClientCapabilities {
-        text_document: Some(TextDocumentClientCapabilities {
-            diagnostic: Some(DiagnosticClientCapabilities::default()),
-            ..TextDocumentClientCapabilities::default()
-        }),
-        ..ClientCapabilities::default()
-    };
     let marker_dir = tempfile::tempdir().expect("marker dir");
     let marker = marker_dir.path().join("pull.marker");
-    let marker_text = marker.to_str().expect("utf-8 marker path").to_owned();
-    let mut context = setup_test_with_env(
-        true,
-        &[],
-        capabilities,
-        &[
+    let marker_text = marker.to_str().expect("utf-8 marker path");
+    let mut context = launch(Launch {
+        capabilities: pull_capabilities(false),
+        env: &[
             ("RY_TEST_DELAY_PULL_MS", "1000"),
-            ("RY_TEST_PULL_MARKER", &marker_text),
+            ("RY_TEST_PULL_MARKER", marker_text),
         ],
-    )
+        ..Launch::default()
+    })
     .await;
-    let uri = context.open("R/cancel.R", "x = 1\n").await;
+    let uri = context.open("R/cancel.R", "x = 1\n");
 
     // Socket sends are eager, so the request is written before the edit.
     let pending = context
         .server
-        .document_diagnostic(DocumentDiagnosticParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
-            identifier: Some("ry".into()),
-            previous_result_id: None,
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-        });
-    tokio::time::timeout(TIMEOUT, async {
+        .document_diagnostic(diagnostic_params(&uri, None));
+    timeout(TIMEOUT, async {
         while !marker.exists() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
     .expect("the server never started holding the pull");
-    context.replace_file_full(&uri, 2, "y = 2\n");
+    context.change(&uri, 2, None, "y = 2\n");
 
     let result = pending.await;
     let Err(async_lsp::Error::Response(error)) = result else {
         panic!("expected the cancelled-pull error, got {result:?}");
     };
-    assert_eq!(
-        error.code,
-        async_lsp::ErrorCode::SERVER_CANCELLED,
-        "{error:?}"
-    );
+    assert_eq!(error.code, ErrorCode::SERVER_CANCELLED, "{error:?}");
     let data = error.data.as_ref().expect("cancellation data");
     assert_eq!(
         data.get("retriggerRequest")
@@ -2766,21 +1544,408 @@ async fn cancelled_pull_is_retryable_and_recovers() {
         "{data:?}"
     );
 
-    let report = context.document_diagnostic(&uri, None).await;
-    let DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) = report
-    else {
-        panic!("expected a full report on retry");
+    let retried = report_messages(context.document_diagnostic(&uri, None).await);
+    assert!(
+        mentions(&retried, "<-"),
+        "expected the assignment-operator lint on the edited text: {retried:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn completion() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/comp.R", "my_function <- function(x) x\nmy_f\n");
+    context.drain_diagnostics();
+
+    let response = context
+        .completion(&uri, 1, 4)
+        .await
+        .expect("completion request failed")
+        .expect("expected completions");
+    let CompletionResponse::List(list) = response else {
+        panic!("expected a CompletionList response carrying isIncomplete");
     };
-    let messages: Vec<&str> = full
-        .full_document_diagnostic_report
+    assert!(
+        !list.is_incomplete,
+        "small candidate set should not be marked incomplete"
+    );
+    let my_function = list
         .items
         .iter()
-        .map(|item| item.message.as_str())
-        .collect();
+        .find(|item| item.label == "my_function")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected 'my_function' in completions, got: {:?}",
+                list.items
+            )
+        });
     assert!(
-        messages.iter().any(|message| message.contains("<-")),
-        "expected the assignment-operator lint on the edited text: {messages:?}"
+        my_function.insert_text.is_none() && my_function.insert_text_format.is_none(),
+        "a non-snippet client must get plain-label insertion"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn completion_inserts_call_snippets_for_functions() {
+    let capabilities = ClientCapabilities {
+        text_document: Some(TextDocumentClientCapabilities {
+            completion: Some(CompletionClientCapabilities {
+                completion_item: Some(CompletionItemCapability {
+                    snippet_support: Some(true),
+                    ..CompletionItemCapability::default()
+                }),
+                ..CompletionClientCapabilities::default()
+            }),
+            ..TextDocumentClientCapabilities::default()
+        }),
+        ..ClientCapabilities::default()
+    };
+    let mut context = setup_with(&[], capabilities).await;
+    let uri = context.open(
+        "R/snip.R",
+        "snip_args <- function(x) x\nsnip_none <- function() 1L\nsn\n",
+    );
+    context.drain_diagnostics();
+
+    let response = context
+        .completion(&uri, 2, 2)
+        .await
+        .expect("completion request failed")
+        .expect("expected completions");
+    let CompletionResponse::List(list) = response else {
+        panic!("expected a list response");
+    };
+    let item = |label: &str| {
+        list.items
+            .iter()
+            .find(|item| item.label == label)
+            .unwrap_or_else(|| panic!("expected a {label} item"))
+    };
+    let snip_args = item("snip_args");
+    assert_eq!(
+        snip_args.insert_text.as_deref(),
+        Some("snip_args($0)"),
+        "a function taking arguments drops the cursor between the parens"
+    );
+    assert_eq!(
+        snip_args.insert_text_format,
+        Some(InsertTextFormat::SNIPPET)
+    );
+    assert_eq!(
+        snip_args
+            .command
+            .as_ref()
+            .map(|command| command.command.as_str()),
+        Some("editor.action.triggerParameterHints"),
+        "inserting a call asks the editor for parameter hints"
+    );
+    assert_eq!(
+        item("snip_none").insert_text.as_deref(),
+        Some("snip_none()$0"),
+        "a zero-argument function drops the cursor past the parens"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn signature_help_labels_parameters_by_offset_or_substring() {
+    let offset_capabilities = ClientCapabilities {
+        text_document: Some(TextDocumentClientCapabilities {
+            signature_help: Some(SignatureHelpClientCapabilities {
+                signature_information: Some(SignatureInformationSettings {
+                    parameter_information: Some(ParameterInformationSettings {
+                        label_offset_support: Some(true),
+                    }),
+                    ..SignatureInformationSettings::default()
+                }),
+                ..SignatureHelpClientCapabilities::default()
+            }),
+            ..TextDocumentClientCapabilities::default()
+        }),
+        ..ClientCapabilities::default()
+    };
+    for (capabilities, offsets) in [
+        (offset_capabilities, true),
+        (ClientCapabilities::default(), false),
+    ] {
+        let mut context = setup_with(&[], capabilities).await;
+        let uri = context.open("R/sig.R", "result <- lapply()\n");
+        let help = context
+            .signature_help(&uri, 0, 17)
+            .await
+            .expect("signature_help request failed")
+            .expect("signature help expected inside the call");
+        // `lapply` is an overload set, so the list carries every declared
+        // candidate; the labels under test are the active one's.
+        let active = help.active_signature.expect("an active signature") as usize;
+        let signature = &help.signatures[active];
+        let parameter_texts: Vec<&str> = signature
+            .parameters
+            .as_ref()
+            .expect("signature parameters expected")
+            .iter()
+            .map(|parameter| match &parameter.label {
+                ParameterLabel::LabelOffsets([start, end]) if offsets => signature
+                    .label
+                    .get(*start as usize..*end as usize)
+                    .expect("parameter offsets must slice the label"),
+                ParameterLabel::Simple(text) if !offsets => text.as_str(),
+                label => panic!("label offset support is {offsets}, but got {label:?}"),
+            })
+            .collect();
+        assert_eq!(
+            parameter_texts,
+            ["x: list[named: T]", "f: fn(T) -> U", "...: Any"]
+        );
+        assert_eq!(help.active_parameter, Some(0));
+        context.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn inlay_hints_respect_requested_viewport() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open(
+        "R/hints.R",
+        "count <- 1L\nlabel <- \"hello\"\nratio <- 2L\n",
+    );
+    context.drain_diagnostics();
+
+    let hints = context
+        .inlay_hints(&uri, Range::new(Position::new(1, 0), Position::new(1, 16)))
+        .await
+        .expect("inlay hint request failed")
+        .expect("expected inlay hints");
+    let lines: Vec<u32> = hints.iter().map(|hint| hint.position.line).collect();
+    assert_eq!(
+        lines,
+        vec![1],
+        "only the in-viewport hint should be returned"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn rename_and_references_use_analysis_across_files() {
+    let mut context =
+        setup_test(&[("R/a.R", "value <- 1L\n"), ("R/b.R", "result <- value\n")]).await;
+    let file_a = context.open("R/a.R", "value <- 1L\n");
+    let file_b = context.workspace_uri("R/b.R");
+    context.drain_diagnostics();
+
+    let changes = context
+        .rename(&file_a, 0, 1, "renamed")
+        .await
+        .expect("rename request failed")
+        .expect("expected rename edit")
+        .changes
+        .expect("expected rename changes");
+    let file_a_edits = changes.get(&file_a).expect("missing file A edits");
+    assert_eq!(file_a_edits.len(), 1);
+    assert_eq!(file_a_edits[0].new_text, "renamed");
+    assert_eq!(file_a_edits[0].range.start, Position::new(0, 0));
+    let file_b_edits = changes.get(&file_b).expect("missing file B edits");
+    assert_eq!(file_b_edits.len(), 1);
+    assert_eq!(file_b_edits[0].range.start, Position::new(0, 10));
+
+    let locations = context
+        .references(&file_a, 0, 1, true)
+        .await
+        .expect("references request failed")
+        .expect("expected reference locations");
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.uri == file_a && location.range.start.line == 0),
+        "expected the declaration in file A, got: {locations:?}"
+    );
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.uri == file_b && location.range.start.character == 10),
+        "expected the cross-file use in file B, got: {locations:?}"
     );
 
+    let without_declaration = context
+        .references(&file_a, 0, 1, false)
+        .await
+        .expect("references request failed")
+        .expect("expected reference locations");
+    assert!(
+        without_declaration
+            .iter()
+            .all(|location| location.uri != file_a),
+        "expected the declaration to be excluded, got: {without_declaration:?}"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn document_symbols_cover_functions_type_definitions_and_classes() {
+    let mut context = setup_test(&[]).await;
+    let functions = context.open(
+        "R/syms.R",
+        "add <- function(x, y) x + y\nmultiply <- function(a, b) a * b\n",
+    );
+    let types = context.open(
+        "R/typed_syms.R",
+        "#: @type point {list{x: double, y: double}}\n\n#: @alias points {list[point]}\nmake <- function() 1L\n",
+    );
+    let classes = context.open(
+        "R/classes.R",
+        "setClass(\"Person\", representation(name = \"character\"))\n\
+         Account <- R6Class(\"Account\",\n\
+         \x20 public = list(\n\
+         \x20   balance = 0,\n\
+         \x20   deposit = function(amount) invisible(self)\n\
+         \x20 )\n\
+         )\n",
+    );
+    context.drain_diagnostics();
+    let find = |symbols: &[DocumentSymbol], name: &str| -> DocumentSymbol {
+        symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("expected `{name}` in the outline: {symbols:?}"))
+    };
+
+    let symbols = context.document_symbols(&functions).await;
+    assert_eq!(find(&symbols, "add").kind, SymbolKind::FUNCTION);
+    find(&symbols, "multiply");
+
+    let symbols = context.document_symbols(&types).await;
+    let point = find(&symbols, "point");
+    assert_eq!(point.kind, SymbolKind::STRUCT);
+    assert_eq!(point.detail.as_deref(), Some("@type"));
+    assert_eq!(find(&symbols, "points").kind, SymbolKind::INTERFACE);
+    // Item bindings still appear alongside type definitions.
+    find(&symbols, "make");
+
+    let symbols = context.document_symbols(&classes).await;
+    assert_eq!(find(&symbols, "Person").kind, SymbolKind::CLASS);
+    let account = find(&symbols, "Account");
+    assert_eq!(account.kind, SymbolKind::CLASS);
+    let members = account.children.as_deref().expect("R6 members nest");
+    assert_eq!(find(members, "balance").kind, SymbolKind::FIELD);
+    let deposit = find(members, "deposit");
+    assert_eq!(deposit.kind, SymbolKind::METHOD);
+    assert_eq!(deposit.detail.as_deref(), Some("fn(amount)"));
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn out_of_bounds_positions_are_safe_on_every_entry_point() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/oob.R", "alpha <- 1\n\nbeta <- 2\n");
+    context.drain_diagnostics();
+
+    // A character past the end of the empty line 1, and a line past the end.
+    for (line, character) in [(1, 50), (50, 0)] {
+        context
+            .hover(&uri, line, character)
+            .await
+            .expect("hover must not panic the server");
+        context
+            .definition(&uri, line, character)
+            .await
+            .expect("definition must not panic the server");
+        context
+            .references(&uri, line, character, true)
+            .await
+            .expect("references must not panic the server");
+        context
+            .completion(&uri, line, character)
+            .await
+            .expect("completion must not panic the server");
+        let signature = context
+            .signature_help(&uri, line, character)
+            .await
+            .expect("signature help must not panic the server");
+        assert!(signature.is_none(), "OOB signature help should be None");
+        let rename = context
+            .rename(&uri, line, character, "renamed")
+            .await
+            .expect("rename must not panic the server");
+        assert!(rename.is_none(), "OOB rename should be None");
+    }
+
+    // Inlay hints over an oversized viewport are clamped, not fatal.
+    context
+        .inlay_hints(&uri, Range::new(Position::new(0, 0), Position::new(99, 99)))
+        .await
+        .expect("inlay hints must not panic the server");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn annotation_bodies_get_semantic_tokens() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/tokens.R", "#: <T> fn(x: T) -> T\nid <- function(x) x\n");
+    context.drain_diagnostics();
+    let tokens = context.semantic_tokens(&uri).await;
+    assert!(
+        !tokens.data.is_empty(),
+        "the #: annotation body must produce semantic tokens"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn stub_documents_are_served_with_parse_diagnostics() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open(
+        "stubs/project.Rtypes",
+        "good_helper : fn(x: double) -> double\nsize : Frobnicate\n",
+    );
+    let published = context.recv_first_diagnostics(&uri).await.diagnostics;
+    assert_eq!(published.len(), 1, "{published:?}");
+    let diagnostic = &published[0];
+    assert!(
+        diagnostic.message.contains("does not load") && diagnostic.message.contains("Frobnicate"),
+        "{diagnostic:?}"
+    );
+    assert_eq!(diagnostic.range.start.line, 1, "whole-line on the bad line");
+
+    context.change(&uri, 2, None, "good_helper : fn(x: double) -> double\n");
+    let published = context.recv_first_diagnostics(&uri).await.diagnostics;
+    assert!(published.is_empty(), "{published:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn stub_documents_answer_pull_diagnostics() {
+    let mut context = setup_with(&[], pull_capabilities(false)).await;
+    let uri = context.open("stubs/project.Rtypes", "size : Frobnicate\n");
+    let items = report_messages(context.document_diagnostic(&uri, None).await);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(items[0].contains("does not load"), "{items:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn stub_documents_get_semantic_tokens_and_type_definitions() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open(
+        "stubs/project.Rtypes",
+        "@type frame\nmake_frame : fn(n: integer) -> frame\n",
+    );
+    context.drain_diagnostics();
+
+    let tokens = context.semantic_tokens(&uri).await;
+    assert!(
+        !tokens.data.is_empty(),
+        "a stub buffer must produce semantic tokens"
+    );
+
+    // The cursor sits on the `frame` return-type reference (line 1, col 32).
+    let location = context.definition_location(&uri, 1, 32).await;
+    assert_eq!(location.uri, uri);
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(0, 6), Position::new(0, 11))
+    );
     context.shutdown().await;
 }

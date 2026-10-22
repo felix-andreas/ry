@@ -343,14 +343,24 @@ ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycl
 reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
 any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
 
+### A read waits for the idle job in flight
+
+Only a notification (an open, edit, save or watched-file change) cancels in-flight work; a request
+never does (`ServerState::notify` against `ServerState::read` in `crates/ry/src/server.rs`). A hover
+or completion that arrives while the worker warms a file therefore waits for that one file's
+analysis to finish, because idle work runs one file per job. Measure the
+worst single-file warm-up on a large package before adding read preemption; if it is well under the
+keystroke budget, delete this entry.
+
 ### Judged fast enough, so do not invent work here
 
 Single-package cold analysis is 1.9 s and 88 MiB peak for ggplot2's 68k lines, 1.3 s and 72 MiB for
 mgcv's 37k lines after the chain fix, and 1.4 s for the 64k lines of `targets` as the instrument
 classifies it. Parse is only 2% to 7% of the pass, at about 0.9 microseconds per line.
 
-`item_spans` identity is clean. `item_span_positions` is a memoized index, so `item_span_range` is a
-constant-time probe, and `item_spans` itself is consumed per file. Incrementality genuinely holds:
+`item_spans` identity is clean. `item_span_positions` is a memoized index, so `item_node` finds an
+item's span in constant time, and `item_spans` itself is consumed per file. Incrementality genuinely
+holds:
 every project reported zero item rechecks per keystroke and zero resolve steps, with edited-file
 diagnostics at a 2.5 ms median on ggplot2 and a 21.3 ms median at 277,586 lines, which is inside the
 stated bar. rowan re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
@@ -556,8 +566,8 @@ ones.
 
 ### The semantics incremental invariant never performs a small edit
 
-`check_pipeline_reporting` derives its edit by generating an unrelated program, so the computed
-splice covers 97.3% of the old text on average and only one pair in 250 touches 10% or less.
+The fuzz harness's `run_single_file` derives its edit by generating an unrelated program, so the
+computed splice covers 97.3% of the old text on average and only one pair in 250 touches 10% or less.
 `syntax::reparse` therefore takes the full-parse fallback essentially always, and the engine sees
 whole-file invalidation every time. The splice-reuse path and per-item early cutoff, which are the
 architecture's core claim, are never exercised. Derive the edit from the source instead, by
@@ -711,8 +721,8 @@ input, and a stack overflow aborts printing nothing. A stack overflow is a live 
 itself acknowledges, through `deep_nesting_is_refused_not_fatal`.
 
 This is recoverable today only because the seed is fixed, and that property disappears the moment
-`FUZZ_SEED` lands, so this has to land with it. `semantics::check_pipeline_reporting` is the correct
-pattern and is already in the tree.
+`FUZZ_SEED` lands, so this has to land with it. The semantics fuzz harness's `run_single_file` is
+the correct pattern and is already in the tree.
 
 ### Two arms are silently dead and one is 99% wasted
 
@@ -2321,7 +2331,7 @@ The end-to-end guard rests on the corpus suites.
 - **Every real R export resolves, through a vendored manifest.** `decisions.md` has the record.
 
 - **The diagnostics phase stopped scanning every project file per non-local read.**
-  `declared_global_variable` was work proportional to reads times files, at about 375 million memo
+  The `globalVariables` check was work proportional to reads times files, at about 375 million memo
   lookups on a script-heavy workspace, and a script-local cross-statement read paid the
   project-wide guard chain before its own frame-slot resolution. One memoized project-level
   `globalVariables` union set, `project_global_variable_declarations`, replaced it, with the guards

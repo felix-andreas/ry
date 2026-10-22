@@ -93,18 +93,22 @@ impl Config {
     fn parse(text: &str, path: Option<&Path>) -> Result<Config, ConfigError> {
         let deserializer = toml::de::Deserializer::new(text);
         let mut unknown_keys = Vec::new();
-        match serde_ignored::deserialize::<_, _, ConfigToml>(deserializer, |key| {
-            unknown_keys.push(key.to_string())
-        }) {
-            Ok(config) => {
-                let mut config = config.to_config();
-                config.unknown_keys = unknown_keys;
-                Ok(config)
-            }
-            Err(error) => Err(ConfigError::Invalid(ConfigParseError::new(
-                &error, text, path,
-            ))),
+        let mut toml: ConfigToml =
+            serde_ignored::deserialize(deserializer, |key| unknown_keys.push(key.to_string()))
+                .map_err(|error| ConfigError::Invalid(ConfigParseError::new(&error, text, path)))?;
+        if let Some(spaces) = toml.spaces {
+            toml.format.indent_width = spaces;
         }
+        if let Some(case) = toml.case {
+            toml.lint.naming_style = Some(case);
+        }
+        Ok(Config {
+            format: toml.format,
+            lint: toml.lint,
+            check: toml.check,
+            source_directory: None,
+            unknown_keys,
+        })
     }
 }
 
@@ -321,32 +325,16 @@ fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The file's shape: `case` and `spaces` are the legacy spellings of
+/// `lint.naming-style` and `format.indent-width`.
+#[derive(Default, Deserialize)]
 #[serde(default)]
-pub struct ConfigToml {
-    pub case: Option<NameStyle>, // kept for backwards compatibility
-    pub spaces: Option<usize>,   // kept for backwards compatibility
-    pub format: format::Config,
-    pub lint: LintConfig,
-    pub check: CheckConfig,
-}
-
-impl ConfigToml {
-    pub fn to_config(mut self) -> Config {
-        if let Some(spaces) = self.spaces {
-            self.format.indent_width = spaces;
-        }
-        if let Some(case) = self.case {
-            self.lint.naming_style = Some(case);
-        }
-        Config {
-            format: self.format,
-            lint: self.lint,
-            check: self.check,
-            source_directory: None,
-            unknown_keys: Vec::new(),
-        }
-    }
+struct ConfigToml {
+    case: Option<NameStyle>,
+    spaces: Option<usize>,
+    format: format::Config,
+    lint: LintConfig,
+    check: CheckConfig,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

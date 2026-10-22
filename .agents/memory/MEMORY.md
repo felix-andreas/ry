@@ -9,7 +9,7 @@ The companion files are `backlog.md` (open work, plus a one-line shipped ledger 
 - **Cleanup program (user-directed, one PR per step, and a step may split):**
   1. Done: legacy ported and deleted.
   2. Done: comments cut to short non-obvious "why" comments, and the agent docs trimmed.
-  3. Next: shrink the code in several passes. Simple and data-oriented, and duplication is acceptable.
+  3. In progress: shrink the code in several passes, one crate per subagent with the gate run once at the end. Simple and data-oriented, and duplication is acceptable.
   4. Docs passes for density that still introduce one concept after another (style reference: vxlang.org/docs/tour.html).
   5. At the local maximum, consider a green-field rewrite.
 

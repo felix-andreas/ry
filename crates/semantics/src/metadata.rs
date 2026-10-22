@@ -1,8 +1,10 @@
 //! `NAMESPACE` and `DESCRIPTION` facts. `NAMESPACE` is R call syntax and parses with the
 //! ordinary grammar; `DESCRIPTION` is DCF.
 
-use crate::Db;
+use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
+use crate::{Db, SourceFile, parse};
 use std::collections::BTreeSet;
+use syntax::ast::is_expression_kind;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
@@ -24,10 +26,6 @@ pub struct PackageMetadata {
     pub package: Option<String>,
 }
 
-pub fn imported_bare(db: &dyn Db, name: &str) -> bool {
-    imported_by_name(db, name) || imports_every_name(db)
-}
-
 /// Knowledge about `name` itself, unlike the blanket tolerance of [`imports_every_name`].
 pub fn imported_by_name(db: &dyn Db, name: &str) -> bool {
     let Some(metadata) = PackageMetadata::try_get(db) else {
@@ -39,8 +37,8 @@ pub fn imported_by_name(db: &dyn Db, name: &str) -> bool {
         .any(|(namespace, imported)| match imported {
             Some(imported) => imported == name,
             None => {
-                crate::stubs::namespace_known(db, namespace) == Some(true)
-                    && crate::stubs::namespace_exports(db, namespace, name)
+                namespace_known(db, namespace) == Some(true)
+                    && namespace_exports(db, namespace, name)
             }
         })
 }
@@ -54,8 +52,7 @@ pub fn imports_every_name(db: &dyn Db) -> bool {
     };
     let own = metadata.package(db).as_deref();
     let unknowable = |namespace: &String| {
-        Some(namespace.as_str()) != own
-            && crate::stubs::namespace_known(db, namespace) != Some(true)
+        Some(namespace.as_str()) != own && namespace_known(db, namespace) != Some(true)
     };
     metadata
         .imports(db)
@@ -91,7 +88,7 @@ pub fn namespace_active(db: &dyn Db, package: &str) -> bool {
     named(package)
         // A meta-package attaches its members rather than re-exporting them, so
         // `library(tidyverse)` activates them too.
-        || crate::stubs::META_PACKAGE_MEMBERS
+        || META_PACKAGE_MEMBERS
             .iter()
             .any(|(meta, members)| members.contains(&package) && named(meta))
 }
@@ -99,7 +96,7 @@ pub fn namespace_active(db: &dyn Db, package: &str) -> bool {
 /// Parses every file passed in, so call it where the workspace is parsed anyway.
 pub fn attached_union(
     db: &dyn Db,
-    files: impl IntoIterator<Item = crate::SourceFile>,
+    files: impl IntoIterator<Item = SourceFile>,
 ) -> BTreeSet<String> {
     files
         .into_iter()
@@ -110,10 +107,9 @@ pub fn attached_union(
 /// Purely syntactic: a local binding shadowing `library` is not honored, which can only
 /// over-activate, and activation only adds resolution.
 #[salsa::tracked(returns(clone))]
-pub fn file_attached_namespaces(db: &dyn Db, file: crate::SourceFile) -> BTreeSet<String> {
-    let parse = crate::parse(db, file);
+pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     let mut attached = BTreeSet::new();
-    for node in parse.syntax_node().descendants() {
+    for node in parse(db, file).syntax_node().descendants() {
         if node.kind() != SyntaxKind::CALL_EXPR {
             continue;
         }
@@ -147,7 +143,7 @@ pub fn file_attached_namespaces(db: &dyn Db, file: crate::SourceFile) -> BTreeSe
         if let Some(argument) = first_positional
             && let Some(value) = argument
                 .children()
-                .filter(|child| syntax::ast::is_expression_kind(child.kind()))
+                .filter(|child| is_expression_kind(child.kind()))
                 .last()
             && let Some((namespace, _)) = name_argument(&value)
         {
@@ -166,65 +162,27 @@ pub struct NamespaceImport {
 
 /// Directives R would reject are skipped, not reported: R itself validates NAMESPACE syntax.
 pub fn parse_namespace_imports(source: &str) -> Vec<NamespaceImport> {
-    let parse = syntax::parse(source);
     let mut imports = Vec::new();
-    for node in parse.syntax_node().children() {
-        if node.kind() != SyntaxKind::CALL_EXPR {
-            continue;
-        }
-        let Some(callee) = node
-            .children()
-            .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
-        else {
-            continue;
-        };
-        if callee.kind() != SyntaxKind::NAME {
-            continue;
-        }
-        // A named argument (`except = ...`) puts its name first; the value is the last
-        // expression child.
-        let values: Vec<SyntaxNode> = node
-            .children()
-            .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
-            .map(|list| {
-                list.children()
-                    .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
-                    .filter_map(|argument| {
-                        argument
-                            .children()
-                            .filter(|child| syntax::ast::is_expression_kind(child.kind()))
-                            .last()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        match callee.text().to_string().as_str() {
-            "import" => {
-                for value in values {
-                    if let Some((namespace, range)) = name_argument(&value) {
-                        imports.push(NamespaceImport {
-                            namespace,
-                            name: None,
-                            range,
-                        });
-                    }
-                }
-            }
+    for (directive, values) in namespace_directives(source) {
+        match directive.as_str() {
+            "import" => imports.extend(values.iter().filter_map(name_argument).map(
+                |(namespace, range)| NamespaceImport {
+                    namespace,
+                    name: None,
+                    range,
+                },
+            )),
             "importFrom" => {
-                let mut values = values.into_iter();
-                let Some((namespace, _)) = values.next().and_then(|value| name_argument(&value))
-                else {
+                let Some((namespace, _)) = values.first().and_then(name_argument) else {
                     continue;
                 };
-                for value in values {
-                    if let Some((name, range)) = name_argument(&value) {
-                        imports.push(NamespaceImport {
-                            namespace: namespace.clone(),
-                            name: Some(name),
-                            range,
-                        });
-                    }
-                }
+                imports.extend(values[1..].iter().filter_map(name_argument).map(
+                    |(name, range)| NamespaceImport {
+                        namespace: namespace.clone(),
+                        name: Some(name),
+                        range,
+                    },
+                ));
             }
             _ => {}
         }
@@ -235,21 +193,29 @@ pub fn parse_namespace_imports(source: &str) -> Vec<NamespaceImport> {
 /// Only explicit `export()` names: `exportPattern` is a load-time regex, and
 /// `exportClasses`/`exportMethods`/`S3method` name S4 and S3 entities, not bindings.
 pub fn parse_namespace_exports(source: &str) -> Vec<(String, TextRange)> {
-    let parse = syntax::parse(source);
-    let mut exports = Vec::new();
-    for node in parse.syntax_node().children() {
+    namespace_directives(source)
+        .into_iter()
+        .filter(|(directive, _)| directive == "export")
+        .flat_map(|(_, values)| values)
+        .filter_map(|value| name_argument(&value))
+        .collect()
+}
+
+/// Each top-level call with a bare-name callee, with its argument values. A named argument
+/// (`except = ...`) puts its name first; the value is the last expression child.
+fn namespace_directives(source: &str) -> Vec<(String, Vec<SyntaxNode>)> {
+    let mut directives = Vec::new();
+    for node in syntax::parse(source).syntax_node().children() {
         if node.kind() != SyntaxKind::CALL_EXPR {
             continue;
         }
         let Some(callee) = node
             .children()
             .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
+            .filter(|callee| callee.kind() == SyntaxKind::NAME)
         else {
             continue;
         };
-        if callee.kind() != SyntaxKind::NAME || callee.text() != "export" {
-            continue;
-        }
         let values = node
             .children()
             .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
@@ -259,19 +225,15 @@ pub fn parse_namespace_exports(source: &str) -> Vec<(String, TextRange)> {
                     .filter_map(|argument| {
                         argument
                             .children()
-                            .filter(|child| syntax::ast::is_expression_kind(child.kind()))
+                            .filter(|child| is_expression_kind(child.kind()))
                             .last()
                     })
-                    .collect::<Vec<SyntaxNode>>()
+                    .collect()
             })
             .unwrap_or_default();
-        for value in values {
-            if let Some((name, range)) = name_argument(&value) {
-                exports.push((name, range));
-            }
-        }
+        directives.push((callee.text().to_string(), values));
     }
-    exports
+    directives
 }
 
 /// Sorted and deduplicated, so reordering or reformatting directives does not invalidate queries.

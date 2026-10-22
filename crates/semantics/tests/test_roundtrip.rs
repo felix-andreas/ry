@@ -7,7 +7,6 @@ use semantics::diagnostics::file_diagnostics;
 use semantics::{
     DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_spans,
 };
-use std::fmt::Write as _;
 
 /// `id :: name` schemes known not to round-trip; keep it empty.
 const KNOWN_UNWRITABLE: [&str; 0] = [];
@@ -46,7 +45,7 @@ fn rendered_schemes_are_writable_annotations() {
             }
             let mut report = format!("{id} :: {name}\n  rendered  #: {scheme}\n");
             for diagnostic in added {
-                let _ = writeln!(report, "  {} {}", diagnostic.code, diagnostic.message);
+                report.push_str(&format!("  {} {}\n", diagnostic.code, diagnostic.message));
             }
             violations.push(report);
         }

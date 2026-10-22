@@ -3,12 +3,14 @@
 
 use crate::diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics};
 use crate::lints::{LintConfig, LintLevel, NameStyle, lint_file};
+use crate::stubs::install_shipped_stubs;
 use crate::{
     Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, SpliceCache, item_check,
     item_tree,
 };
 use salsa::Setter as _;
 use salsa::plumbing::AsId as _;
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 /// Renders schemes, diagnostics, and every lint (all enabled) for a file, asserting each range
@@ -19,7 +21,7 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
         if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
-        let Some(name) = item.name(db).clone() else {
+        let Some(name) = item.name(db) else {
             continue;
         };
         let Some(check) = item_check(db, item) else {
@@ -29,10 +31,10 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
             continue;
         };
         let mut renderer = TypeRenderer::default();
-        output.push_str(&name);
-        output.push_str(": ");
-        output.push_str(&renderer.render_scheme(db, &scheme));
-        output.push('\n');
+        output.push_str(&format!(
+            "{name}: {}\n",
+            renderer.render_scheme(db, &scheme)
+        ));
     }
     let lint_config = LintConfig {
         naming_style: Some(NameStyle::Snake),
@@ -61,21 +63,22 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
     output
 }
 
-fn fresh_output(source: &str, kind: DocumentKind) -> String {
+fn single_file_project(source: &str, kind: DocumentKind) -> (RootDatabase, SourceFile) {
     let db = RootDatabase::default();
-    crate::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let file = SourceFile::new(&db, source.to_owned(), kind);
     ProjectFiles::new(&db, vec![file]);
+    (db, file)
+}
+
+fn fresh_output(source: &str, kind: DocumentKind) -> String {
+    let (db, file) = single_file_project(source, kind);
     render_semantics(&db, file)
 }
 
 pub fn check_semantics_invariants(source: &str, edited_source: &str, kind: DocumentKind) {
     let first = fresh_output(source, kind);
-
-    let mut db = RootDatabase::default();
-    crate::stubs::install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, source.to_owned(), kind);
-    ProjectFiles::new(&db, vec![file]);
+    let (mut db, file) = single_file_project(source, kind);
     let before = render_semantics(&db, file);
     // `first` comes from an independent database, so this comparison is the determinism check.
     assert_eq!(
@@ -113,9 +116,8 @@ pub fn check_semantics_input(input: &str) {
     check_semantics_invariants(input, &edited, kind);
 }
 
-std::thread_local! {
-    static FIXTURE_DATABASE: std::cell::RefCell<Option<RootDatabase>> =
-        const { std::cell::RefCell::new(None) };
+thread_local! {
+    static FIXTURE_DATABASE: RefCell<Option<RootDatabase>> = const { RefCell::new(None) };
 }
 
 /// Reuses one database per thread across cases, because parsing the shipped stubs costs far more
@@ -127,7 +129,7 @@ pub fn with_fixture_project<R>(
     FIXTURE_DATABASE.with_borrow_mut(|slot| {
         let db = slot.get_or_insert_with(|| {
             let db = RootDatabase::default();
-            crate::stubs::install_shipped_stubs(&db);
+            install_shipped_stubs(&db);
             db
         });
         let sources: Vec<SourceFile> = files

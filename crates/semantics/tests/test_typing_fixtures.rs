@@ -1,45 +1,40 @@
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::diagnostics::{Severity, TypeRenderer, file_diagnostics, strict_diagnostics};
+use salsa::Setter;
+use semantics::annotations::lower_annotation;
+use semantics::diagnostics::{Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics};
+use semantics::metadata::{
+    PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
+    parse_description_package, parse_namespace_imports,
+};
+use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
 use semantics::testing::with_fixture_project;
 use semantics::{
     DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, file_typing_mode, item_check,
     item_hir, item_tree,
 };
 use std::path::Path;
-
-fn render(source: &str) -> String {
-    render_as(source, DocumentKind::Package)
-}
-
-fn render_script(source: &str) -> String {
-    render_as(source, DocumentKind::Script)
-}
-
-fn render_as(source: &str, kind: DocumentKind) -> String {
-    render_case(source, kind, &render_file)
-}
+use syntax::testing::{run_fixture_suite, split_files};
 
 fn render_case(
     source: &str,
     kind: DocumentKind,
     render: &dyn Fn(&RootDatabase, SourceFile) -> String,
 ) -> String {
-    let files: Vec<(Option<String>, String, DocumentKind)> =
-        match syntax::testing::split_files(source) {
-            None => vec![(None, source.to_owned(), kind)],
-            Some(files) => files
-                .into_iter()
-                .map(|(path, text)| {
-                    let kind = if path.starts_with("R/") {
-                        DocumentKind::Package
-                    } else {
-                        DocumentKind::Script
-                    };
-                    (Some(path), text, kind)
-                })
-                .collect(),
-        };
+    let files: Vec<(Option<String>, String, DocumentKind)> = match split_files(source) {
+        None => vec![(None, source.to_owned(), kind)],
+        Some(files) => files
+            .into_iter()
+            .map(|(path, text)| {
+                let kind = if path.starts_with("R/") {
+                    DocumentKind::Package
+                } else {
+                    DocumentKind::Script
+                };
+                (Some(path), text, kind)
+            })
+            .collect(),
+    };
     let inputs = files
         .iter()
         .map(|(_, text, kind)| (text.clone(), *kind))
@@ -59,7 +54,7 @@ fn render_case(
 /// The `#namespace `/`#description ` lines stay in the analyzed text, so ranges stay honest.
 fn render_with_metadata(source: &str) -> String {
     let mut db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let mut namespace_source = String::new();
     let mut description_source = String::new();
     for line in source.lines() {
@@ -71,20 +66,19 @@ fn render_with_metadata(source: &str) -> String {
             description_source.push('\n');
         }
     }
-    let imports = semantics::metadata::parse_namespace_imports(&namespace_source);
-    let metadata = semantics::metadata::PackageMetadata::new(
+    let imports = parse_namespace_imports(&namespace_source);
+    let metadata = PackageMetadata::new(
         &db,
-        semantics::metadata::normalized_imports(&imports),
-        semantics::metadata::parse_description_dependencies(&description_source),
+        normalized_imports(&imports),
+        parse_description_dependencies(&description_source),
         Default::default(),
-        semantics::metadata::parse_description_package(&description_source),
+        parse_description_package(&description_source),
     );
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
     // Attach facts are scanned from the sources exactly as the hosts do.
-    let attached = semantics::metadata::attached_union(&db, [file]);
+    let attached = attached_union(&db, [file]);
     if !attached.is_empty() {
-        use salsa::Setter;
         metadata.set_attached(&mut db).to(attached);
     }
     render_file(&db, file)
@@ -107,44 +101,43 @@ fn render_file(db: &RootDatabase, file: SourceFile) -> String {
             output.push('\n');
         }
     }
-    output.push_str(&render_diagnostics(db, file));
+    render_diagnostics(&mut output, &file_diagnostics(db, file));
     output
 }
 
-fn render_diagnostics(db: &RootDatabase, file: SourceFile) -> String {
-    let mut output = String::new();
-    for diagnostic in file_diagnostics(db, file) {
-        let severity = match diagnostic.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
+fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
+    for diagnostic in diagnostics {
         output.push_str(&format!(
-            "{}..{} {severity}[{}] {}\n",
+            "{}..{} {}[{}] {}\n",
             u32::from(diagnostic.range.start()),
             u32::from(diagnostic.range.end()),
+            format!("{:?}", diagnostic.severity).to_lowercase(),
             diagnostic.code,
             diagnostic.message
         ));
     }
-    output
 }
 
 #[test]
 fn typing_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing");
-    syntax::testing::run_fixture_suite(&suite, &render);
+    run_fixture_suite(&suite, &|source| {
+        render_case(source, DocumentKind::Package, &render_file)
+    });
 }
 
 #[test]
 fn typing_import_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-imports");
-    syntax::testing::run_fixture_suite(&suite, &render_with_metadata);
+    run_fixture_suite(&suite, &render_with_metadata);
 }
 
 #[test]
 fn typing_script_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-scripts");
-    syntax::testing::run_fixture_suite(&suite, &render_script);
+    run_fixture_suite(&suite, &|source| {
+        render_case(source, DocumentKind::Script, &render_file)
+    });
 }
 
 fn render_with_strict(source: &str) -> String {
@@ -154,15 +147,7 @@ fn render_with_strict(source: &str) -> String {
             output.push_str(&format!("typing mode: {mode:?}\n"));
         }
         output.push_str(&render_file(db, file));
-        for diagnostic in strict_diagnostics(db, file) {
-            output.push_str(&format!(
-                "{}..{} error[{}] {}\n",
-                u32::from(diagnostic.range.start()),
-                u32::from(diagnostic.range.end()),
-                diagnostic.code,
-                diagnostic.message
-            ));
-        }
+        render_diagnostics(&mut output, &strict_diagnostics(db, file));
         output
     })
 }
@@ -170,17 +155,13 @@ fn render_with_strict(source: &str) -> String {
 #[test]
 fn typing_strict_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-strict");
-    syntax::testing::run_fixture_suite(&suite, &render_with_strict);
+    run_fixture_suite(&suite, &render_with_strict);
 }
 
 fn render_stub_source(source: &str) -> String {
     let db = RootDatabase::default();
-    let sources = semantics::stubs::StubSources::new(
-        &db,
-        vec![("base".to_owned(), source.to_owned())],
-        vec![],
-    );
-    let library = semantics::stubs::stub_library(&db, sources);
+    let sources = StubSources::new(&db, vec![("base".to_owned(), source.to_owned())], vec![]);
+    let library = stub_library(&db, sources);
     let mut names: Vec<(&String, _)> = library
         .declarations
         .iter()
@@ -204,7 +185,7 @@ fn render_stub_source(source: &str) -> String {
             output.push_str(&format!("{name} : {masked}{rendered}\n"));
         }
     }
-    for problem in semantics::stubs::stub_source_problems(&db, source) {
+    for problem in stub_source_problems(&db, source) {
         output.push_str(&format!("line {}: {}\n", problem.line, problem.message));
     }
     output
@@ -213,7 +194,7 @@ fn render_stub_source(source: &str) -> String {
 #[test]
 fn stub_source_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stubs");
-    syntax::testing::run_fixture_suite(&suite, &render_stub_source);
+    run_fixture_suite(&suite, &render_stub_source);
 }
 
 /// Each case line becomes one line of a single `#:` block.
@@ -228,7 +209,7 @@ fn render_annotation_block(source: &str) -> String {
     else {
         return "no annotation".to_owned();
     };
-    let annotation = semantics::annotations::lower_annotation(&db, &node);
+    let annotation = lower_annotation(&db, &node);
     let mut renderer = TypeRenderer::default();
     let mut output = String::new();
     if let Some(declared) = &annotation.declared {
@@ -284,5 +265,5 @@ fn render_annotation_block(source: &str) -> String {
 #[test]
 fn annotation_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/annotations");
-    syntax::testing::run_fixture_suite(&suite, &render_annotation_block);
+    run_fixture_suite(&suite, &render_annotation_block);
 }

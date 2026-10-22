@@ -4,11 +4,16 @@
 
 use crate::Db;
 use crate::annotations::NamedDefinition;
-use crate::diagnostics::nearest_field_name;
+use crate::diagnostics::nearest_name;
+use crate::stubs::stubs;
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, substitute_rigid, union_of,
+    Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, for_each_child_type,
+    map_child_types, substitute_rigid, union_of, unknown,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::{Cell, RefCell};
+use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
@@ -45,12 +50,12 @@ pub struct InferenceTable<'db> {
     pub rigid_constraints: FxHashMap<Name<'db>, Constraint>,
     /// Valid for one binding epoch; only subtrees whose resolution hit no cycle
     /// cut are stored.
-    resolve_cache: std::cell::RefCell<(u64, rustc_hash::FxHashMap<Ty<'db>, Ty<'db>>)>,
-    epoch: std::cell::Cell<u64>,
+    resolve_cache: RefCell<(u64, FxHashMap<Ty<'db>, Ty<'db>>)>,
+    epoch: Cell<u64>,
 }
 
 /// Read by the perf witnesses: must stay near-linear in corpus size.
-pub static RESOLVE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static RESOLVE_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
@@ -90,7 +95,7 @@ impl<'db> InferenceTable<'db> {
 
     fn set(&mut self, var: InferenceVar, entry: Entry<'db>) {
         self.epoch.set(self.epoch.get() + 1);
-        let previous = std::mem::replace(&mut self.entries[var.0 as usize], entry);
+        let previous = mem::replace(&mut self.entries[var.0 as usize], entry);
         self.undo.push((var, previous));
     }
 
@@ -117,8 +122,7 @@ impl<'db> InferenceTable<'db> {
         match self.definitions.and_then(|table| table.get(name)) {
             // Includes the bare use of a generic (`Box` for `Box<T>`).
             Some(definition) => definition.parameters.len() != arguments.len(),
-            None => !crate::stubs::stubs(db)
-                .is_some_and(|library| library.nominals.contains(name.text(db))),
+            None => !stubs(db).is_some_and(|library| library.nominals.contains(name.text(db))),
         }
     }
 
@@ -164,7 +168,7 @@ impl<'db> InferenceTable<'db> {
         ty: Ty<'db>,
         visiting: &mut Vec<InferenceVar>,
     ) -> (Ty<'db>, bool) {
-        RESOLVE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RESOLVE_CALLS.fetch_add(1, Ordering::Relaxed);
         if let TyKind::Var(var) = ty.kind(db) {
             let root = self.find(*var);
             let shallow = self.shallow_resolve(db, ty);
@@ -185,7 +189,7 @@ impl<'db> InferenceTable<'db> {
         }
 
         let mut clean = true;
-        let resolved = crate::types::map_child_types(db, ty, &mut |child| {
+        let resolved = map_child_types(db, ty, &mut |child| {
             let (child, child_clean) = self.resolve_rec(db, child, visiting);
             clean &= child_clean;
             child
@@ -197,12 +201,12 @@ impl<'db> InferenceTable<'db> {
                 .definitions
                 .and_then(|table| table.get(name))
                 .filter(|definition| definition.alias)
-                .map(|definition| (definition, arguments.clone())),
+                .map(|definition| (definition, arguments)),
             _ => None,
         };
         let (resolved, clean) = match alias {
             Some((definition, arguments)) if visiting.len() < ALIAS_EXPANSION_LIMIT => {
-                let expanded = apply_definition(db, definition, &arguments);
+                let expanded = apply_definition(db, definition, arguments);
                 // Sentinel slot: alias depth counts against the variable cycle stack.
                 visiting.push(InferenceVar(u32::MAX));
                 let (expanded, expanded_clean) = self.resolve_rec(db, expanded, visiting);
@@ -240,7 +244,7 @@ impl<'db> InferenceTable<'db> {
         ty: Ty<'db>,
     ) -> Result<(), UnifyError<'db>> {
         let representative = self.find(var);
-        if self.occurs(db, representative, ty) {
+        if !self.walk_unbound_vars(db, ty, &mut |found| found != representative) {
             return Err(UnifyError::Occurs(representative, ty));
         }
         let Entry::Unbound { level, constraint } = *self.entry(representative) else {
@@ -270,43 +274,9 @@ impl<'db> InferenceTable<'db> {
             }
             return;
         }
-        crate::types::for_each_child_type(db, shallow, &mut |child| {
+        for_each_child_type(db, shallow, &mut |child| {
             self.adjust_levels(db, level, child)
         });
-    }
-
-    fn occurs(&self, db: &'db dyn Db, var: InferenceVar, ty: Ty<'db>) -> bool {
-        let shallow = self.shallow_resolve(db, ty);
-        match shallow.kind(db) {
-            TyKind::Var(other) => self.find(*other) == var,
-            TyKind::Vector(inner)
-            | TyKind::NamedVector(inner)
-            | TyKind::List(inner)
-            | TyKind::NamedList(inner) => self.occurs(db, var, *inner),
-            TyKind::Tuple(items) => items.iter().any(|&item| self.occurs(db, var, item)),
-            TyKind::Record(fields) => fields.iter().any(|field| self.occurs(db, var, field.ty)),
-            TyKind::Function(function) => {
-                function
-                    .positional
-                    .iter()
-                    .any(|&ty| self.occurs(db, var, ty))
-                    || function
-                        .named
-                        .iter()
-                        .flat_map(|parameter| parameter.types())
-                        .any(|ty| self.occurs(db, var, ty))
-                    || function
-                        .variadic
-                        .as_ref()
-                        .is_some_and(|rest| self.occurs(db, var, rest.element))
-                    || self.occurs(db, var, function.ret)
-            }
-            TyKind::Union(members) => members.iter().any(|&member| self.occurs(db, var, member)),
-            TyKind::Named(_, arguments) => arguments
-                .iter()
-                .any(|&argument| self.occurs(db, var, argument)),
-            _ => false,
-        }
     }
 
     pub fn unify(
@@ -376,9 +346,7 @@ impl<'db> InferenceTable<'db> {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                let pairs: Vec<(Ty<'db>, Ty<'db>)> =
-                    left.iter().copied().zip(right.iter().copied()).collect();
-                for (left, right) in pairs {
+                for (&left, &right) in left.iter().zip(right) {
                     self.unify(db, left, right)?;
                 }
                 Ok(())
@@ -392,13 +360,8 @@ impl<'db> InferenceTable<'db> {
                 {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                let pairs: Vec<(Ty<'db>, Ty<'db>)> = left
-                    .iter()
-                    .map(|f| f.ty)
-                    .zip(right.iter().map(|f| f.ty))
-                    .collect();
-                for (left, right) in pairs {
-                    self.unify(db, left, right)?;
+                for (left, right) in left.iter().zip(right) {
+                    self.unify(db, left.ty, right.ty)?;
                 }
                 Ok(())
             }
@@ -414,16 +377,14 @@ impl<'db> InferenceTable<'db> {
                 {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                let left = left.clone();
-                let right = right.clone();
-                for (l, r) in left.positional.iter().zip(right.positional.iter()) {
-                    self.unify(db, *l, *r)?;
+                for (&left, &right) in left.positional.iter().zip(&right.positional) {
+                    self.unify(db, left, right)?;
                 }
-                for (l, r) in left.named.iter().zip(right.named.iter()) {
-                    self.unify(db, l.ty, r.ty)?;
+                for (left, right) in left.named.iter().zip(&right.named) {
+                    self.unify(db, left.ty, right.ty)?;
                 }
-                if let (Some(l), Some(r)) = (&left.variadic, &right.variadic) {
-                    self.unify(db, l.element, r.element)?;
+                if let (Some(left), Some(right)) = (&left.variadic, &right.variadic) {
+                    self.unify(db, left.element, right.element)?;
                 }
                 self.unify(db, left.ret, right.ret)
             }
@@ -434,12 +395,7 @@ impl<'db> InferenceTable<'db> {
                 if left_name != right_name || left_arguments.len() != right_arguments.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                let pairs: Vec<(Ty<'db>, Ty<'db>)> = left_arguments
-                    .iter()
-                    .copied()
-                    .zip(right_arguments.iter().copied())
-                    .collect();
-                for (left, right) in pairs {
+                for (&left, &right) in left_arguments.iter().zip(right_arguments) {
                     self.unify(db, left, right)?;
                 }
                 Ok(())
@@ -572,7 +528,7 @@ impl<'db> InferenceTable<'db> {
         if self.undeclared_nominal(db, actual) || self.undeclared_nominal(db, expected) {
             return true;
         }
-        match (actual.kind(db).clone(), expected.kind(db).clone()) {
+        match (actual.kind(db), expected.kind(db)) {
             // First, so union-vs-union means every actual member fits some expected member.
             (TyKind::Union(members), _) => members
                 .iter()
@@ -599,7 +555,7 @@ impl<'db> InferenceTable<'db> {
             {
                 let variances = self
                     .definitions
-                    .and_then(|table| table.get(&actual_name))
+                    .and_then(|table| table.get(actual_name))
                     .map(|definition| parameter_variances(db, definition))
                     .unwrap_or_default();
                 actual_arguments
@@ -639,7 +595,7 @@ impl<'db> InferenceTable<'db> {
             }
             // Only the projection direction: structural into nominal happens only via `@new`.
             (TyKind::Named(actual_name, actual_arguments), _) => {
-                match self.representation(db, actual_name, &actual_arguments) {
+                match self.representation(db, *actual_name, actual_arguments) {
                     Some(representation) => {
                         self.compatible_probe(db, representation, expected, depth + 1)
                     }
@@ -649,21 +605,21 @@ impl<'db> InferenceTable<'db> {
             // Element recursion reaches the variable arms for a generic element, which is
             // how `sort(c(1L))` binds `T := integer`.
             (TyKind::Scalar(_), TyKind::Vector(element)) => {
-                self.compatible_probe(db, actual, element, depth + 1)
+                self.compatible_probe(db, actual, *element, depth + 1)
             }
             (TyKind::NamedVector(actual_element), TyKind::Vector(expected_element)) => {
-                self.compatible_probe(db, actual_element, expected_element, depth + 1)
+                self.compatible_probe(db, *actual_element, *expected_element, depth + 1)
             }
             // R promotes `logical` and `integer` freely in numeric contexts (`sum(flags)`).
             // Directional only: unification never widens.
             (TyKind::Scalar(actual_atomic), TyKind::Scalar(expected_atomic)) => {
-                numeric_ladder_rank(actual_atomic)
-                    .zip(numeric_ladder_rank(expected_atomic))
+                numeric_ladder_rank(*actual_atomic)
+                    .zip(numeric_ladder_rank(*expected_atomic))
                     .is_some_and(|(actual_rank, expected_rank)| actual_rank < expected_rank)
             }
             (TyKind::Vector(actual_element), TyKind::Vector(expected_element))
             | (TyKind::NamedVector(actual_element), TyKind::NamedVector(expected_element)) => {
-                self.compatible_probe(db, actual_element, expected_element, depth + 1)
+                self.compatible_probe(db, *actual_element, *expected_element, depth + 1)
             }
             (TyKind::Tuple(actual_items), TyKind::Tuple(expected_items))
                 if actual_items.len() == expected_items.len() =>
@@ -689,34 +645,34 @@ impl<'db> InferenceTable<'db> {
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
             // to the first item and reject the rest.
             (TyKind::Tuple(items), TyKind::List(element))
-                if matches!(self.resolve(db, element).kind(db), TyKind::Var(_)) =>
+                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
             {
-                let joined = union_of(db, items);
-                self.unify(db, element, joined).is_ok()
+                let joined = union_of(db, items.iter().copied());
+                self.unify(db, *element, joined).is_ok()
             }
             (TyKind::Record(fields), TyKind::List(element))
             | (TyKind::Record(fields), TyKind::NamedList(element))
-                if matches!(self.resolve(db, element).kind(db), TyKind::Var(_)) =>
+                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
             {
                 let joined = union_of(db, fields.iter().map(|field| field.ty));
-                self.unify(db, element, joined).is_ok()
+                self.unify(db, *element, joined).is_ok()
             }
             (TyKind::Tuple(items), TyKind::List(element)) => items
                 .iter()
-                .all(|&item| self.compatible_probe(db, item, element, depth + 1)),
+                .all(|&item| self.compatible_probe(db, item, *element, depth + 1)),
             // In R `list()` is also the empty named list, so it fits `list[named: T]`.
             (TyKind::Tuple(items), TyKind::NamedList(_)) if items.is_empty() => true,
             (TyKind::Record(fields), TyKind::List(element))
             | (TyKind::Record(fields), TyKind::NamedList(element)) => fields
                 .iter()
-                .all(|field| self.compatible_probe(db, field.ty, element, depth + 1)),
+                .all(|field| self.compatible_probe(db, field.ty, *element, depth + 1)),
             (TyKind::NamedList(actual_element), TyKind::List(expected_element))
             | (TyKind::NamedList(actual_element), TyKind::NamedList(expected_element))
             | (TyKind::List(actual_element), TyKind::List(expected_element)) => {
-                self.compatible_probe(db, actual_element, expected_element, depth + 1)
+                self.compatible_probe(db, *actual_element, *expected_element, depth + 1)
             }
             (TyKind::Function(actual_function), TyKind::Function(expected_function)) => {
-                self.function_compatible(db, &actual_function, &expected_function, depth)
+                self.function_compatible(db, actual_function, expected_function, depth)
             }
             _ => false,
         }
@@ -803,13 +759,13 @@ impl<'db> InferenceTable<'db> {
         path: &mut Vec<String>,
     ) -> Option<RecordMismatch<'db>> {
         let (TyKind::Record(actual_fields), TyKind::Record(expected_fields)) = (
-            self.resolve(db, actual).kind(db).clone(),
-            self.resolve(db, expected).kind(db).clone(),
+            self.resolve(db, actual).kind(db),
+            self.resolve(db, expected).kind(db),
         ) else {
             return None;
         };
         // Optionality is not compared: `compatible` does not compare it either.
-        for expected_field in &expected_fields {
+        for expected_field in expected_fields {
             let name = expected_field.name.text(db);
             let Some(actual_field) = actual_fields
                 .iter()
@@ -817,11 +773,8 @@ impl<'db> InferenceTable<'db> {
             else {
                 path.push(name.to_owned());
                 return Some(RecordMismatch::Missing {
-                    near: nearest_field_name(
-                        name,
-                        actual_fields.iter().map(|field| field.name.text(db)),
-                    ),
-                    path: std::mem::take(path),
+                    near: nearest_name(name, actual_fields.iter().map(|field| field.name.text(db))),
+                    path: mem::take(path),
                 });
             };
             if self.compatible(db, actual_field.ty, expected_field.ty) {
@@ -836,11 +789,11 @@ impl<'db> InferenceTable<'db> {
             return Some(RecordMismatch::Field {
                 expected: self.resolve(db, expected_field.ty),
                 found: self.resolve(db, actual_field.ty),
-                path: std::mem::take(path),
+                path: mem::take(path),
             });
         }
         // Surplus fields last: a wrong type in a shared field is the likelier mistake.
-        for actual_field in &actual_fields {
+        for actual_field in actual_fields {
             if expected_fields
                 .iter()
                 .any(|field| field.name == actual_field.name)
@@ -850,11 +803,11 @@ impl<'db> InferenceTable<'db> {
             let name = actual_field.name.text(db);
             path.push(name.to_owned());
             return Some(RecordMismatch::Unexpected {
-                near: nearest_field_name(
+                near: nearest_name(
                     name,
                     expected_fields.iter().map(|field| field.name.text(db)),
                 ),
-                path: std::mem::take(path),
+                path: mem::take(path),
             });
         }
         None
@@ -901,42 +854,14 @@ impl<'db> InferenceTable<'db> {
         visit: &mut impl FnMut(InferenceVar) -> bool,
     ) -> bool {
         let shallow = self.shallow_resolve(db, ty);
-        match shallow.kind(db) {
-            TyKind::Var(var) => visit(*var),
-            TyKind::Vector(inner)
-            | TyKind::NamedVector(inner)
-            | TyKind::List(inner)
-            | TyKind::NamedList(inner) => self.walk_unbound_vars(db, *inner, visit),
-            TyKind::Tuple(items) => items
-                .iter()
-                .all(|&item| self.walk_unbound_vars(db, item, visit)),
-            TyKind::Record(fields) => fields
-                .iter()
-                .all(|field| self.walk_unbound_vars(db, field.ty, visit)),
-            TyKind::Function(function) => {
-                function
-                    .positional
-                    .iter()
-                    .all(|&ty| self.walk_unbound_vars(db, ty, visit))
-                    && function
-                        .named
-                        .iter()
-                        .flat_map(|parameter| parameter.types())
-                        .all(|ty| self.walk_unbound_vars(db, ty, visit))
-                    && function
-                        .variadic
-                        .as_ref()
-                        .is_none_or(|rest| self.walk_unbound_vars(db, rest.element, visit))
-                    && self.walk_unbound_vars(db, function.ret, visit)
-            }
-            TyKind::Union(members) => members
-                .iter()
-                .all(|&member| self.walk_unbound_vars(db, member, visit)),
-            TyKind::Named(_, arguments) => arguments
-                .iter()
-                .all(|&argument| self.walk_unbound_vars(db, argument, visit)),
-            _ => true,
+        if let TyKind::Var(var) = shallow.kind(db) {
+            return visit(*var);
         }
+        let mut complete = true;
+        for_each_child_type(db, shallow, &mut |child| {
+            complete = complete && self.walk_unbound_vars(db, child, visit);
+        });
+        complete
     }
 }
 
@@ -1086,10 +1011,7 @@ pub fn apply_definition<'db>(
         .map(|(index, &parameter)| {
             (
                 parameter,
-                arguments
-                    .get(index)
-                    .copied()
-                    .unwrap_or_else(|| crate::types::unknown(db)),
+                arguments.get(index).copied().unwrap_or_else(|| unknown(db)),
             )
         })
         .collect();
@@ -1097,7 +1019,7 @@ pub fn apply_definition<'db>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Variance {
+enum Variance {
     /// Never occurs in the representation.
     Bivariant,
     Covariant,
@@ -1105,24 +1027,18 @@ pub enum Variance {
     Invariant,
 }
 
-pub fn parameter_variances<'db>(
-    db: &'db dyn Db,
-    definition: &NamedDefinition<'db>,
-) -> Vec<Variance> {
-    let mut positive = vec![false; definition.parameters.len()];
-    let mut negative = vec![false; definition.parameters.len()];
+fn parameter_variances<'db>(db: &'db dyn Db, definition: &NamedDefinition<'db>) -> Vec<Variance> {
+    let mut occurrences = vec![(false, false); definition.parameters.len()];
     record_occurrences(
         db,
         definition.body,
         &definition.parameters,
         true,
-        &mut positive,
-        &mut negative,
+        &mut occurrences,
     );
-    positive
+    occurrences
         .into_iter()
-        .zip(negative)
-        .map(|(positive, negative)| match (positive, negative) {
+        .map(|occurrence| match occurrence {
             (false, false) => Variance::Bivariant,
             (true, false) => Variance::Covariant,
             (false, true) => Variance::Contravariant,
@@ -1131,114 +1047,46 @@ pub fn parameter_variances<'db>(
         .collect()
 }
 
+/// `occurrences` holds `(positive, negative)` per parameter.
 fn record_occurrences<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
     parameters: &[Name<'db>],
-    positive_position: bool,
-    positive: &mut [bool],
-    negative: &mut [bool],
+    positive: bool,
+    occurrences: &mut [(bool, bool)],
 ) {
     match ty.kind(db) {
         TyKind::Rigid(name) => {
             if let Some(index) = parameters.iter().position(|parameter| parameter == name) {
-                if positive_position {
-                    positive[index] = true;
+                if positive {
+                    occurrences[index].0 = true;
                 } else {
-                    negative[index] = true;
+                    occurrences[index].1 = true;
                 }
             }
         }
-        TyKind::Vector(inner)
-        | TyKind::NamedVector(inner)
-        | TyKind::List(inner)
-        | TyKind::NamedList(inner) => {
-            record_occurrences(
-                db,
-                *inner,
-                parameters,
-                positive_position,
-                positive,
-                negative,
-            );
-        }
-        TyKind::Tuple(items) => {
-            for &item in items {
-                record_occurrences(db, item, parameters, positive_position, positive, negative);
-            }
-        }
-        TyKind::Record(fields) => {
-            for field in fields {
-                record_occurrences(
-                    db,
-                    field.ty,
-                    parameters,
-                    positive_position,
-                    positive,
-                    negative,
-                );
-            }
-        }
         TyKind::Function(function) => {
-            for &parameter in &function.positional {
-                record_occurrences(
-                    db,
-                    parameter,
-                    parameters,
-                    !positive_position,
-                    positive,
-                    negative,
-                );
+            let parameter_types = function
+                .positional
+                .iter()
+                .copied()
+                .chain(function.named.iter().map(|field| field.ty))
+                .chain(function.variadic.iter().map(|rest| rest.element));
+            for parameter in parameter_types {
+                record_occurrences(db, parameter, parameters, !positive, occurrences);
             }
-            for field in &function.named {
-                record_occurrences(
-                    db,
-                    field.ty,
-                    parameters,
-                    !positive_position,
-                    positive,
-                    negative,
-                );
-            }
-            if let Some(rest) = &function.variadic {
-                record_occurrences(
-                    db,
-                    rest.element,
-                    parameters,
-                    !positive_position,
-                    positive,
-                    negative,
-                );
-            }
-            record_occurrences(
-                db,
-                function.ret,
-                parameters,
-                positive_position,
-                positive,
-                negative,
-            );
-        }
-        TyKind::Union(members) => {
-            for &member in members {
-                record_occurrences(
-                    db,
-                    member,
-                    parameters,
-                    positive_position,
-                    positive,
-                    negative,
-                );
-            }
+            record_occurrences(db, function.ret, parameters, positive, occurrences);
         }
         // Nested nominal variance is not composed: conservatively invariant.
         TyKind::Named(_, arguments) => {
             for &argument in arguments {
-                record_occurrences(db, argument, parameters, true, positive, negative);
-                record_occurrences(db, argument, parameters, false, positive, negative);
+                record_occurrences(db, argument, parameters, true, occurrences);
+                record_occurrences(db, argument, parameters, false, occurrences);
             }
         }
-        _ => {}
+        _ => for_each_child_type(db, ty, &mut |child| {
+            record_occurrences(db, child, parameters, positive, occurrences)
+        }),
     }
 }
 
@@ -1273,7 +1121,6 @@ fn constraint_rejects<'db>(
     constraint: Constraint,
     ty: Ty<'db>,
 ) -> Option<UnifyError<'db>> {
-    use crate::types::Atomic;
     let arithmetic_classes = table.arithmetic_classes;
     let declares_arithmetic = |name: &Name<'db>| {
         arithmetic_classes.is_some_and(|classes| classes.contains(name.text(db)))
@@ -1320,7 +1167,7 @@ fn constraint_rejects<'db>(
 mod tests {
     use super::*;
     use crate::RootDatabase;
-    use crate::types::{Atomic, scalar};
+    use crate::types::{Parameter, null, scalar};
 
     #[test]
     fn unify_binds_and_resolves() {
@@ -1391,7 +1238,7 @@ mod tests {
         let mut table = InferenceTable::default();
         let int = scalar(&db, Atomic::Integer);
         let chr = scalar(&db, Atomic::Character);
-        let null = crate::types::null(&db);
+        let null = null(&db);
         let a = union_of(&db, [int, chr]);
         let b = union_of(&db, [chr, int]);
         assert!(table.unify(&db, a, b).is_ok());
@@ -1429,7 +1276,7 @@ mod tests {
         let db = RootDatabase::default();
         let mut table = InferenceTable::default();
         let int = scalar(&db, Atomic::Integer);
-        let null = crate::types::null(&db);
+        let null = null(&db);
         let element = table.fresh_ty(&db, Constraint::Unconstrained);
         let generic_vector = Ty::new(&db, TyKind::Vector(element));
         assert!(table.compatible(&db, int, generic_vector));
@@ -1455,8 +1302,8 @@ mod tests {
             &db,
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
-                named: vec![crate::types::Parameter {
-                    name: crate::types::Name::new(&db, "x".to_owned()),
+                named: vec![Parameter {
+                    name: Name::new(&db, "x".to_owned()),
                     ty: int,
                     optional: false,
                     default: None,

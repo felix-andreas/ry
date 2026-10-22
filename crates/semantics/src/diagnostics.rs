@@ -1,10 +1,21 @@
-use crate::check::{OperandExpectation, TypeError, TypeErrorKind};
+use crate::annotations::{NamedDefinition, lower_annotation};
+use crate::check::{ItemCheck, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind};
+use crate::hir::{ExprId, ExpressionKind};
 use crate::infer::{FunctionMismatch, RecordMismatch};
-use crate::types::{Atomic, Constraint, FunctionType, Name, Ty, TyKind, TypeScheme};
-use crate::{Db, DocumentKind, SourceFile, item_check, item_tree, parse};
-use syntax::TextRange;
+use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
+use crate::stubs::stubs;
+use crate::types::{Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, TypeScheme};
+use crate::{
+    AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
+    item_check, item_hir, item_name_range, item_naming, item_spans, item_tree, parse,
+    project_type_definitions,
+};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
+use syntax::{SyntaxKind, TextRange};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
     Error,
     Warning,
@@ -17,6 +28,18 @@ pub struct Diagnostic {
     pub code: &'static str,
     pub message: String,
     pub related: Vec<RelatedLocation>,
+}
+
+impl Diagnostic {
+    pub fn new(range: TextRange, severity: Severity, code: &'static str, message: String) -> Self {
+        Diagnostic {
+            range,
+            severity,
+            code,
+            message,
+            related: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -34,56 +57,46 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
 
     let parsed = parse(db, file);
     for error in parsed.errors() {
-        diagnostics.push(Diagnostic {
-            range: error.range,
-            severity: Severity::Error,
+        diagnostics.push(Diagnostic::new(
+            error.range,
+            Severity::Error,
             // The code names whose grammar broke (R or `#:`), not which stage noticed.
-            code: if error.in_annotation {
+            if error.in_annotation {
                 "annotation"
             } else {
                 "syntax-error"
             },
-            message: error.message.clone(),
-            related: Vec::new(),
-        });
+            error.message.clone(),
+        ));
     }
 
     for (range, value) in crate::file_typing_directives(db, file).1 {
-        diagnostics.push(Diagnostic {
-            range,
-            severity: Severity::Error,
-            code: "annotation",
-            message: format!(
+        diagnostics.push(Diagnostic::new(range, Severity::Error, "annotation", format!(
                 "Unknown typing directive `{value}`. Use `# typing: on`, `# typing: off`, or `# typing: strict`."
-            ),
-            related: Vec::new(),
-        });
+            )));
     }
 
     let root = parsed.syntax_node();
     for node in root
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
-        let annotation = crate::annotations::lower_annotation(db, &node);
+        let annotation = lower_annotation(db, &node);
         for (message, range) in &annotation.errors {
-            diagnostics.push(Diagnostic {
-                range: *range,
-                severity: Severity::Error,
-                code: "annotation",
-                message: message.clone(),
-                related: Vec::new(),
-            });
+            diagnostics.push(Diagnostic::new(
+                *range,
+                Severity::Error,
+                "annotation",
+                message.clone(),
+            ));
         }
         if !annotation.definitions.is_empty() && node.parent().as_ref() != Some(&root) {
-            diagnostics.push(Diagnostic {
-                range: node.text_range(),
-                severity: Severity::Error,
-                code: "annotation",
-                message: "Type definition blocks are only allowed at the top level of a file."
-                    .to_owned(),
-                related: Vec::new(),
-            });
+            diagnostics.push(Diagnostic::new(
+                node.text_range(),
+                Severity::Error,
+                "annotation",
+                "Type definition blocks are only allowed at the top level of a file.".to_owned(),
+            ));
         }
     }
     diagnostics.extend(dangling_annotation_diagnostics(db, file));
@@ -99,10 +112,10 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let mut diagnostics = Vec::new();
     let sequences = std::iter::once(root.clone()).chain(
         root.descendants()
-            .filter(|node| node.kind() == syntax::SyntaxKind::BRACE_EXPR),
+            .filter(|node| node.kind() == SyntaxKind::BRACE_EXPR),
     );
     for (node, target) in sequences.flat_map(|parent| crate::statement_annotations(&parent)) {
-        let annotation = crate::annotations::lower_annotation(db, &node);
+        let annotation = lower_annotation(db, &node);
         if !annotation.definitions.is_empty()
             || annotation.strict.is_some()
             || !annotation.errors.is_empty()
@@ -111,49 +124,47 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             continue;
         }
         let message = match target {
-            crate::AnnotationTarget::Attached(_) => {
+            AnnotationTarget::Attached(_) => {
                 if node.children().next().is_none() {
                     "A `#:` typing comment must include a type expression."
                 } else {
                     continue;
                 }
             }
-            crate::AnnotationTarget::BlankLineSeparated => {
+            AnnotationTarget::BlankLineSeparated => {
                 "A `#:` typing comment cannot be separated from its expression by an empty line."
             }
-            crate::AnnotationTarget::Dangling => {
+            AnnotationTarget::Dangling => {
                 // Almost always a `#:` block placed above a roxygen2 block, so name the fix.
                 "A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block."
             }
         };
-        diagnostics.push(Diagnostic {
-            range: node.text_range(),
-            severity: Severity::Error,
-            code: "annotation",
-            message: message.to_owned(),
-            related: Vec::new(),
-        });
+        diagnostics.push(Diagnostic::new(
+            node.text_range(),
+            Severity::Error,
+            "annotation",
+            message.to_owned(),
+        ));
     }
     for node in root
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
-        if node.parent().map(|parent| parent.kind()) != Some(syntax::SyntaxKind::ARGUMENT_LIST) {
+        if node.parent().map(|parent| parent.kind()) != Some(SyntaxKind::ARGUMENT_LIST) {
             continue;
         }
         // A block that failed to lower already owns a diagnostic.
-        let annotation = crate::annotations::lower_annotation(db, &node);
+        let annotation = lower_annotation(db, &node);
         if !annotation.errors.is_empty() || !annotation.typing_errors.is_empty() {
             continue;
         }
-        diagnostics.push(Diagnostic {
-            range: node.text_range(),
-            severity: Severity::Error,
-            code: "annotation",
+        diagnostics.push(Diagnostic::new(
+            node.text_range(),
+            Severity::Error,
+            "annotation",
             // Not "move it up a line": that would type the enclosing statement instead.
-            message: "A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.".to_owned(),
-            related: Vec::new(),
-        });
+            "A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.".to_owned(),
+        ));
     }
     diagnostics
 }
@@ -161,14 +172,14 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
 /// Name → index of the earliest item whose top-level frame writes it. Conditional
 /// writes count: they create the document's slot just like unconditional ones.
 #[salsa::tracked(returns(ref))]
-fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashMap<String, usize> {
-    let mut positions = rustc_hash::FxHashMap::default();
+fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> FxHashMap<String, usize> {
+    let mut positions = FxHashMap::default();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
-        let Some(naming) = crate::item_naming(db, item) else {
+        let Some(naming) = item_naming(db, item) else {
             continue;
         };
         for binding in naming.bindings.values() {
-            if binding.kind != crate::naming::BindingKind::TopLevel {
+            if binding.kind != BindingKind::TopLevel {
                 continue;
             }
             positions.entry(binding.name.clone()).or_insert(index);
@@ -195,7 +206,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             .any(|error| error.start() <= range.end() && range.start() <= error.end())
     };
 
-    for (item_index, span) in crate::item_spans(db, file).iter().enumerate() {
+    for (item_index, span) in item_spans(db, file).iter().enumerate() {
         if is_broken(span.range) {
             continue;
         }
@@ -205,27 +216,30 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         for error in &check.errors {
-            let range = TextRange::new(error.range.start() + offset, error.range.end() + offset);
-            diagnostics.push(render_type_error(db, range, error));
+            diagnostics.push(Diagnostic::new(
+                error.range + offset,
+                Severity::Error,
+                "type-mismatch",
+                render_type_error_message(db, error),
+            ));
         }
-        let Some(module) = crate::item_hir(db, item) else {
+        let Some(module) = item_hir(db, item) else {
             continue;
         };
-        let Some(naming) = crate::item_naming(db, item) else {
+        let Some(naming) = item_naming(db, item) else {
             continue;
         };
         for unused in &naming.unused_assignments {
-            let range = TextRange::new(unused.range.start() + offset, unused.range.end() + offset);
-            diagnostics.push(Diagnostic {
+            let range = unused.range + offset;
+            diagnostics.push(Diagnostic::new(
                 range,
-                severity: Severity::Warning,
-                code: "unused",
-                message: format!("`{}` is assigned but never used.", unused.name),
-                related: Vec::new(),
-            });
+                Severity::Warning,
+                "unused",
+                format!("`{}` is assigned but never used.", unused.name),
+            ));
         }
         for target in &naming.invalid_assignment_targets {
-            let range = TextRange::new(target.range.start() + offset, target.range.end() + offset);
+            let range = target.range + offset;
             // A trailing operator pulled the next line in only if the break falls after
             // the operator; a break before it is an ordinary continuation.
             let dangling_operator = target.operand_gap.is_some_and(|gap| {
@@ -241,15 +255,12 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             } else {
                 ""
             };
-            diagnostics.push(Diagnostic {
+            diagnostics.push(Diagnostic::new(
                 range,
-                severity: Severity::Error,
-                code: "syntax-error",
-                message: format!(
-                    "this is a value, not a name, so nothing can be assigned to it{hint}"
-                ),
-                related: Vec::new(),
-            });
+                Severity::Error,
+                "syntax-error",
+                format!("this is a value, not a name, so nothing can be assigned to it{hint}"),
+            ));
         }
         // R errors on a read with no prior write. Local slots only: a top-level
         // variable's unwritten path falls through to the enclosing environment.
@@ -261,41 +272,31 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             else {
                 continue;
             };
-            if binding.kind == crate::naming::BindingKind::TopLevel {
+            if binding.kind == BindingKind::TopLevel {
                 continue;
             }
-            let expression_range = module.expression(*expression).range;
-            let range = TextRange::new(
-                expression_range.start() + offset,
-                expression_range.end() + offset,
-            );
-            diagnostics.push(Diagnostic {
+            let range = module.expression(*expression).range + offset;
+            diagnostics.push(Diagnostic::new(
                 range,
-                severity: Severity::Warning,
-                code: "maybe-undefined",
-                message: format!(
+                Severity::Warning,
+                "maybe-undefined",
+                format!(
                     "`{}` is only assigned on some paths here, so this read can find nothing.",
                     display_name(&binding.name)
                 ),
-                related: Vec::new(),
-            });
+            ));
         }
         for (expression, read) in &naming.namespace_reads {
             let Some(message) = namespace_read_message(db, read) else {
                 continue;
             };
-            let expression_range = module.expression(*expression).range;
-            let range = TextRange::new(
-                expression_range.start() + offset,
-                expression_range.end() + offset,
-            );
-            diagnostics.push(Diagnostic {
+            let range = module.expression(*expression).range + offset;
+            diagnostics.push(Diagnostic::new(
                 range,
-                severity: Severity::Warning,
-                code: "unresolved",
+                Severity::Warning,
+                "unresolved",
                 message,
-                related: Vec::new(),
-            });
+            ));
         }
         // Immediate reads see only slots created by earlier statements; reads inside a
         // nested function run after the frame settled, so any slot in the document
@@ -306,24 +307,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             else {
                 continue;
             };
-            let expression_range = module.expression(*expression).range;
-            let range = TextRange::new(
-                expression_range.start() + offset,
-                expression_range.end() + offset,
-            );
+            let range = module.expression(*expression).range + offset;
             let display = display_name(name);
             let suggestion = suggestion
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Severity::Warning,
-                code: "unresolved",
-                message: format!(
+            diagnostics.push(Diagnostic::new(range, Severity::Warning, "unresolved", format!(
                     "I could not resolve `{display}` in this package, its imports, or builtins.{suggestion}"
-                ),
-                related: Vec::new(),
-            });
+                )));
         }
     }
 
@@ -353,9 +344,9 @@ fn classify_non_local_read(
     db: &dyn Db,
     file: SourceFile,
     item_index: usize,
-    check: &crate::check::ItemCheck<'_>,
-    naming: &crate::naming::ItemNaming,
-    expression: &crate::hir::ExprId,
+    check: &ItemCheck<'_>,
+    naming: &ItemNaming,
+    expression: &ExprId,
     name: &str,
 ) -> NonLocalRead {
     if check.masked_reads.contains(expression) {
@@ -369,30 +360,40 @@ fn classify_non_local_read(
     if R6_INJECTED_BINDINGS.contains(&name) && *file_defines_r6_class(db, file) {
         return NonLocalRead::Resolvable;
     }
+    let files = ProjectFiles::try_get(db);
     if crate::package_scheme_exists(db, name)
         || super_globals(db, file).contains(name)
-        || declared_global_variable(db, name)
+        || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || crate::metadata::imported_by_name(db, name)
     {
         return NonLocalRead::Resolvable;
     }
     // A near-miss of a name the project itself binds (including the item's locals
-    // and parameters) is a typo, reported even under the blanket tolerance.
-    let project_typo = project_definition_suggestion(db, name).or_else(|| {
-        nearest_name(
-            name,
-            naming
-                .bindings
-                .values()
-                .map(|binding| binding.name.as_str()),
-        )
-        .map(str::to_owned)
-    });
+    // and parameters) is a typo, reported even under the blanket tolerance. It is
+    // checked before the stub corpus because it is the likelier intent.
+    let project_typo = files
+        .and_then(|files| {
+            nearest_name(
+                name,
+                crate::package_definitions(db, files)
+                    .keys()
+                    .map(String::as_str),
+            )
+        })
+        .or_else(|| {
+            nearest_name(
+                name,
+                naming
+                    .bindings
+                    .values()
+                    .map(|binding| binding.name.as_str()),
+            )
+        });
     if project_typo.is_none() && crate::metadata::imports_every_name(db) {
         return NonLocalRead::Tolerated;
     }
     NonLocalRead::Unresolved {
-        suggestion: project_typo.or_else(|| unresolved_suggestion(db, name)),
+        suggestion: project_typo.or_else(|| typo_suggestion(db, Name::new(db, name.to_owned()))),
     }
 }
 
@@ -403,24 +404,24 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     for node in parsed
         .syntax_node()
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
-        references.extend(crate::annotations::lower_annotation(db, &node).nominal_references);
+        references.extend(lower_annotation(db, &node).nominal_references);
     }
     if references.is_empty() {
         return Vec::new();
     }
 
-    let mut known: std::collections::BTreeSet<String> = crate::stubs::stubs(db)
+    let mut known: BTreeSet<String> = stubs(db)
         .map(|library| library.nominals.iter().cloned().collect())
         .unwrap_or_default();
-    if let Some(files) = crate::ProjectFiles::try_get(db) {
-        for name in crate::project_type_definitions(db, files).keys() {
+    if let Some(files) = ProjectFiles::try_get(db) {
+        for name in project_type_definitions(db, files).keys() {
             known.insert(name.text(db).to_owned());
         }
     }
     // A script's own declarations shadow the project namespace.
-    for definition in crate::file_type_definitions(db, file) {
+    for definition in file_type_definitions(db, file) {
         known.insert(definition.name.text(db).to_owned());
     }
 
@@ -437,15 +438,9 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             )
             .map(|nearest| format!(" Did you mean `{nearest}`?"))
             .unwrap_or_default();
-            Diagnostic {
-                range,
-                severity: Severity::Error,
-                code: "annotation",
-                message: format!(
+            Diagnostic::new(range, Severity::Error, "annotation", format!(
                     "I do not know the type `{name}`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.{suggestion}"
-                ),
-                related: Vec::new(),
-            }
+                ))
         })
         .collect()
 }
@@ -454,16 +449,15 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
     let mut diagnostics = Vec::new();
-    let mut definitions: std::collections::BTreeMap<String, crate::annotations::NamedDefinition> =
-        std::collections::BTreeMap::new();
+    let mut definitions: BTreeMap<String, NamedDefinition> = BTreeMap::new();
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
-    let mut ambiguous: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    if let Some(files) = crate::ProjectFiles::try_get(db) {
-        for (name, definition) in crate::project_type_definitions(db, files) {
+    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
+    if let Some(files) = ProjectFiles::try_get(db) {
+        for (name, definition) in project_type_definitions(db, files) {
             definitions.insert(name.text(db).to_owned(), definition.clone());
         }
-        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         for &project_file in files.files(db) {
             if *project_file.kind(db) != DocumentKind::Package {
                 continue;
@@ -479,27 +473,26 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 .map(|(name, _)| name.to_owned()),
         );
     }
-    for definition in crate::file_type_definitions(db, file) {
+    for definition in file_type_definitions(db, file) {
         definitions.insert(definition.name.text(db).to_owned(), definition);
     }
-    let stub_nominals: std::collections::BTreeSet<String> = crate::stubs::stubs(db)
+    let stub_nominals: BTreeSet<String> = stubs(db)
         .map(|library| library.nominals.iter().cloned().collect())
         .unwrap_or_default();
 
     for node in parsed
         .syntax_node()
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
-        let annotation = crate::annotations::lower_annotation(db, &node);
+        let annotation = lower_annotation(db, &node);
         for (message, range) in &annotation.typing_errors {
-            diagnostics.push(Diagnostic {
-                range: *range,
-                severity: Severity::Error,
-                code: "type-mismatch",
-                message: message.clone(),
-                related: Vec::new(),
-            });
+            diagnostics.push(Diagnostic::new(
+                *range,
+                Severity::Error,
+                "type-mismatch",
+                message.clone(),
+            ));
         }
         for (element, range) in &annotation.vector_elements {
             if vector_element_atomic(db, *element, &definitions, &stub_nominals) {
@@ -507,15 +500,9 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             }
             let mut renderer = TypeRenderer::default();
             let rendered = renderer.render(db, *element);
-            diagnostics.push(Diagnostic {
-                range: *range,
-                severity: Severity::Error,
-                code: "type-mismatch",
-                message: format!(
+            diagnostics.push(Diagnostic::new(*range, Severity::Error, "type-mismatch", format!(
                     "the element of a `[]` vector type must be an atomic type, found `{rendered}`. For a list of these, write `list[{rendered}]`"
-                ),
-                related: Vec::new(),
-            });
+                )));
         }
         // A bare reference to a generic must be applied, except under `@new`, which
         // infers its arguments through the representation check.
@@ -530,24 +517,22 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 continue;
             };
             if arity == 0 {
-                diagnostics.push(Diagnostic {
-                    range: *range,
-                    severity: Severity::Error,
-                    code: "annotation",
-                    message: format!("`{name}` is not a generic type. It takes no type arguments."),
-                    related: Vec::new(),
-                });
+                diagnostics.push(Diagnostic::new(
+                    *range,
+                    Severity::Error,
+                    "annotation",
+                    format!("`{name}` is not a generic type. It takes no type arguments."),
+                ));
             } else if arity != *count {
-                diagnostics.push(Diagnostic {
-                    range: *range,
-                    severity: Severity::Error,
-                    code: "annotation",
-                    message: format!(
+                diagnostics.push(Diagnostic::new(
+                    *range,
+                    Severity::Error,
+                    "annotation",
+                    format!(
                         "generic type `{name}` expects {arity} type {}, but found {count}.",
                         plural(arity, "argument", "arguments"),
                     ),
-                    related: Vec::new(),
-                });
+                ));
             }
         }
         for (name, range) in &annotation.nominal_references {
@@ -567,16 +552,15 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 continue;
             };
             if arity > 0 {
-                diagnostics.push(Diagnostic {
-                    range: *range,
-                    severity: Severity::Error,
-                    code: "annotation",
-                    message: format!(
+                diagnostics.push(Diagnostic::new(
+                    *range,
+                    Severity::Error,
+                    "annotation",
+                    format!(
                         "generic type `{name}` expects {arity} type {}, but found 0.",
                         plural(arity, "argument", "arguments"),
                     ),
-                    related: Vec::new(),
-                });
+                ));
             }
         }
         if let Some((name, _, range)) = &annotation.new_nominal
@@ -585,16 +569,15 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 .get(name.text(db))
                 .is_some_and(|definition| definition.alias)
         {
-            diagnostics.push(Diagnostic {
-                range: *range,
-                severity: Severity::Error,
-                code: "annotation",
-                message: format!(
+            diagnostics.push(Diagnostic::new(
+                *range,
+                Severity::Error,
+                "annotation",
+                format!(
                     "`@new` requires a nominal type declared with `@type`, but `{}` is an alias.",
                     name.text(db)
                 ),
-                related: Vec::new(),
-            });
+            ));
         }
     }
     diagnostics
@@ -605,8 +588,8 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
 fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
-    definitions: &std::collections::BTreeMap<String, crate::annotations::NamedDefinition<'db>>,
-    stub_nominals: &std::collections::BTreeSet<String>,
+    definitions: &BTreeMap<String, NamedDefinition<'db>>,
+    stub_nominals: &BTreeSet<String>,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();
     let mut current = element;
@@ -651,16 +634,13 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
 fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
     let mut sites = Vec::new();
     for &item in item_tree(db, file) {
-        if !matches!(
-            *item.kind(db),
-            crate::ItemKind::Function | crate::ItemKind::Value
-        ) {
+        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
         let Some(name) = item.name(db).clone() else {
             continue;
         };
-        let Some(range) = crate::item_name_range(db, item) else {
+        let Some(range) = item_name_range(db, item) else {
             continue;
         };
         sites.push((name, range));
@@ -674,10 +654,7 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
 fn top_level_binding_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
     let mut names = Vec::new();
     for &item in item_tree(db, file) {
-        if !matches!(
-            *item.kind(db),
-            crate::ItemKind::Function | crate::ItemKind::Value
-        ) {
+        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
         if let Some(name) = item.name(db).clone() {
@@ -689,12 +666,8 @@ fn top_level_binding_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
 
 /// Near-empty in healthy projects, so its value-equality firewall holds.
 #[salsa::tracked(returns(ref))]
-fn duplicate_binding_map(
-    db: &dyn Db,
-    files: crate::ProjectFiles,
-) -> rustc_hash::FxHashMap<String, Vec<SourceFile>> {
-    let mut sites: rustc_hash::FxHashMap<String, Vec<SourceFile>> =
-        rustc_hash::FxHashMap::default();
+fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<String, Vec<SourceFile>> {
+    let mut sites: FxHashMap<String, Vec<SourceFile>> = FxHashMap::default();
     for &project_file in files.files(db) {
         if *project_file.kind(db) != DocumentKind::Package {
             continue;
@@ -713,7 +686,7 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     if *file.kind(db) != DocumentKind::Package {
         return Vec::new();
     }
-    let Some(files) = crate::ProjectFiles::try_get(db) else {
+    let Some(files) = ProjectFiles::try_get(db) else {
         return Vec::new();
     };
     let map = duplicate_binding_map(db, files);
@@ -789,9 +762,9 @@ fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRan
     for node in parsed
         .syntax_node()
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
-        let annotation = crate::annotations::lower_annotation(db, &node);
+        let annotation = lower_annotation(db, &node);
         for (definition, range) in annotation
             .definitions
             .iter()
@@ -813,12 +786,8 @@ fn type_declaration_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
 }
 
 #[salsa::tracked(returns(ref))]
-fn duplicate_type_map(
-    db: &dyn Db,
-    files: crate::ProjectFiles,
-) -> rustc_hash::FxHashMap<String, Vec<SourceFile>> {
-    let mut sites: rustc_hash::FxHashMap<String, Vec<SourceFile>> =
-        rustc_hash::FxHashMap::default();
+fn duplicate_type_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<String, Vec<SourceFile>> {
+    let mut sites: FxHashMap<String, Vec<SourceFile>> = FxHashMap::default();
     for &project_file in files.files(db) {
         if *project_file.kind(db) != DocumentKind::Package {
             continue;
@@ -837,7 +806,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
     if *file.kind(db) != DocumentKind::Package {
         return script_duplicate_type_diagnostics(db, file);
     }
-    let Some(files) = crate::ProjectFiles::try_get(db) else {
+    let Some(files) = ProjectFiles::try_get(db) else {
         return Vec::new();
     };
     let map = duplicate_type_map(db, files);
@@ -924,7 +893,7 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
 
 /// `:::` reaches unexported names, so only `::` checks exports. No stub corpus
 /// means no validation.
-fn namespace_read_message(db: &dyn Db, read: &crate::naming::NamespaceRead) -> Option<String> {
+fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
     // A package's export set is not the names its sources bind (re-exports, S4
     // generics, lazy-loaded data, `.onLoad` bindings), so its own qualified reads
     // are never validated.
@@ -949,10 +918,10 @@ fn namespace_read_message(db: &dyn Db, read: &crate::naming::NamespaceRead) -> O
 /// Names written by `<<-` with no enclosing binding anywhere in the file: R
 /// creates them in the global environment, so reads of them resolve.
 #[salsa::tracked(returns(ref))]
-fn super_globals(db: &dyn Db, file: SourceFile) -> std::collections::BTreeSet<String> {
-    let mut names = std::collections::BTreeSet::new();
+fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
     for &item in item_tree(db, file) {
-        if let Some(naming) = crate::item_naming(db, item) {
+        if let Some(naming) = item_naming(db, item) {
             names.extend(naming.super_globals.iter().cloned());
         }
     }
@@ -962,14 +931,11 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> std::collections::BTreeSet<St
 /// Names declared via top-level `globalVariables(...)`, the escape hatch for
 /// NSE. Only direct top-level calls with literal strings are recognized.
 #[salsa::tracked(returns(ref))]
-fn file_global_variable_declarations(
-    db: &dyn Db,
-    file: SourceFile,
-) -> std::collections::BTreeSet<String> {
-    use crate::hir::{ExpressionKind, LiteralKind};
-    let mut declared = std::collections::BTreeSet::new();
+fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
+    use crate::hir::LiteralKind;
+    let mut declared = BTreeSet::new();
     for &item in item_tree(db, file) {
-        let Some(module) = crate::item_hir(db, item) else {
+        let Some(module) = item_hir(db, item) else {
             continue;
         };
         let Some(root) = module.root else {
@@ -1023,11 +989,8 @@ fn file_global_variable_declarations(
 
 /// Unioned once per project so the per-read guard is a single lookup.
 #[salsa::tracked(returns(ref))]
-fn project_global_variable_declarations(
-    db: &dyn Db,
-    files: crate::ProjectFiles,
-) -> std::collections::BTreeSet<String> {
-    let mut declared = std::collections::BTreeSet::new();
+fn project_global_variable_declarations(db: &dyn Db, files: ProjectFiles) -> BTreeSet<String> {
+    let mut declared = BTreeSet::new();
     for &file in files.files(db).iter() {
         declared.extend(file_global_variable_declarations(db, file).iter().cloned());
     }
@@ -1041,30 +1004,20 @@ const R6_INJECTED_BINDINGS: [&str; 3] = ["self", "private", "super"];
 /// Purely syntactic: a local binding shadowing `R6Class` is not honored.
 #[salsa::tracked]
 fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
-    use crate::hir::ExpressionKind;
-    crate::item_spans(db, file).iter().any(|span| {
-        crate::item_hir(db, span.item)
-            .as_ref()
-            .is_some_and(|module| {
-                module.expressions.iter().any(|expression| {
-                    let ExpressionKind::Call { callee, .. } = &expression.kind else {
-                        return false;
-                    };
-                    match &module.expression(*callee).kind {
-                        ExpressionKind::NameRef(name) => name == "R6Class",
-                        ExpressionKind::Namespace { name, .. } => {
-                            name.as_deref() == Some("R6Class")
-                        }
-                        _ => false,
-                    }
-                })
+    item_spans(db, file).iter().any(|span| {
+        item_hir(db, span.item).as_ref().is_some_and(|module| {
+            module.expressions.iter().any(|expression| {
+                let ExpressionKind::Call { callee, .. } = &expression.kind else {
+                    return false;
+                };
+                match &module.expression(*callee).kind {
+                    ExpressionKind::NameRef(name) => name == "R6Class",
+                    ExpressionKind::Namespace { name, .. } => name.as_deref() == Some("R6Class"),
+                    _ => false,
+                }
             })
+        })
     })
-}
-
-fn declared_global_variable(db: &dyn Db, name: &str) -> bool {
-    crate::ProjectFiles::try_get(db)
-        .is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
 }
 
 fn display_name(name: &str) -> String {
@@ -1079,29 +1032,10 @@ fn display_name(name: &str) -> String {
     }
 }
 
-pub(crate) fn nearest_field_name<'a>(
-    name: &str,
-    candidates: impl Iterator<Item = &'a str>,
-) -> Option<String> {
-    nearest_name(name, candidates).map(str::to_owned)
-}
-
-/// Checked before the stub corpus: a near-miss of the project's own name is the
-/// likelier intent.
-fn project_definition_suggestion(db: &dyn Db, name: &str) -> Option<String> {
-    let files = crate::ProjectFiles::try_get(db)?;
-    let definitions = crate::package_definitions(db, files);
-    nearest_name(name, definitions.keys().map(String::as_str)).map(str::to_owned)
-}
-
 /// Memoized per name: the scan over the whole stub corpus is the expensive part.
-fn unresolved_suggestion(db: &dyn Db, name: &str) -> Option<String> {
-    typo_suggestion(db, crate::types::Name::new(db, name.to_owned()))
-}
-
 #[salsa::tracked(returns(clone))]
-fn typo_suggestion<'db>(db: &'db dyn Db, name: crate::types::Name<'db>) -> Option<String> {
-    let library = crate::stubs::stubs(db)?;
+fn typo_suggestion<'db>(db: &'db dyn Db, name: Name<'db>) -> Option<String> {
+    let library = stubs(db)?;
     nearest_name(
         name.text(db),
         library
@@ -1110,13 +1044,15 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: crate::types::Name<'db>) -> Optio
             .chain(library.known_exports.iter())
             .map(String::as_str),
     )
-    .map(str::to_owned)
 }
 
 /// Ties break lexicographically for determinism. The budget is deliberately
 /// tight (a wrong guess is worse than none); transposition counts as one edit
 /// so `lenght` still finds `length`.
-fn nearest_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+pub(crate) fn nearest_name<'a>(
+    name: &str,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<String> {
     let name_characters: Vec<char> = name.chars().collect();
     if name_characters.len() < 4 {
         return None;
@@ -1150,7 +1086,7 @@ fn nearest_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Op
             _ => Some((distance, candidate)),
         };
     }
-    best.map(|(_, candidate)| candidate)
+    best.map(|(_, candidate)| candidate.to_owned())
 }
 
 /// Optimal string alignment distance, or `None` past `budget`. The caller lends
@@ -1193,8 +1129,8 @@ fn edit_distance_within(
         if row_minimum > budget {
             return None;
         }
-        std::mem::swap(&mut before_previous, previous);
-        std::mem::swap(previous, current);
+        mem::swap(&mut before_previous, previous);
+        mem::swap(previous, current);
         current.clear();
         current.resize(right.len() + 1, 0);
     }
@@ -1204,7 +1140,7 @@ fn edit_distance_within(
 /// A script's top level is one frame run in order, so the unused check spans
 /// items. A read inside a nested function keeps every write to the name live.
 fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let error_ranges: Vec<TextRange> = crate::parse(db, file)
+    let error_ranges: Vec<TextRange> = parse(db, file)
         .errors()
         .iter()
         .filter(|error| !error.in_annotation)
@@ -1220,31 +1156,27 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     }
     let mut definers: Vec<Definer> = Vec::new();
     let mut reads: Vec<(usize, String, bool)> = Vec::new();
-    for (index, span) in crate::item_spans(db, file).iter().enumerate() {
+    for (index, span) in item_spans(db, file).iter().enumerate() {
         let item = span.item;
         let offset = span.range.start();
-        let Some(naming) = crate::item_naming(db, item) else {
+        let Some(naming) = item_naming(db, item) else {
             continue;
         };
-        let item_name = matches!(
-            *item.kind(db),
-            crate::ItemKind::Function | crate::ItemKind::Value
-        )
-        .then(|| item.name(db).clone())
-        .flatten();
+        let item_name = matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
+            .then(|| item.name(db).clone())
+            .flatten();
         let broken = |range: TextRange| {
             error_ranges
                 .iter()
                 .any(|error| error.start() <= range.end() && range.start() <= error.end())
         };
         if let Some(name) = item_name.clone()
-            && let Some(module) = crate::item_hir(db, item)
+            && let Some(module) = item_hir(db, item)
             && let Some(root) = module.root
-            && let Some(name_range) = crate::item_name_range(db, item)
+            && let Some(name_range) = item_name_range(db, item)
         {
             let root_range = module.expression(root).range;
-            let statement_range =
-                TextRange::new(root_range.start() + offset, root_range.end() + offset);
+            let statement_range = root_range + offset;
             // The finding goes on the name, but a syntax error anywhere in the statement
             // suppresses it.
             if !broken(statement_range) {
@@ -1258,13 +1190,12 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             }
         }
         for binding in naming.bindings.values() {
-            if binding.kind != crate::naming::BindingKind::TopLevel
+            if binding.kind != BindingKind::TopLevel
                 || item_name.as_deref() == Some(binding.name.as_str())
             {
                 continue;
             }
-            let range =
-                TextRange::new(binding.range.start() + offset, binding.range.end() + offset);
+            let range = binding.range + offset;
             if !broken(range) {
                 definers.push(Definer {
                     item_index: index,
@@ -1299,7 +1230,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(binding) = naming.bindings.get(slot) else {
                 continue;
             };
-            if binding.kind == crate::naming::BindingKind::TopLevel {
+            if binding.kind == BindingKind::TopLevel {
                 reads.push((index, binding.name.clone(), false));
             }
         }
@@ -1334,12 +1265,13 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 && !definer.name.starts_with('_')
                 && !crate::is_s3_method_name(db, &definer.name, &generics)
         })
-        .map(|definer| Diagnostic {
-            range: definer.range,
-            severity: Severity::Warning,
-            code: "unused",
-            message: format!("`{}` is assigned but never used.", definer.name),
-            related: Vec::new(),
+        .map(|definer| {
+            Diagnostic::new(
+                definer.range,
+                Severity::Warning,
+                "unused",
+                format!("`{}` is assigned but never used.", definer.name),
+            )
         })
         .collect()
 }
@@ -1348,9 +1280,6 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// origin that is an assignment's value is phrased against the assigned name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    use crate::check::StrictOriginKind;
-    use crate::hir::ExpressionKind;
-
     let mut diagnostics = Vec::new();
     // Reads silenced by an unknowable export set are undetermined, which is what
     // strict mode reports.
@@ -1360,7 +1289,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .filter(|error| !error.in_annotation)
         .map(|error| error.range)
         .collect();
-    for (item_index, span) in crate::item_spans(db, file).iter().enumerate() {
+    for (item_index, span) in item_spans(db, file).iter().enumerate() {
         if broken_ranges
             .iter()
             .any(|error| error.start() <= span.range.end() && span.range.start() <= error.end())
@@ -1371,8 +1300,8 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let offset = span.range.start();
         let (Some(check), Some(module), Some(naming)) = (
             item_check(db, item),
-            crate::item_hir(db, item),
-            crate::item_naming(db, item),
+            item_hir(db, item),
+            item_naming(db, item),
         ) else {
             continue;
         };
@@ -1383,23 +1312,13 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ) {
                 continue;
             }
-            let expression_range = module.expression(*expression).range;
-            diagnostics.push(Diagnostic {
-                range: TextRange::new(
-                    expression_range.start() + offset,
-                    expression_range.end() + offset,
-                ),
-                severity: Severity::Error,
-                code: "strict",
-                message: format!(
+            diagnostics.push(Diagnostic::new(module.expression(*expression).range + offset, Severity::Error, "strict", format!(
                     "strict mode: nothing this project can see defines `{}`. It is silent only because an attached package's exports are unknown. Declare the package with a `.Rtypes` stub to check it",
                     display_name(name)
-                ),
-                related: Vec::new(),
-            });
+                )));
         }
     }
-    for span in crate::item_spans(db, file) {
+    for span in item_spans(db, file) {
         let item = span.item;
         let offset = span.range.start();
         let Some(check) = item_check(db, item) else {
@@ -1408,10 +1327,10 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         if check.strict_origins.is_empty() {
             continue;
         }
-        let Some(module) = crate::item_hir(db, item) else {
+        let Some(module) = item_hir(db, item) else {
             continue;
         };
-        let mut assignment_targets = rustc_hash::FxHashMap::default();
+        let mut assignment_targets = FxHashMap::default();
         for expression in &module.expressions {
             if let ExpressionKind::Assign { target, value, .. } = &expression.kind
                 && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
@@ -1446,13 +1365,12 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     ),
                 }
             };
-            diagnostics.push(Diagnostic {
-                range: TextRange::new(origin.range.start() + offset, origin.range.end() + offset),
-                severity: Severity::Error,
-                code: "strict",
+            diagnostics.push(Diagnostic::new(
+                origin.range + offset,
+                Severity::Error,
+                "strict",
                 message,
-                related: Vec::new(),
-            });
+            ));
         }
     }
     diagnostics.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
@@ -1461,25 +1379,6 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
 fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
     if count == 1 { one } else { many }
-}
-
-fn render_names(names: &[String]) -> String {
-    names
-        .iter()
-        .map(|name| format!("`{name}`"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn render_type_error(db: &dyn Db, range: TextRange, error: &TypeError<'_>) -> Diagnostic {
-    let message = render_type_error_message(db, error);
-    Diagnostic {
-        range,
-        severity: Severity::Error,
-        code: "type-mismatch",
-        message,
-        related: Vec::new(),
-    }
 }
 
 fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
@@ -1534,7 +1433,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 format!(
                     "this function has no parameter `{argument}`. Its named {} {}",
                     plural(expected_parameters.len(), "parameter is", "parameters are"),
-                    render_names(expected_parameters),
+                    expected_parameters
+                        .iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 )
             }
         }
@@ -1747,17 +1650,8 @@ pub struct TypeRenderer<'db> {
 
 #[derive(PartialEq, Eq)]
 enum RenderedVar<'db> {
-    Inference(crate::types::InferenceVar),
+    Inference(InferenceVar),
     Rigid(Name<'db>),
-}
-
-/// Rendered types must be copyable into annotations, and an unquoted
-/// non-syntactic name can even parse as a different type (`list{a,b: integer}`).
-fn spell_field_name(name: &str) -> String {
-    match syntax::is_syntactic_name(name) {
-        true => name.to_owned(),
-        false => format!("`{name}`"),
-    }
 }
 
 impl<'db> TypeRenderer<'db> {
@@ -1779,11 +1673,15 @@ impl<'db> TypeRenderer<'db> {
                 let fields: Vec<String> = fields
                     .iter()
                     .map(|field| {
-                        format!(
-                            "{}: {}",
-                            spell_field_name(field.name.text(db)),
-                            self.render(db, field.ty)
-                        )
+                        let name = field.name.text(db);
+                        // Rendered types must be copyable into annotations, and an unquoted
+                        // non-syntactic name can even parse as a different type
+                        // (`list{a,b: integer}`).
+                        if syntax::is_syntactic_name(name) {
+                            format!("{name}: {}", self.render(db, field.ty))
+                        } else {
+                            format!("`{name}`: {}", self.render(db, field.ty))
+                        }
                     })
                     .collect();
                 format!("list{{{}}}", fields.join(", "))
@@ -1918,7 +1816,7 @@ fn atomic_name(atomic: Atomic) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+    use crate::RootDatabase;
 
     fn render_all(db: &RootDatabase, file: SourceFile) -> Vec<String> {
         file_diagnostics(db, file)
@@ -2028,14 +1926,8 @@ mod tests {
     fn renderer_shares_names_across_both_sides() {
         let db = RootDatabase::default();
         let mut renderer = TypeRenderer::default();
-        let t = crate::types::Ty::new(
-            &db,
-            crate::types::TyKind::Rigid(crate::types::Name::new(&db, "A".to_owned())),
-        );
-        let u = crate::types::Ty::new(
-            &db,
-            crate::types::TyKind::Rigid(crate::types::Name::new(&db, "B".to_owned())),
-        );
+        let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A".to_owned())));
+        let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B".to_owned())));
         assert_eq!(renderer.render(&db, t), "T");
         assert_eq!(renderer.render(&db, u), "U");
         assert_eq!(renderer.render(&db, t), "T");

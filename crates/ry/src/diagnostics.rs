@@ -1,13 +1,18 @@
 //! Shared by the language server and `ry check` so their gating cannot drift.
 
-use crate::config::{CheckConfig, Config};
+use crate::config::Config;
 use semantics::diagnostics::{Diagnostic, Severity, file_diagnostics, strict_diagnostics};
 use semantics::lints::lint_file;
 use semantics::{Db, SourceFile, TypingMode, file_typing_mode};
 
 /// In position order. Suppression comments are the caller's step.
 pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
-    let (typing_enabled, strict_enabled) = effective_typing(db, file, &config.check);
+    let (typing_enabled, strict_enabled) = match file_typing_mode(db, file) {
+        Some(TypingMode::Off) => (false, false),
+        Some(TypingMode::On) => (true, false),
+        Some(TypingMode::Strict) => (true, true),
+        None => (config.check.typing, config.check.strict),
+    };
     let mut rendered: Vec<Diagnostic> = file_diagnostics(db, file)
         .into_iter()
         .filter(|diagnostic| match diagnostic.code {
@@ -37,16 +42,6 @@ pub fn first_wave_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) ->
     rendered.extend(lint_file(db, file, &config.lint));
     rendered.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     rendered
-}
-
-/// (typing, strict); a per-file directive overrides the configured default.
-pub fn effective_typing(db: &dyn Db, file: SourceFile, check: &CheckConfig) -> (bool, bool) {
-    match file_typing_mode(db, file) {
-        Some(TypingMode::Off) => (false, false),
-        Some(TypingMode::On) => (true, false),
-        Some(TypingMode::Strict) => (true, true),
-        None => (check.typing, check.strict),
-    }
 }
 
 /// `roughly:` is the former name and must stay valid: retiring it would silently
@@ -117,13 +112,12 @@ mod tests {
     use syntax::{TextRange, TextSize};
 
     fn diagnostic(offset: u32, code: &'static str) -> Diagnostic {
-        Diagnostic {
-            range: TextRange::new(TextSize::from(offset), TextSize::from(offset + 1)),
-            severity: Severity::Warning,
+        Diagnostic::new(
+            TextRange::new(TextSize::from(offset), TextSize::from(offset + 1)),
+            Severity::Warning,
             code,
-            message: "test".to_owned(),
-            related: Vec::new(),
-        }
+            "test".to_owned(),
+        )
     }
 
     #[test]

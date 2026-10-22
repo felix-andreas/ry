@@ -1,3 +1,5 @@
+use rustc_hash::FxHashMap;
+
 use crate::Db;
 
 #[salsa::interned(debug)]
@@ -156,36 +158,14 @@ impl<'db> TypeScheme<'db> {
 
 /// Named types are not expanded: their representation is a separate declaration.
 pub fn contains_unknown(db: &dyn Db, ty: Ty<'_>) -> bool {
-    match ty.kind(db) {
-        TyKind::Unknown => true,
-        TyKind::Any | TyKind::Null | TyKind::Scalar(_) | TyKind::Var(_) | TyKind::Rigid(_) => false,
-        TyKind::Vector(inner)
-        | TyKind::NamedVector(inner)
-        | TyKind::List(inner)
-        | TyKind::NamedList(inner) => contains_unknown(db, *inner),
-        TyKind::Tuple(items) => items.iter().any(|&item| contains_unknown(db, item)),
-        TyKind::Record(fields) => fields.iter().any(|field| contains_unknown(db, field.ty)),
-        TyKind::Function(function) => {
-            function
-                .positional
-                .iter()
-                .any(|&parameter| contains_unknown(db, parameter))
-                || function
-                    .named
-                    .iter()
-                    .flat_map(|parameter| parameter.types())
-                    .any(|ty| contains_unknown(db, ty))
-                || function
-                    .variadic
-                    .as_ref()
-                    .is_some_and(|rest| contains_unknown(db, rest.element))
-                || contains_unknown(db, function.ret)
-        }
-        TyKind::Union(members) => members.iter().any(|&member| contains_unknown(db, member)),
-        TyKind::Named(_, arguments) => arguments
-            .iter()
-            .any(|&argument| contains_unknown(db, argument)),
+    if matches!(ty.kind(db), TyKind::Unknown) {
+        return true;
     }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || contains_unknown(db, child);
+    });
+    found
 }
 
 pub fn any(db: &dyn Db) -> Ty<'_> {
@@ -241,38 +221,13 @@ pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>
 /// record's tree grows exponentially while its distinct nodes stay few.
 #[salsa::tracked(returns(clone))]
 pub fn type_size<'db>(db: &'db dyn Db, ty: Ty<'db>) -> u64 {
-    fn sum<'db>(db: &'db dyn Db, types: impl Iterator<Item = Ty<'db>>) -> u64 {
-        types.fold(1, |total, ty| {
-            total
-                .saturating_add(type_size(db, ty))
-                .min(TYPE_SIZE_CEILING)
-        })
-    }
-    match ty.kind(db) {
-        TyKind::Vector(inner)
-        | TyKind::NamedVector(inner)
-        | TyKind::List(inner)
-        | TyKind::NamedList(inner) => sum(db, std::iter::once(*inner)),
-        TyKind::Tuple(items) | TyKind::Union(items) => sum(db, items.iter().copied()),
-        TyKind::Record(fields) => sum(db, fields.iter().map(|field| field.ty)),
-        TyKind::Named(_, arguments) => sum(db, arguments.iter().copied()),
-        TyKind::Function(function) => sum(
-            db,
-            function
-                .positional
-                .iter()
-                .copied()
-                .chain(
-                    function
-                        .named
-                        .iter()
-                        .flat_map(|parameter| parameter.types()),
-                )
-                .chain(function.variadic.iter().map(|rest| rest.element))
-                .chain(std::iter::once(function.ret)),
-        ),
-        _ => 1,
-    }
+    let mut total: u64 = 1;
+    for_each_child_type(db, ty, &mut |child| {
+        total = total
+            .saturating_add(type_size(db, child))
+            .min(TYPE_SIZE_CEILING);
+    });
+    total
 }
 
 /// Far above any type real code produces, far below what a self-referential value reaches.
@@ -286,17 +241,17 @@ pub fn map_child_types<'db>(
     ty: Ty<'db>,
     map: &mut impl FnMut(Ty<'db>) -> Ty<'db>,
 ) -> Ty<'db> {
-    match ty.kind(db).clone() {
+    match ty.kind(db) {
         TyKind::Any
         | TyKind::Unknown
         | TyKind::Null
         | TyKind::Scalar(_)
         | TyKind::Var(_)
         | TyKind::Rigid(_) => ty,
-        TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(map(inner))),
-        TyKind::NamedVector(inner) => Ty::new(db, TyKind::NamedVector(map(inner))),
-        TyKind::List(inner) => Ty::new(db, TyKind::List(map(inner))),
-        TyKind::NamedList(inner) => Ty::new(db, TyKind::NamedList(map(inner))),
+        TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(map(*inner))),
+        TyKind::NamedVector(inner) => Ty::new(db, TyKind::NamedVector(map(*inner))),
+        TyKind::List(inner) => Ty::new(db, TyKind::List(map(*inner))),
+        TyKind::NamedList(inner) => Ty::new(db, TyKind::NamedList(map(*inner))),
         TyKind::Tuple(items) => Ty::new(
             db,
             TyKind::Tuple(items.iter().map(|&item| map(item)).collect()),
@@ -338,7 +293,7 @@ pub fn map_child_types<'db>(
         TyKind::Named(name, arguments) => Ty::new(
             db,
             TyKind::Named(
-                name,
+                *name,
                 arguments.iter().map(|&argument| map(argument)).collect(),
             ),
         ),
@@ -394,9 +349,9 @@ pub fn contains_inference_var<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
 pub fn substitute_rigid<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
-    substitution: &rustc_hash::FxHashMap<Name<'db>, Ty<'db>>,
+    substitution: &FxHashMap<Name<'db>, Ty<'db>>,
 ) -> Ty<'db> {
-    substitute_rigid_memo(db, ty, substitution, &mut rustc_hash::FxHashMap::default())
+    substitute_rigid_memo(db, ty, substitution, &mut FxHashMap::default())
 }
 
 /// Memoized because interning makes types DAGs: unmemoized, shared subtrees are
@@ -404,29 +359,20 @@ pub fn substitute_rigid<'db>(
 fn substitute_rigid_memo<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
-    substitution: &rustc_hash::FxHashMap<Name<'db>, Ty<'db>>,
-    memo: &mut rustc_hash::FxHashMap<Ty<'db>, Ty<'db>>,
+    substitution: &FxHashMap<Name<'db>, Ty<'db>>,
+    memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
 ) -> Ty<'db> {
     if let Some(&done) = memo.get(&ty) {
         return done;
     }
-    let substituted = substitute_rigid_uncached(db, ty, substitution, memo);
+    let substituted = match ty.kind(db) {
+        TyKind::Rigid(name) => substitution.get(name).copied().unwrap_or(ty),
+        _ => map_child_types(db, ty, &mut |child| {
+            substitute_rigid_memo(db, child, substitution, memo)
+        }),
+    };
     memo.insert(ty, substituted);
     substituted
-}
-
-fn substitute_rigid_uncached<'db>(
-    db: &'db dyn Db,
-    ty: Ty<'db>,
-    substitution: &rustc_hash::FxHashMap<Name<'db>, Ty<'db>>,
-    memo: &mut rustc_hash::FxHashMap<Ty<'db>, Ty<'db>>,
-) -> Ty<'db> {
-    if let TyKind::Rigid(name) = ty.kind(db) {
-        return substitution.get(name).copied().unwrap_or(ty);
-    }
-    map_child_types(db, ty, &mut |child| {
-        substitute_rigid_memo(db, child, substitution, memo)
-    })
 }
 
 /// For values that must survive a table rollback, which reclaims and reuses
@@ -439,7 +385,7 @@ pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
 }
 
 #[cfg(test)]
-mod size_tests {
+mod tests {
     use super::*;
     use crate::RootDatabase;
 
@@ -468,12 +414,6 @@ mod size_tests {
         }
         assert_eq!(type_size(&db, ty), TYPE_SIZE_CEILING);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::RootDatabase;
 
     #[test]
     fn a_parameter_default_is_part_of_the_type() {

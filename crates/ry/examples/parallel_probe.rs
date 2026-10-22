@@ -2,8 +2,15 @@
 //! project-wide salsa queries. On throttled vCPUs check raw thread scaling (H) first.
 //! Usage: `WORKERS=4 cargo run --release -p ry-lang --example parallel_probe <package-dir>...`
 
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::diagnostics::file_diagnostics;
+use semantics::types::{Name, Ty, TyKind};
+use semantics::{
+    DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache, global_scheme,
+    interface_sccs, item_naming, item_tree, package_definitions,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -16,7 +23,7 @@ static BLOCKS: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone)]
 struct ProbeDatabase {
     storage: salsa::Storage<Self>,
-    splice_cache: std::sync::Arc<semantics::SpliceCache>,
+    splice_cache: Arc<SpliceCache>,
 }
 
 impl Default for ProbeDatabase {
@@ -31,7 +38,7 @@ impl Default for ProbeDatabase {
                 }
                 _ => {}
             }))),
-            splice_cache: std::sync::Arc::default(),
+            splice_cache: Arc::default(),
         }
     }
 }
@@ -41,118 +48,16 @@ impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
 impl semantics::Db for ProbeDatabase {
-    fn splice_cache(&self) -> &semantics::SpliceCache {
+    fn splice_cache(&self) -> &SpliceCache {
         &self.splice_cache
     }
-}
-
-fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
-    let mut sources = Vec::new();
-    let mut stack: Vec<PathBuf> = roots.to_vec();
-    while let Some(directory) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("r"))
-                && let Ok(bytes) = std::fs::read(&path)
-            {
-                sources.push((path, String::from_utf8_lossy(&bytes).into_owned()));
-            }
-        }
-    }
-    sources.sort();
-    sources
-}
-
-fn setup<D: semantics::Db + Default>(sources: &[(PathBuf, String)]) -> (D, Vec<SourceFile>) {
-    let db = D::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let files: Vec<SourceFile> = sources
-        .iter()
-        .map(|(_, source)| SourceFile::new(&db, source.clone(), DocumentKind::Package))
-        .collect();
-    ProjectFiles::new(&db, files.clone());
-    (db, files)
-}
-
-fn full_check<D: semantics::Db>(db: &D, files: &[SourceFile]) -> usize {
-    let mut findings = 0usize;
-    for &file in files {
-        findings += semantics::diagnostics::file_diagnostics(db, file).len();
-    }
-    findings
-}
-
-fn parallel_check<D: semantics::Db + Clone + Send>(
-    db: &D,
-    files: &[SourceFile],
-    workers: usize,
-    warm: bool,
-) -> usize {
-    let chunk = files.len().div_ceil(workers).max(1);
-    let total = std::sync::atomic::AtomicUsize::new(0);
-    if warm {
-        std::thread::scope(|scope| {
-            for chunk_files in files.chunks(chunk) {
-                let db = db.clone();
-                scope.spawn(move || {
-                    for &file in chunk_files {
-                        for &item in semantics::item_tree(&db, file) {
-                            let _ = semantics::item_naming(&db, item);
-                        }
-                    }
-                });
-            }
-        });
-    }
-    std::thread::scope(|scope| {
-        for chunk_files in files.chunks(chunk) {
-            let db = db.clone();
-            let total = &total;
-            scope.spawn(move || {
-                let mut findings = 0usize;
-                for &file in chunk_files {
-                    findings += semantics::diagnostics::file_diagnostics(&db, file).len();
-                }
-                total.fetch_add(findings, std::sync::atomic::Ordering::Relaxed);
-            });
-        }
-    });
-    total.into_inner()
-}
-
-/// (utime, stime) in clock ticks, counting /proc/self/stat fields after the
-/// parenthesized comm.
-fn cpu_ticks() -> (u64, u64) {
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
-    let after_comm = stat.rsplit(')').next().unwrap_or("");
-    let fields: Vec<&str> = after_comm.split_whitespace().collect();
-    let utime = fields
-        .get(11)
-        .and_then(|field| field.parse().ok())
-        .unwrap_or(0);
-    let stime = fields
-        .get(12)
-        .and_then(|field| field.parse().ok())
-        .unwrap_or(0);
-    (utime, stime)
 }
 
 fn main() {
     let roots: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
     assert!(!roots.is_empty(), "pass package directories");
     let sources = collect_sources(&roots);
-    let lines: usize = sources
-        .iter()
-        .map(|(_, source)| source.lines().count())
-        .sum();
+    let lines: usize = sources.iter().map(|source| source.lines().count()).sum();
     println!("{} files, {} lines", sources.len(), lines);
     let workers = std::env::var("WORKERS")
         .ok()
@@ -171,8 +76,7 @@ fn main() {
 
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
-    let project = semantics::ProjectFiles::try_get(&db).expect("project installed");
-    let sccs = semantics::interface_sccs(&db, project);
+    let sccs = interface_sccs(&db, ProjectFiles::get(&db));
     let interface = start.elapsed();
     let start = Instant::now();
     let findings = full_check(&db, &files);
@@ -185,7 +89,7 @@ fn main() {
 
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
-    let findings = parallel_check(&db, &files, workers, false);
+    let findings = parallel_check(&db, &files, workers);
     println!(
         "D parallel x{workers} (CLI shape): {:?} ({findings} findings)",
         start.elapsed()
@@ -193,7 +97,8 @@ fn main() {
 
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
-    let findings = parallel_check(&db, &files, workers, true);
+    warm_naming(&db, &files, workers);
+    let findings = parallel_check(&db, &files, workers);
     println!(
         "E parallel x{workers} + naming pre-warm: {:?} ({findings} findings)",
         start.elapsed()
@@ -201,27 +106,14 @@ fn main() {
 
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
-    let chunk = files.len().div_ceil(workers).max(1);
-    std::thread::scope(|scope| {
-        for chunk_files in files.chunks(chunk) {
-            let db = db.clone();
-            scope.spawn(move || {
-                for &file in chunk_files {
-                    for &item in semantics::item_tree(&db, file) {
-                        let _ = semantics::item_naming(&db, item);
-                    }
-                }
-            });
-        }
-    });
+    warm_naming(&db, &files, workers);
     println!("E1 parallel naming warm: {:?}", start.elapsed());
     let start = Instant::now();
-    let project = semantics::ProjectFiles::try_get(&db).expect("project installed");
-    let _ = semantics::interface_sccs(&db, project);
+    interface_sccs(&db, ProjectFiles::get(&db));
     println!("E2 interface_sccs after warm: {:?}", start.elapsed());
     let start = Instant::now();
     let cpu_before = cpu_ticks();
-    let findings = parallel_check(&db, &files, workers, false);
+    let findings = parallel_check(&db, &files, workers);
     let cpu_after = cpu_ticks();
     println!(
         "E3 parallel check after warm+interface: {:?} ({findings} findings, \
@@ -238,25 +130,12 @@ fn main() {
     );
 
     let (db, files) = setup::<ProbeDatabase>(&sources);
-    let chunk = files.len().div_ceil(workers).max(1);
-    std::thread::scope(|scope| {
-        for chunk_files in files.chunks(chunk) {
-            let db = db.clone();
-            scope.spawn(move || {
-                for &file in chunk_files {
-                    for &item in semantics::item_tree(&db, file) {
-                        let _ = semantics::item_naming(&db, item);
-                    }
-                }
-            });
-        }
-    });
-    let project = semantics::ProjectFiles::try_get(&db).expect("project installed");
-    let _ = semantics::interface_sccs(&db, project);
+    warm_naming(&db, &files, workers);
+    interface_sccs(&db, ProjectFiles::get(&db));
     let executes_before = EXECUTES.load(Ordering::Relaxed);
     let blocks_before = BLOCKS.load(Ordering::Relaxed);
     let start = Instant::now();
-    let findings = parallel_check(&db, &files, workers, false);
+    let findings = parallel_check(&db, &files, workers);
     println!(
         "F parallel check events: {:?} ({findings} findings, {} executes, {} blocks)",
         start.elapsed(),
@@ -268,26 +147,14 @@ fn main() {
     // path, not scheduling, is the ceiling.
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
-    let chunk = files.len().div_ceil(workers).max(1);
-    std::thread::scope(|scope| {
-        for chunk_files in files.chunks(chunk) {
-            let db = db.clone();
-            scope.spawn(move || {
-                for &file in chunk_files {
-                    for &item in semantics::item_tree(&db, file) {
-                        let _ = semantics::item_naming(&db, item);
-                    }
-                }
-            });
-        }
-    });
-    let project = semantics::ProjectFiles::try_get(&db).expect("project installed");
-    let sccs = semantics::interface_sccs(&db, project);
-    let winners = semantics::package_definitions(&db, project);
-    let mut nodes: Vec<semantics::Item> = Vec::new();
-    let mut position = std::collections::HashMap::new();
+    warm_naming(&db, &files, workers);
+    let project = ProjectFiles::get(&db);
+    let sccs = interface_sccs(&db, project);
+    let winners = package_definitions(&db, project);
+    let mut nodes: Vec<Item> = Vec::new();
+    let mut position = HashMap::new();
     for &file in &files {
-        for &item in semantics::item_tree(&db, file) {
+        for &item in item_tree(&db, file) {
             if item.name(&db).is_some() {
                 position.insert(item, nodes.len());
                 nodes.push(item);
@@ -296,7 +163,7 @@ fn main() {
     }
     let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (index, &item) in nodes.iter().enumerate() {
-        if let Some(naming) = semantics::item_naming(&db, item) {
+        if let Some(naming) = item_naming(&db, item) {
             for name in naming.non_locals.values() {
                 if let Some(target) = winners.get(name)
                     && let Some(&target_index) = position.get(target)
@@ -308,6 +175,10 @@ fn main() {
         }
     }
     // Cycle members all take their group's first member's level.
+    let same_group = |a: usize, b: usize| {
+        sccs.membership.contains_key(&nodes[a])
+            && sccs.membership.get(&nodes[a]) == sccs.membership.get(&nodes[b])
+    };
     let mut level: Vec<usize> = vec![0; nodes.len()];
     let mut changed = true;
     let mut rounds = 0usize;
@@ -315,15 +186,8 @@ fn main() {
         changed = false;
         rounds += 1;
         for index in 0..nodes.len() {
-            let same_group = |a: usize, b: usize| {
-                sccs.membership.contains_key(&nodes[a])
-                    && sccs.membership.get(&nodes[a]) == sccs.membership.get(&nodes[b])
-            };
             for &target in &edges[index] {
-                if same_group(index, target) {
-                    continue;
-                }
-                if level[index] <= level[target] {
+                if !same_group(index, target) && level[index] <= level[target] {
                     level[index] = level[target] + 1;
                     changed = true;
                 }
@@ -331,7 +195,7 @@ fn main() {
         }
     }
     let depth = level.iter().copied().max().unwrap_or(0) + 1;
-    let mut by_level: Vec<Vec<semantics::Item>> = vec![Vec::new(); depth];
+    let mut by_level: Vec<Vec<Item>> = vec![Vec::new(); depth];
     for (index, &item) in nodes.iter().enumerate() {
         by_level[level[index]].push(item);
     }
@@ -342,20 +206,12 @@ fn main() {
         &widths[..widths.len().min(12)]
     );
     for level_items in &by_level {
-        let chunk = level_items.len().div_ceil(workers).max(1);
-        std::thread::scope(|scope| {
-            for chunk_items in level_items.chunks(chunk) {
-                let db = db.clone();
-                scope.spawn(move || {
-                    for &item in chunk_items {
-                        let _ = semantics::global_scheme(&db, item);
-                    }
-                });
-            }
+        fan_out(&db, level_items, workers, |db, &item| {
+            global_scheme(db, item);
         });
     }
     let schemes_done = start.elapsed();
-    let findings = parallel_check(&db, &files, workers, false);
+    let findings = parallel_check(&db, &files, workers);
     println!(
         "G levelized schemes then fan-out: schemes {:?}, total {:?} ({findings} findings)",
         schemes_done,
@@ -378,16 +234,10 @@ fn main() {
                     scope.spawn(move || {
                         for i in 0..OPS / threads {
                             if distinct {
-                                let name = semantics::types::Name::new(
-                                    &db,
-                                    format!("t{thread}_{}", i % 4096),
-                                );
-                                let _ = semantics::types::Ty::new(
-                                    &db,
-                                    semantics::types::TyKind::Named(name, Vec::new()),
-                                );
+                                let name = Name::new(&db, format!("t{thread}_{}", i % 4096));
+                                Ty::new(&db, TyKind::Named(name, Vec::new()));
                             } else {
-                                let _ = semantics::types::unknown(&db);
+                                semantics::types::unknown(&db);
                             }
                         }
                     });
@@ -400,4 +250,103 @@ fn main() {
             );
         }
     }
+}
+
+fn collect_sources(roots: &[PathBuf]) -> Vec<String> {
+    let mut sources = Vec::new();
+    let mut stack: Vec<PathBuf> = roots.to_vec();
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("r"))
+                && let Ok(bytes) = std::fs::read(&path)
+            {
+                sources.push((path, String::from_utf8_lossy(&bytes).into_owned()));
+            }
+        }
+    }
+    sources.sort();
+    sources.into_iter().map(|(_, source)| source).collect()
+}
+
+fn setup<D: semantics::Db + Default>(sources: &[String]) -> (D, Vec<SourceFile>) {
+    let db = D::default();
+    semantics::stubs::install_shipped_stubs(&db);
+    let files: Vec<SourceFile> = sources
+        .iter()
+        .map(|source| SourceFile::new(&db, source.clone(), DocumentKind::Package))
+        .collect();
+    ProjectFiles::new(&db, files.clone());
+    (db, files)
+}
+
+fn full_check<D: semantics::Db>(db: &D, files: &[SourceFile]) -> usize {
+    files
+        .iter()
+        .map(|&file| file_diagnostics(db, file).len())
+        .sum()
+}
+
+/// Runs `work` over `items` split into one contiguous chunk per worker, each
+/// worker on its own database handle.
+fn fan_out<D, T, F>(db: &D, items: &[T], workers: usize, work: F)
+where
+    D: semantics::Db + Clone + Send,
+    T: Sync,
+    F: Fn(&D, &T) + Sync,
+{
+    let chunk = items.len().div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        for chunk_items in items.chunks(chunk) {
+            let db = db.clone();
+            let work = &work;
+            scope.spawn(move || {
+                for item in chunk_items {
+                    work(&db, item);
+                }
+            });
+        }
+    });
+}
+
+fn warm_naming<D: semantics::Db + Clone + Send>(db: &D, files: &[SourceFile], workers: usize) {
+    fan_out(db, files, workers, |db, &file| {
+        for &item in item_tree(db, file) {
+            item_naming(db, item);
+        }
+    });
+}
+
+fn parallel_check<D: semantics::Db + Clone + Send>(
+    db: &D,
+    files: &[SourceFile],
+    workers: usize,
+) -> usize {
+    let total = AtomicUsize::new(0);
+    fan_out(db, files, workers, |db, &file| {
+        total.fetch_add(file_diagnostics(db, file).len(), Ordering::Relaxed);
+    });
+    total.into_inner()
+}
+
+/// (utime, stime) in clock ticks, counting /proc/self/stat fields after the
+/// parenthesized comm.
+fn cpu_ticks() -> (u64, u64) {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let after_comm = stat.rsplit(')').next().unwrap_or("");
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    let field = |index: usize| {
+        fields
+            .get(index)
+            .and_then(|field| field.parse().ok())
+            .unwrap_or(0)
+    };
+    (field(11), field(12))
 }

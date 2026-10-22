@@ -16,22 +16,16 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
-    let experimental_features = cli::parse_experimental_flags(
-        &cli.experimental_features
-            .as_ref()
-            .map(|flags| {
-                flags
-                    .iter()
-                    .flat_map(|flag| flag.split(' '))
-                    .collect::<Vec<&str>>()
-            })
-            .unwrap_or_default(),
-    );
+    let experimental_features =
+        cli::parse_experimental_flags(cli.experimental_features.as_deref().unwrap_or_default());
 
     // Embedded R assumes it owns the thread it initializes on, so it must stay on `main`.
     let embedded_options = match &cli.command {
         Command::Repl { keybindings, file } => Some(repl::RunOptions {
-            keybindings: (*keybindings).into(),
+            keybindings: match keybindings {
+                ReplKeybindings::Emacs => repl::Keybindings::Emacs,
+                ReplKeybindings::Vi => repl::Keybindings::Vi,
+            },
             file: file.clone(),
             batch: false,
             completer: Some(Box::new(ry::repl_completer::AnalysisCompleter::new())),
@@ -73,7 +67,7 @@ fn main() -> ExitCode {
             debug,
         } => {
             let debug = debug || matches!(std::env::var("RY_DEBUG").as_deref(), Ok("1"));
-            cli::server(experimental_features, debug);
+            ry::server::run(experimental_features, debug);
             ExitCode::SUCCESS
         }
         Command::Debug(debug) => match debug {
@@ -207,15 +201,6 @@ enum Command {
 enum ReplKeybindings {
     Emacs,
     Vi,
-}
-
-impl From<ReplKeybindings> for repl::Keybindings {
-    fn from(keybindings: ReplKeybindings) -> repl::Keybindings {
-        match keybindings {
-            ReplKeybindings::Emacs => repl::Keybindings::Emacs,
-            ReplKeybindings::Vi => repl::Keybindings::Vi,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]

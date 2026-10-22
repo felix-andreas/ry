@@ -31,7 +31,7 @@ record still retypes, which is the contrast the report drew. The reference is up
 fixtures pin it.
 
 **A branch join involving a function slot invented a type belonging to neither path.**
-`join_writes_reporting` let a branch's scheme replace whatever preceded it, and a monotype replace a
+`join_writes` let a branch's scheme replace whatever preceded it, and a monotype replace a
 scheme, so a conditionally reassigned function kept one arm. `pick` exported
 `fn(shout: logical) -> fn(x: T) -> character`, taking the parameter from the identity branch and the
 return from the `paste0` branch, which is a signature neither function has. Both directions followed.

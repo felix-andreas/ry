@@ -1,6 +1,9 @@
 use crate::diagnostics::{Diagnostic, Severity};
-use crate::{Db, SourceFile, item_naming, item_spans, parse};
-use syntax::ast::AstNode;
+use crate::naming::BindingKind;
+use crate::stubs::{declaring_namespace, stubs};
+use crate::{Db, SourceFile, is_s3_method_name, item_naming, item_spans, parse, s3_generics};
+use rowan::{NodeOrToken, WalkEvent};
+use syntax::ast::{AstNode, BinaryExpr};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 /// `Default` keeps the lint's built-in severity, which is off for opt-in lints.
@@ -45,8 +48,8 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
     let mut diagnostics = Vec::new();
     let root = parse(db, file).syntax_node();
     syntax_lints(&root, config, &mut diagnostics);
-    if let Some(severity) = opt_in_severity(config.unused_parameter) {
-        let generics = crate::s3_generics(db, file);
+    if let Some(severity) = lint_severity(config.unused_parameter, None) {
+        let generics = s3_generics(db, file);
         for span in item_spans(db, file) {
             let Some(naming) = item_naming(db, span.item) else {
                 continue;
@@ -54,22 +57,18 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
             // An S3 method's formals must match its generic, and a generic only forwards its
             // formals to `UseMethod`, so unused formals in either are correct code.
             let exempt = span.item.name(db).as_deref().is_some_and(|name| {
-                crate::is_s3_method_name(db, name, &generics) || generics.contains(name)
+                is_s3_method_name(db, name, &generics) || generics.contains(name)
             });
             if exempt {
                 continue;
             }
             for unused in &naming.unused_parameters {
-                diagnostics.push(Diagnostic {
-                    range: TextRange::new(
-                        unused.range.start() + span.range.start(),
-                        unused.range.end() + span.range.start(),
-                    ),
-                    severity: severity.clone(),
-                    code: "unused-parameter",
-                    message: format!("parameter `{}` is never used.", unused.name),
-                    related: Vec::new(),
-                });
+                diagnostics.push(Diagnostic::new(
+                    unused.range + span.range.start(),
+                    severity,
+                    "unused-parameter",
+                    format!("parameter `{}` is never used.", unused.name),
+                ));
             }
         }
     }
@@ -85,12 +84,12 @@ fn shadow_lints(
     config: &LintConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let builtin_severity = opt_in_severity(config.shadows_builtin);
-    let namespace_severity = opt_in_severity(config.shadows_namespace);
+    let builtin_severity = lint_severity(config.shadows_builtin, None);
+    let namespace_severity = lint_severity(config.shadows_namespace, None);
     if builtin_severity.is_none() && namespace_severity.is_none() {
         return;
     }
-    let Some(library) = crate::stubs::stubs(db) else {
+    let Some(library) = stubs(db) else {
         return;
     };
     let is_builtin = |name: &str| {
@@ -104,36 +103,31 @@ fn shadow_lints(
             continue;
         };
         for binding in naming.bindings.values() {
-            if binding.kind != crate::naming::BindingKind::TopLevel {
+            if binding.kind != BindingKind::TopLevel {
                 continue;
             }
-            let range = TextRange::new(
-                binding.range.start() + span.range.start(),
-                binding.range.end() + span.range.start(),
-            );
+            let range = binding.range + span.range.start();
             if is_builtin(&binding.name) {
                 if let Some(severity) = &builtin_severity {
-                    diagnostics.push(Diagnostic {
+                    diagnostics.push(Diagnostic::new(
                         range,
-                        severity: severity.clone(),
-                        code: "shadows-builtin",
-                        message: format!("Top-level binding `{}` shadows a builtin.", binding.name),
-                        related: Vec::new(),
-                    });
+                        *severity,
+                        "shadows-builtin",
+                        format!("Top-level binding `{}` shadows a builtin.", binding.name),
+                    ));
                 }
             } else if let Some(severity) = &namespace_severity
-                && let Some(namespace) = crate::stubs::declaring_namespace(db, &binding.name)
+                && let Some(namespace) = declaring_namespace(db, &binding.name)
             {
-                diagnostics.push(Diagnostic {
+                diagnostics.push(Diagnostic::new(
                     range,
-                    severity: severity.clone(),
-                    code: "shadows-namespace",
-                    message: format!(
+                    *severity,
+                    "shadows-namespace",
+                    format!(
                         "Top-level binding `{}` shadows `{namespace}::{}`.",
                         binding.name, binding.name
                     ),
-                    related: Vec::new(),
-                });
+                ));
             }
         }
     }
@@ -144,58 +138,46 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
     let mut annotation_depth = 0usize;
     for event in root.preorder_with_tokens() {
         match event {
-            rowan::WalkEvent::Enter(element) => match element {
-                rowan::NodeOrToken::Node(node) => match node.kind() {
-                    SyntaxKind::ANNOTATION => annotation_depth += 1,
-                    SyntaxKind::BINARY_EXPR => {
-                        binary_lints(&node, config, diagnostics);
-                    }
-                    SyntaxKind::ARGUMENT_LIST => {
-                        let call = node
-                            .parent()
-                            .is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR);
-                        if call {
-                            trailing_comma_lint(&node, config, diagnostics);
-                        }
-                    }
-                    SyntaxKind::PARAMETER => {
-                        parameter_name_lint(&node, config, diagnostics);
-                    }
-                    _ => {}
-                },
-                rowan::NodeOrToken::Token(token) => {
-                    if token.kind() == SyntaxKind::IDENT && annotation_depth == 0 {
-                        let message = match token.text() {
-                            "T" => Some("Use TRUE, not T, for Boolean values"),
-                            "F" => Some("Use FALSE, not F, for Boolean values"),
-                            _ => None,
-                        };
-                        if let Some(message) = message {
-                            push_lint(
-                                diagnostics,
-                                config.boolean_shorthand,
-                                Severity::Warning,
-                                "boolean-shorthand",
-                                token.text_range(),
-                                message,
-                            );
-                        }
-                    }
-                }
-            },
-            rowan::WalkEvent::Leave(element) => {
-                if let rowan::NodeOrToken::Node(node) = element
-                    && node.kind() == SyntaxKind::ANNOTATION
+            WalkEvent::Enter(NodeOrToken::Node(node)) => match node.kind() {
+                SyntaxKind::ANNOTATION => annotation_depth += 1,
+                SyntaxKind::BINARY_EXPR => binary_lints(&node, config, diagnostics),
+                SyntaxKind::ARGUMENT_LIST
+                    if node
+                        .parent()
+                        .is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR) =>
                 {
-                    annotation_depth -= 1;
+                    trailing_comma_lint(&node, config, diagnostics);
                 }
+                SyntaxKind::PARAMETER => parameter_name_lint(&node, config, diagnostics),
+                _ => {}
+            },
+            WalkEvent::Enter(NodeOrToken::Token(token))
+                if token.kind() == SyntaxKind::IDENT && annotation_depth == 0 =>
+            {
+                let message = match token.text() {
+                    "T" => "Use TRUE, not T, for Boolean values",
+                    "F" => "Use FALSE, not F, for Boolean values",
+                    _ => continue,
+                };
+                push_lint(
+                    diagnostics,
+                    config.boolean_shorthand,
+                    Severity::Warning,
+                    "boolean-shorthand",
+                    token.text_range(),
+                    message,
+                );
             }
+            WalkEvent::Leave(NodeOrToken::Node(node)) if node.kind() == SyntaxKind::ANNOTATION => {
+                annotation_depth -= 1;
+            }
+            _ => {}
         }
     }
 }
 
 fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
-    let Some(binary) = syntax::ast::BinaryExpr::cast(node.clone()) else {
+    let Some(binary) = BinaryExpr::cast(node.clone()) else {
         return;
     };
     let Some(operator) = binary.operator() else {
@@ -221,13 +203,22 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
     {
         let name = target.text().to_string();
         if let Some(message) = naming_style_message(&name, style, "Variable") {
-            diagnostics.push(Diagnostic {
-                range: expression_range(&target),
-                severity: Severity::Warning,
-                code: "naming-style",
+            // Excludes the trailing trivia (a comment or newline) some expression nodes swallow.
+            let start = target.text_range().start();
+            let mut end = target.text_range().end();
+            let mut token = target.last_token();
+            while let Some(trivia) = token.filter(|token| token.kind().is_trivia()) {
+                end = trivia.text_range().start();
+                token = trivia
+                    .prev_token()
+                    .filter(|previous| previous.text_range().start() >= start);
+            }
+            diagnostics.push(Diagnostic::new(
+                TextRange::new(start, end),
+                Severity::Warning,
+                "naming-style",
                 message,
-                related: Vec::new(),
-            });
+            ));
         }
     }
 }
@@ -240,10 +231,10 @@ fn trailing_comma_lint(
     let mut last_comma = None;
     for element in argument_list.children_with_tokens() {
         match element {
-            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => {
                 last_comma = Some(token.text_range());
             }
-            rowan::NodeOrToken::Node(node) if node.kind() == SyntaxKind::ARGUMENT => {
+            NodeOrToken::Node(node) if node.kind() == SyntaxKind::ARGUMENT => {
                 last_comma = None;
             }
             _ => {}
@@ -277,13 +268,12 @@ fn parameter_name_lint(
         return;
     };
     if let Some(message) = naming_style_message(name_token.text(), style, "Parameter") {
-        diagnostics.push(Diagnostic {
-            range: name_token.text_range(),
-            severity: Severity::Warning,
-            code: "naming-style",
+        diagnostics.push(Diagnostic::new(
+            name_token.text_range(),
+            Severity::Warning,
+            "naming-style",
             message,
-            related: Vec::new(),
-        });
+        ));
     }
 }
 
@@ -321,45 +311,19 @@ fn push_lint(
     range: TextRange,
     message: impl Into<String>,
 ) {
-    let severity = match level {
-        LintLevel::Off => return,
-        LintLevel::Default => default_severity,
-        LintLevel::Warn => Severity::Warning,
-        LintLevel::Error => Severity::Error,
-    };
-    diagnostics.push(Diagnostic {
-        range,
-        severity,
-        code,
-        message: message.into(),
-        related: Vec::new(),
-    });
+    if let Some(severity) = lint_severity(level, Some(default_severity)) {
+        diagnostics.push(Diagnostic::new(range, severity, code, message.into()));
+    }
 }
 
-/// `Default` behaves as `Off` for an opt-in lint.
-fn opt_in_severity(level: LintLevel) -> Option<Severity> {
+/// An opt-in lint has no default severity, so `Default` leaves it off.
+pub fn lint_severity(level: LintLevel, default: Option<Severity>) -> Option<Severity> {
     match level {
-        LintLevel::Default | LintLevel::Off => None,
+        LintLevel::Default => default,
+        LintLevel::Off => None,
         LintLevel::Warn => Some(Severity::Warning),
         LintLevel::Error => Some(Severity::Error),
     }
-}
-
-/// Excludes the trailing trivia (a comment or newline) some expression nodes swallow.
-fn expression_range(node: &SyntaxNode) -> TextRange {
-    let mut end = node.text_range().end();
-    let mut token = node.last_token();
-    while let Some(current) = token {
-        if current.kind().is_trivia() {
-            end = current.text_range().start();
-            token = current
-                .prev_token()
-                .filter(|previous| previous.text_range().start() >= node.text_range().start());
-        } else {
-            break;
-        }
-    }
-    TextRange::new(node.text_range().start(), end)
 }
 
 fn to_camel_case(name: &str) -> String {

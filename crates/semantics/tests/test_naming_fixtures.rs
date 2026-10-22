@@ -2,12 +2,13 @@
 //! while still producing the same type.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::hir::{ExprId, Module};
+use semantics::hir::{ExprId, ExpressionKind, Module};
 use semantics::naming::{BindingKind, ItemNaming};
 use semantics::testing::with_fixture_project;
-use semantics::{DocumentKind, ItemKind, item_hir, item_naming, item_tree};
-use std::fmt::Write as _;
+use semantics::{DocumentKind, item_hir, item_naming, item_tree};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+use syntax::TextRange;
 
 #[test]
 fn naming_fixtures() {
@@ -19,11 +20,9 @@ fn render(source: &str) -> String {
     with_fixture_project(
         vec![(source.to_owned(), DocumentKind::Package)],
         |db, files| {
-            let [file] = files else {
+            let &[file] = files else {
                 panic!("a fixture case is one file");
             };
-            let file = *file;
-
             let mut output = String::new();
             for &item in item_tree(db, file) {
                 let (Some(naming), Some(module)) =
@@ -33,9 +32,9 @@ fn render(source: &str) -> String {
                 };
                 let header = match item.name(db).clone() {
                     Some(name) => name,
-                    None => format!("<{}>", item_kind(*item.kind(db))),
+                    None => format!("<{:?}>", item.kind(db)).to_lowercase(),
                 };
-                let _ = writeln!(output, "# {header}");
+                output.push_str(&format!("# {header}\n"));
                 render_item(&mut output, naming, module);
             }
             output
@@ -44,15 +43,14 @@ fn render(source: &str) -> String {
 }
 
 fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
-    for binding in naming.bindings.values() {
-        let _ = writeln!(
-            output,
-            "  b{} {} {} {}",
-            binding.id.0,
+    for (id, binding) in &naming.bindings {
+        output.push_str(&format!(
+            "  b{} {} {} {}\n",
+            id.0,
             binding.name,
             binding_kind(binding.kind),
             span(binding.range),
-        );
+        ));
     }
 
     // Writes and reads must render differently: two `-> b0` lines would not say which is which.
@@ -113,57 +111,59 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     }
     reads.sort();
     for (_, line) in reads {
-        let _ = writeln!(output, "{line}");
+        output.push_str(&format!("{line}\n"));
     }
 
     render_set(output, "operator reads", naming.quiet_operator_reads.iter());
     render_set(output, "super-globals", naming.super_globals.iter());
     render_set(output, "used top-level", naming.used_top_level_names.iter());
     for unused in &naming.unused_assignments {
-        let _ = writeln!(output, "  unused {} {}", unused.name, span(unused.range));
-    }
-    for unused in &naming.unused_parameters {
-        let _ = writeln!(
-            output,
-            "  unused-parameter {} {}",
+        output.push_str(&format!(
+            "  unused {} {}\n",
             unused.name,
             span(unused.range)
-        );
+        ));
+    }
+    for unused in &naming.unused_parameters {
+        output.push_str(&format!(
+            "  unused-parameter {} {}\n",
+            unused.name,
+            span(unused.range)
+        ));
     }
     for target in &naming.invalid_assignment_targets {
-        let _ = writeln!(output, "  invalid-target {}", span(target.range));
+        output.push_str(&format!("  invalid-target {}\n", span(target.range)));
     }
     for &expression in &naming.masked_subsets {
-        let _ = writeln!(
-            output,
-            "  masked-subset {}",
+        output.push_str(&format!(
+            "  masked-subset {}\n",
             span(module.expression(expression).range)
-        );
+        ));
     }
 }
 
 fn render_set<'a>(output: &mut String, label: &str, values: impl Iterator<Item = &'a String>) {
     let joined: Vec<&str> = values.map(String::as_str).collect();
     if !joined.is_empty() {
-        let _ = writeln!(output, "  {label}: {}", joined.join(", "));
+        output.push_str(&format!("  {label}: {}\n", joined.join(", ")));
     }
 }
 
-fn assignment_targets(module: &Module) -> std::collections::BTreeSet<ExprId> {
-    use semantics::hir::ExpressionKind;
-    let mut targets = std::collections::BTreeSet::new();
-    for expression in &module.expressions {
-        if let ExpressionKind::Assign { target, .. } = &expression.kind {
-            targets.insert(*target);
-        }
-    }
-    targets
+fn assignment_targets(module: &Module) -> BTreeSet<ExprId> {
+    module
+        .expressions
+        .iter()
+        .filter_map(|expression| match expression.kind {
+            ExpressionKind::Assign { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A quoted target (`"x" <- 1`) lowers to a string literal, so it renders as its kind.
 fn name_at(module: &Module, expression: ExprId) -> String {
     match &module.expression(expression).kind {
-        semantics::hir::ExpressionKind::NameRef(name) => name.clone(),
+        ExpressionKind::NameRef(name) => name.clone(),
         other => format!("{other:?}")
             .split(['(', ' '])
             .next()
@@ -176,7 +176,7 @@ fn start_of(module: &Module, expression: ExprId) -> u32 {
     module.expression(expression).range.start().into()
 }
 
-fn span(range: syntax::TextRange) -> String {
+fn span(range: TextRange) -> String {
     format!("{}..{}", u32::from(range.start()), u32::from(range.end()))
 }
 
@@ -186,13 +186,5 @@ fn binding_kind(kind: BindingKind) -> &'static str {
         BindingKind::Local => "local",
         BindingKind::Parameter => "parameter",
         BindingKind::ForVariable => "for-variable",
-    }
-}
-
-fn item_kind(kind: ItemKind) -> &'static str {
-    match kind {
-        ItemKind::Function => "function",
-        ItemKind::Value => "value",
-        ItemKind::Statement => "statement",
     }
 }
