@@ -1,14 +1,12 @@
 //! `ry debug analysis-stats`: where time and memory go across a workspace,
 //! measured through the same queries the language server uses.
 
-use crate::cli::CommandError;
+use crate::cli::{self, CommandError};
 use crate::config::Config;
 use crate::diagnostics::document_diagnostics;
-
 use semantics::check::CHECK_EXECUTIONS;
 use semantics::infer::RESOLVE_CALLS;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -19,28 +17,26 @@ const TYPING_BURST: usize = 10;
 pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     let target = target.unwrap_or(Path::new("."));
     let mut config = Config::discover(target).map_err(|error| {
-        crate::cli::report(&error);
+        cli::report(&error);
         CommandError
     })?;
-    crate::cli::warn_unknown_config_keys(&config);
+    cli::warn_unknown_config_keys(&config);
     let target = std::fs::canonicalize(target).map_err(|error| {
-        crate::cli::error(&format!("failed to resolve {}: {error}", target.display()));
+        cli::error(&format!("failed to resolve {}: {error}", target.display()));
         CommandError
     })?;
-    let root = crate::cli::analysis_root_for_target(&target);
+    let root = cli::analysis_root_for_target(&target);
 
     let typing_was_off = !config.check.typing;
     config.check.typing = true;
 
     let mut stub_sources = semantics::stubs::shipped_stub_sources();
-    match crate::cli::discover_project_stubs(&root) {
+    match cli::read_project_stubs(&root) {
         Ok(project_stubs) => {
-            for stub in project_stubs {
-                stub_sources.push((stub.stem, stub.text));
-            }
+            stub_sources.extend(project_stubs.into_iter().map(|stub| (stub.stem, stub.text)));
         }
         Err((path, error)) => {
-            crate::cli::warn(&format!(
+            cli::warn(&format!(
                 "failed to read override stub {}: {error}",
                 path.display()
             ));
@@ -55,46 +51,18 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         .as_deref()
         .map(semantics::metadata::parse_description_collate)
         .unwrap_or_default();
-    let collate_rank: HashMap<&str, usize> = collate
-        .iter()
-        .enumerate()
-        .map(|(rank, name)| (name.as_str(), rank))
-        .collect();
 
     // File order and the `[check] exclude` scope must match the CLI and server.
-    let exclude = crate::cli::exclude_matcher(&config, &target)?;
-    let r_path = root.join("R");
-    let mut entries: Vec<(bool, bool, usize, String, PathBuf)> = Vec::new();
-    for path in crate::cli::collect_r_files(&target, exclude.as_ref())? {
-        // Sorting and namespace sharing differ: package files sort first by `R/`
-        // membership, but `tests/testthat/` also shares the namespace.
-        let sorts_first = path.starts_with(&r_path);
-        let is_package = crate::cli::shares_a_namespace(&path, &root);
-        let rank = path
-            .file_name()
-            .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
-            .copied()
-            .unwrap_or(usize::MAX);
-        let key = path
-            .strip_prefix(&root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        entries.push((sorts_first, is_package, rank, key, path));
-    }
-    entries.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.2.cmp(&right.2))
-            .then_with(|| left.3.cmp(&right.3))
-    });
-    if entries.is_empty() {
-        crate::cli::error(&format!("no R files under {}", target.display()));
+    let exclude = cli::exclude_matcher(&config, &target)?;
+    let mut paths = cli::collect_r_files(&target, exclude.as_ref())?;
+    let order = cli::project_order(&root, &collate);
+    paths.sort_by_cached_key(|path| order(path));
+    if paths.is_empty() {
+        cli::error(&format!("no R files under {}", target.display()));
         return Err(CommandError);
     }
 
-    let rss_baseline = resident_set_bytes();
+    let rss_baseline = proc_status_field("VmRSS:");
     let mut db = RootDatabase::default();
     semantics::stubs::StubSources::new(
         &db,
@@ -111,18 +79,19 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         std::collections::BTreeSet::new(),
         None,
     );
-    let mut records: Vec<FileRecord> = Vec::with_capacity(entries.len());
+    let mut records: Vec<FileRecord> = Vec::with_capacity(paths.len());
     let mut package_count = 0usize;
     let mut load_total = Duration::ZERO;
-    for (_, is_package, _, _, path) in entries {
+    for path in paths {
         let source = match std::fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
-                crate::cli::warn(&format!("failed to read {}: {error}", path.display()));
+                cli::warn(&format!("failed to read {}: {error}", path.display()));
                 continue;
             }
         };
         let loc = source.lines().count();
+        let is_package = cli::shares_a_namespace(&path, &root);
         let kind = if is_package {
             DocumentKind::Package
         } else {
@@ -141,7 +110,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         });
     }
     ProjectFiles::new(&db, records.iter().map(|record| record.file).collect());
-    let rss_after_load = resident_set_bytes();
+    let rss_after_load = proc_status_field("VmRSS:");
 
     // Memoization makes each stage's wall time its own marginal cost; package-wide
     // folds run inside the first stage that needs them, as in an editor.
@@ -152,7 +121,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         let _ = semantics::parse(&db, record.file);
         parse_total += start.elapsed();
     }
-    let rss_after_parse = resident_set_bytes();
+    let rss_after_parse = proc_status_field("VmRSS:");
     // Must land before naming so conditional stub namespaces resolve as the real
     // hosts see them.
     let attached =
@@ -172,7 +141,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         }
         lower_total += start.elapsed();
     }
-    let rss_after_lower = resident_set_bytes();
+    let rss_after_lower = proc_status_field("VmRSS:");
     let mut typecheck_total = Duration::ZERO;
     for record in &mut records {
         let start = Instant::now();
@@ -182,7 +151,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         record.typecheck = start.elapsed();
         typecheck_total += record.typecheck;
     }
-    let rss_after_typecheck = resident_set_bytes();
+    let rss_after_typecheck = proc_status_field("VmRSS:");
     let mut semantic_render_total = Duration::ZERO;
     for record in &records {
         let start = Instant::now();
@@ -203,7 +172,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         assemble_total += start.elapsed();
     }
     let render_total = semantic_render_total + lint_total + assemble_total;
-    let rss_after_render = resident_set_bytes();
+    let rss_after_render = proc_status_field("VmRSS:");
     let cold_total = load_total + parse_total + lower_total + typecheck_total + render_total;
 
     println!("workspace: {}", root.display());
@@ -219,57 +188,55 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     }
     println!();
     println!("cold analysis (one full pass, phase marginal cost, resident-set growth):");
-    let phase = |name: &str, duration: Duration, memory: Option<(u64, u64)>| {
-        let memory = match memory {
-            Some((before, after)) => {
-                format!("  {:>+9.1} MiB", (after as f64 - before as f64) / MEBIBYTE)
-            }
-            None => String::new(),
-        };
+    let growth = |before: Option<u64>, after: Option<u64>| match (before, after) {
+        (Some(before), Some(after)) => {
+            format!("  {:>+9.1} MiB", (after as f64 - before as f64) / MEBIBYTE)
+        }
+        _ => String::new(),
+    };
+    let phase = |name: &str, duration: Duration, memory: String| {
         println!(
             "  {name:<26} {:>10.1} ms  ({:>4.1}%){memory}",
             duration.as_secs_f64() * 1e3,
             duration.as_secs_f64() / cold_total.as_secs_f64().max(f64::EPSILON) * 100.0,
         );
     };
-    let delta = |before: Option<u64>, after: Option<u64>| Some((before?, after?));
     phase(
         "load (read + inputs)",
         load_total,
-        delta(rss_baseline, rss_after_load),
+        growth(rss_baseline, rss_after_load),
     );
-    phase("parse", parse_total, delta(rss_after_load, rss_after_parse));
+    phase(
+        "parse",
+        parse_total,
+        growth(rss_after_load, rss_after_parse),
+    );
     phase(
         "lower + naming",
         lower_total,
-        delta(rss_after_parse, rss_after_lower),
+        growth(rss_after_parse, rss_after_lower),
     );
     phase(
         "typecheck (+interfaces)",
         typecheck_total,
-        delta(rss_after_lower, rss_after_typecheck),
+        growth(rss_after_lower, rss_after_typecheck),
     );
     phase(
         "diagnostics (render +lint)",
         render_total,
-        delta(rss_after_typecheck, rss_after_render),
+        growth(rss_after_typecheck, rss_after_render),
     );
-    phase("  semantic render", semantic_render_total, None);
-    phase("  lints", lint_total, None);
-    phase("  assembly (gate + sort)", assemble_total, None);
-    let total_memory = match delta(rss_baseline, rss_after_render) {
-        Some((before, after)) => {
-            format!("  {:>+9.1} MiB", (after as f64 - before as f64) / MEBIBYTE)
-        }
-        None => String::new(),
-    };
+    phase("  semantic render", semantic_render_total, String::new());
+    phase("  lints", lint_total, String::new());
+    phase("  assembly (gate + sort)", assemble_total, String::new());
+    let total_memory = growth(rss_baseline, rss_after_render);
     println!(
         "  {:<26} {:>10.1} ms        {total_memory}   ({} diagnostics)",
         "total",
         cold_total.as_secs_f64() * 1e3,
         diagnostic_count,
     );
-    if let Some(peak) = peak_resident_set_bytes() {
+    if let Some(peak) = proc_status_field("VmHWM:") {
         println!(
             "  peak resident set          {:>10.1} MiB",
             peak as f64 / MEBIBYTE
@@ -410,16 +377,8 @@ struct FileRecord {
 
 const MEBIBYTE: f64 = 1024.0 * 1024.0;
 
-// Includes allocator-held freed pages, so a phase with heavy transient
-// allocation reads slightly high.
-fn resident_set_bytes() -> Option<u64> {
-    proc_status_field("VmRSS:")
-}
-
-fn peak_resident_set_bytes() -> Option<u64> {
-    proc_status_field("VmHWM:")
-}
-
+/// In bytes. The resident set includes allocator-held freed pages, so a phase with
+/// heavy transient allocation reads slightly high.
 fn proc_status_field(field: &str) -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|line| line.starts_with(field))?;

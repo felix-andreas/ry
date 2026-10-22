@@ -3,10 +3,11 @@
 //! Usage: `cargo run --release -p ry-lang --example keystroke_probe <package-dir>...`
 
 use salsa::Setter as _;
-use semantics::{DocumentKind, ProjectFiles, SourceFile};
+use semantics::diagnostics::file_diagnostics;
+use semantics::{DocumentKind, ProjectFiles, SourceFile, SpliceCache};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
@@ -22,7 +23,7 @@ const WALKS: &[&str] = &[
 #[derive(Clone)]
 struct ProbeDatabase {
     storage: salsa::Storage<Self>,
-    splice_cache: std::sync::Arc<semantics::SpliceCache>,
+    splice_cache: Arc<SpliceCache>,
 }
 
 impl Default for ProbeDatabase {
@@ -40,7 +41,7 @@ impl Default for ProbeDatabase {
                     }
                 }
             }))),
-            splice_cache: std::sync::Arc::default(),
+            splice_cache: Arc::default(),
         }
     }
 }
@@ -50,57 +51,9 @@ impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
 impl semantics::Db for ProbeDatabase {
-    fn splice_cache(&self) -> &semantics::SpliceCache {
+    fn splice_cache(&self) -> &SpliceCache {
         &self.splice_cache
     }
-}
-
-fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
-    let mut sources = Vec::new();
-    let mut stack: Vec<PathBuf> = roots.to_vec();
-    while let Some(directory) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("r"))
-                && let Ok(bytes) = std::fs::read(&path)
-            {
-                sources.push((path, String::from_utf8_lossy(&bytes).into_owned()));
-            }
-        }
-    }
-    sources.sort();
-    sources
-}
-
-/// A literal to lengthen so ranges shift inside one item without any name changing.
-fn body_literal_offset(source: &str) -> Option<usize> {
-    let function = source.find("function")?;
-    let relative = source[function..].find('1')?;
-    Some(function + relative)
-}
-
-fn drain_walks() -> Vec<String> {
-    std::mem::take(&mut *WALK_EXECUTES.lock().expect("probe lock"))
-}
-
-fn timed_demand(db: &ProbeDatabase, file: SourceFile) -> (std::time::Duration, usize, Vec<String>) {
-    EXECUTES.store(0, Ordering::Relaxed);
-    drain_walks();
-    let start = Instant::now();
-    let _ = semantics::diagnostics::file_diagnostics(db, file);
-    (
-        start.elapsed(),
-        EXECUTES.load(Ordering::Relaxed),
-        drain_walks(),
-    )
 }
 
 fn main() {
@@ -122,17 +75,16 @@ fn main() {
     ProjectFiles::new(&db, files.clone());
 
     let start = Instant::now();
-    let mut findings = 0usize;
-    for &file in &files {
-        findings += semantics::diagnostics::file_diagnostics(&db, file).len();
-    }
+    let findings: usize = files
+        .iter()
+        .map(|&file| file_diagnostics(&db, file).len())
+        .sum();
     println!("cold prime: {:?} ({findings} findings)", start.elapsed());
 
     let mut by_size: Vec<usize> = (0..sources.len()).collect();
     by_size.sort_by_key(|&index| std::cmp::Reverse(sources[index].1.len()));
     let editable: Vec<usize> = by_size
-        .iter()
-        .copied()
+        .into_iter()
         .filter(|&index| body_literal_offset(&sources[index].1).is_some())
         .collect();
     let picks: Vec<usize> = [0, editable.len() / 2]
@@ -145,61 +97,76 @@ fn main() {
         let (path, original) = &sources[index];
         let file = files[index];
         let offset = body_literal_offset(original).expect("picked for a literal");
-
-        let mut times = Vec::new();
-        let mut executes = Vec::new();
-        let mut walks: Vec<String> = Vec::new();
-        for edit in 0..EDITS {
-            let text = if edit % 2 == 0 {
-                format!("{}11{}", &original[..offset], &original[offset + 1..])
-            } else {
-                original.clone()
-            };
-            file.set_text(&mut db).to(text);
-            let (elapsed, count, walk) = timed_demand(&db, file);
-            times.push(elapsed);
-            executes.push(count);
-            walks.extend(walk);
+        let edits = [
+            (
+                "body edit",
+                format!("{}11{}", &original[..offset], &original[offset + 1..]),
+            ),
+            ("new item ", format!("{original}\nprobe_binding <- 0L\n")),
+        ];
+        for (label, edited) in edits {
+            let mut times = Vec::new();
+            let mut executes = Vec::new();
+            let mut walks: Vec<String> = Vec::new();
+            for edit in 0..EDITS {
+                let text = if edit % 2 == 0 { &edited } else { original };
+                file.set_text(&mut db).to(text.clone());
+                EXECUTES.store(0, Ordering::Relaxed);
+                drain_walks();
+                let start = Instant::now();
+                file_diagnostics(&db, file);
+                times.push(start.elapsed());
+                executes.push(EXECUTES.load(Ordering::Relaxed));
+                walks.extend(drain_walks());
+            }
+            times.sort();
+            executes.sort();
+            println!(
+                "{label} {:>50}: median {:?} / worst {:?}, {}..{} queries, walks: {:?}",
+                path.display(),
+                times[times.len() / 2],
+                times[times.len() - 1],
+                executes[0],
+                executes[executes.len() - 1],
+                walks
+            );
         }
-        times.sort();
-        executes.sort();
-        println!(
-            "body edit {:>50}: median {:?} / worst {:?}, {}..{} queries, walks: {:?}",
-            path.display(),
-            times[times.len() / 2],
-            times[times.len() - 1],
-            executes[0],
-            executes[executes.len() - 1],
-            walks
-        );
-
-        let mut times = Vec::new();
-        let mut executes = Vec::new();
-        let mut walks: Vec<String> = Vec::new();
-        for edit in 0..EDITS {
-            let text = if edit % 2 == 0 {
-                format!("{original}\nprobe_binding <- 0L\n")
-            } else {
-                original.clone()
-            };
-            file.set_text(&mut db).to(text);
-            let (elapsed, count, walk) = timed_demand(&db, file);
-            times.push(elapsed);
-            executes.push(count);
-            walks.extend(walk);
-        }
-        times.sort();
-        executes.sort();
-        println!(
-            "new item  {:>50}: median {:?} / worst {:?}, {}..{} queries, walks: {:?}",
-            path.display(),
-            times[times.len() / 2],
-            times[times.len() - 1],
-            executes[0],
-            executes[executes.len() - 1],
-            walks
-        );
         file.set_text(&mut db).to(original.clone());
-        let _ = semantics::diagnostics::file_diagnostics(&db, file);
+        file_diagnostics(&db, file);
     }
+}
+
+fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    let mut sources = Vec::new();
+    let mut stack: Vec<PathBuf> = roots.to_vec();
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("r"))
+                && let Ok(bytes) = std::fs::read(&path)
+            {
+                sources.push((path, String::from_utf8_lossy(&bytes).into_owned()));
+            }
+        }
+    }
+    sources.sort();
+    sources
+}
+
+/// A literal to lengthen so ranges shift inside one item without any name changing.
+fn body_literal_offset(source: &str) -> Option<usize> {
+    let function = source.find("function")?;
+    let relative = source[function..].find('1')?;
+    Some(function + relative)
+}
+
+fn drain_walks() -> Vec<String> {
+    std::mem::take(&mut *WALK_EXECUTES.lock().expect("probe lock"))
 }

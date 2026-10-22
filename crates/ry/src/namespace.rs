@@ -2,7 +2,7 @@
 
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::{LintLevel, lint_severity};
-pub use semantics::metadata::{NamespaceImport, parse_namespace_imports};
+use semantics::metadata::NamespaceImport;
 use std::collections::BTreeSet;
 use syntax::{SyntaxKind, TextRange};
 
@@ -110,6 +110,7 @@ pub fn collect_used_tokens(source: &str, out: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use semantics::metadata::parse_namespace_imports;
 
     fn stub_backed<'db>(
         db: &'db semantics::RootDatabase,
