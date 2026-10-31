@@ -2366,7 +2366,7 @@ fn loess_jumps(y: &[f64], span: usize, degree: i32, jump: usize, robust: bool, w
     let mut fitted = vec![0.0; n];
     let step = jump.min(n - 1);
     let (mut left, mut right) = (1usize, n);
-    let mut fit_at = |i: usize, left: usize, right: usize, fitted: &mut [f64]| {
+    let fit_at = |i: usize, left: usize, right: usize, fitted: &mut [f64]| {
         fitted[i - 1] = loess_estimate(y, span, degree, i as f64, left, right, robust, weights).unwrap_or(y[i - 1]);
     };
     if span >= n {
