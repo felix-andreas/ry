@@ -12,6 +12,10 @@ ry repl            # interactive console
 ry run script.R    # run a script through the same R, then exit
 ```
 
+You can type [inline annotations](/type-checking/inline-annotations) at the console. R runs each
+command with them erased, and ry prints a warning when an inline annotation and a `#:` comment
+disagree. In [strict mode](/type-checking/strict-mode), a command with an error does not run.
+
 Started inside an R package, `ry repl` also loads that package and reloads what you change, as
 [Loading packages](/guides/loading-packages) describes. These commands and `ry load` are the only
 ones that need R. Everything else in ry reads the source and never runs it. The [command

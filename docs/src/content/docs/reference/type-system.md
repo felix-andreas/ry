@@ -183,7 +183,56 @@ apply_discount <- function(price: integer, rate) price * (1 - rate)
 also run under R. An annotation that is off types nothing, and each one is reported once as an
 `inline-annotation` warning, because R cannot run that code. ry also warns once per run, and the
 language server once per load, for as long as the setting stays off. A `#:` block on the same
-statement then applies alone.
+statement then applies alone. The setting also governs running code: `ry run` and `ry repl` still
+erase the annotations, but ry's runtime registers no checks for them.
+
+### Inline annotations at run time
+
+`ry run` and `ry repl` run annotated code on both runtimes. GNU R reads the erasure. ry's runtime
+reads the annotations themselves and checks a function's parameter and return types at its
+boundary, so a function called with the wrong kind of value fails where it was called instead of
+somewhere inside it:
+
+```r
+scale <- function(values: double, by: double) -> double values * by
+scale("a", 1)
+```
+
+```text
+Error in scale("a", 1) :
+  argument `values` must be `double`, not `character`
+```
+
+A check never changes what code that satisfies its annotations does, which the oracle pins by
+comparing annotated cases on ry's runtime against GNU R running their erasure. The checks follow
+these rules:
+
+- **Parameters are checked when their value is computed.** An argument stays a promise and is
+  checked when it is forced, so laziness, `missing()`, and `substitute()` behave as in R, and an
+  argument that is never used is never checked. An argument that is already a value, such as a
+  constant, is checked when the function is entered.
+- **Every `...` argument is checked against the rest parameter's type**, under the same rule.
+- **The return value is checked when the function returns**, including through `return()`, and
+  before `on.exit` code runs.
+- **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
+  run time.
+- **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
+  `character`, `raw`, and `NULL` admit values of that type, and each numeric type also admits the
+  types below it in the promotion order, as the checker does. A list type admits any list, a
+  function type any function, and a union any of its members. Vector shape, element types, and
+  attributes are not checked, and a type the storage type cannot decide (an alias, a class, a type
+  parameter, `Any`, `data.frame`) is not checked at all. A check therefore fails only on a value that really does not
+  have the annotated type.
+- **A function with no parameters whose body is a constant or a bare name is not checked**, because
+  it has no language object to carry its signature.
+
+A failed check is an ordinary R error, so `tryCatch()` and `try()` handle it.
+
+Before running anything, `ry run` checks the script and `ry repl` checks each command, with the
+project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In
+[strict mode](/type-checking/strict-mode) they also print every error and refuse to run code that
+has one: `ry run` exits with status 1, and the console drops the command. Other findings are left
+to `ry check`, so they never change whether R code runs.
 
 ## Types
 

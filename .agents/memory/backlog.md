@@ -1768,6 +1768,15 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
 
+- **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
+  A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
+  because the pending check is dropped at exit. A function without parameters whose body is a
+  constant or a symbol is not checked. The `ry run` preflight analyzes the
+  script alone, so in strict mode `ry run R/b.R` inside a package refuses a name another package
+  file defines, which `ry check` accepts.
+- **`ry repl --runtime ry` starts bare**: no `tools:ry` environment, no `.Call` routines and no
+  package autoload, because the loader's R code targets the GNU R backend.
+
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).
@@ -1847,6 +1856,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
+- **Inline annotations at run time.** Boundary checks on ry's runtime, erasure for GNU R, and the `ry run`/`ry repl` preflight for the annotation warnings and strict mode. `decisions.md` has the record.
 - **Inline type annotations, the comment-agreement warning, and strict mode's untyped parameters.** `name: TYPE <- value`, typed parameters, `-> TYPE` and `function<T>`, sharing the `#:` grammar and lowering, with `annotation-mismatch`, `[check] inline-annotations`, and erasure to plain R. `decisions.md` has the record.
 
 - **`declares_arithmetic` is computed from the project as well as the stubs.** It consulted the stub

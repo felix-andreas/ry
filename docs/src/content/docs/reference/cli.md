@@ -56,12 +56,18 @@ file.
 `ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
 before the first prompt. [The console guide](/guides/console) describes what its completion knows.
 Started inside an R package, `ry repl` [loads it](/guides/loading-packages) and reloads what changed
-before each command; `--no-load` turns that off.
+before each command; `--no-load` turns that off. `ry repl --runtime ry` (or `RY_RUNTIME=ry`) runs
+the console on ry's own interpreter, which loads no package and runs no startup code.
 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
 `Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`. R's
 startup banner is not printed, so the output is only what the script prints. Arguments after the
 file reach the script through `commandArgs(trailingOnly = TRUE)`.
+
+Before anything runs, `ry run` checks the script and `ry repl` checks each command against the
+project's `ry.toml`. They print the [inline annotation](/type-checking/inline-annotations) warnings,
+and in [strict mode](/type-checking/strict-mode) they print every error and refuse code that has
+one. GNU R then runs the script with its inline annotations erased.
 
 `ry run --runtime ry script.R` (or `RY_RUNTIME=ry`) runs the script on ry's own interpreter instead
 of GNU R. It still reads base R's R code and the default packages from the GNU R installation, so R
@@ -79,7 +85,8 @@ too.
 
 - **0**: nothing found, or nothing to reformat.
 - **1**: `check` counted a finding (warnings count, unless `--min-severity error`), `fmt --check` or
-  `--diff` found a file to change, `run` or `load` hit an error in the script or the package, or the
+  `--diff` found a file to change, `run` or `load` hit an error in the script or the package, `run` refused a script in strict
+  mode, or the
   server stopped after an analysis panic.
 - **2**: ry could not do its job. That is a usage error, invalid TOML in `ry.toml`, a path that does
   not exist, a file or stub it cannot read, an invalid `exclude` pattern, for `load` a path inside
