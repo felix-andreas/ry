@@ -659,8 +659,8 @@ type. No interpreter calls it yet. The rest of this section describes the shape 
   ([prior art](/contributing/design/prior-art/#vx)); ry keeps the transfer implicit, and plans a lint
   for typed code that forces a column to materialize inside a loop.
 - **NA maps onto Arrow validity, and NaN stays a value.** Integer NA (`INT_MIN`) and double NA (the
-  `NaN` with low word 1954) are rewritten at the boundary only when a column has nulls; otherwise
-  the vector moves into Arrow without a copy.
+  `NaN` with low word 1954) are rewritten into validity at the boundary. A vector coming in from R
+  is copied into a new Arrow buffer; only a column R never materialized comes back zero-copy.
 - **Queries go through a small IR to a Polars lazy plan.** `tbl[price > 0, .(total = sum(price)), by
   = ticker]` becomes a `Query` (rows, `j`, `by`, `keyby`), which lowers to one lazy frame, so the
   planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers

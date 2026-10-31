@@ -1860,7 +1860,9 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **Queries go through a small IR** (`crates/table/src/query.rs`), not straight from R syntax to
   Polars, so the interpreter, the checker's result types (`result_type`) and the tests share one
   description of `tbl[i, j, by]`. Lowering gives operations R semantics on top of Polars: integer
-  `+ - *` overflow to `NA`, an integer `sum` overflows to `NA`, aggregates propagate `NA` unless
+  `+ - *` overflow to `NA`, a top-level integer `sum` that does not fit becomes a double (as in
+  R 4.3 and data.table's gsum), a NaN comparison is `NA`, `max`/`min` return NaN when one is
+  present, `!`/`&`/`|` treat a nonzero number as `TRUE`, aggregates propagate `NA` unless
   `na.rm` (a `null_count` guard that costs nothing when the input has no nulls), `%/%` floors, `%%`
   takes the divisor's sign, and `cor` is `NA` where Polars gives `NaN`.
 - **data.table's layout is the contract for joins**: rows follow `i`, `x`'s columns come first with
@@ -1877,6 +1879,12 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **NA is Arrow validity, NaN is a value.** A column without nulls has the same bytes in both
   layouts, which is what makes the zero-copy paths possible.
 
-Known structural debt: `Table`'s own `Mirror`/`Residency` tracking and the ALTREP object's `data2`
-both model "R's layout of this column". When the interpreter exposes frames through ALTREP, the
-residency should be read from the ALTREP object and `Table`'s mirrors removed.
+- **The ALTREP object is the only R-layout copy of a column.** `Table` once tracked its own
+  per-column mirrors next to the ALTREP `data2`, two sources of truth for the same fact. `Table`
+  now holds only the Polars frame and its key; residency is read from the ALTREP object.
+- **Keyed joins without `on` match x's key positionally against i's leading columns, and NA keys
+  join each other** (`join_nulls`), both as in data.table. A rolling join marks x's rows with a
+  hidden column so an inner rolling join keeps matches whose values are NA.
+
+Known gap: an integer `sum` nested in arithmetic or assigned through `:=` still narrows to integer
+and gives NA on overflow, where R gives a double.
