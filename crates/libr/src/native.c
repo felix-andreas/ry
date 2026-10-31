@@ -587,3 +587,124 @@ RY_EXPORT SEXP R_tryCatchError(SEXP (*body)(void *), void *bdata,
     UNPROTECT(1);
     return result;
 }
+
+/*
+ * Numerical routines (applic.rs). The objective functions, gradients and integrands that
+ * packages hand to the optimizers and to the quadrature are native code, so each kind runs in
+ * a context of its own: an error inside one returns here as status 1 and unwinds through the
+ * Rust optimizer as an ordinary Err.
+ */
+
+#include <R_ext/Applic.h>
+
+int ry_call_optimfn(optimfn *fn, int n, double *par, void *ex, double *result)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    *result = fn(n, par, ex);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_optimgr(optimgr *gr, int n, double *par, double *gradient, void *ex)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    gr(n, par, gradient, ex);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_integrand(integr_fn *f, double *x, int n, void *ex)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    f(x, n, ex);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_fcn(fcn_p fcn, int n, double *x, double *value, void *state)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    fcn(n, x, value, state);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_d2fcn(d2fcn_p d2fcn, int nr, int n, double *x, double *h, void *state)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    d2fcn(nr, n, x, h, state);
+    ry_context_pop(&context);
+    return 0;
+}
+
+/*
+ * samin draws its Gaussian steps from norm_rand, which the Rmath module defines. The weak
+ * reference lets this library link without that module; samin then reports the gap as an
+ * error instead of crashing.
+ */
+extern double norm_rand(void) __attribute__((weak));
+
+int ry_norm_rand_available(void)
+{
+    return norm_rand != NULL;
+}
+
+double ry_norm_rand(void)
+{
+    return norm_rand();
+}
+
+/* Fortran's error and warning calls. GNU R caps the message at 255 characters. */
+
+static int ry_fortran_length(const char *message, int length)
+{
+    if (length < 0)
+        length = (int) strlen(message);
+    return length > 255 ? 255 : length;
+}
+
+RY_EXPORT void rexitc_(char *message, int *length)
+{
+    Rf_error("%.*s", ry_fortran_length(message, *length), message);
+}
+
+RY_EXPORT void rwarnc_(char *message, int *length)
+{
+    Rf_warning("%.*s", ry_fortran_length(message, *length), message);
+}
+
+/* The forms without a length take it from Fortran's hidden trailing argument. */
+RY_EXPORT void rexit_(char *message, size_t length)
+{
+    Rf_error("%.*s", ry_fortran_length(message, (int) length), message);
+}
+
+RY_EXPORT void rwarn_(char *message, size_t length)
+{
+    Rf_warning("%.*s", ry_fortran_length(message, (int) length), message);
+}
