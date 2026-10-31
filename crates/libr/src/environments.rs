@@ -367,7 +367,7 @@ pub unsafe extern "C" fn R_FindNamespace(info: Sexp) -> Sexp {
         if info.kind() != SexpType::String || crate::vectors::xlength(info)? < 1 {
             return Err(error("bad namespace name"));
         }
-        let name = info.element(0);
+        let name = crate::vectors::sexp_elt(info, 0)?;
         if name.bytes() == b"base" {
             return Ok(known.base_namespace);
         }

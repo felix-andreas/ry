@@ -95,8 +95,8 @@ unsafe fn null_slot() -> ApiResult<Sexp> {
 unsafe fn slot_symbol(name: Sexp) -> ApiResult<Sexp> {
     match name.kind() {
         SexpType::Symbol => Ok(name),
-        SexpType::String if name.length() == 1 => {
-            Ok(runtime().heap.install_char(name.element(0))?)
+        SexpType::String if crate::vectors::xlength(name)? == 1 => {
+            Ok(runtime().heap.install_char(crate::vectors::sexp_elt(name, 0)?)?)
         }
         _ => Err(error(format!(
             "invalid type or length for slot name"

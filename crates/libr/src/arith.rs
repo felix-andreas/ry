@@ -146,10 +146,12 @@ unsafe fn read_seed() -> ApiResult<()> {
     if seed == known.unbound {
         return Ok(());
     }
-    if seed.kind() != SexpType::Integer || seed.length() != (STATE_WORDS + 2) as isize {
+    if seed.kind() != SexpType::Integer
+        || crate::vectors::xlength(seed)? != (STATE_WORDS + 2) as isize
+    {
         return Err(error("'.Random.seed' is not a valid integer vector"));
     }
-    let values = seed.slice::<i32>();
+    let values = crate::vectors::integers(seed)?;
     if values[0] != DEFAULT_KIND {
         return Err(error(
             "ry supports only the default RNG kinds (Mersenne-Twister, Inversion, Rejection)",

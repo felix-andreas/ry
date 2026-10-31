@@ -326,14 +326,14 @@ pub unsafe fn native_call(
                     "PACKAGE argument must be a single character string",
                 ));
             }
-            package = Some(utf8_text(value.element(0))?.into_owned());
+            package = Some(utf8_text(crate::vectors::sexp_elt(value, 0)?)?.into_owned());
         } else {
             values.push((tag, value));
         }
     }
     let (function, arity, routine_name) = match name.kind() {
         SexpType::String if xlength(*name)? >= 1 => {
-            let routine_name = utf8_text(name.element(0))?.into_owned();
+            let routine_name = utf8_text(crate::vectors::sexp_elt(*name, 0)?)?.into_owned();
             let (function, arity) = find_routine(&routine_name, package.as_deref(), kind).map_err(
                 |unwind| match unwind {
                     Unwind::Error(error) => error_in(call, error.message),
@@ -443,14 +443,16 @@ unsafe fn dot_c(
             | SexpType::Real
             | SexpType::Complex
             | SexpType::Raw => {
-                if !na_ok && !c_values_finite(value)? {
+                // The copy is an ordinary vector even when the argument is ALTREP, so the
+                // checks below read its storage directly.
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                if !na_ok && !c_values_finite(copy)? {
                     return Err(error_in(
                         call,
                         format!("NA/NaN/Inf in foreign function call (arg {})", position + 1),
                     ));
                 }
-                let copy = crate::memory::duplicate(value, false)?;
-                runtime.heap.root(copy);
                 pointers.push(crate::vectors::data_pointer(copy, true)? as *mut std::ffi::c_void);
                 CArgument::Vector(copy)
             }
@@ -583,7 +585,7 @@ unsafe fn dyn_load(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiRes
     if path.kind() != SexpType::String || xlength(path)? != 1 {
         return Err(error_in(call, "character argument expected"));
     }
-    let path = utf8_text(path.element(0))?.into_owned();
+    let path = utf8_text(crate::vectors::sexp_elt(path, 0)?)?.into_owned();
     let local_symbol = runtime().heap.install(b"local")?;
     let mut local = true;
     for (position, &(tag, value)) in arguments.iter().enumerate().skip(1) {
@@ -701,6 +703,16 @@ const INFIX: &[&str] = &[
 pub unsafe fn deparse(object: Sexp, depth: usize) -> String {
     if depth > 20 {
         return "...".into();
+    }
+    // The vector arms below read storage directly, so an ALTREP vector is expanded first.
+    if object.is_altrep() {
+        return match crate::altrep::materialize(object) {
+            Ok(expanded) => {
+                runtime().heap.root(expanded);
+                deparse(expanded, depth)
+            }
+            Err(_) => format!("<{}>", object.kind().name()),
+        };
     }
     match object.kind() {
         SexpType::Nil => "NULL".into(),
