@@ -59,8 +59,8 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 - Runtime step 1 session session_0111kWqDPNiugVJPvUec1xKs: corpus, differential oracle, benchmark generator.
 - Runtime step 2 session session_0111kWqDWCzM9zgtXPN1prpJ: object model, GC, libR skeleton.
-- Typing session session_0111kWqDjwjNJcGFMYNSyybM: inline annotation syntax, the comment/inline disagreement warning, and strict mode. It delivers one large PR.
-- Docs session session_0111kWqCgbHESLzg96ct5Rm8: restructuring the introduction and type-checking sections.
+- Docs session session_0111kWqCgbHESLzg96ct5Rm8: PR #100, integrating #102's typing pages before merge.
+- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa: item index, lazy bindings and item-level reload, on the GNU R backend first.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
