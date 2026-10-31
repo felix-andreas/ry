@@ -440,7 +440,13 @@ impl Writer<'_, '_> {
             return Ok(false);
         };
         runtime().heap.root(state);
-        let flags = pack_flags(code::ALTREP_SXP, object.gp(), object.is_object(), false, false);
+        let flags = pack_flags(
+            code::ALTREP_SXP,
+            object.gp(),
+            object.is_object(),
+            false,
+            false,
+        );
         self.write_integer(flags as i32)?;
         self.write_item(info)?;
         self.write_item(state)?;

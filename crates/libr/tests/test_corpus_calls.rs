@@ -10,11 +10,7 @@
 mod harness;
 
 use harness::*;
-use std::{
-    ffi::CString,
-    path::Path,
-    process::Command,
-};
+use std::{ffi::CString, path::Path, process::Command};
 
 const CHILD_CASE: &str = "RY_CORPUS_CALL_CASE";
 
@@ -152,7 +148,10 @@ fn corpus_routines_return_what_they_return_under_gnu_r() {
             .unwrap_or_else(|| {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let last = stderr.lines().rev().find(|line| !line.trim().is_empty());
-                ("crashed".to_owned(), format!("{} {}", output.status, last.unwrap_or("")))
+                (
+                    "crashed".to_owned(),
+                    format!("{} {}", output.status, last.unwrap_or("")),
+                )
             });
         if outcome == "same" {
             same += 1;
@@ -161,7 +160,10 @@ fn corpus_routines_return_what_they_return_under_gnu_r() {
     }
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("corpus-calls.tsv");
     std::fs::write(&path, &report).expect("the report");
-    eprintln!("{same} of {count} recorded routine calls match GNU R; report: {}", path.display());
+    eprintln!(
+        "{same} of {count} recorded routine calls match GNU R; report: {}",
+        path.display()
+    );
     eprint!("{report}");
     // A routine whose library loads must give GNU R's answer. A library that does not load
     // yet is the corpus binary test's to report.
@@ -172,5 +174,9 @@ fn corpus_routines_return_what_they_return_under_gnu_r() {
             matches!(outcome, "different" | "crashed" | "error")
         })
         .collect();
-    assert!(wrong.is_empty(), "routines that disagree with GNU R:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "routines that disagree with GNU R:\n{}",
+        wrong.join("\n")
+    );
 }

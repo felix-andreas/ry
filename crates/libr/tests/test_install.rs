@@ -29,7 +29,10 @@ fn home() -> &'static PathBuf {
             .status()
             .expect("cargo build");
         assert!(status.success(), "building ry-rcmd failed");
-        let rcmd = deps.parent().expect("the profile directory").join("ry-rcmd");
+        let rcmd = deps
+            .parent()
+            .expect("the profile directory")
+            .join("ry-rcmd");
         let rscript = which("Rscript");
         rcmd::assemble(
             &root,
@@ -77,12 +80,18 @@ fn rytest_source() -> PathBuf {
          NeedsCompilation: yes\n",
     )
     .expect("DESCRIPTION");
-    std::fs::write(root.join("NAMESPACE"), "useDynLib(rytest, .registration = TRUE)\n")
-        .expect("NAMESPACE");
+    std::fs::write(
+        root.join("NAMESPACE"),
+        "useDynLib(rytest, .registration = TRUE)\n",
+    )
+    .expect("NAMESPACE");
     for entry in std::fs::read_dir(package_sources("rytest")).expect("rytest sources") {
         let path = entry.expect("an entry").path();
-        std::fs::copy(&path, root.join("src").join(path.file_name().expect("a name")))
-            .expect("copy a source");
+        std::fs::copy(
+            &path,
+            root.join("src").join(path.file_name().expect("a name")),
+        )
+        .expect("copy a source");
     }
     root
 }
@@ -94,7 +103,10 @@ fn a_source_package_installs_and_runs_under_ry() {
     let description =
         std::fs::read_to_string(installed.directory.join("DESCRIPTION")).expect("DESCRIPTION");
     assert!(description.contains("RyBuilt: "), "{description}");
-    assert!(description.contains("Built: R 4.6.2; x86_64-pc-linux-gnu;"), "{description}");
+    assert!(
+        description.contains("Built: R 4.6.2; x86_64-pc-linux-gnu;"),
+        "{description}"
+    );
     assert!(installed.directory.join("NAMESPACE").exists());
     let shared = installed.library.expect("rytest has compiled code");
     let r = r();
@@ -120,7 +132,10 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
     let installed = rcmd::install(home(), &source, &library).expect("install a binary");
     let description =
         std::fs::read_to_string(installed.directory.join("DESCRIPTION")).expect("DESCRIPTION");
-    assert!(!description.contains("RyBuilt"), "a binary is copied as it is");
+    assert!(
+        !description.contains("RyBuilt"),
+        "a binary is copied as it is"
+    );
 
     std::fs::write(
         source.join("DESCRIPTION"),
@@ -128,7 +143,10 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
     )
     .expect("DESCRIPTION");
     let error = rcmd::install(home(), &source, &library).expect_err("a pre-3.0.0 build");
-    assert!(error.to_string().contains("built before R 3.0.0"), "{error}");
+    assert!(
+        error.to_string().contains("built before R 3.0.0"),
+        "{error}"
+    );
 }
 
 /// Builds every source tarball in `RY_SOURCE_PACKAGES` against ry's headers into
@@ -149,13 +167,20 @@ fn source_packages_build_against_ry_s_headers() {
     let mut report = String::from("tarball\toutcome\tdetail\n");
     let mut built = 0;
     for tarball in &tarballs {
-        let name = tarball.file_name().expect("a name").to_string_lossy().into_owned();
+        let name = tarball
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
         match rcmd::install(home(), tarball, &library) {
             Ok(installed) => {
                 built += 1;
                 report.push_str(&format!(
                     "{name}\tbuilt\t{}\n",
-                    installed.library.map(|path| path.display().to_string()).unwrap_or_default()
+                    installed
+                        .library
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
                 ));
             }
             Err(error) => {
@@ -172,5 +197,9 @@ fn source_packages_build_against_ry_s_headers() {
     }
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("source-packages.tsv");
     std::fs::write(&path, report).expect("the report");
-    eprintln!("{built} of {} source packages built; report: {}", tarballs.len(), path.display());
+    eprintln!(
+        "{built} of {} source packages built; report: {}",
+        tarballs.len(),
+        path.display()
+    );
 }

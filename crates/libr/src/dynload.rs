@@ -391,9 +391,7 @@ pub unsafe extern "C" fn R_GetCCallable(
         let name = String::from_utf8_lossy(c_bytes(name)).into_owned();
         let key = (package.clone(), name.clone());
         let registered = |key: &(String, String)| match runtime().c_callables.get(key) {
-            Some(&address) if address != 0 => {
-                Some(std::mem::transmute::<usize, DlFunc>(address))
-            }
+            Some(&address) if address != 0 => Some(std::mem::transmute::<usize, DlFunc>(address)),
             _ => None,
         };
         if let Some(function) = registered(&key) {
@@ -429,14 +427,18 @@ pub fn loaded_libraries() -> Vec<(String, String)> {
 /// How many routines of each interface a library registered: `.C`, `.Call`, `.Fortran` and
 /// `.External`.
 pub fn registered_counts(name: &str) -> Option<[usize; 4]> {
-    runtime().dlls.iter().find(|dll| dll.name == name).map(|dll| {
-        [
-            dll.c_routines.len(),
-            dll.call_routines.len(),
-            dll.fortran_routines.len(),
-            dll.external_routines.len(),
-        ]
-    })
+    runtime()
+        .dlls
+        .iter()
+        .find(|dll| dll.name == name)
+        .map(|dll| {
+            [
+                dll.c_routines.len(),
+                dll.call_routines.len(),
+                dll.fortran_routines.len(),
+                dll.external_routines.len(),
+            ]
+        })
 }
 
 /// The registered routine `name` of the library `package` (any interface), as
@@ -444,7 +446,10 @@ pub fn registered_counts(name: &str) -> Option<[usize; 4]> {
 /// symbols, because that only forbids lookup by a name string in `.Call` itself.
 /// An unregistered routine comes from the library's dynamic symbol table, as with GNU R's
 /// lookup, with an unknown arity (-1).
-pub unsafe fn registered_routine(name: &str, package: &str) -> Option<(RoutineKind, DlFunc, c_int)> {
+pub unsafe fn registered_routine(
+    name: &str,
+    package: &str,
+) -> Option<(RoutineKind, DlFunc, c_int)> {
     let runtime = runtime();
     let dll = runtime.dlls.iter().rev().find(|dll| dll.name == package)?;
     for kind in [
@@ -453,7 +458,11 @@ pub unsafe fn registered_routine(name: &str, package: &str) -> Option<(RoutineKi
         RoutineKind::C,
         RoutineKind::Fortran,
     ] {
-        if let Some(routine) = dll.registered(kind).iter().find(|routine| routine.name == name) {
+        if let Some(routine) = dll
+            .registered(kind)
+            .iter()
+            .find(|routine| routine.name == name)
+        {
             return Some((kind, routine.function, routine.arity));
         }
     }
@@ -472,9 +481,8 @@ pub unsafe fn registered_routine(name: &str, package: &str) -> Option<(RoutineKi
 /// external pointer of class `RegisteredNativeSymbol`), `dll` and `numParameters`, as
 /// `getNativeSymbolInfo` returns, which `.Call` accepts in place of a name.
 pub unsafe fn native_symbol_info(name: &str, package: &str) -> ApiResult<Sexp> {
-    let (kind, function, arity) = registered_routine(name, package).ok_or_else(|| {
-        error(format!("no such symbol {name} in package {package}"))
-    })?;
+    let (kind, function, arity) = registered_routine(name, package)
+        .ok_or_else(|| error(format!("no such symbol {name} in package {package}")))?;
     let runtime = runtime();
     let nil = runtime.nil();
     let address = runtime
@@ -487,7 +495,8 @@ pub unsafe fn native_symbol_info(name: &str, package: &str) -> ApiResult<Sexp> {
     address.set_object(true);
     let info = runtime.heap.alloc_vector(SexpType::List, 4)?;
     runtime.heap.root(info);
-    let name_value = crate::memory::scalar_string(crate::strings::mk_char(name.as_bytes(), Encoding::Utf8)?)?;
+    let name_value =
+        crate::memory::scalar_string(crate::strings::mk_char(name.as_bytes(), Encoding::Utf8)?)?;
     runtime.heap.set_element(info, 0, name_value);
     runtime.heap.set_element(info, 1, address);
     let dll = runtime
@@ -499,10 +508,15 @@ pub unsafe fn native_symbol_info(name: &str, package: &str) -> ApiResult<Sexp> {
         .ok_or_else(|| error(format!("package {package} is not loaded")))?;
     let dll_value = dll_info_object(dll)?;
     runtime.heap.set_element(info, 2, dll_value);
-    runtime.heap.set_element(info, 3, crate::memory::scalar(SexpType::Integer, arity)?);
+    runtime
+        .heap
+        .set_element(info, 3, crate::memory::scalar(SexpType::Integer, arity)?);
     let names = runtime.heap.alloc_vector(SexpType::String, 4)?;
     runtime.heap.root(names);
-    for (index, label) in ["name", "address", "dll", "numParameters"].iter().enumerate() {
+    for (index, label) in ["name", "address", "dll", "numParameters"]
+        .iter()
+        .enumerate()
+    {
         let label = runtime.heap.mk_char(label.as_bytes(), Encoding::Native)?;
         runtime.heap.set_element(names, index, label);
     }

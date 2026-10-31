@@ -16,6 +16,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod altrep;
+pub mod applic;
 pub mod arith;
 pub mod attributes;
 pub mod boundary;
@@ -30,10 +31,12 @@ pub mod globals;
 pub mod graphics;
 pub mod hashtab;
 pub mod legacy;
+pub mod linpack;
 pub mod lists;
 pub mod memory;
 pub mod serialize;
 pub mod strings;
+pub mod utils;
 pub mod vectors;
 
 use crate::{boundary::Unwind, dynload::Dll};

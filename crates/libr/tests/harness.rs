@@ -655,7 +655,10 @@ pub fn scan(libraries: &[PathBuf]) -> std::collections::BTreeMap<String, Package
             objects.sort();
             // The package's own object is named after it, with dots as underscores in a few
             // packages (data.table builds data_table.so).
-            let wanted = [format!("{name}.so"), format!("{}.so", name.replace('.', "_"))];
+            let wanted = [
+                format!("{name}.so"),
+                format!("{}.so", name.replace('.', "_")),
+            ];
             let Some(library) = objects
                 .iter()
                 .find(|path| {
@@ -685,7 +688,10 @@ pub fn scan(libraries: &[PathBuf]) -> std::collections::BTreeMap<String, Package
 }
 
 /// `name` and the packages it depends on, dependencies first.
-pub fn load_order(name: &str, packages: &std::collections::BTreeMap<String, Package>) -> Vec<String> {
+pub fn load_order(
+    name: &str,
+    packages: &std::collections::BTreeMap<String, Package>,
+) -> Vec<String> {
     fn visit(
         name: &str,
         packages: &std::collections::BTreeMap<String, Package>,
@@ -703,7 +709,11 @@ pub fn load_order(name: &str, packages: &std::collections::BTreeMap<String, Pack
         }
     }
     let mut order = Vec::new();
-    visit(name, packages, &mut std::collections::BTreeSet::new(), &mut order);
+    visit(
+        name,
+        packages,
+        &mut std::collections::BTreeSet::new(),
+        &mut order,
+    );
     order
 }
-

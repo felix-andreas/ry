@@ -80,7 +80,11 @@ fn corpus_binaries_load_and_register() {
             .map(|package| package.library.to_string_lossy().into_owned())
             .collect();
         let output = Command::new(&executable)
-            .args(["corpus_binaries_load_and_register", "--exact", "--nocapture"])
+            .args([
+                "corpus_binaries_load_and_register",
+                "--exact",
+                "--nocapture",
+            ])
             .env(CHILD_PACKAGE, name)
             .env(CHILD_LIBRARIES, paths.join("\n"))
             .output()
@@ -104,14 +108,20 @@ fn corpus_binaries_load_and_register() {
                         .and_then(Path::file_name)
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    outcome = Some(Outcome::DependencyFailed(format!("{dependency}: {message}")));
+                    outcome = Some(Outcome::DependencyFailed(format!(
+                        "{dependency}: {message}"
+                    )));
                 }
                 _ => {}
             }
         }
         let outcome = outcome.unwrap_or_else(|| {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let last = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
             Outcome::Crashed(format!("{} {}", output.status, last.trim()))
         });
         outcomes.insert(name.clone(), outcome);
@@ -129,7 +139,10 @@ fn corpus_binaries_load_and_register() {
                 if !base {
                     loaded += 1;
                 }
-                ("loaded", packages[name].directory.to_string_lossy().into_owned())
+                (
+                    "loaded",
+                    packages[name].directory.to_string_lossy().into_owned(),
+                )
             }
             Outcome::Failed(message) => ("failed", message.clone()),
             Outcome::DependencyFailed(message) => ("dependency-failed", message.clone()),

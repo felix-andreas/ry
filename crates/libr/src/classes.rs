@@ -35,7 +35,11 @@ pub unsafe fn data_class(object: Sexp, single: bool) -> ApiResult<Sexp> {
     }
     let dim = raw_attribute(object, R_DimSymbol.get());
     let names: &[&str] = if dim.kind() != SexpType::Nil && dim.length() == 2 {
-        if single { &["matrix"] } else { &["matrix", "array"] }
+        if single {
+            &["matrix"]
+        } else {
+            &["matrix", "array"]
+        }
     } else if dim.kind() != SexpType::Nil {
         &["array"]
     } else {
@@ -95,12 +99,10 @@ unsafe fn null_slot() -> ApiResult<Sexp> {
 unsafe fn slot_symbol(name: Sexp) -> ApiResult<Sexp> {
     match name.kind() {
         SexpType::Symbol => Ok(name),
-        SexpType::String if crate::vectors::xlength(name)? == 1 => {
-            Ok(runtime().heap.install_char(crate::vectors::sexp_elt(name, 0)?)?)
-        }
-        _ => Err(error(format!(
-            "invalid type or length for slot name"
-        ))),
+        SexpType::String if crate::vectors::xlength(name)? == 1 => Ok(runtime()
+            .heap
+            .install_char(crate::vectors::sexp_elt(name, 0)?)?),
+        _ => Err(error(format!("invalid type or length for slot name"))),
     }
 }
 
@@ -186,7 +188,9 @@ pub unsafe extern "C" fn R_has_slot(object: Sexp, name: Sexp) -> c_int {
 pub unsafe extern "C" fn R_do_MAKE_CLASS(what: *const c_char) -> Sexp {
     enter(|| {
         if what.is_null() {
-            return Err(error("C level MAKE_CLASS macro called with NULL string pointer"));
+            return Err(error(
+                "C level MAKE_CLASS macro called with NULL string pointer",
+            ));
         }
         let name = crate::strings::mk_char(c_bytes(what), Encoding::Native)?;
         let name = scalar_string(name)?;
@@ -217,7 +221,9 @@ pub unsafe extern "C" fn R_do_new_object(class_def: Sexp) -> Sexp {
 
 pub unsafe fn new_object(class_def: Sexp) -> ApiResult<Sexp> {
     if class_def.kind() == SexpType::Nil {
-        return Err(error("C level NEW macro called with null class definition pointer"));
+        return Err(error(
+            "C level NEW macro called with null class definition pointer",
+        ));
     }
     let runtime = runtime();
     let virtual_symbol = runtime.heap.install(b"virtual")?;
@@ -238,7 +244,9 @@ pub unsafe fn new_object(class_def: Sexp) -> ApiResult<Sexp> {
     let prototype = get_slot(class_def, runtime.heap.install(b"prototype")?)?;
     let value = duplicate(prototype, true)?;
     runtime.heap.root(value);
-    if value.kind() == SexpType::Object || raw_attribute(class_name, R_PackageSymbol.get()).kind() != SexpType::Nil {
+    if value.kind() == SexpType::Object
+        || raw_attribute(class_name, R_PackageSymbol.get()).kind() != SexpType::Nil
+    {
         install_attribute(value, R_ClassSymbol.get(), class_name)?;
         value.set_object(true);
         value.set_gp_bits(gp::S4_OBJECT, true);
@@ -301,8 +309,7 @@ pub unsafe extern "C" fn R_check_class_etc(object: Sexp, valid: *const *const c_
                 }
             }
         }
-        if object.has_gp(gp::S4_OBJECT) && class.kind() == SexpType::String && class.length() > 0
-        {
+        if object.has_gp(gp::S4_OBJECT) && class.kind() == SexpType::String && class.length() > 0 {
             let class_def = R_getClassDef_bytes(class.element(0).bytes())?;
             runtime().heap.root(class_def);
             if class_def.kind() != SexpType::Nil {

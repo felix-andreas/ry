@@ -233,8 +233,8 @@ fn every_header_compiles_after_r_and_rinternals() {
 
 #[test]
 fn graphics_macros_expand_cleanly() {
-    let source = fs::read_to_string(probe_dir().join("macro_probe.c"))
-        .expect("the macro probe is readable");
+    let source =
+        fs::read_to_string(probe_dir().join("macro_probe.c")).expect("the macro probe is readable");
     let mut jobs: Vec<Job> = Vec::new();
     for language in [C_FLAGS, CXX_FLAGS] {
         for defines in [&[][..], &["R_NO_REMAP"][..]] {
@@ -448,7 +448,8 @@ fn every_declared_name_is_exported_by_libr() {
     let exported = dynamic_symbols(&libr_path());
     let missing: Vec<String> = declared
         .iter()
-        .filter(|(name, _)| !exported.contains(*name))
+        // Applic.h and Linpack.h include BLAS.h, so its names reach the scan transitively.
+        .filter(|(name, file)| !exported.contains(*name) && !NOT_IN_LIBR.contains(&file.as_str()))
         .map(|(name, file)| format!("{name} ({file})"))
         .collect();
     assert!(

@@ -62,7 +62,11 @@ unsafe fn hash_key(kind: c_int, key: Sexp) -> ApiResult<u64> {
 
 /// Hashes what `identical()` compares, to a bounded depth: equal values hash equally, and the
 /// bucket's `identical()` check decides.
-unsafe fn hash_value(value: Sexp, hasher: &mut rustc_hash::FxHasher, depth: usize) -> ApiResult<()> {
+unsafe fn hash_value(
+    value: Sexp,
+    hasher: &mut rustc_hash::FxHasher,
+    depth: usize,
+) -> ApiResult<()> {
     (value.kind() as u8).hash(hasher);
     if depth > 2 {
         return Ok(());
@@ -146,7 +150,9 @@ pub unsafe fn make(kind: c_int, size: c_int) -> ApiResult<Hashtab> {
     let header = runtime.heap.alloc_vector(SexpType::Integer, 2)?;
     runtime.heap.root(header);
     *(header.data() as *mut i32) = kind;
-    let count = (size.max(0) as usize).next_power_of_two().max(INITIAL_BUCKETS);
+    let count = (size.max(0) as usize)
+        .next_power_of_two()
+        .max(INITIAL_BUCKETS);
     let buckets = runtime.heap.alloc_vector(SexpType::List, count as isize)?;
     runtime.heap.root(buckets);
     let cell = runtime
@@ -203,9 +209,10 @@ pub unsafe extern "C" fn R_sethash(table_value: Hashtab, key: Sexp, value: Sexp)
         }
         let index = bucket_index(cell, key)?;
         let buckets = cell.external_protected();
-        let entry = runtime
-            .heap
-            .alloc_triple(SexpType::Pairlist, value, buckets.element(index), key)?;
+        let entry =
+            runtime
+                .heap
+                .alloc_triple(SexpType::Pairlist, value, buckets.element(index), key)?;
         runtime.heap.set_element(buckets, index, entry);
         header(cell)[1] += 1;
         Ok(value)

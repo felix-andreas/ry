@@ -1730,10 +1730,7 @@ unsafe fn element_key(object: Sexp, index: usize) -> ApiResult<ElementKey> {
             ElementKey::Bucket(element.kind(), length)
         }
         kind => {
-            return Err(error(format!(
-                "{} is not a vector type",
-                kind.name()
-            )));
+            return Err(error(format!("{} is not a vector type", kind.name())));
         }
     })
 }
@@ -1819,7 +1816,11 @@ pub unsafe extern "C" fn Rf_duplicated(object: Sexp, from_last: Rboolean) -> Sex
     })
 }
 
-unsafe fn first_duplicate(object: Sexp, incomparables: Option<Sexp>, from_last: bool) -> ApiResult<R_xlen_t> {
+unsafe fn first_duplicate(
+    object: Sexp,
+    incomparables: Option<Sexp>,
+    from_last: bool,
+) -> ApiResult<R_xlen_t> {
     let flags = duplicated_flags(object, incomparables, from_last, true)?;
     Ok(flags
         .iter()
@@ -1887,9 +1888,11 @@ pub unsafe extern "C" fn Rf_asBool(object: Sexp) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_isTRUE(object: Sexp) -> Rboolean {
     enter(|| {
-        Ok((object.kind() == SexpType::Logical
-            && xlength(object)? == 1
-            && int_elt(object, 0)? == 1) as Rboolean)
+        Ok(
+            (object.kind() == SexpType::Logical
+                && xlength(object)? == 1
+                && int_elt(object, 0)? == 1) as Rboolean,
+        )
     })
 }
 

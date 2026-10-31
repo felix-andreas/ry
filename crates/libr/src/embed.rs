@@ -144,7 +144,9 @@ pub(crate) fn start_frontend() {
     unsafe {
         ry_frontend_start(
             home.as_ref().map_or(std::ptr::null(), |text| text.as_ptr()),
-            temp_dir.as_ref().map_or(std::ptr::null(), |text| text.as_ptr()),
+            temp_dir
+                .as_ref()
+                .map_or(std::ptr::null(), |text| text.as_ptr()),
         );
     }
 }

@@ -70,8 +70,13 @@ pub trait Evaluator: Sync {
 
     /// Calls `function` with already evaluated arguments, given as a pairlist whose tags are the
     /// argument names. `call` is the call reported in errors and seen by `sys.call()`.
-    unsafe fn apply(&self, call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
-    -> ApiResult<Sexp>;
+    unsafe fn apply(
+        &self,
+        call: Sexp,
+        function: Sexp,
+        arguments: Sexp,
+        env: Sexp,
+    ) -> ApiResult<Sexp>;
 
     /// Parses `text` (a character vector) into an expression vector, as `R_ParseVector` does;
     /// `count` is the number of expressions to read, or a negative number for all of them.
@@ -318,8 +323,7 @@ pub unsafe fn native_call(
     let mut na_ok = false;
     let mut values = Vec::new();
     for &(tag, value) in rest {
-        if matches!(kind, RoutineKind::C | RoutineKind::Fortran) && control_symbols.contains(&tag)
-        {
+        if matches!(kind, RoutineKind::C | RoutineKind::Fortran) && control_symbols.contains(&tag) {
             if tag == control_symbols[0] {
                 na_ok = crate::vectors::as_logical(value)? == 1;
             }
@@ -350,7 +354,9 @@ pub unsafe fn native_call(
         }
         // A `NativeSymbolInfo` list carries the routine's address in its `address` element.
         SexpType::List if native_symbol_address(*name)?.is_some() => {
-            let address = native_symbol_address(*name)?.unwrap_or(*name).external_address();
+            let address = native_symbol_address(*name)?
+                .unwrap_or(*name)
+                .external_address();
             if address.is_null() {
                 return Err(error_in(call, "NULL value passed as symbol address"));
             }
@@ -364,7 +370,11 @@ pub unsafe fn native_call(
                 arity,
                 list_element(*name, "name")
                     .filter(|value| value.kind() == SexpType::String)
-                    .and_then(|value| utf8_text(value.element(0)).ok().map(|text| text.into_owned()))
+                    .and_then(|value| {
+                        utf8_text(value.element(0))
+                            .ok()
+                            .map(|text| text.into_owned())
+                    })
                     .unwrap_or_default(),
             )
         }
@@ -498,7 +508,8 @@ unsafe fn dot_c(
                 let copy = crate::memory::duplicate(value, false)?;
                 runtime.heap.root(copy);
                 let pointer = if kind == RoutineKind::Fortran {
-                    strings.first().copied().unwrap_or(std::ptr::null_mut()) as *mut std::ffi::c_void
+                    strings.first().copied().unwrap_or(std::ptr::null_mut())
+                        as *mut std::ffi::c_void
                 } else {
                     strings.as_mut_ptr() as *mut std::ffi::c_void
                 };
@@ -519,7 +530,11 @@ unsafe fn dot_c(
             other => {
                 return Err(error_in(
                     call,
-                    format!("invalid mode ({}) to pass to Fortran (arg {})", other.name(), position + 1),
+                    format!(
+                        "invalid mode ({}) to pass to Fortran (arg {})",
+                        other.name(),
+                        position + 1
+                    ),
                 ));
             }
         };
@@ -923,7 +938,11 @@ impl crate::boundary::Handout for Option<Sexp> {
 }
 
 unsafe fn installed_evaluator(what: &str) -> ApiResult<&'static dyn Evaluator> {
-    evaluator().ok_or_else(|| error(format!("{what} needs ry's interpreter, which is not loaded")))
+    evaluator().ok_or_else(|| {
+        error(format!(
+            "{what} needs ry's interpreter, which is not loaded"
+        ))
+    })
 }
 
 /// `R_ParseVector(text, n, status, srcfile)`.
@@ -999,7 +1018,11 @@ pub unsafe extern "C" fn R_forceAndCall(call: Sexp, count: c_int, env: Sexp) -> 
 /// Evaluates `package::function(arguments...)` in the global environment, which loads the
 /// package's namespace when needed. The C API uses this for entry points that GNU R implements
 /// by calling R code, such as the S4 class functions that call into `methods`.
-pub unsafe fn call_namespaced(package: &str, function: &str, arguments: &[Sexp]) -> ApiResult<Sexp> {
+pub unsafe fn call_namespaced(
+    package: &str,
+    function: &str,
+    arguments: &[Sexp],
+) -> ApiResult<Sexp> {
     let runtime = runtime();
     let nil = runtime.nil();
     let mut list = nil;
@@ -1012,10 +1035,16 @@ pub unsafe fn call_namespaced(package: &str, function: &str, arguments: &[Sexp])
     let function = runtime.heap.install(function.as_bytes())?;
     let head = crate::lists::list_of(SexpType::Language, &[colons, package, function])?;
     runtime.heap.root(head);
-    let call = runtime.heap.alloc_triple(SexpType::Language, head, list, nil)?;
+    let call = runtime
+        .heap
+        .alloc_triple(SexpType::Language, head, list, nil)?;
     runtime.heap.root(call);
     let global = runtime.heap.known().global_env;
-    installed_evaluator(&format!("{}::{}", utf8_text(package.car())?, utf8_text(function.car())?))?;
+    installed_evaluator(&format!(
+        "{}::{}",
+        utf8_text(package.car())?,
+        utf8_text(function.car())?
+    ))?;
     eval(call, global)
 }
 

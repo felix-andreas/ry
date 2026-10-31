@@ -37,11 +37,13 @@ pub unsafe fn truelength(object: Sexp) -> ApiResult<R_xlen_t> {
         return Ok(0);
     }
     let capacity = object.capacity();
-    Ok(if runtime().heap.is_resizable(object) || capacity > object.length() {
-        capacity
-    } else {
-        0
-    })
+    Ok(
+        if runtime().heap.is_resizable(object) || capacity > object.length() {
+            capacity
+        } else {
+            0
+        },
+    )
 }
 
 pub unsafe fn set_truelength(object: Sexp, value: R_xlen_t) -> ApiResult<()> {
@@ -285,8 +287,7 @@ pub unsafe extern "C" fn INTERNAL(symbol: Sexp) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DDVAL(symbol: Sexp) -> c_int {
     let name = symbol.car().bytes();
-    (name.len() > 2 && name.starts_with(b"..") && name[2..].iter().all(u8::is_ascii_digit))
-        as c_int
+    (name.len() > 2 && name.starts_with(b"..") && name[2..].iter().all(u8::is_ascii_digit)) as c_int
 }
 
 #[unsafe(no_mangle)]
@@ -380,7 +381,11 @@ pub unsafe extern "C" fn XLENGTH_EX(object: Sexp) -> R_xlen_t {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn LENGTH_EX(object: Sexp, _file: *const std::ffi::c_char, _line: c_int) -> c_int {
+pub unsafe extern "C" fn LENGTH_EX(
+    object: Sexp,
+    _file: *const std::ffi::c_char,
+    _line: c_int,
+) -> c_int {
     enter(|| Ok(crate::vectors::xlength(object)? as c_int))
 }
 
@@ -489,7 +494,12 @@ macro_rules! scalar_value {
 scalar_value!(SCALAR_IVAL, SET_SCALAR_IVAL, c_int, SexpType::Integer);
 scalar_value!(SCALAR_LVAL, SET_SCALAR_LVAL, c_int, SexpType::Logical);
 scalar_value!(SCALAR_DVAL, SET_SCALAR_DVAL, f64, SexpType::Real);
-scalar_value!(SCALAR_CVAL, SET_SCALAR_CVAL, heap::object::Rcomplex, SexpType::Complex);
+scalar_value!(
+    SCALAR_CVAL,
+    SET_SCALAR_CVAL,
+    heap::object::Rcomplex,
+    SexpType::Complex
+);
 scalar_value!(SCALAR_BVAL, SET_SCALAR_BVAL, u8, SexpType::Raw);
 
 /// `R_MB_CUR_MAX`: the longest multibyte character, which is six bytes in glibc's UTF-8.
@@ -586,10 +596,31 @@ pub unsafe extern "C" fn R_NewHashedEnv(enclosure: Sexp, _size: c_int) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_isBasicClass(name: *const std::ffi::c_char) -> crate::Rboolean {
     const BASIC: &[&[u8]] = &[
-        b"NULL", b"logical", b"numeric", b"character", b"complex", b"integer", b"double",
-        b"raw", b"expression", b"list", b"function", b"environment", b"name", b"call",
-        b"language", b"externalptr", b"S4", b"matrix", b"array", b"ts", b"data.frame",
-        b"factor", b"ordered", b"formula", b"oldClass",
+        b"NULL",
+        b"logical",
+        b"numeric",
+        b"character",
+        b"complex",
+        b"integer",
+        b"double",
+        b"raw",
+        b"expression",
+        b"list",
+        b"function",
+        b"environment",
+        b"name",
+        b"call",
+        b"language",
+        b"externalptr",
+        b"S4",
+        b"matrix",
+        b"array",
+        b"ts",
+        b"data.frame",
+        b"factor",
+        b"ordered",
+        b"formula",
+        b"oldClass",
     ];
     BASIC.contains(&crate::strings::c_bytes(name)) as crate::Rboolean
 }
@@ -630,12 +661,18 @@ pub unsafe extern "C" fn Rstrdup(text: *const std::ffi::c_char) -> *mut std::ffi
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Rf_strchr(text: *const std::ffi::c_char, character: c_int) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn Rf_strchr(
+    text: *const std::ffi::c_char,
+    character: c_int,
+) -> *mut std::ffi::c_char {
     libc::strchr(text, character)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Rf_strrchr(text: *const std::ffi::c_char, character: c_int) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn Rf_strrchr(
+    text: *const std::ffi::c_char,
+    character: c_int,
+) -> *mut std::ffi::c_char {
     libc::strrchr(text, character)
 }
 
@@ -670,7 +707,9 @@ pub unsafe extern "C" fn R_duplicate_attr(object: Sexp) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_copyMostAttribNoTs(from: Sexp, to: Sexp) {
     enter(|| {
-        use crate::globals::{R_ClassSymbol, R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol, R_TspSymbol};
+        use crate::globals::{
+            R_ClassSymbol, R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol, R_TspSymbol,
+        };
         let runtime = runtime();
         let mut cell = from.attrib();
         while cell.kind() == SexpType::Pairlist {
@@ -682,7 +721,9 @@ pub unsafe extern "C" fn Rf_copyMostAttribNoTs(from: Sexp, to: Sexp) {
                     .filter(|name| name.bytes() != b"ts")
                     .collect();
                 if !kept.is_empty() {
-                    let value = runtime.heap.alloc_vector(SexpType::String, kept.len() as isize)?;
+                    let value = runtime
+                        .heap
+                        .alloc_vector(SexpType::String, kept.len() as isize)?;
                     runtime.heap.root(value);
                     for (index, name) in kept.into_iter().enumerate() {
                         runtime.heap.set_element(value, index, name);
@@ -698,8 +739,13 @@ pub unsafe extern "C" fn Rf_copyMostAttribNoTs(from: Sexp, to: Sexp) {
             }
             cell = cell.cdr();
         }
-        to.set_object(crate::attributes::raw_attribute(to, R_ClassSymbol.get()).kind() != SexpType::Nil);
-        to.set_gp_bits(heap::object::gp::S4_OBJECT, from.has_gp(heap::object::gp::S4_OBJECT));
+        to.set_object(
+            crate::attributes::raw_attribute(to, R_ClassSymbol.get()).kind() != SexpType::Nil,
+        );
+        to.set_gp_bits(
+            heap::object::gp::S4_OBJECT,
+            from.has_gp(heap::object::gp::S4_OBJECT),
+        );
         Ok(())
     })
 }
@@ -790,7 +836,9 @@ unsafe fn substitute_list(list: Sexp, env: Sexp) -> ApiResult<Sexp> {
     }
     let mut result = known.nil;
     for &(tag, value) in items.iter().rev() {
-        result = runtime.heap.alloc_triple(SexpType::Pairlist, value, result, tag)?;
+        result = runtime
+            .heap
+            .alloc_triple(SexpType::Pairlist, value, result, tag)?;
         runtime.heap.root(result);
     }
     Ok(result)

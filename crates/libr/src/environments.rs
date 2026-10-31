@@ -603,9 +603,7 @@ pub unsafe extern "C" fn R_MakeActiveBinding(symbol: Sexp, function: Sexp, env: 
         if let Some(cell) = runtime().heap.frame_cell(env, symbol)
             && !cell.has_gp(gp::ACTIVE_BINDING)
         {
-            return Err(error(format!(
-                "symbol already has a regular binding"
-            )));
+            return Err(error(format!("symbol already has a regular binding")));
         }
         let cell = rebind(symbol, function, env)?;
         cell.set_gp_bits(gp::ACTIVE_BINDING, true);
@@ -635,7 +633,12 @@ pub unsafe extern "C" fn R_MakeDelayedBinding(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn R_MakeForcedBinding(symbol: Sexp, expression: Sexp, value: Sexp, env: Sexp) {
+pub unsafe extern "C" fn R_MakeForcedBinding(
+    symbol: Sexp,
+    expression: Sexp,
+    value: Sexp,
+    env: Sexp,
+) {
     enter(|| {
         checked_symbol(symbol, "R_MakeForcedBinding")?;
         let env = environment(env, "R_MakeForcedBinding")?;
@@ -751,7 +754,9 @@ pub unsafe extern "C" fn R_DotsNames(env: Sexp) -> Sexp {
         for index in 0..count {
             if cell.tag().kind() == SexpType::Symbol {
                 if names == runtime.nil() {
-                    names = runtime.heap.alloc_vector(SexpType::String, count as isize)?;
+                    names = runtime
+                        .heap
+                        .alloc_vector(SexpType::String, count as isize)?;
                     runtime.heap.root(names);
                     let blank = runtime.heap.mk_char(b"", heap::strings::Encoding::Native)?;
                     for position in 0..count {
@@ -799,7 +804,9 @@ pub unsafe extern "C" fn R_GetDotType(index: c_int, env: Sexp) -> DotType {
 unsafe fn dot_promise(index: c_int, env: Sexp, wanted: DotType, what: &str) -> ApiResult<Sexp> {
     let value = dot(index, env)?;
     if R_GetDotType(index, env) != wanted {
-        return Err(error(format!("{what}: the ... element is not of the right type")));
+        return Err(error(format!(
+            "{what}: the ... element is not of the right type"
+        )));
     }
     Ok(innermost_promise(value))
 }
@@ -872,11 +879,14 @@ pub unsafe extern "C" fn R_NamespaceEnvSpec(env: Sexp) -> Sexp {
         if env == known.base_namespace {
             let spec = runtime().heap.alloc_vector(SexpType::String, 2)?;
             runtime().heap.root(spec);
-            let name = runtime().heap.mk_char(b"base", heap::strings::Encoding::Native)?;
-            runtime().heap.set_element(spec, 0, name);
-            let version = runtime()
+            let name = runtime()
                 .heap
-                .mk_char(crate::R_VERSION_STRING.as_bytes(), heap::strings::Encoding::Native)?;
+                .mk_char(b"base", heap::strings::Encoding::Native)?;
+            runtime().heap.set_element(spec, 0, name);
+            let version = runtime().heap.mk_char(
+                crate::R_VERSION_STRING.as_bytes(),
+                heap::strings::Encoding::Native,
+            )?;
             runtime().heap.set_element(spec, 1, version);
             return Ok(spec);
         }
