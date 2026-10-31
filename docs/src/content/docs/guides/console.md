@@ -18,7 +18,8 @@ disagree. In [strict mode](/type-checking/strict-mode), a command with an error 
 
 Started inside an R package, `ry repl` also loads that package and reloads what you change, as
 [Loading packages](/guides/loading-packages) describes. These commands and `ry load` are the only
-ones that need R. Everything else in ry reads the source and never runs it. Both commands accept
-`--runtime ry` to run on ry's own, still incomplete, interpreter instead of GNU R; the console then
-loads no package. The [command
-reference](/reference/cli#server-repl-run-and-load) lists their options.
+ones that need R. Everything else in ry reads the source and never runs it.
+
+`ry repl` and `ry run` also accept `--runtime ry`, which runs on ry's own, still incomplete,
+interpreter instead of GNU R; the console then loads no package. The [command
+reference](/reference/cli#server-repl-run-and-load) lists all options.
