@@ -1151,6 +1151,21 @@ fn nan_compares_sorts_and_aggregates_as_in_r() {
     let mut sorted = run_table(&mut x, query(descending, Select::All));
     assert_eq!(read(&mut sorted, "d"), doubles(&[1.0, -1.0, f64::NAN, NA_REAL]));
 
+    // `order` keeps `NA` and `NaN` in their original order at the end, in either direction.
+    let mut na_first = frame(vec![("d", doubles(&[NA_REAL, f64::NAN, 1.0, -1.0]))]);
+    for descending in [false, true] {
+        let order = Rows::Order(vec![SortKey {
+            expr: column("d"),
+            descending,
+        }]);
+        let mut sorted = run_table(&mut na_first, query(order, Select::All));
+        let numbers = if descending { [1.0, -1.0] } else { [-1.0, 1.0] };
+        assert_eq!(
+            read(&mut sorted, "d"),
+            doubles(&[numbers[0], numbers[1], NA_REAL, f64::NAN])
+        );
+    }
+
     let mut without_na = frame(vec![("d", doubles(&[1.0, f64::NAN, -1.0]))]);
     let select = Select::Columns(vec![
         named("mx", aggregate(Aggregate::Max, column("d"))),
