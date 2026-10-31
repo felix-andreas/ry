@@ -23,7 +23,9 @@ render <- function(count, label) label
 render: <T> fn(count: T) -> character
 render: fn(count: integer, label: character) -> character
 0..6 warning[duplicate] Top-level binding `render` is overwritten by a later top-level binding in this package.
+  = 85..91 the later binding is here.
 85..91 warning[duplicate] Top-level binding `render` overwrites an earlier top-level binding in this package.
+  = 0..6 the earlier binding is here.
 
 #---- exports_interleaved_with_type_definitions
 #: @alias Count {integer}

@@ -1,9 +1,12 @@
 ---
 title: Inline type syntax
-description: "Proposal, not implemented: inline type annotations as a compiled R dialect"
+description: "Proposal: inline type annotations as a compiled R dialect"
 ---
 
-This is a proposal. Nothing on this page is implemented.
+This is a proposal, written before the project mandate in `AGENTS.md` required an inline
+annotation syntax that is enabled by default. The mandate settles whether to build one, so the
+recommendation below against building it is superseded. The design details and the costing remain
+input, and the syntax that ships may differ from this page.
 
 The recommendation, up front, is **not to build this for inline typing alone**. The ergonomic case is
 weaker than it looks (section 3 shows why), and the cost is close to total: a typed file is not R

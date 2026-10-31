@@ -4,20 +4,8 @@ description: Every rule the formatter applies, with a before-and-after for each
 ---
 <!-- THIS FILE IS GENERATED AUTOMATICALLY. MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD -->
 
-ry includes an R code formatter that changes as little as it can: it normalizes spacing, indentation, and bracing, and keeps the structure you wrote.
-
-## Usage
-
-```sh
-ry fmt           # Format all files in the current directory
-ry fmt <path>    # Format all files in <path>
-ry fmt --check   # List files that would be reformatted, without writing
-ry fmt --diff    # Show a diff of formatting changes without applying them
-```
-
-`--check` and `--diff` exit 1 when any file would change, which is what a CI job gates on, and an
-error, such as a file that cannot be parsed, exits 2. The [exit codes](/reference/cli#exit-codes)
-have the details.
+`ry fmt` changes as little as it can: it normalizes spacing, indentation, and bracing, and keeps the
+structure you wrote. [CLI](/reference/cli#fmt) lists its flags and exit codes.
 
 ## Philosophy
 
@@ -276,7 +264,7 @@ for (
 
 ### Function calls
 
-Function calls receive consistent formatting with proper spacing around argument separators and assignment operators.
+A comma is followed by a space, and a named argument's `=` has a space on each side.
 
 ```r
 # Before formatting
@@ -304,7 +292,7 @@ call(
 
 **Nested function calls** keep whichever of the hugged and expanded styles you wrote (see [hugging behavior](#hugging-behavior)).
 
-**Compact multiline calls:** When a call spans multiple lines solely because a single argument (often the final one) is itself multiline, the formatter keeps the other arguments on the original line rather than placing every argument on its own line, preserving a concise, compact layout:
+**Compact multiline calls:** When a call spans multiple lines only because a single argument (often the last) is itself multiline, the other arguments stay on the original line:
 
 ```r
 # This format is preserved - only last argument spans multiple lines
@@ -578,6 +566,22 @@ and mixed closer shapes normalize to the nearest consistent style:
 
 A blank line, a non-`#:` comment, or ordinary code ends an annotation block, so unrelated comments are never pulled into one. Trailing empty `#:` lines at the end of a block are dropped.
 
+### Inline type annotations
+
+An [inline annotation](/reference/type-system#inline-annotation-syntax) is rendered on one line with the same spacing as a `#:` type: no space before `:` and one after, spaces around `|` and `->`, and no padding inside brackets. The `<...>` of a function's type parameters hugs `function` and the parameter list, and the return type sits between the parameter list and the body with one space on each side. A type written across several lines is joined onto one, unless it holds a comment, in which case it is kept as written.
+
+```r
+# Before formatting
+count:integer<-0L
+add<-function(x:integer,y:  list[ named:double ]=list())->double{x}
+pick <- function <T:numeric> (x : T) -> T x
+
+# After formatting
+count: integer <- 0L
+add <- function(x: integer, y: list[named: double] = list()) -> double { x }
+pick <- function<T: numeric>(x: T) -> T x
+```
+
 ### Line spacing
 
 The formatter normalizes line spacing between expressions, allowing at most one empty line:
@@ -620,7 +624,7 @@ The line ending follows `[format] line-ending`, whose default `"auto"` keeps the
 
 ## Format Suppression
 
-You can disable formatting for specific code sections using the `# fmt: skip` comment directive. This is useful when you want to preserve specific formatting for readability, such as aligned data structures. The skipped expression is preserved byte-exactly, including the column of its first line, so hand-aligned constructs keep their alignment.
+A `# fmt: skip` comment turns formatting off for one expression, for example to keep a hand-aligned data structure. The skipped expression is preserved byte-exactly, including the column of its first line, so hand-aligned constructs keep their alignment.
 
 The `fmt: skip` directive can be placed before any expression to skip formatting for it:
 

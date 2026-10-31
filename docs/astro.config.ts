@@ -8,18 +8,18 @@ import starlightThemeBlack from 'starlight-theme-black'
 export default defineConfig({
 	// Every page published before the docs were reorganised keeps working.
 	redirects: {
-		'/formatter': '/reference/formatting-rules',
-		'/linter': '/reference/diagnostic-codes',
+		'/formatter': '/guides/formatting',
+		'/linter': '/guides/checking',
 		'/diagnostics': '/reference/diagnostic-codes',
 		'/configuration': '/reference/configuration',
-		'/language-server': '/type-checking/tour#editors',
-		'/features': '/type-checking/tour',
-		'/type-checking/concepts': '/type-checking/tour',
+		'/language-server': '/guides/editors',
+		'/features': '/type-checking/overview',
+		'/type-checking/concepts': '/type-checking/overview',
 		'/limitations': '/type-checking/limitations',
 		'/stdlib-stubs': '/type-checking/stubs',
-		'/typing': '/type-checking/tour',
-		'/typing/guide': '/type-checking/tour',
-		'/type-checking/tutorial': '/type-checking/tour',
+		'/typing': '/type-checking/overview',
+		'/typing/guide': '/type-checking/overview',
+		'/type-checking/tutorial': '/type-checking/overview',
 		'/typing/reference': '/reference/type-system',
 		'/typing-reference': '/reference/type-system',
 		'/development': '/contributing/development',
@@ -27,10 +27,11 @@ export default defineConfig({
 		'/structure': '/contributing/structure',
 		'/testing': '/contributing/testing',
 		'/guides/adopting': '/getting-started',
-		'/tour': '/type-checking/tour',
-		'/type-checking/domain-modeling': '/type-checking/tour#structural-and-nominal-types',
-		'/guides/continuous-integration': '/reference/cli#exit-codes',
-		'/guides/r-console': '/reference/cli#server-repl-and-run',
+		'/tour': '/type-checking/overview',
+		'/type-checking/tour': '/type-checking/overview',
+		'/type-checking/domain-modeling': '/type-checking/custom-types',
+		'/guides/continuous-integration': '/guides/checking#in-ci',
+		'/guides/r-console': '/guides/console',
 	},
 	integrations: [
 		starlight({
@@ -51,19 +52,36 @@ export default defineConfig({
 				{ label: "Visual Studio Marketplace", icon: "vscode", href: 'https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry' },
 				{ label: "GitHub", icon: "github", href: 'https://github.com/felix-andreas/ry' },
 			],
-			// The installation page is unlisted: getting started already covers the common install.
 			sidebar: [
 				{
 					label: 'Introduction',
 					items: [
 						{ slug: 'getting-started' },
 						{ slug: 'why-ry' },
+						{ slug: 'installation' },
+					],
+				},
+				{
+					label: 'Using ry',
+					items: [
+						{ slug: 'guides/checking' },
+						{ slug: 'guides/formatting' },
+						{ slug: 'guides/editors' },
+						{ slug: 'guides/console' },
 					],
 				},
 				{
 					label: 'Type checking',
 					items: [
-						{ slug: 'type-checking/tour' },
+						{ slug: 'type-checking/overview' },
+						{ slug: 'type-checking/annotations' },
+						{ slug: 'type-checking/inline-annotations' },
+						{ slug: 'type-checking/vectors-and-lists' },
+						{ slug: 'type-checking/null' },
+						{ slug: 'type-checking/functions' },
+						{ slug: 'type-checking/custom-types' },
+						{ slug: 'type-checking/unknown' },
+						{ slug: 'type-checking/strict-mode' },
 						{ slug: 'type-checking/stubs' },
 						{ slug: 'type-checking/limitations' },
 					],

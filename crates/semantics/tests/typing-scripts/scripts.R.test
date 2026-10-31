@@ -651,7 +651,9 @@ use_it <- function(t) t
 #++++
 use_it: fn(t: Thing) -> character
 234..255 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
+  = 260..284 another declaration of this name is here.
 260..284 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
+  = 234..255 another declaration of this name is here.
 315..321 warning[unused] `use_it` is assigned but never used.
 
 #---- a_type_and_an_alias_of_one_name_conflict_too
@@ -663,7 +665,9 @@ keep <- 1.0
 #++++
 keep: double
 3..23 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
+  = 28..52 another declaration of this name is here.
 28..52 error[annotation] the type name `Thing` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file.
+  = 3..23 another declaration of this name is here.
 54..58 warning[unused] `keep` is assigned but never used.
 
 #---- distinct_names_in_one_script_are_fine

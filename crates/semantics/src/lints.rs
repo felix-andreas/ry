@@ -4,7 +4,7 @@ use crate::stubs::{declaring_namespace, stubs};
 use crate::{Db, SourceFile, is_s3_method_name, item_naming, item_spans, parse, s3_generics};
 use rowan::{NodeOrToken, WalkEvent};
 use syntax::ast::BinaryExpr;
-use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, is_inline_annotation};
 
 /// `Default` keeps the lint's built-in severity, which is off for opt-in lints.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
@@ -134,12 +134,13 @@ fn shadow_lints(
 }
 
 fn syntax_lints(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
-    // `#:` annotation regions are type syntax, not R identifiers.
+    // `#:` annotation regions and inline annotations are type syntax, not R identifiers.
     let mut annotation_depth = 0usize;
     for event in root.preorder_with_tokens() {
         match event {
             WalkEvent::Enter(NodeOrToken::Node(node)) => match node.kind() {
                 SyntaxKind::ANNOTATION => annotation_depth += 1,
+                _ if is_inline_annotation(&node) => annotation_depth += 1,
                 SyntaxKind::BINARY_EXPR => binary_lints(&node, config, diagnostics),
                 SyntaxKind::ARGUMENT_LIST
                     if node
@@ -168,7 +169,9 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
                     message,
                 );
             }
-            WalkEvent::Leave(NodeOrToken::Node(node)) if node.kind() == SyntaxKind::ANNOTATION => {
+            WalkEvent::Leave(NodeOrToken::Node(node))
+                if node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(&node) =>
+            {
                 annotation_depth -= 1;
             }
             _ => {}

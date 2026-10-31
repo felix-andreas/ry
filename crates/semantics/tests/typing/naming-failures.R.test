@@ -33,9 +33,11 @@ x <- 2L
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 
 #---- duplicate_top_level_value_names_across_three_files_produce_full_warning_chain
 #~~~~ R/a.R
@@ -48,13 +50,17 @@ x <- 3L
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/c.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 
 #==== type_conflicts
 #---- duplicate_type_names_across_several_files_mark_every_conflicting_declaration
@@ -67,10 +73,13 @@ x: integer
 #++++
 == R/a.R
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..24 another declaration of this name is here.
 == R/b.R
 3..24 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 == R/c.R
 3..28 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..24 another declaration of this name is here.
 
 #==== mixed_package_failures
 #---- later_package_winner_does_not_beat_local_shadow
@@ -87,9 +96,11 @@ f <- function() {
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 f: fn() -> integer
 

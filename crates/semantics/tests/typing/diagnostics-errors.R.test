@@ -174,7 +174,9 @@ value <- 1L
 #++++
 value: integer
 3..39 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 43..66 another declaration of this name is here.
 43..66 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..39 another declaration of this name is here.
 
 #---- recovery_unknown_no_cascade
 #: fn(count: integer) -> integer

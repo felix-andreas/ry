@@ -21,11 +21,13 @@ g <- 2L
 == R/a.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 integer
 == R/c.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 
 #---- winner_flip_then_later_definer_drops
 #~~~~ R/a.R
@@ -55,13 +57,17 @@ g
 == R/a.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/c.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/d.R
 integer
 
@@ -78,9 +84,11 @@ g
 == R/a.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 c_other: integer
 == R/d.R
@@ -116,9 +124,11 @@ g
 == R/a.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 g: integer
 0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 integer
 

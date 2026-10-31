@@ -15,8 +15,8 @@ unresolved
 
 Every finding starts with its code, here `unresolved`. The code stays the same when the wording of
 a message changes, so it is what you name in a suppression, in `ry.toml`, and in the JSON output.
-`!` marks a warning and `x` an error (`⚠` and `×` in a terminal). The carets underline exactly what the finding is about, such
-as one name, not the whole statement.
+`!` marks a warning and `x` an error (`⚠` and `×` in a terminal). The carets underline exactly
+what the finding is about, such as one name, not the whole statement.
 
 ## Suppressing a finding
 
@@ -54,8 +54,14 @@ hides every other finding in the broken statement, because ry draws no conclusio
 could not read. Strict mode can still report an undetermined type there.
 
 **`annotation`** (error): a `#:` comment that is malformed, names a type that does not exist, or
-annotates nothing, and an unknown `# typing:` value. It is reported even in files with type checking
-off, because a broken annotation is a mistake either way.
+annotates nothing, an inline annotation whose type names something that does not exist or is
+malformed in the same ways, and an unknown `# typing:` value. It is reported even in files with type
+checking off, because a broken annotation is a mistake either way. A mistake in an inline type's
+grammar is a `syntax-error` instead, because it breaks the R statement it sits in.
+
+**`annotation-mismatch`** (warning): a statement whose inline annotation and `#:` comment give the
+same slot (the value, a parameter, the rest parameter, or the return) different types. It points at
+both types and says which one ry uses, so a stale comment cannot silently contradict the code.
 
 **`unresolved`** (warning): a name that is defined nowhere ry can see, with a suggestion for a near
 miss. It also covers `pkg::name` where `pkg` does not export `name`, and an unknown package.
@@ -82,8 +88,12 @@ so `c(1, 2, )` fails when it runs.
 **`stub`** (error): a line in your `stubs/*.Rtypes` files that ry could not load, so a broken
 declaration is never dropped in silence.
 
+**`inline-annotation`** (warning), while `[check] inline-annotations = false`: an inline annotation,
+which then types nothing, and which R itself cannot run.
+
 **`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`. The language server
-marks the line in `ry.toml`, while `ry check` stops with exit status 2 instead of reporting it.
+marks the line in `ry.toml`, and `ry check` prints the finding and exits with status 2 without
+checking any R.
 
 ## Opt-in
 
@@ -92,8 +102,8 @@ type, a call with the wrong arguments, a field that does not exist, and every ot
 [type system](/reference/type-system).
 
 **`strict`** (error), with `[check] strict = true` or `# typing: strict`: each place where a value's
-type could not be determined, and each name that resolves only because an unknown package was
-attached. It also raises `unresolved` from a warning to an error, so a gate on
+type could not be determined, each parameter nothing constrains, and each name that resolves only
+because an unknown package was attached. It also raises `unresolved` from a warning to an error, so a gate on
 `--min-severity error` counts it.
 
 **`maybe-undefined`** (warning), with `[check] maybe-undefined = true`: a read that some path reaches

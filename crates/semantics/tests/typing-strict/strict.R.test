@@ -19,14 +19,20 @@ elementwise <- function(a, b) a & b
 special: <T, U> fn(a: T, b: U) -> Unknown
 formula_model: fn() -> Unknown
 elementwise: <T, U> fn(a: T, b: U) -> Unknown
+20..21 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
+23..24 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
 26..42 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 71..76 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+101..102 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
+104..105 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
 107..112 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- a_corpus_declared_operator_is_typed_and_no_origin
 member <- function(a, b) a %in% b
 #++++
 member: <T, U> fn(a: T, b: U) -> logical
+19..20 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
+22..23 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
 
 #---- assignment_value_phrasing
 f <- function(x) {
@@ -35,18 +41,21 @@ f <- function(x) {
 }
 #++++
 f: <T> fn(x: T) -> Unknown
+14..15 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 31..53 error[strict] strict mode: could not determine the type of `result`; add a type annotation
 
 #---- dollar_on_an_unresolved_variable
 f <- function(node) node$value
 #++++
 f: <T> fn(node: T) -> Unknown
+14..18 error[strict] strict mode: parameter `node` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `node: TYPE`
 20..30 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- combine_with_an_unresolved_argument
 f <- function(x) c(x, 1L)
 #++++
 f: <T> fn(x: T) -> Unknown
+14..15 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 17..25 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- qualified_read_with_no_known_type
@@ -115,6 +124,7 @@ summarize <- function(dt) {
 }
 #++++
 summarize: <T> fn(dt: T) -> Unknown
+22..24 error[strict] strict mode: parameter `dt` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `dt: TYPE`
 
 #---- data_table_column_assignment
 add_column <- function(dt) {
@@ -128,6 +138,7 @@ add_column: <T> fn(dt: T) -> T
 pick <- function(df) subset(df, cyl > 4)
 #++++
 pick: <T> fn(df: T) -> Unknown
+17..19 error[strict] strict mode: parameter `df` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `df: TYPE`
 21..40 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- base_indexing_keeps_checking

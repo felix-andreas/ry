@@ -8,7 +8,9 @@ value <- 1L
 == R/main.R
 value: integer
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 29..50 another declaration of this name is here.
 29..50 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 
 #---- duplicate_alias_name
 #~~~~ R/main.R
@@ -19,7 +21,9 @@ value <- 1L
 == R/main.R
 value: integer
 3..26 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 30..52 another declaration of this name is here.
 30..52 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..26 another declaration of this name is here.
 
 #---- alias_collides_with_nominal_type_name
 #~~~~ R/main.R
@@ -30,7 +34,9 @@ value <- 1L
 == R/main.R
 value: integer
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 29..51 another declaration of this name is here.
 29..51 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 
 #---- nominal_type_collides_with_alias_name
 #~~~~ R/main.R
@@ -41,7 +47,9 @@ value <- 1L
 == R/main.R
 value: integer
 3..26 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 30..51 another declaration of this name is here.
 30..51 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..26 another declaration of this name is here.
 
 #---- definition_unknown_type
 #~~~~ R/main.R
@@ -60,8 +68,10 @@ value: integer
 #++++
 == R/a.R
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..24 another declaration of this name is here.
 == R/b.R
 3..24 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 
 #---- duplicate_alias_name_across_files
 #~~~~ R/a.R
@@ -71,8 +81,10 @@ value: integer
 #++++
 == R/a.R
 3..26 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 == R/b.R
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..26 another declaration of this name is here.
 
 #---- nominal_alias_collision_across_files
 #~~~~ R/a.R
@@ -82,8 +94,10 @@ value: integer
 #++++
 == R/a.R
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 == R/b.R
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 
 #==== annotations
 #---- annotation_unknown_type

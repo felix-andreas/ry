@@ -14,7 +14,9 @@ mirror <- function(x) 1L
 mirror: <T> fn(x: T) -> T
 mirror: <T> fn(x: T) -> integer
 0..6 warning[duplicate] Top-level binding `mirror` is overwritten by a later top-level binding in this package.
+  = 24..30 the later binding is here.
 24..30 warning[duplicate] Top-level binding `mirror` overwrites an earlier top-level binding in this package.
+  = 0..6 the earlier binding is here.
 
 #---- generic_alias_export
 #: @alias Box<T> {list{value: T}}
