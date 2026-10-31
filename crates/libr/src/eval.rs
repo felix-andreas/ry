@@ -19,7 +19,7 @@ use heap::{
     strings::Encoding,
 };
 use interp::{
-    builtin_libraries,
+    TaskCallbackRoutine, builtin_libraries,
     builtins::{Arg, BuiltinDef, Call, builtin, internal},
     native::Interface,
 };
@@ -31,6 +31,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         write_console: |text, is_error| crate::boundary::write_console(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
+        run_task_callbacks: |expression, value, succeeded, visible| unsafe {
+            run_task_callbacks(expression, value, succeeded, visible)
+        },
+        task_callback_routine: |routine, args| unsafe { task_callback_routine(routine, args) },
     };
     interp::install(&mut runtime.heap, hooks);
     interp::register_builtins(NATIVE_BUILTINS);
@@ -221,6 +225,32 @@ pub unsafe fn run_task_callbacks(
         );
         status
     })
+}
+
+unsafe extern "C" {
+    fn ry_add_r_task_callback(function: Sexp, data: Sexp, use_data: Sexp, name: Sexp) -> Sexp;
+    fn ry_remove_r_task_callback(id: Sexp) -> Sexp;
+    fn ry_task_callback_names() -> Sexp;
+}
+
+/// Base's task-callback routines. They live in C beside the list that `Rf_addTaskCallback`
+/// keeps, so R-level and native callbacks share one list.
+unsafe fn task_callback_routine(routine: TaskCallbackRoutine, args: &[Sexp]) -> ApiResult<Sexp> {
+    let function: DlFunc = match routine {
+        TaskCallbackRoutine::Add => std::mem::transmute::<
+            unsafe extern "C" fn(Sexp, Sexp, Sexp, Sexp) -> Sexp,
+            DlFunc,
+        >(ry_add_r_task_callback),
+        TaskCallbackRoutine::Remove => {
+            std::mem::transmute::<unsafe extern "C" fn(Sexp) -> Sexp, DlFunc>(
+                ry_remove_r_task_callback,
+            )
+        }
+        TaskCallbackRoutine::Names => {
+            std::mem::transmute::<unsafe extern "C" fn() -> Sexp, DlFunc>(ry_task_callback_names)
+        }
+    };
+    call_native(function, args, ".Call")
 }
 
 /// Stand-ins for a few base R closures, so a host that never loads base R (the C API tests) can

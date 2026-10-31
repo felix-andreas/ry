@@ -99,6 +99,21 @@ pub struct Hooks {
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
+    /// Runs the top-level task callbacks after a task: the expression, its value, whether it
+    /// succeeded, and whether the value was visible.
+    pub run_task_callbacks: unsafe fn(Sexp, Sexp, bool, bool) -> R<()>,
+    /// Base's task-callback routines, which keep their list in the host so that callbacks
+    /// registered from R and from native code share one list and one numbering.
+    pub task_callback_routine: unsafe fn(TaskCallbackRoutine, &[Sexp]) -> R<Sexp>,
+}
+
+/// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
+/// `getTaskCallbackNames()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskCallbackRoutine {
+    Add,
+    Remove,
+    Names,
 }
 
 pub struct Interp {
@@ -239,12 +254,16 @@ pub unsafe fn register_builtins(definitions: &[BuiltinDef]) {
 }
 
 /// The default hooks: console output to the process's stdout and stderr, no ALTREP classes, no
-/// finalizers.
+/// finalizers, and no task callbacks.
 pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
+        run_task_callbacks: |_, _, _, _| Ok(()),
+        task_callback_routine: |_, _| {
+            Err(unwind::error("top-level task callbacks need the libR host"))
+        },
     }
 }
 

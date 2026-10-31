@@ -9,9 +9,9 @@
 //! without libR.
 
 use crate::{
-    builtin_libraries,
+    TaskCallbackRoutine, builtin_libraries,
     builtins::{Arg, BuiltinDef, Call, builtin, internal},
-    linalg,
+    interp, linalg,
     unwind::{R, error},
     values::{self, nil, scalar_bool, string_vector, symbols},
 };
@@ -88,11 +88,15 @@ impl BaseRoutine {
 /// Base's native routines, as GNU R registers them: the task-callback entry points and the
 /// LINPACK QR and condition routines behind `qr()` and `kappa()`.
 pub const BASE_ROUTINES: &[BaseRoutine] = &[
-    call_routine("R_addTaskCallback", 4, no_task_callbacks),
-    call_routine("R_getTaskCallbackNames", 0, |_| unsafe {
-        string_vector::<&str>(&[])
+    call_routine("R_addTaskCallback", 4, |args| unsafe {
+        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Add, args)
     }),
-    call_routine("R_removeTaskCallback", 1, no_task_callbacks),
+    call_routine("R_getTaskCallbackNames", 0, |args| unsafe {
+        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Names, args)
+    }),
+    call_routine("R_removeTaskCallback", 1, |args| unsafe {
+        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Remove, args)
+    }),
     fortran_routine("dqrcf", 8, linalg::dqrcf),
     fortran_routine("dqrdc2", 9, linalg::dqrdc2),
     fortran_routine("dqrqty", 7, linalg::dqrqty),
@@ -124,10 +128,6 @@ const fn fortran_routine(
         arity,
         body: RoutineBody::Fortran(function),
     }
-}
-
-unsafe fn no_task_callbacks(_: &[Sexp]) -> R<Sexp> {
-    Err(error("top-level task callbacks are not supported yet"))
 }
 
 pub fn is_base_routine(name: &str) -> bool {

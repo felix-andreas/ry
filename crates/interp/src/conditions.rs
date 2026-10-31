@@ -307,7 +307,9 @@ pub unsafe fn print_warnings() {
         text.push_str("Warning message:\n");
         let (call, message) = &warnings[0];
         if *call == nil() {
+            // GNU R ends a lone warning without a call with a space.
             text.push_str(message);
+            text.push(' ');
         } else {
             let call_text = first_deparse_line(*call);
             let separator = if call_text.len() + message.len() + 6 > 75 {

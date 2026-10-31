@@ -182,7 +182,9 @@ pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
 pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     let mark = crate::heap().handle_mark();
     interp().visible = true;
-    let result = eval::eval(expression, global_env()).and_then(|value| {
+    let mut value = nil();
+    let result = eval::eval(expression, global_env()).and_then(|result| {
+        value = result;
         crate::heap().root(value);
         let last = values::install(".Last.value")?;
         crate::heap().define(base_env(), last, value)?;
@@ -201,6 +203,15 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     interp().frames.clear();
     interp().handlers = None;
     interp().restarts = None;
+    conditions::print_warnings();
+    // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
+    let visible = interp().visible;
+    if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible) {
+        report_toplevel(unwind);
+        interp().frames.clear();
+        interp().handlers = None;
+        interp().restarts = None;
+    }
     conditions::print_warnings();
     crate::heap().release_handles(mark);
     succeeded
