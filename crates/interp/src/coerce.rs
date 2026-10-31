@@ -870,9 +870,6 @@ unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     if values::inherits(object, "factor") {
         return Err(call.error("invalid to change the storage mode of a factor"));
     }
-    if values::inherits(object, "factor") {
-        return Err(call.error("invalid to change the storage mode of a factor"));
-    }
     coerce_vector(object, kind)
 }
 
