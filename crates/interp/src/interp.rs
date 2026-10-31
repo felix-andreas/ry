@@ -23,6 +23,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod arith;
+pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
 pub mod coerce;
@@ -34,6 +35,7 @@ pub mod envir;
 pub mod eval;
 pub mod format;
 pub mod lower;
+pub mod methods;
 pub mod native;
 pub mod print;
 pub mod random;
@@ -118,6 +120,8 @@ pub struct Interp {
     pub started: std::time::Instant,
     /// `commandArgs()`.
     pub command_args: Vec<String>,
+    /// The default packages' libraries `dyn.load` loaded, with the paths it was given.
+    pub builtin_libraries: Vec<(&'static str, String)>,
 }
 
 struct InterpState {
@@ -207,6 +211,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         max_depth: 5000,
         started: std::time::Instant::now(),
         command_args: Vec::new(),
+        builtin_libraries: Vec::new(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

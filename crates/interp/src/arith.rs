@@ -20,6 +20,77 @@ unsafe extern "C" {
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    internal("intToBits", 1, |call| unsafe {
+        let integers = coerce_vector(call.arg(0), SexpType::Integer)?;
+        let source = values::ints(integers);
+        let result = alloc(SexpType::Raw, source.len() * 32)?;
+        for (index, value) in source.iter().enumerate() {
+            for bit in 0..32 {
+                values::raws_mut(result)[index * 32 + bit] = ((*value as u32 >> bit) & 1) as u8;
+            }
+        }
+        Ok(result)
+    }),
+    internal("rawToBits", 1, |call| unsafe {
+        let raw = call.arg(0);
+        if raw.kind() != SexpType::Raw {
+            return Err(call.error("argument 'x' must be a raw vector"));
+        }
+        let source = values::raws(raw);
+        let result = alloc(SexpType::Raw, source.len() * 8)?;
+        for (index, value) in source.iter().enumerate() {
+            for bit in 0..8 {
+                values::raws_mut(result)[index * 8 + bit] = (value >> bit) & 1;
+            }
+        }
+        Ok(result)
+    }),
+    internal("numToBits", 1, |call| unsafe {
+        let reals = call.arg(0);
+        if reals.kind() != SexpType::Real {
+            return Err(call.error("argument 'x' must be a numeric vector"));
+        }
+        let source = values::reals(reals);
+        let result = alloc(SexpType::Raw, source.len() * 64)?;
+        for (index, value) in source.iter().enumerate() {
+            let bits = value.to_bits();
+            for bit in 0..64 {
+                values::raws_mut(result)[index * 64 + bit] = ((bits >> bit) & 1) as u8;
+            }
+        }
+        Ok(result)
+    }),
+    internal("numToInts", 1, |call| unsafe {
+        let reals = call.arg(0);
+        if reals.kind() != SexpType::Real {
+            return Err(call.error("argument 'x' must be a numeric vector"));
+        }
+        let source = values::reals(reals);
+        let result = alloc(SexpType::Integer, source.len() * 2)?;
+        for (index, value) in source.iter().enumerate() {
+            let bits = value.to_bits();
+            values::ints_mut(result)[index * 2] = bits as u32 as i32;
+            values::ints_mut(result)[index * 2 + 1] = (bits >> 32) as u32 as i32;
+        }
+        Ok(result)
+    }),
+    internal("packBits", 2, do_pack_bits),
+    internal("rawShift", 2, |call| unsafe {
+        let raw = call.arg(0);
+        let shift = values::as_integer_scalar(call.arg(1));
+        if raw.kind() != SexpType::Raw {
+            return Err(call.error("argument 'x' must be a raw vector"));
+        }
+        if !(-8..=8).contains(&shift) {
+            return Err(call.error("argument 'n' must be a small integer"));
+        }
+        let source = values::raws(raw);
+        let result = alloc(SexpType::Raw, source.len())?;
+        for (index, value) in source.iter().enumerate() {
+            values::raws_mut(result)[index] = if shift >= 0 { ((*value as u32) << shift) as u8 } else { value >> -shift };
+        }
+        Ok(result)
+    }),
     builtin("+", -1, |call| unsafe { arithmetic(call, Op::Add) }).generic(Generic::Ops),
     builtin("-", -1, |call| unsafe { arithmetic(call, Op::Subtract) }).generic(Generic::Ops),
     builtin("*", 2, |call| unsafe { arithmetic(call, Op::Multiply) }).generic(Generic::Ops),
@@ -2635,4 +2706,61 @@ unsafe fn do_is_unsorted(call: &Call<'_>) -> R<Sexp> {
         }
     }
     scalar_bool(false)
+}
+
+unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
+    let bits = call.arg(0);
+    let kind = values::require_string(call.arg(1), "type")?;
+    let width = match kind.as_str() {
+        "raw" => 8,
+        "integer" => 32,
+        "double" => 64,
+        _ => return Err(call.error("invalid 'type' argument")),
+    };
+    let count = length(bits);
+    if count % width != 0 {
+        return Err(call.error(format!("argument 'x' must be a multiple of {width} long")));
+    }
+    let mut flags = Vec::with_capacity(count);
+    for index in 0..count {
+        let bit = match bits.kind() {
+            SexpType::Raw => values::raws(bits)[index] & 1,
+            SexpType::Logical | SexpType::Integer => {
+                let value = values::ints(bits)[index];
+                if value == NA_INTEGER {
+                    return Err(call.error("argument 'x' must not contain NAs"));
+                }
+                (value & 1) as u8
+            }
+            _ => return Err(call.error("argument 'x' must be raw, integer or logical")),
+        };
+        flags.push(bit as u64);
+    }
+    let packed: Vec<u64> = flags
+        .chunks(width)
+        .map(|chunk| chunk.iter().enumerate().fold(0u64, |word, (bit, flag)| word | (flag << bit)))
+        .collect();
+    match width {
+        8 => {
+            let result = alloc(SexpType::Raw, packed.len())?;
+            for (index, word) in packed.iter().enumerate() {
+                values::raws_mut(result)[index] = *word as u8;
+            }
+            Ok(result)
+        }
+        32 => {
+            let result = alloc(SexpType::Integer, packed.len())?;
+            for (index, word) in packed.iter().enumerate() {
+                values::ints_mut(result)[index] = *word as u32 as i32;
+            }
+            Ok(result)
+        }
+        _ => {
+            let result = alloc(SexpType::Real, packed.len())?;
+            for (index, word) in packed.iter().enumerate() {
+                values::reals_mut(result)[index] = f64::from_bits(*word);
+            }
+            Ok(result)
+        }
+    }
 }

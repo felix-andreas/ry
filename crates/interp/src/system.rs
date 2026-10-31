@@ -14,6 +14,50 @@ use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
 use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
+    internal("eSoftVersion", 0, do_esoft_version),
+    internal("pcre_config", 0, |_| unsafe {
+        let result = values::logical_vector(&[1, 1, 1, 1])?;
+        let names = string_vector(&["UTF-8", "Unicode properties", "JIT", "stack"])?;
+        values::set_attr(result, symbols().names, names)?;
+        Ok(result)
+    }),
+    internal("icuSetCollate", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("icuGetCollate", 1, |_| unsafe { scalar_string("ICU not in use") }),
+    internal("setNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
+    internal("setMaxNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
+    internal("isatty", 1, |call| unsafe {
+        let descriptor = values::as_integer_scalar(call.arg(0));
+        scalar_bool(descriptor >= 0 && libc::isatty(descriptor) == 1)
+    }),
+    internal("readRenviron", 1, do_read_renviron).invisible(),
+    internal("debug", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("undebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("debugonce", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("isdebugged", 2, |_| unsafe { scalar_bool(false) }),
+    internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
+    internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
+    internal("browserText", 1, |call| unsafe { Err(call.error("no browser context to query")) }),
+    internal("browserCondition", 1, |call| unsafe { Err(call.error("no browser context to query")) }),
+    internal("browserSetDebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("memory.profile", 0, |_| unsafe { values::integer_vector(&[]) }),
+    internal("file.symlink", 2, |call| unsafe { link_paths(call, |from, to| std::os::unix::fs::symlink(from, to).is_ok()) }),
+    internal("file.link", 2, |call| unsafe { link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok()) }),
+    internal("setFileTime", 2, |_| unsafe { scalar_bool(true) }),
+    internal("file.show", 5, |call| unsafe {
+        for index in 0..length(call.arg(0)) {
+            if let Some(path) = values::string_at(call.arg(0), index) {
+                let text = std::fs::read_to_string(&*path).map_err(|failure| call.error(format!("cannot open file '{path}': {failure}")))?;
+                crate::write_console(text.as_bytes(), false);
+            }
+        }
+        Ok(nil())
+    }).invisible(),
+    internal("file.choose", 1, |call| unsafe { Err(call.error("file.choose() needs an interactive session")) }),
+    internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
+    internal("curlGetHeaders", 5, |call| unsafe { Err(call.error("libcurl is not available in this session")) }),
+    internal("curlDownload", 6, |call| unsafe { Err(call.error("libcurl is not available in this session")) }),
+    internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
     internal("R.home", 0, |_| unsafe { scalar_string(&r_home()) }),
     internal("Sys.getenv", 2, do_sys_getenv),
     internal("Sys.setenv", 2, do_sys_setenv).invisible(),
@@ -124,6 +168,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.setenv", 2, do_sys_setenv),
     internal("pkgload", -1, |_| unsafe { Ok(nil()) }),
 ];
+
+/// GNU R's identifier for its internals interface, which `loadNamespace` compares against the one a
+/// package with compiled code recorded when it was installed. Matching it lets packages installed by
+/// GNU R 4.3 load unchanged.
+const INTERNALS_ID: &str = "2fdf6c18-697a-4ba7-b8ef-11c0d92f1327";
 
 /// The R installation whose base and recommended packages the session loads.
 pub fn r_home() -> String {
@@ -1179,4 +1228,83 @@ pub unsafe fn platform() -> R<Sexp> {
         ("path.sep", string(":")?),
         ("r_arch", string("")?),
     ])
+}
+
+unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
+    let entries = [
+        ("zlib", "1.3"),
+        ("bzlib", ""),
+        ("xz", ""),
+        ("PCRE", "10.42 2022-12-11"),
+        ("ICU", ""),
+        ("TRE", ""),
+        ("iconv", "glibc"),
+        ("readline", ""),
+        ("BLAS", ""),
+    ];
+    let result = string_vector(&entries.iter().map(|(_, version)| *version).collect::<Vec<_>>())?;
+    let names = string_vector(&entries.iter().map(|(name, _)| *name).collect::<Vec<_>>())?;
+    values::set_attr(result, symbols().names, names)?;
+    Ok(result)
+}
+
+unsafe fn do_read_renviron(call: &Call<'_>) -> R<Sexp> {
+    let path = values::require_string(call.arg(0), "x")?;
+    let path = crate::connections::expand_path(&path);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        crate::conditions::warning_call(call.call, &format!("file '{path}' cannot be opened for reading"))?;
+        return scalar_bool(false);
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(|quote| quote == '"' || quote == '\'');
+        let value = expand_renviron_value(value);
+        // SAFETY: the interpreter is single-threaded.
+        std::env::set_var(name.trim(), value);
+    }
+    scalar_bool(true)
+}
+
+/// Expands `${NAME}` and `${NAME-default}` references, the forms `.Renviron` files use.
+fn expand_renviron_value(value: &str) -> String {
+    let mut result = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        result.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find('}') else {
+            result.push_str(&rest[start..]);
+            return result;
+        };
+        let reference = &rest[start + 2..start + end];
+        let (name, default) = reference.split_once('-').unwrap_or((reference, ""));
+        match std::env::var(name) {
+            Ok(found) if !found.is_empty() => result.push_str(&found),
+            _ => result.push_str(&expand_renviron_value(default)),
+        }
+        rest = &rest[start + end + 1..];
+    }
+    result.push_str(rest);
+    result
+}
+
+unsafe fn link_paths(call: &Call<'_>, function: impl Fn(&str, &str) -> bool) -> R<Sexp> {
+    let from = call.arg(0);
+    let to = call.arg(1);
+    let count = length(from).max(length(to));
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        let source = values::string_at(from, index % length(from).max(1));
+        let target = values::string_at(to, index % length(to).max(1));
+        values::ints_mut(result)[index] = match (source, target) {
+            (Some(source), Some(target)) => function(&source, &target) as i32,
+            _ => 0,
+        };
+    }
+    Ok(result)
 }

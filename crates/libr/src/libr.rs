@@ -27,7 +27,9 @@ pub mod extptr;
 pub mod globals;
 pub mod lists;
 pub mod memory;
+pub mod methods;
 pub mod strings;
+pub mod utilities;
 pub mod vectors;
 
 use crate::{boundary::Unwind, dynload::Dll};

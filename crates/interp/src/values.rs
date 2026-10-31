@@ -193,10 +193,11 @@ pub struct Globals {
     pub options: Sexp,
     /// `R_MethodsNamespace`, once `methods` is loaded.
     pub methods_namespace: Sexp,
-    /// The S4 dispatch hook `standardGeneric` calls, once `methods` installs it.
-    pub standard_generic: Sexp,
+    /// Whether the methods package turned S4 dispatch on, which makes `standardGeneric` and
+    /// primitive generics dispatch.
+    pub methods_dispatch: bool,
     /// Primitives the methods package turned generic, by primitive index.
-    pub primitive_methods: Vec<(u32, Sexp)>,
+    pub primitive_methods: rustc_hash::FxHashMap<u32, crate::dispatch::PrimitiveMethods>,
     /// Environments `attach` put on the search path are ordinary enclosures of the global
     /// environment; this keeps `Autoloads` and the like alive between `attach` and first use.
     pub keep: Vec<Sexp>,
@@ -207,8 +208,8 @@ impl Globals {
         Globals {
             options: Sexp::dangling(),
             methods_namespace: Sexp::dangling(),
-            standard_generic: Sexp::dangling(),
-            primitive_methods: Vec::new(),
+            methods_dispatch: false,
+            primitive_methods: rustc_hash::FxHashMap::default(),
             keep: Vec::new(),
         }
     }
@@ -218,15 +219,14 @@ impl Globals {
         let globals = &mut interp().globals;
         globals.options = nil;
         globals.methods_namespace = nil;
-        globals.standard_generic = nil;
     }
 
     pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
         marker.mark(self.options);
         marker.mark(self.methods_namespace);
-        marker.mark(self.standard_generic);
-        for &(_, function) in &self.primitive_methods {
-            marker.mark(function);
+        for methods in self.primitive_methods.values() {
+            marker.mark(methods.generic);
+            marker.mark(methods.methods);
         }
         for &object in &self.keep {
             marker.mark(object);

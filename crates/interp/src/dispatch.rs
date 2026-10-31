@@ -837,62 +837,156 @@ unsafe fn find_group_method(
 
 // S4.
 
-/// Dispatches a primitive on an S4 object through the methods package, if it made the
-/// primitive generic.
-unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+/// What the methods package set up for one primitive with `setGeneric` or `setMethod`.
+pub struct PrimitiveMethods {
+    pub state: MethodsState,
+    /// The generic function, a closure.
+    pub generic: Sexp,
+    /// The methods table `quick_method_check` searches.
+    pub methods: Sexp,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MethodsState {
+    None,
+    NeedsReset,
+    Has,
+    Suppressed,
+}
+
+/// `R_set_prim_method`: `code` is one of `"clear"`, `"reset"`, `"set"` and `"suppress"`.
+pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods: Sexp) -> R<()> {
+    let state = match code {
+        "clear" => MethodsState::None,
+        "reset" => MethodsState::NeedsReset,
+        "set" => MethodsState::Has,
+        "suppress" => MethodsState::Suppressed,
+        _ => return Err(error(format!("invalid primitive methods code (\"{code}\"): should be \"clear\", \"reset\", \"set\", or \"suppress\""))),
+    };
+    if !matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
+        return Err(error("invalid object: must be a primitive function"));
+    }
+    let table = &mut interp().globals.primitive_methods;
     let index = op.primitive_index();
-    let Some(&(_, generic)) = interp()
+    match state {
+        MethodsState::None => {
+            table.remove(&index);
+        }
+        MethodsState::Suppressed => {
+            if let Some(entry) = table.get_mut(&index) {
+                entry.state = state;
+            }
+        }
+        MethodsState::Has | MethodsState::NeedsReset => {
+            if generic != nil() && generic.kind() != SexpType::Closure {
+                return Err(error(format!(
+                    "the formal definition of a primitive generic must be a function object (got type '{}')",
+                    generic.kind().name()
+                )));
+            }
+            let entry = table.entry(index).or_insert(PrimitiveMethods { state, generic: nil(), methods: nil() });
+            entry.state = state;
+            if generic != nil() {
+                entry.generic = generic;
+            }
+            if methods != nil() {
+                entry.methods = methods;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The generic and methods table the methods package set for primitive `op`, if any.
+pub unsafe fn primitive_methods(op: Sexp) -> Option<(Sexp, Sexp)> {
+    if !matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
+        return None;
+    }
+    interp()
         .globals
         .primitive_methods
-        .iter()
-        .find(|(primitive, _)| *primitive == index)
-    else {
+        .get(&op.primitive_index())
+        .filter(|entry| entry.state != MethodsState::None)
+        .map(|entry| (entry.generic, entry.methods))
+}
+
+/// `R_possible_dispatch`: dispatches primitive `op` through the methods package when it made
+/// the primitive generic. `None` means the primitive's own code runs.
+unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    let Some(entry) = interp().globals.primitive_methods.get(&op.primitive_index()) else {
         return Ok(None);
     };
+    if !matches!(entry.state, MethodsState::Has | MethodsState::NeedsReset) {
+        return Ok(None);
+    }
+    let (generic, methods) = (entry.generic, entry.methods);
     if generic.kind() != SexpType::Closure {
         return Ok(None);
     }
     let promised = promised_args(call, args)?;
+    if methods != nil() {
+        let arguments = eval::args_pairlist(&promised)?;
+        let method = crate::methods::quick_method_check(arguments, methods, generic)?;
+        if method.kind() == SexpType::Closure {
+            let value = apply_closure(call, method, &promised, env, None)?;
+            return Ok(Some(value));
+        }
+    }
     let value = apply_closure(call, generic, &promised, env, None)?;
+    if value == deferred_default_marker()? {
+        return Ok(None);
+    }
     Ok(Some(value))
+}
+
+/// The value a generic returns to have the primitive's own code run instead.
+pub unsafe fn deferred_default_marker() -> R<Sexp> {
+    values::install("__Deferred_Default_Marker__")
 }
 
 unsafe fn do_is_methods_dispatch_on(call: &Call<'_>) -> R<Sexp> {
     let _ = call;
-    values::scalar_bool(interp().globals.standard_generic != nil())
+    values::scalar_bool(interp().globals.methods_dispatch)
 }
 
 /// `standardGeneric("f")`: hands the call to the dispatcher the methods package installed.
 pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
-    let dispatcher = interp().globals.standard_generic;
-    if dispatcher == nil() {
+    if !interp().globals.methods_dispatch {
         return Err(call.error(
             "standardGeneric called without 'methods' dispatch enabled (will be ignored)",
         ));
     }
     let name = call.arg(0);
+    if name.kind() != SexpType::String || length(name) != 1 {
+        return Err(call.error("argument to 'standardGeneric' must be a non-empty character string"));
+    }
     let env = call.env;
-    let frame_function = interp()
-        .frames
-        .iter()
-        .rev()
-        .find(|frame| frame.env == env)
-        .map_or(nil(), |frame| frame.function);
-    let args = [
-        Arg {
-            tag: nil(),
-            value: name,
-        },
-        Arg {
-            tag: nil(),
-            value: env,
-        },
-        Arg {
-            tag: nil(),
-            value: frame_function,
-        },
-    ];
-    eval::apply(nil(), dispatcher, &args, env)
+    let generic = this_generic(name)?;
+    if generic == nil() {
+        return Err(call.error(format!(
+            "call to standardGeneric(\"{}\") apparently not from the body of that generic function",
+            values::string_at(name, 0).unwrap_or_default()
+        )));
+    }
+    crate::methods::dispatch_generic(name, env, generic)
+}
+
+/// The innermost function on the call stack whose `generic` attribute names `name`, which is
+/// how `standardGeneric` finds the generic it was called from.
+unsafe fn this_generic(name: Sexp) -> R<Sexp> {
+    let wanted = values::string_at(name, 0).unwrap_or_default().into_owned();
+    let generic_symbol = values::install("generic")?;
+    for frame in interp().frames.iter().rev() {
+        let function = frame.function;
+        if function.kind() != SexpType::Closure {
+            continue;
+        }
+        let attribute = get_attr(function, generic_symbol);
+        if values::string_at(attribute, 0).is_some_and(|text| *text == wanted) {
+            return Ok(function);
+        }
+    }
+    Ok(nil())
 }
 
 unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {

@@ -13,6 +13,7 @@ use crate::{
 };
 use heap::object::{Sexp, SexpType};
 use interp::builtins::{Arg, BuiltinDef, Call, builtin, internal};
+use interp::builtin_libraries;
 use std::ffi::{c_char, c_int, c_void};
 
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
@@ -382,6 +383,9 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
         RoutineKind::External => ".External",
         _ => ".Call",
     };
+    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+        return Ok(value);
+    }
     let args = foreign_args(call)?;
     let (function, arity, routine_name) =
         resolve_routine(call.call, args.name, args.package.as_deref(), kind)?;
@@ -431,6 +435,9 @@ unsafe extern "C" {
 /// `.C` and `.Fortran`: each argument is copied into native memory, the routine receives
 /// pointers, and the copies come back as a list.
 unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
+    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+        return Ok(value);
+    }
     let args = foreign_args(call)?;
     let (function, _, _) = resolve_routine(call.call, args.name, args.package.as_deref(), kind)?;
     let mut copies = Vec::with_capacity(args.values.len());
@@ -520,6 +527,9 @@ unsafe fn do_dyn_load(call: &Call<'_>) -> ApiResult<Sexp> {
         return Err(error_in(call.call, "character argument expected"));
     }
     let path = utf8_text(path.element(0))?.into_owned();
+    if let Some(package) = builtin_libraries::builtin_library(&path) {
+        return Ok(builtin_libraries::load(package, &path)?);
+    }
     let dll = crate::dynload::load_library(&path)?;
     dll_info(dll)
 }
@@ -527,6 +537,10 @@ unsafe fn do_dyn_load(call: &Call<'_>) -> ApiResult<Sexp> {
 unsafe fn loaded_dlls() -> ApiResult<Sexp> {
     let mut items = vec![interp::native::dll_info("base", "base")?];
     let mut names = vec!["base".to_owned()];
+    for (name, info) in builtin_libraries::loaded()? {
+        items.push(info);
+        names.push(name);
+    }
     let count = runtime().dlls.len();
     for index in 0..count {
         let dll: *mut Dll = &mut *runtime().dlls[index];
@@ -542,6 +556,9 @@ unsafe fn loaded_dlls() -> ApiResult<Sexp> {
 }
 
 unsafe fn registered_routines(info: Sexp) -> ApiResult<Sexp> {
+    if let Some(routines) = builtin_libraries::registered_routines(info)? {
+        return Ok(routines);
+    }
     let dll = if info.kind() == SexpType::ExternalPtr {
         info.external_address() as *mut Dll
     } else if info.kind() == SexpType::List {
@@ -611,6 +628,9 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
     } else {
         None
     };
+    if let Some(info) = builtin_libraries::symbol_info(&name, package_name.as_deref())? {
+        return Ok(info);
+    }
     for kind in [RoutineKind::Call, RoutineKind::External, RoutineKind::C, RoutineKind::Fortran] {
         if let Ok((function, arity)) = find_routine(&name, package_name.as_deref(), kind) {
             let dll = runtime()

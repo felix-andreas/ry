@@ -36,6 +36,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     let platform = crate::system::platform()?;
     eval::define(values::install(".Platform")?, platform, base_env())?;
     eval::define(values::install(".BaseNamespaceEnv")?, base_namespace(), base_env())?;
+    eval::define(values::install("base")?, base_namespace(), crate::heap().known().namespace_registry)?;
     let home = crate::system::r_home();
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
