@@ -18,6 +18,8 @@ ry becomes a full, backwards-compatible reimplementation of R, extended with ry'
 
 Most of the benchmark dependencies ship compiled C, C++ or Rust code written against R's C API (`SEXP`, memory protection, `.Call`). Full compatibility therefore means implementing that C API, not only R's language semantics. That interface shapes the architecture more than the JIT does, so it is designed first.
 
+The runtime is the highest priority (user directive). Packaging work covers only what affects the runtime directly. Existing R ecosystem tools (package managers and the like) are inspiration, not the design bar; the bar is the one in `AGENTS.md`.
+
 ## Benchmark
 
 Three synthetic code bases (finance, data science, and biostatistics), each about 300,000 lines in about 500 files. Each uses this dependency set:
@@ -59,7 +61,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Runtime step 2 session session_0111kWqDWCzM9zgtXPN1prpJ: object model, GC, libR skeleton.
 - Typing session session_0111kWqDjwjNJcGFMYNSyybM: inline annotation syntax, the comment/inline disagreement warning, and strict mode. It delivers one large PR.
 - Docs session session_0111kWqCgbHESLzg96ct5Rm8: restructuring the introduction and type-checking sections.
-- Packaging design session session_0111kWqE44e29XzkN1aPkfbs: R versions and package management (rv, rig, rpx, renv, pak), delivering `contributing/design/packaging.md`.
+- Packaging design session session_0111kWqE44e29XzkN1aPkfbs: R versions and package management (rv, rig, rpx, renv, pak), narrowed to what the runtime needs, delivering `contributing/design/packaging.md`.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
