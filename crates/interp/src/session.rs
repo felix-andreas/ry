@@ -177,6 +177,43 @@ pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
     Outcome::Completed
 }
 
+/// Runs a read-eval-print loop: `read` returns the next chunk of input after showing a prompt,
+/// or `None` at the end of input. Input that ends inside an unfinished expression is
+/// continued on the next chunk, and each complete expression runs as its own top-level call.
+pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
+    let mut buffer = String::new();
+    loop {
+        let prompt = if buffer.is_empty() { "> " } else { "+ " };
+        let Some(chunk) = read(prompt) else {
+            break;
+        };
+        buffer.push_str(&chunk);
+        if !buffer.ends_with('\n') {
+            buffer.push('\n');
+        }
+        if syntax::input_is_unfinished(&buffer) {
+            continue;
+        }
+        let text = std::mem::take(&mut buffer);
+        let mark = crate::heap().handle_mark();
+        match crate::lower::parse_text(&text, "<text>") {
+            Ok(expressions) => {
+                crate::heap().root(expressions);
+                for index in 0..length(expressions) {
+                    if !run_toplevel(expressions.element(index)) {
+                        break;
+                    }
+                }
+            }
+            Err(Unwind::Error(failure)) => {
+                write_console(format!("Error: {}\n", failure.message).as_bytes(), true);
+            }
+            Err(_) => {}
+        }
+        crate::heap().release_handles(mark);
+    }
+}
+
 /// Evaluates one top-level expression, prints it if visible, and reports deferred warnings.
 /// Returns whether it succeeded.
 pub unsafe fn run_toplevel(expression: Sexp) -> bool {
@@ -216,7 +253,7 @@ pub unsafe fn report_toplevel(unwind: Unwind) {
             let text = conditions::format_error(call, &failure.message);
             write_console(text.as_bytes(), true);
         }
-        Unwind::Interrupt => {}
+        Unwind::Interrupt => write_console(b"\n", false),
         Unwind::Jump(jump) => match *jump {
             Jump::TopLevel => {}
             Jump::Return { .. } => {

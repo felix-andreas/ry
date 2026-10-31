@@ -2019,6 +2019,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "syntax",
  "thiserror 2.0.17",
 ]
 

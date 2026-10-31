@@ -50,10 +50,31 @@ annotation-mismatch
    |                               ^^^^^^^
 ```
 
+## Running annotated code
+
+`ry run` and `ry repl` run annotated code. On GNU R they run the plain program it means, and on
+ry's own runtime (`--runtime ry`) the annotations also become checks: an argument of the wrong kind
+fails where the function was called.
+
+```r
+scale <- function(values: double, by: double) -> double values * by
+scale("a", 1)
+```
+
+```text
+Error in scale("a", 1) :
+  argument `values` must be `double`, not `character`
+```
+
+A check runs when the argument is first used, so lazy arguments stay lazy, and it tests only the
+kind of value (`double`, `character`, a list, a function), not its length or class. Both commands
+also print the warnings above before the code runs. The
+[type system reference](/reference/type-system#inline-annotations-at-run-time) has the full rules.
+
 ## Keeping files runnable by R
 
-R itself cannot run code with inline annotations. Inline annotations are on by default, so if your
-project must also run under R, turn them off:
+`Rscript` and other R tools cannot run code with inline annotations. Inline annotations are on by
+default, so if your project must also run under them, turn inline annotations off:
 
 ```toml
 [check]
@@ -68,5 +89,6 @@ inline-annotation
   ! inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on
 ```
 
-Use `#:` comments in such a project. The [type system reference](/reference/type-system#inline-annotation-syntax)
-lists every place an inline annotation may go.
+`ry run` still runs such a file, but nothing checks the annotations. Use `#:` comments in such a
+project. The [type system reference](/reference/type-system#inline-annotation-syntax) lists every
+place an inline annotation may go.
