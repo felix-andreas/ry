@@ -14,9 +14,10 @@ The rest of the page argues for each of these, and section 10 orders them into a
 
 - **Implement R's C API as an ABI-compatible `libR`.** A package's compiled code must load and run
   unchanged, including binaries built against GNU R's headers. This is cheap to promise, because
-  since R 4.x the public headers treat `SEXP` as an opaque pointer, so ry's object layout stays its
-  own. The surface is the whole public header set of R 4.6, not a subset: the benchmark closure uses
-  814 distinct API names, and no smaller set covers even half its packages.
+  since R 4.2.0 the public headers treat `SEXP` as an opaque pointer, so ry's object layout stays
+  its own. The surface is the whole public header set of R 4.6, not a subset: the benchmark's
+  dependency closure uses 792 distinct API names (plus 150 BLAS and LAPACK routines), and covering
+  even half of its compiled packages takes the 495 most widely used ones.
 - **Keep the object model close to GNU R where native code can see it,** and free everywhere else.
   Objects that native code touches do not move, `PROTECT` keeps its stack semantics, strings are
   interned so pointer equality works, and ALTREP is a first-class mechanism. Inside the interpreter
@@ -33,8 +34,8 @@ The rest of the page argues for each of these, and section 10 orders them into a
 - **Build the table type on Polars, linked as a Rust crate,** and expose its columns to R and to
   native code as ALTREP vectors. Typed columns come from ry's record types.
 - **Share one type model between checker and runtime.** The runtime consumes the checker's types
-  through a small, stable projection. Types are hints by default and become guarantees, with checks
-  at the boundary, in strict mode.
+  through a small, stable projection. Types are hints by default; in strict mode they become
+  guarantees wherever a runtime check backs them.
 - **Get real packages running first.** The interpreter and the C API come before the JIT, the table
   type and the inline syntax, because nothing else can be measured until the benchmark code runs.
 
@@ -43,42 +44,55 @@ The rest of the page argues for each of these, and section 10 orders them into a
 ### What was measured
 
 The scripts are in `tools/research/`. `r_api_usage.py` resolves the dependency closure of the
-benchmark's `Imports` (following `Depends`, `Imports` and `LinkingTo`, recursively) against CRAN,
-the extra repository `ak-finccam.github.io/r-packages` (which supplies `azidentity`, `polars` and
-`Rblpapi`), and the two GitHub remotes. It downloads every source package and scans the compiled
-code under `src/` and `inst/include/` for identifiers declared in R 4.6.2's public headers (`R.h`,
-`Rinternals.h`, `Rdefines.h`, `Rembedded.h`, `Rinterface.h`, `Rconnections.h`, `Rmath.h` and every
-`R_ext/*.h`). `r_api_summary.py` turns the result into the figures below. The raw data is in
-`tools/research/data/`: `symbols.csv` has one row per symbol with the packages that use it,
-`packages.csv` one row per package, `r_calls.csv` the R-level foreign calls, and `summary.txt` the
-output these tables quote.
+benchmark's `Imports` (following `Depends`, `Imports` and `LinkingTo`, recursively, but not
+`Suggests`) against CRAN, the extra repository `ak-finccam.github.io/r-packages` (which supplies
+`azidentity`, `polars` and `Rblpapi`), and the two GitHub remotes. It downloads every source package
+and scans the compiled code under `src/` and `inst/include/` for identifiers declared in R 4.6.2's
+public headers (`R.h`, `Rinternals.h`, `Rdefines.h`, `Rembedded.h`, `Rinterface.h`,
+`Rconnections.h`, `Rmath.h` and every `R_ext/*.h`). `r_api_summary.py` turns the result into the
+figures below. The raw data is in `tools/research/data/`: `symbols.csv` has one row per name with
+its class, declaring header and the packages that use it, `packages.csv` one row per package,
+`r_calls.csv` the R-level foreign calls, and `summary.txt` the output every figure here is quoted
+from.
 
-R classifies its own entry points, and the scan keeps that classification. "API" and "experimental"
-are the functions *Writing R Extensions* documents with `@apifun` and `@eapifun`, "embedding" is the
-API for programs that embed R, and "non-API" is the list `tools:::nonAPI` that `R CMD check` warns
-about. Everything else declared in a public header is "header": mostly types (`SEXP`, `R_xlen_t`),
-type codes (`INTSXP`), constants (`R_NaInt`), the Rmath distribution functions and the graphics
-engine.
+R classifies its own entry points, and the scan keeps that classification:
 
-The scan is lexical, and three of its limits matter when you read the numbers:
+- **API** and **experimental** are the names *Writing R Extensions* documents with `@apifun`,
+  `@apivar`, `@eapifun` and `@eapivar`.
+- **Embedding** is the API for programs that embed R.
+- **Non-API** is the list `tools:::nonAPI` that `R CMD check` warns about.
+- **BLAS/LAPACK** is every routine declared in `R_ext/BLAS.h`, `Lapack.h` and `Linpack.h`. These are
+  Fortran libraries to link against, not R API to reimplement, so they are reported separately.
+- **Header** is everything else declared in a public header: mostly types (`SEXP`, `R_xlen_t`), type
+  codes (`INTSXP`), constants, the Rmath distribution functions and the graphics engine.
 
-- A file counts only if it can see R's headers, directly or through a local include, which keeps a
-  vendored C library such as ICU out of the counts. Inside a file that defines `R_NO_REMAP`, or uses
-  Rcpp or cpp11 (both define it), an unprefixed name like `length` is the package's own and is not
-  counted.
-- Both branches of an `#if` are counted. Many non-API uses sit in fallback branches for older R, so
-  the non-API figures are an upper bound (more on this below).
+The scan is lexical, and its limits matter when you read the numbers:
+
+- A file counts only if it can see R's headers. That means it includes one, or it is connected to
+  such a file through the package's own `#include` edges in either direction, which is how Rcpp's
+  umbrella header reaches the many files that use the API without including anything. A vendored C
+  library that no R-facing file includes stays out.
+- Unprefixed names such as `length` count only where R would remap them. They do not count in C++
+  files (since R 4.5.0, `R CMD INSTALL` compiles C++ with `-DR_NO_REMAP`), in packages that define
+  `R_NO_REMAP`, or for Rmath's short names (`dt`, `df`, `beta`) in files that do not include
+  `Rmath.h`.
+- Both branches of an `#if` are counted, so a fallback branch for an older R counts as much as the
+  modern one. Names that R 4.6 removed from its public headers (`TRUELENGTH`, `SETLENGTH`,
+  `IS_GROWABLE`) are not counted at all, so the measured surface is R 4.6's, not what those
+  fallbacks need.
+- A package-local macro that shadows an API name still counts as that name. Two known cases are
+  data.table's own `BODY` macro and simdjson's `OBJECT` enumerator.
 - `polars` and `azidentity` fetch their Rust dependencies with Cargo at build time. Only the code in
-  the tarball is scanned, which includes each package's own FFI layer but not `savvy-ffi` or
-  `libR-sys`.
+  the tarball is scanned, which includes each package's own glue but not `savvy-ffi` or `libR-sys`,
+  where their calls into the API live.
 
 ### The closure
 
 | | |
 | --- | --- |
 | Packages in the closure, base packages excluded | 232 |
-| ... with compiled code that uses the R API | 121 |
-| Direct (non-base) dependencies | 67, of which 36 are compiled |
+| ... whose compiled code uses the R API | 121 |
+| Direct (non-base) dependencies | 67; 36 ship code that uses the API (35 compile, and `progress` ships a header) |
 | Compiled source lines: C / C++ / headers | 1.21M / 0.64M / 3.97M |
 | Compiled source lines: Fortran / Rust | 24.7K / 11.6K |
 
@@ -95,73 +109,75 @@ Most packages call the C API directly rather than through a binding layer:
 | cpp11 | 9 (`readr`, `readxl`, `vroom`, `tzdb`, `systemfonts`, ...) |
 | Rust | 2 (`polars` through savvy, `azidentity` through extendr) |
 
-Rcpp and cpp11 are header-only, so their own use of the API compiles into every package that links
-to them. The coverage curve below charges each package with its own symbols plus those of every
-package in its `LinkingTo`.
+### The names
 
-### The symbols
+The closure uses **942 distinct names** from R's headers, 131,275 times in total. 150 of them are
+BLAS and LAPACK routines, which leaves **792 names of R API proper** (130,074 occurrences). By class,
+307 are API, 102 experimental, 5 embedding, 30 non-API and 348 header-only. Of the 570 names R
+documents as API or experimental API, the closure uses 409.
 
-The closure uses **814 distinct names** from R's headers, 116,673 times in total. By class, 292 are
-API, 91 experimental, 5 embedding, 29 non-API and 397 header-only. Of the 582 functions R documents
-as API or experimental API, the closure uses 383.
+The most widely used names are the ones any implementation starts with:
 
-The most widely used names are the ones any implementation would start with:
-
-| Symbol | Class | Packages | Occurrences |
+| Name | Class | Packages | Occurrences |
 | --- | --- | ---: | ---: |
-| `R_registerRoutines`, `R_useDynamicSymbols`, `DllInfo` | api / header | 117 | 133 |
-| `SEXP` | header | 107 | 35,873 |
-| `R_NilValue` | api | 81 | 2,302 |
-| `Rf_error` | api | 80 | 4,220 |
-| `Rf_allocVector` | api | 77 | 2,723 |
-| `INTEGER` | api | 71 | 3,327 |
-| `PROTECT` / `UNPROTECT` (`Rf_protect` / `Rf_unprotect`) | api | 70 | 4,777 / 2,922 |
-| `STRING_ELT` | api | 70 | 1,705 |
-| `CHAR` (`R_CHAR`) | api | 68 | 1,404 |
-| `Rf_length` | api | 64 | 1,872 |
-| `REAL` | api | 60 | 2,410 |
-| `TYPEOF` | api | 58 | 1,269 |
-| `SET_VECTOR_ELT` / `VECTOR_ELT` | api | 50 / 46 | 1,608 / 1,494 |
-| `Rf_setAttrib` / `Rf_getAttrib` | api | 48 / 39 | 633 / 571 |
-| `Rf_mkChar` | api | 47 | 627 |
-| `Rf_install` | api | 44 | 810 |
-| `Rf_eval` | api | 36 | 187 |
-| `R_RegisterCCallable` | api | 25 | 275 |
-| `R_ExternalPtrAddr` | api | 24 | 457 |
+| `R_registerRoutines`, `R_useDynamicSymbols` | api | 117 | 133 each |
+| `SEXP` | header | 107 | 41,844 |
+| `Rf_error` | api | 83 | 5,836 |
+| `R_NilValue` | api | 82 | 2,429 |
+| `PROTECT` / `UNPROTECT` (`Rf_protect` / `Rf_unprotect`) | api | 79 / 78 | 5,092 / 3,144 |
+| `Rf_allocVector` | api | 77 | 2,791 |
+| `INTEGER` | api | 71 | 3,391 |
+| `STRING_ELT` | api | 70 | 1,717 |
+| `CHAR` (`R_CHAR`) | api | 68 | 1,449 |
+| `Rf_length` | api | 65 | 2,568 |
+| `REAL` | api | 61 | 3,777 |
+| `TYPEOF` | api | 59 | 1,333 |
+| `SET_VECTOR_ELT` / `VECTOR_ELT` | api | 50 / 47 | 1,635 / 1,519 |
+| `Rf_setAttrib` / `Rf_getAttrib` | api | 48 / 39 | 664 / 590 |
+| `Rf_mkChar` | api | 47 | 651 |
+| `Rf_install` | api | 45 | 843 |
+| `Rf_eval` | api | 38 | 195 |
+| `R_RegisterCCallable` | api | 25 | 276 |
+| `R_ExternalPtrAddr` | api | 25 | 469 |
 
-But the distribution has a long tail, and the tail is not optional. 460 names are used by at least
-two packages, 243 by at least five, 146 by at least ten, and only 25 by fifty or more. The coverage
+But the distribution has a long tail, and the tail is not optional. 499 names are used by at least
+two packages, 249 by at least five, 145 by at least ten, and only 24 by fifty or more. The coverage
 curve shows what that means: if ry implemented the N most widely used names, this many of the 121
-compiled packages would have everything they need.
+compiled packages would have every name they use.
 
-| Names implemented | 25 | 50 | 100 | 150 | 200 | 300 | 400 | 500 | all 814 |
+| Names implemented | 25 | 50 | 100 | 150 | 200 | 300 | 400 | 500 | all 942 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Packages fully covered | 1 | 5 | 10 | 19 | 24 | 37 | 43 | 64 | 121 |
+| Packages fully covered | 2 | 5 | 9 | 19 | 24 | 33 | 43 | 62 | 121 |
 
-The packages that need the most are the ones the benchmark cannot do without: `Matrix` needs 259
-names, `vctrs` 245, `pak` 224, `data.table` 206 and `rlang` 203. So the target is the public header
-set as a whole, and a "most common 200" subset would leave the core of the tidyverse and data.table
-unable to load.
+Covering half of the compiled packages takes the 495 most widely used names. The curve charges a
+package with the names of every header-only layer in its `LinkingTo` as well as its own, which
+overstates Rcpp's share: Rcpp's headers mention 358 names, most of them Rmath distribution functions
+it wraps, and an unused inline wrapper never reaches a package's binary. In their own code, the
+packages that use the most names are the ones the benchmark cannot do without: Rcpp (358),
+`Matrix` (257), `vctrs` (250), `pak` (237), `rlang` (233) and `data.table` (202). So the target is the
+public header set as a whole, and a "most common 200" subset would leave the core of the tidyverse
+and data.table unable to load.
 
-Grouped by subsystem (the grouping is by name prefix, in `r_api_summary.py`):
+Grouped by subsystem (by declaring header, then by name; the rules are in `r_api_summary.py`):
 
 | Subsystem | Names | Packages using any |
 | --- | ---: | ---: |
 | Registration and cross-package C calls | 8 | 117 |
-| Vector data access (`INTEGER`, `REAL`, `VECTOR_ELT`, lengths, resizable vectors) | 51 | 101 |
-| Non-local exits and errors (`Rf_error`, `R_UnwindProtect`, `R_ToplevelExec`) | 15 | 88 |
-| Allocation, coercion, duplication | 24 | 86 |
-| Math, RNG, BLAS and LAPACK | 84 | 82 |
-| Strings and encodings | 28 | 81 |
-| Protection and GC | 19 | 79 |
-| Evaluation, calls and pairlists | 39 | 57 |
-| Attributes, classes and S4 | 31 | 57 |
-| Environments, closures, promises | 41 | 38 |
-| External pointers, weak references, finalizers | 15 | 27 |
-| ALTREP | 14 | 9 |
-| Graphics engine and devices | 112 | 7 |
-| Connections | 6 | 5 |
-| Types, constants and everything else | 327 | 121 |
+| Vector data access (`INTEGER`, `REAL`, `VECTOR_ELT`, lengths, resizable vectors) | 50 | 96 |
+| Non-local exits, errors and interrupts | 19 | 93 |
+| Allocation, coercion, duplication | 24 | 85 |
+| Protection and GC | 13 | 82 |
+| Strings and encodings | 33 | 82 |
+| Math and RNG (Rmath, `R_ext/Random.h`, `Arith.h`, `Applic.h`) | 172 | 77 |
+| Attributes, classes and S4 | 30 | 58 |
+| Evaluation, calls and pairlists | 45 | 57 |
+| Environments, closures, promises | 57 | 39 |
+| External pointers, weak references, finalizers | 18 | 28 |
+| BLAS, LAPACK and LINPACK | 150 | 10 |
+| ALTREP | 31 | 9 |
+| Connections | 5 | 5 |
+| Graphics engine and devices | 112 | 5 |
+| Types, constants and everything else | 175 | 121 |
 
 ### Interfaces that shape the runtime
 
@@ -174,16 +190,20 @@ suggest:
   objects or read them through the region and element accessors.
 - **Cross-package C callables** (27 packages register or fetch them with `R_RegisterCCallable` and
   `R_GetCCallable`, among them `Rcpp`, `rlang`, `vctrs`, `xts`, `zoo`, `Matrix` and `data.table`).
-  `xts` calls `zoo`'s C functions this way, so native libraries must be able to find each other
-  through the runtime.
+  `xts` calls `zoo`'s C functions this way (`R_GetCCallable("zoo", "zoo_lag")`), so native libraries
+  must be able to find each other through the runtime.
 - **External pointers and finalizers** (27 packages). Every handle to a database connection,
   HTTP session, git repository or parser lives in one.
-- **Unwind protection** (14 packages, including Rcpp, cpp11, polars and rlang). C++ and Rust
-  bindings use `R_UnwindProtect` to run destructors when an R error unwinds through their frames.
-- **Connections** (`readr`, `vroom`, `xml2` read and write R connections; `curl` and `pak` create
+- **Non-local exits** (15 packages use `R_UnwindProtect`, `R_ToplevelExec`, `R_tryEval` or their
+  relatives). Rcpp and cpp11 call `R_UnwindProtect` directly so that C++ destructors run when an R
+  error unwinds through their frames; savvy and extendr do the same for Rust from crates the scan
+  does not see.
+- **Connections** (`readr`, `vroom` and `xml2` read and write R connections; `curl` and `pak` create
   custom ones), which exposes the `Rconnection` struct layout, versioned by `R_CONNECTIONS_VERSION`.
-- **Graphics devices** (`ragg`, `textshaping`, `systemfonts`, ...), which expose the `DevDesc` and
-  graphics-engine structs. Only 7 packages need them, so they can come late.
+- **Graphics** (5 packages: `ragg` implements a device, and `systemfonts`, `farver`, `later` and `pak`
+  use smaller parts). The device API can come late, but the graphics headers also declare
+  `Rf_ucstoutf8` and the interrupt-suspension macros, which `rlang`, `readxl` and `later` use, and
+  Rcpp, rlang and vctrs include them, so the headers themselves and those few names are needed early.
 
 At the R level, 104 packages call `.Call` (4,255 call sites), 18 use `.C` (443), 5 use `.Fortran`
 (127), and 8 use `.External` or `.External2` (58). Three call `.Internal` directly (`pkgload`,
@@ -191,40 +211,52 @@ At the R level, 104 packages call `.Call` (4,255 call sites), 18 use `.C` (443),
 
 ### The non-API surface is shrinking, and ry should follow it
 
-29 non-API names appear in the closure, used by 28 packages. The heaviest users are `rlang`,
-`vctrs` and `lazyeval` (promise and environment internals such as `PRVALUE`, `SET_PRENV`, `ENCLOS`),
-`data.table` (`DATAPTR`, `LEVELS`, `IS_UTF8`) and Rcpp (`STRING_PTR`, `CLOENV`, `BODY`).
+30 non-API names appear in the closure, used by 28 packages. The heaviest users are `rlang`,
+`vctrs`, `lazyeval` (which vendors rlang) and `magrittr` (promise and environment internals such as
+`PRVALUE`, `SET_PRENV`, `ENCLOS`), `data.table` (`DATAPTR`, `LEVELS`, `IS_UTF8`) and Rcpp
+(`STRING_PTR`, `PRCODE`, `CLOENV`, `BODY`).
 
-Most of these uses are fallbacks. R 4.5 and 4.6 added API replacements for the internals packages
+Many of these uses are fallbacks. R 4.5 and 4.6 added API replacements for the internals packages
 used to reach for, such as `R_ParentEnv`, `R_getVar`, `R_ClosureFormals` and the resizable-vector
 functions `R_allocResizableVector`, `R_resizeVector` and `R_mapAttrib`, and the packages switched
 with version guards. `rlang`'s `env.h` returns `R_ParentEnv(env)` under
 `#if R_VERSION >= R_Version(4, 5, 0)` and `ENCLOS(env)` only otherwise, `cli` maps `R_getVar` to
 `Rf_findVar` only before R 4.5, and `data.table` 1.18 keeps its `TRUELENGTH`-based growable vectors
-only as a backport for R older than 4.6. The `TRUELENGTH` family is no longer even declared in
-R 4.6's public headers.
+only as a backport for older R. The `TRUELENGTH` family is no longer declared in R 4.6's public
+headers at all.
 
-So **ry should present itself as R 4.6** (`R_VERSION` and `Rversion.h`), which makes every guarded
-package take the modern branch. What remains genuinely non-API after that is a short list (the
-promise accessors in `rlang`, `vctrs` and `magrittr`, `ATTRIB` and `SET_ATTRIB`, `R_GlobalContext` in
-`later`), and ry should implement those too, because a package that does not load is a failed
-benchmark, whatever R core's policy says.
+So **ry should present itself as R 4.6**, which makes every guarded package take the modern branch.
+That means `R_VERSION` and `Rversion.h`, and also `R_SVN_REVISION`: data.table's guard is
+`R_VERSION < R_Version(4, 6, 0) || R_SVN_REVISION < 89077` (and `< 89194` for `R_mapAttrib`), so ry
+must report a revision of at least 89194 or data.table takes the backport.
+
+A real non-API surface remains after that, unguarded: the promise accessors in `rlang`, `vctrs`,
+`lazyeval` and `magrittr` and `PRCODE`/`PRENV` in Rcpp's `Promise.h`, `ATTRIB` and `SET_ATTRIB`,
+`IS_UTF8` and `IS_ASCII` in `stringi`, `fansi` and data.table's `forder.c`, `Rf_findVarInFrame` in
+`S7`, `BODY` in Rcpp's `Function.h`, `OBJECT` in `reshape2` and `R_Outputfile` in `Rmpfr`. `later`
+declares `R_GlobalContext` itself rather than taking it from a header. ry should implement all of
+these, because a package that does not load is a failed benchmark, whatever R core's policy says.
 
 ### What the API implies for the object model
 
-**`SEXP` is opaque.** In R 4.6's `Rinternals.h`, `SEXP` is `typedef struct SEXPREC *SEXP` with no
-definition of the struct, and every accessor (`INTEGER`, `LENGTH`, `TYPEOF`, `CAR`) is a function.
-The old `USE_RINTERNALS` escape hatch that let packages read fields directly no longer exposes the
-layout. A compiled package therefore depends on R's *function* ABI, not its object layout, which is
-what makes an ABI-compatible reimplementation possible at all.
+**`SEXP` is opaque.** Since R 4.2.0, defining `USE_RINTERNALS` no longer exposes R's internal
+structures. In R 4.6's `Rinternals.h`, `SEXP` is `typedef struct SEXPREC *SEXP` with no definition
+of the struct, and every accessor (`INTEGER`, `LENGTH`, `TYPEOF`, `CAR`) is a function. A compiled
+package therefore depends on R's *function* ABI, not its object layout, which is what makes an
+ABI-compatible reimplementation possible at all.
 
 What native code does rely on, and ry must keep:
 
 - **Pointer identity.** Code compares `x == R_NilValue`, compares symbols by pointer after
   `Rf_install`, and compares `CHARSXP` strings by pointer, because `Rf_mkChar` returns the one
   interned copy of each string. So handles must be canonical: one object, one pointer.
-- **Stable data pointers.** `INTEGER(x)` returns a pointer into the vector's storage, and code keeps
-  it across later allocations. Objects reachable from native code must not move.
+- **Stable, writable data pointers.** `INTEGER(x)` returns a pointer into the vector's storage, and
+  code keeps it across later allocations and writes through it. Objects reachable from native code
+  must not move, and a pointer handed out by a writable accessor must point at memory that native
+  code may write.
+- **Writes that ignore reference counts.** Correct code checks `MAYBE_SHARED` before mutating, but
+  some code mutates in place on purpose: data.table's `:=`, `set()` and `setattr()` write into the
+  object they are given. The runtime cannot assume a vector's contents survive a native call.
 - **Precise rooting through `PROTECT`.** An unprotected object may be collected at the next
   allocation, and correct packages protect everything they keep. `PROTECT_WITH_INDEX`,
   `R_PreserveObject` and the protected slot of an external pointer are the other roots.
@@ -236,8 +268,8 @@ What native code does rely on, and ry must keep:
   `Rconnection` (versioned), the graphics `DevDesc`, ALTREP class handles, and the bit patterns of
   `NA_integer_` (`INT_MIN`) and `NA_real_` (a NaN with payload 1954).
 - **`longjmp` errors.** `Rf_error` never returns; it jumps to the nearest context. Code between the
-  error and the handler is skipped without running destructors, which is why C++ and Rust bindings
-  wrap their calls in `R_UnwindProtect`.
+  error and the handler is skipped without running destructors, which is why C++ bindings wrap their
+  calls in `R_UnwindProtect`.
 
 None of this pins down how ry stores an object internally. The constraints are on the objects native
 code can reach, which are exactly the objects passed to or created by it.
@@ -272,12 +304,12 @@ its limits, or reimplemented R and then struggled with packages. That pattern is
 | GNU R + `compiler` | AST interpreter plus a stack bytecode compiler (Tierney), JIT on by default since R 3.4.0 | Native: it *is* the API | The baseline; the bytecode removes interpretive overhead on scalar loops but keeps R's environments, promises and boxed values |
 | pqR (Neal) | Fork of R 2.15 with a faster interpreter, deferred evaluation on helper threads, and lower allocation | Native, as a fork | Real speedups, but it never followed mainline R, so it fell behind the packages |
 | CXXR / Rho | Incremental C++ rewrite of R's internals, later with an LLVM JIT | Kept R's API by construction | Discontinued |
-| Riposte (Talbot et al.) | Tracing JIT and parallel VM for vector code | None | Research prototype; showed that fusing vector operations matters more than scalar speed |
+| Riposte (Talbot et al.) | Tracing JIT and parallel VM for vector code | None | Research prototype; showed large gains from fusing vector operations, beside scalar trace compilation |
 | Renjin | JVM interpreter; GCC-Bridge compiled C and Fortran to JVM bytecode | Recompiled, with no raw memory model | No longer maintained; packages relying on pointer-level behavior broke |
 | FastR (Oracle) | Truffle AST interpreter with Graal partial evaluation | Emulated C API over Java objects, so a raw data pointer required native memory to be kept in sync with the Java-side vector | Large speedups on R code, but the native boundary was slow and incomplete; no longer actively developed, last release 22.3 |
 | TERR (TIBCO, now Spotfire) | Closed-source clean-room engine from the S-PLUS lineage | Own implementation of the C API | Commercial and still shipped; checks CRAN compatibility on every release, which is the cost of not being a fork |
 | Ř / rir (Vitek group) | Bytecode tier plus an optimizing tier with an SSA IR (PIR), speculation, deoptimization and contextual dispatch, LLVM backend | Native: built on a patched GNU R | Large speedups on R-level code in the published evaluations; remains a research VM tied to its GNU R base |
-| rcp (Kocourek, Křikava, Vitek, 2025) | Copy-and-patch JIT from GNU R bytecode, as a package | Native, inside GNU R | 1.26x mean over GNU R on 57 benchmarks, at about 980 bytecode instructions per millisecond of compile time |
+| rcp (Kocourek, Křikava, Vitek, 2025) | Copy-and-patch JIT from GNU R bytecode, as a package | Native, inside GNU R | 1.15x to 1.91x over GNU R on 57 programs, at about 980 bytecode instructions per millisecond of compile time |
 
 What carries over to ry:
 
@@ -289,7 +321,7 @@ What carries over to ry:
   fork GNU R's C sources. It reimplements the runtime, and treats GNU R as an oracle, not a codebase.
 - **Most of R's cost is semantic, not instruction dispatch.** Ř's papers show that the wins come from
   removing environment allocation, promise creation and argument matching through speculation and
-  deoptimization. rcp's modest 1.26x for a fast template JIT confirms it: compiling R's bytecode
+  deoptimization. rcp's 1.15x to 1.91x for a fast template JIT is consistent with it: compiling R's bytecode
   faster does not remove the R semantics it encodes.
 - **Riposte's lesson** is that vector code wants fusion (`sum(x * y + z)` without temporaries),
   which a scalar JIT does not give you.
@@ -346,6 +378,11 @@ strictly more forgiving than GNU R (code that forgets to `PROTECT` a temporary k
 `PROTECT` itself keeps its exact semantics for objects that outlive the call through globals or
 preserved references.
 
+**`R_alloc` is an arena.** R frees `R_alloc` memory when the `.C`, `.Call` or `.External` call that
+allocated it returns, and `vmaxget`/`vmaxset` let code reset it earlier, so it is a stack of nested
+watermarks. ry implements it as a bump allocator that keeps R's alignment and restores the watermark
+on return and on a `longjmp`.
+
 ### Errors across the boundary
 
 R signals an error with `longjmp`, and a `longjmp` across Rust frames is undefined behavior. So the
@@ -383,7 +420,8 @@ must be a working `Rscript` replacement that worker processes can start.
 Bun's speed comes from three things, and only one of them is the JIT. JavaScriptCore runs four tiers
 (the LLInt interpreter, a baseline JIT, the DFG optimizer and the FTL backend) with inline caches,
 value profiling and watchpoints, so code warms up gradually and optimized code is invalidated when an
-assumption breaks. Bun adds fast startup by caching compiled bytecode, and it implements its hot
+assumption breaks. Bun adds fast startup (a transpiler cache by default, and opt-in bytecode caching with
+`bun build --bytecode`), and it implements its hot
 builtins in a systems language instead of in JavaScript. ry's equivalents are:
 
 - **A fast first tier and cached bytecode,** so `ry run script.R` starts in milliseconds and a
@@ -422,15 +460,27 @@ The IR represents environments, promises and boxed values explicitly, so they ca
 - **Vector fusion.** Element-wise chains over vectors of equal length compile into one loop, without
   intermediate allocations, writing into a result allocated once at its final size (construction in
   place, as in goose).
-- **Reference-count elision.** Inside compiled code, counts are tracked precisely, increments and
-  decrements that cancel are dropped, an update of a uniquely owned vector becomes a store (Roc's
-  Perceus scheme), and an argument the callee only reads is passed without touching its count
-  (Bend's borrow inference).
+- **Reference-count elision.** Inside compiled code, counts are tracked precisely and increments
+  and decrements that cancel are dropped, as Roc does with Perceus. A binding in an elided
+  environment still counts as a reference, so `y <- x; x[1] <- 0` copies, and deoptimization
+  rebuilds the exact counts. A loop like `for (i in ...) x[i] <- v` copies at most once, on entry if
+  `x` is shared, and the per-iteration sharing check is hoisted out. Every elided count is
+  materialized before a native call, and native code may write into any vector it is given (section
+  2), so the JIT assumes nothing about a vector's contents across one.
+- **Borrowed arguments.** An argument the callee only reads is passed without touching its count,
+  as Bend's and Roc's borrow inference do. This is a speculation: it applies only when the whole
+  callee is compiled and visible, any call to unknown R code or to `.Call` or `.External` counts as an
+  escape, and deoptimization restores the counts.
 - **Bounds-check elimination** over difference constraints between loop indices and vector lengths,
-  as goose does, so `for (i in seq_along(x)) y[i] <- x[i]` runs without per-iteration checks.
+  as goose does, so `for (i in seq_along(x)) y[i] <- x[i]` runs without per-iteration checks. Only
+  positive in-range subscripts are bounds facts; zero, negative and `NA` subscripts, `[[`, and classed
+  vectors with their own `[` methods stay behind guards, and a fact about `length(x)` dies when `x` is
+  rebound in the loop body.
 - **Closure specialization at higher-order call sites.** A call like `vapply(xs, function(x) x * 2,
-  double(1))` with a known closure compiles to a loop that calls it directly, in the spirit of Roc's
-  lambda sets, guarded so that reflection on the closure still works.
+  double(1))` with a known closure compiles to a loop that calls it directly (ordinary callback
+  inlining, inspired by Roc's lambda sets), guarded so that reflection on the closure still works.
+  This covers base R's higher-order functions, which ry implements itself; `purrr::map` runs its loop
+  in the package's own C code, which the JIT cannot see into.
 
 Cranelift is the right backend: it is a Rust crate, it was designed to compile much faster than
 LLVM's optimizing pipeline, and it supports the stack maps the GC needs. LLVM would add a large C++
@@ -447,16 +497,20 @@ treats them in two ways, depending on whether a guarantee exists:
 - **Default mode: types are profiles that arrive early.** A function annotated
   `fn(values: double[], scale: double) -> double[]` starts with that type profile before its first
   call, so tier 1 can compile it on the first hot loop instead of after warmup. The guards stay.
-- **Strict mode: types are guarantees with boundary checks.** In a strictly typed package, ry checks
-  argument types where untyped code calls a typed function (a type-code, length and attribute check,
-  which costs a few instructions per argument), and the body is compiled without guards on those
-  facts. This is the gradual-typing contract: a value that crosses into typed code is checked once,
-  at the crossing.
+- **Strict mode: types are guarantees where a check backs them.** Strict mode does not report every
+  imprecision (it never reports `Any`, nor an `Unknown` nested inside a type, and the stubs use `Any`
+  on purpose), so a strict package can still receive an imprecise value from typed code. ry
+  therefore inserts a check wherever an `Any` or `Unknown` value flows into a precise type, at an
+  untyped caller and inside typed code alike, and keeps guards on facts that come only from
+  hand-written stubs, because a wrong stub must never mean memory-unsafe compiled code. An atomic
+  type costs a type-code, length and attribute check; a record or list type costs a walk of the
+  value; a function type cannot be checked at the boundary at all and needs a wrapper that checks
+  each call. Between checks, the body is compiled without guards on the checked facts.
 
-The ideas above that come from Roc, Bend and goose, and the ones from those languages that ry
-rejects, are argued in [prior art from new language implementations](/contributing/design/prior-art/).
-The JIT never reads the checker's internal data structures. It consumes a per-function summary
-(section 8) that the analysis computes and that is cached with the bytecode.
+The ideas above that come from Roc, Bend and goose, and the ones from those languages and from Vx
+that ry rejects, are argued in [prior art from new language implementations](/contributing/design/prior-art/).
+The JIT never reads the checker's internal data structures. It consumes the per-function summaries
+of section 8, which the analysis computes and which are cached with the bytecode.
 
 ## 6. Lazy package loading
 
@@ -469,10 +523,11 @@ call.
 
 `loadfast` keeps the same steps for the first load and makes later loads incremental: it hashes the
 `R/` files with MD5 and re-sources only those that changed, rebuilds S3 method tables, and tracks
-which loaded packages import from which, so reloading a dependency forces its importers to reload.
-Its README is candid about the limits: it does not track which symbols came from which file, so
-deleted files and removed functions leave stale objects until a full reload, and it does not re-read
-`NAMESPACE`, so new exports or imports also need one. Compiled code is rebuilt into a new temporary
+which loaded packages import from which, so reloading a dependency upgrades its importers' next load
+to a full reload. Its documentation is candid about the limits: the README explains that it does not
+track which symbols came from which file, so deleted files and removed functions leave stale objects
+until a full reload, and `TECHNICAL_DEBT.md` records that it does not re-read `NAMESPACE`, so new
+exports or imports also need one. Compiled code is rebuilt into a new temporary
 library and loaded beside the old one.
 
 Both tools are eager: every top-level expression in every file runs before the first function is
@@ -493,9 +548,13 @@ reads that index:
   classes, registration calls) runs eagerly in `Collate` order, as R would, because it may have
   effects. A constructor call that the analysis proves pure (for example a constant `list()` or a
   call to a known pure base function) may also become lazy.
-- **Imports are forwarding cells,** not copies. An importer's import environment points at the
-  exporter's binding cell, so reloading a dependency is seen by every importer immediately and no
-  reload cascade is needed. This removes the snapshot problem that loadfast handles with flags.
+- **Imports keep R's copy semantics, and a development reload refreshes them.** In GNU R an import
+  environment holds copies, and code depends on that: `assignInNamespace`, unlocking and reassigning
+  an exporter's binding, and testthat's `local_mocked_bindings` (which patches imports) all behave as
+  they do because of it. So imports stay copies. When `ry load` reloads a package it already knows,
+  from the analysis, which importers hold a copy of each changed binding, and it updates exactly those
+  copies, which removes loadfast's full-reload cascade without changing what an installed package
+  sees.
 - **Reload is a diff over items.** The analysis knows which items changed, appeared or disappeared,
   so reloading rebinds the changed ones, removes the deleted ones, and reruns only the eager
   expressions that changed or that read a changed binding. Stale symbols, loadfast's documented
@@ -533,25 +592,34 @@ directly, with no FFI layer between the runtime and the engine. The R package `p
 benchmark closure already does this through savvy, which proves the engine works for R users; ry's
 table type removes the binding layer and teaches the type checker about it.
 
-The alternatives are weaker for this purpose. DuckDB is excellent but C++, SQL-shaped, and its
-in-process API is not designed to share memory with a host language's vectors. Arrow's own compute
+The alternatives are weaker for this purpose. DuckDB is excellent, and it already scans R data
+frames and Arrow data without copying (duckdb-r returns ALTREP-backed results), but it is a C++
+engine with a SQL-shaped planner, so ry would embed it through a C API rather than link a Rust
+library whose plan it can build directly. Arrow's own compute
 kernels lack a query planner. A custom engine would spend years re-deriving what Polars has.
 
 ### The design
 
 - **A table is a Polars `DataFrame` held by a ry object,** and each column is exposed to R and to
-  native code as an ALTREP vector over the Arrow buffer. Reading a column costs nothing; native code
-  that asks for `INTEGER()` gets the buffer directly when the layout matches (integers and doubles
-  without nulls) and a materialized copy otherwise. This is what lets existing code that expects a
-  `data.frame` keep working when it receives a table.
+  native code as an ALTREP vector over the Arrow buffer. This is what lets existing code that expects
+  a `data.frame` keep working when it receives a table. Element and region reads of integer and
+  double columns without nulls go to the buffer directly, and so does a read-only data pointer
+  (`DATAPTR_RO`, `INTEGER_RO`). A writable pointer (`INTEGER`, `REAL`, `DATAPTR`) is a different
+  matter, because Arrow buffers are immutable and shared and native code writes through it (section
+  2), so the column first becomes a private R vector. Logical columns (bit-packed in Arrow, 32-bit
+  in R), character columns (whose elements must become interned `CHARSXP`s) and dictionary columns
+  always materialize, and character columns pay the interning cost.
 - **Residency is tracked per column.** A column's data lives in Polars' Arrow buffer until R code or
-  native code asks for an R vector, and only then is it materialized, much as Vx makes a transfer
-  between memories explicit ([prior art](/contributing/design/prior-art/#vx)).
+  native code needs an R vector, and only then is it materialized. Vx tracks where data lives in the
+  type and makes every transfer explicit ([prior art](/contributing/design/prior-art/#vx)); ry keeps
+  the transfer implicit, and adds a lint when typed code forces a column to materialize inside a
+  loop.
 - **NA handling** maps R's NA onto Arrow validity bitmaps. Integer NA (`INT_MIN`) and double NA need
-  conversion at the boundary when nulls are present, which is a vectorized pass, and it only happens
-  when R code materializes a column.
-- **Typed columns come from ry's record types.** A table type is a row record,
-  `table{id: integer, price: double, ticker: character}`, so column references in a query are
+  conversion at the boundary when nulls are present, which is a vectorized pass that happens only
+  when a column materializes.
+- **Typed columns come from ry's record types.** A table type names its columns and their vector
+  types, in the notation the data-masking draft already sketches for `data.table<x: integer[], …>`,
+  so `table<id: integer[], price: double[], ticker: character[]>`. Column references in a query are
   checked, and the data-masking design (`contributing/design/data-masking.md`) gets the column
   vocabulary it is waiting for.
 - **Queries build a lazy plan.** `tbl[price > 0, .(total = sum(price)), by = ticker]` and its verb
@@ -559,8 +627,10 @@ kernels lack a query planner. A custom engine would spend years re-deriving what
   expression runs as a Polars kernel instead of as R code per group. An R function inside an
   aggregation falls back to per-group evaluation, with a lint saying so.
 - **`:=` is copy-on-write with reference counts,** not over-allocation. A table whose reference count
-  is one is updated in place, so `tbl[, x := y * 2]` costs one column, and a shared table copies only
-  the column metadata, because Arrow buffers are immutable and shared.
+  is one is updated in place, so `tbl[, x := y * 2]` costs one new column, and a shared table copies
+  only its column list, because the Arrow buffers themselves are immutable and shared. data.table's
+  `:=` on a `data.table` object keeps data.table's own by-reference semantics, because that package
+  runs unchanged.
 - **Interop is zero-copy where possible:** conversion to and from `data.frame`, data.table and the R
   `polars` package goes through the Arrow C data interface.
 
@@ -573,11 +643,18 @@ against data.table with all threads. Only that measurement can settle the claim.
 
 ### The inline syntax
 
-`contributing/design/inline-type-syntax.md` designed inline types as a dialect compiled to plain R,
-and recommended against building it for inline types alone, mainly because a typed file would be
-invisible to every other R tool. A runtime changes that calculation: ry executes the syntax
-directly, so there is no compile step and no generated R to keep in sync. The four positions that
-draft chose stay as they are:
+Three drafts and decisions bear on this, and the mandate settles what they left open.
+`decisions.md` ("An annotation is one concept with pluggable spellings") makes the surface spelling
+pluggable at lowering, names a valid-R inline form through R 4.4's `declare()` primitive as the route
+that keeps every file ordinary R, and leaves a superset dialect as a product decision.
+`contributing/design/inline-type-syntax.md` costed that superset as a dialect compiled to plain R, in
+its own `.ry` files, and recommended against building it for inline types alone. The mandate now
+requires an inline syntax that is on by default and that ry warns about when it is turned off. A
+`declare()` form is valid R, so it would need no switch and no warning, which means the mandate asks
+for the superset. A runtime also changes the draft's cost argument: ry executes the syntax directly,
+so there is no compile step and no generated R to keep in sync.
+
+The recommendation is therefore the superset, using the four positions the draft chose:
 
 ```
 scale_by <- function<T: numeric>(values: T, scale: T) -> T {
@@ -586,41 +663,52 @@ scale_by <- function<T: numeric>(values: T, scale: T) -> T {
 count: integer <- 0L
 ```
 
-The parameter, return and binder positions are syntax errors in GNU R (checked with R 4.3.3: `unexpected '<'`,
-`unexpected ':'` and `unexpected '->'`), so no valid R program changes meaning. The binding position is
-the one subtle case: R parses `count: integer <- 0L` as an assignment to `count:integer`, and running
-it fails with `could not find function ":<-"`, so the only R programs it could change are ones that
-already fail. The mandate's switches follow:
+The parameter, return and binder positions are syntax errors in GNU R (checked with R 4.3.3:
+`unexpected '<'`, `unexpected ':'` and `unexpected '->'`), so no valid R program changes meaning. The
+binding position is the one subtle case. R parses `count: integer <- 0L` as an assignment to
+`count:integer`, and running it fails, with `object 'count' not found` when `count` does not exist
+yet and `could not find function ":<-"` when it does. So the only R programs it could change are ones
+that already fail. The rest follows from the mandate:
 
 - **The syntax is on by default** in ry's parser and runtime, and ry warns when a project turns it off
-  in `ry.toml`, as the mandate requires.
-- **A typed file stays a `.R` file.** The cost the earlier draft identified remains for code that
-  must also run on GNU R, such as a package submitted to CRAN; for those, a `ry build` command would write
-  plain R with the inline types moved into `#:` comments.
+  in `ry.toml`.
+- **`declare(type(...))` stays a recognized spelling** of the same annotation, for code that must
+  remain valid R, as the pluggable design intends.
+- **A typed file keeps the `.R` extension,** which reverses the draft's `.ry` files: in a runtime
+  that executes the syntax, a second extension buys nothing. The cost is real, though. Every other R
+  tool (`R CMD check`, roxygen2, lintr, styler) fails on a typed file under `R/`. Code that must also
+  run on GNU R, such as a package submitted to CRAN, therefore needs a strip step: a `ry build`
+  command would write plain R with the inline types moved into `#:` comments.
 - **Comment and inline annotations must agree.** When both annotate the same item, ry compares them
   as types, after alias expansion, and reports a warning on the inline annotation when they differ.
-- **Strict mode rejects untyped code.** Today's strict mode reports the origins of `Unknown`; the
-  mandate extends it to report every function parameter, return and top-level binding without a
-  declared or fully inferred type.
+- **Strict mode rejects untyped code.** Today's strict mode reports the sites where a type could not
+  be determined; the mandate extends it to report every function parameter, return and top-level
+  binding without a declared or fully inferred type.
+
+This settles the question `decisions.md` left open, and the decision is recorded there ("The inline
+annotation syntax is a superset of R").
 
 ### One type model
 
 The checker's types (`TyKind` in `crates/semantics/src/types.rs`) are interned in the salsa database
 and reference inference variables and arena names, which the runtime should not depend on. So the
-runtime receives a **runtime type summary** per function: a small, owned, serializable value computed
-by a tracked query from the checker's exported scheme.
+runtime receives two small, owned, serializable values per function, computed by tracked queries:
 
-- It keeps what the runtime can use: atomic type, scalar or vector shape, names, record fields,
-  function arity, and nominal types.
-- It collapses what the runtime cannot check cheaply (type parameters, deep unions) to "unknown".
-- It adds the effect facts the JIT needs: whether the function reflects on its frame, which
-  parameters it always forces, which parameters it only reads (so the JIT can borrow them, as Bend
-  does), and whether it is free of effects.
-- It is cached with the bytecode, and invalidated by the same salsa revision that invalidates the
-  function's interface.
+- **The runtime type summary** comes from the checker's exported scheme. It keeps what the runtime
+  can use (atomic type, scalar or vector shape, names, record fields, function arity, nominal types)
+  and collapses what it cannot check cheaply (type parameters, deep unions) to "unknown". It changes
+  only when the function's interface changes.
+- **The runtime body facts** come from the function's body, not its scheme: whether it reflects on
+  its frame, which parameters it always forces, which it only reads, and whether it is free of
+  effects. They change on any body edit, so they live in their own query, and only the function's
+  own compiled code depends on them. The JIT's callers read a callee's facts through a watchpoint,
+  so an edit deoptimizes the callers that relied on the old facts instead of widening the interface,
+  which keeps the interface firewall that makes incremental analysis cheap.
 
-This keeps a single source of truth (the checker's types) and makes the runtime's copy a derived,
-recomputable projection. The same summary drives strict mode's boundary checks, the JIT's initial
+Both are cached with the bytecode, keyed by a content hash so the cache stays valid across processes
+(salsa's ids are stable only inside one database). This keeps a single source of truth (the
+checker's types and the syntax tree) and makes the runtime's copies derived, recomputable
+projections. The same summary drives strict mode's boundary checks, the JIT's initial
 profiles, and the table type's column checks.
 
 ## 9. The benchmark code bases
@@ -639,11 +727,11 @@ built to exercise what real code exercises rather than to be easy to run:
   `by`, R6 classes, S4 generics, `purrr` maps, `foreach` with `doParallel`, `httr2` and Azure clients
   behind mocks, `testthat` suites, `lgr` logging, and `rlang` tidy evaluation. A fraction of each code
   base carries `#:` annotations, and a fraction carries inline ones, so the analysis has typed and
-  untyped code to check.
+  untyped code to check. GNU R runs the inline-typed files only after the strip step of section 8.
 - **Hermetic runs.** Network-dependent packages (Azure, Bloomberg via `Rblpapi`, ODBC) run against
   local mocks or fakes, so a benchmark run is deterministic.
-- **Three measurements:** run the test suite under GNU R and under ry (wall time and outputs must
-  match), check the code base with `ry check` (cold and incremental keystroke latency), and load it
+- **Three measurements:** run the test suite under GNU R (on the stripped sources) and under ry (wall
+  time, and outputs must match), check the code base with `ry check` (cold and incremental keystroke latency), and load it
   with `ry load` (cold and incremental reload).
 
 ## 10. Build order
@@ -651,7 +739,8 @@ built to exercise what real code exercises rather than to be easy to run:
 Each step ends with something real running, and each one is a large, whole change.
 
 1. **Corpus and oracle first.** Fetch the benchmark closure (the scripts in `tools/research/`
-   already resolve it), install it into a GNU R library, and build a differential harness that runs
+   already resolve it) together with the `Suggests` its packages' tests need, install it into a GNU R
+   library, and build a differential harness that runs
    an R file under GNU R and under ry and compares output, errors and warnings. Write the benchmark
    generator and generate small versions of the three code bases.
 2. **The object model, GC and C API skeleton.** Objects, interned strings and symbols, the GC with
@@ -662,14 +751,16 @@ Each step ends with something real running, and each one is a large, whole chang
    `base`, `stats`, `utils`, `methods`, `tools` and `parallel` sources) is reused as R source, so only
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
-4. **The full C API and packages.** The rest of the 814 measured names, ALTREP, connections,
+4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
+   interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
-   232 packages of the closure install and pass their own tests under ry, and the three generated
+   232 packages of the closure install and pass their own tests under ry (with their `Suggests`
+   installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases.
 6. **Inline syntax, agreement warnings and strict mode,** in the parser, the checker and the
-   runtime, with the runtime type summary.
+   runtime, with the runtime type summary and body facts.
 7. **The JIT.** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
@@ -682,7 +773,7 @@ JIT fits around them.
 
 ## 11. Open questions
 
-- **Graphics.** Seven packages need the graphics engine. Implementing R's device API is large; the
+- **Graphics.** Five packages use the graphics engine, and only `ragg` implements a device. Implementing R's device API is large; the
   alternative is to defer graphics to GNU R in a subprocess. Undecided, and not needed for the
   benchmark's test suites.
 - **Windows.** The C layer and the `dlopen` path need a Windows equivalent; the REPL's Windows work

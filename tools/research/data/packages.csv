@@ -10,31 +10,31 @@ BH,1.90.0-1,no,,,0,0,2694629,0,0,0,0,,0,0,0,0,0,0
 Bessel,0.7-1,yes,,C,8219,0,51,170,0,14,176,,0,0,0,0,2,0
 DBI,1.3.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 DistributionUtils,0.6-2,yes,,C,21,0,0,170,0,6,7,,0,0,0,0,2,0
-FLSSS,9.3.0,yes,Rcpp RcppParallel,Rcpp,0,15158,18282,0,0,10,540,,0,0,0,0,2,0
-FNN,1.1.4.1,yes,,C,106,4562,3152,0,0,10,31,,0,0,0,0,2,0
+FLSSS,9.3.0,yes,Rcpp RcppParallel,Rcpp,0,15158,18282,0,0,8,292,,0,0,0,0,2,0
+FNN,1.1.4.1,yes,,C,106,4562,3152,0,0,11,44,,0,0,0,0,2,0
 GeneralizedHyperbolic,0.8-7,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 KernSmooth,2.23-27,yes,,C,69,0,0,953,0,6,21,,0,0,0,0,2,0
-MASS,7.3-66,yes,,C,908,0,0,0,0,25,91,,0,0,0,0,3,0
-Matrix,1.7-6,yes,,C,126564,0,23695,0,0,259,15324,ATTRIB Rf_findVarInFrame SET_ATTRIB SET_OBJECT UNSET_S4_OBJECT,0,60,0,0,2,1615
+MASS,7.3-66,yes,,C,908,0,0,0,0,23,83,,0,0,0,0,3,0
+Matrix,1.7-6,yes,,C,126564,0,23695,0,0,257,15039,ATTRIB Rf_findVarInFrame SET_ATTRIB SET_OBJECT UNSET_S4_OBJECT,0,60,0,0,2,1774
 NlcOptim,0.6,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-PerformanceAnalytics,2.1.0,yes,,C,4751,0,0,0,0,14,1176,,0,0,0,0,2,234
+PerformanceAnalytics,2.1.0,yes,,C,4751,0,0,0,0,13,1127,,0,0,0,0,2,234
 R6,2.6.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 RColorBrewer,1.1-3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 ROI,1.0-2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 ROI.plugin.highs,1.0-4,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-Rblpapi,0.3.16.9004,yes,Rcpp BH,Rcpp BH,0,3483,27310,0,0,35,482,,0,0,10,0,2,18
-Rcpp,1.1.2,yes,,C,0,6027,41828,0,0,139,1709,BODY CLOENV R_NamespaceRegistry Rf_findVarInFrame STRING_PTR,0,2,12,2,2,44
-RcppArmadillo,15.6.2-1,yes,Rcpp,Rcpp,0,252,214873,0,0,12,54,,0,0,0,0,2,0
-RcppDE,0.1.9,yes,Rcpp RcppArmadillo,Rcpp RcppArmadillo,0,555,70,0,0,18,80,,0,0,0,0,2,3
-RcppParallel,6.2.1,yes,,C,1807,17569,55966,0,0,10,24,,0,0,0,0,2,3
-RcppSimdJson,0.1.17,yes,Rcpp,Rcpp,0,82083,250106,0,0,48,768,OBJECT,0,8,0,0,2,41
+Rblpapi,0.3.16.9004,yes,Rcpp BH,Rcpp BH,0,3483,27310,0,0,34,436,,0,0,10,0,2,18
+Rcpp,1.1.2,yes,,C,0,6027,41828,0,0,358,6088,ATTRIB BODY CLOENV ENCLOS PRCODE PRENV PRVALUE R_NamespaceRegistry Rf_findVar Rf_findVarInFrame STRING_PTR,0,3,17,4,2,461
+RcppArmadillo,15.6.2-1,yes,Rcpp,Rcpp,0,252,214873,0,0,17,111,,0,0,0,0,2,0
+RcppDE,0.1.9,yes,Rcpp RcppArmadillo,Rcpp RcppArmadillo,0,555,70,0,0,17,74,,0,0,0,0,2,3
+RcppParallel,6.2.1,yes,,C,1807,17569,55966,0,0,16,138,,0,0,0,0,2,3
+RcppSimdJson,0.1.17,yes,Rcpp,Rcpp,0,82083,250106,0,0,49,724,OBJECT,0,8,0,0,2,41
 Rdpack,2.6.6,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-Rglpk,0.6-5.1,yes,,C,611,0,6,0,0,7,21,,0,0,0,0,2,0
-Rmpfr,1.1-3,yes,,C,2913,0,229,0,0,71,1108,R_Outputfile,0,1,0,0,2,67
-Rsolnp,2.0.1,yes,Rcpp RcppArmadillo,Rcpp RcppArmadillo,0,888,273,0,0,8,13,,0,0,0,0,2,0
+Rglpk,0.6-5.1,yes,,C,611,0,6,0,0,6,15,,0,0,0,0,2,0
+Rmpfr,1.1-3,yes,,C,2913,0,229,0,0,70,1107,R_Outputfile,0,1,0,0,2,67
+Rsolnp,2.0.1,yes,Rcpp RcppArmadillo,Rcpp RcppArmadillo,0,888,273,0,0,7,12,,0,0,0,0,2,0
 S7,0.2.2,yes,,C,776,0,26,0,0,73,565,FORMALS Rf_findVarInFrame,0,0,0,0,2,0
 SkewHyperbolic,0.4-2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-VineCopula,2.6.1,yes,,C,13760,0,598,0,0,31,642,,0,82,0,0,2,0
+VineCopula,2.6.1,yes,,C,13760,0,598,0,0,16,489,,0,82,0,0,2,0
 YieldCurve,5.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 abind,1.4-8,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 askpass,1.2.1,yes,,C,86,0,0,0,0,11,12,,0,0,0,0,3,0
@@ -43,7 +43,7 @@ azidentity,1.2.0,yes,,Rust,10,0,0,0,890,1,1,,0,0,0,0,0,0
 backports,1.5.1,yes,,C,103,0,0,0,0,33,79,Rf_findVar,0,0,0,0,2,2
 base64enc,0.1-6,yes,,C,447,0,0,0,0,27,142,,0,0,0,0,0,19
 bit,4.6.0,yes,,C,5195,0,907,0,0,57,2160,,0,0,0,0,3,309
-bit64,4.8.6,yes,,C,5545,0,2252,0,0,53,2134,,0,0,0,0,3,311
+bit64,4.8.6,yes,,C,5545,0,2252,0,0,52,2118,,0,0,0,0,3,311
 blob,1.3.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 brew,1.0-10,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 brio,1.1.5,yes,,C,432,0,5,0,0,33,171,,0,0,0,0,2,5
@@ -51,133 +51,133 @@ bslib,0.12.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 cachem,1.1.0,yes,,C,42,0,0,0,0,16,22,,0,0,0,0,2,0
 callr,3.8.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 cellranger,1.1.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-checkmate,2.3.4,yes,,C,2272,0,257,0,0,104,2246,ATTRIB Rf_isFrame,0,5,0,0,2,79
+checkmate,2.3.4,yes,,C,2272,0,257,0,0,102,2209,ATTRIB Rf_isFrame,0,5,0,0,2,79
 chron,2.3-63,yes,,C,140,0,16,0,0,24,44,,0,0,0,0,2,1
-cli,3.6.6,yes,,C,8895,0,13753,0,0,123,1537,Rf_allocSExp Rf_findVar Rf_findVarInFrame SET_ATTRIB STRING_PTR,17,15,12,0,3,80
+cli,3.6.6,yes,,C,8895,0,13753,0,0,134,1566,Rf_allocSExp Rf_findVar Rf_findVarInFrame SET_ATTRIB STRING_PTR,35,15,12,0,3,80
 clipr,0.8.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 codetools,0.2-20,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-commonmark,2.0.0,yes,,C,25945,0,2823,0,0,26,76,,0,0,0,0,3,0
+commonmark,2.0.0,yes,,C,25945,0,2823,0,0,28,138,,0,0,0,0,3,0
 corpcor,1.6.10,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-cpp11,0.5.5,no,,C,0,0,12625,0,0,123,959,R_NamespaceRegistry Rf_findVarInFrame3,6,0,7,4,0,42
+cpp11,0.5.5,no,,C,0,0,12625,0,0,120,904,R_NamespaceRegistry Rf_findVarInFrame3,6,0,7,4,0,42
 crayon,1.5.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 credentials,2.0.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-curl,8.1.0,yes,,C,2732,0,916,0,0,106,1383,FORMALS,0,0,22,8,2,44
-data.table,1.18.6.1,yes,,C,22411,0,3750,0,0,206,9803,ATTRIB BODY DATAPTR IS_ASCII IS_UTF8 LEVELS Rf_findVar SET_ATTRIB STRING_PTR,11,2,10,0,2,1109
+curl,8.1.0,yes,,C,2732,0,916,0,0,105,1374,FORMALS,0,0,22,8,2,44
+data.table,1.18.6.1,yes,,C,22411,0,3750,0,0,202,9521,ATTRIB BODY DATAPTR IS_ASCII IS_UTF8 LEVELS Rf_findVar SET_ATTRIB STRING_PTR,11,2,10,0,2,1109
 desc,1.4.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 devtools,2.5.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-diffobj,0.3.9,yes,,C,833,0,113,0,0,24,96,,0,0,0,0,3,5
-digest,0.6.39,yes,,C,5685,808,9685,0,0,54,282,,0,2,6,0,2,15
+diffobj,0.3.9,yes,,C,833,0,113,0,0,23,93,,0,0,0,0,3,5
+digest,0.6.39,yes,,C,5685,808,9685,0,0,55,321,,0,2,6,0,2,15
 doParallel,1.0.17,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 downlit,0.4.5,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 ellipsis,0.3.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-esgtoolkit,1.0.0,yes,Rcpp,Rcpp,0,519,0,0,0,6,131,,0,0,0,0,2,0
+esgtoolkit,1.0.0,yes,Rcpp,Rcpp,0,519,0,0,0,5,72,,0,0,0,0,2,0
 evaluate,1.0.5,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-fansi,1.0.7,yes,,C,7118,0,766,0,0,69,1651,IS_UTF8,0,0,0,0,3,36
-farver,2.1.2,yes,,C,0,2738,1197,0,0,48,783,,0,0,0,0,2,84
+fansi,1.0.7,yes,,C,7118,0,766,0,0,68,1637,IS_UTF8,0,0,0,0,3,36
+farver,2.1.2,yes,,C,0,2738,1197,0,0,48,808,,0,0,0,0,2,84
 fastmap,1.2.0,yes,,C,37,265,2883,0,0,36,151,,0,0,5,0,2,4
-ff,4.5.3,yes,,C,6658,1211,5315,0,0,52,1385,,0,0,72,0,3,81
+ff,4.5.3,yes,,C,6658,1211,5315,0,0,58,3936,,0,0,80,0,3,133
 fontawesome,0.5.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 foreach,1.5.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 fracdiff,1.5-4,yes,,C,3870,0,75,0,0,21,192,,0,0,0,0,2,37
-fs,2.1.0,yes,,C,663,1602,241,0,0,54,859,,0,0,0,0,2,73
+fs,2.1.0,yes,,C,663,1602,241,0,0,52,822,,0,0,0,0,2,73
 future,1.80.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 future.apply,1.21.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 generics,0.1.4,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-gert,2.5.0,yes,,C,2791,0,36,0,0,79,1701,,0,0,7,3,2,35
+gert,2.5.0,yes,,C,2791,0,36,0,0,77,1668,,0,0,7,3,2,35
 ggplot2,4.0.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 gh,1.6.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-git2r,0.36.2,yes,,C,11939,0,1344,0,0,58,3594,,0,0,0,0,3,89
+git2r,0.36.2,yes,,C,11939,0,1344,0,0,57,3547,,0,0,0,0,3,89
 gitcreds,0.1.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 globals,0.20.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-glue,1.8.1,yes,,C,372,0,0,0,0,32,85,,0,0,0,0,2,1
-gmp,0.7-5.1,yes,,C,0,5861,3319,0,0,60,1355,,0,0,0,0,2,70
+glue,1.8.1,yes,,C,372,0,0,0,0,34,96,,0,0,0,0,2,1
+gmp,0.7-5.1,yes,,C,0,5861,3319,0,0,58,1356,,0,0,0,0,2,70
 gridExtra,2.3.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 gtable,0.3.6,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 highr,0.12,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-highs,1.15.1-1,yes,Rcpp,Rcpp,0,2630,144,0,0,17,845,,0,0,0,0,2,0
+highs,1.15.1-1,yes,Rcpp,Rcpp,0,2630,144,0,0,16,628,,0,0,0,0,2,0
 hms,1.1.4,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 htmltools,0.5.9,yes,,C,227,0,0,0,0,26,57,,0,0,0,0,2,0
 htmlwidgets,1.6.4,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-httpuv,1.6.17,yes,later Rcpp,Rcpp,95798,6758,17903,0,0,30,234,,0,0,3,0,2,2
+httpuv,1.6.17,yes,later Rcpp,Rcpp,95798,6758,17903,0,0,33,836,,0,0,3,0,2,2
 httr,1.4.9,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 httr2,1.3.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 ini,0.3.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-isoband,0.3.0,yes,cpp11,cpp11,0,3318,123,0,0,12,72,,0,0,0,0,3,11
+isoband,0.3.0,yes,cpp11,cpp11,0,3318,123,0,0,11,51,,0,0,0,0,3,11
 iterators,1.0.14,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 jose,2.0.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 jquerylib,0.1.4,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-jsonlite,2.0.0,yes,,C,4503,0,1199,0,0,71,661,,0,0,0,0,2,16
-kernlab,0.9-33,yes,,C,1619,7424,2774,0,0,30,465,,0,0,0,0,2,96
+jsonlite,2.0.0,yes,,C,4503,0,1199,0,0,71,685,,0,0,0,0,2,16
+kernlab,0.9-33,yes,,C,1619,7424,2774,0,0,26,443,,0,0,0,0,2,96
 knitr,1.52,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 ks,1.15.3,yes,,C,596,0,0,0,0,11,79,,0,0,0,0,3,38
 labeling,0.4.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-later,1.4.8,yes,Rcpp,Rcpp,1015,1738,1634,0,0,34,202,R_GlobalContext,0,6,1,1,3,1
+later,1.4.8,yes,Rcpp,Rcpp,1015,1738,1634,0,0,35,196,R_GlobalContext,0,6,1,1,3,1
 lattice,0.23-1,yes,,C,610,0,21,0,0,21,100,,0,0,0,0,2,19
-lazyeval,0.2.3,yes,,C,4462,25,2893,0,0,188,815,ATTRIB CLOENV ENCLOS FORMALS PRENV PRVALUE R_PromiseExpr Rf_allocSExp Rf_findVar Rf_findVarInFrame3 SET_ATTRIB SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT,2,2,2,0,2,24
+lazyeval,0.2.3,yes,,C,4462,25,2893,0,0,198,750,ATTRIB CLOENV ENCLOS FORMALS PRENV PRVALUE R_PromiseExpr Rf_allocSExp Rf_findVar Rf_findVarInFrame Rf_findVarInFrame3 SET_ATTRIB SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT,2,2,2,0,2,24
 lgr,0.5.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 lifecycle,1.0.5,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 listcomp,0.4.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 listenv,1.1.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 loadfast,1.0.0,,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-lubridate,1.9.5,yes,,C,1048,0,109,0,0,39,288,,0,0,0,0,3,40
-magrittr,2.0.5,yes,,C,594,0,66,0,0,66,386,Rf_allocSExp Rf_findVar Rf_findVarInFrame3 SET_PRCODE SET_PRENV SET_PRVALUE,0,0,0,0,2,1
+lubridate,1.9.5,yes,,C,1048,0,109,0,0,38,284,,0,0,0,0,3,40
+magrittr,2.0.5,yes,,C,594,0,66,0,0,66,422,Rf_allocSExp Rf_findVar Rf_findVarInFrame3 SET_PRCODE SET_PRENV SET_PRVALUE,0,0,0,0,2,1
 mclust,6.1.3,yes,,C,214,0,0,19406,0,6,197,,0,0,0,0,2,0
 memoise,2.0.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-mgcv,1.9-4,yes,,C,21056,0,432,0,0,95,3189,,0,3,9,0,2,414
+mgcv,1.9-4,yes,,C,21056,0,432,0,0,86,2563,,0,3,9,0,2,414
 mime,0.13,yes,,C,45,0,0,0,0,11,23,,0,0,0,0,2,3
 miniUI,0.1.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-multicool,1.0.2,yes,Rcpp,Rcpp,0,526,0,0,0,32,116,,0,0,1,0,2,5
-mvtnorm,1.4-2,yes,,C,1892,0,168,1907,0,52,580,,0,13,0,0,3,89
-nlme,3.1-171,yes,,C,3533,0,254,820,0,47,497,,0,0,0,0,3,18
+multicool,1.0.2,yes,Rcpp,Rcpp,0,526,0,0,0,33,112,,0,0,1,0,2,5
+mvtnorm,1.4-2,yes,,C,1892,0,168,1907,0,47,562,,0,13,0,0,3,89
+nlme,3.1-171,yes,,C,3533,0,254,820,0,45,479,,0,0,0,0,3,18
 nloptr,2.2.1,yes,,C,1182,0,468,0,0,38,430,,0,110,0,0,3,29
 numDeriv,2016.8-1.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-odbc,1.7.2,yes,Rcpp,Rcpp,0,17760,4994,0,0,63,454,Rf_isFrame,0,0,0,0,2,21
+odbc,1.7.2,yes,Rcpp,Rcpp,0,17760,4994,0,0,56,274,Rf_isFrame,0,0,0,0,2,22
 ompr,1.0.4,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 ompr.roi,1.0.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-openssl,2.4.2,yes,,C,3649,0,153,0,0,60,1283,,0,0,19,3,2,208
-openxlsx,4.2.9,yes,Rcpp,Rcpp,0,3503,84,0,0,18,378,,0,0,0,0,2,0
+openssl,2.4.2,yes,,C,3649,0,153,0,0,58,1265,,0,0,19,3,2,208
+openxlsx,4.2.9,yes,Rcpp,Rcpp,0,3503,84,0,0,13,239,,0,0,0,0,2,0
 otel,0.2.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-pak,0.11.1,yes,,C,531132,0,98324,0,0,224,13344,BODY CLOENV FORMALS Rf_allocSExp Rf_findVar Rf_findVarInFrame SET_ATTRIB STRING_PTR,17,15,273,11,42,1246
-parallelly,1.48.0,yes,,C,176,0,5,0,0,23,36,,0,0,0,0,2,1
-partitions,1.11-1,yes,,C,622,51,108,0,0,6,10,,0,0,0,0,2,0
-pcaPP,2.0-7,yes,,C,121,5047,4839,0,0,70,242,,0,0,0,0,3,51
-pdftools,3.9.1,yes,Rcpp,Rcpp,0,653,0,0,0,12,106,,0,0,0,0,2,0
+pak,0.11.1,yes,,C,531132,0,98324,0,0,237,17243,BODY CLOENV FORMALS IS_ASCII Rf_allocSExp Rf_findVar Rf_findVarInFrame SET_ATTRIB STRING_PTR,35,15,273,11,42,2504
+parallelly,1.48.0,yes,,C,176,0,5,0,0,23,40,,0,0,0,0,2,1
+partitions,1.11-1,yes,,C,622,51,108,0,0,5,6,,0,0,0,0,2,0
+pcaPP,2.0-7,yes,,C,121,5047,4839,0,0,71,283,,0,0,0,0,3,51
+pdftools,3.9.1,yes,Rcpp,Rcpp,0,653,0,0,0,11,64,,0,0,0,0,2,0
 pillar,1.11.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 pkgbuild,1.4.8,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 pkgconfig,2.0.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 pkgdown,2.2.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 pkgload,1.5.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 plumber,1.3.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-plyr,1.8.9,yes,Rcpp,Rcpp,25,73,0,0,0,20,37,,0,0,0,0,2,1
-polars,1.15.0,yes,,Rust,4168,0,714,0,10724,16,3095,,0,0,0,1,2,0
+plyr,1.8.9,yes,Rcpp,Rcpp,25,73,0,0,0,19,35,,0,0,0,0,2,1
+polars,1.15.0,yes,,Rust,4168,0,714,0,10724,14,5308,,0,0,0,1,2,0
 polynom,1.4-1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 pool,1.0.5,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 pracma,2.4.6,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 praise,1.0.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 prettyunits,1.2.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-processx,3.9.0,yes,,C,9130,0,937,0,0,80,1286,Rf_findVar,0,0,81,0,6,84
+processx,3.9.0,yes,,C,9130,0,937,0,0,79,1282,Rf_findVar,0,0,81,0,6,84
 profvis,0.4.0,yes,,C,54,0,0,0,0,14,17,,0,0,0,0,3,1
-progress,1.2.3,no,,C,0,0,434,0,0,14,25,,0,0,0,0,0,0
+progress,1.2.3,no,,C,0,0,434,0,0,13,20,,0,0,0,0,0,0
 promises,1.5.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-ps,1.9.3,yes,,C,11197,0,866,0,0,95,3529,Rf_allocSExp Rf_findVar SET_ATTRIB,0,0,114,0,3,388
-purrr,1.2.2,yes,cli,C,1638,0,131,0,0,126,1090,Rf_allocSExp Rf_findVar Rf_findVarInFrame,0,1,12,0,2,72
-qpdf,1.4.1,yes,Rcpp,Rcpp,1286,42533,21145,0,0,6,63,,0,0,0,0,2,0
+ps,1.9.3,yes,,C,11197,0,866,0,0,94,3529,Rf_allocSExp Rf_findVar SET_ATTRIB,0,0,114,0,3,388
+purrr,1.2.2,yes,cli,C,1638,0,131,0,0,126,1198,Rf_allocSExp Rf_findVar Rf_findVarInFrame,0,1,12,0,2,72
+qpdf,1.4.1,yes,Rcpp,Rcpp,1286,42533,21145,0,0,9,55,,0,0,0,0,2,0
 quadprog,1.5-8,yes,,C,50,0,40,1320,0,11,55,,0,0,0,0,2,16
-ragg,1.5.2,yes,systemfonts textshaping,C,0,3098,50536,0,0,138,974,,0,0,0,0,2,177
-randtoolbox,2.0.5,yes,,C,5900,0,10681,0,0,35,354,,0,11,0,0,2,21
+ragg,1.5.2,yes,systemfonts textshaping,C,0,3098,50536,0,0,137,963,,0,0,0,0,2,177
+randtoolbox,2.0.5,yes,,C,5900,0,10681,0,0,34,352,,0,11,0,0,2,21
 rappdirs,0.3.4,yes,,C,52,0,0,0,0,8,14,,0,0,0,0,2,1
-rbibutils,2.4.1,yes,,C,107141,0,1583,0,0,16,824,,0,0,0,0,2,0
+rbibutils,2.4.1,yes,,C,107141,0,1583,0,0,15,430,,0,0,0,0,2,0
 rcmdcheck,1.4.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 rdtools,0.1.0,yes,,C,250,0,0,0,0,22,40,,0,0,0,0,3,0
-readr,2.2.0,yes,cpp11 tzdb,cpp11,443,3141,4588,0,0,58,478,,0,0,0,0,5,50
-readxl,1.6.0,yes,cpp11 progress,cpp11,4744,624,7736,0,0,37,260,,0,0,0,0,3,11
+readr,2.2.0,yes,cpp11 tzdb,cpp11,443,3141,4588,0,0,52,536,,0,0,0,0,5,50
+readxl,1.6.0,yes,cpp11 progress,cpp11,4744,624,7736,0,0,34,170,,0,0,0,0,3,11
 registry,0.5-1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 rematch,2.0.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 renv,1.3.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-reshape2,1.4.5,yes,Rcpp,Rcpp,0,356,0,0,0,38,127,OBJECT,0,0,0,0,2,22
-rlang,1.3.0,yes,,C,13973,25,8237,0,0,203,737,ATTRIB CLOENV ENCLOS FORMALS PRENV PRVALUE R_NamespaceRegistry R_PromiseExpr Rf_allocSExp Rf_findVar Rf_findVarInFrame3 SET_ATTRIB SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT,2,35,4,1,2,28
+reshape2,1.4.5,yes,Rcpp,Rcpp,0,356,0,0,0,37,120,OBJECT,0,0,0,0,2,22
+rlang,1.3.0,yes,,C,13973,25,8237,0,0,233,698,ATTRIB CLOENV ENCLOS FORMALS LEVELS PRENV PRVALUE R_NamespaceRegistry R_PromiseExpr Rf_allocSExp Rf_findVar Rf_findVarInFrame Rf_findVarInFrame3 SET_ATTRIB SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT,2,35,11,1,2,28
 rmarkdown,2.32,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-rmgarch,1.4-3,yes,Rcpp RcppArmadillo,Rcpp RcppArmadillo,76,2016,148,0,0,15,814,,0,0,0,0,2,65
+rmgarch,1.4-3,yes,Rcpp RcppArmadillo,Rcpp RcppArmadillo,76,2016,148,0,0,14,798,,0,0,0,0,2,65
 rngWELL,0.10-10,yes,,C,3825,0,775,0,0,21,59,,0,3,0,0,2,2
 roxygen2,8.1.1,yes,cpp11,cpp11,0,661,0,0,0,11,32,,0,0,0,0,3,0
 rprojroot,2.1.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
@@ -185,49 +185,49 @@ rstudioapi,0.19.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 rugarch,1.5-6,yes,Rcpp RcppArmadillo,Rcpp RcppArmadillo,2921,357,366,0,0,29,464,,0,0,0,0,2,30
 rversions,3.0.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 rvest,1.0.5,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-sass,0.4.10,yes,,C,300,28748,12648,0,0,26,85,,0,0,0,0,3,1
+sass,0.4.10,yes,,C,300,28748,12648,0,0,28,105,,0,0,0,0,3,1
 scales,1.4.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 selectr,0.8-0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 sessioninfo,1.2.4,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-sets,1.0-25,yes,,C,438,0,152,0,0,32,224,,0,0,0,0,2,54
+sets,1.0-25,yes,,C,438,0,152,0,0,32,249,,0,0,0,0,2,54
 shape,1.4.6.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 shiny,1.14.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 slam,0.1-56,yes,,C,1774,0,0,0,0,85,1317,ATTRIB IS_S4_OBJECT OBJECT SET_ATTRIB SET_OBJECT,0,0,0,0,2,234
 snakecase,0.11.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 sodium,1.4.0,yes,,C,422,0,0,0,0,20,460,,0,0,0,0,2,116
-sourcetools,0.1.7-2,yes,,C,28,184,2966,0,0,28,132,,0,0,0,0,2,8
+sourcetools,0.1.7-2,yes,,C,28,184,2966,0,0,50,271,,0,0,0,0,2,10
 spd,2.0-1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-stringi,1.8.9,yes,,C,0,341553,199253,0,0,99,7235,IS_ASCII IS_UTF8,7,2,0,9,3,146
+stringi,1.8.9,yes,,C,0,341553,199253,0,0,99,6967,IS_ASCII IS_UTF8 LEVELS,7,2,0,9,3,164
 stringr,1.6.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 swagger,5.32.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 sys,3.4.3,yes,,C,691,0,0,0,0,40,191,,0,0,5,4,2,6
-systemfonts,1.3.2,yes,cpp11,cpp11,0,4935,1737,0,0,49,424,,0,42,0,1,3,24
-testthat,3.3.2,yes,,C,18,102,11753,0,0,9,18,,0,0,0,0,2,1
-textshaping,1.0.5,yes,cpp11 systemfonts,cpp11,0,2017,983,0,0,17,117,,0,6,0,0,3,1
-tibble,3.3.1,yes,,C,369,0,14,0,0,59,268,,0,0,0,0,3,21
+systemfonts,1.3.2,yes,cpp11,cpp11,0,4935,1737,0,0,51,411,,0,42,0,1,3,24
+testthat,3.3.2,yes,,C,18,102,11753,0,0,13,59,,0,0,0,0,2,1
+textshaping,1.0.5,yes,cpp11 systemfonts,cpp11,0,2017,983,0,0,19,88,,0,6,0,1,3,1
+tibble,3.3.1,yes,,C,369,0,14,0,0,58,266,,0,0,0,0,3,21
 tidyselect,1.2.1,yes,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-timechange,0.4.0,yes,cpp11,cpp11,163,5017,2225,0,0,43,309,,0,0,0,0,3,4
+timechange,0.4.0,yes,cpp11,cpp11,163,5017,2225,0,0,41,232,,0,0,0,0,3,4
 tinytex,0.61,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 truncnorm,1.0-9,yes,,C,800,0,81,0,0,44,284,,0,0,0,0,3,9
 tryCatchLog,1.3.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-tzdb,0.5.0,yes,cpp11,cpp11,0,4658,23661,0,0,15,43,,0,6,0,0,3,0
+tzdb,0.5.0,yes,cpp11,cpp11,0,4658,23661,0,0,15,44,,0,6,0,0,3,0
 urlchecker,2.0.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 usethis,3.2.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-utf8,1.2.6,yes,,C,10248,0,21358,0,0,63,646,,0,0,10,0,3,31
-uuid,1.2-2,yes,,C,2436,0,1828,0,0,43,217,,0,3,0,0,2,27
-vctrs,0.7.3,yes,,C,39079,25,10286,0,0,245,5543,ATTRIB CLOENV ENCLOS FORMALS LEVELS PRENV PRVALUE R_PromiseExpr Rf_allocSExp Rf_findVar Rf_findVarInFrame3 SET_ATTRIB SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT,30,17,4,0,2,232
+utf8,1.2.6,yes,,C,10248,0,21358,0,0,62,739,,0,0,10,0,3,31
+uuid,1.2-2,yes,,C,2436,0,1828,0,0,44,224,,0,3,0,0,2,27
+vctrs,0.7.3,yes,,C,39079,25,10286,0,0,250,5198,ATTRIB CLOENV ENCLOS FORMALS LEVELS PRENV PRVALUE R_PromiseExpr Rf_allocSExp Rf_findVar Rf_findVarInFrame3 SET_ATTRIB SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT,43,17,4,0,2,232
 viridisLite,0.4.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-vroom,1.7.1,yes,cpp11 progress tzdb,cpp11,418,3964,6563,0,0,113,1217,ATTRIB DATAPTR,127,0,30,0,3,45
+vroom,1.7.1,yes,cpp11 progress tzdb,cpp11,418,3964,6563,0,0,119,1278,ATTRIB DATAPTR,187,0,30,0,3,45
 waldo,0.6.2,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 webutils,1.2.3,yes,,C,280,0,0,0,0,20,62,,0,0,0,0,2,8
 whisker,0.4.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 withr,3.0.3,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 xfun,0.62,yes,,C,281,0,0,0,0,28,81,,0,0,0,0,2,4
-xml2,1.6.0,yes,,C,251,2134,314,0,0,72,1223,,0,0,5,1,2,37
+xml2,1.6.0,yes,,C,251,2134,314,0,0,71,1177,,0,0,5,1,2,37
 xopen,1.0.1,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 xtable,1.8-8,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
 xts,0.14.3,yes,zoo,C,5748,0,235,0,0,97,2959,,0,33,0,0,3,519
-yaml,2.3.12,yes,,C,14461,0,2727,0,0,104,1089,BODY CLOENV FORMALS Rf_allocSExp,0,0,0,2,3,36
+yaml,2.3.12,yes,,C,14461,0,2727,0,0,104,1476,BODY CLOENV FORMALS IS_ASCII Rf_allocSExp,0,0,0,2,3,36
 zeallot,0.2.0,no,,,0,0,0,0,0,0,0,,0,0,0,0,0,0
-zip,3.0.2,yes,cli,C,16711,0,30637,0,0,64,645,Rf_findVar,0,0,12,0,3,90
+zip,3.0.2,yes,cli,C,16711,0,30637,0,0,67,706,Rf_findVar,0,0,12,0,3,90
 zoo,1.9-1,yes,,C,353,0,28,0,0,53,237,,0,3,0,0,2,37

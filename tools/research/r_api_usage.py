@@ -83,7 +83,11 @@ C_KEYWORDS = set(
 # Names the declaration patterns pick up from macro parameters and from
 # function-pointer members of the graphics device structs; in package code
 # they are almost always the package's own identifiers.
-GENERIC_NAMES = set("name format fun fd port cell buff ptr size col visibility ctxt dtype rs_ ch_ cg_ rg_".split())
+GENERIC_NAMES = set("name format fun fd port cell buff ptr size col visibility ctxt dtype rs_ ch_ cg_ rg_ type sorted parseError INTERNAL".split())
+
+# Headers whose declarations are Fortran BLAS, LAPACK and LINPACK routines: a
+# library to link against, reported separately from the R API proper.
+NUMERIC_LIBRARY_HEADERS = {"R_ext/BLAS.h", "R_ext/Lapack.h", "R_ext/Linpack.h"}
 
 SOURCE_EXTENSIONS = {
     ".c": "C", ".h": "C/C++ header", ".cc": "C++", ".cpp": "C++", ".cxx": "C++",
@@ -96,7 +100,7 @@ R_HEADER_INCLUDE = re.compile(
     r'R_ext/[^>"]+|Rcpp[^>"]*|cpp11[^>"]*|RcppArmadillo[^>"]*|RcppEigen[^>"]*|'
     r'Rconfig\.h|Rversion\.h|Rembedded\.h|Rinterface\.h)\s*[>"]'
 )
-LOCAL_INCLUDE = re.compile(r'#\s*include\s*"([^"]+)"')
+LOCAL_INCLUDE = re.compile(r'#\s*include\s*[<"]([^>"]+)[>"]')
 IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 R_CALL = re.compile(r"(?<![A-Za-z0-9_.])\.(Call|External2?|C|Fortran|Internal|Primitive)\s*\(")
 
@@ -146,6 +150,7 @@ def main():
         {
             "symbol": symbol,
             "class": api["class"].get(symbol, "header"),
+            "declared_in": api["origin"].get(symbol, "WRE only"),
             "packages": len(symbol_packages[symbol]),
             "occurrences": symbol_occurrences[symbol],
             "used_by": " ".join(sorted(symbol_packages[symbol])),
@@ -177,14 +182,20 @@ def load_api(work):
                 sotools = read_member(tar, member)
 
     aliases = {}
+    rmath_aliases = set()
     declared = set()
-    for text in headers.values():
+    numeric_library = set()
+    origin = {}
+    for header, text in headers.items():
+        before = set(declared)
         text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
         text = re.sub(r"//[^\n]*", " ", text)
         for match in re.finditer(r"^\s*#\s*define\s+([A-Za-z_]\w*)(?:\((\w+)\))?[ \t]+([A-Za-z_]\w*)(?:\(\2\))?[ \t]*$", text, re.M):
             alias, _, target = match.groups()
             if target.startswith("Rf_") or target.startswith("R_") or alias.islower():
                 aliases[alias] = target
+                if header == "Rmath.h0.in":
+                    rmath_aliases.add(alias)
         for match in re.finditer(r"^\s*#\s*define\s+([A-Za-z_]\w*)", text, re.M):
             declared.add(match.group(1))
         pointer_members = set(re.findall(r"\(\s*\*\s*([A-Za-z_]\w*)\s*\)", text))
@@ -201,6 +212,13 @@ def load_api(work):
                 declared.add(constant.group(1))
         for match in re.finditer(r"\btypedef\b[^;]*?\b([A-Za-z_]\w*)\s*;", text, re.S):
             declared.add(match.group(1))
+        # Altrep.h declares its method setters through a token-pasting macro.
+        for match in re.finditer(r"^\s*DECLARE_METHOD_SETTER\(\s*(\w+)\s*,\s*(\w+)\s*\)", text, re.M):
+            declared.add(f"R_set_{match.group(1)}_{match.group(2)}_method")
+        if header in NUMERIC_LIBRARY_HEADERS:
+            numeric_library |= declared - before
+        for name in declared - before:
+            origin.setdefault(name, header)
     declared -= C_KEYWORDS | GENERIC_NAMES
     declared = {name for name in declared if len(name) > 1 and not name.startswith("__") and not name.endswith("_H_")}
 
@@ -223,14 +241,20 @@ def load_api(work):
         for candidate in (name, f"Rf_{name}", aliases.get(name, "")):
             if candidate in universe:
                 resolved.setdefault(candidate, label)
-        if name not in universe and f"Rf_{name}" not in universe:
+        if name not in universe and f"Rf_{name}" not in universe and name not in aliases:
             resolved.setdefault(name, label)
             universe.add(name)
+    for name in numeric_library - C_KEYWORDS - GENERIC_NAMES:
+        if name in universe:
+            resolved.setdefault(name, "blas-lapack")
     return {
         "aliases": aliases,
         "universe": universe,
         "class": resolved,
-        "remappable": {alias for alias, target in aliases.items() if target.startswith("Rf_")},
+        # Only the lower-case aliases sit behind `#ifndef R_NO_REMAP`; PROTECT and friends are always defined.
+        "remappable": {alias for alias, target in aliases.items() if target.startswith("Rf_") and alias[:1].islower()},
+        "rmath_aliases": rmath_aliases,
+        "origin": {aliases.get(name, name): header for name, header in origin.items()},
     }
 
 
@@ -410,23 +434,35 @@ def scan_compiled(root, api):
     by_basename = collections.defaultdict(list)
     for path in files:
         by_basename[os.path.basename(path)].append(path)
+    # A file sees R's headers if it includes one, includes a package file that
+    # does, or is included by one: umbrella headers such as Rcpp.h include the
+    # R headers once and then pull in files that use the API without including
+    # anything themselves.
+    edges = collections.defaultdict(set)
+    for path, text in files.items():
+        for include in LOCAL_INCLUDE.findall(text):
+            for target in by_basename.get(os.path.basename(include), []):
+                if target != path:
+                    edges[path].add(target)
+                    edges[target].add(path)
     r_facing = {path for path, text in files.items() if R_HEADER_INCLUDE.search(text)}
-    changed = True
-    while changed:
-        changed = False
-        for path, text in files.items():
-            if path in r_facing or path.endswith(".rs"):
-                continue
-            for include in LOCAL_INCLUDE.findall(text):
-                if any(candidate in r_facing for candidate in by_basename.get(os.path.basename(include), [])):
-                    r_facing.add(path)
-                    changed = True
-                    break
+    pending = list(r_facing)
+    while pending:
+        for neighbor in edges[pending.pop()]:
+            if neighbor not in r_facing and not neighbor.endswith(".rs"):
+                r_facing.add(neighbor)
+                pending.append(neighbor)
+    # A package that defines R_NO_REMAP once (Rcpp does, in RcppCommon.h) or
+    # has no C sources is C++ throughout, so its headers see prefixed names only.
+    package_no_remap = any("R_NO_REMAP" in text for text in files.values()) or not any(
+        path.lower().endswith(".c") for path in files
+    )
 
     usage = collections.Counter()
     aliases = api["aliases"]
     universe = api["universe"]
     remappable = api["remappable"]
+    rmath_aliases = api["rmath_aliases"]
     for path, text in files.items():
         is_rust = path.endswith(".rs")
         if not is_rust and path not in r_facing:
@@ -434,10 +470,19 @@ def scan_compiled(root, api):
         if path.lower().endswith((".f", ".f90", ".f95")):
             continue
         text = strip_comments(text, is_rust)
-        no_remap = is_rust or "R_NO_REMAP" in text or re.search(r"#\s*include\s*[<\"](Rcpp|cpp11)", text)
+        # R CMD INSTALL compiles C++ with -DR_NO_REMAP since R 4.5.0.
+        no_remap = (
+            is_rust
+            or path.lower().endswith((".cpp", ".cc", ".cxx", ".hpp", ".hh"))
+            or (package_no_remap and path.lower().endswith(".h"))
+            or "R_NO_REMAP" in text
+            or re.search(r"#\s*include\s*[<\"](Rcpp|cpp11)", text)
+        )
+        # Rmath's short names (dt, df, pt, beta) are remapped only where Rmath.h is included.
+        uses_rmath = re.search(r"#\s*include\s*[<\"]Rmath\.h[>\"]", text) is not None
         for token in IDENTIFIER.findall(text):
             if token in remappable:
-                if no_remap:
+                if no_remap or (token in rmath_aliases and not uses_rmath):
                     continue
                 token = aliases[token]
             elif token in aliases:

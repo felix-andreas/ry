@@ -1,815 +1,943 @@
-symbol,class,packages,occurrences,used_by
-DllInfo,header,117,243,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports bit bit64 brio cachem checkmate chron cli commonmark curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg randtoolbox rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-R_registerRoutines,api,117,133,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports bit bit64 brio cachem checkmate chron cli commonmark curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg randtoolbox rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-R_useDynamicSymbols,api,117,133,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports bit bit64 brio cachem checkmate chron cli commonmark curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg randtoolbox rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-FALSE,api,115,1736,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom xfun xml2 xts yaml zip zoo
-SEXP,header,107,35873,FLSSS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rmpfr Rsolnp S7 askpass backports base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab later lattice lazyeval lubridate magrittr mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly pdftools plyr polars processx profvis progress ps purrr qpdf ragg randtoolbox rappdirs rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-R_NilValue,api,81,2302,FLSSS Matrix Rblpapi Rcpp RcppArmadillo RcppSimdJson Rmpfr S7 askpass backports bit checkmate cli cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r gmp highs httpuv jsonlite later lattice lazyeval lubridate magrittr mgcv multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly pdftools plyr polars processx profvis ps purrr ragg randtoolbox rappdirs readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sets slam sodium sourcetools stringi sys systemfonts tibble truncnorm tzdb utf8 uuid vctrs vroom xfun xml2 xts yaml zip zoo
-Rf_error,api,80,4220,FNN MASS Matrix Rcpp RcppSimdJson Rglpk Rmpfr S7 backports base64enc bit bit64 brio cachem checkmate cli commonmark curl data.table diffobj digest fansi fastmap ff fs gert git2r glue gmp htmltools jsonlite later lattice lazyeval lubridate magrittr mgcv mvtnorm nlme openssl pak parallelly partitions pcaPP plyr processx profvis progress ps purrr ragg randtoolbox rbibutils rdtools readr readxl rlang rmgarch rngWELL sass sets slam sodium stringi sys systemfonts textshaping tibble timechange truncnorm utf8 uuid vctrs vroom xfun xml2 xts yaml zip zoo
-Rf_allocVector,api,77,2723,Matrix PerformanceAnalytics Rblpapi Rcpp RcppParallel RcppSimdJson Rmpfr S7 backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r glue gmp htmltools jsonlite kernlab lattice lazyeval lubridate magrittr mgcv mime mvtnorm nlme nloptr odbc openssl pak parallelly plyr processx ps purrr ragg randtoolbox rdtools reshape2 rlang sets slam sodium sourcetools stringi sys systemfonts tibble timechange truncnorm utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-TRUE,api,73,1185,MASS Matrix Rblpapi Rcpp RcppParallel Rmpfr S7 askpass azidentity backports base64enc bit bit64 cachem checkmate cli commonmark cpp11 curl data.table diffobj digest fansi fastmap ff gert git2r gmp htmltools isoband jsonlite ks later lazyeval lubridate mgcv multicool mvtnorm nlme nloptr openssl pak pcaPP processx profvis ps purrr ragg randtoolbox rdtools readr readxl rlang roxygen2 sass sets slam sodium stringi sys systemfonts textshaping tibble timechange truncnorm tzdb utf8 vctrs vroom webutils xts yaml zip
-INTEGER,api,71,3327,Matrix Rblpapi Rcpp RcppParallel RcppSimdJson Rmpfr backports bit bit64 brio checkmate chron cli cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r gmp isoband jsonlite kernlab later lattice lazyeval lubridate magrittr mgcv mime mvtnorm nlme nloptr odbc pak parallelly plyr processx ps purrr ragg randtoolbox rappdirs readr reshape2 rlang rmgarch rugarch sets slam sourcetools stringi systemfonts textshaping tibble truncnorm utf8 uuid vctrs vroom xml2 xts yaml zip zoo
-Rf_protect,api,70,4777,Matrix PerformanceAnalytics Rcpp Rmpfr S7 backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r gmp htmltools httpuv jsonlite kernlab lattice lubridate magrittr mgcv mvtnorm nlme nloptr odbc openssl pak parallelly plyr processx progress ps ragg randtoolbox rdtools rlang rngWELL sass sets slam stringi sys tibble timechange truncnorm utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-Rf_unprotect,api,70,2922,Matrix PerformanceAnalytics Rcpp Rmpfr S7 backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r gmp htmltools httpuv jsonlite kernlab lattice lubridate magrittr mgcv mvtnorm nlme nloptr odbc openssl pak parallelly plyr processx progress ps ragg randtoolbox rdtools rlang rngWELL sass sets slam stringi sys tibble timechange truncnorm utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-STRING_ELT,api,70,1705,Matrix Rcpp Rmpfr S7 askpass base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r glue gmp htmltools httpuv jsonlite kernlab lazyeval lubridate mgcv multicool nlme nloptr odbc openssl pak processx ps purrr ragg rdtools readr reshape2 rlang sass slam sodium sourcetools stringi sys systemfonts textshaping tibble timechange utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-R_CHAR,api,68,1404,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr S7 askpass base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r glue gmp htmltools httpuv jsonlite kernlab lazyeval lubridate mgcv multicool nlme nloptr odbc openssl pak polars processx ps purrr ragg readr rlang sass slam sodium sourcetools stringi sys systemfonts tibble timechange utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip
-Rf_length,api,64,1872,FNN Matrix Rblpapi Rcpp Rmpfr S7 backports cachem checkmate chron cli commonmark curl data.table digest farver fastmap ff fs gert git2r gmp httpuv jsonlite lazyeval magrittr mgcv mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly processx profvis progress ps purrr randtoolbox rbibutils rdtools readr readxl reshape2 rlang rngWELL sass slam sodium sourcetools stringi sys systemfonts tibble truncnorm utf8 vctrs vroom webutils xml2 xts yaml
-INTSXP,header,63,1282,Matrix Rcpp RcppParallel RcppSimdJson Rmpfr base64enc bit bit64 checkmate chron cli cpp11 curl data.table diffobj digest fansi farver fastmap ff fracdiff fs gert git2r gmp jsonlite ks lubridate mgcv mime multicool mvtnorm nlme nloptr odbc pak parallelly pcaPP processx ps purrr quadprog ragg randtoolbox readr reshape2 sass sets slam sourcetools stringi systemfonts tibble timechange utf8 uuid vctrs vroom xml2 xts yaml zip zoo
-SET_STRING_ELT,api,62,1429,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r glue gmp htmltools jsonlite lazyeval lubridate magrittr mgcv nloptr odbc openssl pak processx ps purrr rdtools readr readxl reshape2 rlang slam sourcetools stringi tibble timechange tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-STRSXP,header,62,1047,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr S7 backports base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r glue gmp htmltools jsonlite lazyeval lubridate magrittr multicool nloptr odbc openssl pak processx ps purrr rdtools readr readxl reshape2 sass slam sourcetools stringi tibble timechange uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-REAL,api,60,2410,Matrix PerformanceAnalytics Rblpapi RcppDE RcppSimdJson Rmpfr bit bit64 checkmate cli cpp11 curl data.table fansi farver ff fs gert git2r gmp isoband jsonlite kernlab lattice lazyeval lubridate mgcv mvtnorm nlme nloptr odbc pak processx ps purrr ragg randtoolbox readr readxl reshape2 rlang rmgarch rngWELL rugarch slam stringi sys systemfonts tibble timechange truncnorm uuid vctrs vroom xfun xml2 xts yaml zip zoo
-type,header,59,3587,FLSSS Matrix Rblpapi Rcpp RcppArmadillo RcppDE RcppSimdJson Rglpk Rmpfr Rsolnp VineCopula checkmate cli cpp11 curl data.table diffobj digest esgtoolkit fansi fs gert git2r gmp highs httpuv isoband kernlab later lazyeval mgcv multicool odbc openssl openxlsx pak pdftools plyr polars processx ps purrr qpdf ragg randtoolbox rbibutils readr readxl reshape2 rlang sourcetools stringi tibble utf8 uuid vctrs vroom xml2 yaml
-TYPEOF,api,58,1269,FLSSS Matrix Rblpapi Rcpp RcppDE RcppSimdJson Rmpfr S7 backports base64enc bit cachem checkmate cli cpp11 curl data.table diffobj digest fansi fastmap ff gert git2r gmp httpuv jsonlite lazyeval lubridate magrittr multicool mvtnorm odbc openssl pak polars profvis purrr readr readxl reshape2 rlang sass sets slam stringi systemfonts tibble timechange utf8 uuid vctrs vroom xfun xml2 xts yaml zoo
-REALSXP,header,56,936,Matrix PerformanceAnalytics Rcpp RcppSimdJson Rmpfr base64enc bit bit64 checkmate cpp11 curl data.table fansi farver ff fracdiff fs gert git2r gmp jsonlite kernlab ks lattice lubridate mgcv multicool mvtnorm nlme nloptr odbc pak pcaPP profvis ps purrr quadprog randtoolbox readr reshape2 rngWELL sass slam stringi systemfonts tibble timechange truncnorm uuid vctrs vroom xfun xts yaml zip zoo
-R_NaInt,api,55,1412,Matrix Rblpapi Rcpp RcppArmadillo RcppSimdJson Rmpfr bit bit64 checkmate chron cli cpp11 curl data.table diffobj fansi farver ff fs gert git2r gmp jsonlite later lazyeval lubridate odbc openssl openxlsx pak pcaPP processx ps purrr readr readxl reshape2 rlang slam sourcetools stringi sys systemfonts textshaping tibble timechange truncnorm utf8 uuid vctrs vroom xml2 xts yaml zoo
-SET_VECTOR_ELT,api,50,1608,Matrix Rcpp RcppSimdJson Rmpfr S7 bit bit64 chron cli cpp11 curl data.table diffobj fansi farver ff fs gert git2r glue gmp jsonlite lazyeval lubridate nloptr odbc openssl pak plyr processx ps purrr ragg readr readxl reshape2 rlang sets slam sourcetools stringi tibble timechange vctrs vroom webutils xml2 xts yaml zip
-VECSXP,header,50,655,Matrix Rcpp RcppSimdJson Rmpfr S7 bit bit64 checkmate chron cli cpp11 curl data.table diffobj digest fansi farver fs gert git2r glue gmp jsonlite lazyeval lubridate multicool nlme nloptr odbc openssl pak plyr processx ps purrr reshape2 rlang sets slam sourcetools stringi tibble timechange vctrs vroom webutils xml2 xts yaml zip
-Rf_setAttrib,api,48,633,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr S7 bit checkmate cli cpp11 curl data.table farver fastmap ff fs gert git2r gmp jsonlite lazyeval lubridate mgcv multicool nloptr odbc openssl pak processx ps purrr ragg readr rlang sets slam sourcetools stringi sys systemfonts tibble utf8 uuid vctrs xml2 xts yaml zoo
-LOGICAL,api,47,1135,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr bit bit64 checkmate cli cpp11 data.table fansi farver fastmap ff fs gert git2r glue gmp lazyeval lubridate mvtnorm odbc pak processx ps purrr ragg readr readxl reshape2 rlang sets slam stringi testthat tibble utf8 uuid vctrs vroom xml2 xts yaml zip zoo
-Rf_mkChar,api,47,627,Matrix Rblpapi Rcpp Rmpfr base64enc bit bit64 checkmate chron cli commonmark curl data.table digest fansi farver ff fs gert git2r gmp jsonlite lazyeval lubridate magrittr mgcv nloptr odbc openssl pak processx ps purrr rlang sourcetools stringi tibble timechange utf8 uuid vctrs webutils xfun xml2 xts zip zoo
-VECTOR_ELT,api,46,1494,Matrix Rcpp Rmpfr S7 bit64 checkmate cli cpp11 curl data.table digest fansi farver ff fs gert git2r gmp jsonlite kernlab lazyeval magrittr mgcv multicool nlme nloptr odbc openssl pak processx ps purrr reshape2 rlang sass sets slam stringi tibble utf8 vctrs vroom xml2 xts yaml zip
-LGLSXP,header,46,575,Matrix Rcpp RcppSimdJson Rmpfr bit bit64 checkmate cli cpp11 curl data.table fansi ff fs gert git2r gmp jsonlite lubridate multicool mvtnorm odbc openssl pak processx ps purrr quadprog readr readxl reshape2 sass sets slam stringi tibble timechange utf8 uuid vctrs vroom xml2 xts yaml zip zoo
-Rf_install,api,44,810,Matrix Rblpapi Rcpp Rmpfr S7 bit checkmate cli cpp11 curl data.table digest farver ff fs gert gmp jsonlite later lattice lazyeval magrittr mgcv mvtnorm odbc pak processx progress ps purrr readr rlang slam stringi sys timechange utf8 vctrs vroom xml2 xts yaml zip zoo
-R_NaString,api,44,605,Matrix Rblpapi RcppSimdJson bit64 brio cachem checkmate cli cpp11 curl data.table fansi farver fastmap fs gert git2r gmp httpuv jsonlite lazyeval odbc openssl openxlsx pak pdftools processx ps purrr rdtools readr readxl rlang stringi systemfonts timechange utf8 uuid vctrs vroom xml2 xts yaml zoo
-Rprintf,api,43,533,Bessel FNN MASS Matrix RcppDE Rglpk Rmpfr base64enc bit bit64 cli data.table fansi ff git2r gmp highs lazyeval mgcv nlme nloptr pak pdftools progress randtoolbox rbibutils readr readxl reshape2 rlang sets slam stringi sys testthat textshaping truncnorm uuid vctrs vroom xts yaml zoo
-RAW,api,41,603,Matrix base64enc bit brio cli cpp11 curl data.table digest ff git2r gmp httpuv jsonlite lazyeval mime odbc openssl pak processx ps purrr readr readxl reshape2 rlang slam sodium sourcetools stringi sys uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
-Rf_ScalarLogical,api,40,615,Matrix Rcpp RcppParallel Rmpfr S7 base64enc cachem checkmate cli cpp11 curl data.table digest fansi fastmap ff gert git2r gmp jsonlite lazyeval magrittr openssl pak processx progress ps purrr ragg readxl rlang slam sodium stringi testthat tibble vctrs xml2 xts yaml
-Rf_mkString,api,40,540,Matrix Rcpp RcppSimdJson Rmpfr S7 askpass base64enc brio cli curl data.table fansi fs gert git2r gmp jsonlite lazyeval magrittr odbc openssl pak ps purrr ragg rappdirs rlang sass slam sodium sourcetools stringi sys systemfonts timechange uuid vctrs vroom xml2 xts
-Rf_getAttrib,api,39,571,Matrix Rcpp RcppSimdJson S7 bit bit64 checkmate cli cpp11 curl data.table farver ff git2r gmp jsonlite lazyeval mgcv multicool mvtnorm nlme nloptr pak purrr randtoolbox sass sets slam stringi tibble timechange utf8 uuid vctrs vroom xml2 xts yaml zoo
-R_NaReal,api,39,401,Matrix Rblpapi Rcpp RcppSimdJson Rsolnp bit64 cli cpp11 curl data.table farver fs gert gmp lazyeval lubridate multicool odbc openxlsx pak pcaPP pdftools processx ps purrr readr readxl rlang slam stringi tibble timechange truncnorm uuid vctrs vroom xts yaml zoo
-R_NamesSymbol,api,39,357,Matrix Rcpp RcppSimdJson S7 bit checkmate cli cpp11 curl data.table farver fastmap ff fs gert git2r jsonlite lazyeval lubridate mgcv multicool nlme nloptr openssl pak ps purrr rlang sass slam sourcetools stringi tibble utf8 vctrs xml2 xts yaml zoo
-R_forceSymbols,api,39,51,MASS askpass bit bit64 cli commonmark diffobj fansi ff git2r isoband ks later lubridate mvtnorm nlme nloptr pak pcaPP processx profvis ps rdtools readr readxl roxygen2 sass stringi systemfonts textshaping tibble timechange truncnorm tzdb utf8 vroom xts yaml zip
-R_xlen_t,header,38,1442,Matrix Rcpp RcppSimdJson S7 brio checkmate cli cpp11 data.table digest fansi fs glue htmltools lazyeval multicool pak parallelly ps purrr readr readxl rlang roxygen2 sodium systemfonts textshaping tibble timechange tzdb utf8 vctrs vroom xfun xml2 xts zip zoo
-Rf_ScalarInteger,api,38,479,Matrix RcppSimdJson Rmpfr backports base64enc checkmate cli cpp11 curl data.table diffobj fansi fastmap fs gert git2r gmp jsonlite lazyeval magrittr openssl pak plyr processx ps purrr ragg rlang slam stringi sys systemfonts vctrs xml2 xts yaml zip zoo
-Rf_isNull,api,37,718,Matrix Rcpp RcppSimdJson Rmpfr Rsolnp checkmate cli data.table farver gert git2r highs httpuv jsonlite multicool odbc openssl openxlsx pak processx progress ps purrr ragg randtoolbox readr rlang sass sets slam stringi tibble timechange vroom xts zip zoo
-CE_UTF8,header,37,346,Rblpapi Rcpp RcppSimdJson brio cli commonmark cpp11 curl data.table fansi fastmap fs gert glue htmltools httpuv jsonlite lazyeval odbc openssl openxlsx pak pdftools processx ps rdtools readr readxl rlang stringi tzdb utf8 vctrs vroom xml2 yaml zip
-LENGTH,api,36,1511,Matrix Rmpfr base64enc bit bit64 cli commonmark curl data.table fansi ff fs gert git2r glue gmp lubridate mime mvtnorm nlme openssl pak processx ps sets slam sodium stringi timechange utf8 uuid vroom xfun xts yaml zip
-Rf_asInteger,api,36,542,Matrix PerformanceAnalytics Rmpfr base64enc bit bit64 checkmate commonmark curl data.table diffobj digest fansi ff gert git2r gmp jsonlite lattice mgcv nloptr openssl pak parallelly processx randtoolbox rlang rngWELL sass sodium sys uuid xfun xts zip zoo
-Rf_eval,api,36,187,Matrix Rcpp RcppDE S7 backports checkmate cli cpp11 curl data.table digest fs gert glue jsonlite lattice lazyeval magrittr nlme nloptr odbc pak plyr processx ps purrr ragg rlang slam stringi vctrs vroom xml2 xts yaml zip
-RAWSXP,header,35,313,Matrix Rcpp RcppSimdJson base64enc bit brio checkmate cpp11 curl data.table digest git2r gmp jsonlite odbc openssl pak processx ps purrr reshape2 rlang slam sodium sourcetools stringi sys uuid vctrs webutils xml2 xts yaml zip zoo
-attribute_visible,header,35,41,Matrix Rcpp cachem cli commonmark curl data.table fansi fastmap fs gert git2r glue isoband jsonlite ks lazyeval magrittr mvtnorm pak purrr quadprog readr readxl rlang roxygen2 systemfonts textshaping timechange truncnorm tzdb vctrs vroom xml2 zip
-Rf_warning,api,34,359,Matrix Rcpp Rmpfr bit64 chron cli cpp11 curl data.table fansi fracdiff gert git2r gmp htmltools lazyeval nlme odbc pak pcaPP processx ragg rbibutils readr readxl rlang slam sourcetools stringi timechange vctrs xml2 xts yaml
-R_ClassSymbol,api,33,218,Matrix Rblpapi Rcpp RcppSimdJson S7 checkmate cli cpp11 curl data.table fs gert git2r gmp jsonlite lazyeval odbc openssl pak processx ps rlang slam sourcetools stringi sys tibble uuid vctrs xml2 xts yaml zoo
-Rboolean,header,30,433,Matrix Rcpp RcppSimdJson Rmpfr S7 backports bit bit64 checkmate chron cli cpp11 curl data.table ff glue gmp htmltools later mvtnorm pak progress purrr ragg slam stringi systemfonts vctrs vroom xml2
-Rf_xlength,api,30,356,Rcpp RcppSimdJson S7 brio checkmate cli cpp11 curl data.table digest fansi fs glue htmltools lazyeval multicool pak parallelly ps purrr rdtools readr rlang systemfonts tibble vctrs vroom xml2 xts zoo
-R_Version,api,28,214,Matrix Rcpp S7 backports base64enc checkmate cli cpp11 curl data.table lazyeval magrittr odbc pak pcaPP processx ps purrr ragg rbibutils rlang slam stringi vctrs vroom xfun yaml zip
-R_alloc,api,27,366,MASS Matrix Rmpfr base64enc bit bit64 brio cli data.table diffobj digest fansi ff lubridate pak processx ps ragg randtoolbox rdtools readr rngWELL stringi utf8 vctrs vroom zip
-Rf_mkCharLenCE,api,27,186,Rcpp RcppSimdJson brio cli cpp11 curl data.table fansi gert glue htmltools httpuv jsonlite odbc openssl pak processx ps rdtools readr rlang stringi tzdb utf8 vctrs vroom xml2
-Rf_mkCharCE,api,27,162,Rblpapi brio cli commonmark cpp11 curl data.table fastmap fs gert glue httpuv jsonlite lazyeval odbc openxlsx pak processx ps readr readxl rlang stringi vctrs xml2 yaml zip
-Rf_asLogical,api,26,424,Matrix Rmpfr S7 bit bit64 chron commonmark curl fansi ff gert gmp jsonlite lazyeval multicool mvtnorm openssl pak purrr randtoolbox readxl rngWELL sass sys xts zoo
-Rf_lang2,api,26,91,Matrix Rcpp S7 cli cpp11 curl data.table fs glue lattice lazyeval nlme nloptr odbc openssl pak plyr ps purrr rlang stringi vctrs vroom xml2 xts yaml
-R_RegisterCCallable,api,25,275,Matrix Rcpp RcppSimdJson Rmpfr VineCopula checkmate cli data.table digest later mgcv mvtnorm nloptr pak randtoolbox rlang rngWELL stringi systemfonts textshaping tzdb uuid vctrs xts zoo
-Rf_ScalarString,api,25,178,Rcpp RcppSimdJson brio checkmate cli cpp11 curl data.table gert git2r glue lazyeval openssl pak processx ps purrr rlang stringi utf8 vctrs webutils xml2 yaml zip
-Rf_inherits,api,25,127,Matrix Rcpp RcppSimdJson S7 checkmate cli curl data.table gert git2r jsonlite lazyeval multicool odbc openssl pak purrr reshape2 rlang slam stringi uuid vctrs vroom xml2
-R_GlobalEnv,api,25,104,Matrix Rcpp checkmate cpp11 curl data.table digest fs gert lattice lazyeval nlme odbc openssl pak ps purrr ragg rlang slam sys vctrs xml2 xts yaml
-R_CheckUserInterrupt,api,25,70,MASS Rcpp Rmpfr bit64 cli cpp11 curl diffobj fansi gert lazyeval nlme nloptr openssl pak processx profvis ps purrr rlang sets sys truncnorm utf8 vctrs
-R_ExternalPtrAddr,api,24,457,Rblpapi Rcpp cli cpp11 curl data.table digest fastmap ff gert httpuv mgcv multicool openssl pak processx ps purrr sys utf8 vctrs vroom xml2 zip
-R_finite,api,24,243,Matrix Rcpp RcppArmadillo checkmate data.table farver git2r gmp isoband jsonlite ks mvtnorm nlme pak purrr randtoolbox readr rngWELL slam stringi timechange truncnorm vroom xts
-R_DimSymbol,api,24,117,Matrix Rcpp Rmpfr bit64 checkmate cpp11 data.table gmp jsonlite lazyeval multicool pak ragg randtoolbox rlang slam stringi systemfonts tibble utf8 uuid vctrs xts zoo
-CDR,api,23,310,Matrix Rcpp S7 backports checkmate cli cpp11 curl data.table fansi lazyeval magrittr pak processx ps purrr rlang slam tibble vctrs xts yaml zip
-CAR,api,23,211,Matrix Rcpp S7 backports cli cpp11 curl data.table fansi lazyeval magrittr pak processx ps purrr rlang slam tibble vctrs vroom xts yaml zip
-Rf_isString,api,23,183,Rcpp Rmpfr checkmate commonmark cpp11 curl data.table gert git2r highs httpuv jsonlite lubridate openssl pak processx rdtools slam stringi sys timechange utf8 yaml
-Rf_duplicate,api,23,117,Matrix Rcpp Rmpfr S7 bit data.table digest fansi fs git2r jsonlite lazyeval mvtnorm pak ps rlang sets slam utf8 vctrs vroom xts yaml
-R_MakeExternalPtr,api,23,91,Rblpapi Rcpp cli cpp11 curl data.table digest fastmap ff gert httpuv mgcv openssl pak processx ps purrr sys utf8 vctrs vroom xml2 zip
-R_isnancpp,api,21,289,MASS Matrix Rcpp RcppDE Rmpfr bit64 checkmate data.table farver ff gmp jsonlite lattice multicool pak readr slam stringi timechange vroom xts
-Rf_translateCharUTF8,api,21,166,brio cli cpp11 curl data.table farver fastmap gert glue httpuv jsonlite pak purrr ragg readr systemfonts textshaping utf8 vctrs vroom xml2
-Rf_ScalarReal,api,21,153,Matrix Rmpfr cli cpp11 curl data.table gert git2r jsonlite lazyeval pak parallelly processx ps purrr readxl rlang stringi vctrs xml2 yaml
-R_BaseEnv,api,21,66,Matrix Rcpp S7 cli cpp11 fs httpuv jsonlite later lazyeval magrittr odbc pak processx ps purrr rlang stringi vctrs vroom zip
-R_GetCCallable,api,20,213,Matrix Rcpp RcppSimdJson checkmate cli data.table digest later lazyeval mvtnorm nloptr pak purrr randtoolbox rlang systemfonts textshaping tzdb vctrs xts
-Rf_asReal,api,20,92,Matrix PerformanceAnalytics Rmpfr base64enc bit64 checkmate curl digest ff gert lattice mgcv multicool nloptr pak profvis randtoolbox sodium xfun xts
-REprintf,api,19,467,Rcpp Rmpfr cli cpp11 curl data.table fracdiff gert highs httpuv later openssl pak processx progress ps rbibutils stringi vroom
-REPROTECT,api,19,218,Matrix S7 bit bit64 brio cli data.table fansi glue htmltools lazyeval magrittr pak ps purrr rlang utf8 vctrs xts
-Rf_coerceVector,api,19,214,Matrix Rcpp Rmpfr checkmate data.table gmp mgcv nlme nloptr pak purrr reshape2 rlang slam stringi utf8 vctrs xts yaml
-PROTECT_WITH_INDEX,api,19,102,Matrix S7 bit bit64 brio cli data.table fansi glue htmltools lazyeval magrittr pak ps purrr rlang utf8 vctrs xts
-PROTECT_INDEX,header,19,95,Matrix S7 bit bit64 brio cli data.table fansi glue htmltools lazyeval magrittr pak ps purrr rlang utf8 vctrs xts
-R_IsNA,api,19,85,Rmpfr bit checkmate cpp11 data.table jsonlite lubridate nlme odbc pak purrr readr rlang stringi vctrs vroom xts yaml zip
-Rf_isInteger,api,18,145,Rmpfr checkmate commonmark cpp11 curl data.table farver git2r highs jsonlite lubridate pak parallelly readr stringi truncnorm xts yaml
-NILSXP,header,18,37,FLSSS Matrix Rcpp RcppSimdJson checkmate cpp11 data.table fansi gert gmp jsonlite lazyeval odbc pak purrr vctrs xts yaml
-Rf_type2char,api,17,178,Matrix Rcpp checkmate cli cpp11 data.table fansi lazyeval odbc pak purrr readr reshape2 rlang vctrs vroom xml2
-Rf_isLogical,api,17,98,checkmate cli commonmark cpp11 curl data.table ff git2r highs pak randtoolbox readr rngWELL stringi sys xts yaml
-Rf_lcons,api,17,51,Rcpp S7 cli curl digest gert lazyeval magrittr openssl pak processx ps purrr rlang rmgarch vctrs zip
-COMPLEX,api,16,436,Matrix bit checkmate data.table lazyeval pak purrr reshape2 rlang slam tibble uuid vctrs xts yaml zoo
-XLENGTH,api,16,375,Matrix base64enc bit64 cli data.table diffobj digest fansi pak rlang sodium tibble utf8 uuid xfun zip
-CPLXSXP,header,16,232,Matrix Rcpp bit checkmate data.table jsonlite pak purrr reshape2 slam tibble uuid vctrs xts yaml zoo
-Rf_lengthgets,api,16,88,bit bit64 brio cli fs glue htmltools odbc pak ps readr readxl slam vctrs xts zip
-SETCDR,api,16,59,Rcpp S7 cli cpp11 curl fansi lazyeval pak processx ps purrr rlang tibble vctrs yaml zip
-R_PreserveObject,api,16,55,Rcpp RcppSimdJson S7 cli cpp11 fs lazyeval magrittr pak processx ps purrr rlang stringi vctrs xml2
-R_RegisterCFinalizerEx,api,16,48,Rblpapi Rcpp cpp11 curl digest fastmap gert mgcv openssl pak processx ps sys utf8 vroom xml2
-R_ClearExternalPtr,api,16,47,Rblpapi Rcpp cpp11 curl data.table digest fastmap ff gert httpuv openssl pak processx sys vroom xml2
-EXTPTRSXP,header,16,32,Rblpapi Rcpp RcppDE cpp11 curl data.table fastmap gert httpuv multicool openssl pak rlang utf8 vctrs xml2
-Rf_errorcall,api,15,132,S7 cpp11 curl farver jsonlite lazyeval magrittr openssl pak polars purrr rlang sys vctrs vroom
-Rf_cons,api,15,64,Rcpp S7 cli cpp11 curl lazyeval magrittr pak processx ps purrr rlang tibble vctrs zip
-Rf_lang3,api,15,47,Matrix Rcpp RcppDE S7 curl lazyeval magrittr pak purrr rlang vctrs vroom xml2 xts yaml
-CADR,api,15,42,cli data.table lazyeval magrittr pak processx ps purrr rlang slam vctrs vroom xts yaml zip
-R_len_t,header,14,1863,Rblpapi bit checkmate data.table fansi gert httpuv lubridate magrittr stringi timechange truncnorm vctrs xml2
-Rf_defineVar,api,14,140,Matrix Rcpp S7 cli cpp11 data.table lazyeval magrittr pak processx ps rlang vctrs xts
-R_PosInf,api,14,89,Matrix Rcpp checkmate cli data.table gmp jsonlite later pak pcaPP timechange truncnorm xml2 yaml
-R_DimNamesSymbol,api,14,79,Matrix Rmpfr checkmate data.table lazyeval rlang sets slam stringi tibble utf8 vctrs xts zoo
-PRINTNAME,api,14,64,Rblpapi Rcpp backports cli cpp11 data.table lazyeval magrittr pak purrr rlang stringi vctrs vroom
-SET_TAG,api,14,55,Matrix Rcpp S7 cpp11 data.table lazyeval magrittr pak purrr rlang tibble vctrs xts yaml
-GetRNGstate,api,14,35,MASS Matrix Rcpp VineCopula bit bit64 httpuv mvtnorm pak pcaPP rbibutils rugarch stringi truncnorm
-Rf_nrows,api,13,380,Matrix RcppDE cpp11 data.table farver gert mgcv multicool odbc truncnorm utf8 xts zoo
-Rcomplex,header,13,314,Matrix Rcpp checkmate data.table lazyeval reshape2 rlang slam tibble uuid vctrs xts zoo
-Rf_mkNamed,api,13,96,Matrix Rmpfr cli fs git2r gmp odbc openssl pak ps timechange vctrs zip
-Rf_allocMatrix,api,13,59,Matrix PerformanceAnalytics farver lubridate mgcv mvtnorm randtoolbox rngWELL sets slam stringi systemfonts xts
-unif_rand,api,13,47,MASS Matrix RcppArmadillo RcppDE VineCopula bit bit64 mvtnorm pak pcaPP rbibutils rugarch stringi
-R_getVar,api,13,46,Matrix Rcpp cli cpp11 data.table lazyeval pak processx ps purrr rlang vctrs zip
-TAG,api,13,43,Matrix S7 backports checkmate cpp11 data.table lazyeval pak rlang tibble vctrs xts yaml
-SETCAR,api,13,40,Matrix Rcpp S7 checkmate cpp11 data.table lazyeval magrittr pak rlang vctrs xts yaml
-PutRNGstate,api,13,36,MASS Matrix Rcpp VineCopula bit bit64 mvtnorm pak pcaPP rbibutils rugarch stringi truncnorm
-Rf_getCharCE,api,13,34,curl data.table fansi fastmap htmltools jsonlite pak rlang systemfonts utf8 vctrs vroom yaml
-R_RowNamesSymbol,api,13,25,RcppSimdJson checkmate cpp11 data.table fs gert lazyeval pak rlang sourcetools tibble vctrs xml2
-Rf_ncols,api,12,250,Matrix cpp11 data.table farver mgcv odbc pak truncnorm utf8 vctrs xts zoo
-Rf_sign,api,12,135,FLSSS Matrix Rmpfr fracdiff kernlab lubridate mgcv openssl pak readr rugarch vroom
-Rf_asChar,api,12,72,Matrix RcppSimdJson Rmpfr curl fansi ff gmp jsonlite openssl pak purrr sass
-Rf_isReal,api,12,64,Matrix Rmpfr checkmate cpp11 data.table git2r jsonlite mgcv pak stringi truncnorm xts
-Rf_isNumeric,api,12,55,Matrix checkmate curl data.table highs jsonlite lubridate nloptr pak randtoolbox rngWELL yaml
-Rf_translateChar,api,12,28,brio curl data.table lazyeval odbc pak rdtools readxl rlang roxygen2 vctrs vroom
-Rf_findVar,non-api,12,23,backports cli data.table lazyeval magrittr pak processx ps purrr rlang vctrs zip
-R_ReleaseObject,api,12,18,Rcpp RcppSimdJson cli fs lazyeval pak processx purrr rlang stringi vctrs xml2
-Rf_lang4,api,12,16,Rcpp S7 data.table gert jsonlite lattice lazyeval pak purrr rlang vctrs xml2
-Rf_beta,api,11,489,Bessel MASS Matrix PerformanceAnalytics VineCopula kernlab mgcv nlme pcaPP rugarch truncnorm
-Rf_elt,api,11,464,brio cli cpp11 lazyeval pak rlang tibble timechange utf8 uuid vctrs
-Rf_match,experimental,11,175,Matrix data.table git2r openxlsx pak ps purrr rbibutils rlang stringi vctrs
-R_NegInf,api,11,74,Matrix Rcpp checkmate data.table gmp jsonlite pak pcaPP timechange truncnorm yaml
-Rf_mkCharLen,api,11,48,cli data.table gert jsonlite openssl pak ps sourcetools stringi webutils yaml
-LANGSXP,header,11,41,Rcpp S7 checkmate cpp11 data.table lazyeval magrittr purrr rlang vctrs xts
-R_UnboundValue,experimental,11,31,Rcpp S7 backports cli cpp11 lazyeval magrittr pak purrr rlang vctrs
-ENVSXP,header,11,15,Rcpp S7 cli data.table lazyeval magrittr pak ps purrr rlang vctrs
-R_Free,api,10,359,FNN MASS Matrix VineCopula bit data.table digest ff nlme pcaPP
-Rbyte,header,10,95,cli cpp11 data.table mime pak processx reshape2 vctrs xts zoo
-STRING_PTR_RO,api,10,92,Rcpp cli cpp11 data.table lazyeval pak purrr rlang vctrs vroom
-R_SetExternalPtrAddr,api,10,32,cli curl data.table ff pak processx ps purrr utf8 zip
-R_ExternalPtrTag,api,10,31,Rblpapi cli curl data.table pak processx ps purrr utf8 zip
-Rf_isVector,api,10,26,Matrix checkmate curl data.table gmp pak purrr slam stringi truncnorm
-Rf_GetOption1,api,10,25,cli curl data.table gmp lazyeval magrittr pak progress rlang vctrs
-DATAPTR_RO,api,10,23,Rcpp cli cpp11 data.table lazyeval odbc pak rlang vctrs vroom
-R_EmptyEnv,api,10,21,cli glue httpuv lazyeval magrittr pak ps rlang vctrs vroom
-R_Calloc,api,9,353,FNN MASS Matrix VineCopula bit data.table digest ff nlme
-R_NaN,header,9,65,Matrix Rcpp data.table jsonlite pak pcaPP truncnorm vctrs yaml
-R_ExternalPtrAddrFn,api,9,38,cli lazyeval pak processx ps purrr rlang vctrs zip
-Rf_isMatrix,api,9,28,Matrix Rcpp checkmate data.table farver sets slam stringi truncnorm
-R_MakeExternalPtrFn,api,9,25,cli lazyeval pak processx ps purrr rlang vctrs zip
-Rf_allocSExp,non-api,9,21,cli lazyeval magrittr pak ps purrr rlang vctrs yaml
-CDDR,api,9,20,Rcpp lazyeval magrittr pak purrr rlang slam vctrs yaml
-Rf_xlengthgets,api,9,19,brio cli glue htmltools lazyeval pak rlang vctrs xts
-PROMSXP,header,9,18,Rcpp cli cpp11 lazyeval magrittr pak purrr rlang vctrs
-Rf_isObject,api,9,17,Matrix data.table lazyeval purrr rlang stringi tibble vctrs vroom
-Rf_onintr,api,9,17,Rcpp RcppSimdJson curl later lazyeval pak polars rlang vctrs
-Rf_lang1,api,9,16,Rcpp curl later lazyeval pak purrr ragg rlang vctrs
-R_FindNamespace,experimental,9,13,S7 curl gert lazyeval pak rlang vctrs xml2 xts
-SET_ATTRIB,non-api,9,13,Matrix cli data.table lazyeval pak ps rlang slam vctrs
-R_ExternalMethodDef,header,9,9,Matrix Rcpp S7 data.table magrittr rlang slam vctrs xts
-Rf_dt,header,8,489,MASS VineCopula data.table mgcv odbc readr timechange vroom
-F77_CALL,header,8,446,MASS Matrix fracdiff kernlab mgcv mvtnorm nlme pcaPP
-SEXPTYPE,header,8,79,Matrix Rmpfr cpp11 data.table purrr tibble vctrs vroom
-M_PI,api,8,42,MASS VineCopula farver mvtnorm nlme pcaPP rmgarch rugarch
-SYMSXP,header,8,35,Matrix Rcpp S7 data.table lazyeval purrr rlang vctrs
-cetype_t,header,8,35,curl data.table fansi pak stringi utf8 vroom yaml
-CLOSXP,header,8,32,Rcpp S7 curl data.table pak purrr vctrs yaml
-Rf_shallow_duplicate,api,8,26,S7 cpp11 data.table lazyeval magrittr rlang tibble vctrs
-MARK_NOT_MUTABLE,api,8,25,cli lazyeval magrittr pak rlang vctrs vroom yaml
-Rf_warningcall,api,8,25,cpp11 curl fansi jsonlite pak purrr rlang sys
-R_tryEval,api,8,24,curl gert later openssl pak rlang sys yaml
-Rf_findFun,api,8,20,Rcpp cpp11 fs odbc pak ps vroom yaml
-ATTRIB,non-api,8,15,Matrix checkmate data.table lazyeval rlang slam vctrs vroom
-CHARSXP,header,8,14,Rcpp bit cpp11 data.table fansi pak polars yaml
-R_DotsSymbol,api,8,14,RcppDE S7 backports lazyeval purrr rlang vctrs xts
-R_INLINE,api,7,89,Rmpfr cli data.table pak ps randtoolbox truncnorm
-Rf_copyMostAttrib,api,7,65,cpp11 data.table reshape2 tibble vctrs xts zoo
-ALTREP,experimental,7,37,cpp11 data.table lazyeval rlang stringi vctrs vroom
-R_MissingArg,api,7,23,Rcpp S7 cpp11 lazyeval purrr rlang vctrs
-Rf_isS4,api,7,21,Matrix Rcpp data.table tibble vctrs xml2 zoo
-LONG_VECTOR_SUPPORT,header,7,19,Matrix Rcpp cpp11 lazyeval rlang vctrs vroom
-Rf_isFunction,api,7,16,curl gert openssl pak plyr slam sys
-MAYBE_REFERENCED,api,7,14,Matrix data.table digest lazyeval rlang stringi vctrs
-R_ClosureFormals,api,7,12,S7 curl lazyeval pak rlang vctrs yaml
-R_ExecWithCleanup,api,7,12,cli magrittr pak processx ps purrr zip
-R_NewEnv,api,7,11,cli lazyeval magrittr pak ps rlang vctrs
-Rf_PrintValue,api,7,9,Rcpp lazyeval magrittr pak rlang vctrs yaml
-SETCADR,api,7,9,Matrix S7 checkmate lazyeval plyr rlang vctrs
-FORMALS,non-api,7,8,S7 curl lazyeval pak rlang vctrs yaml
-ParseStatus,header,7,7,lazyeval magrittr pak purrr rlang vctrs yaml
-R_ParseVector,api,7,7,lazyeval magrittr pak purrr rlang vctrs yaml
-F77_NAME,header,6,208,Bessel DistributionUtils mclust mvtnorm nlme slam
-sorted,header,6,191,Matrix bit64 checkmate data.table partitions polars
-Rf_df,header,6,97,gert mvtnorm odbc readr rlang vctrs
-INTEGER_RO,api,6,78,checkmate cli data.table pak vctrs vroom
-R_LevelsSymbol,api,6,56,checkmate data.table pak slam vctrs yaml
-Rf_isVectorAtomic,api,6,41,Matrix bit checkmate data.table reshape2 stringi
-R_NativePrimitiveArgType,header,6,29,chron fracdiff ks mvtnorm pcaPP quadprog
-Rf_list1,api,6,26,fansi lazyeval pak rlang vctrs yaml
-CE_NATIVE,header,6,25,data.table fansi pak stringi utf8 yaml
-R_BlankString,experimental,6,23,Rcpp cpp11 data.table fansi slam stringi
-EXPRSXP,header,6,20,Matrix Rcpp data.table slam vctrs xts
-ANY_ATTRIB,api,6,18,Matrix data.table lazyeval rlang slam vctrs
-CLEAR_ATTRIB,api,6,15,Matrix data.table lazyeval rlang slam vctrs
-LCONS,api,6,15,data.table pak slam sys xts yaml
-Riconv_close,api,6,14,odbc pak processx readr vroom zip
-Riconv,api,6,13,odbc pak processx readr vroom zip
-Rf_findVarInFrame,non-api,6,12,Matrix Rcpp S7 cli pak purrr
-REvprintf,api,6,11,Rmpfr gert highs pak ps readxl
-BUILTINSXP,header,6,10,Rcpp data.table pak purrr vctrs yaml
-R_mkClosure,api,6,10,lazyeval pak purrr rlang vctrs yaml
-Riconv_open,api,6,10,odbc pak processx readr vroom zip
-R_ClosureEnv,api,6,8,Rcpp lazyeval pak rlang vctrs yaml
-SPECIALSXP,header,6,8,Rcpp data.table pak purrr vctrs yaml
-Rf_ScalarRaw,api,6,7,lazyeval pak ps purrr rlang vctrs
-Rf_lang5,api,6,7,gert lazyeval pak purrr rlang vctrs
-CLOENV,non-api,6,6,Rcpp lazyeval pak rlang vctrs yaml
-PARSE_OK,header,6,6,lazyeval magrittr pak rlang vctrs yaml
-R_existsVarInFrame,experimental,6,6,cli cpp11 lazyeval pak rlang vctrs
-Rf_isEnvironment,api,6,6,Matrix Rcpp checkmate data.table lazyeval plyr
-FCONE,header,5,614,Matrix kernlab mgcv mvtnorm pcaPP
-Rf_pt,header,5,151,VineCopula mgcv mvtnorm nlme rugarch
-R_FlushConsole,embedding,5,55,bit bit64 data.table ff testthat
-R_LEN_T_MAX,header,5,52,Matrix fansi lazyeval rlang vctrs
-R_allocResizableVector,experimental,5,38,data.table lazyeval rlang vctrs vroom
-R_resizeVector,experimental,5,28,data.table lazyeval rlang vctrs vroom
-R_compute_identical,experimental,5,16,data.table lazyeval progress rlang vctrs
-CE_BYTES,header,5,15,fansi pak stringi utf8 vroom
-S_realloc,api,5,15,Rmpfr cli pak processx ps
-daxpy,header,5,12,fracdiff kernlab mgcv pcaPP slam
-Rf_classgets,api,5,10,S7 bit bit64 fs systemfonts
-Rf_list2,api,5,10,lazyeval pak rlang vctrs yaml
-R_ToplevelExec,api,5,9,Rcpp curl openssl pak sys
-Rf_findVarInFrame3,non-api,5,9,cpp11 lazyeval magrittr rlang vctrs
-Rf_type2str,api,5,9,lazyeval pak rlang vctrs yaml
-SHALLOW_DUPLICATE_ATTRIB,api,5,9,data.table lazyeval rlang vctrs vroom
-R_FortranMethodDef,header,5,5,Bessel DistributionUtils KernSmooth mclust quadprog
-R_removeVarFromFrame,experimental,5,5,cpp11 lazyeval magrittr rlang vctrs
-Rf_list3,api,5,5,curl lazyeval pak rlang vctrs
-Rf_list4,api,5,5,lazyeval pak rlang vctrs yaml
-SET_OBJECT,non-api,5,5,Matrix lazyeval rlang slam vctrs
-UserBreak,header,5,5,curl lazyeval pak rlang vctrs
-Rf_rt,header,4,99,mgcv openxlsx readxl rugarch
-R_altrep_data2,experimental,4,60,cli pak vctrs vroom
-dnorm4,header,4,51,VineCopula mgcv mvtnorm truncnorm
-BODY,non-api,4,50,Rcpp data.table pak yaml
-REAL_RO,api,4,50,checkmate data.table vctrs vroom
-qnorm5,header,4,45,VineCopula mvtnorm rugarch truncnorm
-ddot,header,4,41,fracdiff kernlab mgcv pcaPP
-R_altrep_data1,experimental,4,36,cli pak vctrs vroom
-Rf_isFactor,api,4,36,checkmate data.table reshape2 stringi
-LOGICAL_RO,api,4,35,checkmate data.table vctrs vroom
-F77_SUB,header,4,29,KernSmooth mvtnorm nlme quadprog
-R_altrep_class_t,header,4,29,cli pak vctrs vroom
-Rf_isVectorList,api,4,28,jsonlite pak stringi vctrs
-dsymv,header,4,24,Matrix kernlab mgcv pcaPP
-pnorm5,header,4,22,VineCopula mvtnorm rugarch truncnorm
-R_new_altrep,header,4,18,cli pak vctrs vroom
-dtrsv,header,4,18,Matrix kernlab mgcv pcaPP
-RAW_RO,api,4,17,curl data.table pak vctrs
-VECTOR_PTR_RO,api,4,15,Rcpp lazyeval rlang vctrs
-R_do_slot_assign,experimental,4,13,Matrix Rmpfr data.table mgcv
-R_mapAttrib,experimental,4,13,data.table lazyeval rlang vctrs
-Rf_duplicated,experimental,4,11,Matrix data.table openxlsx sets
-Rf_str2type,api,4,11,lazyeval purrr rlang vctrs
-dscal,header,4,11,Matrix fracdiff kernlab pcaPP
-LISTSXP,header,4,10,Rcpp S7 vctrs xts
-R_isResizable,experimental,4,10,data.table lazyeval rlang vctrs
-vmaxget,api,4,10,cpp11 data.table fansi vctrs
-MAYBE_SHARED,api,4,9,data.table slam vctrs xts
-R_Bracket2Symbol,api,4,9,lazyeval purrr rlang vctrs
-CE_LATIN1,header,4,8,data.table pdftools stringi utf8
-R_USE_C99_IN_CXX,header,4,8,highs pak pcaPP ps
-R_getVarEx,api,4,8,Rcpp S7 magrittr purrr
-dswap,header,4,8,Matrix data.table mgcv pcaPP
-vmaxset,api,4,8,cpp11 data.table fansi vctrs
-R_do_new_object,experimental,4,7,Matrix Rmpfr mgcv zoo
-Rf_asCharacterFactor,api,4,7,Matrix data.table reshape2 vctrs
-Rf_installChar,api,4,7,lazyeval purrr rlang vctrs
-SET_PRCODE,non-api,4,7,lazyeval magrittr rlang vctrs
-SET_PRENV,non-api,4,7,lazyeval magrittr rlang vctrs
-SET_PRVALUE,non-api,4,7,lazyeval magrittr rlang vctrs
-CADDR,api,4,6,data.table lazyeval rlang vctrs
-R_SetExternalPtrProtected,api,4,6,Rcpp curl openssl pak
-S_alloc,api,4,6,chron cli data.table pak
-R_ContinueUnwind,api,4,5,Rcpp cpp11 polars systemfonts
-Rf_ScalarComplex,api,4,5,lazyeval purrr rlang vctrs
-R_ExpandFileName,api,4,4,curl data.table fs pak
-R_MakeDelayedBinding,experimental,4,4,lazyeval magrittr rlang vctrs
-Rf_list5,api,4,4,lazyeval purrr rlang vctrs
-STRING_PTR,non-api,4,4,Rcpp cli data.table pak
-UNSET_S4_OBJECT,non-api,4,4,Matrix lazyeval rlang vctrs
-R_do_slot,experimental,3,76,Matrix Rmpfr mgcv
-Rf_isNewList,api,3,64,checkmate data.table git2r
-Rf_qt,header,3,62,VineCopula mgcv rugarch
-Rf_fmax2,api,3,49,Bessel Rmpfr fracdiff
-Rf_gammafn,api,3,41,VineCopula kernlab rugarch
-dgemm,header,3,41,Matrix mgcv pcaPP
-COMPLEX_RO,api,3,24,checkmate data.table vctrs
-Rf_imax2,api,3,21,Bessel Rmpfr fracdiff
-S4SXP,header,3,18,Matrix Rcpp purrr
-IS_UTF8,non-api,3,17,data.table fansi stringi
-R_PRIdXLEN_T,header,3,17,cpp11 vctrs vroom
-R_PromiseExpr,non-api,3,15,lazyeval rlang vctrs
-Rf_runif,header,3,14,VineCopula rugarch truncnorm
-CONS,api,3,13,Rcpp pak slam
-LOGICAL_ELT,api,3,13,cpp11 gert purrr
-Rf_isDataFrame,api,3,13,checkmate data.table odbc
-R_CheckStack,api,3,12,Matrix randtoolbox rngWELL
-Rf_rnorm,header,3,12,kernlab rugarch truncnorm
-dsyrk,header,3,12,Matrix mgcv pcaPP
-INTEGER_ELT,api,3,10,cpp11 purrr vroom
-dtrsm,header,3,10,Matrix mgcv pcaPP
-R_ReadConnection,experimental,3,9,readr vroom xml2
-Rf_isPairList,api,3,9,curl data.table pak
-dnrm2,header,3,9,Matrix kernlab pcaPP
-OBJECT,non-api,3,8,RcppSimdJson reshape2 slam
-R_GetConnection,experimental,3,8,readr vroom xml2
-R_make_altinteger_class,header,3,8,cli pak vroom
-Rlog1p,api,3,8,VineCopula mgcv polars
-R_ExternalPtrProtected,api,3,7,curl data.table pak
-R_IsNamespaceEnv,experimental,3,7,lazyeval rlang vctrs
-R_WriteConnection,experimental,3,7,readr vroom xml2
-dtrmm,header,3,7,Matrix mgcv pcaPP
-PRENV,non-api,3,6,lazyeval rlang vctrs
-PRVALUE,non-api,3,6,lazyeval rlang vctrs
-Rf_isSymbol,api,3,6,data.table lazyeval stringi
-R_ALPHA,header,3,5,farver ragg systemfonts
-R_BLUE,header,3,5,farver ragg systemfonts
-R_GREEN,header,3,5,farver ragg systemfonts
-R_IsNaN,api,3,5,checkmate pak yaml
-R_NamespaceRegistry,non-api,3,5,Rcpp cpp11 rlang
-R_RED,header,3,5,farver ragg systemfonts
-R_WeakRefKey,api,3,5,later pak processx
-CAAR,api,3,4,lazyeval rlang vctrs
-CDAR,api,3,4,lazyeval rlang vctrs
-DOTSXP,header,3,4,Rcpp backports vctrs
-R_do_MAKE_CLASS,experimental,3,4,Matrix Rmpfr zoo
-dsymm,header,3,4,Matrix mgcv pcaPP
-ENCLOS,non-api,3,3,lazyeval rlang vctrs
-INTEGER_GET_REGION,experimental,3,3,cli cpp11 pak
-R_ActiveBindingFunction,experimental,3,3,lazyeval rlang vctrs
-R_BindingIsActive,experimental,3,3,lazyeval rlang vctrs
-R_BindingTypeActive,experimental,3,3,lazyeval rlang vctrs
-R_BindingTypeDelayed,experimental,3,3,lazyeval rlang vctrs
-R_BindingTypeForced,experimental,3,3,lazyeval rlang vctrs
-R_BindingTypeMissing,experimental,3,3,lazyeval rlang vctrs
-R_BindingTypeUnbound,experimental,3,3,lazyeval rlang vctrs
-R_BindingTypeValue,experimental,3,3,lazyeval rlang vctrs
-R_BraceSymbol,api,3,3,lazyeval rlang vctrs
-R_BracketSymbol,api,3,3,lazyeval rlang vctrs
-R_ClosureExpr,api,3,3,lazyeval rlang vctrs
-R_DelayedBindingEnvironment,experimental,3,3,lazyeval rlang vctrs
-R_DelayedBindingExpression,experimental,3,3,lazyeval rlang vctrs
-R_DoubleColonSymbol,api,3,3,lazyeval rlang vctrs
-R_ForcedBindingExpression,experimental,3,3,lazyeval rlang vctrs
-R_GetBindingType,experimental,3,3,lazyeval rlang vctrs
-R_MakeActiveBinding,experimental,3,3,lazyeval rlang vctrs
-R_MakeForcedBinding,experimental,3,3,lazyeval rlang vctrs
-R_MakeMissingBinding,experimental,3,3,lazyeval rlang vctrs
-R_ParentEnv,api,3,3,lazyeval rlang vctrs
-R_TripleColonSymbol,api,3,3,lazyeval rlang vctrs
-R_envSymbols,experimental,3,3,lazyeval rlang vctrs
-R_lsInternal3,experimental,3,3,lazyeval rlang vctrs
-Rf_lang6,api,3,3,curl pak purrr
-Rf_nthcdr,api,3,3,Rcpp backports xts
-Rf_reEnc,api,3,3,pak rlang yaml
-Rf_ucstoutf8,header,3,3,ragg readxl rlang
-Rvprintf,api,3,3,Matrix highs pcaPP
-dtpmv,header,3,3,Matrix mvtnorm pcaPP
-GET_SLOT,header,2,899,Matrix zoo
-SET_SLOT,header,2,465,Matrix zoo
-Memcpy,header,2,48,Matrix nlme
-dgemv,header,2,42,Matrix mgcv
-Rf_fmin2,api,2,36,Bessel fracdiff
-Rf_pf,header,2,27,Matrix mgcv
-AS_INTEGER,header,2,15,gmp nloptr
-IS_ASCII,non-api,2,15,data.table stringi
-Rf_digamma,api,2,15,VineCopula mgcv
-dcopy,header,2,15,fracdiff pcaPP
-R_set_altrep_data2,experimental,2,13,vctrs vroom
-Rconnection,header,2,12,curl pak
-NORET,header,2,11,Rcpp data.table
-Rf_pbeta,header,2,11,Matrix VineCopula
-Rf_qgamma,header,2,11,VineCopula rugarch
-Rf_trigamma,api,2,11,VineCopula mgcv
-Rf_imin2,api,2,10,Bessel fracdiff
-Rf_nlevels,experimental,2,10,Matrix data.table
-Int32,header,2,9,Rblpapi polars
-Rf_bessel_k,api,2,9,rmgarch rugarch
-Rf_lgammafn,api,2,9,rmgarch rugarch
-R_qsort_int_I,api,2,8,ff slam
-REAL_ELT,api,2,7,cpp11 vroom
-Rf_allocArray,api,2,7,slam vctrs
-Rf_logspace_sub,api,2,6,Matrix truncnorm
-SET_LOGICAL_ELT,api,2,6,cpp11 gert
-R_outpstream_t,header,2,5,digest parallelly
-dgetrf,header,2,5,Matrix mgcv
-dgetri,header,2,5,Matrix mgcv
-dqrdc2,api,2,5,MASS nlme
-BEGIN_SUSPEND_INTERRUPTS,header,2,4,later ragg
-CE_ANY,header,2,4,utf8 vroom
-R_CONNECTIONS_VERSION,header,2,4,curl pak
-R_ClosureBody,api,2,4,pak yaml
-R_RGBA,header,2,4,farver systemfonts
-R_duplicateAsResizable,experimental,2,4,data.table vroom
-R_make_altstring_class,header,2,4,vctrs vroom
-R_rsort,api,2,4,MASS pcaPP
-Rf_allocList,api,2,4,data.table xts
-Rf_any_duplicated,experimental,2,4,checkmate data.table
-Rf_fround,api,2,4,Rcpp stringi
-Rf_isLanguage,api,2,4,data.table lazyeval
-Rf_isNumber,api,2,4,readr stringi
-Rf_pgamma,header,2,4,VineCopula rugarch
-dpstrf,header,2,4,Matrix mgcv
-dqrsl,header,2,4,MASS nlme
-optif9,experimental,2,4,nlme pcaPP
-END_SUSPEND_INTERRUPTS,header,2,3,later ragg
-LEVELS,non-api,2,3,data.table vctrs
-M_LN2,header,2,3,Rmpfr gmp
-Rf_asS4,experimental,2,3,tibble vctrs
-Rf_installTrChar,api,2,3,S7 data.table
-Rf_isList,api,2,3,data.table kernlab
-Rf_rexp,header,2,3,rmgarch truncnorm
-Rf_rf,header,2,3,data.table readxl
-Rf_warningcall_immediate,api,2,3,gert later
-dger,header,2,3,Matrix pcaPP
-dgesvd,header,2,3,mgcv pcaPP
-dlarfg,header,2,3,Matrix mgcv
-dpptrf,header,2,3,Matrix mvtnorm
-dtptri,header,2,3,Matrix mvtnorm
-pGEDevDesc,header,2,3,ragg systemfonts
-rsort_with_index,api,2,3,RcppDE pcaPP
-BCODESXP,header,2,2,Rcpp vctrs
-DATAPTR,non-api,2,2,data.table vroom
-DATAPTR_OR_NULL,experimental,2,2,cli pak
-R_BaseNamespace,api,2,2,Rcpp vctrs
-R_InitOutPStream,experimental,2,2,digest parallelly
-R_MakeWeakRefC,api,2,2,pak processx
-R_RGB,header,2,2,farver ragg
-R_Serialize,experimental,2,2,digest parallelly
-R_getRegisteredNamespace,experimental,2,2,Rcpp cpp11
-R_make_altlogical_class,header,2,2,cli pak
-R_new_custom_connection,experimental,2,2,curl pak
-R_pstream_binary_format,header,2,2,digest parallelly
-R_pstream_data_t,header,2,2,digest parallelly
-R_tryEvalSilent,api,2,2,gert xml2
-Rf_GetOptionWidth,api,2,2,progress readr
-Rf_StringBlank,experimental,2,2,cachem fastmap
-Rf_charIsASCII,experimental,2,2,data.table vctrs
-Rf_isArray,api,2,2,checkmate data.table
-Rf_isFrame,non-api,2,2,checkmate odbc
-SET_NAMES,header,2,2,pak ps
-SORTED_INCR,header,2,2,cli pak
-dlarf,header,2,2,Matrix mgcv
-drotg,header,2,2,Matrix pcaPP
-dtpsv,header,2,2,mvtnorm pcaPP
-norm_rand,api,2,2,pcaPP rugarch
-vmmin,api,2,2,MASS pcaPP
-R_check_class_etc,experimental,1,106,Matrix
-R_Busy,embedding,1,84,bit64
-FCLEN,header,1,82,Matrix
-Rf_pmatch,experimental,1,65,Matrix
-AM,header,1,51,mgcv
-pDevDesc,header,1,47,ragg
-pGEcontext,header,1,26,ragg
-R_GE_fontVar,header,1,21,ragg
-R_altrep_inherits,header,1,18,vroom
-R_GE_lineend,header,1,17,ragg
-F0,header,1,16,pak
-M_LOG10_2,header,1,15,Bessel
-R_GE_linejoin,header,1,13,ragg
-DATAPTR_RW,experimental,1,11,vroom
-R_maxLength,experimental,1,10,data.table
-R_tryCatchError,api,1,9,stringi
-Rf_RGBpar,header,1,9,ragg
-dtrsl,header,1,8,nlme
-LTY_BLANK,header,1,7,ragg
-R_OPAQUE,header,1,7,ragg
-R_InputHandlers,embedding,1,6,later
-R_Realloc,api,1,6,data.table
-R_make_altreal_class,header,1,6,vroom
-NEW_LIST,header,1,5,gmp
-R_interrupts_suspended,header,1,5,later
-Rf_dbeta,header,1,5,mgcv
-Rf_fsign,api,1,5,Bessel
-Rf_revsort,api,1,5,mgcv
-Rf_unprotect_ptr,api,1,5,sets
-dsysv,header,1,5,mgcv
-expm1,api,1,5,VineCopula
-GET_DIM,header,1,4,sets
-GE_INCHES,header,1,4,systemfonts
-Rf_isOrdered,api,1,4,data.table
-Rf_rPsort,api,1,4,MASS
-Rf_rgamma,header,1,4,rugarch
-USING_R,header,1,4,FNN
-error_return,header,1,4,Matrix
-removeInputHandler,embedding,1,4,later
-zgetri,header,1,4,Matrix
-GE_ROUND_JOIN,header,1,3,ragg
-HC,header,1,3,Matrix
-KNOWN_INCR,header,1,3,checkmate
-R_DotsExist,experimental,1,3,backports
-R_GE_compositeDest,header,1,3,ragg
-R_GE_compositeDestAtop,header,1,3,ragg
-R_GE_compositeDestIn,header,1,3,ragg
-R_GE_compositeDestOver,header,1,3,ragg
-R_GE_compositeIn,header,1,3,ragg
-R_GE_compositeOut,header,1,3,ragg
-R_GE_compositeSource,header,1,3,ragg
-R_GE_evenOddRule,header,1,3,ragg
-R_GE_patternExtendNone,header,1,3,ragg
-R_GE_patternExtendPad,header,1,3,ragg
-R_GE_patternExtendReflect,header,1,3,ragg
-R_GE_patternExtendRepeat,header,1,3,ragg
-R_Outputfile,non-api,1,3,Rmpfr
-R_chk_realloc,experimental,1,3,mgcv
-R_getClassDef,experimental,1,3,mgcv
-Rf_dcauchy,header,1,3,kernlab
-Rf_log1mexp,api,1,3,VineCopula
-Rf_utf8Toutf8NoPUA,header,1,3,ragg
-UNKNOWN_SORTEDNESS,header,1,3,checkmate
-dgetrs,header,1,3,Matrix
-dlange,header,1,3,Matrix
-dlansp,header,1,3,Matrix
-dlansy,header,1,3,Matrix
-dpotrf,header,1,3,Matrix
-dsytrf,header,1,3,Matrix
-dtrcon,header,1,3,Matrix
-interv,api,1,3,mgcv
-zlansp,header,1,3,Matrix
-zlansy,header,1,3,Matrix
-zpotrf,header,1,3,Matrix
-zsytrf,header,1,3,Matrix
-ALTREP_CLASS,experimental,1,2,vroom
-DUPLICATE_ATTRIB,api,1,2,data.table
-DevDesc,header,1,2,ragg
-GEUnit,header,1,2,systemfonts
-GE_CM,header,1,2,systemfonts
-GE_DEVICE,header,1,2,systemfonts
-GE_NDC,header,1,2,systemfonts
-GEcurrentDevice,header,1,2,systemfonts
-INTEGER_NO_NA,experimental,1,2,checkmate
-LOGICAL_NO_NA,experimental,1,2,checkmate
-LTY_SOLID,header,1,2,ragg
-REAL_NO_NA,experimental,1,2,checkmate
-R_BLAS_H,header,1,2,slam
-R_CheckStack2,api,1,2,vctrs
-R_DotsLength,experimental,1,2,backports
-R_GE_compositeAdd,header,1,2,ragg
-R_GE_compositeAtop,header,1,2,ragg
-R_GE_compositeClear,header,1,2,ragg
-R_GE_compositeColorBurn,header,1,2,ragg
-R_GE_compositeColorDodge,header,1,2,ragg
-R_GE_compositeDarken,header,1,2,ragg
-R_GE_compositeDestOut,header,1,2,ragg
-R_GE_compositeDifference,header,1,2,ragg
-R_GE_compositeExclusion,header,1,2,ragg
-R_GE_compositeHardLight,header,1,2,ragg
-R_GE_compositeLighten,header,1,2,ragg
-R_GE_compositeMultiply,header,1,2,ragg
-R_GE_compositeOver,header,1,2,ragg
-R_GE_compositeOverlay,header,1,2,ragg
-R_GE_compositeSaturate,header,1,2,ragg
-R_GE_compositeScreen,header,1,2,ragg
-R_GE_compositeSoftLight,header,1,2,ragg
-R_GE_compositeXor,header,1,2,ragg
-R_GE_linearGradientPattern,header,1,2,ragg
-R_GE_luminanceMask,header,1,2,ragg
-R_GE_radialGradientPattern,header,1,2,ragg
-R_GE_tilingPattern,header,1,2,ragg
-R_GE_tilingPatternHeight,header,1,2,ragg
-R_GE_tilingPatternWidth,header,1,2,ragg
-R_LockBinding,experimental,1,2,data.table
-R_TRANSPARENT,header,1,2,ragg
-R_altrep_class_name,experimental,1,2,vroom
-R_altrep_class_package,experimental,1,2,vroom
-R_chk_calloc,experimental,1,2,mgcv
-R_forceAndCall,experimental,1,2,purrr
-R_interrupts_pending,header,1,2,later
-R_pow_di,api,1,2,randtoolbox
-R_pstream_format_t,header,1,2,digest
-Rf_isComplex,api,1,2,checkmate
-SET_LENGTH,header,1,2,bit64
-STRING_NO_NA,experimental,1,2,checkmate
-addInputHandler,embedding,1,2,later
-dgebal,header,1,2,Matrix
-dgees,header,1,2,Matrix
-dgels,header,1,2,Matrix
-dgeqp3,header,1,2,mgcv
-dgeqrf,header,1,2,Matrix
-dgesdd,header,1,2,mgcv
-dlacpy,header,1,2,Matrix
-dormqr,header,1,2,mgcv
-dormtr,header,1,2,mgcv
-dpotf2,header,1,2,kernlab
-dpotri,header,1,2,Matrix
-dpotrs,header,1,2,Matrix
-dpptri,header,1,2,Matrix
-dpptrs,header,1,2,Matrix
-dsptrf,header,1,2,Matrix
-dsptri,header,1,2,Matrix
-dsptrs,header,1,2,Matrix
-dstedc,header,1,2,mgcv
-dsyevd,header,1,2,mgcv
-dsyevr,header,1,2,mgcv
-dsytrd,header,1,2,mgcv
-dsytri,header,1,2,Matrix
-dsytrs,header,1,2,Matrix
-dtptrs,header,1,2,Matrix
-dtrti2,header,1,2,mgcv
-dtrtri,header,1,2,Matrix
-dtrtrs,header,1,2,Matrix
-zgemm,header,1,2,Matrix
-zgetrf,header,1,2,Matrix
-zgetrs,header,1,2,Matrix
-zlacpy,header,1,2,Matrix
-zlange,header,1,2,Matrix
-zpotri,header,1,2,Matrix
-zpotrs,header,1,2,Matrix
-zpptrf,header,1,2,Matrix
-zpptri,header,1,2,Matrix
-zpptrs,header,1,2,Matrix
-zpstrf,header,1,2,Matrix
-zsptrf,header,1,2,Matrix
-zsptri,header,1,2,Matrix
-zsptrs,header,1,2,Matrix
-zsytri,header,1,2,Matrix
-zsytrs,header,1,2,Matrix
-ztptri,header,1,2,Matrix
-ztptrs,header,1,2,Matrix
-ztrtri,header,1,2,Matrix
-ztrtrs,header,1,2,Matrix
-ANYSXP,header,1,1,Rcpp
-CDDDR,api,1,1,data.table
-CE_SYMBOL,header,1,1,utf8
-COMPLEX_ELT,api,1,1,purrr
-ENABLE_LEGACY_NONAPI_FUNS,header,1,1,S7
-GEStrMetric,header,1,1,systemfonts
-GEStrWidth,header,1,1,systemfonts
-GE_BEVEL_JOIN,header,1,1,ragg
-GE_BUTT_CAP,header,1,1,ragg
-GE_MITRE_JOIN,header,1,1,ragg
-GE_ROUND_CAP,header,1,1,ragg
-GE_SQUARE_CAP,header,1,1,ragg
-GEaddDevice2,header,1,1,ragg
-GEcreateDevDesc,header,1,1,ragg
-GEinitDisplayList,header,1,1,ragg
-INTEGER_IS_SORTED,experimental,1,1,checkmate
-INTEGER_OR_NULL,experimental,1,1,cpp11
-IS_RAW,header,1,1,digest
-IS_S4_OBJECT,non-api,1,1,slam
-LOGICAL_GET_REGION,experimental,1,1,cpp11
-LOGICAL_OR_NULL,experimental,1,1,cpp11
-M_1_SQRT_2PI,header,1,1,truncnorm
-M_2PI,header,1,1,RcppDE
-NEW_CHARACTER,header,1,1,xfun
-NEW_RAW,header,1,1,xfun
-OBJSXP,header,1,1,Rcpp
-RAW_ELT,api,1,1,cpp11
-RAW_GET_REGION,experimental,1,1,cpp11
-RAW_OR_NULL,experimental,1,1,cpp11
-RAW_POINTER,header,1,1,xfun
-REAL_GET_REGION,experimental,1,1,cpp11
-REAL_IS_SORTED,experimental,1,1,checkmate
-REAL_OR_NULL,experimental,1,1,cpp11
-R_CheckDeviceAvailable,header,1,1,ragg
-R_DEFINES_H,header,1,1,Matrix
-R_DotsElt,experimental,1,1,backports
-R_DotsNames,experimental,1,1,backports
-R_EnvironmentIsLocked,experimental,1,1,rlang
-R_GE_alphaMask,header,1,1,ragg
-R_GE_capability_clippingPaths,header,1,1,ragg
-R_GE_capability_compositing,header,1,1,ragg
-R_GE_capability_glyphs,header,1,1,ragg
-R_GE_capability_masks,header,1,1,ragg
-R_GE_capability_paths,header,1,1,ragg
-R_GE_capability_patterns,header,1,1,ragg
-R_GE_capability_transformations,header,1,1,ragg
-R_GE_checkVersionOrDie,header,1,1,ragg
-R_GE_clipPathFillRule,header,1,1,ragg
-R_GE_getVersion,header,1,1,pak
-R_GE_glyphFontFile,header,1,1,ragg
-R_GE_glyphFontIndex,header,1,1,ragg
-R_GE_linearGradientColour,header,1,1,ragg
-R_GE_linearGradientExtend,header,1,1,ragg
-R_GE_linearGradientNumStops,header,1,1,ragg
-R_GE_linearGradientStop,header,1,1,ragg
-R_GE_linearGradientX1,header,1,1,ragg
-R_GE_linearGradientX2,header,1,1,ragg
-R_GE_linearGradientY1,header,1,1,ragg
-R_GE_linearGradientY2,header,1,1,ragg
-R_GE_maskType,header,1,1,ragg
-R_GE_patternType,header,1,1,ragg
-R_GE_radialGradientCX1,header,1,1,ragg
-R_GE_radialGradientCX2,header,1,1,ragg
-R_GE_radialGradientCY1,header,1,1,ragg
-R_GE_radialGradientCY2,header,1,1,ragg
-R_GE_radialGradientColour,header,1,1,ragg
-R_GE_radialGradientExtend,header,1,1,ragg
-R_GE_radialGradientNumStops,header,1,1,ragg
-R_GE_radialGradientR1,header,1,1,ragg
-R_GE_radialGradientR2,header,1,1,ragg
-R_GE_radialGradientStop,header,1,1,ragg
-R_GE_tilingPatternExtend,header,1,1,ragg
-R_GE_tilingPatternFunction,header,1,1,ragg
-R_GE_tilingPatternX,header,1,1,ragg
-R_GE_tilingPatternY,header,1,1,ragg
-R_GlobalContext,non-api,1,1,later
-R_IsPackageEnv,experimental,1,1,rlang
-R_MakeUnwindCont,api,1,1,cpp11
-R_MakeWeakRef,api,1,1,later
-R_NameSymbol,api,1,1,S7
-R_RegisterCFinalizer,api,1,1,data.table
-R_SetExternalPtrTag,api,1,1,Rcpp
-R_TRANWHITE,header,1,1,ragg
-R_USE_PROTOTYPES,header,1,1,ragg
-R_UnwindProtect,api,1,1,cpp11
-R_chk_free,experimental,1,1,mgcv
-R_getAttribCount,experimental,1,1,checkmate
-R_has_slot,experimental,1,1,purrr
-R_isort,api,1,1,data.table
-R_qsort,api,1,1,pcaPP
-R_strtod,api,1,1,openxlsx
-R_unif_index,api,1,1,rbibutils
-Rf_allocS4Object,experimental,1,1,S7
-Rf_copyMatrix,api,1,1,Matrix
-Rf_dimnamesgets,api,1,1,Matrix
-Rf_dlnorm,header,1,1,rugarch
-Rf_lbeta,api,1,1,VineCopula
-Rf_log1pmx,api,1,1,mgcv
-Rf_logspace_add,api,1,1,Matrix
-Rf_namesgets,api,1,1,farver
-Rf_pchisq,header,1,1,VineCopula
-Rf_pnorm5,header,1,1,mvtnorm
-Rf_qchisq,header,1,1,mvtnorm
-Rf_qnorm5,header,1,1,mvtnorm
-Rf_rbinom,header,1,1,RcppArmadillo
-Rf_rchisq,header,1,1,rmgarch
-SET_INTEGER_ELT,api,1,1,cpp11
-SET_RAW_ELT,api,1,1,cpp11
-SET_REAL_ELT,api,1,1,cpp11
-STRING_IS_SORTED,experimental,1,1,checkmate
-STRING_VALUE,header,1,1,digest
-WEAKREFSXP,header,1,1,Rcpp
-cgmin,api,1,1,pcaPP
-dasum,header,1,1,pcaPP
-dgecon,header,1,1,Matrix
-dgeev,header,1,1,pcaPP
-dgeqr2,header,1,1,mgcv
-dgesv,header,1,1,pcaPP
-dlantp,header,1,1,Matrix
-dlantr,header,1,1,Matrix
-dlarfb,header,1,1,Matrix
-dlarft,header,1,1,Matrix
-dlauu2,header,1,1,mgcv
-dpbtrf,header,1,1,mgcv
-dpocon,header,1,1,Matrix
-dposv,header,1,1,Matrix
-dppcon,header,1,1,Matrix
-dptsv,header,1,1,mgcv
-dpttrf,header,1,1,mgcv
-dqrls,api,1,1,nlme
-drot,header,1,1,pcaPP
-drotm,header,1,1,pcaPP
-drotmg,header,1,1,pcaPP
-dspcon,header,1,1,Matrix
-dspmv,header,1,1,Matrix
-dspr,header,1,1,pcaPP
-dspr2,header,1,1,pcaPP
-dsvdc,header,1,1,fracdiff
-dsycon,header,1,1,Matrix
-dsyr,header,1,1,pcaPP
-dsyr2,header,1,1,pcaPP
-dsyr2k,header,1,1,pcaPP
-dtbmv,header,1,1,pcaPP
-dtbsv,header,1,1,pcaPP
-dtpcon,header,1,1,Matrix
-dtrmv,header,1,1,pcaPP
-dznrm2,header,1,1,Matrix
-exp_rand,api,1,1,pcaPP
-idamax,header,1,1,pcaPP
-mbcslocale,header,1,1,later
-nmmin,api,1,1,pcaPP
-samin,api,1,1,pcaPP
-set_seed,header,1,1,RcppArmadillo
-user_unif_init,header,1,1,randtoolbox
-user_unif_rand,header,1,1,randtoolbox
-zgecon,header,1,1,Matrix
-zgemv,header,1,1,Matrix
-zgeru,header,1,1,Matrix
-zherk,header,1,1,Matrix
-zlantp,header,1,1,Matrix
-zlantr,header,1,1,Matrix
-zlarf,header,1,1,Matrix
-zlarfb,header,1,1,Matrix
-zlarfg,header,1,1,Matrix
-zlarft,header,1,1,Matrix
-zpocon,header,1,1,Matrix
-zppcon,header,1,1,Matrix
-zscal,header,1,1,Matrix
-zspcon,header,1,1,Matrix
-zspmv,header,1,1,Matrix
-zsycon,header,1,1,Matrix
-zsymm,header,1,1,Matrix
-zsymv,header,1,1,Matrix
-zsyrk,header,1,1,Matrix
-ztpcon,header,1,1,Matrix
-ztpmv,header,1,1,Matrix
-ztrcon,header,1,1,Matrix
-ztrmm,header,1,1,Matrix
-ztrsm,header,1,1,Matrix
-ztrsv,header,1,1,Matrix
+symbol,class,declared_in,packages,occurrences,used_by
+DllInfo,header,R_ext/Rdynload.h,117,244,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports bit bit64 brio cachem checkmate chron cli commonmark curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg randtoolbox rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+R_registerRoutines,api,R_ext/Rdynload.h,117,133,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports bit bit64 brio cachem checkmate chron cli commonmark curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg randtoolbox rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+R_useDynamicSymbols,api,R_ext/Rdynload.h,117,133,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports bit bit64 brio cachem checkmate chron cli commonmark curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg randtoolbox rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+FALSE,api,Rdefines.h,115,2607,Bessel DistributionUtils FLSSS FNN KernSmooth MASS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rglpk Rmpfr Rsolnp S7 VineCopula askpass backports base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab ks later lattice lazyeval lubridate magrittr mclust mgcv mime multicool mvtnorm nlme nloptr odbc openxlsx pak parallelly partitions pcaPP pdftools plyr polars processx profvis ps purrr qpdf quadprog ragg rappdirs rbibutils rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom xfun xml2 xts yaml zip zoo
+SEXP,header,Rinternals.h,107,41844,FLSSS Matrix PerformanceAnalytics Rblpapi Rcpp RcppArmadillo RcppDE RcppParallel RcppSimdJson Rmpfr Rsolnp S7 askpass backports base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table diffobj digest esgtoolkit fansi farver fastmap ff fracdiff fs gert git2r glue gmp highs htmltools httpuv isoband jsonlite kernlab later lattice lazyeval lubridate magrittr mgcv mime multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly pdftools plyr polars processx profvis progress ps purrr qpdf ragg randtoolbox rappdirs rdtools readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sass sets slam sodium sourcetools stringi sys systemfonts testthat textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+Rf_error,api,R_ext/Error.h,83,5836,FNN MASS Matrix Rcpp RcppParallel RcppSimdJson Rglpk Rmpfr S7 backports base64enc bit bit64 brio cachem checkmate cli commonmark curl data.table diffobj digest fansi fastmap ff fs gert git2r glue gmp htmltools httpuv jsonlite later lattice lazyeval lubridate magrittr mgcv mvtnorm nlme openssl pak parallelly partitions pcaPP plyr processx profvis progress ps purrr qpdf ragg randtoolbox rbibutils rdtools readr readxl rlang rmgarch rngWELL sass sets slam sodium stringi sys systemfonts textshaping tibble timechange truncnorm utf8 uuid vctrs vroom xfun xml2 xts yaml zip zoo
+R_NilValue,api,Rdefines.h,82,2429,FLSSS Matrix Rblpapi Rcpp RcppArmadillo RcppSimdJson Rmpfr S7 askpass backports bit checkmate cli cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r gmp highs httpuv jsonlite later lattice lazyeval lubridate magrittr mgcv multicool mvtnorm nlme nloptr odbc openssl openxlsx pak parallelly pdftools plyr polars processx profvis ps purrr ragg randtoolbox rappdirs readr readxl reshape2 rlang rmgarch rngWELL roxygen2 rugarch sets slam sodium sourcetools stringi sys systemfonts textshaping tibble truncnorm tzdb utf8 uuid vctrs vroom xfun xml2 xts yaml zip zoo
+Rf_protect,api,Rinternals.h,79,5092,Matrix PerformanceAnalytics Rcpp RcppParallel RcppSimdJson Rmpfr S7 backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r glue gmp htmltools httpuv jsonlite kernlab later lattice lazyeval lubridate magrittr mgcv multicool mvtnorm nlme nloptr odbc openssl pak parallelly plyr processx progress ps purrr ragg randtoolbox rdtools rlang rngWELL sass sets slam sourcetools stringi sys systemfonts tibble timechange truncnorm utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+Rf_unprotect,api,Rinternals.h,78,3144,Matrix PerformanceAnalytics Rcpp RcppSimdJson Rmpfr S7 backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r glue gmp htmltools httpuv jsonlite kernlab later lattice lazyeval lubridate magrittr mgcv multicool mvtnorm nlme nloptr odbc openssl pak parallelly plyr processx progress ps purrr ragg randtoolbox rdtools rlang rngWELL sass sets slam sourcetools stringi sys systemfonts tibble timechange truncnorm utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+Rf_allocVector,api,Rinternals.h,77,2791,Matrix PerformanceAnalytics Rblpapi Rcpp RcppParallel RcppSimdJson Rmpfr S7 backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r glue gmp htmltools jsonlite kernlab lattice lazyeval lubridate magrittr mgcv mime mvtnorm nlme nloptr odbc openssl pak parallelly plyr processx ps purrr ragg randtoolbox rdtools reshape2 rlang sets slam sodium sourcetools stringi sys systemfonts tibble timechange truncnorm utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+TRUE,api,Rdefines.h,77,2035,MASS Matrix Rblpapi Rcpp RcppParallel Rmpfr S7 askpass azidentity backports base64enc bit bit64 cachem checkmate cli commonmark cpp11 curl data.table diffobj digest fansi fastmap ff gert git2r gmp htmltools httpuv isoband jsonlite ks later lazyeval lubridate mgcv multicool mvtnorm nlme nloptr openssl pak pcaPP processx profvis ps purrr qpdf ragg randtoolbox rdtools readr readxl rlang roxygen2 sass sets slam sodium sourcetools stringi sys systemfonts textshaping tibble timechange truncnorm tzdb utf8 uuid vctrs vroom webutils xts yaml zip
+INTEGER,api,Rinternals.h,71,3391,Matrix Rblpapi Rcpp RcppParallel RcppSimdJson Rmpfr backports bit bit64 brio checkmate chron cli cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r gmp isoband jsonlite kernlab later lattice lazyeval lubridate magrittr mgcv mime mvtnorm nlme nloptr odbc pak parallelly plyr processx ps purrr ragg randtoolbox rappdirs readr reshape2 rlang rmgarch rugarch sets slam sourcetools stringi systemfonts textshaping tibble truncnorm utf8 uuid vctrs vroom xml2 xts yaml zip zoo
+STRING_ELT,api,Rinternals.h,70,1717,Matrix Rcpp Rmpfr S7 askpass base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table diffobj digest fansi farver fastmap ff fs gert git2r glue gmp htmltools httpuv jsonlite kernlab lazyeval lubridate mgcv multicool nlme nloptr odbc openssl pak processx ps purrr ragg rdtools readr reshape2 rlang sass slam sodium sourcetools stringi sys systemfonts textshaping tibble timechange utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+R_CHAR,api,Rinternals.h,68,1449,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr S7 askpass base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r glue gmp htmltools httpuv jsonlite kernlab lazyeval lubridate mgcv multicool nlme nloptr odbc openssl pak polars processx ps purrr ragg readr rlang sass slam sodium sourcetools stringi sys systemfonts tibble timechange utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip
+Rf_length,api,Rdefines.h,65,2568,FNN Matrix Rblpapi Rcpp RcppParallel Rmpfr S7 backports cachem checkmate chron cli commonmark curl data.table digest farver fastmap ff gert git2r gmp httpuv jsonlite kernlab lazyeval magrittr mgcv mvtnorm nlme nloptr odbc openssl pak parallelly processx profvis ps purrr qpdf randtoolbox rbibutils rdtools readr readxl reshape2 rlang rngWELL sass slam sodium sourcetools sys systemfonts testthat tibble truncnorm utf8 vctrs vroom webutils xml2 xts yaml zip
+INTSXP,header,Rinternals.h,64,1436,Matrix Rcpp RcppArmadillo RcppParallel RcppSimdJson Rmpfr base64enc bit bit64 checkmate chron cli cpp11 curl data.table diffobj digest fansi farver fastmap ff fracdiff fs gert git2r gmp jsonlite ks lubridate mgcv mime multicool mvtnorm nlme nloptr odbc pak parallelly pcaPP processx ps purrr quadprog ragg randtoolbox readr reshape2 sass sets slam sourcetools stringi systemfonts tibble timechange utf8 uuid vctrs vroom xml2 xts yaml zip zoo
+SET_STRING_ELT,api,Rinternals.h,62,1451,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr backports base64enc bit bit64 brio checkmate chron cli commonmark cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r glue gmp htmltools jsonlite lazyeval lubridate magrittr mgcv nloptr odbc openssl pak processx ps purrr rdtools readr readxl reshape2 rlang slam sourcetools stringi tibble timechange tzdb utf8 uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+STRSXP,header,Rinternals.h,62,1183,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr S7 backports base64enc bit bit64 brio cachem checkmate chron cli commonmark cpp11 curl data.table digest fansi farver fastmap ff fs gert git2r glue gmp htmltools jsonlite lazyeval lubridate magrittr multicool nloptr odbc openssl pak processx ps purrr rdtools readr readxl reshape2 sass slam sourcetools stringi tibble timechange uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+REAL,api,Rinternals.h,61,3777,Matrix PerformanceAnalytics Rblpapi Rcpp RcppDE RcppSimdJson Rmpfr bit bit64 checkmate cli cpp11 curl data.table fansi farver ff fs gert git2r gmp isoband jsonlite kernlab lattice lazyeval lubridate mgcv mvtnorm nlme nloptr odbc pak processx ps purrr ragg randtoolbox readr readxl reshape2 rlang rmgarch rngWELL rugarch slam stringi sys systemfonts tibble timechange truncnorm uuid vctrs vroom xfun xml2 xts yaml zip zoo
+TYPEOF,api,Rinternals.h,59,1333,FLSSS Matrix Rblpapi Rcpp RcppDE RcppSimdJson Rmpfr S7 backports base64enc bit cachem checkmate cli cpp11 curl data.table diffobj digest fansi fastmap ff gert git2r gmp httpuv jsonlite lazyeval lubridate magrittr multicool mvtnorm odbc openssl pak polars profvis purrr readr readxl reshape2 rlang sass sets slam sourcetools stringi systemfonts tibble timechange utf8 uuid vctrs vroom xfun xml2 xts yaml zoo
+REALSXP,header,Rinternals.h,56,1310,Matrix PerformanceAnalytics Rcpp RcppSimdJson Rmpfr base64enc bit bit64 checkmate cpp11 curl data.table fansi farver ff fracdiff fs gert git2r gmp jsonlite kernlab ks lattice lubridate mgcv multicool mvtnorm nlme nloptr odbc pak pcaPP profvis ps purrr quadprog randtoolbox readr reshape2 rngWELL sass slam stringi systemfonts tibble timechange truncnorm uuid vctrs vroom xfun xts yaml zip zoo
+R_NaInt,api,R_ext/Arith.h,55,1476,Matrix Rblpapi Rcpp RcppArmadillo RcppSimdJson Rmpfr bit bit64 checkmate chron cli cpp11 curl data.table diffobj fansi farver ff fs gert git2r gmp jsonlite later lazyeval lubridate odbc openssl openxlsx pak pcaPP processx ps purrr readr readxl reshape2 rlang slam sourcetools stringi sys systemfonts textshaping tibble timechange truncnorm utf8 uuid vctrs vroom xml2 xts yaml zoo
+SET_VECTOR_ELT,api,Rinternals.h,50,1635,Matrix Rcpp RcppSimdJson Rmpfr S7 bit bit64 chron cli cpp11 curl data.table diffobj fansi farver ff fs gert git2r glue gmp jsonlite lazyeval lubridate nloptr odbc openssl pak plyr processx ps purrr ragg readr readxl reshape2 rlang sets slam sourcetools stringi tibble timechange vctrs vroom webutils xml2 xts yaml zip
+VECSXP,header,Rinternals.h,50,700,Matrix Rcpp RcppSimdJson Rmpfr S7 bit bit64 checkmate chron cli cpp11 curl data.table diffobj digest fansi farver fs gert git2r glue gmp jsonlite lazyeval lubridate multicool nlme nloptr odbc openssl pak plyr processx ps purrr reshape2 rlang sets slam sourcetools stringi tibble timechange vctrs vroom webutils xml2 xts yaml zip
+Rf_setAttrib,api,Rinternals.h,48,664,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr S7 bit checkmate cli cpp11 curl data.table farver fastmap ff fs gert git2r gmp jsonlite lazyeval lubridate mgcv multicool nloptr odbc openssl pak processx ps purrr ragg readr rlang sets slam sourcetools stringi sys systemfonts tibble utf8 uuid vctrs xml2 xts yaml zoo
+VECTOR_ELT,api,Rinternals.h,47,1519,Matrix Rcpp Rmpfr S7 bit64 checkmate cli cpp11 curl data.table digest fansi farver ff fs gert git2r gmp jsonlite kernlab lazyeval magrittr mgcv multicool nlme nloptr odbc openssl pak processx ps purrr reshape2 rlang sass sets slam sourcetools stringi tibble utf8 vctrs vroom xml2 xts yaml zip
+LOGICAL,api,Rinternals.h,47,1159,Matrix Rblpapi Rcpp RcppSimdJson Rmpfr bit bit64 checkmate cli cpp11 data.table fansi farver fastmap ff fs gert git2r glue gmp lazyeval lubridate mvtnorm odbc pak processx ps purrr ragg readr readxl reshape2 rlang sets slam stringi testthat tibble utf8 uuid vctrs vroom xml2 xts yaml zip zoo
+Rf_mkChar,api,Rdefines.h,47,651,Matrix Rblpapi Rcpp Rmpfr base64enc bit bit64 checkmate chron cli commonmark curl data.table digest fansi farver ff fs gert git2r gmp jsonlite lazyeval lubridate magrittr mgcv nloptr odbc openssl pak processx ps purrr rlang sourcetools stringi tibble timechange utf8 uuid vctrs webutils xfun xml2 xts zip zoo
+LGLSXP,header,Rinternals.h,46,732,Matrix Rcpp RcppSimdJson Rmpfr bit bit64 checkmate cli cpp11 curl data.table fansi ff fs gert git2r gmp jsonlite lubridate multicool mvtnorm odbc openssl pak processx ps purrr quadprog readr readxl reshape2 sass sets slam stringi tibble timechange utf8 uuid vctrs vroom xml2 xts yaml zip zoo
+Rf_install,api,Rinternals.h,45,843,Matrix Rblpapi Rcpp Rmpfr S7 bit checkmate cli cpp11 curl data.table digest farver ff fs gert gmp jsonlite later lattice lazyeval magrittr mgcv mvtnorm odbc pak processx progress ps purrr readr rlang slam sourcetools stringi sys timechange utf8 vctrs vroom xml2 xts yaml zip zoo
+R_NaString,api,Rinternals.h,45,625,Matrix Rblpapi Rcpp RcppSimdJson bit64 brio cachem checkmate cli cpp11 curl data.table fansi farver fastmap fs gert git2r gmp httpuv jsonlite lazyeval odbc openssl openxlsx pak pdftools processx ps purrr rdtools readr readxl rlang stringi systemfonts timechange utf8 uuid vctrs vroom xml2 xts yaml zoo
+Rprintf,api,R_ext/Print.h,44,556,Bessel FNN MASS Matrix Rcpp RcppDE Rglpk Rmpfr base64enc bit bit64 cli data.table fansi ff git2r gmp highs lazyeval mgcv nlme nloptr pak pdftools progress randtoolbox rbibutils readr readxl reshape2 rlang sets slam stringi sys testthat textshaping truncnorm uuid vctrs vroom xts yaml zoo
+RAW,api,Rinternals.h,41,604,Matrix base64enc bit brio cli cpp11 curl data.table digest ff git2r gmp httpuv jsonlite lazyeval mime odbc openssl pak processx ps purrr readr readxl reshape2 rlang slam sodium sourcetools stringi sys uuid vctrs vroom webutils xfun xml2 xts yaml zip zoo
+Rf_warning,api,R_ext/Error.h,41,387,Matrix Rcpp RcppArmadillo RcppParallel Rmpfr bit64 chron cli curl data.table digest fansi fracdiff gert git2r gmp htmltools httpuv kernlab lazyeval nlme pak pcaPP processx qpdf ragg rbibutils readr readxl rlang sass slam sourcetools stringi testthat timechange vctrs xml2 xts yaml zip
+Rf_ScalarLogical,api,Rinternals.h,40,620,Matrix Rcpp RcppParallel Rmpfr S7 base64enc cachem checkmate cli cpp11 curl data.table digest fansi fastmap ff gert git2r gmp jsonlite lazyeval magrittr openssl pak processx progress ps purrr ragg readxl rlang slam sodium stringi testthat tibble vctrs xml2 xts yaml
+Rf_mkString,api,Rinternals.h,40,559,Matrix Rcpp RcppSimdJson Rmpfr S7 askpass base64enc brio cli curl data.table fansi fs gert git2r gmp jsonlite lazyeval magrittr odbc openssl pak ps purrr ragg rappdirs rlang sass slam sodium sourcetools stringi sys systemfonts timechange uuid vctrs vroom xml2 xts
+R_xlen_t,header,Rinternals.h,39,2105,Matrix Rcpp RcppSimdJson S7 brio checkmate cli cpp11 data.table digest fansi fs glue htmltools lazyeval multicool pak parallelly ps purrr readr readxl rlang roxygen2 sodium sourcetools systemfonts textshaping tibble timechange tzdb utf8 vctrs vroom xfun xml2 xts zip zoo
+LENGTH,api,Rinternals.h,39,1546,Matrix Rcpp Rmpfr base64enc bit bit64 cli commonmark curl data.table fansi ff fs gert git2r glue gmp lubridate mime mvtnorm nlme openssl pak processx ps rlang sass sets slam sodium stringi timechange utf8 uuid vroom xfun xts yaml zip
+Rf_getAttrib,api,Rinternals.h,39,590,Matrix Rcpp RcppSimdJson S7 bit bit64 checkmate cli cpp11 curl data.table farver ff git2r gmp jsonlite lazyeval mgcv multicool mvtnorm nlme nloptr pak purrr randtoolbox sass sets slam stringi tibble timechange utf8 uuid vctrs vroom xml2 xts yaml zoo
+R_NaReal,api,R_ext/Arith.h,39,431,Matrix Rblpapi Rcpp RcppSimdJson Rsolnp bit64 cli cpp11 curl data.table farver fs gert gmp lazyeval lubridate multicool odbc openxlsx pak pcaPP pdftools processx ps purrr readr readxl rlang slam stringi tibble timechange truncnorm uuid vctrs vroom xts yaml zoo
+R_NamesSymbol,api,Rinternals.h,39,370,Matrix Rcpp RcppSimdJson S7 bit checkmate cli cpp11 curl data.table farver fastmap ff fs gert git2r jsonlite lazyeval lubridate mgcv multicool nlme nloptr openssl pak ps purrr rlang sass slam sourcetools stringi tibble utf8 vctrs xml2 xts yaml zoo
+R_forceSymbols,api,R_ext/Rdynload.h,39,51,MASS askpass bit bit64 cli commonmark diffobj fansi ff git2r isoband ks later lubridate mvtnorm nlme nloptr pak pcaPP processx profvis ps rdtools readr readxl roxygen2 sass stringi systemfonts textshaping tibble timechange truncnorm tzdb utf8 vroom xts yaml zip
+Rf_isNull,api,Rinternals.h,38,734,Matrix Rcpp RcppArmadillo RcppSimdJson Rmpfr Rsolnp checkmate cli data.table farver gert git2r highs httpuv jsonlite multicool odbc openssl openxlsx pak processx progress ps purrr ragg randtoolbox readr rlang sass sets slam stringi tibble timechange vroom xts zip zoo
+Rf_ScalarInteger,api,Rinternals.h,38,479,Matrix RcppSimdJson Rmpfr backports base64enc checkmate cli cpp11 curl data.table diffobj fansi fastmap fs gert git2r gmp jsonlite lazyeval magrittr openssl pak plyr processx ps purrr ragg rlang slam stringi sys systemfonts vctrs xml2 xts yaml zip zoo
+Rf_eval,api,Rinternals.h,38,195,Matrix Rcpp RcppDE S7 backports checkmate cli cpp11 curl data.table digest fs gert glue jsonlite lattice lazyeval magrittr nlme nloptr odbc pak plyr processx ps purrr ragg rlang slam sourcetools stringi uuid vctrs vroom xml2 xts yaml zip
+CE_UTF8,header,Rinternals.h,37,363,Rblpapi Rcpp RcppSimdJson brio cli commonmark cpp11 curl data.table fansi fastmap fs gert glue htmltools httpuv jsonlite lazyeval odbc openssl openxlsx pak pdftools processx ps rdtools readr readxl rlang stringi tzdb utf8 vctrs vroom xml2 yaml zip
+Rf_asInteger,api,Rdefines.h,36,611,Matrix PerformanceAnalytics Rmpfr base64enc bit bit64 checkmate commonmark curl data.table diffobj digest fansi ff gert git2r gmp jsonlite lattice mgcv nloptr openssl pak parallelly processx randtoolbox rlang rngWELL sass sodium sys uuid xfun xts zip zoo
+RAWSXP,header,Rinternals.h,36,340,Matrix Rcpp RcppSimdJson base64enc bit brio checkmate cpp11 curl data.table digest ff git2r gmp jsonlite odbc openssl pak processx ps purrr reshape2 rlang slam sodium sourcetools stringi sys uuid vctrs webutils xml2 xts yaml zip zoo
+attribute_visible,header,R_ext/Visibility.h,35,41,Matrix Rcpp cachem cli commonmark curl data.table fansi fastmap fs gert git2r glue isoband jsonlite ks lazyeval magrittr mvtnorm pak purrr quadprog readr readxl rlang roxygen2 systemfonts textshaping timechange truncnorm tzdb vctrs vroom xml2 zip
+R_ClassSymbol,api,Rinternals.h,34,230,Matrix Rblpapi Rcpp RcppSimdJson S7 checkmate cli cpp11 curl data.table ff fs gert git2r gmp jsonlite lazyeval odbc openssl pak processx ps rlang slam sourcetools stringi sys tibble uuid vctrs xml2 xts yaml zoo
+Rboolean,header,Rinternals.h,30,456,Matrix Rcpp RcppSimdJson Rmpfr S7 backports bit bit64 checkmate chron cli cpp11 curl data.table ff glue gmp htmltools later mvtnorm pak progress purrr ragg slam stringi systemfonts vctrs vroom xml2
+Rf_xlength,api,Rinternals.h,30,380,Rcpp RcppSimdJson S7 brio checkmate cli cpp11 curl data.table digest fansi fs glue htmltools lazyeval multicool pak parallelly ps purrr rdtools readr rlang systemfonts tibble vctrs vroom xml2 xts zoo
+R_alloc,api,R_ext/Memory.h,29,407,MASS Matrix RcppArmadillo Rmpfr base64enc bit bit64 brio cli data.table diffobj digest fansi ff lubridate pak processx ps ragg randtoolbox rdtools readr rlang rngWELL stringi utf8 vctrs vroom zip
+R_Version,api,WRE only,28,230,Matrix Rcpp S7 backports base64enc checkmate cli cpp11 curl data.table lazyeval magrittr odbc pak pcaPP processx ps purrr ragg rbibutils rlang slam stringi vctrs vroom xfun yaml zip
+Rf_mkCharCE,api,Rinternals.h,28,166,Rblpapi Rcpp brio cli commonmark cpp11 curl data.table fastmap fs gert glue httpuv jsonlite lazyeval odbc openxlsx pak processx ps readr readxl rlang stringi vctrs xml2 yaml zip
+Rf_mkCharLenCE,api,Rinternals.h,27,189,Rcpp RcppSimdJson brio cli cpp11 curl data.table fansi gert glue htmltools httpuv jsonlite odbc openssl pak processx ps rdtools readr rlang stringi tzdb utf8 vctrs vroom xml2
+Rf_lang2,api,Rinternals.h,27,97,Matrix Rcpp S7 cli cpp11 curl data.table fs glue lattice lazyeval nlme nloptr odbc openssl pak plyr ps purrr rlang sourcetools stringi vctrs vroom xml2 xts yaml
+Rf_asLogical,api,Rdefines.h,26,427,Matrix Rmpfr S7 bit bit64 chron commonmark curl fansi ff gert gmp jsonlite lazyeval multicool mvtnorm openssl pak purrr randtoolbox readxl rngWELL sass sys xts zoo
+R_CheckUserInterrupt,api,R_ext/Itermacros.h,26,71,MASS Matrix Rcpp Rmpfr bit64 cli cpp11 curl diffobj fansi gert lazyeval nlme nloptr openssl pak processx profvis ps purrr rlang sets sys truncnorm utf8 vctrs
+R_ExternalPtrAddr,api,Rinternals.h,25,469,Rblpapi Rcpp cli cpp11 curl data.table digest fastmap ff gert httpuv mgcv multicool openssl pak processx ps purrr rlang sys utf8 vctrs vroom xml2 zip
+R_RegisterCCallable,api,R_ext/Rdynload.h,25,276,Matrix Rcpp RcppSimdJson Rmpfr VineCopula checkmate cli data.table digest later mgcv mvtnorm nloptr pak randtoolbox rlang rngWELL stringi systemfonts textshaping tzdb uuid vctrs xts zoo
+Rf_ScalarString,api,Rinternals.h,25,179,Rcpp RcppSimdJson brio checkmate cli cpp11 curl data.table gert git2r glue lazyeval openssl pak processx ps purrr rlang stringi utf8 vctrs webutils xml2 yaml zip
+R_GlobalEnv,api,Rinternals.h,25,116,Matrix Rcpp checkmate cpp11 curl data.table digest fs gert lattice lazyeval nlme odbc openssl pak ps purrr ragg rlang slam sys vctrs xml2 xts yaml
+CDR,api,Rinternals.h,24,324,Matrix Rcpp S7 backports checkmate cli cpp11 curl data.table fansi lazyeval magrittr pak processx ps purrr rlang slam sourcetools tibble vctrs xts yaml zip
+R_finite,api,Rmath.h0.in,24,263,Matrix Rcpp RcppArmadillo checkmate data.table farver git2r gmp isoband jsonlite ks mvtnorm nlme pak purrr randtoolbox readr rngWELL slam stringi timechange truncnorm vroom xts
+CAR,api,Rinternals.h,24,219,Matrix Rcpp S7 backports cli cpp11 curl data.table fansi lazyeval magrittr pak processx ps purrr rlang slam sourcetools tibble vctrs vroom xts yaml zip
+Rf_inherits,api,Rinternals.h,24,133,Matrix Rcpp RcppArmadillo RcppSimdJson S7 checkmate cli curl data.table gert git2r jsonlite lazyeval multicool openssl pak reshape2 rlang slam stringi uuid vctrs vroom xml2
+R_DimSymbol,api,Rinternals.h,24,129,Matrix Rcpp Rmpfr bit64 checkmate cpp11 data.table gmp jsonlite lazyeval multicool pak ragg randtoolbox rlang slam stringi systemfonts tibble utf8 uuid vctrs xts zoo
+R_MakeExternalPtr,api,Rinternals.h,24,92,Rblpapi Rcpp cli cpp11 curl data.table digest fastmap ff gert httpuv mgcv openssl pak processx ps purrr rlang sys utf8 vctrs vroom xml2 zip
+Rf_isString,api,Rdefines.h,23,186,Rcpp Rmpfr checkmate commonmark cpp11 curl data.table gert git2r highs httpuv jsonlite lubridate openssl pak processx rdtools slam stringi sys timechange utf8 yaml
+Rf_translateCharUTF8,api,Rinternals.h,23,169,Rcpp brio cli cpp11 curl data.table farver fastmap gert glue httpuv jsonlite pak purrr ragg readr rlang systemfonts textshaping utf8 vctrs vroom xml2
+Rf_duplicate,api,Rinternals.h,23,122,Matrix Rcpp Rmpfr S7 bit data.table digest fansi fs git2r jsonlite lazyeval mvtnorm pak ps rlang sets slam utf8 vctrs vroom xts yaml
+REprintf,api,R_ext/Print.h,22,484,FNN Matrix Rcpp RcppParallel Rmpfr cli cpp11 curl data.table fracdiff gert highs httpuv later openssl pak processx progress ps rbibutils stringi vroom
+Rf_ScalarReal,api,Rinternals.h,22,155,Matrix Rcpp Rmpfr cli cpp11 curl data.table gert git2r jsonlite lazyeval pak parallelly processx ps purrr readxl rlang stringi vctrs xml2 yaml
+R_isnancpp,api,Rmath.h0.in,21,344,MASS Matrix Rcpp RcppDE Rmpfr bit64 checkmate data.table farver ff gmp jsonlite lattice multicool pak readr slam stringi timechange vroom xts
+R_BaseEnv,api,Rinternals.h,21,67,Matrix Rcpp S7 cli cpp11 fs httpuv jsonlite later lazyeval magrittr odbc pak processx ps purrr rlang stringi vctrs vroom zip
+REPROTECT,api,Rinternals.h,20,219,Matrix Rcpp S7 bit bit64 brio cli data.table fansi glue htmltools lazyeval magrittr pak ps purrr rlang utf8 vctrs xts
+R_GetCCallable,api,R_ext/stats_stubs.h,20,213,Matrix Rcpp RcppSimdJson checkmate cli data.table digest later lazyeval mvtnorm nloptr pak purrr randtoolbox rlang systemfonts textshaping tzdb vctrs xts
+PROTECT_WITH_INDEX,api,Rinternals.h,20,103,Matrix Rcpp S7 bit bit64 brio cli data.table fansi glue htmltools lazyeval magrittr pak ps purrr rlang utf8 vctrs xts
+PROTECT_INDEX,header,Rinternals.h,20,96,Matrix Rcpp S7 bit bit64 brio cli data.table fansi glue htmltools lazyeval magrittr pak ps purrr rlang utf8 vctrs xts
+Rf_asReal,api,Rdefines.h,20,95,Matrix PerformanceAnalytics Rmpfr base64enc bit64 checkmate curl digest ff gert lattice mgcv multicool nloptr pak profvis randtoolbox sodium xfun xts
+R_IsNA,api,R_ext/Arith.h,20,88,Rcpp Rmpfr bit checkmate cpp11 data.table jsonlite lubridate nlme odbc pak purrr readr rlang stringi vctrs vroom xts yaml zip
+Rf_coerceVector,api,Rinternals.h,19,220,Matrix Rcpp Rmpfr checkmate data.table gmp mgcv nlme nloptr pak purrr reshape2 rlang slam stringi utf8 vctrs xts yaml
+Rf_isLogical,api,Rdefines.h,18,97,Rcpp checkmate cli commonmark cpp11 curl data.table ff git2r highs pak randtoolbox readr rngWELL stringi sys xts yaml
+NILSXP,header,Rinternals.h,18,37,FLSSS Matrix Rcpp RcppSimdJson checkmate cpp11 data.table fansi gert gmp jsonlite lazyeval odbc pak purrr vctrs xts yaml
+COMPLEX,api,Rinternals.h,17,486,Matrix bit checkmate data.table ff lazyeval pak purrr reshape2 rlang slam tibble uuid vctrs xts yaml zoo
+XLENGTH,api,Rinternals.h,17,378,Matrix Rcpp base64enc bit64 cli data.table diffobj digest fansi pak rlang sodium tibble utf8 uuid xfun zip
+CPLXSXP,header,Rinternals.h,17,299,Matrix Rcpp bit checkmate data.table ff jsonlite pak purrr reshape2 slam tibble uuid vctrs xts yaml zoo
+Rf_type2char,api,Rinternals.h,17,184,Matrix Rcpp checkmate cli cpp11 data.table fansi lazyeval odbc pak purrr readr reshape2 rlang vctrs vroom xml2
+Rf_isInteger,api,Rdefines.h,17,143,Rmpfr checkmate commonmark cpp11 curl data.table farver git2r highs jsonlite lubridate pak parallelly stringi truncnorm xts yaml
+R_RegisterCFinalizerEx,api,Rinternals.h,17,49,Rblpapi Rcpp cpp11 curl digest fastmap gert mgcv openssl pak processx ps rlang sys utf8 vroom xml2
+R_ClearExternalPtr,api,Rinternals.h,17,48,Rblpapi Rcpp cpp11 curl data.table digest fastmap ff gert httpuv openssl pak processx rlang sys vroom xml2
+Rf_lengthgets,api,Rinternals.h,16,88,bit bit64 brio cli fs glue htmltools odbc pak ps readr readxl slam vctrs xts zip
+SETCDR,api,Rinternals.h,16,66,Rcpp S7 cli cpp11 curl fansi lazyeval pak processx ps purrr rlang tibble vctrs yaml zip
+R_PreserveObject,api,Rinternals.h,16,56,Rcpp RcppSimdJson S7 cli cpp11 fs lazyeval magrittr pak processx ps purrr rlang stringi vctrs xml2
+Rf_lcons,api,Rinternals.h,16,50,Rcpp S7 cli curl digest gert lazyeval magrittr openssl pak processx ps purrr rlang vctrs zip
+CADR,api,Rinternals.h,16,43,cli data.table lazyeval magrittr pak processx ps purrr rlang slam sourcetools vctrs vroom xts yaml zip
+EXTPTRSXP,header,Rinternals.h,16,34,Rblpapi Rcpp RcppDE cpp11 curl data.table fastmap gert httpuv multicool openssl pak rlang utf8 vctrs xml2
+R_len_t,header,Rinternals.h,15,1883,Rblpapi Rcpp bit checkmate data.table fansi gert httpuv lubridate magrittr stringi timechange truncnorm vctrs xml2
+Rf_errorcall,api,Rinternals.h,15,134,S7 cpp11 curl farver jsonlite lazyeval magrittr openssl pak polars purrr rlang sys vctrs vroom
+Rf_cons,api,Rinternals.h,15,88,Rcpp S7 cli cpp11 curl lazyeval magrittr pak processx ps purrr rlang tibble vctrs zip
+R_DimNamesSymbol,api,Rinternals.h,15,86,Matrix Rcpp Rmpfr checkmate data.table lazyeval rlang sets slam stringi tibble utf8 vctrs xts zoo
+PRINTNAME,api,Rinternals.h,15,68,Rblpapi Rcpp backports cli cpp11 data.table lazyeval magrittr pak purrr rlang sourcetools stringi vctrs vroom
+Rf_lang3,api,Rinternals.h,15,52,Matrix Rcpp RcppDE S7 curl lazyeval magrittr pak purrr rlang vctrs vroom xml2 xts yaml
+Rf_getCharCE,api,Rinternals.h,15,44,Rcpp curl data.table fansi fastmap htmltools jsonlite pak rlang stringi systemfonts utf8 vctrs vroom yaml
+Rcomplex,header,Rinternals.h,14,498,Matrix Rcpp checkmate data.table ff lazyeval reshape2 rlang slam tibble uuid vctrs xts zoo
+Rf_nrows,api,Rinternals.h,14,427,Matrix RcppDE cpp11 data.table farver gert mgcv multicool pak pcaPP truncnorm utf8 xts zoo
+Rf_defineVar,api,Rinternals.h,14,141,Matrix Rcpp S7 cli cpp11 data.table lazyeval magrittr pak processx ps rlang vctrs xts
+R_PosInf,api,R_ext/Arith.h,14,92,Matrix Rcpp checkmate cli data.table gmp jsonlite later pak pcaPP timechange truncnorm xml2 yaml
+Rf_asChar,api,Rinternals.h,14,80,Matrix Rcpp RcppSimdJson Rmpfr curl fansi ff gmp jsonlite openssl pak purrr sass testthat
+unif_rand,api,Rmath.h0.in,14,70,MASS Matrix Rcpp RcppArmadillo RcppDE VineCopula bit bit64 mvtnorm pak pcaPP rbibutils rugarch stringi
+Rf_allocMatrix,api,Rinternals.h,14,65,Matrix PerformanceAnalytics Rcpp farver lubridate mgcv mvtnorm randtoolbox rngWELL sets slam stringi systemfonts xts
+SET_TAG,api,Rinternals.h,14,63,Matrix Rcpp S7 cpp11 data.table lazyeval magrittr pak purrr rlang tibble vctrs xts yaml
+TAG,api,Rinternals.h,14,45,Matrix Rcpp S7 backports checkmate cpp11 data.table lazyeval pak rlang tibble vctrs xts yaml
+GetRNGstate,api,R_ext/Random.h,14,35,MASS Matrix Rcpp VineCopula bit bit64 httpuv mvtnorm pak pcaPP rbibutils rugarch stringi truncnorm
+R_RowNamesSymbol,api,Rinternals.h,14,28,Rcpp RcppSimdJson checkmate cpp11 data.table fs gert lazyeval pak rlang sourcetools tibble vctrs xml2
+Rf_ncols,api,Rinternals.h,13,275,Matrix commonmark cpp11 data.table farver mgcv pak pcaPP truncnorm utf8 vctrs xts zoo
+Rf_match,experimental,Rinternals.h,13,206,Matrix RcppParallel commonmark data.table git2r httpuv pak ps purrr rbibutils rlang testthat vctrs
+Rf_mkNamed,api,Rinternals.h,13,97,Matrix Rmpfr cli fs git2r gmp odbc openssl pak ps timechange vctrs zip
+Rf_isNumeric,api,Rinternals.h,13,56,Matrix Rcpp checkmate curl data.table highs jsonlite lubridate nloptr pak randtoolbox rngWELL yaml
+SETCAR,api,Rinternals.h,13,48,Matrix Rcpp S7 checkmate cpp11 data.table lazyeval magrittr pak rlang vctrs xts yaml
+R_getVar,api,Rinternals.h,13,46,Matrix Rcpp cli cpp11 data.table lazyeval pak processx ps purrr rlang vctrs zip
+PutRNGstate,api,R_ext/Random.h,13,36,MASS Matrix Rcpp VineCopula bit bit64 mvtnorm pak pcaPP rbibutils rugarch stringi truncnorm
+Rf_findVar,non-api,Rinternals.h,13,24,Rcpp backports cli data.table lazyeval magrittr pak processx ps purrr rlang vctrs zip
+Rf_isReal,api,Rdefines.h,12,64,Matrix Rmpfr checkmate cpp11 data.table git2r jsonlite mgcv pak stringi truncnorm xts
+LANGSXP,header,Rinternals.h,12,53,Rcpp S7 checkmate cpp11 data.table lazyeval magrittr purrr rlang sourcetools vctrs xts
+Rf_mkCharLen,api,Rinternals.h,12,52,Rcpp cli data.table gert jsonlite openssl pak ps sourcetools stringi webutils yaml
+Rf_translateChar,api,Rinternals.h,12,30,brio curl data.table lazyeval odbc pak rdtools readxl rlang roxygen2 vctrs vroom
+Rf_lang4,api,Rinternals.h,12,19,Rcpp S7 data.table gert jsonlite lattice lazyeval pak purrr rlang vctrs xml2
+R_ReleaseObject,api,Rinternals.h,12,18,Rcpp RcppSimdJson cli fs lazyeval pak processx purrr rlang stringi vctrs xml2
+Rbyte,header,Rinternals.h,11,123,Rcpp cli cpp11 data.table mime pak processx reshape2 vctrs xts zoo
+R_NegInf,api,R_ext/Arith.h,11,77,Matrix Rcpp checkmate data.table gmp jsonlite pak pcaPP timechange truncnorm yaml
+R_UnboundValue,experimental,Rinternals.h,11,43,Rcpp S7 backports cli cpp11 lazyeval magrittr pak purrr rlang vctrs
+R_ExternalPtrTag,api,Rinternals.h,11,33,Rblpapi Rcpp cli curl data.table pak processx ps purrr utf8 zip
+R_EmptyEnv,api,Rinternals.h,11,23,Rcpp cli glue httpuv lazyeval magrittr pak ps rlang vctrs vroom
+ENVSXP,header,Rinternals.h,11,17,Rcpp S7 cli data.table lazyeval magrittr pak ps purrr rlang vctrs
+R_Free,api,R_ext/RS.h,10,365,FNN MASS Matrix VineCopula bit data.table digest ff nlme pcaPP
+STRING_PTR_RO,api,Rinternals.h,10,92,Rcpp cli cpp11 data.table lazyeval pak purrr rlang vctrs vroom
+R_NaN,header,R_ext/Arith.h,10,83,Matrix Rcpp data.table jsonlite pak pcaPP rlang truncnorm vctrs yaml
+R_SetExternalPtrAddr,api,Rinternals.h,10,32,cli curl data.table ff pak processx ps purrr utf8 zip
+Rf_GetOption1,api,Rinternals.h,10,25,cli curl data.table gmp lazyeval magrittr pak progress rlang vctrs
+DATAPTR_RO,api,Rinternals.h,10,23,Rcpp cli cpp11 data.table lazyeval odbc pak rlang vctrs vroom
+Rf_lang1,api,Rinternals.h,10,21,Rcpp curl later lazyeval pak purrr ragg rlang sourcetools vctrs
+Rf_isObject,api,Rinternals.h,10,18,Matrix Rcpp data.table lazyeval purrr rlang stringi tibble vctrs vroom
+R_FindNamespace,experimental,Rinternals.h,10,14,S7 curl gert lazyeval pak rlang sourcetools vctrs xml2 xts
+Rf_elt,api,Rinternals.h,9,454,brio cli lazyeval pak rlang tibble utf8 uuid vctrs
+R_Calloc,api,R_ext/RS.h,9,357,FNN MASS Matrix VineCopula bit data.table digest ff nlme
+SEXPTYPE,header,Rinternals.h,9,81,Matrix Rmpfr cpp11 data.table purrr sourcetools tibble vctrs vroom
+M_PI,api,Rmath.h0.in,9,59,MASS Rcpp VineCopula farver mvtnorm nlme pcaPP rmgarch rugarch
+cetype_t,header,Rinternals.h,9,46,Rcpp curl data.table fansi pak stringi utf8 vroom yaml
+SYMSXP,header,Rinternals.h,9,39,Matrix Rcpp S7 data.table lazyeval purrr rlang sourcetools vctrs
+R_ExternalPtrAddrFn,api,Rinternals.h,9,38,cli lazyeval pak processx ps purrr rlang vctrs zip
+Rf_isMatrix,api,Rinternals.h,9,30,Matrix Rcpp checkmate data.table farver sets slam stringi truncnorm
+Rf_warningcall,api,Rinternals.h,9,27,Rcpp cpp11 curl fansi jsonlite pak purrr rlang sys
+R_MakeExternalPtrFn,api,Rinternals.h,9,25,cli lazyeval pak processx ps purrr rlang vctrs zip
+Rf_isVector,api,Rdefines.h,9,23,Matrix checkmate curl data.table pak purrr slam stringi truncnorm
+CDDR,api,Rinternals.h,9,22,Rcpp lazyeval magrittr pak purrr rlang slam vctrs yaml
+PROMSXP,header,Rinternals.h,9,22,Rcpp cli cpp11 lazyeval magrittr pak purrr rlang vctrs
+Rf_allocSExp,non-api,Rinternals.h,9,21,cli lazyeval magrittr pak ps purrr rlang vctrs yaml
+Rf_findFun,api,Rinternals.h,9,21,Rcpp cpp11 fs odbc pak ps sourcetools vroom yaml
+Rf_xlengthgets,api,Rinternals.h,9,19,brio cli glue htmltools lazyeval pak rlang vctrs xts
+Rf_onintr,api,R_ext/GraphicsDevice.h,9,17,Rcpp RcppSimdJson curl later lazyeval pak polars rlang vctrs
+ATTRIB,non-api,Rinternals.h,9,16,Matrix Rcpp checkmate data.table lazyeval rlang slam vctrs vroom
+SET_ATTRIB,non-api,Rinternals.h,9,13,Matrix cli data.table lazyeval pak ps rlang slam vctrs
+R_ExternalMethodDef,header,R_ext/Rdynload.h,9,9,Matrix Rcpp S7 data.table magrittr rlang slam vctrs xts
+F77_CALL,header,R_ext/RS.h,8,446,MASS Matrix fracdiff kernlab mgcv mvtnorm nlme pcaPP
+Rf_copyMostAttrib,api,Rinternals.h,8,66,Rcpp cpp11 data.table reshape2 tibble vctrs xts zoo
+CLOSXP,header,Rinternals.h,8,33,Rcpp S7 curl data.table pak purrr vctrs yaml
+Rf_isS4,api,Rinternals.h,8,31,Matrix Rcpp data.table rlang tibble vctrs xml2 zoo
+Rf_shallow_duplicate,api,Rinternals.h,8,26,S7 cpp11 data.table lazyeval magrittr rlang tibble vctrs
+MARK_NOT_MUTABLE,api,Rinternals.h,8,25,cli lazyeval magrittr pak rlang vctrs vroom yaml
+R_tryEval,api,Rinternals.h,8,24,curl gert later openssl pak rlang sys yaml
+Rf_findVarInFrame,non-api,Rinternals.h,8,22,Matrix Rcpp S7 cli lazyeval pak purrr rlang
+CHARSXP,header,Rinternals.h,8,18,Rcpp bit cpp11 data.table fansi pak polars yaml
+Rf_isFunction,api,Rinternals.h,8,17,curl gert openssl pak plyr slam sourcetools sys
+R_ExecWithCleanup,api,Rinternals.h,8,15,cli magrittr pak processx ps purrr rlang zip
+R_DotsSymbol,api,Rinternals.h,8,14,RcppDE S7 backports lazyeval purrr rlang vctrs xts
+ParseStatus,header,R_ext/Parse.h,8,8,Rcpp lazyeval magrittr pak purrr rlang vctrs yaml
+R_ParseVector,api,R_ext/Parse.h,8,8,Rcpp lazyeval magrittr pak purrr rlang vctrs yaml
+R_INLINE,api,WRE only,7,89,Rmpfr cli data.table pak ps randtoolbox truncnorm
+ALTREP,experimental,Rinternals.h,7,38,cpp11 data.table lazyeval rlang stringi vctrs vroom
+Rf_list1,api,Rinternals.h,7,27,Rcpp fansi lazyeval pak rlang vctrs yaml
+R_MissingArg,api,Rinternals.h,7,25,Rcpp S7 cpp11 lazyeval purrr rlang vctrs
+LONG_VECTOR_SUPPORT,header,Rinternals.h,7,19,Matrix Rcpp cpp11 lazyeval rlang vctrs vroom
+MAYBE_REFERENCED,api,Rinternals.h,7,14,Matrix data.table digest lazyeval rlang stringi vctrs
+R_ClosureFormals,api,Rinternals.h,7,12,S7 curl lazyeval pak rlang vctrs yaml
+R_NewEnv,api,Rinternals.h,7,11,cli lazyeval magrittr pak ps rlang vctrs
+Rf_PrintValue,api,Rinternals.h,7,10,Rcpp lazyeval magrittr pak rlang vctrs yaml
+SETCADR,api,Rinternals.h,7,9,Matrix S7 checkmate lazyeval plyr rlang vctrs
+FORMALS,non-api,WRE only,7,8,S7 curl lazyeval pak rlang vctrs yaml
+Rf_lang5,api,Rinternals.h,7,8,Rcpp gert lazyeval pak purrr rlang vctrs
+PARSE_OK,header,R_ext/Parse.h,7,7,Rcpp lazyeval magrittr pak rlang vctrs yaml
+F77_NAME,header,R_ext/Utils.h,6,208,Bessel DistributionUtils mclust mvtnorm nlme slam
+INTEGER_RO,api,Rinternals.h,6,78,checkmate cli data.table pak vctrs vroom
+R_FlushConsole,embedding,R.h,6,57,Rcpp bit bit64 data.table ff testthat
+R_LevelsSymbol,api,Rinternals.h,6,56,checkmate data.table pak slam vctrs yaml
+EXPRSXP,header,Rinternals.h,6,42,Matrix Rcpp data.table slam vctrs xts
+Rf_isVectorAtomic,api,Rinternals.h,6,41,Matrix bit checkmate data.table reshape2 stringi
+R_NativePrimitiveArgType,header,R_ext/Rdynload.h,6,29,chron fracdiff ks mvtnorm pcaPP quadprog
+CE_NATIVE,header,Rinternals.h,6,25,data.table fansi pak stringi utf8 yaml
+R_BlankString,experimental,Rinternals.h,6,23,Rcpp cpp11 data.table fansi slam stringi
+ANY_ATTRIB,api,Rinternals.h,6,18,Matrix data.table lazyeval rlang slam vctrs
+CLEAR_ATTRIB,api,Rinternals.h,6,15,Matrix data.table lazyeval rlang slam vctrs
+LCONS,api,Rinternals.h,6,15,data.table pak slam sys xts yaml
+Riconv_close,api,R_ext/Riconv.h,6,14,odbc pak processx readr vroom zip
+Riconv,api,R_ext/Riconv.h,6,13,odbc pak processx readr vroom zip
+BUILTINSXP,header,Rinternals.h,6,11,Rcpp data.table pak purrr vctrs yaml
+REvprintf,api,R_ext/Print.h,6,11,Rmpfr gert highs pak ps readxl
+R_mkClosure,api,Rinternals.h,6,10,lazyeval pak purrr rlang vctrs yaml
+Riconv_open,api,R_ext/Riconv.h,6,10,odbc pak processx readr vroom zip
+SPECIALSXP,header,Rinternals.h,6,9,Rcpp data.table pak purrr vctrs yaml
+R_ClosureEnv,api,Rinternals.h,6,8,Rcpp lazyeval pak rlang vctrs yaml
+Rf_ScalarRaw,api,Rinternals.h,6,7,lazyeval pak ps purrr rlang vctrs
+Rf_isEnvironment,api,Rinternals.h,6,7,Matrix Rcpp checkmate data.table lazyeval plyr
+CLOENV,non-api,WRE only,6,6,Rcpp lazyeval pak rlang vctrs yaml
+R_existsVarInFrame,experimental,Rinternals.h,6,6,cli cpp11 lazyeval pak rlang vctrs
+FCONE,blas-lapack,R_ext/BLAS.h,5,614,Matrix kernlab mgcv mvtnorm pcaPP
+R_LEN_T_MAX,header,Rinternals.h,5,52,Matrix fansi lazyeval rlang vctrs
+dnorm4,header,Rmath.h0.in,5,52,Rcpp VineCopula mgcv mvtnorm truncnorm
+Rf_sign,api,Rmath.h0.in,5,51,Matrix Rcpp Rmpfr fracdiff rugarch
+qnorm5,header,Rmath.h0.in,5,46,Rcpp VineCopula mvtnorm rugarch truncnorm
+R_allocResizableVector,experimental,Rinternals.h,5,38,data.table lazyeval rlang vctrs vroom
+R_resizeVector,experimental,Rinternals.h,5,28,data.table lazyeval rlang vctrs vroom
+pnorm5,header,Rmath.h0.in,5,23,Rcpp VineCopula mvtnorm rugarch truncnorm
+CE_BYTES,header,Rinternals.h,5,16,fansi pak stringi utf8 vroom
+R_compute_identical,experimental,Rinternals.h,5,16,data.table lazyeval progress rlang vctrs
+S_realloc,api,R_ext/Memory.h,5,15,Rmpfr cli pak processx ps
+R_do_slot_assign,experimental,Rinternals.h,5,14,Matrix Rcpp Rmpfr data.table mgcv
+daxpy,blas-lapack,R_ext/BLAS.h,5,12,fracdiff kernlab mgcv pcaPP slam
+vmaxget,api,R_ext/Memory.h,5,12,cpp11 data.table fansi rlang vctrs
+Rf_classgets,api,Rinternals.h,5,10,S7 bit bit64 fs systemfonts
+Rf_list2,api,Rinternals.h,5,10,lazyeval pak rlang vctrs yaml
+vmaxset,api,R_ext/Memory.h,5,10,cpp11 data.table fansi rlang vctrs
+R_ToplevelExec,api,Rinternals.h,5,9,Rcpp curl openssl pak sys
+Rf_findVarInFrame3,non-api,Rinternals.h,5,9,cpp11 lazyeval magrittr rlang vctrs
+Rf_installChar,api,Rinternals.h,5,9,Rcpp lazyeval purrr rlang vctrs
+Rf_type2str,api,Rinternals.h,5,9,lazyeval pak rlang vctrs yaml
+SHALLOW_DUPLICATE_ATTRIB,api,Rinternals.h,5,9,data.table lazyeval rlang vctrs vroom
+R_do_new_object,experimental,Rdefines.h,5,8,Matrix Rcpp Rmpfr mgcv zoo
+CADDR,api,Rinternals.h,5,7,data.table lazyeval rlang sourcetools vctrs
+R_IsNaN,api,R_ext/Arith.h,5,7,Rcpp checkmate pak rlang yaml
+R_WeakRefKey,api,Rinternals.h,5,7,Rcpp later pak processx rlang
+R_ContinueUnwind,api,Rinternals.h,5,6,Rcpp cpp11 polars systemfonts textshaping
+R_FortranMethodDef,header,R_ext/Rdynload.h,5,5,Bessel DistributionUtils KernSmooth mclust quadprog
+R_removeVarFromFrame,experimental,Rinternals.h,5,5,cpp11 lazyeval magrittr rlang vctrs
+Rf_list3,api,Rinternals.h,5,5,curl lazyeval pak rlang vctrs
+Rf_list4,api,Rinternals.h,5,5,lazyeval pak rlang vctrs yaml
+SET_OBJECT,non-api,Rinternals.h,5,5,Matrix lazyeval rlang slam vctrs
+UserBreak,header,Rembedded.h,5,5,curl lazyeval pak rlang vctrs
+Rf_beta,api,Rmath.h0.in,4,130,Bessel Rcpp rugarch truncnorm
+R_do_slot,experimental,Rinternals.h,4,79,Matrix Rcpp Rmpfr mgcv
+R_altrep_data2,experimental,Rinternals.h,4,60,cli pak vctrs vroom
+BODY,non-api,WRE only,4,50,Rcpp data.table pak yaml
+REAL_RO,api,Rinternals.h,4,50,checkmate data.table vctrs vroom
+Rf_fmax2,api,Rmath.h0.in,4,50,Bessel Rcpp Rmpfr fracdiff
+ddot,blas-lapack,R_ext/BLAS.h,4,41,fracdiff kernlab mgcv pcaPP
+R_altrep_data1,experimental,Rinternals.h,4,36,cli pak vctrs vroom
+Rf_isFactor,api,Rinternals.h,4,36,checkmate data.table reshape2 stringi
+LOGICAL_RO,api,Rinternals.h,4,35,checkmate data.table vctrs vroom
+F77_SUB,header,R_ext/Utils.h,4,29,KernSmooth mvtnorm nlme quadprog
+R_altrep_class_t,header,R_ext/Altrep.h,4,29,cli pak vctrs vroom
+Rf_isVectorList,api,Rinternals.h,4,28,jsonlite pak stringi vctrs
+IS_ASCII,non-api,WRE only,4,27,data.table pak stringi yaml
+dsymv,blas-lapack,R_ext/BLAS.h,4,24,Matrix kernlab mgcv pcaPP
+Rf_imax2,api,Rmath.h0.in,4,22,Bessel Rcpp Rmpfr fracdiff
+Rlog1p,api,Rmath.h0.in,4,22,Rcpp VineCopula mgcv polars
+R_set_altvec_Dataptr_method,header,R_ext/Altrep.h,4,20,cli pak vctrs vroom
+R_new_altrep,header,R_ext/Altrep.h,4,18,cli pak vctrs vroom
+R_set_altrep_Length_method,header,R_ext/Altrep.h,4,18,cli pak vctrs vroom
+Rf_runif,header,Rmath.h0.in,4,18,Rcpp RcppArmadillo rugarch truncnorm
+dtrsv,blas-lapack,R_ext/BLAS.h,4,18,Matrix kernlab mgcv pcaPP
+RAW_RO,api,Rinternals.h,4,17,curl data.table pak vctrs
+VECTOR_PTR_RO,api,Rinternals.h,4,15,Rcpp lazyeval rlang vctrs
+R_set_altrep_Inspect_method,header,R_ext/Altrep.h,4,14,cli pak vctrs vroom
+R_set_altvec_Dataptr_or_null_method,header,R_ext/Altrep.h,4,14,cli pak vctrs vroom
+LISTSXP,header,Rinternals.h,4,13,Rcpp S7 vctrs xts
+R_mapAttrib,experimental,Rinternals.h,4,13,data.table lazyeval rlang vctrs
+R_getVarEx,api,Rinternals.h,4,11,Rcpp S7 magrittr purrr
+Rf_duplicated,experimental,Rinternals.h,4,11,Matrix data.table rlang sets
+Rf_str2type,api,Rinternals.h,4,11,lazyeval purrr rlang vctrs
+dscal,blas-lapack,R_ext/BLAS.h,4,11,Matrix fracdiff kernlab pcaPP
+R_isResizable,experimental,Rinternals.h,4,10,data.table lazyeval rlang vctrs
+CE_LATIN1,header,Rinternals.h,4,9,data.table pdftools stringi utf8
+MAYBE_SHARED,api,Rinternals.h,4,9,data.table slam vctrs xts
+PRENV,non-api,Rinternals.h,4,9,Rcpp lazyeval rlang vctrs
+R_Bracket2Symbol,api,Rinternals.h,4,9,lazyeval purrr rlang vctrs
+R_ExternalPtrProtected,api,Rinternals.h,4,9,Rcpp curl data.table pak
+PRVALUE,non-api,WRE only,4,8,Rcpp lazyeval rlang vctrs
+R_USE_C99_IN_CXX,header,R_ext/Print.h,4,8,highs pak pcaPP ps
+dswap,blas-lapack,R_ext/BLAS.h,4,8,Matrix data.table mgcv pcaPP
+R_SetExternalPtrProtected,api,Rinternals.h,4,7,Rcpp curl openssl pak
+Rf_asCharacterFactor,api,Rinternals.h,4,7,Matrix data.table reshape2 vctrs
+SET_PRCODE,non-api,WRE only,4,7,lazyeval magrittr rlang vctrs
+SET_PRENV,non-api,WRE only,4,7,lazyeval magrittr rlang vctrs
+SET_PRVALUE,non-api,WRE only,4,7,lazyeval magrittr rlang vctrs
+S_alloc,api,R_ext/Memory.h,4,6,chron cli data.table pak
+LEVELS,non-api,WRE only,4,5,data.table rlang stringi vctrs
+R_do_MAKE_CLASS,experimental,Rdefines.h,4,5,Matrix Rcpp Rmpfr zoo
+Rf_ScalarComplex,api,Rinternals.h,4,5,lazyeval purrr rlang vctrs
+ENCLOS,non-api,WRE only,4,4,Rcpp lazyeval rlang vctrs
+R_BindingIsActive,experimental,Rinternals.h,4,4,Rcpp lazyeval rlang vctrs
+R_BindingTypeUnbound,experimental,Rinternals.h,4,4,Rcpp lazyeval rlang vctrs
+R_ExpandFileName,api,R_ext/Utils.h,4,4,curl data.table fs pak
+R_GetBindingType,experimental,Rinternals.h,4,4,Rcpp lazyeval rlang vctrs
+R_MakeDelayedBinding,experimental,Rinternals.h,4,4,lazyeval magrittr rlang vctrs
+R_ParentEnv,api,Rinternals.h,4,4,Rcpp lazyeval rlang vctrs
+R_lsInternal3,experimental,Rinternals.h,4,4,Rcpp lazyeval rlang vctrs
+Rf_charIsASCII,experimental,Rinternals.h,4,4,data.table rlang stringi vctrs
+Rf_lang6,api,Rinternals.h,4,4,Rcpp curl pak purrr
+Rf_list5,api,Rinternals.h,4,4,lazyeval purrr rlang vctrs
+STRING_PTR,non-api,Rinternals.h,4,4,Rcpp cli data.table pak
+UNSET_S4_OBJECT,non-api,Rinternals.h,4,4,Matrix lazyeval rlang vctrs
+Rf_isNewList,api,Rinternals.h,3,64,checkmate data.table git2r
+dgemm,blas-lapack,R_ext/BLAS.h,3,42,Matrix mgcv pcaPP
+Rf_fmin2,api,Rmath.h0.in,3,37,Bessel Rcpp fracdiff
+F0,header,R_ext/stats_package.h,3,34,digest pak zip
+COMPLEX_RO,api,Rinternals.h,3,24,checkmate data.table vctrs
+IS_UTF8,non-api,WRE only,3,19,data.table fansi stringi
+S4SXP,header,Rinternals.h,3,18,Matrix Rcpp purrr
+R_PRIdXLEN_T,header,Rinternals.h,3,17,cpp11 vctrs vroom
+R_PromiseExpr,non-api,Rinternals.h,3,17,lazyeval rlang vctrs
+OBJECT,non-api,Rinternals.h,3,14,RcppSimdJson reshape2 slam
+CONS,api,Rinternals.h,3,13,Rcpp pak slam
+LOGICAL_ELT,api,Rinternals.h,3,13,cpp11 gert purrr
+Rf_isDataFrame,api,Rinternals.h,3,13,checkmate data.table odbc
+R_CheckStack,api,R_ext/Utils.h,3,12,Matrix randtoolbox rngWELL
+Rf_lgammafn,api,Rmath.h0.in,3,12,Rcpp rmgarch rugarch
+dsyrk,blas-lapack,R_ext/BLAS.h,3,12,Matrix mgcv pcaPP
+norm_rand,api,Rmath.h0.in,3,12,Rcpp pcaPP rugarch
+Rf_imin2,api,Rmath.h0.in,3,11,Bessel Rcpp fracdiff
+INTEGER_ELT,api,Rinternals.h,3,10,cpp11 purrr vroom
+Rf_bessel_k,api,Rmath.h0.in,3,10,Rcpp rmgarch rugarch
+Rf_rnorm,header,Rmath.h0.in,3,10,Rcpp rugarch truncnorm
+dtrsm,blas-lapack,R_ext/BLAS.h,3,10,Matrix mgcv pcaPP
+R_ReadConnection,experimental,R_ext/Connections.h,3,9,readr vroom xml2
+Rf_isPairList,api,Rinternals.h,3,9,curl data.table pak
+dnrm2,blas-lapack,R_ext/BLAS.h,3,9,Matrix kernlab pcaPP
+R_GetConnection,experimental,R_ext/Connections.h,3,8,readr vroom xml2
+R_make_altinteger_class,header,R_ext/Altrep.h,3,8,cli pak vroom
+R_BaseNamespace,api,Rinternals.h,3,7,Rcpp sourcetools vctrs
+R_IsNamespaceEnv,experimental,Rinternals.h,3,7,lazyeval rlang vctrs
+R_WriteConnection,experimental,R_ext/Connections.h,3,7,readr vroom xml2
+Rf_any_duplicated,experimental,Rinternals.h,3,7,checkmate data.table rlang
+Rf_logspace_sub,api,Rmath.h0.in,3,7,Matrix Rcpp truncnorm
+dtrmm,blas-lapack,R_ext/BLAS.h,3,7,Matrix mgcv pcaPP
+M_LN2,header,Rmath.h0.in,3,6,Rcpp Rmpfr gmp
+R_set_altinteger_Elt_method,header,R_ext/Altrep.h,3,6,cli pak vroom
+Rf_isSymbol,api,Rinternals.h,3,6,data.table lazyeval stringi
+R_ALPHA,header,R_ext/GraphicsDevice.h,3,5,farver ragg systemfonts
+R_BLUE,header,R_ext/GraphicsDevice.h,3,5,farver ragg systemfonts
+R_DotsExist,experimental,Rinternals.h,3,5,backports lazyeval rlang
+R_GREEN,header,R_ext/GraphicsDevice.h,3,5,farver ragg systemfonts
+R_NamespaceRegistry,non-api,WRE only,3,5,Rcpp cpp11 rlang
+R_RED,header,R_ext/GraphicsDevice.h,3,5,farver ragg systemfonts
+CAAR,api,Rinternals.h,3,4,lazyeval rlang vctrs
+CDAR,api,Rinternals.h,3,4,lazyeval rlang vctrs
+DOTSXP,header,Rinternals.h,3,4,Rcpp backports vctrs
+R_DotsLength,experimental,Rinternals.h,3,4,backports lazyeval rlang
+Rf_rexp,header,Rmath.h0.in,3,4,Rcpp rmgarch truncnorm
+dsymm,blas-lapack,R_ext/BLAS.h,3,4,Matrix mgcv pcaPP
+INTEGER_GET_REGION,experimental,Rinternals.h,3,3,cli cpp11 pak
+R_ActiveBindingFunction,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_BindingTypeActive,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_BindingTypeDelayed,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_BindingTypeForced,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_BindingTypeMissing,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_BindingTypeValue,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_BraceSymbol,api,Rinternals.h,3,3,lazyeval rlang vctrs
+R_BracketSymbol,api,Rinternals.h,3,3,lazyeval rlang vctrs
+R_ClosureExpr,api,Rinternals.h,3,3,lazyeval rlang vctrs
+R_DelayedBindingEnvironment,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_DelayedBindingExpression,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_DotsElt,experimental,Rinternals.h,3,3,backports lazyeval rlang
+R_DotsNames,experimental,Rinternals.h,3,3,backports lazyeval rlang
+R_DoubleColonSymbol,api,Rinternals.h,3,3,lazyeval rlang vctrs
+R_ForcedBindingExpression,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_MakeActiveBinding,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_MakeForcedBinding,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_MakeMissingBinding,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_TripleColonSymbol,api,Rinternals.h,3,3,lazyeval rlang vctrs
+R_envSymbols,experimental,Rinternals.h,3,3,lazyeval rlang vctrs
+R_set_altrep_Duplicate_method,header,R_ext/Altrep.h,3,3,cli pak vroom
+Rf_nthcdr,api,Rinternals.h,3,3,Rcpp backports xts
+Rf_reEnc,api,Rinternals.h,3,3,pak rlang yaml
+Rf_ucstoutf8,header,R_ext/GraphicsDevice.h,3,3,ragg readxl rlang
+Rvprintf,api,R_ext/Print.h,3,3,Matrix highs pcaPP
+dtpmv,blas-lapack,R_ext/BLAS.h,3,3,Matrix mvtnorm pcaPP
+GET_SLOT,header,Rdefines.h,2,912,Matrix zoo
+SET_SLOT,header,Rdefines.h,2,472,Matrix zoo
+Memcpy,header,R_ext/RS.h,2,54,Matrix nlme
+Int32,header,R_ext/Random.h,2,53,Rblpapi polars
+AM,header,R_ext/stats_package.h,2,52,mgcv stringi
+dgemv,blas-lapack,R_ext/BLAS.h,2,42,Matrix mgcv
+Rf_gammafn,api,Rmath.h0.in,2,36,Rcpp rugarch
+Rf_rgamma,header,Rmath.h0.in,2,16,Rcpp rugarch
+AS_INTEGER,header,Rdefines.h,2,15,gmp nloptr
+dcopy,blas-lapack,R_ext/BLAS.h,2,15,fracdiff pcaPP
+expm1,api,WRE only,2,15,Rcpp VineCopula
+R_set_altrep_data2,experimental,Rinternals.h,2,13,vctrs vroom
+Rconnection,header,Rinternals.h,2,12,curl pak
+NORET,header,Rinterface.h,2,11,Rcpp data.table
+Rf_nlevels,experimental,Rinternals.h,2,11,Matrix data.table
+R_set_altvec_Extract_subset_method,header,R_ext/Altrep.h,2,10,vctrs vroom
+Rf_revsort,api,R_ext/Utils.h,2,9,Rcpp mgcv
+R_Realloc,api,R_ext/RS.h,2,8,Matrix data.table
+R_qsort_int_I,api,R_ext/Utils.h,2,8,ff slam
+REAL_ELT,api,Rinternals.h,2,7,cpp11 vroom
+Rf_allocArray,api,Rinternals.h,2,7,slam vctrs
+USING_R,header,R.h,2,7,FNN Rcpp
+Rf_digamma,api,Rmath.h0.in,2,6,Rcpp mgcv
+Rf_fsign,api,Rmath.h0.in,2,6,Bessel Rcpp
+Rf_trigamma,api,Rmath.h0.in,2,6,Rcpp mgcv
+SET_LOGICAL_ELT,api,Rinternals.h,2,6,cpp11 gert
+WEAKREFSXP,header,Rinternals.h,2,6,Rcpp rlang
+exp_rand,api,Rmath.h0.in,2,6,Rcpp pcaPP
+M_1_SQRT_2PI,header,Rmath.h0.in,2,5,Rcpp truncnorm
+R_CheckStack2,api,R_ext/Utils.h,2,5,rlang vctrs
+R_outpstream_t,header,Rinternals.h,2,5,digest parallelly
+dgetrf,blas-lapack,R_ext/Lapack.h,2,5,Matrix mgcv
+dgetri,blas-lapack,R_ext/Lapack.h,2,5,Matrix mgcv
+dqrdc2,api,R_ext/Applic.h,2,5,MASS nlme
+BEGIN_SUSPEND_INTERRUPTS,header,R_ext/GraphicsDevice.h,2,4,later ragg
+CE_ANY,header,Rinternals.h,2,4,utf8 vroom
+R_CONNECTIONS_VERSION,header,R_ext/Connections.h,2,4,curl pak
+R_ClosureBody,api,Rinternals.h,2,4,pak yaml
+R_RGBA,header,R_ext/GraphicsDevice.h,2,4,farver systemfonts
+R_duplicateAsResizable,experimental,Rinternals.h,2,4,data.table vroom
+R_getClassDef,experimental,Rinternals.h,2,4,Rcpp mgcv
+R_has_slot,experimental,Rinternals.h,2,4,Rcpp purrr
+R_make_altstring_class,header,R_ext/Altrep.h,2,4,vctrs vroom
+R_rsort,api,R_ext/Utils.h,2,4,MASS pcaPP
+R_set_altstring_Elt_method,header,R_ext/Altrep.h,2,4,vctrs vroom
+Rf_allocList,api,Rinternals.h,2,4,data.table xts
+Rf_isLanguage,api,Rinternals.h,2,4,data.table lazyeval
+Rf_pgamma,header,Rmath.h0.in,2,4,Rcpp rugarch
+Rf_qgamma,header,Rmath.h0.in,2,4,Rcpp rugarch
+dgesvd,blas-lapack,R_ext/Lapack.h,2,4,mgcv pcaPP
+dpstrf,blas-lapack,R_ext/Lapack.h,2,4,Matrix mgcv
+dqrsl,blas-lapack,R_ext/Linpack.h,2,4,MASS nlme
+optif9,experimental,R_ext/Applic.h,2,4,nlme pcaPP
+END_SUSPEND_INTERRUPTS,header,R_ext/GraphicsDevice.h,2,3,later ragg
+R_LockBinding,experimental,Rinternals.h,2,3,Rcpp data.table
+Rf_asS4,experimental,Rinternals.h,2,3,tibble vctrs
+Rf_dlnorm,header,Rmath.h0.in,2,3,Rcpp rugarch
+Rf_installTrChar,api,Rinternals.h,2,3,S7 data.table
+Rf_isList,api,Rinternals.h,2,3,data.table kernlab
+Rf_pt,header,Rmath.h0.in,2,3,Rcpp rugarch
+Rf_qt,header,Rmath.h0.in,2,3,Rcpp rugarch
+Rf_rbinom,header,Rmath.h0.in,2,3,Rcpp RcppArmadillo
+Rf_warningcall_immediate,api,Rinternals.h,2,3,gert later
+dger,blas-lapack,R_ext/BLAS.h,2,3,Matrix pcaPP
+dlarfg,blas-lapack,R_ext/Lapack.h,2,3,Matrix mgcv
+dpptrf,blas-lapack,R_ext/Lapack.h,2,3,Matrix mvtnorm
+dtptri,blas-lapack,R_ext/Lapack.h,2,3,Matrix mvtnorm
+pGEDevDesc,header,R_ext/GraphicsEngine.h,2,3,ragg systemfonts
+rsort_with_index,api,R_ext/Utils.h,2,3,RcppDE pcaPP
+BCODESXP,header,Rinternals.h,2,2,Rcpp vctrs
+DATAPTR,non-api,Rinternals.h,2,2,data.table vroom
+DATAPTR_OR_NULL,experimental,Rinternals.h,2,2,cli pak
+R_DotDelayedEnvironment,experimental,Rinternals.h,2,2,lazyeval rlang
+R_DotDelayedExpression,experimental,Rinternals.h,2,2,lazyeval rlang
+R_DotForcedExpression,experimental,Rinternals.h,2,2,lazyeval rlang
+R_EnvironmentIsLocked,experimental,Rinternals.h,2,2,Rcpp rlang
+R_GetDotType,experimental,Rinternals.h,2,2,lazyeval rlang
+R_InitOutPStream,experimental,Rinternals.h,2,2,digest parallelly
+R_MakeUnwindCont,api,Rinternals.h,2,2,Rcpp cpp11
+R_MakeWeakRef,api,Rinternals.h,2,2,later rlang
+R_MakeWeakRefC,api,Rinternals.h,2,2,pak processx
+R_RGB,header,R_ext/GraphicsDevice.h,2,2,farver ragg
+R_Serialize,experimental,Rinternals.h,2,2,digest parallelly
+R_UnwindProtect,api,Rinternals.h,2,2,Rcpp cpp11
+R_WeakRefValue,api,Rinternals.h,2,2,Rcpp rlang
+R_getRegisteredNamespace,experimental,Rinternals.h,2,2,Rcpp cpp11
+R_make_altlogical_class,header,R_ext/Altrep.h,2,2,cli pak
+R_new_custom_connection,experimental,R_ext/Connections.h,2,2,curl pak
+R_pstream_binary_format,header,Rinternals.h,2,2,digest parallelly
+R_pstream_data_t,header,Rinternals.h,2,2,digest parallelly
+R_set_altinteger_Get_region_method,header,R_ext/Altrep.h,2,2,cli pak
+R_set_altinteger_Is_sorted_method,header,R_ext/Altrep.h,2,2,cli pak
+R_set_altinteger_Max_method,header,R_ext/Altrep.h,2,2,cli pak
+R_set_altinteger_Min_method,header,R_ext/Altrep.h,2,2,cli pak
+R_set_altinteger_Sum_method,header,R_ext/Altrep.h,2,2,cli pak
+R_set_altlogical_Elt_method,header,R_ext/Altrep.h,2,2,cli pak
+R_tryEvalSilent,api,Rinternals.h,2,2,gert xml2
+Rf_GetOptionWidth,api,Rinternals.h,2,2,progress readr
+Rf_StringBlank,experimental,Rinternals.h,2,2,cachem fastmap
+Rf_isArray,api,Rinternals.h,2,2,checkmate data.table
+Rf_isFrame,non-api,WRE only,2,2,checkmate odbc
+Rf_log1pmx,api,Rmath.h0.in,2,2,Rcpp mgcv
+Rf_logspace_add,api,Rmath.h0.in,2,2,Matrix Rcpp
+Rf_namesgets,api,Rinternals.h,2,2,Rcpp farver
+Rf_rchisq,header,Rmath.h0.in,2,2,Rcpp rmgarch
+Rf_rt,header,Rmath.h0.in,2,2,Rcpp rugarch
+SET_NAMES,header,Rdefines.h,2,2,pak ps
+SORTED_INCR,header,Rinternals.h,2,2,cli pak
+dlarf,blas-lapack,R_ext/Lapack.h,2,2,Matrix mgcv
+drotg,blas-lapack,R_ext/BLAS.h,2,2,Matrix pcaPP
+dtpsv,blas-lapack,R_ext/BLAS.h,2,2,mvtnorm pcaPP
+vmmin,api,R_ext/Applic.h,2,2,MASS pcaPP
+R_check_class_etc,experimental,Rinternals.h,1,108,Matrix
+R_Busy,embedding,Rinterface.h,1,84,bit64
+FCLEN,blas-lapack,R_ext/BLAS.h,1,82,Matrix
+Rf_pmatch,experimental,Rinternals.h,1,65,Matrix
+pDevDesc,header,R_ext/GraphicsDevice.h,1,47,ragg
+pGEcontext,header,R_ext/GraphicsEngine.h,1,26,ragg
+R_GE_fontVar,header,R_ext/GraphicsEngine.h,1,21,ragg
+R_altrep_inherits,header,R_ext/Altrep.h,1,18,vroom
+R_GE_lineend,header,R_ext/GraphicsEngine.h,1,17,ragg
+M_LOG10_2,header,Rmath.h0.in,1,15,Bessel
+R_GE_linejoin,header,R_ext/GraphicsEngine.h,1,13,ragg
+DATAPTR_RW,experimental,R_ext/Altrep.h,1,11,vroom
+R_maxLength,experimental,Rinternals.h,1,10,data.table
+R_tryCatchError,api,Rinternals.h,1,9,stringi
+Rf_RGBpar,header,R_ext/GraphicsEngine.h,1,9,ragg
+dtrsl,blas-lapack,R_ext/Linpack.h,1,8,nlme
+LTY_BLANK,header,R_ext/GraphicsEngine.h,1,7,ragg
+R_OPAQUE,header,R_ext/GraphicsDevice.h,1,7,ragg
+R_InputHandlers,embedding,WRE only,1,6,later
+R_make_altreal_class,header,R_ext/Altrep.h,1,6,vroom
+R_set_altreal_Elt_method,header,R_ext/Altrep.h,1,6,vroom
+Rf_qnorm5,header,Rmath.h0.in,1,6,Rcpp
+Rf_rpois,header,Rmath.h0.in,1,6,Rcpp
+NEW_LIST,header,Rdefines.h,1,5,gmp
+R_interrupts_suspended,header,R_ext/GraphicsDevice.h,1,5,later
+Rf_fround,api,Rmath.h0.in,1,5,Rcpp
+Rf_unprotect_ptr,api,Rinternals.h,1,5,sets
+dsysv,blas-lapack,R_ext/Lapack.h,1,5,mgcv
+AI,header,R_ext/stats_package.h,1,4,pak
+GET_DIM,header,Rdefines.h,1,4,sets
+GE_INCHES,header,R_ext/GraphicsEngine.h,1,4,systemfonts
+M_LN_SQRT_2PI,header,Rmath.h0.in,1,4,Rcpp
+Rf_dcauchy,header,Rmath.h0.in,1,4,Rcpp
+Rf_dpois,header,Rmath.h0.in,1,4,Rcpp
+Rf_isOrdered,api,Rinternals.h,1,4,data.table
+Rf_pcauchy,header,Rmath.h0.in,1,4,Rcpp
+Rf_qcauchy,header,Rmath.h0.in,1,4,Rcpp
+Rf_rPsort,api,R_ext/Utils.h,1,4,MASS
+error_return,header,Rinternals.h,1,4,Matrix
+removeInputHandler,embedding,R_ext/eventloop.h,1,4,later
+zgetri,blas-lapack,R_ext/Lapack.h,1,4,Matrix
+GE_ROUND_JOIN,header,R_ext/GraphicsEngine.h,1,3,ragg
+HC,header,R_ext/stats_package.h,1,3,Matrix
+KNOWN_INCR,header,Rinternals.h,1,3,checkmate
+R_GE_compositeDest,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_compositeDestAtop,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_compositeDestIn,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_compositeDestOver,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_compositeIn,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_compositeOut,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_compositeSource,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_evenOddRule,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_patternExtendNone,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_patternExtendPad,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_patternExtendReflect,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_GE_patternExtendRepeat,header,R_ext/GraphicsEngine.h,1,3,ragg
+R_Outputfile,non-api,WRE only,1,3,Rmpfr
+R_chk_realloc,experimental,R_ext/RS.h,1,3,mgcv
+Rf_dunif,header,Rmath.h0.in,1,3,Rcpp
+Rf_pnorm_both,header,Rmath.h0.in,1,3,Rcpp
+Rf_punif,header,Rmath.h0.in,1,3,Rcpp
+Rf_utf8Toutf8NoPUA,header,R_ext/GraphicsDevice.h,1,3,ragg
+UNKNOWN_SORTEDNESS,header,Rinternals.h,1,3,checkmate
+dgetrs,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+dlange,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+dlansp,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+dlansy,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+dpotrf,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+dsytrf,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+dtrcon,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+interv,api,R_ext/Utils.h,1,3,mgcv
+set_seed,header,Rmath.h0.in,1,3,RcppArmadillo
+zlansp,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+zlansy,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+zpotrf,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+zsytrf,blas-lapack,R_ext/Lapack.h,1,3,Matrix
+ALTREP_CLASS,experimental,Rinternals.h,1,2,vroom
+DUPLICATE_ATTRIB,api,Rinternals.h,1,2,data.table
+DevDesc,header,R_ext/GraphicsDevice.h,1,2,ragg
+GEUnit,header,R_ext/GraphicsEngine.h,1,2,systemfonts
+GE_CM,header,R_ext/GraphicsEngine.h,1,2,systemfonts
+GE_DEVICE,header,R_ext/GraphicsEngine.h,1,2,systemfonts
+GE_NDC,header,R_ext/GraphicsEngine.h,1,2,systemfonts
+GEcurrentDevice,header,R_ext/GraphicsEngine.h,1,2,systemfonts
+INTEGER_NO_NA,experimental,Rinternals.h,1,2,checkmate
+LOGICAL_NO_NA,experimental,Rinternals.h,1,2,checkmate
+LTY_SOLID,header,R_ext/GraphicsEngine.h,1,2,ragg
+M_PI_2,header,Rmath.h0.in,1,2,Rcpp
+REAL_NO_NA,experimental,Rinternals.h,1,2,checkmate
+R_BLAS_H,blas-lapack,R_ext/BLAS.h,1,2,slam
+R_DollarSymbol,api,Rinternals.h,1,2,Rcpp
+R_GE_compositeAdd,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeAtop,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeClear,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeColorBurn,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeColorDodge,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeDarken,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeDestOut,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeDifference,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeExclusion,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeHardLight,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeLighten,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeMultiply,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeOver,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeOverlay,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeSaturate,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeScreen,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeSoftLight,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_compositeXor,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_linearGradientPattern,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_luminanceMask,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_radialGradientPattern,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_tilingPattern,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_tilingPatternHeight,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_GE_tilingPatternWidth,header,R_ext/GraphicsEngine.h,1,2,ragg
+R_SetExternalPtrTag,api,Rinternals.h,1,2,Rcpp
+R_TRANSPARENT,header,R_ext/GraphicsDevice.h,1,2,ragg
+R_altrep_class_name,experimental,Rinternals.h,1,2,vroom
+R_altrep_class_package,experimental,Rinternals.h,1,2,vroom
+R_chk_calloc,experimental,R_ext/RS.h,1,2,mgcv
+R_forceAndCall,experimental,Rinternals.h,1,2,purrr
+R_interrupts_pending,header,R_ext/GraphicsDevice.h,1,2,later
+R_pow,api,Rmath.h0.in,1,2,Rcpp
+R_pow_di,api,Rmath.h0.in,1,2,randtoolbox
+R_pstream_format_t,header,Rinternals.h,1,2,digest
+Rcpp_Version,header,Rmath.h0.in,1,2,Rcpp
+Rf_choose,api,Rmath.h0.in,1,2,Rcpp
+Rf_dbeta,header,Rmath.h0.in,1,2,Rcpp
+Rf_dbinom,header,Rmath.h0.in,1,2,Rcpp
+Rf_dchisq,header,Rmath.h0.in,1,2,Rcpp
+Rf_dexp,header,Rmath.h0.in,1,2,Rcpp
+Rf_df,header,Rmath.h0.in,1,2,Rcpp
+Rf_dgamma,header,Rmath.h0.in,1,2,Rcpp
+Rf_dgeom,header,Rmath.h0.in,1,2,Rcpp
+Rf_dhyper,header,Rmath.h0.in,1,2,Rcpp
+Rf_dlogis,header,Rmath.h0.in,1,2,Rcpp
+Rf_dnbeta,header,Rmath.h0.in,1,2,Rcpp
+Rf_dnbinom,header,Rmath.h0.in,1,2,Rcpp
+Rf_dnchisq,header,Rmath.h0.in,1,2,Rcpp
+Rf_dnf,header,Rmath.h0.in,1,2,Rcpp
+Rf_dnorm4,header,Rmath.h0.in,1,2,Rcpp
+Rf_dnt,header,Rmath.h0.in,1,2,Rcpp
+Rf_dt,header,Rmath.h0.in,1,2,Rcpp
+Rf_dweibull,header,Rmath.h0.in,1,2,Rcpp
+Rf_fprec,api,Rmath.h0.in,1,2,Rcpp
+Rf_ftrunc,api,Rmath.h0.in,1,2,Rcpp
+Rf_isComplex,api,Rdefines.h,1,2,checkmate
+Rf_lbeta,api,Rmath.h0.in,1,2,Rcpp
+Rf_lchoose,api,Rmath.h0.in,1,2,Rcpp
+Rf_pbeta,header,Rmath.h0.in,1,2,Rcpp
+Rf_pbinom,header,Rmath.h0.in,1,2,Rcpp
+Rf_pchisq,header,Rmath.h0.in,1,2,Rcpp
+Rf_pentagamma,api,Rmath.h0.in,1,2,Rcpp
+Rf_pexp,header,Rmath.h0.in,1,2,Rcpp
+Rf_pf,header,Rmath.h0.in,1,2,Rcpp
+Rf_pgeom,header,Rmath.h0.in,1,2,Rcpp
+Rf_phyper,header,Rmath.h0.in,1,2,Rcpp
+Rf_plnorm,header,Rmath.h0.in,1,2,Rcpp
+Rf_plogis,header,Rmath.h0.in,1,2,Rcpp
+Rf_pnbeta,header,Rmath.h0.in,1,2,Rcpp
+Rf_pnbinom,header,Rmath.h0.in,1,2,Rcpp
+Rf_pnchisq,header,Rmath.h0.in,1,2,Rcpp
+Rf_pnf,header,Rmath.h0.in,1,2,Rcpp
+Rf_pnorm5,header,Rmath.h0.in,1,2,Rcpp
+Rf_pnt,header,Rmath.h0.in,1,2,Rcpp
+Rf_ppois,header,Rmath.h0.in,1,2,Rcpp
+Rf_psigamma,api,Rmath.h0.in,1,2,Rcpp
+Rf_pweibull,header,Rmath.h0.in,1,2,Rcpp
+Rf_qbeta,header,Rmath.h0.in,1,2,Rcpp
+Rf_qbinom,header,Rmath.h0.in,1,2,Rcpp
+Rf_qchisq,header,Rmath.h0.in,1,2,Rcpp
+Rf_qexp,header,Rmath.h0.in,1,2,Rcpp
+Rf_qf,header,Rmath.h0.in,1,2,Rcpp
+Rf_qgeom,header,Rmath.h0.in,1,2,Rcpp
+Rf_qhyper,header,Rmath.h0.in,1,2,Rcpp
+Rf_qlnorm,header,Rmath.h0.in,1,2,Rcpp
+Rf_qlogis,header,Rmath.h0.in,1,2,Rcpp
+Rf_qnbeta,header,Rmath.h0.in,1,2,Rcpp
+Rf_qnbinom,header,Rmath.h0.in,1,2,Rcpp
+Rf_qnchisq,header,Rmath.h0.in,1,2,Rcpp
+Rf_qnf,header,Rmath.h0.in,1,2,Rcpp
+Rf_qnt,header,Rmath.h0.in,1,2,Rcpp
+Rf_qpois,header,Rmath.h0.in,1,2,Rcpp
+Rf_qunif,header,Rmath.h0.in,1,2,Rcpp
+Rf_qweibull,header,Rmath.h0.in,1,2,Rcpp
+Rf_rbeta,header,Rmath.h0.in,1,2,Rcpp
+Rf_rhyper,header,Rmath.h0.in,1,2,Rcpp
+Rf_rsignrank,header,Rmath.h0.in,1,2,Rcpp
+Rf_rwilcox,header,Rmath.h0.in,1,2,Rcpp
+Rf_tetragamma,api,Rmath.h0.in,1,2,Rcpp
+SET_LENGTH,header,Rdefines.h,1,2,bit64
+STRING_NO_NA,experimental,Rinternals.h,1,2,checkmate
+UNIMPLEMENTED,header,R_ext/Error.h,1,2,stringi
+addInputHandler,embedding,R_ext/eventloop.h,1,2,later
+dgebal,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dgees,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dgeev,blas-lapack,R_ext/Lapack.h,1,2,pcaPP
+dgels,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dgeqp3,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dgeqrf,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dgesdd,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dgesv,blas-lapack,R_ext/Lapack.h,1,2,pcaPP
+dlacpy,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dormqr,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dormtr,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dpotf2,blas-lapack,R_ext/Lapack.h,1,2,kernlab
+dpotri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dpotrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dpptri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dpptrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dsptrf,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dsptri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dsptrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dstedc,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dsyevd,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dsyevr,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dsytrd,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dsytri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dsytrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dtptrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dtrti2,blas-lapack,R_ext/Lapack.h,1,2,mgcv
+dtrtri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+dtrtrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+user_unif_init,header,R_ext/Random.h,1,2,randtoolbox
+user_unif_rand,header,R_ext/Random.h,1,2,randtoolbox
+zgemm,blas-lapack,R_ext/BLAS.h,1,2,Matrix
+zgetrf,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zgetrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zlacpy,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zlange,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zpotri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zpotrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zpptrf,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zpptri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zpptrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zpstrf,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zsptrf,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zsptri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zsptrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zsytri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+zsytrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+ztptri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+ztptrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+ztrtri,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+ztrtrs,blas-lapack,R_ext/Lapack.h,1,2,Matrix
+ANYSXP,header,Rinternals.h,1,1,Rcpp
+CDDDR,api,Rinternals.h,1,1,data.table
+CE_SYMBOL,header,Rinternals.h,1,1,utf8
+COMPLEX_ELT,api,Rinternals.h,1,1,purrr
+ENABLE_LEGACY_NONAPI_FUNS,header,Rinternals.h,1,1,S7
+GEStrMetric,header,R_ext/GraphicsEngine.h,1,1,systemfonts
+GEStrWidth,header,R_ext/GraphicsEngine.h,1,1,systemfonts
+GE_BEVEL_JOIN,header,R_ext/GraphicsEngine.h,1,1,ragg
+GE_BUTT_CAP,header,R_ext/GraphicsEngine.h,1,1,ragg
+GE_MITRE_JOIN,header,R_ext/GraphicsEngine.h,1,1,ragg
+GE_ROUND_CAP,header,R_ext/GraphicsEngine.h,1,1,ragg
+GE_SQUARE_CAP,header,R_ext/GraphicsEngine.h,1,1,ragg
+GEaddDevice2,header,R_ext/GraphicsEngine.h,1,1,ragg
+GEcreateDevDesc,header,R_ext/GraphicsEngine.h,1,1,ragg
+GEinitDisplayList,header,R_ext/GraphicsEngine.h,1,1,ragg
+HAVE_EXPM1,header,Rmath.h0.in,1,1,Rcpp
+HAVE_HYPOT,header,Rmath.h0.in,1,1,Rcpp
+HAVE_LOG1P,header,Rmath.h0.in,1,1,Rcpp
+INTEGER_IS_SORTED,experimental,Rinternals.h,1,1,checkmate
+INTEGER_OR_NULL,experimental,Rinternals.h,1,1,cpp11
+IS_RAW,header,Rdefines.h,1,1,digest
+IS_S4_OBJECT,non-api,Rinternals.h,1,1,slam
+LOGICAL_GET_REGION,experimental,Rinternals.h,1,1,cpp11
+LOGICAL_OR_NULL,experimental,Rinternals.h,1,1,cpp11
+M_2PI,header,Rmath.h0.in,1,1,RcppDE
+NEW_CHARACTER,header,Rdefines.h,1,1,xfun
+NEW_RAW,header,Rdefines.h,1,1,xfun
+OBJSXP,header,Rinternals.h,1,1,Rcpp
+PRCODE,non-api,WRE only,1,1,Rcpp
+RAW_ELT,api,Rinternals.h,1,1,cpp11
+RAW_GET_REGION,experimental,Rinternals.h,1,1,cpp11
+RAW_OR_NULL,experimental,Rinternals.h,1,1,cpp11
+RAW_POINTER,header,Rdefines.h,1,1,xfun
+REAL_GET_REGION,experimental,Rinternals.h,1,1,cpp11
+REAL_IS_SORTED,experimental,Rinternals.h,1,1,checkmate
+REAL_OR_NULL,experimental,Rinternals.h,1,1,cpp11
+R_BindingIsLocked,experimental,Rinternals.h,1,1,Rcpp
+R_BindingType_t,header,Rinternals.h,1,1,Rcpp
+R_CheckDeviceAvailable,header,R_ext/GraphicsDevice.h,1,1,ragg
+R_DEFINES_H,header,Rdefines.h,1,1,Matrix
+R_GE_alphaMask,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_capability_clippingPaths,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_capability_compositing,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_capability_glyphs,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_capability_masks,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_capability_paths,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_capability_patterns,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_capability_transformations,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_checkVersionOrDie,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_clipPathFillRule,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_getVersion,header,R_ext/GraphicsEngine.h,1,1,pak
+R_GE_glyphFontFile,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_glyphFontIndex,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientColour,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientExtend,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientNumStops,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientStop,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientX1,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientX2,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientY1,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_linearGradientY2,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_maskType,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_patternType,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientCX1,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientCX2,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientCY1,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientCY2,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientColour,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientExtend,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientNumStops,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientR1,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientR2,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_radialGradientStop,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_tilingPatternExtend,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_tilingPatternFunction,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_tilingPatternX,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GE_tilingPatternY,header,R_ext/GraphicsEngine.h,1,1,ragg
+R_GlobalContext,non-api,WRE only,1,1,later
+R_IsPackageEnv,experimental,Rinternals.h,1,1,rlang
+R_LockEnvironment,experimental,Rinternals.h,1,1,Rcpp
+R_NameSymbol,api,Rinternals.h,1,1,S7
+R_R_H,header,R.h,1,1,Rcpp
+R_RegisterCFinalizer,api,Rinternals.h,1,1,data.table
+R_TRANWHITE,header,R_ext/GraphicsDevice.h,1,1,ragg
+R_USE_PROTOTYPES,header,R_ext/GraphicsDevice.h,1,1,ragg
+R_chk_free,experimental,R_ext/RS.h,1,1,mgcv
+R_getAttribCount,experimental,Rinternals.h,1,1,checkmate
+R_getAttribNames,experimental,Rinternals.h,1,1,Rcpp
+R_hasAttrib,experimental,Rinternals.h,1,1,Rcpp
+R_isort,api,R_ext/Utils.h,1,1,data.table
+R_nrow,experimental,Rinternals.h,1,1,Rcpp
+R_qsort,api,R_ext/Utils.h,1,1,pcaPP
+R_set_altstring_Set_elt_method,header,R_ext/Altrep.h,1,1,vctrs
+R_strtod,api,R_ext/Utils.h,1,1,openxlsx
+R_unLockBinding,experimental,Rinternals.h,1,1,Rcpp
+R_unif_index,api,Rmath.h0.in,1,1,rbibutils
+Rf_allocS4Object,experimental,Rinternals.h,1,1,S7
+Rf_any_duplicated3,experimental,Rinternals.h,1,1,rlang
+Rf_asComplex,api,Rinternals.h,1,1,ff
+Rf_bessel_i,api,Rmath.h0.in,1,1,Rcpp
+Rf_bessel_i_ex,header,Rmath.h0.in,1,1,Rcpp
+Rf_bessel_j,api,Rmath.h0.in,1,1,Rcpp
+Rf_bessel_j_ex,header,Rmath.h0.in,1,1,Rcpp
+Rf_bessel_k_ex,header,Rmath.h0.in,1,1,Rcpp
+Rf_bessel_y,api,Rmath.h0.in,1,1,Rcpp
+Rf_bessel_y_ex,header,Rmath.h0.in,1,1,Rcpp
+Rf_copyMatrix,api,Rinternals.h,1,1,Matrix
+Rf_dimnamesgets,api,Rinternals.h,1,1,Matrix
+Rf_dnbinom_mu,header,Rmath.h0.in,1,1,Rcpp
+Rf_dpsifn,api,Rmath.h0.in,1,1,Rcpp
+Rf_dsignrank,header,Rmath.h0.in,1,1,Rcpp
+Rf_dwilcox,header,Rmath.h0.in,1,1,Rcpp
+Rf_isPrimitive,api,Rinternals.h,1,1,sourcetools
+Rf_lgamma1p,api,Rmath.h0.in,1,1,Rcpp
+Rf_lgammafn_sign,header,Rmath.h0.in,1,1,Rcpp
+Rf_pnbinom_mu,header,Rmath.h0.in,1,1,Rcpp
+Rf_psignrank,header,Rmath.h0.in,1,1,Rcpp
+Rf_ptukey,header,Rmath.h0.in,1,1,Rcpp
+Rf_pwilcox,header,Rmath.h0.in,1,1,Rcpp
+Rf_qnbinom_mu,header,Rmath.h0.in,1,1,Rcpp
+Rf_qsignrank,header,Rmath.h0.in,1,1,Rcpp
+Rf_qtukey,header,Rmath.h0.in,1,1,Rcpp
+Rf_qwilcox,header,Rmath.h0.in,1,1,Rcpp
+Rf_rcauchy,header,Rmath.h0.in,1,1,Rcpp
+Rf_rf,header,Rmath.h0.in,1,1,Rcpp
+Rf_rgeom,header,Rmath.h0.in,1,1,Rcpp
+Rf_rlnorm,header,Rmath.h0.in,1,1,Rcpp
+Rf_rlogis,header,Rmath.h0.in,1,1,Rcpp
+Rf_rnbinom,header,Rmath.h0.in,1,1,Rcpp
+Rf_rnchisq,header,Rmath.h0.in,1,1,Rcpp
+Rf_rweibull,header,Rmath.h0.in,1,1,Rcpp
+SET_INTEGER_ELT,api,Rinternals.h,1,1,cpp11
+SET_RAW_ELT,api,Rinternals.h,1,1,cpp11
+SET_REAL_ELT,api,Rinternals.h,1,1,cpp11
+STRING_IS_SORTED,experimental,Rinternals.h,1,1,checkmate
+STRING_VALUE,header,Rdefines.h,1,1,digest
+cgmin,api,R_ext/Applic.h,1,1,pcaPP
+dasum,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dgecon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dgeqr2,blas-lapack,R_ext/Lapack.h,1,1,mgcv
+dlantp,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dlantr,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dlarfb,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dlarft,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dlauu2,blas-lapack,R_ext/Lapack.h,1,1,mgcv
+dpbtrf,blas-lapack,R_ext/Lapack.h,1,1,mgcv
+dpocon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dposv,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dppcon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dptsv,blas-lapack,R_ext/Lapack.h,1,1,mgcv
+dpttrf,blas-lapack,R_ext/Lapack.h,1,1,mgcv
+dqrls,api,R_ext/Applic.h,1,1,nlme
+drot,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+drotm,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+drotmg,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dspcon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dspmv,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+dspr,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dspr2,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dsvdc,blas-lapack,R_ext/Linpack.h,1,1,fracdiff
+dsycon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dsyr,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dsyr2,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dsyr2k,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dtbmv,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dtbsv,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dtpcon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+dtrmv,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+dznrm2,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+idamax,blas-lapack,R_ext/BLAS.h,1,1,pcaPP
+mbcslocale,header,R_ext/GraphicsDevice.h,1,1,later
+nmmin,api,R_ext/Applic.h,1,1,pcaPP
+samin,api,R_ext/Applic.h,1,1,pcaPP
+zgecon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zgemv,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+zgeru,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+zherk,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+zlantp,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zlantr,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zlarf,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zlarfb,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zlarfg,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zlarft,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zpocon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zppcon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zscal,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+zspcon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zspmv,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+zsycon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zsymm,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+zsymv,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+zsyrk,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+ztpcon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+ztpmv,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+ztrcon,blas-lapack,R_ext/Lapack.h,1,1,Matrix
+ztrmm,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+ztrsm,blas-lapack,R_ext/BLAS.h,1,1,Matrix
+ztrsv,blas-lapack,R_ext/BLAS.h,1,1,Matrix
