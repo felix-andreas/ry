@@ -644,6 +644,44 @@ SEXP R_maphash(R_hashtab_type h, SEXP FUN);
 SEXP R_maphashC(R_hashtab_type h, SEXP (*FUN)(SEXP, SEXP, void *), void *data);
 void R_clrhash(R_hashtab_type h);
 
+/* Names R 4.6 dropped from the API that GNU R 4.3's headers still declared. Package sources
+ * pinned to releases from that time (readr, isoband) call them unconditionally, and libR
+ * exports them for the binaries built then, so the declarations stay too. */
+R_xlen_t (TRUELENGTH)(SEXP x);
+R_xlen_t (XTRUELENGTH)(SEXP x);
+void (SETLENGTH)(SEXP x, R_xlen_t v);
+void (SET_TRUELENGTH)(SEXP x, R_xlen_t v);
+int (IS_GROWABLE)(SEXP x);
+void (SET_GROWABLE_BIT)(SEXP x);
+void (SET_TYPEOF)(SEXP x, SEXPTYPE v);
+SEXP (FRAME)(SEXP x);
+SEXP (HASHTAB)(SEXP x);
+void (SET_ENCLOS)(SEXP x, SEXP v);
+void (SET_FORMALS)(SEXP x, SEXP v);
+void (SET_BODY)(SEXP x, SEXP v);
+void (SET_CLOENV)(SEXP x, SEXP v);
+int (RDEBUG)(SEXP x);
+void (SET_RDEBUG)(SEXP x, int v);
+int (RSTEP)(SEXP x);
+void (SET_RSTEP)(SEXP x, int v);
+int (RTRACE)(SEXP x);
+void (SET_RTRACE)(SEXP x, int v);
+int (PRSEEN)(SEXP x);
+void (SET_PRSEEN)(SEXP x, int v);
+SEXP (SYMVALUE)(SEXP x);
+SEXP (INTERNAL)(SEXP x);
+int (DDVAL)(SEXP x);
+void (SET_PRINTNAME)(SEXP x, SEXP v);
+void *(EXTPTR_PTR)(SEXP x);
+SEXP (EXTPTR_PROT)(SEXP x);
+SEXP (EXTPTR_TAG)(SEXP x);
+Rboolean Rf_isBasicClass(const char *name);
+SEXP Rf_S3Class(SEXP x);
+int Rf_envlength(SEXP rho);
+R_xlen_t Rf_envxlength(SEXP rho);
+SEXP Rf_CreateTag(SEXP x);
+SEXP Rf_type2rstr(SEXPTYPE t);
+
 /* Environment flags, which GNU R exposes as functions. */
 int (ENVFLAGS)(SEXP x);
 void (SET_ENVFLAGS)(SEXP x, int v);
@@ -656,6 +694,12 @@ void (SET_ENVFLAGS)(SEXP x, int v);
 #define asComplex Rf_asComplex
 #define asRboolean Rf_asRboolean
 #define asS4 Rf_asS4
+#define CreateTag Rf_CreateTag
+#define envlength Rf_envlength
+#define envxlength Rf_envxlength
+#define isBasicClass Rf_isBasicClass
+#define S3Class Rf_S3Class
+#define type2rstr Rf_type2rstr
 #define copyListMatrix Rf_copyListMatrix
 #define copyMatrix Rf_copyMatrix
 #define copyVector Rf_copyVector
