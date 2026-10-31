@@ -10,7 +10,7 @@ use semantics::metadata::{
 use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
 use semantics::testing::with_fixture_project;
 use semantics::{
-    DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, file_typing_mode, item_check,
+    AnalysisSettings, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, file_typing_mode, item_check,
     item_hir, item_tree,
 };
 use std::path::Path;
@@ -165,6 +165,22 @@ fn render_with_strict(source: &str) -> String {
 fn typing_strict_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-strict");
     run_fixture_suite(&suite, &render_with_strict);
+}
+
+/// A fresh database, because the shared fixture database keeps its settings input.
+fn render_with_inline_annotations_off(source: &str) -> String {
+    let db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    AnalysisSettings::new(&db, false);
+    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
+    ProjectFiles::new(&db, vec![file]);
+    render_file(&db, file)
+}
+
+#[test]
+fn typing_inline_off_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-inline-off");
+    run_fixture_suite(&suite, &render_with_inline_annotations_off);
 }
 
 fn render_stub_source(source: &str) -> String {

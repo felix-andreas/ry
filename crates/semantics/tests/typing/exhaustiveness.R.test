@@ -1,0 +1,282 @@
+#==== exhaustiveness_witnesses
+#---- missing_bare_tag
+#: @alias Shape {:Circle(radius: double) | :Rect(width: double, height: double) | :Empty}
+
+#: fn(s: Shape) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => r * r
+    :Rect(width = w, height = h) => w * h
+  }
+}
+#++++
+area: fn(s: Shape) -> double
+141..150 error[non-exhaustive-match] this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- missing_tag_with_a_payload
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :None => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+65..74 error[non-exhaustive-match] this `match` does not handle `:Some(_)`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- missing_named_payload
+#: fn(s: :Rect(width: double, height: double) | :Empty) -> double
+f <- function(s) {
+  match (s) {
+    :Empty => 0
+  }
+}
+#++++
+f: fn(s: :Rect(height: double, width: double) | :Empty) -> double
+87..96 error[non-exhaustive-match] this `match` does not handle `:Rect(height = _, width = _)`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- every_tag_covered
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    :None => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+
+#---- several_missing_cases
+#: fn(c: :Red | :Green | :Blue) -> integer
+f <- function(c) {
+  match (c) {
+    :Red => 1L
+  }
+}
+#++++
+f: fn(c: :Red | :Green | :Blue) -> integer
+64..73 error[non-exhaustive-match] this `match` does not handle `:Green` and `:Blue`: add arms for them, or a catch-all `_ => ...` arm
+
+#---- more_than_three_missing_cases
+#: fn(pair: tuple{logical, logical}) -> integer
+f <- function(pair) {
+  match (pair) {
+    (TRUE, TRUE) => 1L
+    (FALSE, _) => 2L
+  }
+}
+#++++
+f: fn(pair: tuple{logical, logical}) -> integer
+72..84 error[non-exhaustive-match] this `match` does not handle `(TRUE, FALSE)`, `(TRUE, NA)`, `(NA, TRUE)` and more: add arms for them, or a catch-all `_ => ...` arm
+
+#---- logical_needs_na
+#: fn(flag: logical) -> integer
+f <- function(flag) {
+  match (flag) {
+    TRUE => 1L
+    FALSE => 2L
+  }
+}
+#++++
+f: fn(flag: logical) -> integer
+56..68 error[non-exhaustive-match] this `match` does not handle `NA`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- nested_payload_case
+#: fn(o: :Some(logical) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(TRUE) => 1L
+    :Some(FALSE) => 2L
+    :None => 3L
+  }
+}
+#++++
+f: fn(o: :Some(logical) | :None) -> integer
+65..74 error[non-exhaustive-match] this `match` does not handle `:Some(NA)`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- unbounded_type_needs_a_catch_all
+#: fn(n: integer) -> integer
+f <- function(n) {
+  match (n) {
+    1L => 1L
+    2L => 2L
+  }
+}
+#++++
+f: fn(n: integer) -> integer
+50..59 error[non-exhaustive-match] this `match` does not handle every value: add a catch-all `_ => ...` arm
+
+#---- open_union_needs_a_catch_all
+#: fn(r: :Ok(integer) | ..) -> integer
+f <- function(r) {
+  match (r) {
+    :Ok(v) => v
+  }
+}
+#++++
+f: fn(r: :Ok(integer) | ..) -> integer
+60..69 error[non-exhaustive-match] this `match` does not handle every value: add a catch-all `_ => ...` arm
+
+#---- open_union_names_its_listed_tags_too
+#: fn(r: :Ok(integer) | :Err(character) | ..) -> integer
+f <- function(r) {
+  match (r) {
+    :Ok(v) => v
+  }
+}
+#++++
+f: fn(r: :Ok(integer) | :Err(character) | ..) -> integer
+78..87 error[non-exhaustive-match] this `match` does not handle `:Err(_)` and `_`: add arms for them, or a catch-all `_ => ...` arm
+
+#---- null_is_one_case
+#: fn(x: :Some(integer) | NULL) -> integer
+f <- function(x) {
+  match (x) {
+    :Some(v) => v
+  }
+}
+#++++
+f: fn(x: :Some(integer) | NULL) -> integer
+64..73 error[non-exhaustive-match] this `match` does not handle `NULL`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- record_with_a_rest_covers_the_record
+#: fn(r: record{x: logical, y: double}) -> integer
+f <- function(r) {
+  match (r) {
+    (x = TRUE, ..) => 1L
+    (x = FALSE, ..) => 2L
+  }
+}
+#++++
+f: fn(r: record{x: logical, y: double}) -> integer
+72..81 error[non-exhaustive-match] this `match` does not handle `(x = NA, y = _)`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- or_pattern_covers_both
+#: fn(c: :Red | :Green | :Blue) -> integer
+f <- function(c) {
+  match (c) {
+    :Red | :Green => 1L
+    :Blue => 2L
+  }
+}
+#++++
+f: fn(c: :Red | :Green | :Blue) -> integer
+
+#---- shaped_scrutinee_is_exhaustive_by_construction
+g <- function(r) {
+  match (r) {
+    :Ok(v) => v
+    :Err(e) => 0
+  }
+}
+#++++
+g: <T, U> fn(r: :Ok(T) | :Err(U)) -> T | double
+
+#---- unknown_scrutinee_is_not_counted
+f <- function(x) {
+  v <- x$value
+  match (v) {
+    :A => 1L
+    :B => 2L
+  }
+}
+#++++
+f: <T> fn(x: T) -> integer
+
+#==== guards
+#---- guarded_arm_does_not_cover
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(x) if (x > 0L) => x
+    :None => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+65..74 error[non-exhaustive-match] this `match` does not handle `:Some(_)`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- guarded_arm_then_unguarded_covers
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(x) if (x > 0L) => x
+    :Some(_) => 0L
+    :None => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+
+#---- guarded_arm_can_be_unreachable
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    _ => 0L
+    :Some(x) if (x > 0L) => x
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+93..101 warning[unreachable-pattern] this arm is unreachable: the arms above it already match every value its pattern matches
+
+#==== unreachable_patterns
+#---- arm_after_a_catch_all
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    _ => 0L
+    :None => 1L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+93..98 warning[unreachable-pattern] this arm is unreachable: the arms above it already match every value its pattern matches
+
+#---- repeated_tag
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :None => 0L
+    :Some(v) => v
+    :None => 1L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+115..120 warning[unreachable-pattern] this arm is unreachable: the arms above it already match every value its pattern matches
+
+#---- catch_all_after_full_coverage
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    :None => 0L
+    _ => 1L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+115..116 warning[unreachable-pattern] this arm is unreachable: the arms above it already match every value its pattern matches
+
+#---- trailing_catch_all_on_an_unknown_scrutinee_is_reachable
+f <- function(x) {
+  v <- x$value
+  match (v) {
+    :A => 1L
+    _ => 2L
+  }
+}
+#++++
+f: <T> fn(x: T) -> integer
+
+#---- binding_then_catch_all
+f <- function(x) {
+  match (x) {
+    y => 1L
+    _ => 2L
+  }
+}
+#++++
+f: <T> fn(x: T) -> integer
+49..50 warning[unreachable-pattern] this arm is unreachable: the arms above it already match every value its pattern matches

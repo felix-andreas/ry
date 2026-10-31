@@ -1,6 +1,7 @@
 pub mod annotations;
 pub mod check;
 pub mod diagnostics;
+pub mod exhaustiveness;
 pub mod hir;
 pub mod infer;
 pub mod lints;
@@ -1571,6 +1572,7 @@ mod tests {
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
             column_misses: Default::default(),
+            match_findings: Vec::new(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),

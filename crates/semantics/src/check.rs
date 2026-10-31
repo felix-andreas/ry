@@ -4,6 +4,7 @@
 use crate::Db;
 use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
+use crate::exhaustiveness::{MatchFinding, match_findings};
 use crate::hir::{
     Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, MatchArm,
     Module, NaAtom, Parameter as Formal, PatId, PatternKind, Symbol, UnaryOperator,
@@ -189,6 +190,9 @@ pub struct ItemCheck<'db> {
     /// Settled scheme of every name the top-level frame binds, so a statement item's
     /// conditional write serves cross-item reads; a definition resolves via `scheme`.
     pub top_level_bindings: Vec<(Symbol, TypeScheme<'db>)>,
+    /// Coverage of each `match`, kept apart from `errors` because a missing case does not
+    /// make the item's exported type untrustworthy.
+    pub match_findings: Vec<MatchFinding>,
 }
 
 /// Settled type of every expression the checker recorded, indexed by expression id.
@@ -473,7 +477,9 @@ pub fn check_item_with_annotation<'db>(
         };
         top_level_bindings.push((info.name, binding_scheme));
     }
+    let match_findings = match_findings(db, module, &expression_types);
     ItemCheck {
+        match_findings,
         expression_types,
         errors,
         strict_origins: context.strict_origins,
