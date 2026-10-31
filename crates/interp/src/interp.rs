@@ -45,6 +45,8 @@ pub mod random;
 pub mod serialize;
 pub mod session;
 pub mod sort;
+pub mod stats;
+pub mod stats_models;
 pub mod strings;
 pub mod subset;
 pub mod system;
