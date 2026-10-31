@@ -273,15 +273,7 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         }));
     }
     if level == 1 {
-        let text = if call == nil() {
-            format!("Warning: {message}\n")
-        } else {
-            format!(
-                "Warning in {} : {message}\n",
-                deparse::deparse_one_line(call)
-            )
-        };
-        write_console(text.as_bytes(), true);
+        write_console(immediate_warning_text(call, message).as_bytes(), true);
         return Ok(());
     }
     let state = interp();
@@ -289,6 +281,21 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         state.warnings.push((call, message.to_owned()));
     }
     Ok(())
+}
+
+/// A warning printed as it happens: the first line of the call, then the message on the same
+/// line when the two fit in 57 characters, and indented on the next line otherwise.
+unsafe fn immediate_warning_text(call: Sexp, message: &str) -> String {
+    if call == nil() {
+        return format!("Warning: {message}\n");
+    }
+    let call_text = first_deparse_line(call);
+    let separator = if call_text.chars().count() + message.chars().count() + 18 > 75 {
+        " :\n  "
+    } else {
+        " : "
+    };
+    format!("Warning in {call_text}{separator}{message}\n")
 }
 
 /// The first line of a call's deparse, which is all of a long call a warning shows.
@@ -509,15 +516,7 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
         String::new()
     };
     if immediate {
-        let text = if condition_call == nil() {
-            format!("Warning: {message}\n")
-        } else {
-            format!(
-                "Warning in {} : {message}\n",
-                deparse::deparse_one_line(condition_call)
-            )
-        };
-        write_console(text.as_bytes(), true);
+        write_console(immediate_warning_text(condition_call, &message).as_bytes(), true);
     } else {
         warning_call(condition_call, message.clone())?;
     }

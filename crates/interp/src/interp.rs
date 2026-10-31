@@ -136,11 +136,6 @@ pub struct Interp {
     pub global_handlers: HandlerStack,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
-    /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
-    /// `None` for a builtin with `...` or with no entry, whose argument names go unchecked.
-    /// Set while `NextMethod` calls a special primitive as the next method, so that the
-    /// special runs its default instead of dispatching.
-    pub skip_special_dispatch: bool,
     pub primitive_formals: FxHashMap<&'static str, Option<Box<[String]>>>,
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
@@ -248,7 +243,6 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: FxHashMap::default(),
-        skip_special_dispatch: false,
         symbols,
         visible: true,
         warnings: Vec::new(),

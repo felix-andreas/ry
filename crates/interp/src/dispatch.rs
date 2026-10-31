@@ -649,9 +649,12 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         SexpType::Closure => apply_closure(new_call, method, &args, method_env, Some(&vars)),
         _ => {
             let definition = eval::builtin_def(method)?;
+            // A special evaluates its arguments itself, so it gets the promises, which
+            // evaluate to their values without running a value that is a call.
+            let special = matches!(definition.kind, Kind::Special | Kind::InternalSpecial);
             let mut forced = Vec::with_capacity(args.len());
             for arg in &args {
-                let value = if arg.value == missing_arg() {
+                let value = if arg.value == missing_arg() || special {
                     arg.value
                 } else {
                     value_of(arg.value)?
@@ -661,14 +664,11 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
                     value,
                 });
             }
-            let primitive_call = renamed_call(frame_call, values::install(&generic_name)?)?;
-            // A special such as `$<-` dispatches by itself, which here would find the method
-            // that called `NextMethod` again.
-            let special = definition.kind == Kind::Special;
-            interp().skip_special_dispatch = special;
-            let result = call_builtin(definition, primitive_call, method, &forced, method_env);
-            interp().skip_special_dispatch = false;
-            result
+            // The call names the default method, as in GNU R's "Error in `[.default`(x, 5)",
+            // which also tells a special that dispatches internally not to dispatch again.
+            let default_name = format!("{generic_name}.default");
+            let primitive_call = renamed_call(frame_call, values::install(&default_name)?)?;
+            call_builtin(definition, primitive_call, method, &forced, method_env)
         }
     }
 }
@@ -764,7 +764,10 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
 
 /// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`).
 pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
-    if std::mem::take(&mut interp().skip_special_dispatch) {
+    if call.kind() == SexpType::Language
+        && call.car().kind() == SexpType::Symbol
+        && symbol_name(call.car()).ends_with(".default")
+    {
         return Ok(None);
     }
     if args.first().is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))

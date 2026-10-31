@@ -770,7 +770,8 @@ unsafe fn single_position(index: Sexp, extent: usize, names: Sexp, exact: Option
 
 /// The name argument of `$` and `@`: a symbol or string, never evaluated.
 unsafe fn name_argument(value: Sexp) -> R<Sexp> {
-    let value = if value.kind() == SexpType::Promise { value.cdr() } else { value };
+    // A promise comes from `NextMethod` and stands for the name the method received.
+    let value = eval::value_of(value)?;
     match value.kind() {
         SexpType::Symbol => Ok(value.car()),
         SexpType::String if length(value) >= 1 => Ok(value.element(0)),
