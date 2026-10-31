@@ -81,3 +81,7 @@ path = "tests/test_install.rs"
 [[test]]
 name = "test_headers"
 path = "tests/test_headers.rs"
+
+[[test]]
+name = "test_corpus_calls"
+path = "tests/test_corpus_calls.rs"

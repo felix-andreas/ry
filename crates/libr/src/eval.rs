@@ -348,6 +348,26 @@ pub unsafe fn native_call(
             )?;
             (function, arity, routine_name)
         }
+        // A `NativeSymbolInfo` list carries the routine's address in its `address` element.
+        SexpType::List if native_symbol_address(*name)?.is_some() => {
+            let address = native_symbol_address(*name)?.unwrap_or(*name).external_address();
+            if address.is_null() {
+                return Err(error_in(call, "NULL value passed as symbol address"));
+            }
+            let arity = crate::attributes::get_attrib(*name, R_NamesSymbol.get())
+                .ok()
+                .and_then(|_| list_element(*name, "numParameters"))
+                .filter(|value| value.kind() == SexpType::Integer && value.length() == 1)
+                .map(|value| value.slice::<i32>()[0]);
+            (
+                std::mem::transmute::<*mut std::ffi::c_void, crate::boundary::DlFunc>(address),
+                arity,
+                list_element(*name, "name")
+                    .filter(|value| value.kind() == SexpType::String)
+                    .and_then(|value| utf8_text(value.element(0)).ok().map(|text| text.into_owned()))
+                    .unwrap_or_default(),
+            )
+        }
         SexpType::ExternalPtr => {
             let address = name.external_address();
             if address.is_null() {
@@ -1049,4 +1069,23 @@ pub unsafe extern "C" fn R_dot_Last() {
         Some(evaluator) => evaluator.dot_last(),
         None => Ok(()),
     })
+}
+
+/// The element of a named list called `name`.
+unsafe fn list_element(list: Sexp, name: &str) -> Option<Sexp> {
+    let names = crate::attributes::raw_attribute(list, R_NamesSymbol.get());
+    if names.kind() != SexpType::String {
+        return None;
+    }
+    (0..names.length() as usize)
+        .find(|&index| names.element(index).bytes() == name.as_bytes())
+        .map(|index| list.element(index))
+}
+
+/// The routine address of a `NativeSymbolInfo` list, if `value` is one.
+unsafe fn native_symbol_address(value: Sexp) -> ApiResult<Option<Sexp>> {
+    if !crate::attributes::inherits(value, "NativeSymbolInfo")? {
+        return Ok(None);
+    }
+    Ok(list_element(value, "address").filter(|address| address.kind() == SexpType::ExternalPtr))
 }

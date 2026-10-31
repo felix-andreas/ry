@@ -197,3 +197,13 @@ pub extern "C" fn R_ReplDLLinit() {
 pub extern "C" fn R_ReplDLLdo1() -> c_int {
     -1
 }
+
+/// Reads an RDS file (`saveRDS` output, compressed or not), for hosts and tests that need R
+/// objects GNU R recorded.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_read_rds(path: *const c_char) -> crate::SEXP {
+    crate::boundary::enter(|| {
+        let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
+        crate::serialize::read_rds(std::path::Path::new(&path))
+    })
+}

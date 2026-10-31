@@ -438,3 +438,102 @@ pub fn registered_counts(name: &str) -> Option<[usize; 4]> {
         ]
     })
 }
+
+/// The registered routine `name` of the library `package` (any interface), as
+/// `getNativeSymbolInfo` finds it: registered routines are found even when the library forces
+/// symbols, because that only forbids lookup by a name string in `.Call` itself.
+/// An unregistered routine comes from the library's dynamic symbol table, as with GNU R's
+/// lookup, with an unknown arity (-1).
+pub unsafe fn registered_routine(name: &str, package: &str) -> Option<(RoutineKind, DlFunc, c_int)> {
+    let runtime = runtime();
+    let dll = runtime.dlls.iter().rev().find(|dll| dll.name == package)?;
+    for kind in [
+        RoutineKind::Call,
+        RoutineKind::External,
+        RoutineKind::C,
+        RoutineKind::Fortran,
+    ] {
+        if let Some(routine) = dll.registered(kind).iter().find(|routine| routine.name == name) {
+            return Some((kind, routine.function, routine.arity));
+        }
+    }
+    let c_name = CString::new(name).ok()?;
+    let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
+    (!symbol.is_null()).then(|| {
+        (
+            RoutineKind::Call,
+            std::mem::transmute::<*mut c_void, DlFunc>(symbol),
+            -1,
+        )
+    })
+}
+
+/// A `NativeSymbolInfo` object for a registered routine: a list of `name`, `address` (an
+/// external pointer of class `RegisteredNativeSymbol`), `dll` and `numParameters`, as
+/// `getNativeSymbolInfo` returns, which `.Call` accepts in place of a name.
+pub unsafe fn native_symbol_info(name: &str, package: &str) -> ApiResult<Sexp> {
+    let (kind, function, arity) = registered_routine(name, package).ok_or_else(|| {
+        error(format!("no such symbol {name} in package {package}"))
+    })?;
+    let runtime = runtime();
+    let nil = runtime.nil();
+    let address = runtime
+        .heap
+        .alloc_external_ptr(function as *mut c_void, nil, nil)?;
+    runtime.heap.root(address);
+    let class = crate::strings::mk_char(b"RegisteredNativeSymbol", Encoding::Native)?;
+    let class = crate::memory::scalar_string(class)?;
+    crate::attributes::install_attribute(address, R_ClassSymbol.get(), class)?;
+    address.set_object(true);
+    let info = runtime.heap.alloc_vector(SexpType::List, 4)?;
+    runtime.heap.root(info);
+    let name_value = crate::memory::scalar_string(crate::strings::mk_char(name.as_bytes(), Encoding::Utf8)?)?;
+    runtime.heap.set_element(info, 0, name_value);
+    runtime.heap.set_element(info, 1, address);
+    let dll = runtime
+        .dlls
+        .iter_mut()
+        .rev()
+        .find(|dll| dll.name == package)
+        .map(|dll| &mut **dll as *mut Dll)
+        .ok_or_else(|| error(format!("package {package} is not loaded")))?;
+    let dll_value = dll_info_object(dll)?;
+    runtime.heap.set_element(info, 2, dll_value);
+    runtime.heap.set_element(info, 3, crate::memory::scalar(SexpType::Integer, arity)?);
+    let names = runtime.heap.alloc_vector(SexpType::String, 4)?;
+    runtime.heap.root(names);
+    for (index, label) in ["name", "address", "dll", "numParameters"].iter().enumerate() {
+        let label = runtime.heap.mk_char(label.as_bytes(), Encoding::Native)?;
+        runtime.heap.set_element(names, index, label);
+    }
+    crate::attributes::install_attribute(info, R_NamesSymbol.get(), names)?;
+    let class_name = match kind {
+        RoutineKind::Call => "CallRoutine",
+        RoutineKind::External => "ExternalRoutine",
+        RoutineKind::C => "CRoutine",
+        RoutineKind::Fortran => "FortranRoutine",
+    };
+    let classes = runtime.heap.alloc_vector(SexpType::String, 3)?;
+    runtime.heap.root(classes);
+    for (index, label) in [class_name, "NativeSymbolInfo", "RegisteredNativeSymbol"]
+        .iter()
+        .enumerate()
+    {
+        let label = runtime.heap.mk_char(label.as_bytes(), Encoding::Native)?;
+        runtime.heap.set_element(classes, index, label);
+    }
+    crate::attributes::install_attribute(info, R_ClassSymbol.get(), classes)?;
+    info.set_object(true);
+    Ok(info)
+}
+
+/// `ry_native_symbol(name, package)`: `native_symbol_info` for hosts and tests.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_native_symbol(name: *const c_char, package: *const c_char) -> Sexp {
+    enter(|| {
+        native_symbol_info(
+            &String::from_utf8_lossy(c_bytes(name)),
+            &String::from_utf8_lossy(c_bytes(package)),
+        )
+    })
+}
