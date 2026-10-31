@@ -68,10 +68,11 @@ The driver differs from `Rscript` in four ways that the cases avoid: it parses t
 The second engine is anything that implements the `Engine` trait. `ProcessEngine` covers a
 command line: it is invoked as `<command…> <script> <report>`, must print the script's output
 to stdout, and must write the JSON report that `crates/oracle/src/driver.R` defines (`messages`,
-`warnings`, `errors`, and `value` with `kind` and `deparsed`). Until the ry runtime exists the
-default engine is a stub and `compare` skips every case. To plug an engine in, set
-`ORACLE_ENGINE="ry oracle-run"` (or pass `--engine`), and `cargo test -p oracle` then also
-requires it to match GNU R on every case.
+`warnings`, `errors`, and `value` with `kind` and `deparsed`). ry's runtime is `--engine ry`:
+it runs the driver through `ry run --runtime ry` with the workspace's debug build (or the binary in
+`ORACLE_RY`), so build `ry` and `libr` first. Without `--engine` or `ORACLE_ENGINE` the second engine
+is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or any command line) makes
+`cargo test -p oracle` also require the engine to match GNU R on every case.
 
 ## The benchmark generator
 

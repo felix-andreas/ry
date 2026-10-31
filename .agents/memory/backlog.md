@@ -1766,19 +1766,33 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the runtime
 
-What step 2 of `contributing/design/r-runtime.md` left for later steps, most pressing first.
+What steps 2 and 3 of `contributing/design/r-runtime.md` left for later steps, most pressing
+first.
 
-- **`Rf_eval` evaluates only constants, symbols, promises and calls to nine primitives.** Closures,
-  `R_ParseVector` and `Rf_PrintValue` wait for the interpreter (step 3).
-- **The rest of the measured API surface.** Of the 409 measured API and experimental names, 310 are
-  exported. The missing ones include Rmath (`Rf_sign`, the distribution functions), the S4 slot
-  functions, connections, `.C` and `.Fortran`, BLAS and LAPACK, and the graphics engine.
+- **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
+  differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
+  unimplemented one when it is called) or printer details (complex numbers, wide matrices).
+- **Tier-0 speed.** A scalar `for` loop runs about 6x slower than GNU R's bytecode (`s <- s + i * 2`,
+  1e6 iterations: 0.27 s against 0.04 s). The cost is per-instruction allocation of scalar results,
+  handle-stack pushes, and the guard and frame probes. Next: reuse a register's scalar when it is
+  unshared, cache the frame cell of a local variable per activation, and skip guards proven by the
+  binding epoch for a whole loop body.
+- **Promise code is not compiled.** A closure argument is a promise over its AST, which the AST
+  evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
+  promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
+- **Missing internals.** Several `.Internal`s still raise "not supported" (`scan`'s binary
+  relatives `writeBin`/`readBin`, `save`/`load`, `url`, `polyroot`, `max.col`, `prmatrix`, ...);
+  `grep -n 'not supported' crates/interp/src` lists them.
+- **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
+  families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
+- **The rest of the measured C API surface.** Of the 409 measured API and experimental names, 310 are
+  exported. The missing ones include connections and the graphics engine.
 - **`R_GetCCallable` cannot load the providing namespace**, so a callable registered by a package
   that is not loaded yet is an error instead of a namespace load.
 - **ALTREP `Duplicate`, `Inspect` and `Extract_subset` are stored but never called**; duplication
   materializes a regular vector.
-- **R-level finalizers** (`R_RegisterFinalizer` with a closure) cannot run until closures can, and a
-  finalized weak reference stays in the weak list with a `NULL` key.
+- **R-level finalizers** (`reg.finalizer`, `R_RegisterFinalizer` with a closure) are accepted and
+  never run, and a finalized weak reference stays in the weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
   push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
   `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.

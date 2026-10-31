@@ -60,7 +60,14 @@ before each command; `--no-load` turns that off.
 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
 `Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`. R's
-startup banner is not printed, so the output is only what the script prints.
+startup banner is not printed, so the output is only what the script prints. Arguments after the
+file reach the script through `commandArgs(trailingOnly = TRUE)`.
+
+`ry run --runtime ry script.R` (or `RY_RUNTIME=ry`) runs the script on ry's own interpreter instead
+of GNU R. It still reads base R's R code and the default packages from the GNU R installation, so R
+must be installed, but no GNU R code runs. This runtime is under construction: a script that calls
+something it lacks stops with an error naming it. That error can be a missing `.Internal`, a native
+routine of a default package, or a graphics device, since only the null device exists.
 
 `ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
 current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.

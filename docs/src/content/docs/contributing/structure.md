@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, loader, ry, repl, heap, and libr crates
+description: What each source file holds in the syntax, semantics, ide, format, loader, ry, repl, heap, interp, and libr crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -137,6 +137,43 @@ nothing about C.
 - **`env.rs`**: environment frames, which map symbols to binding cells.
 - **`arena.rs`**: the `R_alloc` arena and its `vmaxget` watermarks.
 
+## `interp`
+
+The crate root is `src/interp.rs`. It is the R interpreter: it evaluates R code on `heap`'s
+objects and implements base R's primitives and internals, and the default packages' native
+routines, in Rust. It knows nothing about C; `libr` installs it and supplies the native-code
+builtins. The root holds the interpreter state (`Interp`, the frame stack, the host `Hooks`).
+
+- **`eval.rs`**: the AST evaluator: variable lookup, promises, calls and argument matching,
+  closures and `on.exit`, the control-flow specials, `substitute` and complex assignment.
+- **`bytecode.rs`**: the tier-0 compiler and register machine, its guards, inline caches and type
+  feedback.
+- **`unwind.rs`**: `Unwind` and `Jump`, the non-local exits as Rust errors.
+- **`conditions.rs`**: condition signalling, handler and restart stacks, the default error and
+  warning handlers, and the traceback.
+- **`dispatch.rs`**: S3 dispatch (`UseMethod`, `NextMethod`, group and internal generics) and the
+  hooks S4 dispatch uses. **`methods.rs`**: the methods package's native routines and S4 dispatch.
+- **`envir.rs`**: environments, the `sys.*` functions, options, namespaces and the apply family.
+- **`builtins.rs`**: the builtin registry (`BuiltinDef`, `Call`) and argument matching for
+  builtins. **`values.rs`**: object constructors and accessors the rest of the crate shares, and
+  `Globals`.
+- **`lower.rs`**: R source to R language objects, through `syntax`'s parser.
+- **`deparse.rs`**, **`format.rs`**, **`print.rs`**: deparsing, number formatting and printing.
+- **`arith.rs`**, **`coerce.rs`**, **`subset.rs`**, **`strings.rs`**, **`sort.rs`**: base's
+  vector internals: arithmetic and math, coercion, subsetting and assignment, strings and regular
+  expressions, sorting and matching.
+- **`linalg.rs`**: BLAS and LAPACK (opened at runtime) and base's LINPACK routines.
+  **`distributions.rs`**: the probability distributions. **`random.rs`**: the random number
+  generators.
+- **`connections.rs`**, **`serialize.rs`**, **`system.rs`**: connections and `cat`, serialization
+  and the lazy-load database, and the operating system (files, time, the environment).
+- **`native.rs`**: the foreign-function builtins for a session without libR, and base's routines.
+  **`builtin_libraries.rs`**: the default packages' routine tables, which `dyn.load` hands out
+  instead of loading their shared libraries; **`utils.rs`**, **`tools.rs`** and **`graphics.rs`**
+  implement them.
+- **`session.rs`**: start-up (base R from the GNU R installation, the profiles, the default
+  packages) and running a script.
+
 ## `libr`
 
 The crate root is `src/libr.rs`, and the crate builds `libR.so` as well as an rlib. It holds the
@@ -157,11 +194,15 @@ runtime state and R's C API. Each exported function that can fail runs its body 
 - **`attributes.rs`**: attributes, classes and the header bits.
 - **`strings.rs`**: `CHARSXP`s, encodings, symbols and `Riconv`.
 - **`environments.rs`**: environments, variable lookup, bindings, namespaces and options.
-- **`eval.rs`**: `Rf_eval` over its small primitive table, conditions and the deparser for messages.
+- **`eval.rs`**: installs the interpreter on the runtime, the evaluation entry points (`Rf_eval`,
+  `R_tryEval`, `R_ParseVector`) and the foreign-call builtins (`.Call`, `dyn.load`, ...).
 - **`dynload.rs`**: loading package libraries, routine registration and C callables.
 - **`extptr.rs`**: external pointers, weak references and finalizers.
 - **`altrep.rs`**: ALTREP classes and dispatch.
-- **`arith.rs`**: NA tests, sorting, and the random number generator.
+- **`arith.rs`**: NA tests, sorting, and the random number entry points, which use the
+  interpreter's generators.
+- **`methods.rs`**: the S4 part of the API (`R_do_slot`, `R_do_new_object`).
+- **`utilities.rs`**: Rmath's small helpers and string and file utilities.
 - **`globals.rs`**: GNU R's data symbols.
 - **`embed.rs`**: ry's own `ry_` entry points for an embedding host, declared in
   `include/ry_embed.h`.
