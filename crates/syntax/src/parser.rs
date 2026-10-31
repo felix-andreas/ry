@@ -29,6 +29,7 @@ pub fn parse(text: &str) -> Parse {
         in_annotation: false,
         type_region: false,
         inline_type: false,
+        deferred_trivia: None,
         annotation_reported: false,
         annotation_unclosed_reported: false,
         statement_had_lexer_error: false,
@@ -62,6 +63,9 @@ struct Parser<'a> {
     /// Inline type grammar sits in R code, so its trivia follows R's newline rules
     /// instead of a `#:` region's.
     inline_type: bool,
+    /// Where trivia skipped by inline type grammar starts. It is emitted only when the
+    /// type continues past it, so trivia after the type stays outside its node.
+    deferred_trivia: Option<usize>,
     annotation_reported: bool,
     /// Unclosed openers are found only at the end of their construct, after the
     /// inner consequences, so one such report gets through regardless.
@@ -141,6 +145,7 @@ impl Parser<'_> {
     }
 
     fn bump(&mut self) {
+        self.flush_deferred_trivia();
         let kind = self.current().expect("bump at end of input");
         let text = &self.text[self.offsets[self.pos]..self.offsets[self.pos + 1]];
         self.builder.token(kind.into(), text);
@@ -148,7 +153,18 @@ impl Parser<'_> {
     }
 
     fn start(&mut self, kind: SyntaxKind) {
+        self.flush_deferred_trivia();
         self.builder.start_node(kind.into());
+    }
+
+    fn flush_deferred_trivia(&mut self) {
+        if let Some(start) = self.deferred_trivia.take() {
+            for pos in start..self.pos {
+                let kind = self.tokens[pos].kind;
+                let text = &self.text[self.offsets[pos]..self.offsets[pos + 1]];
+                self.builder.token(kind.into(), text);
+            }
+        }
     }
 
     fn start_at(&mut self, checkpoint: Checkpoint, kind: SyntaxKind) {
@@ -160,6 +176,7 @@ impl Parser<'_> {
     }
 
     fn checkpoint(&mut self) -> Checkpoint {
+        self.flush_deferred_trivia();
         self.builder.checkpoint()
     }
 
@@ -313,13 +330,18 @@ impl Parser<'_> {
 
     fn ann_trivia(&mut self, end: usize) {
         if self.inline_type {
+            let start = self.pos;
             loop {
                 match self.current() {
-                    Some(WHITESPACE) => self.bump(),
-                    Some(NEWLINE | COMMENT) if !self.newlines_significant() => self.bump(),
-                    _ => return,
+                    Some(WHITESPACE) => self.pos += 1,
+                    Some(NEWLINE | COMMENT) if !self.newlines_significant() => self.pos += 1,
+                    _ => break,
                 }
             }
+            if self.pos > start && self.deferred_trivia.is_none() {
+                self.deferred_trivia = Some(start);
+            }
+            return;
         }
         while self.pos < end
             && matches!(
@@ -1042,7 +1064,14 @@ impl Parser<'_> {
         self.start(TYPE_ASCRIPTION);
         self.bump();
         self.inline_type(|parser, end| parser.ann_type(end, false));
-        if self.pos < assignment {
+        let mut next = self.pos;
+        while self.tokens.get(next).is_some_and(|token| token.kind == WHITESPACE) {
+            next += 1;
+        }
+        if next < assignment {
+            while self.at(WHITESPACE) {
+                self.bump();
+            }
             if !self.annotation_reported {
                 let found = self.describe_current();
                 self.error_here(format!(
@@ -1103,6 +1132,10 @@ impl Parser<'_> {
         let end = self.tokens.len();
         self.ann_trivia(end);
         parse(self, end);
+        // Trivia after the type was never emitted: hand it back to R's grammar.
+        if let Some(start) = self.deferred_trivia.take() {
+            self.pos = start;
+        }
         (self.inline_type, self.type_region) = saved;
     }
 

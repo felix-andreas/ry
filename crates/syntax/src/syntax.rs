@@ -126,28 +126,7 @@ pub fn erase_inline_annotations(parse: &Parse) -> String {
         };
         match element {
             NodeOrToken::Token(token) => out.push_str(token.text()),
-            NodeOrToken::Node(node) if is_inline_annotation(&node) => {
-                preorder.skip_subtree();
-                // The type grammar absorbs the trivia after the type; keep it, unless it
-                // is only spacing that would double the spacing already written.
-                let mut trailing: Vec<SyntaxToken> = Vec::new();
-                let mut token = node.last_token();
-                while let Some(current) = token.filter(|token| {
-                    token.kind().is_trivia() && node.text_range().contains_range(token.text_range())
-                }) {
-                    token = current.prev_token();
-                    trailing.push(current);
-                }
-                let only_spacing = trailing
-                    .iter()
-                    .all(|token| token.kind() == SyntaxKind::WHITESPACE);
-                if only_spacing && (out.is_empty() || out.ends_with(char::is_whitespace)) {
-                    continue;
-                }
-                for token in trailing.iter().rev() {
-                    out.push_str(token.text());
-                }
-            }
+            NodeOrToken::Node(node) if is_inline_annotation(&node) => preorder.skip_subtree(),
             NodeOrToken::Node(_) => {}
         }
     }

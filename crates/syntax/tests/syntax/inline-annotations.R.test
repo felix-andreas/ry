@@ -6,12 +6,12 @@ SOURCE_FILE@0..20
   BINARY_EXPR@0..20
     NAME@0..5
       IDENT@0..5 "count"
-    TYPE_ASCRIPTION@5..15
+    TYPE_ASCRIPTION@5..14
       COLON@5..6 ":"
       WHITESPACE@6..7 " "
       TYPE_REF@7..14
         IDENT@7..14 "integer"
-      WHITESPACE@14..15 " "
+    WHITESPACE@14..15 " "
     LESS_MINUS@15..17 "<-"
     WHITESPACE@17..18 " "
     LITERAL@18..20
@@ -24,12 +24,12 @@ SOURCE_FILE@0..19
   BINARY_EXPR@0..19
     NAME@0..5
       IDENT@0..5 "count"
-    TYPE_ASCRIPTION@5..15
+    TYPE_ASCRIPTION@5..14
       COLON@5..6 ":"
       WHITESPACE@6..7 " "
       TYPE_REF@7..14
         IDENT@7..14 "integer"
-      WHITESPACE@14..15 " "
+    WHITESPACE@14..15 " "
     EQ@15..16 "="
     WHITESPACE@16..17 " "
     LITERAL@17..19
@@ -42,10 +42,10 @@ SOURCE_FILE@0..31
   BINARY_EXPR@0..31
     NAME@0..5
       IDENT@0..5 "label"
-    TYPE_ASCRIPTION@5..24
+    TYPE_ASCRIPTION@5..23
       COLON@5..6 ":"
       WHITESPACE@6..7 " "
-      TYPE_UNION@7..24
+      TYPE_UNION@7..23
         TYPE_REF@7..16
           IDENT@7..16 "character"
         WHITESPACE@16..17 " "
@@ -53,7 +53,7 @@ SOURCE_FILE@0..31
         WHITESPACE@18..19 " "
         TYPE_REF@19..23
           NULL_KW@19..23 "NULL"
-        WHITESPACE@23..24 " "
+    WHITESPACE@23..24 " "
     LESS_MINUS@24..26 "<-"
     WHITESPACE@26..27 " "
     LITERAL@27..31
@@ -66,7 +66,7 @@ SOURCE_FILE@0..76
   BINARY_EXPR@0..76
     NAME@0..6
       IDENT@0..6 "person"
-    TYPE_ASCRIPTION@6..44
+    TYPE_ASCRIPTION@6..43
       COLON@6..7 ":"
       WHITESPACE@7..8 " "
       TYPE_RECORD@8..43
@@ -90,7 +90,7 @@ SOURCE_FILE@0..76
           TYPE_REF@35..42
             IDENT@35..42 "integer"
         R_BRACE@42..43 "}"
-      WHITESPACE@43..44 " "
+    WHITESPACE@43..44 " "
     LESS_MINUS@44..46 "<-"
     WHITESPACE@46..47 " "
     CALL_EXPR@47..76
@@ -125,10 +125,10 @@ SOURCE_FILE@0..53
   BINARY_EXPR@0..53
     NAME@0..4
       IDENT@0..4 "step"
-    TYPE_ASCRIPTION@4..32
+    TYPE_ASCRIPTION@4..31
       COLON@4..5 ":"
       WHITESPACE@5..6 " "
-      TYPE_FUNCTION@6..32
+      TYPE_FUNCTION@6..31
         NAME@6..8
           IDENT@6..8 "fn"
         TYPE_PARAMETER_LIST@8..20
@@ -146,7 +146,7 @@ SOURCE_FILE@0..53
         WHITESPACE@23..24 " "
         TYPE_REF@24..31
           IDENT@24..31 "integer"
-        WHITESPACE@31..32 " "
+    WHITESPACE@31..32 " "
     LESS_MINUS@32..34 "<-"
     WHITESPACE@34..35 " "
     FUNCTION_DEF@35..53
@@ -209,12 +209,12 @@ SOURCE_FILE@0..24
     BINARY_EXPR@4..22
       NAME@4..9
         IDENT@4..9 "total"
-      TYPE_ASCRIPTION@9..18
+      TYPE_ASCRIPTION@9..17
         COLON@9..10 ":"
         WHITESPACE@10..11 " "
         TYPE_REF@11..17
           IDENT@11..17 "double"
-        WHITESPACE@17..18 " "
+      WHITESPACE@17..18 " "
       LESS_MINUS@18..20 "<-"
       WHITESPACE@20..21 " "
       LITERAL@21..22
@@ -248,12 +248,12 @@ SOURCE_FILE@0..50
         WHITESPACE@27..28 " "
         PARAMETER@28..43
           IDENT@28..29 "y"
-          TYPE_ASCRIPTION@29..39
+          TYPE_ASCRIPTION@29..38
             COLON@29..30 ":"
             WHITESPACE@30..31 " "
             TYPE_REF@31..38
               IDENT@31..38 "integer"
-            WHITESPACE@38..39 " "
+          WHITESPACE@38..39 " "
           EQ@39..40 "="
           WHITESPACE@40..41 " "
           LITERAL@41..43
@@ -292,12 +292,12 @@ SOURCE_FILE@0..45
               IDENT@19..26 "integer"
         R_PAREN@26..27 ")"
       WHITESPACE@27..28 " "
-      RETURN_TYPE@28..39
+      RETURN_TYPE@28..38
         MINUS_GREATER@28..30 "->"
         WHITESPACE@30..31 " "
         TYPE_REF@31..38
           IDENT@31..38 "integer"
-        WHITESPACE@38..39 " "
+      WHITESPACE@38..39 " "
       BINARY_EXPR@39..45
         NAME@39..40
           IDENT@39..40 "x"
@@ -332,12 +332,12 @@ SOURCE_FILE@0..51
               IDENT@19..26 "integer"
         R_PAREN@26..27 ")"
       WHITESPACE@27..28 " "
-      RETURN_TYPE@28..39
+      RETURN_TYPE@28..38
         MINUS_GREATER@28..30 "->"
         WHITESPACE@30..31 " "
         TYPE_REF@31..38
           IDENT@31..38 "integer"
-        WHITESPACE@38..39 " "
+      WHITESPACE@38..39 " "
       BRACE_EXPR@39..51
         L_BRACE@39..40 "{"
         NEWLINE@40..41 "\n"
@@ -387,12 +387,12 @@ SOURCE_FILE@0..53
               R_BRACKET@34..35 "]"
         R_PAREN@35..36 ")"
       WHITESPACE@36..37 " "
-      RETURN_TYPE@37..42
+      RETURN_TYPE@37..41
         MINUS_GREATER@37..39 "->"
         WHITESPACE@39..40 " "
         TYPE_REF@40..41
           IDENT@40..41 "T"
-        WHITESPACE@41..42 " "
+      WHITESPACE@41..42 " "
       SUBSET2_EXPR@42..53
         NAME@42..47
           IDENT@42..47 "items"
@@ -437,12 +437,12 @@ SOURCE_FILE@0..39
               IDENT@26..27 "T"
         R_PAREN@27..28 ")"
       WHITESPACE@28..29 " "
-      RETURN_TYPE@29..34
+      RETURN_TYPE@29..33
         MINUS_GREATER@29..31 "->"
         WHITESPACE@31..32 " "
         TYPE_REF@32..33
           IDENT@32..33 "T"
-        WHITESPACE@33..34 " "
+      WHITESPACE@33..34 " "
       BINARY_EXPR@34..39
         NAME@34..35
           IDENT@34..35 "x"
@@ -475,12 +475,12 @@ SOURCE_FILE@0..57
               IDENT@22..31 "character"
         R_PAREN@31..32 ")"
       WHITESPACE@32..33 " "
-      RETURN_TYPE@33..46
+      RETURN_TYPE@33..45
         MINUS_GREATER@33..35 "->"
         WHITESPACE@35..36 " "
         TYPE_REF@36..45
           IDENT@36..45 "character"
-        WHITESPACE@45..46 " "
+      WHITESPACE@45..46 " "
       CALL_EXPR@46..57
         NAME@46..52
           IDENT@46..52 "paste0"
@@ -524,7 +524,7 @@ SOURCE_FILE@0..82
         WHITESPACE@29..31 "  "
         PARAMETER@31..63
           IDENT@31..32 "y"
-          TYPE_ASCRIPTION@32..54
+          TYPE_ASCRIPTION@32..53
             COLON@32..33 ":"
             WHITESPACE@33..34 " "
             TYPE_LIST@34..53
@@ -537,7 +537,7 @@ SOURCE_FILE@0..82
               TYPE_REF@46..52
                 IDENT@46..52 "double"
               R_BRACKET@52..53 "]"
-            WHITESPACE@53..54 " "
+          WHITESPACE@53..54 " "
           EQ@54..55 "="
           WHITESPACE@55..56 " "
           CALL_EXPR@56..62
@@ -549,12 +549,12 @@ SOURCE_FILE@0..82
           NEWLINE@62..63 "\n"
         R_PAREN@63..64 ")"
       WHITESPACE@64..65 " "
-      RETURN_TYPE@65..75
+      RETURN_TYPE@65..74
         MINUS_GREATER@65..67 "->"
         WHITESPACE@67..68 " "
         TYPE_REF@68..74
           IDENT@68..74 "double"
-        WHITESPACE@74..75 " "
+      WHITESPACE@74..75 " "
       BRACE_EXPR@75..82
         L_BRACE@75..76 "{"
         NEWLINE@76..77 "\n"
@@ -592,12 +592,12 @@ SOURCE_FILE@0..50
                   IDENT@23..30 "integer"
             R_PAREN@30..31 ")"
           WHITESPACE@31..32 " "
-          RETURN_TYPE@32..43
+          RETURN_TYPE@32..42
             MINUS_GREATER@32..34 "->"
             WHITESPACE@34..35 " "
             TYPE_REF@35..42
               IDENT@35..42 "integer"
-            WHITESPACE@42..43 " "
+          WHITESPACE@42..43 " "
           BINARY_EXPR@43..49
             NAME@43..44
               IDENT@43..44 "x"

@@ -134,7 +134,7 @@ fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
             .filter(syntax::is_inline_annotation)
         {
             diagnostics.push(Diagnostic::new(
-                inline_annotation_range(&node),
+                node.text_range(),
                 Severity::Warning,
                 "inline-annotation",
                 "inline type annotations are turned off in `ry.toml`, so this one is not checked. R itself cannot run this code: delete the annotation, or set `[check] inline-annotations = true`".to_owned(),
@@ -153,19 +153,6 @@ fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
         }
     }
     diagnostics
-}
-
-/// The written annotation without the trivia the type grammar absorbed after it.
-fn inline_annotation_range(node: &SyntaxNode) -> TextRange {
-    let mut end = node.text_range().end();
-    let mut token = node.last_token();
-    while let Some(current) = token.filter(|token| {
-        token.kind().is_trivia() && node.text_range().contains_range(token.text_range())
-    }) {
-        end = current.text_range().start();
-        token = current.prev_token();
-    }
-    TextRange::new(node.text_range().start(), end)
 }
 
 /// An annotation must be followed on the next line by the expression it types.
