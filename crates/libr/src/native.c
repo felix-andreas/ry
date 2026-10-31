@@ -12,6 +12,11 @@
  */
 
 #include <setjmp.h>
+#include <errno.h>
+#include <stdint.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +26,7 @@
 #include <R_ext/Rdynload.h>
 
 #define RY_EXPORT __attribute__((visibility("default")))
+#define RY_EXPORT_DATA __attribute__((visibility("default")))
 
 /* Implemented in Rust (crates/libr/src/boundary.rs). */
 extern void ry_state_save(size_t *protect, size_t *vmax);
@@ -586,4 +592,401 @@ RY_EXPORT SEXP R_tryCatchError(SEXP (*body)(void *), void *bdata,
     SEXP result = R_tryCatch(body, bdata, conds, handler, hdata, NULL, NULL);
     UNPROTECT(1);
     return result;
+}
+
+/*
+ * The front-end interface (Rinterface.h, Rembedded.h, R_ext/eventloop.h, R_ext/Callbacks.h).
+ * GNU R exports these as data and as hooks a front end replaces; packages such as later share
+ * the event loop through them. The variables are plain C data, so they live here.
+ */
+
+typedef void (*RyInputHandlerProc)(void *);
+
+typedef struct RyInputHandler {
+    int activity;
+    int fileDescriptor;
+    RyInputHandlerProc handler;
+    struct RyInputHandler *next;
+    int active;
+    void *userData;
+} RyInputHandler;
+
+RY_EXPORT_DATA RyInputHandler *R_InputHandlers = NULL;
+RY_EXPORT_DATA void (*R_PolledEvents)(void) = NULL;
+RY_EXPORT_DATA int R_wait_usec = 0;
+
+RY_EXPORT RyInputHandler *addInputHandler(RyInputHandler *handlers, int fd,
+                                          RyInputHandlerProc handler, int activity)
+{
+    RyInputHandler *input = calloc(1, sizeof *input);
+    if (input == NULL)
+        return NULL;
+    input->activity = activity;
+    input->fileDescriptor = fd;
+    input->handler = handler;
+    input->active = 1;
+    if (handlers == NULL) {
+        R_InputHandlers = input;
+        return input;
+    }
+    RyInputHandler *last = handlers;
+    while (last->next != NULL)
+        last = last->next;
+    last->next = input;
+    return input;
+}
+
+RY_EXPORT RyInputHandler *getInputHandler(RyInputHandler *handlers, int fd)
+{
+    for (RyInputHandler *input = handlers; input != NULL; input = input->next)
+        if (input->fileDescriptor == fd)
+            return input;
+    return NULL;
+}
+
+RY_EXPORT int removeInputHandler(RyInputHandler **handlers, RyInputHandler *it)
+{
+    if (handlers == NULL || it == NULL)
+        return 0;
+    for (RyInputHandler **link = handlers; *link != NULL; link = &(*link)->next) {
+        if (*link == it) {
+            *link = it->next;
+            free(it);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+RY_EXPORT RyInputHandler *getSelectedHandler(RyInputHandler *handlers, fd_set *mask)
+{
+    for (RyInputHandler *input = handlers; input != NULL; input = input->next)
+        if (input->active && FD_ISSET(input->fileDescriptor, mask)) {
+            FD_CLR(input->fileDescriptor, mask);
+            return input;
+        }
+    return NULL;
+}
+
+RY_EXPORT int R_SelectEx(int n, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                         struct timeval *timeout, void (*intr)(void))
+{
+    (void) intr;
+    return select(n, readfds, writefds, exceptfds, timeout);
+}
+
+/* The descriptors with input pending, waiting at most `usec` microseconds (forever if negative). */
+RY_EXPORT fd_set *R_checkActivity(int usec, int ignore_stdin)
+{
+    static fd_set ready;
+    struct timeval wait;
+    int highest = -1;
+    FD_ZERO(&ready);
+    if (!ignore_stdin) {
+        FD_SET(STDIN_FILENO, &ready);
+        highest = STDIN_FILENO;
+    }
+    for (RyInputHandler *input = R_InputHandlers; input != NULL; input = input->next) {
+        if (input->active && input->fileDescriptor >= 0) {
+            FD_SET(input->fileDescriptor, &ready);
+            if (input->fileDescriptor > highest)
+                highest = input->fileDescriptor;
+        }
+    }
+    if (R_wait_usec > 0 && (usec < 0 || R_wait_usec < usec))
+        usec = R_wait_usec;
+    wait.tv_sec = usec < 0 ? 0 : usec / 1000000;
+    wait.tv_usec = usec < 0 ? 0 : usec % 1000000;
+    int found = select(highest + 1, &ready, NULL, NULL, usec < 0 ? NULL : &wait);
+    return found > 0 ? &ready : NULL;
+}
+
+RY_EXPORT void R_runHandlers(RyInputHandler *handlers, fd_set *mask)
+{
+    if (mask == NULL) {
+        if (R_PolledEvents != NULL)
+            R_PolledEvents();
+        return;
+    }
+    RyInputHandler *input = handlers;
+    while (input != NULL) {
+        RyInputHandler *next = input->next;
+        if (input->active && input->fileDescriptor >= 0 && FD_ISSET(input->fileDescriptor, mask))
+            input->handler(input->userData);
+        input = next;
+    }
+}
+
+/* R_ProcessEvents runs the polled-events hook and acts on a pending interrupt. */
+RY_EXPORT void R_ProcessEvents(void)
+{
+    if (R_PolledEvents != NULL)
+        R_PolledEvents();
+    R_CheckUserInterrupt();
+}
+
+/* Console and front-end hooks a front end may replace. */
+
+typedef enum { RY_SA_NORESTORE, RY_SA_RESTORE, RY_SA_DEFAULT, RY_SA_NOSAVE, RY_SA_SAVE,
+               RY_SA_SAVEASK, RY_SA_SUICIDE } RySaveAction;
+
+RY_EXPORT_DATA char *R_Home = NULL;
+RY_EXPORT_DATA char *R_TempDir = NULL;
+RY_EXPORT_DATA char *R_GUIType = "unknown";
+RY_EXPORT_DATA char *R_HistoryFile = ".Rhistory";
+RY_EXPORT_DATA int R_HistorySize = 512;
+RY_EXPORT_DATA int R_RestoreHistory = 0;
+RY_EXPORT_DATA int R_DirtyImage = 0;
+RY_EXPORT_DATA Rboolean R_NoEcho = FALSE;
+RY_EXPORT_DATA FILE *R_Consolefile = NULL;
+RY_EXPORT_DATA FILE *R_Outputfile = NULL;
+RY_EXPORT_DATA int R_running_as_main_program = 0;
+RY_EXPORT_DATA int R_SignalHandlers = 0;
+RY_EXPORT_DATA int R_isForkedChild = 0;
+/* No C stack checking: the limit is the largest address, as when GNU R disables the check. */
+RY_EXPORT_DATA uintptr_t R_CStackLimit = (uintptr_t) -1;
+RY_EXPORT_DATA uintptr_t R_CStackStart = (uintptr_t) -1;
+RY_EXPORT_DATA int R_CStackDir = 1;
+RY_EXPORT_DATA int (*R_timeout_handler)(void) = NULL;
+RY_EXPORT_DATA long R_timeout_val = 0;
+RY_EXPORT_DATA Rboolean UserBreak = FALSE;
+RY_EXPORT_DATA int R_num_math_threads = 1;
+RY_EXPORT_DATA int R_max_num_math_threads = 1;
+
+/*
+ * GNU R's context stack is opaque to packages; later declares R_GlobalContext itself and only
+ * compares it with the top-level context, so both point at one zeroed block that reads as "at
+ * top level".
+ */
+static char ry_toplevel_context[1024];
+RY_EXPORT_DATA void *R_GlobalContext = ry_toplevel_context;
+RY_EXPORT_DATA void *R_ToplevelContext = ry_toplevel_context;
+
+RY_EXPORT_DATA void (*ptr_R_Suicide)(const char *) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ShowMessage)(const char *) = NULL;
+RY_EXPORT_DATA int (*ptr_R_ReadConsole)(const char *, unsigned char *, int, int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_WriteConsole)(const char *, int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_WriteConsoleEx)(const char *, int, int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ResetConsole)(void) = NULL;
+RY_EXPORT_DATA void (*ptr_R_FlushConsole)(void) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ClearerrConsole)(void) = NULL;
+RY_EXPORT_DATA void (*ptr_R_Busy)(int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_CleanUp)(RySaveAction, int, int) = NULL;
+RY_EXPORT_DATA int (*ptr_R_ShowFiles)(int, const char **, const char **, const char *,
+                                      Rboolean, const char *) = NULL;
+RY_EXPORT_DATA int (*ptr_R_ChooseFile)(int, char *, int) = NULL;
+RY_EXPORT_DATA int (*ptr_R_EditFile)(const char *) = NULL;
+RY_EXPORT_DATA void (*ptr_R_loadhistory)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA void (*ptr_R_savehistory)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA void (*ptr_R_addhistory)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA int (*ptr_R_EditFiles)(int, const char **, const char **, const char *) = NULL;
+RY_EXPORT_DATA SEXP (*ptr_do_selectlist)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA SEXP (*ptr_do_dataentry)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA SEXP (*ptr_do_dataviewer)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ProcessEvents)(void) = NULL;
+
+/* Called once when the runtime starts: the streams are only known at run time. */
+void ry_frontend_start(const char *home, const char *temp_dir)
+{
+    R_Consolefile = stderr;
+    R_Outputfile = stdout;
+    if (home != NULL)
+        R_Home = strdup(home);
+    if (temp_dir != NULL)
+        R_TempDir = strdup(temp_dir);
+}
+
+RY_EXPORT void R_Busy(int which)
+{
+    if (ptr_R_Busy != NULL)
+        ptr_R_Busy(which);
+}
+
+/* Reads a line of console input into buf (len bytes, including the newline); 0 at end of input. */
+RY_EXPORT int R_ReadConsole(const char *prompt, unsigned char *buf, int len, int addtohistory)
+{
+    if (ptr_R_ReadConsole != NULL)
+        return ptr_R_ReadConsole(prompt, buf, len, addtohistory);
+    if (prompt != NULL) {
+        fputs(prompt, stdout);
+        fflush(stdout);
+    }
+    if (len <= 0 || fgets((char *) buf, len, stdin) == NULL)
+        return 0;
+    return 1;
+}
+
+RY_EXPORT void R_WriteConsole(const char *buf, int len)
+{
+    if (ptr_R_WriteConsole != NULL) {
+        ptr_R_WriteConsole(buf, len);
+        return;
+    }
+    ry_write_console(buf, (size_t) len, 0);
+}
+
+RY_EXPORT void R_WriteConsoleEx(const char *buf, int len, int otype)
+{
+    if (ptr_R_WriteConsoleEx != NULL) {
+        ptr_R_WriteConsoleEx(buf, len, otype);
+        return;
+    }
+    ry_write_console(buf, (size_t) len, otype != 0);
+}
+
+RY_EXPORT void R_ResetConsole(void)
+{
+    if (ptr_R_ResetConsole != NULL)
+        ptr_R_ResetConsole();
+}
+
+RY_EXPORT void R_ClearerrConsole(void)
+{
+    if (ptr_R_ClearerrConsole != NULL)
+        ptr_R_ClearerrConsole();
+    clearerr(stdin);
+}
+
+RY_EXPORT char *R_HomeDir(void)
+{
+    return R_Home;
+}
+
+extern void ry_run_exit_finalizers(void);
+
+RY_EXPORT void R_Suicide(const char *message)
+{
+    if (ptr_R_Suicide != NULL)
+        ptr_R_Suicide(message);
+    fprintf(stderr, "Fatal error: %s\n", message);
+    exit(2);
+}
+
+RY_EXPORT void R_CleanUp(RySaveAction save, int status, int run_last)
+{
+    (void) save;
+    (void) run_last;
+    if (ptr_R_CleanUp != NULL)
+        ptr_R_CleanUp(save, status, run_last);
+    ry_run_exit_finalizers();
+    exit(status);
+}
+
+RY_EXPORT void R_setStartTime(void) {}
+
+RY_EXPORT void fpu_setup(Rboolean start) { (void) start; }
+
+RY_EXPORT int R_EditFiles(int nfile, const char **file, const char **title, const char *editor)
+{
+    if (ptr_R_EditFiles != NULL)
+        return ptr_R_EditFiles(nfile, file, title, editor);
+    return 1;
+}
+
+RY_EXPORT void R_CleanTempDir(void)
+{
+    /* The runtime removes its session directory itself at exit. */
+}
+
+RY_EXPORT void R_SaveGlobalEnv(void) {}
+RY_EXPORT void R_RestoreGlobalEnv(void) {}
+RY_EXPORT void R_SaveGlobalEnvToFile(const char *name) { (void) name; }
+RY_EXPORT void R_RestoreGlobalEnvFromFile(const char *name, Rboolean quiet)
+{
+    (void) name;
+    (void) quiet;
+}
+RY_EXPORT void R_setupHistory(void) {}
+
+/* Task callbacks run after each top-level task; the interpreter calls ry_run_task_callbacks. */
+
+typedef Rboolean (*RyTaskCallback)(SEXP, SEXP, Rboolean, Rboolean, void *);
+
+typedef struct RyToplevelCallback {
+    RyTaskCallback cb;
+    void *data;
+    void (*finalizer)(void *data);
+    char *name;
+    struct RyToplevelCallback *next;
+} RyToplevelCallback;
+
+static RyToplevelCallback *ry_task_callbacks = NULL;
+
+static void ry_free_task_callback(RyToplevelCallback *callback)
+{
+    if (callback->finalizer != NULL)
+        callback->finalizer(callback->data);
+    free(callback->name);
+    free(callback);
+}
+
+RY_EXPORT RyToplevelCallback *Rf_addTaskCallback(RyTaskCallback cb, void *data,
+                                                 void (*finalizer)(void *), const char *name,
+                                                 int *pos)
+{
+    RyToplevelCallback *callback = calloc(1, sizeof *callback);
+    if (callback == NULL)
+        Rf_error("cannot allocate a task callback");
+    callback->cb = cb;
+    callback->data = data;
+    callback->finalizer = finalizer;
+    int position = 1;
+    RyToplevelCallback **link = &ry_task_callbacks;
+    while (*link != NULL) {
+        link = &(*link)->next;
+        position++;
+    }
+    *link = callback;
+    if (name != NULL) {
+        callback->name = strdup(name);
+    } else {
+        char generated[32];
+        snprintf(generated, sizeof generated, "%d", position);
+        callback->name = strdup(generated);
+    }
+    if (pos != NULL)
+        *pos = position;
+    return callback;
+}
+
+RY_EXPORT Rboolean Rf_removeTaskCallbackByIndex(int index)
+{
+    RyToplevelCallback **link = &ry_task_callbacks;
+    for (int position = 1; *link != NULL; position++, link = &(*link)->next) {
+        if (position == index) {
+            RyToplevelCallback *callback = *link;
+            *link = callback->next;
+            ry_free_task_callback(callback);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+RY_EXPORT Rboolean Rf_removeTaskCallbackByName(const char *name)
+{
+    for (RyToplevelCallback **link = &ry_task_callbacks; *link != NULL; link = &(*link)->next) {
+        if (strcmp((*link)->name, name) == 0) {
+            RyToplevelCallback *callback = *link;
+            *link = callback->next;
+            ry_free_task_callback(callback);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* Runs every task callback after a top-level task; one that returns FALSE is removed. */
+RY_EXPORT void ry_run_task_callbacks(SEXP expr, SEXP value, Rboolean succeeded, Rboolean visible)
+{
+    RyToplevelCallback **link = &ry_task_callbacks;
+    while (*link != NULL) {
+        RyToplevelCallback *callback = *link;
+        if (!callback->cb(expr, value, succeeded, visible, callback->data)) {
+            *link = callback->next;
+            ry_free_task_callback(callback);
+        } else {
+            link = &callback->next;
+        }
+    }
 }

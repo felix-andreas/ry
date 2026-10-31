@@ -23,15 +23,31 @@ fn main() {
 
     let text =
         fs::read_to_string(source).unwrap_or_else(|error| panic!("cannot read {source}: {error}"));
-    let exported: Vec<String> = text
+    // `RY_EXPORT` marks a function (the name precedes the first parenthesis) and
+    // `RY_EXPORT_DATA` a variable (the name precedes the initializer or the semicolon, or an
+    // array bound).
+    let functions = text
         .lines()
         .filter_map(|line| line.strip_prefix("RY_EXPORT "))
         .filter_map(|declaration| {
             let name_end = declaration.find('(')?;
             let name = declaration[..name_end].trim().rsplit([' ', '*']).next()?;
             Some(name.to_owned())
-        })
-        .collect();
+        });
+    let variables = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("RY_EXPORT_DATA "))
+        .filter_map(|declaration| {
+            // A function pointer names itself inside `(*name)`.
+            if let Some(start) = declaration.find("(*") {
+                let rest = &declaration[start + 2..];
+                return Some(rest[..rest.find(')')?].trim().to_owned());
+            }
+            let name_end = declaration.find(['=', ';', '['])?;
+            let name = declaration[..name_end].trim().rsplit([' ', '*']).next()?;
+            Some(name.to_owned())
+        });
+    let exported: Vec<String> = functions.chain(variables).collect();
     let out_dir =
         PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|error| panic!("OUT_DIR: {error}")));
     let script = out_dir.join("exports.map");

@@ -117,3 +117,83 @@ pub unsafe extern "C" fn ry_set_console(callback: Option<ConsoleCallback>, data:
         None => Box::new(crate::boundary::default_console),
     };
 }
+
+unsafe extern "C" {
+    fn ry_frontend_start(home: *const c_char, temp_dir: *const c_char);
+}
+
+/// Sets the front-end data native code reads (`R_Home`, `R_TempDir`, the console streams).
+/// `R_Home` comes from `R_HOME`; the session's temporary directory is created here, as GNU R
+/// creates its `Rtmp` directory at startup.
+pub(crate) fn start_frontend() {
+    let home = std::env::var("R_HOME").ok();
+    let temp_root = ["TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+    let temp_dir = temp_root.join(format!("Rtmp{}", std::process::id()));
+    // Without a temporary directory the variable stays null, which is what code testing it
+    // expects of a session that has none.
+    let temp_dir = std::fs::create_dir_all(&temp_dir)
+        .ok()
+        .map(|()| temp_dir.to_string_lossy().into_owned());
+    let to_c = |text: Option<String>| text.and_then(|text| std::ffi::CString::new(text).ok());
+    let home = to_c(home);
+    let temp_dir = to_c(temp_dir);
+    // SAFETY: both strings are NUL-terminated and copied by the C side.
+    unsafe {
+        ry_frontend_start(
+            home.as_ref().map_or(std::ptr::null(), |text| text.as_ptr()),
+            temp_dir.as_ref().map_or(std::ptr::null(), |text| text.as_ptr()),
+        );
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_run_exit_finalizers() {
+    crate::extptr::R_RunExitFinalizers();
+}
+
+/// `Rf_initEmbeddedR(argc, argv)`: starts the runtime. The arguments are ry's to interpret
+/// once the interpreter reads them; the runtime itself needs none.
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_initEmbeddedR(_argc: c_int, _argv: *mut *mut c_char) -> c_int {
+    runtime();
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_initialize_R(_argc: c_int, _argv: *mut *mut c_char) -> c_int {
+    runtime();
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_endEmbeddedR(_fatal: c_int) {
+    crate::extptr::R_RunExitFinalizers();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setup_Rmainloop() {
+    runtime();
+}
+
+/// The read-eval-print loop belongs to the interpreter's front end, not to libR.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn run_Rmainloop() {
+    crate::boundary::write_console(
+        b"run_Rmainloop: ry's console runs through the `ry` binary, not through libR\n",
+        true,
+    );
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn R_ReplDLLinit() {
+    runtime();
+}
+
+/// One step of the embedded read-eval-print loop: -1 means the loop has ended.
+#[unsafe(no_mangle)]
+pub extern "C" fn R_ReplDLLdo1() -> c_int {
+    -1
+}

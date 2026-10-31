@@ -26,6 +26,7 @@ pub mod environments;
 pub mod eval;
 pub mod extptr;
 pub mod globals;
+pub mod graphics;
 pub mod legacy;
 pub mod lists;
 pub mod memory;
@@ -121,6 +122,7 @@ pub fn runtime() -> &'static mut Runtime {
         if slot.is_none() {
             *slot = Some(Runtime::start());
             globals::publish(slot.as_mut().unwrap_or_else(|| unreachable!()));
+            embed::start_frontend();
         }
         slot.as_mut().unwrap_or_else(|| unreachable!())
     }
