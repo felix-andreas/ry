@@ -507,7 +507,8 @@ impl Compiler {
             let args = values::pairlist_items(call.cdr());
             let plain = args.iter().all(|(tag, _)| *tag == nil());
             let inlined = match (name.as_str(), args.len()) {
-                ("{", _) | ("(", 1) | ("if", 2 | 3) | ("while", 2) | ("repeat", 1) | ("return", 0 | 1) => plain,
+                ("(", 1) => plain && args[0].1 != symbols().dots,
+                ("{", _) | ("if", 2 | 3) | ("while", 2) | ("repeat", 1) | ("return", 0 | 1) => plain,
                 ("for", 3) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("break" | "next", 0) => !self.open_loops.is_empty(),
                 ("<-" | "=", 2) => plain && args[0].1.kind() == SexpType::Symbol,

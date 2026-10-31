@@ -513,9 +513,16 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     }
     let result = match operand.kind() {
         SexpType::Logical => {
-            let converted = coerce_vector(operand, SexpType::Integer)?;
-            let result = values::duplicate(converted)?;
-            values::copy_most_attributes(operand, result, true)?;
+            // Coercing to integer makes a new kind of value, so like `!` on a number it keeps
+            // only the structural attributes: `+x` of a logical time series is no time series.
+            let result = alloc(SexpType::Integer, length(operand))?;
+            values::ints_mut(result).copy_from_slice(values::ints(operand));
+            for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
+                let value = get_attr(operand, symbol);
+                if value != nil() {
+                    values::set_attr(result, symbol, value)?;
+                }
+            }
             result
         }
         SexpType::Integer | SexpType::Real | SexpType::Complex => {
@@ -563,8 +570,8 @@ pub enum Keep {
     Structure,
 }
 
-/// The result attributes of a binary operation: dims must agree, names come from the operand
-/// as long as the result, and with `Keep::All` other attributes are copied from both, the
+/// The result attributes of a binary operation: dims must agree, a result that is no array
+/// takes names from the operand as long as itself, and with `Keep::All` other attributes are copied from both, the
 /// first taking precedence.
 pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp, keep: Keep) -> R<()> {
     let left_dims = get_attr(left, symbols().dim);
@@ -610,6 +617,10 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
         } else if from_right != nil() && length(right) == result_length {
             values::set_attr(result, symbol, from_right)?;
         }
+    }
+    // An array result is named by its dimnames, never by the other operand's names.
+    if get_attr(result, symbols().dim) != nil() {
+        return Ok(());
     }
     let left_names = get_attr(left, symbols().names);
     let right_names = get_attr(right, symbols().names);
@@ -1271,8 +1282,22 @@ fn math_value(function: Math, x: f64) -> f64 {
             }
         }
         Math::Tanpi => {
-            let reduced = x % 1.0;
-            if reduced == 0.0 { 0.0 } else { (PI * reduced).tan() }
+            // Reducing into (-1/2, 1/2] is exact, so values one period apart agree exactly.
+            let mut reduced = x % 1.0;
+            if reduced > 0.5 {
+                reduced -= 1.0;
+            } else if reduced <= -0.5 {
+                reduced += 1.0;
+            }
+            if reduced == 0.0 {
+                0.0
+            } else if reduced == 0.5 {
+                f64::NAN
+            } else if reduced == 0.25 || reduced == -0.25 {
+                reduced * 4.0
+            } else {
+                (PI * reduced).tan()
+            }
         }
         Math::Acos => x.acos(),
         Math::Asin => x.asin(),

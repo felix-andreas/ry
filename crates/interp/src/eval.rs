@@ -1210,7 +1210,14 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
     call.check_arity(1)?;
-    eval(call.arg(0), call.env)
+    if call.arg(0) != symbols().dots {
+        return eval(call.arg(0), call.env);
+    }
+    // `(...)` is a builtin call in GNU R, so the dots expand into its single argument.
+    let args = evaluate_args(call.call.cdr(), call.env, false, call.call)?;
+    let expanded = Call { args: &args, ..*call };
+    expanded.check_arity(1)?;
+    Ok(expanded.arg(0))
 }
 
 /// The condition of `if` and `while`, with GNU R's messages.

@@ -35,10 +35,18 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
         )));
     }
     let root = parse.syntax_node();
+    let may_hold_placeholder = text.contains('_');
     let mut expressions = Vec::new();
     for child in root.children() {
         if is_skipped(&child) {
             continue;
+        }
+        if may_hold_placeholder && has_stray_placeholder(&child) {
+            let offset = usize::from(child.text_range().start()).min(text.len());
+            let line = text[..offset].matches('\n').count() + 1;
+            return Err(error(format!(
+                "invalid use of pipe placeholder ({source_name}:{line}:0)"
+            )));
         }
         expressions.push(lower(&child)?);
     }
@@ -230,7 +238,7 @@ unsafe fn binary(node: &SyntaxNode) -> R<Sexp> {
     match operator.kind() {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
         SyntaxKind::MINUS_GREATER2 => values::call(symbols().assign2, &[right_value, left_value]),
-        SyntaxKind::PIPE_GREATER => pipe(left_value, right_value),
+        SyntaxKind::PIPE_GREATER => pipe(left_value, right_value, placeholder_name(right)?),
         _ => {
             let symbol = install(operator.text())?;
             values::call(symbol, &[left_value, right_value])
@@ -238,8 +246,9 @@ unsafe fn binary(node: &SyntaxNode) -> R<Sexp> {
     }
 }
 
-/// `lhs |> f(args)` is `f(lhs, args)`.
-unsafe fn pipe(left: Sexp, right: Sexp) -> R<Sexp> {
+/// `lhs |> f(args)` is `f(lhs, args)`, and `lhs |> f(x, y = _)` is `f(x, y = lhs)`, where
+/// `placeholder` names the argument that holds the placeholder.
+unsafe fn pipe(left: Sexp, right: Sexp, placeholder: Option<Sexp>) -> R<Sexp> {
     if right.kind() != SexpType::Language {
         return Err(error(
             "The pipe operator requires a function call as RHS",
@@ -251,8 +260,66 @@ unsafe fn pipe(left: Sexp, right: Sexp) -> R<Sexp> {
             "function 'function' not supported in RHS call of a pipe",
         ));
     }
+    if let Some(tag) = placeholder {
+        let mut argument = right.cdr();
+        while argument != nil() {
+            if argument.tag() == tag && argument.car() == install("_")? {
+                crate::heap().set_car(argument, left);
+                return Ok(right);
+            }
+            argument = argument.cdr();
+        }
+    }
     let rest = values::cons(left, right.cdr())?;
     values::lcons(head, rest)
+}
+
+/// The placeholder argument of a pipe's right side: the first named argument of the call whose
+/// value is a bare `_`. A backquoted `` `_` `` is an ordinary name, so only the token counts.
+fn placeholder_argument(right: &SyntaxNode) -> Option<SyntaxNode> {
+    if right.kind() != SyntaxKind::CALL_EXPR {
+        return None;
+    }
+    let arguments = right.children().find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
+    arguments.children().filter(|child| child.kind() == SyntaxKind::ARGUMENT).find(|argument| {
+        let mut after_equals = false;
+        argument.children_with_tokens().any(|element| match element {
+            SyntaxElement::Token(token) => {
+                after_equals |= token.kind() == SyntaxKind::EQ;
+                false
+            }
+            SyntaxElement::Node(value) => after_equals && is_bare_placeholder(&value),
+        })
+    })
+}
+
+unsafe fn placeholder_name(right: &SyntaxNode) -> R<Option<Sexp>> {
+    let Some(argument) = placeholder_argument(right) else {
+        return Ok(None);
+    };
+    match argument.children().next() {
+        Some(name) => tag_from_node(&name).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn is_bare_placeholder(node: &SyntaxNode) -> bool {
+    node.kind() == SyntaxKind::NAME
+        && significant_tokens(node).first().is_some_and(|token| token.kind() == SyntaxKind::UNDERSCORE)
+}
+
+/// Whether a `_` in `node` is not the placeholder argument of a pipe, which R rejects.
+fn has_stray_placeholder(node: &SyntaxNode) -> bool {
+    let placeholders = node.descendants().filter(is_bare_placeholder).count();
+    let consumed = node
+        .descendants()
+        .filter(|expression| {
+            expression.kind() == SyntaxKind::BINARY_EXPR
+                && significant_tokens(expression).iter().any(|token| token.kind() == SyntaxKind::PIPE_GREATER)
+                && expression_children(expression).get(1).is_some_and(|right| placeholder_argument(right).is_some())
+        })
+        .count();
+    placeholders > consumed
 }
 
 /// The arguments of a call or subset, with empty arguments as `R_MissingArg`.

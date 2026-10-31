@@ -3737,7 +3737,11 @@ unsafe fn do_bin_count(call: &NativeCall<'_>) -> R<Sexp> {
     values::integer_vector(&counts)
 }
 
-unsafe fn do_stem_leaf(_: &NativeCall<'_>) -> R<Sexp> {
+unsafe fn do_stem_leaf(call: &NativeCall<'_>) -> R<Sexp> {
+    // A single value has no spread to split into stems, so GNU R prints nothing for it.
+    if length(call.arg(0)) <= 1 {
+        return Ok(nil());
+    }
     Err(error("stem() is not supported in ry yet"))
 }
 
