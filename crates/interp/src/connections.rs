@@ -27,6 +27,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("stdout", 0, |_| unsafe { connection_object(1) }),
     internal("stderr", 0, |_| unsafe { connection_object(2) }),
     internal("readLines", 6, do_read_lines),
+    internal("readDCF", 3, do_read_dcf),
     internal("writeLines", 4, do_write_lines).invisible(),
     internal("readChar", 4, do_read_char),
     internal("writeChar", 5, |call| unsafe { Err(call.error("writeChar is not supported")) }),
@@ -833,4 +834,109 @@ unsafe fn do_get_all_connections(_call: &Call<'_>) -> R<Sexp> {
         .map(|(index, _)| index as i32)
         .collect();
     values::integer_vector(&indices)
+}
+
+/// `readDCF(file, fields, keep.white)`: the records of a Debian control file as a character
+/// matrix, one row per record. Without `fields`, the columns are every field in order of first
+/// appearance. A field repeated in a record keeps its last value. A continuation line joins its
+/// field with a newline, and one holding only `.` stands for an empty line. Whitespace is trimmed
+/// around a value and each continuation line, except in the `keep.white` fields, which keep the
+/// continuation lines as written.
+unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
+    let wanted = call.arg(1);
+    let wanted: Option<Vec<String>> = (wanted != nil())
+        .then(|| values::strings(wanted).into_iter().map(Option::unwrap_or_default).collect());
+    let keep_white: Vec<String> = if call.arg(2) == nil() {
+        Vec::new()
+    } else {
+        values::strings(call.arg(2)).into_iter().flatten().collect()
+    };
+    let text = with_input(call.arg(0), |input, position| {
+        let rest = input.get(*position..).unwrap_or_default().to_vec();
+        *position = input.len();
+        rest
+    })?;
+    let text = String::from_utf8_lossy(&text);
+    let mut fields: Vec<String> = Vec::new();
+    let mut records: Vec<Vec<(usize, String)>> = Vec::new();
+    let mut record: Vec<(usize, String)> = Vec::new();
+    // The open field: its column and whether it keeps whitespace.
+    let mut current: Option<(usize, bool)> = None;
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.trim().is_empty() {
+            if !record.is_empty() {
+                records.push(std::mem::take(&mut record));
+            }
+            current = None;
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            let Some((column, keep)) = current else {
+                return Err(call.error(format!("Found continuation line starting '{} ...' at begin of record.", truncate(line))));
+            };
+            let Some((_, value)) = record.iter_mut().rev().find(|(index, _)| *index == column) else {
+                continue;
+            };
+            let content = if line.trim() == "." {
+                ""
+            } else if keep {
+                line
+            } else {
+                line.trim()
+            };
+            value.push('\n');
+            value.push_str(content);
+            continue;
+        }
+        let Some((tag, value)) = line.split_once(':') else {
+            return Err(call.error(format!("Line starting '{} ...' is malformed!", truncate(line))));
+        };
+        let column = match fields.iter().position(|field| field == tag) {
+            Some(column) => column,
+            None => {
+                fields.push(tag.to_owned());
+                fields.len() - 1
+            }
+        };
+        let keep = keep_white.iter().any(|field| field == tag);
+        record.retain(|(index, _)| *index != column);
+        record.push((column, value.trim_start().to_owned()));
+        current = Some((column, keep));
+    }
+    if !record.is_empty() {
+        records.push(record);
+    }
+    let columns: Vec<Option<usize>> = match &wanted {
+        Some(wanted) => wanted.iter().map(|name| fields.iter().position(|field| field == name)).collect(),
+        None => (0..fields.len()).map(Some).collect(),
+    };
+    let rows = records.len();
+    let mut cells: Vec<Option<String>> = vec![None; rows * columns.len()];
+    for (row, record) in records.iter().enumerate() {
+        for (position, column) in columns.iter().enumerate() {
+            let Some(column) = column else { continue };
+            if let Some((_, value)) = record.iter().find(|(index, _)| index == column) {
+                let keep = keep_white.contains(&fields[*column]);
+                cells[position * rows + row] = Some(if keep { value.clone() } else { value.trim().to_owned() });
+            }
+        }
+    }
+    let result = values::string_vector_na(&cells)?;
+    crate::heap().root(result);
+    let dim = values::integer_vector(&[rows as i32, columns.len() as i32])?;
+    values::set_attr(result, symbols().dim, dim)?;
+    let names = match wanted {
+        Some(wanted) => wanted,
+        None => fields,
+    };
+    let names = values::string_vector(&names)?;
+    crate::heap().root(names);
+    let dimnames = values::list_vector(&[nil(), names])?;
+    values::set_attr(result, symbols().dimnames, dimnames)?;
+    Ok(result)
+}
+
+fn truncate(line: &str) -> &str {
+    &line[..line.floor_char_boundary(line.len().min(30))]
 }

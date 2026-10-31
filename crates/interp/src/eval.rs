@@ -1273,7 +1273,22 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("'EXPR' is missing"));
     };
     let selector = eval(first.value, call.env)?;
-    let alternatives = &call.args[1..];
+    // `switch(x, ...)` forwards the caller's alternatives, so `...` expands to its promises.
+    let mut alternatives: Vec<Arg> = Vec::with_capacity(call.args.len() - 1);
+    for arg in &call.args[1..] {
+        if arg.value == symbols().dots && arg.tag == nil() {
+            let dots = find_var(symbols().dots, call.env)?;
+            if dots.kind() == SexpType::Dots {
+                crate::heap().root(dots);
+                for (tag, value) in values::pairlist_items(dots) {
+                    alternatives.push(Arg { tag, value });
+                }
+            }
+        } else {
+            alternatives.push(*arg);
+        }
+    }
+    let alternatives = &alternatives[..];
     if !values::is_string_scalar(selector) && length(selector) != 1 {
         return Err(call.error("EXPR must be a length 1 vector"));
     }

@@ -35,7 +35,14 @@ pub mod options {
 
 /// Deparses to lines at the default cutoff.
 pub unsafe fn deparse_lines(object: Sexp, cutoff: usize, opts: u32) -> Vec<String> {
+    deparse_lines_with(object, cutoff, opts, true)
+}
+
+/// [`deparse_lines`], where `backtick` says whether a non-syntactic name is written in backticks
+/// (`deparse(backtick = )`) or, for names and symbols outside calls, in double quotes.
+pub unsafe fn deparse_lines_with(object: Sexp, cutoff: usize, opts: u32, backtick: bool) -> Vec<String> {
     let mut deparser = Deparser::new(cutoff, opts);
+    deparser.backtick = backtick;
     deparser.deparse(object);
     deparser.finish()
 }
@@ -180,6 +187,7 @@ struct Deparser {
     in_curly: usize,
     in_list: usize,
     depth: usize,
+    backtick: bool,
 }
 
 impl Deparser {
@@ -194,6 +202,7 @@ impl Deparser {
             opts,
             in_curly: 0,
             in_list: 0,
+            backtick: true,
             depth: 0,
         }
     }
@@ -688,6 +697,8 @@ impl Deparser {
         if !text.is_empty() {
             if is_syntactic(&text) {
                 self.print(&text);
+            } else if self.backtick {
+                self.print(&quote_name(&text));
             } else {
                 self.print(&format::encode_string(&text, Some('"')));
             }
@@ -855,6 +866,9 @@ impl Deparser {
                     other => {
                         if is_syntactic(other) {
                             other.to_owned()
+                        } else if self.backtick {
+                            // GNU R quotes the backticked name: `structure(1, "`a b`" = 2)`.
+                            format!("\"{}\"", quote_name(other))
                         } else {
                             format::encode_string(other, Some('"'))
                         }
@@ -995,7 +1009,8 @@ unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
     };
     let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
     let nlines = values::as_integer_scalar(call.arg(4));
-    let mut lines = deparse_lines(object, cutoff, opts);
+    let backtick = values::as_logical_scalar(call.arg(2)) == 1;
+    let mut lines = deparse_lines_with(object, cutoff, opts, backtick);
     if nlines > 0 && (nlines as usize) < lines.len() {
         lines.truncate(nlines as usize);
     }

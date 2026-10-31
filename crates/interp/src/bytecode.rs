@@ -890,10 +890,12 @@ unsafe fn step(
             interp().visible = true;
         }
         Op::GetVar => {
+            // Set first: forcing a promise leaves the visibility of its expression, as in
+            // `f <- function(x) { 1; x }; f(invisible(1))`.
+            interp().visible = true;
             let symbol = constants.element(operand(1));
             let value = lookup_variable(symbol, env, constants, caches, operand(2))?;
             set(operand(0), value);
-            interp().visible = true;
         }
         Op::SetVar => {
             let symbol = constants.element(operand(0));

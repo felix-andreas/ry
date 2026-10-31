@@ -430,7 +430,7 @@ impl crate::boundary::Handout for Option<Sexp> {
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
     builtin(".External", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
-    builtin(".External2", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
+    builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
     builtin(".Call.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
     builtin(".External.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
@@ -457,6 +457,15 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     native_call(call.call, &tagged_values(call), kind)
 }
 
+/// `.External2`: an external routine called as `fun(call, op, args, env)`, where `env` is the
+/// environment `.External2` was called from.
+unsafe fn dot_external2(call: &Call<'_>) -> ApiResult<Sexp> {
+    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+        return Ok(value);
+    }
+    native_call_in(call.call, &tagged_values(call), RoutineKind::External, Some((call.op, call.env)))
+}
+
 /// `.C` and `.Fortran`, routed like [`dot_call`].
 unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     let interface = if kind == RoutineKind::Fortran { Interface::Fortran } else { Interface::C };
@@ -479,6 +488,17 @@ pub unsafe fn native_call(
     call: Sexp,
     arguments: &[(Sexp, Sexp)],
     kind: RoutineKind,
+) -> ApiResult<Sexp> {
+    native_call_in(call, arguments, kind, None)
+}
+
+/// [`native_call`], with `external2` holding the `op` and `env` an `.External2` routine also
+/// receives.
+unsafe fn native_call_in(
+    call: Sexp,
+    arguments: &[(Sexp, Sexp)],
+    kind: RoutineKind,
+    external2: Option<(Sexp, Sexp)>,
 ) -> ApiResult<Sexp> {
     let what = kind.interface();
     let Some(((_, name), rest)) = arguments.split_first() else {
@@ -598,9 +618,12 @@ pub unsafe fn native_call(
             }
             let list = runtime()
                 .heap
-                .alloc_triple(SexpType::Language, *name, list, nil)?;
+                .alloc_triple(SexpType::Pairlist, *name, list, nil)?;
             runtime().heap.root(list);
-            call_native(function, &[list], what)
+            match external2 {
+                Some((op, env)) => call_native(function, &[call, op, list, env], what),
+                None => call_native(function, &[list], what),
+            }
         }
         RoutineKind::C | RoutineKind::Fortran => {
             if values.len() > 65 {

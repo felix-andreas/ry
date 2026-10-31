@@ -1,0 +1,17 @@
+[stdout]
+| [1] "second"
+| [1] 2
+| [1] "fell through"
+| <environment: namespace:base>
+| <environment: namespace:base>
+| c(`a b` = 1)
+| list(`# x` = 1)
+| structure(1, "`my attr`" = 2)
+| [1] "c(\"a b\" = 1)"
+| [1] "list(`a b` = 1)"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "list(`a b` = 1)"

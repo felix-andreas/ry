@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use oracle::{
     Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
-    gnu_r_available, parse, render,
+    gnu_r_available, packages, parse, render,
 };
+use packages::{PackageOutcome, Runtime, Settings};
 
 /// Differential testing of R engines against GNU R.
 #[derive(Parser)]
@@ -30,6 +32,27 @@ enum Command {
     },
     /// Print the outcome of one file under GNU R.
     Show { path: PathBuf },
+    /// Run corpus packages' own tests under GNU R and ry's runtime and report per package.
+    Packages {
+        /// The runtimes to run: `both`, `ry` or `gnur`. A runtime not run reports its recorded
+        /// result.
+        #[arg(long, default_value = "both")]
+        runtime: String,
+        /// Packages run in parallel.
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+        /// The limit in seconds for one package's suite under one runtime.
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// Rerun GNU R even when a result for the same package version is recorded.
+        #[arg(long)]
+        rerun_gnu_r: bool,
+        /// The corpus directory (default: `$RY_CORPUS_DIR`, then `.corpus` in the repository).
+        #[arg(long)]
+        corpus: Option<PathBuf>,
+        /// The packages to run (default: every package in `closure.txt`).
+        packages: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -56,6 +79,14 @@ fn main() -> ExitCode {
             };
             compare(&gnu_r, second.as_ref(), &cases(paths))
         }
+        Command::Packages {
+            runtime,
+            jobs,
+            timeout,
+            rerun_gnu_r,
+            corpus,
+            packages,
+        } => run_packages(runtime, jobs, timeout, rerun_gnu_r, corpus, packages),
         Command::Show { path } => match gnu_r.run(&path) {
             Ok(outcome) => {
                 print!("{}", render(&outcome));
@@ -172,6 +203,77 @@ fn compare(gnu_r: &ProcessEngine, second: &dyn Engine, cases: &[PathBuf]) -> Exi
         return ExitCode::SUCCESS;
     }
     summarize(cases.len() - skipped, failures)
+}
+
+fn run_packages(
+    runtime: String,
+    jobs: usize,
+    timeout: u64,
+    rerun_gnu_r: bool,
+    corpus: Option<PathBuf>,
+    packages: Vec<String>,
+) -> ExitCode {
+    let runtimes = match runtime.as_str() {
+        "both" => vec![Runtime::GnuR, Runtime::Ry],
+        "ry" => vec![Runtime::Ry],
+        "gnur" => vec![Runtime::GnuR],
+        other => {
+            eprintln!("--runtime must be `both`, `ry` or `gnur`, not `{other}`");
+            return ExitCode::from(2);
+        }
+    };
+    let corpus = corpus
+        .or_else(|| std::env::var_os("RY_CORPUS_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
+    let everything = match packages::closure(&corpus) {
+        Ok(everything) => everything,
+        Err(error) => {
+            eprintln!(
+                "cannot read {}: {error}; run `just corpus-sources` first",
+                corpus.join("closure.txt").display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let packages = if packages.is_empty() { everything.clone() } else { packages };
+        let settings = Settings {
+        corpus: corpus.clone(),
+        rscript: std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_owned()),
+        // Scripts run with `tests/` as the working directory, so a relative path must resolve now.
+        ry: std::fs::canonicalize(oracle::ry_program())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| oracle::ry_program()),
+        jobs,
+        timeout: Duration::from_secs(timeout),
+        reuse_gnu_r: !rerun_gnu_r,
+    };
+    let report = |package: &str, outcome: &PackageOutcome| {
+        let line = match outcome {
+            PackageOutcome::NoSources => "no sources".to_owned(),
+            PackageOutcome::NoTests => "no tests".to_owned(),
+            PackageOutcome::SetupFailed(error) => format!("setup failed: {error}"),
+            PackageOutcome::Ran { gnu_r, ry } => {
+                let status = |result: &Option<packages::SuiteResult>| match result {
+                    Some(result) => format!("{:?}", result.status).to_lowercase(),
+                    None => "-".to_owned(),
+                };
+                format!("gnur {:<8} ry {}", status(gnu_r), status(ry))
+            }
+        };
+        println!("{package:<24} {line}");
+    };
+    packages::run_all(&settings, &packages, &runtimes, &report);
+    // The summary always covers the whole closure, reading recorded results for the rest.
+    let all = packages::run_all(&settings, &everything, &[], &|_, _| {});
+    let summary = packages::summary(&all);
+    let path = corpus.join("tests").join("summary.md");
+    if let Err(error) = std::fs::write(&path, &summary) {
+        eprintln!("cannot write {}: {error}", path.display());
+        return ExitCode::FAILURE;
+    }
+    println!("{}", summary.lines().next().unwrap_or_default());
+    println!("report: {}", path.display());
+    ExitCode::SUCCESS
 }
 
 fn summarize(total: usize, failures: usize) -> ExitCode {
