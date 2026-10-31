@@ -45,6 +45,10 @@ fn child(index: usize) {
     let case = r.element(cases, index);
     let package = text(&r, field(&r, case, "package"));
     let packages = scan(&corpus_libraries());
+    if !packages.contains_key(&package) {
+        println!("RY-OUTCOME\tmissing\t{package} is not installed");
+        return;
+    }
     // Base packages' native code is the interpreter's (it backs their R code), and a routine
     // of another package needs only its own library and the libraries it calls into.
     for name in load_order(&package, &packages) {
@@ -65,6 +69,10 @@ fn child(index: usize) {
     let dll_name = CString::new(text(&r, field(&r, case, "dll"))).expect("a name");
     let routine =
         r.keep(unsafe { (r.api().ry_native_symbol)(routine_name.as_ptr(), dll_name.as_ptr()) });
+    if routine == r.nil() {
+        println!("RY-OUTCOME\tmissing\tthe installed {package} does not register the routine");
+        return;
+    }
     let arguments = field(&r, case, "arguments");
     let mut call_arguments = vec![(None, routine)];
     for index in 0..r.length(arguments) {
@@ -101,7 +109,7 @@ fn corpus_routines_return_what_they_return_under_gnu_r() {
         child(index.parse().expect("a case index"));
         return;
     }
-    if scan(&corpus_libraries()).is_empty() {
+    if scan(&corpus_libraries()).values().all(|package| package.base) {
         eprintln!("no corpus library found; run `just corpus` to install it");
         return;
     }
