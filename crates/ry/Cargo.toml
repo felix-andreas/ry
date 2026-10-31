@@ -37,6 +37,7 @@ tracing-tree.workspace = true
 
 format = { path = "../format" }
 ide = { path = "../ide" }
+loader = { path = "../loader" }
 repl = { path = "../repl" }
 semantics = { path = "../semantics" }
 syntax = { path = "../syntax" }

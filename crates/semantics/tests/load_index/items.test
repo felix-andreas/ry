@@ -1,0 +1,114 @@
+#==== laziness
+#---- a_function_definition_with_one_writer_is_lazy
+add <- function(x, y) x + y
+"quoted" <- function() 1
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 lazy add function at 1:7
+2:0 lazy quoted function at 2:12
+
+#---- top_level_code_is_eager_and_lists_what_it_reads
+limit <- 10L
+doubled <- limit * 2L
+helper <- function() limit
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager binds [limit]
+2:0 eager binds [doubled] reads [limit]
+3:0 lazy helper function at 3:10
+
+#---- a_second_writer_makes_every_writer_eager
+#~~~~ R/a.R
+cache <- function(x) x
+#~~~~ R/b.R
+cache <- memoise::memoise(cache)
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager binds [cache]
+== R/b.R
+1:0 eager binds [cache] reads [cache]
+
+#---- a_conditional_definition_is_eager
+if (getRversion() >= "4.0.0") {
+  modern <- function() TRUE
+} else {
+  modern <- function() FALSE
+}
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager binds [modern] reads [getRversion]
+
+#---- a_function_literal_swallows_a_rightward_assignment
+function(x) x -> body_binding
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager
+
+#---- superassignment_at_top_level_is_eager
+global <<- function() 1
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager binds [global] reads [global]
+
+#---- reads_inside_a_function_body_happen_later_so_they_are_not_listed
+make <- function() list(helper = helper)
+wrapped <- list(run = function() helper(), now = helper)
+helper <- function() 1
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 lazy make function at 1:8
+2:0 eager binds [wrapped] reads [helper list]
+3:0 lazy helper function at 3:10
+
+#==== positions
+#---- an_item_after_another_on_the_same_line_keeps_its_column
+first <- function() 1; second <- function() 2
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 lazy first function at 1:9
+1:23 lazy second function at 1:33
+
+#---- multi_line_items_start_at_their_first_line
+alpha <- function(x) {
+  x
+}
+
+beta <- function(y) {
+  y
+}
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 lazy alpha function at 1:9
+5:0 lazy beta function at 5:8
+
+#---- inline_annotations_are_erased_but_lines_stay
+typed <- function(x: int,
+                  y: int) -> int {
+  x + y
+}
+after <- function() 1
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 lazy typed function at 1:9
+5:0 lazy after function at 5:9
+
+#---- a_syntax_error_is_reported_with_its_line
+fine <- function() 1
+broken <- function( {
+#++++
+package demo 0.1.0
+== R/a.R
+syntax error 2: unclosed `(`; expected `)` to close the parameter list
+syntax error 2: expected a parameter name, found `{`
+1:0 lazy fine function at 1:8
+2:0 lazy broken function at 2:10

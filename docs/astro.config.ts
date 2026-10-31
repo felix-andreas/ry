@@ -68,6 +68,7 @@ export default defineConfig({
 						{ slug: 'guides/formatting' },
 						{ slug: 'guides/editors' },
 						{ slug: 'guides/console' },
+						{ slug: 'guides/loading-packages' },
 					],
 				},
 				{

@@ -9,11 +9,12 @@ ry fmt [PATHS]     # format files in place
 ry server          # the language server, over stdio; your editor starts it
 ry repl            # an R console with typed completion
 ry run FILE        # run an R script and exit
+ry load [PATH]     # load an R package from source, run code against it, and exit
 ```
 
-`format` and `lsp` are aliases for `fmt` and `server`. Only `repl` and `run` need R: they use the R in
-`R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be built as a
-shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer.
+`format` and `lsp` are aliases for `fmt` and `server`. Only `repl`, `run`, and `load` need R: they
+use the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must
+be built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer.
 
 ## check
 
@@ -46,7 +47,7 @@ ry fmt --diff    # show the changes without writing them, and exit 1 if any
 touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
 are in [Formatting rules](/reference/formatting-rules).
 
-## server, repl, and run
+## server, repl, run, and load
 
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
 `--experimental-features range_formatting` lets the server format a selection instead of the whole
@@ -54,20 +55,29 @@ file.
 
 `ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
 before the first prompt. [The console guide](/guides/console) describes what its completion knows.
+Started inside an R package, `ry repl` [loads it](/guides/loading-packages) and reloads what changed
+before each command; `--no-load` turns that off.
 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
-`Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`, and R's
-startup banner is printed first, so it ends up in the script's output.
+`Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`. R's
+startup banner is not printed, so the output is only what the script prints.
+
+`ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
+current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
+`ry load --r-entry` prints the R code that gives a plain R session the same `load_all()`, for
+`source(pipe("ry load --r-entry"))`. `load_all()` is available in `ry repl` and `ry run` sessions
+too.
 
 ## Exit codes
 
 - **0**: nothing found, or nothing to reformat.
 - **1**: `check` counted a finding (warnings count, unless `--min-severity error`), `fmt --check` or
-  `--diff` found a file to change, `run` hit an error in the script, or the server stopped after an
-  analysis panic.
+  `--diff` found a file to change, `run` or `load` hit an error in the script or the package, or the
+  server stopped after an analysis panic.
 - **2**: ry could not do its job. That is a usage error, invalid TOML in `ry.toml`, a path that does
-  not exist, a file or stub it cannot read, an invalid `exclude` pattern, or, for `repl` and `run`, no
-  usable R. A `2` overrides a `1`, so a broken setup never looks like ordinary findings.
+  not exist, a file or stub it cannot read, an invalid `exclude` pattern, for `load` a path inside
+  no package, or, for `repl`, `run`, and `load`, no usable R. A `2` overrides a `1`, so a broken
+  setup never looks like ordinary findings.
 
 A [misspelled key](/reference/configuration#mistakes-in-rytoml) in `ry.toml` is only a warning, not
 a `2`.

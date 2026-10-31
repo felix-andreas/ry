@@ -200,6 +200,21 @@ impl ProbeDatabase {
         file.set_text(self).to(text.into());
     }
 
+    /// How many times each query in `queries` ran since the previous drain; drains the log.
+    pub fn executions_since(&self, queries: &[&str]) -> Vec<usize> {
+        let executed = mem::take(&mut *self.executed.lock().expect("probe log"));
+        queries
+            .iter()
+            .map(|query| {
+                let prefix = format!("{query}(");
+                executed
+                    .iter()
+                    .filter(|entry| entry.starts_with(&prefix))
+                    .count()
+            })
+            .collect()
+    }
+
     /// Names of the items whose `item_check` ran since the previous call; drains the log.
     pub fn checked_since(&self) -> Vec<String> {
         let executed = mem::take(&mut *self.executed.lock().expect("probe log"));

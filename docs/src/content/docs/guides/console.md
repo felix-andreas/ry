@@ -12,5 +12,7 @@ ry repl            # interactive console
 ry run script.R    # run a script through the same R, then exit
 ```
 
-These are the only commands that need R. Everything else in ry reads the source and never runs it.
-The [command reference](/reference/cli#server-repl-and-run) lists their options.
+Started inside an R package, `ry repl` also loads that package and reloads what you change, as
+[Loading packages](/guides/loading-packages) describes. These commands and `ry load` are the only
+ones that need R. Everything else in ry reads the source and never runs it. The [command
+reference](/reference/cli#server-repl-run-and-load) lists their options.

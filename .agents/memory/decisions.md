@@ -1785,3 +1785,50 @@ there was no previous source of truth; the choices that settle architecture are 
   range. Generated export manifests remain for base R and as the no-library fallback.
 - **The corpus is pinned with renv** on a dated P3M snapshot in build step 1, because renv is in the
   benchmark set and R's own installer cannot backtrack to older compatible versions.
+
+# Decision record: the package-development loader
+
+Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and the user page
+`guides/loading-packages.md` describe the result. These choices settle architecture.
+
+- **The index lives in `semantics`, the diff in `crates/loader`, and only a backend knows the
+  runtime.** `semantics::load_index` derives per-item facts (`item_load`, `item_immediate_reads`),
+  a per-file layer (`file_items`) and the package join (`package_index`) from the analysis, with
+  its own input `PackageSources` so a loader never perturbs a project's `ProjectFiles`. The diff
+  produces a backend-neutral `loader::Plan`; the GNU R backend (`gnur.rs` plus `runtime.R`) applies
+  it, and ry's runtime will apply the same plan, so the runtime swap touches neither the index nor
+  the reload logic.
+- **A plan travels to R as an uncompressed RDS file** written in Rust (`gnur::rds`), because
+  `readRDS` builds the vectors in C without parsing R code, and one format serves both transports:
+  the `.Call` routines registered on the embedding `DllInfo` inside `ry repl`/`ry run`/`ry load`, and
+  the `ry load --emit-plan` process a plain R session runs. Out of process, the loaded state is a JSON
+  `LoadState` in the session's `tempdir()`, committed by renaming `<state>.pending` once R applied the
+  plan, so a failed apply never records a load that did not happen; in process, `Loader::commit`
+  does the same.
+- **Laziness is decided per name: lazy only when the one writer defines a function.** Two writers
+  make every writer eager in order, which keeps `f <- memoise(f)` correct without special cases.
+- **Reload rules (each one found by the reload property test):** statements match by content in
+  order (longest common subsequence) within a file; a statement reruns when new, when it read a
+  changed binding, or when it writes a changed name; a rerun statement reading a name rewritten at
+  or after it reruns that name's earlier writers first; the rerun set is a fixpoint that repeats
+  while the changed-name set grows; a `Collate` reorder falls back to a full load.
+- **Durability, not a host-side cache, keeps a reload proportional to the edit.** Files enter at
+  `Durability::HIGH` and drop to `LOW` on their first edit, so after the first edit of a file
+  salsa verifies untouched files in O(1). The alternative, the host reusing per-file results it
+  knows are unchanged, would duplicate salsa's own bookkeeping.
+- **The R runtime is byte-compiled once per runtime hash and R version and cached** under
+  `dirs::cache_dir()/ry`, because R's JIT otherwise compiles each runtime function on first call and
+  that alone cost more than a reload (about 200 ms per session). The cache stores the whole
+  environment, because `environment<-` strips bytecode from a closure.
+- **A statement's dependencies include calls.** Function items record the identifiers their body
+  mentions (a syntactic superset, cheap without name resolution), and the diff closes the changed
+  set over that call graph inside the rerun fixpoint, and applies the earlier-writer rule to
+  everything a statement's calls reach.
+- **The REPL reloads by feeding `.ry_autoreload()` as its own top-level command** before the user's
+  command, when a stat fingerprint of the loaded packages changed and R is at its top-level context
+  (`R_GlobalContext` has no parent; comparing prompt text broke on `options(prompt =)` and fed
+  `readline()`). A failed reload is retried only after the next change on disk. This is the one place the console feeds input after startup; it is a
+  user-visible command like typing `load_all()`, and it keeps `.Last.value`.
+- **Deferred:** updating other development packages' import copies of a changed binding, loading a
+  rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and
+  evaluating `if` in `NAMESPACE` (ignored with a warning). `backlog.md` lists them.

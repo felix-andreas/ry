@@ -35,6 +35,9 @@ illegal dependency unrepresentable.
   Anything to do with the editor protocol lives in the server, never here.
 - **`format`** is the formatter. It depends on `syntax` alone, and because the compiler enforces
   that, it can never come to depend on an analysis result.
+- **`loader`** is the package-development loader. It reads a package into the analysis, diffs the
+  load index against what a session has loaded, and produces a backend-neutral plan. Its GNU R
+  backend hands the plan to R code running in the session; ry's own runtime will take the same plan.
 - **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
   `repl` included, needs R to build.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
@@ -46,7 +49,7 @@ illegal dependency unrepresentable.
   [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/), and nothing else in the
   workspace uses it yet.
 - **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
-  `run`, and `debug` commands. It owns configuration, conversion between position encodings,
+  `run`, `load`, and `debug` commands. It owns configuration, conversion between position encodings,
   assembling and publishing diagnostics, and suppression comments.
 
 ## The semantics database
@@ -56,7 +59,7 @@ of a file, such as a function definition, a value binding, or a bare call.
 
 ### Inputs
 
-The database has five inputs:
+The analysis of a project has five inputs:
 
 - `SourceFile` carries one file's text and document kind.
 - `ProjectFiles` is a singleton listing the project's files: package documents first, in the
@@ -68,6 +71,8 @@ The database has five inputs:
 - `AnalysisSettings` is a singleton carrying the configuration that changes what analysis means
   rather than which findings a host publishes, today only `[check] inline-annotations`. It is read
   only where an inline annotation exists, so toggling it re-checks only the items that have one.
+
+The package loader adds a sixth, `PackageSources`, described [below](#the-package-load-index).
 
 ### Parsing, and why it is not where incrementality happens
 
@@ -150,6 +155,27 @@ its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
 Types are interned, so type equality is id equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
 decision log records that design.
+
+### The package-load index
+
+`ry load` reads a package through its own input, `PackageSources`: the `R/` files in collation
+order plus the `NAMESPACE` and `DESCRIPTION` text, as separate fields so a `NAMESPACE` edit never
+re-derives an item. The index has three layers, and each depends only on the one below:
+
+- `item_load` gives one item's content hash (of the text R evaluates, with inline annotations
+  erased), whether it is a function definition, and the S4, R6 and S3 registrations it makes. It
+  reads only `item_syntax`, so it is the per-item firewall. `item_immediate_reads` gives the names a
+  statement reads while it runs, which excludes reads inside the functions it defines.
+- `file_items` joins one file's items with their positions in the erased text, which keeps every
+  line break, so line numbers match the file on disk.
+- `package_index` joins the files and decides which names are bound lazily: a name whose one writer
+  is a function definition.
+
+A reload depends on all of a package's files, so salsa would revisit every file's memos after any
+edit. The loader avoids that with durability: a file starts at high durability and drops to low on
+its first edit, and salsa skips verifying memos that depend only on inputs at a durability nothing
+changed at. The diff then looks inside only the files whose hash changed, plus the eager code of
+every file, which is all an edit can reach. `test_incremental.rs` pins the per-item contract.
 
 ### Diagnostics
 

@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, ry, repl, heap, and libr crates
+description: What each source file holds in the syntax, semantics, ide, format, loader, ry, repl, heap, and libr crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -33,9 +33,9 @@ The crate root is `src/syntax.rs`.
 
 The crate root is `src/semantics.rs`.
 
-- **`semantics.rs`**: the salsa database. It declares two of the four database inputs, `SourceFile`
-  and `ProjectFiles` (the other two, `PackageMetadata` and `StubSources`, live with the modules that
-  own them). It also holds the item tree and its insertion-stable identities, the anchoring of each
+- **`semantics.rs`**: the salsa database. It declares three of the database inputs, `SourceFile`,
+  `ProjectFiles` and `AnalysisSettings` (the others, `PackageMetadata`, `StubSources` and
+  `PackageSources`, live with the modules that own them). It also holds the item tree and its insertion-stable identities, the anchoring of each
   item to its syntax, the package interface computed by the `scc_schemes` fixpoint, and the
   item-span queries.
 - **`hir.rs`**: lowering from the syntax tree to the per-item HIR, whose expression ranges are
@@ -53,7 +53,12 @@ The crate root is `src/semantics.rs`.
 - **`stubs.rs`**: the `.Rtypes` corpus. It parses the stubs, assembles them into a library of
   schemes, nominal types, masked verbs, and namespace exports, and reports loader problems.
 - **`metadata.rs`**: the `PackageMetadata` input. It parses `NAMESPACE` and `DESCRIPTION` and
-  resolves imports and dependencies.
+  resolves imports and dependencies, and it reads the full `NAMESPACE` directive set a loader
+  honors.
+- **`load_index.rs`**: the package-load index behind `ry load`, with its own input,
+  `PackageSources`. Per item it derives a content hash, whether the item is a function definition,
+  and the registrations it makes; per file, the text R reads (inline annotations erased) and every
+  item's position; per package, which names are bound lazily.
 - **`lints.rs`**: the style lints and their configuration types.
 - **`testing.rs`**: test support that other crates share. It holds the invariant battery for the
   semantic pipeline, which the fuzz harness and the coverage-guided targets run, the shared fixture
@@ -75,6 +80,16 @@ smart-case matcher.
 The whole crate is one file, `src/format.rs`: the formatter, which works on the syntax tree and
 preserves your line breaks, together with its configuration types.
 
+## `loader`
+
+The crate root is `src/loader.rs`.
+
+- **`loader.rs`**: the session that reads a package's sources into the analysis, and the diff that
+  turns the load index into a backend-neutral `Plan` of what to bind, run, remove, and register.
+- **`gnur.rs`**: the GNU R backend. It encodes a plan as an RDS file.
+- **`runtime.R`**: the R side of the GNU R backend, which applies a plan to a session and provides
+  `load_all()`.
+
 ## `ry`
 
 The library root is `src/ry.rs`, and the binary root is `src/main.rs`.
@@ -94,6 +109,9 @@ The library root is `src/ry.rs`, and the binary root is `src/main.rs`.
   defaults to UTF-16.
 - **`stats.rs`**: the performance diagnosis behind `ry debug analysis-stats`.
 - **`repl_completer.rs`**: completion for the interactive console.
+- **`load.rs`**: package loading in R sessions: the `.Call` routines and file watcher behind
+  `ry repl`, the plan emitter behind `ry load --emit-plan`, and the R code that installs the
+  runtime, byte-compiled once and cached.
 
 ## `repl`
 
@@ -102,7 +120,8 @@ system's R at runtime. That is why the rest of the workspace builds, and analyze
 with no R installed.
 
 - **`repl.rs`**: the session, with evaluation, the read-eval-print loop, and the exit codes.
-- **`libr.rs`**: the binding to R's shared library, resolved at runtime with no build-time link.
+- **`libr.rs`**: the binding to R's shared library, resolved at runtime with no build-time link,
+  including the registration of `.Call` routines that live in the ry process.
 - **`console.rs`**: the terminal front end.
 
 ## `heap`
