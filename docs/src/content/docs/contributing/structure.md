@@ -35,9 +35,9 @@ The crate root is `src/semantics.rs`.
 
 - **`semantics.rs`**: the salsa database. It declares three of the database inputs, `SourceFile`,
   `ProjectFiles` and `AnalysisSettings` (the others, `PackageMetadata`, `StubSources` and
-  `PackageSources`, live with the modules that own them). It also holds the item tree and its insertion-stable identities, the anchoring of each
-  item to its syntax, the package interface computed by the `scc_schemes` fixpoint, and the
-  item-span queries.
+  `PackageSources`, live with the modules that own them). It also holds the item tree and its
+  insertion-stable identities, the anchoring of each item to its syntax, the package interface
+  computed by the `scc_schemes` fixpoint, and the item-span queries.
 - **`hir.rs`**: lowering from the syntax tree to the per-item HIR, whose expression ranges are
   relative to their item.
 - **`naming.rs`**: the variable model, in which a variable is a mutable slot. It resolves scopes,
