@@ -422,35 +422,11 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
         return array_subset(object, indices, &dims, drop, call);
     }
     let index = indices.first().copied().unwrap_or(missing_arg());
-    // A numeric matrix with one column per dimension selects single elements.
+    // A matrix with one column per dimension selects single elements.
     if let Some(dims) = &dims
-        && dims.len() >= 2
-        && let Some(index_dims) = values::dims(index)
-        && index_dims.len() == 2
-        && index_dims[1] == dims.len()
-        && matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        && let Some(positions) = matrix_index_positions(object, dims, index, call)?
     {
-        let rows = index_dims[0];
-        let mut positions = Vec::with_capacity(rows);
-        for row in 0..rows {
-            let mut offset = 0usize;
-            let mut stride = 1usize;
-            let mut na = false;
-            for (dimension, &extent) in dims.iter().enumerate() {
-                let value = numeric_element(index, row + dimension * rows);
-                if value.is_nan() {
-                    na = true;
-                    break;
-                }
-                let value = value as usize;
-                if value < 1 || value > extent {
-                    return Err(crate::unwind::error_in(call, "subscript out of bounds"));
-                }
-                offset += (value - 1) * stride;
-                stride *= extent;
-            }
-            positions.push(if na { usize::MAX } else { offset });
-        }
+        let positions: Vec<usize> = positions.into_iter().map(|position| position.unwrap_or(usize::MAX)).collect();
         return select_elements(object, &positions);
     }
     let count = length(object);
@@ -871,6 +847,55 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `R_do_slot`: an S4 slot, which is an attribute, with `.Data` and `.S3Class` special.
+/// The elements a matrix subscript selects from an array with `dims`: one row per element and one
+/// column per dimension, holding indices or (for a character matrix) dimnames. `None` when
+/// `index` is not such a matrix; a row with an `NA` selects `NA`.
+unsafe fn matrix_index_positions(object: Sexp, dims: &[usize], index: Sexp, call: Sexp) -> R<Option<Vec<Option<usize>>>> {
+    let Some(index_dims) = values::dims(index) else {
+        return Ok(None);
+    };
+    let numeric = matches!(index.kind(), SexpType::Integer | SexpType::Real);
+    if dims.len() < 2 || index_dims.len() != 2 || index_dims[1] != dims.len() || !(numeric || index.kind() == SexpType::String) {
+        return Ok(None);
+    }
+    let dimnames = get_attr(object, symbols().dimnames);
+    let rows = index_dims[0];
+    let mut positions = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut offset = 0usize;
+        let mut stride = 1usize;
+        let mut na = false;
+        for (dimension, &extent) in dims.iter().enumerate() {
+            let element = row + dimension * rows;
+            let position = if numeric {
+                let value = numeric_element(index, element);
+                if value.is_nan() {
+                    na = true;
+                    break;
+                }
+                if value < 1.0 || value as usize > extent {
+                    return Err(crate::unwind::error_in(call, "subscript out of bounds"));
+                }
+                value as usize - 1
+            } else {
+                let Some(name) = values::string_at(index, element) else {
+                    na = true;
+                    break;
+                };
+                let names = if dimnames == nil() { nil() } else { dimnames.element(dimension) };
+                let found = (0..length(names)).find(|&candidate| {
+                    names.element(candidate) != na_string() && values::string_at(names, candidate).as_deref() == Some(&*name)
+                });
+                found.ok_or_else(|| crate::unwind::error_in(call, "subscript out of bounds"))?
+            };
+            offset += position * stride;
+            stride *= extent;
+        }
+        positions.push((!na).then_some(offset));
+    }
+    Ok(Some(positions))
+}
+
 pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
     if symbol == symbols().dot_data {
         let methods = interp_methods_function("getDataPart")?;
@@ -1114,23 +1139,14 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     let index = indices.first().copied().unwrap_or(missing_arg());
     let count = length(result);
     let names = values::names(result);
-    // A numeric matrix with one column per dimension assigns single elements.
+    // A matrix with one column per dimension assigns single elements.
     if let Some(dims) = values::dims(result)
-        && dims.len() >= 2
-        && let Some(index_dims) = values::dims(index)
-        && index_dims.len() == 2
-        && index_dims[1] == dims.len()
-        && matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        && let Some(positions) = matrix_index_positions(result, &dims, index, call)?
     {
-        let rows = index_dims[0];
-        for row in 0..rows {
-            let mut offset = 0usize;
-            let mut stride = 1usize;
-            for (dimension, &extent) in dims.iter().enumerate() {
-                let value = numeric_element(index, row + dimension * rows) as usize;
-                offset += (value - 1) * stride;
-                stride *= extent;
-            }
+        for (row, position) in positions.into_iter().enumerate() {
+            let Some(offset) = position else {
+                return Err(crate::unwind::error_in(call, "NAs are not allowed in subscripted assignments"));
+            };
             assign_element(result, offset, value, row % value_count.max(1))?;
         }
         return Ok(result);
