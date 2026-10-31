@@ -6,7 +6,7 @@ use semantics::annotations::{block_refusal, statement_inline_site};
 use semantics::check::ItemCheck;
 use semantics::diagnostics::TypeRenderer;
 use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
-use semantics::naming::{BindingId, BindingKind};
+use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
 use semantics::stubs::{declaring_namespace, stub_declaration, stubs};
 use semantics::types::{FunctionType, Ty, TyKind, TypeScheme, contains_inference_var};
 use semantics::{
@@ -2520,7 +2520,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                                 .filter(|(_, non_local)| *non_local == name)
                                 .map(|(expression, _)| Occurrence {
                                     file,
-                                    range: hir.expression(*expression).range + item_offset,
+                                    range: name_range(hir, *expression, name) + item_offset,
                                     is_declaration: false,
                                 }),
                         );
@@ -2595,13 +2595,28 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
             .filter(|(_, resolved)| **resolved == binding)
             .map(|(expression, _)| Occurrence {
                 file,
-                range: hir.expression(*expression).range + item_offset,
+                range: name_range(hir, *expression, &info.name) + item_offset,
                 is_declaration: targets.contains(expression),
             }),
     );
     slot.sort_by_key(|occurrence| occurrence.range.start());
     slot.dedup_by_key(|occurrence| occurrence.range);
     result.extend(slot);
+}
+
+/// The part of a read that spells `name`: a data.table `..name` read inside `[` refers to the
+/// variable `name`, so a rename must keep its `..` prefix.
+fn name_range(hir: &Module, expression: ExprId, name: &str) -> TextRange {
+    let expression = hir.expression(expression);
+    match &expression.kind {
+        ExpressionKind::NameRef(spelled) if dot_dot_variable(spelled) == Some(name) => {
+            TextRange::new(
+                expression.range.start() + TextSize::from(2),
+                expression.range.end(),
+            )
+        }
+        _ => expression.range,
+    }
 }
 
 struct PositionedItem<'db> {

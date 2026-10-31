@@ -66,8 +66,8 @@ pub struct ItemNaming {
     pub captured_slots: BTreeSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: BTreeSet<ExprId>,
-    /// `f[, y := v]` statements: R's `:=` updates `f` in place, which ry models as a
-    /// rebinding of the frame's slot, so later reads see the added or removed column.
+    /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
+    /// a new write of that slot, so later reads see the added or removed column.
     pub column_updates: BTreeMap<ExprId, BindingId>,
     /// Qualified reads outside quiet contexts.
     pub namespace_reads: BTreeMap<ExprId, NamespaceRead>,
@@ -109,6 +109,7 @@ pub fn resolve_item(module: &Module, masked_verbs: &FxHashMap<String, Vec<String
         quiet_depth: 0,
         deferred_depth: 0,
         quoted_depth: 0,
+        bracket_depth: 0,
         naming: ItemNaming::default(),
     };
     if let Some(root) = module.root {
@@ -179,6 +180,9 @@ struct Context<'a> {
     /// Inside a quoting form (`quote`, `substitute`, `bquote`, `expression`): assignments bind
     /// nothing, but reads are still walked because `eval` may run the expression later.
     quoted_depth: u32,
+    /// Inside a single `[`'s index arguments, where data.table reads `..name` as the variable
+    /// `name` from the enclosing scope.
+    bracket_depth: u32,
     naming: ItemNaming,
 }
 
@@ -415,6 +419,9 @@ impl Context<'_> {
                 arguments,
             } => {
                 self.resolve(*target);
+                if !*double {
+                    self.bracket_depth += 1;
+                }
                 if !*double && data_table_signature(module, arguments) {
                     self.naming.masked_subsets.insert(id);
                     self.quiet_depth += 1;
@@ -423,19 +430,34 @@ impl Context<'_> {
                 } else {
                     self.resolve_arguments(arguments);
                 }
-                // A frame's `:=` is copy-on-write, so like `x$a <- v` it binds the name in the
-                // current scope. The target's own read keeps its resolution: it reads the value
-                // before the update, which may live in an enclosing scope.
+                if !*double {
+                    self.bracket_depth -= 1;
+                }
+                // A frame's `:=` is copy-on-write, which ry models as a new write of the
+                // subject's slot, so later reads see the updated columns. It writes only a slot
+                // the current scope already owns (a top-level name, a local, or a parameter):
+                // on any other subject, such as a global `data.table` updated inside a
+                // function, `:=` works by reference, so it must not shadow the subject with a
+                // local binding that would capture navigation and rename. The target's own
+                // read keeps its resolution, since it reads the value before the update.
                 if !*double
                     && self.quoted_depth == 0
                     && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
                     && is_column_update(module, arguments)
                 {
-                    let range = module.expression(*target).range;
-                    let kind = self.assignment_binding_kind();
-                    let slot = self.frame_slot(name, range, kind);
-                    self.record_write_site(id, name, range, slot, false);
-                    self.naming.column_updates.insert(id, slot);
+                    let owned = match self.current_scope().kind {
+                        ScopeKind::TopLevel => true,
+                        ScopeKind::Function | ScopeKind::Local => {
+                            self.current_scope().slots.contains_key(name)
+                        }
+                    };
+                    if owned {
+                        let range = module.expression(*target).range;
+                        let kind = self.assignment_binding_kind();
+                        let slot = self.frame_slot(name, range, kind);
+                        self.record_write_site(id, name, range, slot, false);
+                        self.naming.column_updates.insert(id, slot);
+                    }
                 }
             }
             ExpressionKind::Field { target, .. } => self.resolve(*target),
@@ -738,6 +760,10 @@ impl Context<'_> {
         {
             return;
         }
+        let name = match dot_dot_variable(name) {
+            Some(variable) if self.bracket_depth > 0 => variable,
+            _ => name,
+        };
         match self.mark_slot_read(name) {
             Some((slot, maybe_undefined)) => {
                 self.naming.resolutions.insert(id, slot);
@@ -993,6 +1019,13 @@ fn data_table_signature(module: &Module, arguments: &[Argument]) -> bool {
                 .value
                 .is_some_and(|value| data_table_marker(module, value))
     })
+}
+
+/// The variable a data.table `..name` read inside `[` refers to: `name`, looked up in the
+/// enclosing scope rather than among the columns.
+pub fn dot_dot_variable(name: &str) -> Option<&str> {
+    name.strip_prefix("..")
+        .filter(|variable| !variable.is_empty() && !variable.starts_with('.'))
 }
 
 /// The `j` argument is a `:=` call.

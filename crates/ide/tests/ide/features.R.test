@@ -808,3 +808,84 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: character\n"
 completion: none
 hint @3: character
+
+#==== column_update_resolution
+#---- a_global_updated_inside_a_function_keeps_its_definition
+DT <- data.table::data.table(x = 1)
+f <- function() {
+  DT[, y := 1]
+  D$0T[x > 0]
+}
+#++++
+hover 71..73: DT: Unknown
+hover-definition: global 0..2
+definition 0..2
+references: 0..2*, 56..58, 71..73
+rename: 3 edit(s)
+signature: none
+completion (4): D, DT, DF2formula, DNase
+
+#---- a_top_level_update_keeps_the_first_definition
+DT <- data.table::data.table(x = 1)
+DT[, y := 1]
+D$0T[x > 0]
+#++++
+hover 49..51: DT: Unknown
+hover-definition: global 0..2
+definition 0..2
+references: 0..2*, 36..38, 49..51
+rename: 3 edit(s)
+signature: none
+completion (4): D, DT, DF2formula, DNase
+
+#---- a_frame_update_types_later_reads
+sales <- frame(a = 1)
+sales[, y := 1]
+sal$0es$y
+#++++
+hover 38..43: sales: frame{a: double[], y: double[]}
+hover-definition: global 0..5
+definition 0..5
+references: 0..5*, 22..27, 38..43
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: frame{a: double[]}\n"
+completion (128+): sales, BJsales, BJsales.lead, sample, sample.int, sapply, savePlot, scale
+hint @5: frame{a: double[]}
+
+#---- a_parameter_update_keeps_the_parameter
+f <- function(sales) {
+  sales[, y := 1]
+  sal$0es
+}
+#++++
+hover 43..48: sales: T
+hover-definition: local 14..19
+definition 14..19
+references: 14..19*, 25..30, 43..48
+rename: 3 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 0..0 -> "#: <T> fn(sales: T) -> T\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn(sales: T) -> T\n"
+completion (128+): sales, BJsales, BJsales.lead, sample, sample.int, sapply, savePlot, scale
+hint @1: <T> fn(sales: T) -> T
+
+#---- a_dot_dot_read_renames_only_the_name
+pick <- function(dt) {
+  columns <- "a"
+  dt[, ..colu$0mns]
+}
+#++++
+hover 47..56: ..columns: character
+hover-definition: local 25..32
+definition 25..32
+references: 25..32*, 49..56
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 23..23 -> "  #: character\n"
+completion: none
+hint @32: character

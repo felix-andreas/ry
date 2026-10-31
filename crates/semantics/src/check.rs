@@ -13,7 +13,9 @@ use crate::infer::{
     Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
 };
 use crate::metadata::is_own_package;
-use crate::naming::{BindingId, BindingKind, ItemNaming, query_index_arguments};
+use crate::naming::{
+    BindingId, BindingKind, ItemNaming, dot_dot_variable, is_column_update, query_index_arguments,
+};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, Parameter, RecordField, RestParameter,
@@ -695,6 +697,15 @@ struct ColumnScope<'db> {
     subset_data: Ty<'db>,
     /// Called names inside the bracket, which never read a column.
     callees: FxHashSet<ExprId>,
+    /// The two sides of a join, which `j` can also read as `x.col` and `i.col`.
+    join: Option<JoinSides<'db>>,
+}
+
+/// The queried frame `x` and the joined frame `i` of `x[i, on = keys]`, each `None` when its
+/// columns are not known.
+struct JoinSides<'db> {
+    x: Option<Vec<RecordField<'db>>>,
+    i: Option<Vec<RecordField<'db>>>,
 }
 
 /// One `on =` key: `x` names the queried frame's column and `y` the joined frame's.
@@ -1658,8 +1669,12 @@ impl<'db> Checker<'db, '_> {
         {
             return None;
         }
+        // `..name` is the variable `name` from the enclosing scope, which naming resolved.
+        if dot_dot_variable(name).is_some() {
+            return None;
+        }
         let special = match name.as_str() {
-            ".N" | ".GRP" => Some(scalar(self.db, Atomic::Integer)),
+            ".N" | ".GRP" | ".NGRP" => Some(scalar(self.db, Atomic::Integer)),
             ".I" => Some(Ty::new(
                 self.db,
                 TyKind::Vector(scalar(self.db, Atomic::Integer)),
@@ -1689,10 +1704,48 @@ impl<'db> Checker<'db, '_> {
                 None => all_known = false,
             }
         }
+        // After a join, `x.col` and `i.col` read a column of one side, including a key or a
+        // column whose name does not clash.
+        let prefixed = name
+            .strip_prefix("x.")
+            .map(|column| (true, column))
+            .or_else(|| name.strip_prefix("i.").map(|column| (false, column)));
+        let mut side_columns = Vec::new();
+        if let Some((from_x, column)) = prefixed
+            && let Some(join) = self
+                .column_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.join.as_ref())
+        {
+            let (prefix, side) = if from_x {
+                ("x.", &join.x)
+            } else {
+                ("i.", &join.i)
+            };
+            match side {
+                Some(columns) => {
+                    if let Some(found) = columns
+                        .iter()
+                        .find(|candidate| candidate.name.text(self.db) == column)
+                    {
+                        let ty = found.ty;
+                        self.masked_reads.insert(id);
+                        return Some(ty);
+                    }
+                    side_columns = columns
+                        .iter()
+                        .map(|candidate| format!("{prefix}{}", candidate.name.text(self.db)))
+                        .collect();
+                }
+                None => all_known = false,
+            }
+        }
         if resolved.is_some() {
             return None;
         }
-        if !all_known {
+        // A prefixed name outside a join ry can see is data.table syntax ry cannot check.
+        if !all_known || prefixed.is_some() && side_columns.is_empty() {
             self.masked_reads.insert(id);
             return Some(unknown(self.db));
         }
@@ -1704,6 +1757,7 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .flatten()
                 .map(|column| column.name.text(self.db).to_owned())
+                .chain(side_columns)
                 .collect(),
         };
         self.column_misses.insert(id, miss);
@@ -2433,19 +2487,21 @@ impl<'db> Checker<'db, '_> {
     /// Seeded with the observed type so the guard has a union to filter.
     fn non_local_guard_slot(&mut self, read: ExprId, observed: Ty<'db>) -> Option<BindingId> {
         let name = self.naming.non_locals.get(&read)?.clone();
-        let slot = match self.non_local_slots.get(&name) {
-            Some(&slot) => slot,
-            None => {
-                let slot = BindingId(self.next_non_local_slot);
-                self.next_non_local_slot += 1;
-                self.non_local_slots.insert(name, slot);
-                slot
-            }
-        };
+        let slot = self.non_local_slot(name);
         if self.environment.get(slot).is_none() {
             self.environment.set(slot, EnvEntry::Mono(observed));
         }
         Some(slot)
+    }
+
+    fn non_local_slot(&mut self, name: String) -> BindingId {
+        if let Some(&slot) = self.non_local_slots.get(&name) {
+            return slot;
+        }
+        let slot = BindingId(self.next_non_local_slot);
+        self.next_non_local_slot += 1;
+        self.non_local_slots.insert(name, slot);
+        slot
     }
 
     fn guard_edges(
@@ -5035,6 +5091,14 @@ impl<'db> Checker<'db, '_> {
             let written = if is_query { result } else { target_ty };
             self.environment.set(slot, EnvEntry::Mono(written));
             self.note_captured_write(slot, written);
+        } else if is_query
+            && is_column_update(self.module, arguments)
+            && let Some(name) = self.naming.non_locals.get(&target)
+        {
+            // A frame bound elsewhere binds nothing here, but the update still changes the
+            // frame the name refers to, so later reads in this flow see the new columns.
+            let slot = self.non_local_slot(name.clone());
+            self.environment.set(slot, EnvEntry::Mono(result));
         }
         result
     }
@@ -5169,6 +5233,7 @@ impl<'db> Checker<'db, '_> {
         }
         let i_value = i.and_then(|argument| argument.value);
         let mut source_columns = subject_columns.clone();
+        let mut join = None;
         if let Some(on_value) = on.and_then(|argument| argument.value) {
             // The joined frame evaluates in the caller's scope, not the queried frame's.
             let joined = i_value.map(|value| {
@@ -5177,6 +5242,10 @@ impl<'db> Checker<'db, '_> {
             });
             source_columns = match joined.map(|joined| joined.kind(db)) {
                 Some(TyKind::Frame(joined_columns)) => {
+                    join = Some(JoinSides {
+                        x: subject_columns.clone(),
+                        i: joined_columns.clone(),
+                    });
                     let joined_name = i_value.and_then(|value| variable_name(module, value));
                     match join_keys(module, on_value) {
                         Some(keys) => self.join_columns(
@@ -5198,6 +5267,7 @@ impl<'db> Checker<'db, '_> {
                         bracket,
                         subset_data: Ty::new(db, TyKind::Frame(None)),
                         callees,
+                        join: None,
                     });
                     for value in arguments.iter().filter_map(|argument| argument.value) {
                         if Some(value) != i_value && value != on_value {
@@ -5215,6 +5285,7 @@ impl<'db> Checker<'db, '_> {
             bracket,
             subset_data: Ty::new(db, TyKind::Frame(None)),
             callees,
+            join,
         });
         if on.is_none()
             && let Some(value) = i_value
@@ -5246,20 +5317,34 @@ impl<'db> Checker<'db, '_> {
             scope.subset_data = Ty::new(db, subset_data);
         }
         let j_value = j.and_then(|argument| argument.value);
+        let update = j_value.and_then(|value| match &module.expression(value).kind {
+            ExpressionKind::Call { callee, arguments }
+                if variable_name(module, *callee).as_deref() == Some(":=") =>
+            {
+                Some(arguments)
+            }
+            _ => None,
+        });
         let result = match j_value {
-            // `with = FALSE` reads `j` as column names or positions, which ry does not model.
-            Some(value) if named("with").is_some() => {
+            Some(_) if let Some(update) = update => Ty::new(
+                db,
+                TyKind::Frame(self.column_update(update, subject_columns, i_value.is_some())),
+            ),
+            // `with = FALSE` and a `..name` `j` read `j` as column names or positions, which ry
+            // does not model.
+            Some(value)
+                if named("with").is_some()
+                    || matches!(
+                        &module.expression(value).kind,
+                        ExpressionKind::NameRef(name) if dot_dot_variable(name).is_some()
+                    ) =>
+            {
                 self.infer(value);
                 Ty::new(db, TyKind::Frame(None))
             }
-            Some(value) => self.query_result(
-                id,
-                value,
-                subject_columns,
-                source_columns.as_deref(),
-                groups,
-                by.is_some(),
-            ),
+            Some(value) => {
+                self.query_result(id, value, source_columns.as_deref(), groups, by.is_some())
+            }
             None => Ty::new(db, TyKind::Frame(source_columns)),
         };
         for argument in arguments {
@@ -5443,7 +5528,6 @@ impl<'db> Checker<'db, '_> {
         &mut self,
         id: ExprId,
         j: ExprId,
-        subject_columns: Option<Vec<RecordField<'db>>>,
         source_columns: Option<&[RecordField<'db>]>,
         groups: Option<Vec<RecordField<'db>>>,
         grouped: bool,
@@ -5451,31 +5535,30 @@ impl<'db> Checker<'db, '_> {
         let db = self.db;
         let module = self.module;
         let frame_of = |columns: Option<Vec<RecordField<'db>>>| Ty::new(db, TyKind::Frame(columns));
-        if let ExpressionKind::Call { callee, arguments } = &module.expression(j).kind {
-            match variable_name(module, *callee).as_deref() {
-                Some(":=") => return frame_of(self.column_update(arguments, subject_columns)),
-                Some("." | "list") => {
-                    let mut columns = groups;
-                    for (position, argument) in arguments.iter().enumerate() {
-                        let Some(value) = argument.value else {
-                            continue;
-                        };
-                        let ty = self.infer(value);
-                        // data.table names an unnamed computed item by its position.
-                        let name = argument
-                            .name
-                            .clone()
-                            .or_else(|| variable_name(module, value))
-                            .unwrap_or_else(|| format!("V{}", position + 1));
-                        let field = self.column_field(&name, ty);
-                        if let Some(columns) = columns.as_mut() {
-                            columns.push(field);
-                        }
-                    }
-                    return frame_of(columns);
+        if let ExpressionKind::Call { callee, arguments } = &module.expression(j).kind
+            && matches!(
+                variable_name(module, *callee).as_deref(),
+                Some("." | "list")
+            )
+        {
+            let mut columns = groups;
+            for (position, argument) in arguments.iter().enumerate() {
+                let Some(value) = argument.value else {
+                    continue;
+                };
+                let ty = self.infer(value);
+                // data.table names an unnamed computed item by its position.
+                let name = argument
+                    .name
+                    .clone()
+                    .or_else(|| variable_name(module, value))
+                    .unwrap_or_else(|| format!("V{}", position + 1));
+                let field = self.column_field(&name, ty);
+                if let Some(columns) = columns.as_mut() {
+                    columns.push(field);
                 }
-                _ => {}
             }
+            return frame_of(columns);
         }
         let ty = self.infer(j);
         let resolved = self.table.resolve(db, ty);
@@ -5528,10 +5611,13 @@ impl<'db> Checker<'db, '_> {
     /// `j` as `y := v`, `c("a", "b") := list(v, w)`, or `` `:=`(a = v, b = w) ``: the
     /// queried frame with each named column set to its value's vector type, or removed
     /// by `NULL`. A left side naming columns some other way widens to unknown columns.
+    /// With `subset` (an `i` is present), only some rows change, so data.table coerces the
+    /// value to an existing column and the column keeps its type.
     fn column_update(
         &mut self,
         arguments: &[Argument],
         base: Option<Vec<RecordField<'db>>>,
+        subset: bool,
     ) -> Option<Vec<RecordField<'db>>> {
         let module = self.module;
         let db = self.db;
@@ -5623,6 +5709,7 @@ impl<'db> Checker<'db, '_> {
                     columns.remove(position);
                 }
                 (TyKind::Null, None) => {}
+                (_, Some(_)) if subset => {}
                 (_, Some(position)) => {
                     if let Some(column) = columns.get_mut(position) {
                         column.ty = column_type(db, resolved);
