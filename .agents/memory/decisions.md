@@ -1785,3 +1785,42 @@ there was no previous source of truth; the choices that settle architecture are 
   range. Generated export manifests remain for base R and as the no-library fallback.
 - **The corpus is pinned with renv** on a dated P3M snapshot in build step 1, because renv is in the
   benchmark set and R's own installer cannot backtrack to older compatible versions.
+
+# Decision record: the built-in frame
+
+ry's typed table type is spelled `frame`. It is a Polars `DataFrame` held by the `table` crate,
+which links Polars as a Rust crate, and the checker types it as `frame{col: type, ...}`.
+
+- **The name is `frame`, not `table`.** Base R's `table()` and its `"table"` class must keep
+  working, so the type, the constructor `frame(...)` and the runtime class
+  `c("frame", "data.frame")` use a name base R does not give a meaning to in a type position.
+  `graphics::frame()` exists, so the checker treats `frame()` as the built-in only with at least one
+  argument and when the project defines no `frame` of its own.
+- **`:=` has value semantics in the checker.** `f[, y := e]` rebinds `f` to the extended type, and
+  aliases keep the old type. Column sets are exact. At runtime the update is copy-on-write: the
+  interpreter passes an unshared `&mut Table` (reference count one) and the update happens in place,
+  or it calls `Table::fork` first, which copies only the column list, because Arrow buffers are
+  immutable and shared. data.table's own `:=` on a `data.table` keeps its by-reference semantics.
+- **Queries go through a small IR** (`crates/table/src/query.rs`), not straight from R syntax to
+  Polars, so the interpreter, the checker's result types (`result_type`) and the tests share one
+  description of `tbl[i, j, by]`. Lowering gives operations R semantics on top of Polars: integer
+  `+ - *` overflow to `NA`, an integer `sum` overflows to `NA`, aggregates propagate `NA` unless
+  `na.rm` (a `null_count` guard that costs nothing when the input has no nulls), `%/%` floors, `%%`
+  takes the divisor's sign, and `cor` is `NA` where Polars gives `NaN`.
+- **data.table's layout is the contract for joins**: rows follow `i`, `x`'s columns come first with
+  the join columns carrying `i`'s values, then `i`'s other columns, a clash prefixed `i.`. Join
+  columns of different types meet through a common type (two factors as strings), and the join
+  column is cast back to `i`'s type.
+- **`by` keeps first-appearance order and `keyby` sorts and keys**, matching data.table, through
+  `group_by_stable` and a sort.
+- **ALTREP lives in the `table` crate behind the `runtime` feature**, which links `libr` and `heap`.
+  The dependency points from the engine to the runtime so that `libr`, which every native package
+  loads, never compiles Polars. An exposed column's `data1` owns the Arrow array and `data2` holds
+  R's layout once something needs it; a column that R never materialized comes back from
+  `import_column` as the same buffer.
+- **NA is Arrow validity, NaN is a value.** A column without nulls has the same bytes in both
+  layouts, which is what makes the zero-copy paths possible.
+
+Known structural debt: `Table`'s own `Mirror`/`Residency` tracking and the ALTREP object's `data2`
+both model "R's layout of this column". When the interpreter exposes frames through ALTREP, the
+residency should be read from the ALTREP object and `Table`'s mirrors removed.

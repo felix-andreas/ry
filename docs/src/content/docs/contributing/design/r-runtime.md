@@ -618,44 +618,55 @@ kernels lack a query planner. A custom engine would spend years re-deriving what
 
 ### The design
 
-- **A table is a Polars `DataFrame` held by a ry object,** and each column is exposed to R and to
-  native code as an ALTREP vector over the Arrow buffer. This is what lets existing code that expects
-  a `data.frame` keep working when it receives a table. Element and region reads of integer and
-  double columns without nulls go to the buffer directly, and so does a read-only data pointer
-  (`DATAPTR_RO`, `INTEGER_RO`). A writable pointer (`INTEGER`, `REAL`, `DATAPTR`) is a different
-  matter, because Arrow buffers are immutable and shared and native code writes through it (section
-  2), so the column first becomes a private R vector. Logical columns (bit-packed in Arrow, 32-bit
-  in R), character columns (whose elements must become interned `CHARSXP`s) and dictionary columns
-  always materialize, and character columns pay the interning cost.
-- **Residency is tracked per column.** A column's data lives in Polars' Arrow buffer until R code or
-  native code needs an R vector, and only then is it materialized. Vx tracks where data lives in the
-  type and makes every transfer explicit ([prior art](/contributing/design/prior-art/#vx)); ry keeps
-  the transfer implicit, and adds a lint when typed code forces a column to materialize inside a
-  loop.
-- **NA handling** maps R's NA onto Arrow validity bitmaps. Integer NA (`INT_MIN`) and double NA need
-  conversion at the boundary when nulls are present, which is a vectorized pass that happens only
-  when a column materializes.
-- **Typed columns come from ry's record types.** A table type names its columns and their vector
-  types, in the notation the data-masking draft already sketches for `data.table<x: integer[], …>`,
-  so `table<id: integer[], price: double[], ticker: character[]>`. Column references in a query are
-  checked, and the data-masking design (`contributing/design/data-masking.md`) gets the column
-  vocabulary it is waiting for.
-- **Queries build a lazy plan.** `tbl[price > 0, .(total = sum(price)), by = ticker]` and its verb
-  equivalents lower to a Polars lazy frame, so the planner sees the whole query, and every grouping
-  expression runs as a Polars kernel instead of as R code per group. An R function inside an
-  aggregation falls back to per-group evaluation, with a lint saying so.
-- **`:=` is copy-on-write with reference counts,** not over-allocation. A table whose reference count
-  is one is updated in place, so `tbl[, x := y * 2]` costs one new column, and a shared table copies
-  only its column list, because the Arrow buffers themselves are immutable and shared. data.table's
-  `:=` on a `data.table` object keeps data.table's own by-reference semantics, because that package
-  runs unchanged.
-- **Interop is zero-copy where possible:** conversion to and from `data.frame`, data.table and the R
-  `polars` package goes through the Arrow C data interface.
+The engine exists as `crates/table`, with its query IR, ALTREP exposure and the checker's `frame`
+type. No interpreter calls it yet. The rest of this section describes the shape it has.
 
-To claim that it outperforms data.table, the table type needs a benchmark of its own: the db-benchmark
-group-by and join questions (the suite H2O started and DuckDB Labs maintains) at 0.5 GB and 5 GB, plus
-`:=` update loops and keyed rolling joins (common in the finance code base), run on the same machine
-against data.table with all threads. Only that measurement can settle the claim.
+- **The type is `frame`, and a frame is a Polars `DataFrame` held by a ry object.** The name is not
+  `table`, because base R's `table()` and its `"table"` class must keep working. The constructor is
+  `frame(...)`, the runtime class is `c("frame", "data.frame")`, and the checker types it as
+  `frame{id: integer[], price: double[], ticker: character[]}` (the "Frames" section of the typing
+  reference). Column references in a query are checked, and the data-masking draft gets the row
+  type it was waiting for.
+- **Each column is exposed to R and to native code as an ALTREP vector over the Arrow buffer,** so
+  code that expects a `data.frame` keeps working when it receives a frame. Element and region reads
+  go to the buffer, and so does `DATAPTR_OR_NULL` or a read-only data pointer for an integer or
+  double column without nulls, because those bytes are identical in both layouts. A writable pointer
+  (`INTEGER`, `REAL`, `DATAPTR`), a column with nulls and a logical column (bit-packed in Arrow,
+  32-bit in R) materialize R's layout once into the ALTREP object's `data2`. A write through that
+  pointer changes the R vector and never the frame, which is R's value semantics. Character columns
+  intern their `CHARSXP`s on first access, and factors are copied, because R's one-based `int` codes
+  differ from the enum's codes. A column R never materialized comes back into a frame as the same
+  Arrow buffer.
+- **Residency is per column:** a column lives in the Arrow buffer until R code or native code needs
+  R's layout. Vx tracks where data lives in the type and makes every transfer explicit
+  ([prior art](/contributing/design/prior-art/#vx)); ry keeps the transfer implicit, and plans a lint
+  for typed code that forces a column to materialize inside a loop.
+- **NA maps onto Arrow validity, and NaN stays a value.** Integer NA (`INT_MIN`) and double NA (the
+  `NaN` with low word 1954) are rewritten at the boundary only when a column has nulls; otherwise
+  the vector moves into Arrow without a copy.
+- **Queries go through a small IR to a Polars lazy plan.** `tbl[price > 0, .(total = sum(price)), by
+  = ticker]` becomes a `Query` (rows, `j`, `by`, `keyby`), which lowers to one lazy frame, so the
+  planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers
+  filters, ordering, positions, projections, grouped aggregation over data.table's GForce set (`sum`,
+  `mean`, `min`, `max`, `.N`, `first`, `last`, `median`, `sd`, `var`, plus `head` and `cor`), equi,
+  keyed and rolling joins, and `:=`. Lowering adds R's semantics where Polars differs: integer
+  overflow becomes NA, aggregates propagate NA unless `na.rm`, `%/%` and `%%` follow R's signs, and
+  joins follow data.table's row and column layout. Not covered yet: `.EACHI`, `mult =`, non-equi
+  joins, and R functions inside an aggregation, which will fall back to per-group evaluation with a
+  lint saying so.
+- **`:=` is copy-on-write with reference counts,** not over-allocation. A frame whose reference count
+  is one is updated in place, so `tbl[, x := y * 2]` costs one new column, and a shared frame first
+  copies only its column list, because the Arrow buffers themselves are immutable and shared. In the
+  checker, `:=` rebinds the frame to its extended type. data.table's `:=` on a `data.table` object
+  keeps data.table's own by-reference semantics, because that package runs unchanged.
+- **Interop is zero-copy through the Arrow C data interface,** for a single column and for a whole
+  frame as a struct array, which is how the R `polars` and `arrow` packages, duckdb and nanoarrow
+  exchange data.
+
+The claim that the frame outperforms data.table rests on a benchmark of its own
+(`tools/bench/table/`): the db-benchmark group-by and join questions (the suite H2O started and
+DuckDB Labs maintains) at 0.5 GB and 5 GB, `:=` update loops and a keyed rolling join, run on the
+same machine against data.table with all threads.
 
 ## 8. Typing integration
 
@@ -785,7 +796,9 @@ Each step ends with something real running, and each one is a large, whole chang
 7. **The JIT.** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
-8. **The table type,** on Polars, with its own benchmark against data.table.
+8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
+   IR, ALTREP exposure and the checker's `frame` type exist (section 7); wiring them into the
+   interpreter waits for step 3.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
