@@ -769,10 +769,10 @@ unsupported!(
     GEText,
     GEunregisterSystem,
     GEXspline,
-    GAxisPars,
-    CreateAtVector,
+    Rf_GAxisPars,
+    Rf_CreateAtVector,
     Rf_eval_with_gd,
-    desc2GEDesc,
+    Rf_desc2GEDesc,
     fromDeviceHeight,
     fromDeviceWidth,
     fromDeviceX,
@@ -850,19 +850,19 @@ unsupported!(
     GE_LTYget,
     GE_LTYpar,
     GEstring_to_pch,
-    killDevice,
-    nextDevice,
-    prevDevice,
-    selectDevice,
-    ndevNumber,
-    NewFrameConfirm,
-    doIdle,
-    doKeybd,
-    doMouseEvent,
-    doesIdle,
-    AdobeSymbol2utf8,
-    utf8toAdobeSymbol,
-    utf8ToLatin1AdobeSymbol2utf8,
+    Rf_killDevice,
+    Rf_nextDevice,
+    Rf_prevDevice,
+    Rf_selectDevice,
+    Rf_ndevNumber,
+    Rf_NewFrameConfirm,
+    Rf_doIdle,
+    Rf_doKeybd,
+    Rf_doMouseEvent,
+    Rf_doesIdle,
+    Rf_AdobeSymbol2utf8,
+    Rf_utf8toAdobeSymbol,
+    Rf_utf8ToLatin1AdobeSymbol2utf8,
     Rf_KillAllDevices,
 );
 
@@ -895,17 +895,17 @@ pub extern "C" fn R_CheckDeviceAvailableBool() -> crate::Rboolean {
 
 /// Only the null device exists.
 #[unsafe(no_mangle)]
-pub extern "C" fn NoDevices() -> c_int {
+pub extern "C" fn Rf_NoDevices() -> c_int {
     1
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn NumDevices() -> c_int {
+pub extern "C" fn Rf_NumDevices() -> c_int {
     1
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curDevice() -> c_int {
+pub extern "C" fn Rf_curDevice() -> c_int {
     0
 }
 
@@ -914,23 +914,37 @@ pub extern "C" fn curDevice() -> c_int {
 pub static mbcslocale: crate::Global<crate::Rboolean> = crate::Global::new(1);
 
 /// `Rf_ucstoutf8(s, c)`: writes the UTF-8 encoding of code point `c` into `s` (at least seven
-/// bytes) with a terminating NUL, and returns `s`. An invalid code point writes the empty
-/// string.
+/// bytes) with a terminating NUL, and returns the number of bytes before the NUL. A surrogate or
+/// a value past U+10FFFF is an error, as in GNU R.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Rf_ucstoutf8(buffer: *mut c_char, code: c_uint) -> *mut c_char {
-    let mut bytes = [0u8; 4];
-    let encoded = char::from_u32(code).map_or(&[][..], |character| {
-        character.encode_utf8(&mut bytes).as_bytes()
-    });
-    std::ptr::copy_nonoverlapping(encoded.as_ptr(), buffer as *mut u8, encoded.len());
-    *buffer.add(encoded.len()) = 0;
-    buffer
+pub unsafe extern "C" fn Rf_ucstoutf8(buffer: *mut c_char, code: c_uint) -> usize {
+    enter(|| {
+        let character =
+            char::from_u32(code).ok_or_else(|| error(format!("invalid Unicode point {code}")))?;
+        let mut bytes = [0u8; 4];
+        let encoded = character.encode_utf8(&mut bytes).as_bytes();
+        std::ptr::copy_nonoverlapping(encoded.as_ptr(), buffer as *mut u8, encoded.len());
+        *buffer.add(encoded.len()) = 0;
+        Ok(encoded.len())
+    })
+}
+
+/// `R_GetX11Image(d, ximage, width, height)`: copies the image of X11 device `d`. ry has no X11
+/// device, so there is never an image to return.
+#[unsafe(no_mangle)]
+pub extern "C" fn R_GetX11Image(
+    _device: c_int,
+    _image: *mut std::ffi::c_void,
+    _width: *mut c_int,
+    _height: *mut c_int,
+) -> crate::Rboolean {
+    0
 }
 
 /// Removes the private-use code points some fonts map symbols to. Without a symbol font there
 /// is nothing to remap, so the text is copied.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn utf8Toutf8NoPUA(input: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn Rf_utf8Toutf8NoPUA(input: *const c_char) -> *const c_char {
     input
 }
 
@@ -958,8 +972,15 @@ pub fn parse_color(text: &str) -> Option<RColor> {
                 red | green << 8 | blue << 16 | alpha << 24
             }
             3 | 4 => {
-                let alpha = if digits.len() == 4 { digits[3] * 17 } else { 255 };
-                digits[0] * 17 | (digits[1] * 17) << 8 | (digits[2] * 17) << 16 | alpha << 24
+                let alpha = if digits.len() == 4 {
+                    digits[3] * 17
+                } else {
+                    255
+                };
+                (digits[0] * 17)
+                    | ((digits[1] * 17) << 8)
+                    | ((digits[2] * 17) << 16)
+                    | (alpha << 24)
             }
             _ => return None,
         });
@@ -1028,7 +1049,8 @@ unsafe fn color_at(value: Sexp, index: c_int, background: RColor) -> ApiResult<R
             if number == 0 {
                 return Ok(background);
             }
-            palette_color(number as i64).ok_or_else(|| error("numerical color values must be >= 0, found -1"))
+            palette_color(number as i64)
+                .ok_or_else(|| error("numerical color values must be >= 0, found -1"))
         }
         SexpType::Real => {
             let number = real_elt(value, index)?;
