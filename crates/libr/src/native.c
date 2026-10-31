@@ -12,6 +12,7 @@
  */
 
 #include <setjmp.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
 #include <sys/select.h>
@@ -196,6 +197,26 @@ int ry_call_init(void (*function)(DllInfo *), DllInfo *info)
     function(info);
     ry_context_pop(&context);
     return 0;
+}
+
+/*
+ * A library's static initializers run inside dlopen and may call the API (Rcpp's
+ * `Function c("c")` looks up `c`). An error there jumps out of dlopen, as it does in GNU R;
+ * the loader lock is recursive and stays with this thread, so later loads still work.
+ */
+void *ry_call_dlopen(const char *path, int flags, int *status)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        *status = 1;
+        return NULL;
+    }
+    void *handle = dlopen(path, flags);
+    ry_context_pop(&context);
+    *status = 0;
+    return handle;
 }
 
 int ry_call_finalizer(R_CFinalizer_t function, SEXP object)

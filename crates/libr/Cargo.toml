@@ -97,3 +97,8 @@ path = "tests/test_rmath.rs"
 [[test]]
 name = "test_fuzz_rmath"
 path = "tests/test_fuzz_rmath.rs"
+
+[[test]]
+name = "test_load_errors"
+path = "tests/test_load_errors.rs"
+harness = false

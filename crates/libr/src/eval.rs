@@ -41,6 +41,7 @@ const PRIMITIVES: &[(&str, SexpType, Primitive)] = &[
     ("identity", SexpType::Builtin, identity),
     ("invisible", SexpType::Builtin, identity),
     ("quote", SexpType::Special, quote),
+    ("getNamespace", SexpType::Builtin, get_namespace),
 ];
 
 pub(crate) unsafe fn install_primitives(heap: &mut Heap) {
@@ -661,6 +662,25 @@ unsafe fn list(_call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiResult
         crate::attributes::install_attribute(result, R_NamesSymbol.get(), names)?;
     }
     Ok(result)
+}
+
+/// `getNamespace(name)` through the serializer's resolver, which returns a registered namespace
+/// or registers a placeholder: package initialization code (Rcpp's) looks its own namespace up
+/// to store a cache in it.
+unsafe fn get_namespace(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiResult<Sexp> {
+    match arguments {
+        [(_, name)] => crate::serialize::default_resolver(
+            crate::serialize::EnvironmentReference::Namespace,
+            *name,
+        ),
+        _ => Err(error_in(
+            call,
+            format!(
+                "{} arguments passed to a function that takes 1",
+                arguments.len()
+            ),
+        )),
+    }
 }
 
 unsafe fn identity(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiResult<Sexp> {

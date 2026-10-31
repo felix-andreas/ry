@@ -6,7 +6,7 @@
 
 use crate::{
     Rboolean,
-    boundary::{ApiResult, DlFunc, enter, error, ry_call_init, with_native_scope},
+    boundary::{ApiResult, DlFunc, enter, error, ry_call_dlopen, ry_call_init, with_native_scope},
     globals::{R_ClassSymbol, R_NamesSymbol},
     runtime,
     strings::c_bytes,
@@ -124,7 +124,12 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     } else {
         libc::RTLD_GLOBAL
     };
-    let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | visibility);
+    let mut handle = std::ptr::null_mut();
+    with_native_scope(|| {
+        let mut status = 0;
+        handle = ry_call_dlopen(c_path.as_ptr(), libc::RTLD_NOW | visibility, &mut status);
+        status
+    })?;
     if handle.is_null() {
         return Err(error(format!(
             "unable to load shared object '{canonical}':\n  {}",

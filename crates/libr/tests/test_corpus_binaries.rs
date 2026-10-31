@@ -11,7 +11,7 @@
 mod harness;
 
 use harness::*;
-use std::{collections::BTreeMap, path::Path, process::Command};
+use std::{collections::BTreeMap, io::Write, path::Path, process::Command};
 
 const CHILD_PACKAGE: &str = "RY_CORPUS_CHILD_PACKAGE";
 const CHILD_LIBRARIES: &str = "RY_CORPUS_CHILD_LIBRARIES";
@@ -62,7 +62,10 @@ fn corpus_binaries_load_and_register() {
         (std::env::var(CHILD_PACKAGE), std::env::var(CHILD_LIBRARIES))
     {
         child(&libraries, &target);
-        return;
+        // An error in a library's static initializer leaves the dynamic loader's lock with this
+        // test thread, and the exit handlers on the main thread would wait for it forever.
+        std::io::stdout().flush().expect("flush the report");
+        unsafe { libc::_exit(0) };
     }
     let libraries = corpus_libraries();
     let packages = scan(&libraries);
@@ -74,8 +77,11 @@ fn corpus_binaries_load_and_register() {
     let mut outcomes: BTreeMap<String, Outcome> = BTreeMap::new();
     for name in packages.keys() {
         let order = load_order(name, &packages);
+        // ry implements the base packages' internals itself, so GNU R's libraries for them
+        // (which import GNU R internals) are loaded only when they are the package under test.
         let paths: Vec<String> = order
             .iter()
+            .filter(|dependency| *dependency == name || !packages[*dependency].base)
             .filter_map(|name| packages.get(name))
             .map(|package| package.library.to_string_lossy().into_owned())
             .collect();
