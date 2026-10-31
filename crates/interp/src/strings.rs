@@ -895,7 +895,7 @@ fn join_number(
 
 /// C's `%e`: one digit before the point and an exponent of at least two digits.
 fn exponent_form(magnitude: f64, precision: usize, alternate: bool) -> String {
-    let text = scientific_text(magnitude, precision, 2);
+    let text = scientific_text(magnitude, precision);
     if alternate && precision == 0 {
         text.replacen('e', ".e", 1)
     } else {
@@ -916,7 +916,7 @@ fn general_form(magnitude: f64, precision: usize, alternate: bool) -> String {
             .unwrap_or(0)
     };
     let text = if exponent < -4 || exponent >= precision as i32 {
-        scientific_text(magnitude, precision - 1, 2)
+        scientific_text(magnitude, precision - 1)
     } else {
         format!(
             "{:.*}",

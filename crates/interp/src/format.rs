@@ -179,12 +179,13 @@ pub fn format_real_with(value: f64, format: RealFormat, na: &str) -> String {
         }
         return text;
     }
-    scientific_text(value, format.decimals, format.exponent)
+    scientific_text(value, format.decimals)
 }
 
-/// `value` in scientific notation with `decimals` mantissa decimals and at least
-/// `exponent_digits` exponent digits.
-pub fn scientific_text(value: f64, decimals: usize, exponent_digits: usize) -> String {
+/// `value` in scientific notation with `decimals` mantissa decimals and at least two exponent
+/// digits. A vector whose exponents need three digits pads its shorter elements to the common
+/// width with spaces, not with exponent zeros, as GNU R does.
+pub fn scientific_text(value: f64, decimals: usize) -> String {
     let text = format!("{:.*e}", decimals, value);
     let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
     let exponent: i32 = exponent.parse().unwrap_or(0);
@@ -192,7 +193,7 @@ pub fn scientific_text(value: f64, decimals: usize, exponent_digits: usize) -> S
     format!(
         "{mantissa}e{sign}{:0width$}",
         exponent.unsigned_abs(),
-        width = exponent_digits
+        width = 2
     )
 }
 
@@ -617,8 +618,8 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
     let text = match format {
         "d" => format!("{}", value.round() as i64),
         "f" => format!("{:.*}", precision.unwrap_or(6), value),
-        "e" => scientific_text(value, precision.unwrap_or(6), 2),
-        "E" => scientific_text(value, precision.unwrap_or(6), 2).to_uppercase(),
+        "e" => scientific_text(value, precision.unwrap_or(6)),
+        "E" => scientific_text(value, precision.unwrap_or(6)).to_uppercase(),
         "g" | "G" | "fg" => {
             let significant = precision.unwrap_or(6).max(1);
             let text = c_general(value, significant, flag.contains('#'));
@@ -645,7 +646,7 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
         .split_once('e')
         .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
     let text = if exponent < -4 || exponent >= significant as i32 {
-        let text = scientific_text(value, significant.saturating_sub(1), 2);
+        let text = scientific_text(value, significant.saturating_sub(1));
         if keep_zeros {
             text
         } else {

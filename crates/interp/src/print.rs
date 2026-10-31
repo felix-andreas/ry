@@ -410,12 +410,30 @@ pub unsafe fn print_matrix(
             }
         })
         .collect();
-    let row_label_width = row_labels
-        .iter()
-        .map(|label| display_width(label))
-        .chain(std::iter::once(display_width(&row_title)))
-        .max()
-        .unwrap_or(0);
+    // Row names align left, but GNU R right-aligns the `[i,]` labels that stand in for them.
+    // Named dimnames (even named "") indent the row labels by at least two columns, or enough
+    // for the row title, and always print the column title line.
+    let numbered_rows = row_names == nil();
+    let titled = dimnames_names != nil();
+    let label_width = row_labels.iter().map(|label| display_width(label)).max().unwrap_or(0);
+    let offset = if !titled {
+        0
+    } else if display_width(&row_title) < label_width + 2 {
+        2
+    } else {
+        display_width(&row_title) - label_width
+    };
+    let row_label_width = label_width + offset;
+    let row_labels: Vec<String> = row_labels
+        .into_iter()
+        .map(|label| {
+            if numbered_rows {
+                pad(&label, row_label_width, true)
+            } else {
+                pad(&format!("{}{label}", " ".repeat(offset)), row_label_width, false)
+            }
+        })
+        .collect();
     let columns = matrix_columns(matrix, rows, cols, options)?;
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
@@ -444,7 +462,7 @@ pub unsafe fn print_matrix(
         text.push_str(&pad(&row_title, row_label_width, false));
         text.push('\n');
         for label in &row_labels {
-            text.push_str(&pad(label, row_label_width, false));
+            text.push_str(label);
             text.push('\n');
         }
         out(&text);
@@ -459,9 +477,8 @@ pub unsafe fn print_matrix(
             end += 1;
         }
         let mut text = String::new();
-        if !col_title.is_empty() {
+        if titled {
             text.push_str(&" ".repeat(row_label_width));
-            text.push_str(&" ".repeat(options.gap));
             text.push_str(&col_title);
             text.push('\n');
         }
@@ -473,7 +490,7 @@ pub unsafe fn print_matrix(
         }
         text.push('\n');
         for row in 0..rows {
-            text.push_str(&pad(&row_labels[row], row_label_width, false));
+            text.push_str(&row_labels[row]);
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
                 text.push_str(&pad(&columns[col][row], widths[col], right));

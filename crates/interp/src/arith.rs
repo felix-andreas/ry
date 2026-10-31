@@ -344,8 +344,13 @@ pub fn pretty(
     let small = if range == 0.0 && scale == 0.0 {
         true
     } else {
-        let candidate = if (count as f64) < 1.0 { 1.0 } else { count as f64 };
-        range < scale * candidate * f64::EPSILON * 3.0 || range == 0.0
+        let bias = 1.0
+            + if five_bias >= 1.5 * high_bias + 0.5 {
+                1.0 / (1.0 + high_bias)
+            } else {
+                1.5 / (1.0 + five_bias)
+            };
+        range < scale * bias * count.max(1) as f64 * f64::EPSILON * 3.0
     };
     let mut cell;
     if small {
@@ -394,12 +399,13 @@ pub fn pretty(
     let mut steps = (0.5 + end - start) as i32;
     if steps < min_count {
         let missing = min_count - steps;
+        let (half, rest) = ((missing / 2) as f64, (missing % 2) as f64);
         if start >= 0.0 {
-            end += missing as f64 / 2.0;
-            start -= (missing as f64 / 2.0 + missing as f64 % 2.0).floor();
+            end += half;
+            start -= half + rest;
         } else {
-            start -= missing as f64 / 2.0;
-            end += (missing as f64 / 2.0 + missing as f64 % 2.0).floor();
+            start -= half;
+            end += half + rest;
         }
         steps = min_count;
     }
@@ -689,15 +695,48 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
     }
 }
 
-/// `^` with R's special cases: `1^y` and `x^0` are 1 even for `NA`.
+/// `^` with R's special cases, which C's `pow` leaves to the platform: `1^y` and `x^0` are 1
+/// even for `NA`, and an infinite operand gives a defined limit or `NaN` (`(-Inf)^0.5`).
 pub fn power(base: f64, exponent: f64) -> f64 {
     if base == 1.0 || exponent == 0.0 {
         return 1.0;
     }
-    if is_na_real(base) || is_na_real(exponent) {
-        return NA_REAL;
+    if base == 0.0 {
+        return if exponent > 0.0 {
+            0.0
+        } else if exponent < 0.0 {
+            f64::INFINITY
+        } else {
+            exponent
+        };
     }
-    base.powf(exponent)
+    if base.is_finite() && exponent.is_finite() {
+        return if exponent == 2.0 { base * base } else { base.powf(exponent) };
+    }
+    if base.is_nan() || exponent.is_nan() {
+        // GNU R's result carries the exponent's payload when both are NaN, so `NA^NaN` is
+        // `NaN` and `NaN^NA` is `NA`; x86 addition keeps its first operand's payload.
+        return exponent + base;
+    }
+    if base.is_infinite() {
+        if base > 0.0 {
+            return if exponent < 0.0 { 0.0 } else { f64::INFINITY };
+        }
+        if exponent.is_finite() && exponent == exponent.floor() {
+            return if exponent < 0.0 {
+                0.0
+            } else if exponent % 2.0 != 0.0 {
+                base
+            } else {
+                -base
+            };
+        }
+    }
+    if exponent.is_infinite() && base >= 0.0 {
+        let grows = if exponent > 0.0 { base >= 1.0 } else { base < 1.0 };
+        return if grows { f64::INFINITY } else { 0.0 };
+    }
+    f64::NAN
 }
 
 pub fn real_modulo(a: f64, b: f64) -> f64 {
@@ -1153,51 +1192,6 @@ pub fn gamma_fn(value: f64) -> f64 {
     unsafe { tgamma(value) }
 }
 
-fn digamma(mut x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    let mut result = 0.0;
-    if x <= 0.0 && x == x.floor() {
-        return f64::NAN;
-    }
-    if x < 0.0 {
-        // Reflection.
-        return digamma(1.0 - x) - std::f64::consts::PI / (std::f64::consts::PI * x).tan();
-    }
-    while x < 6.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let inverse2 = inverse * inverse;
-    result + x.ln() - 0.5 * inverse
-        - inverse2
-            * (1.0 / 12.0
-                - inverse2
-                    * (1.0 / 120.0
-                        - inverse2 * (1.0 / 252.0 - inverse2 * (1.0 / 240.0 - inverse2 / 132.0))))
-}
-
-fn trigamma(mut x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    let mut result = 0.0;
-    if x <= 0.0 && x == x.floor() {
-        return f64::INFINITY;
-    }
-    while x < 6.0 {
-        result += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let inverse2 = inverse * inverse;
-    result + inverse + inverse2 / 2.0
-        + inverse * inverse2
-            * (1.0 / 6.0 - inverse2 * (1.0 / 30.0 - inverse2 * (1.0 / 42.0 - inverse2 / 30.0)))
-}
-
 fn math_value(function: Math, x: f64) -> f64 {
     use std::f64::consts::PI;
     match function {
@@ -1270,8 +1264,8 @@ fn math_value(function: Math, x: f64) -> f64 {
         Math::Atanh => x.atanh(),
         Math::Gamma => gamma_fn(x),
         Math::Lgamma => gamma_ln(x),
-        Math::Digamma => digamma(x),
-        Math::Trigamma => trigamma(x),
+        Math::Digamma => distributions::psigamma(x, 0.0),
+        Math::Trigamma => distributions::psigamma(x, 1.0),
     }
 }
 

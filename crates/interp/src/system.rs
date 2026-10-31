@@ -310,12 +310,18 @@ unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_proc_time(_call: &Call<'_>) -> R<Sexp> {
-    let elapsed = interp().started.elapsed().as_secs_f64();
-    let mut usage: libc::rusage = std::mem::zeroed();
-    libc::getrusage(libc::RUSAGE_SELF, &mut usage);
-    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1e6;
-    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
-    let result = values::real_vector(&[user, system, elapsed, 0.0, 0.0])?;
+    // GNU R reports whole milliseconds, which is what keeps printed timings short.
+    let milliseconds = |seconds: f64| (seconds * 1000.0).round() / 1000.0;
+    let times = |who: libc::c_int| {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        libc::getrusage(who, &mut usage);
+        let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
+        (milliseconds(seconds(usage.ru_utime)), milliseconds(seconds(usage.ru_stime)))
+    };
+    let (user, system) = times(libc::RUSAGE_SELF);
+    let (child_user, child_system) = times(libc::RUSAGE_CHILDREN);
+    let elapsed = milliseconds(interp().started.elapsed().as_secs_f64());
+    let result = values::real_vector(&[user, system, elapsed, child_user, child_system])?;
     let names = string_vector(&["user.self", "sys.self", "elapsed", "user.child", "sys.child"])?;
     values::set_attr(result, symbols().names, names)?;
     let class = scalar_string("proc_time")?;
