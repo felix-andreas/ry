@@ -191,9 +191,6 @@ pub unsafe extern "C" fn SETCDR(object: Sexp, value: Sexp) -> Sexp {
         if cell == runtime().nil() {
             return Err(error("bad call to SETCDR"));
         }
-        if !matches!(value.kind(), SexpType::Nil) && !is_cell(value.kind()) {
-            return Err(error("SETCDR: value must be a pairlist or NULL"));
-        }
         runtime().heap.set_cdr(cell, value);
         Ok(value)
     })

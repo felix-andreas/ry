@@ -4,9 +4,7 @@ use crate::{
     R_len_t, R_xlen_t, Rboolean, SEXPTYPE, altrep,
     attributes::{get_attrib, inherits, set_attrib},
     boundary::{ApiResult, enter, error, warn},
-    globals::{
-        R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_RowNamesSymbol, R_TspSymbol,
-    },
+    globals::{R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_TspSymbol},
     memory::{alloc_vector, scalar_string},
     runtime,
     strings::{c_bytes, utf8_text},
@@ -318,8 +316,7 @@ pub fn format_complex(value: Rcomplex) -> String {
 
 /// The `CHARSXP` R prints for element `index` of an atomic vector.
 pub unsafe fn element_as_charsxp(object: Sexp, index: usize) -> ApiResult<Sexp> {
-    let runtime = runtime();
-    let na = runtime.heap.known().na_string;
+    let na = runtime().heap.known().na_string;
     let text = match object.kind() {
         SexpType::String => return sexp_elt(object, index),
         SexpType::Logical => match int_elt(object, index)? {
@@ -353,7 +350,7 @@ pub unsafe fn element_as_charsxp(object: Sexp, index: usize) -> ApiResult<Sexp> 
             )));
         }
     };
-    Ok(runtime.heap.mk_char(text.as_bytes(), Encoding::Native)?)
+    Ok(runtime().heap.mk_char(text.as_bytes(), Encoding::Native)?)
 }
 
 /// `Rf_coerceVector`.
@@ -407,19 +404,18 @@ pub unsafe fn coerce_vector(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
 }
 
 unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
-    let runtime = runtime();
     let length = xlength(object)?;
     let count = length as usize;
     match target {
         SexpType::List | SexpType::Expression => {
-            let result = runtime.heap.alloc_vector(target, length)?;
-            runtime.heap.root(result);
+            let result = runtime().heap.alloc_vector(target, length)?;
+            runtime().heap.root(result);
             for index in 0..count {
                 let element = element_vector(object, index)?;
-                runtime.heap.set_element(result, index, element);
+                runtime().heap.set_element(result, index, element);
             }
             let names = get_attrib(object, R_NamesSymbol.get())?;
-            if names != runtime.nil() {
+            if names != runtime().nil() {
                 set_names_from(result, names)?;
             }
             return Ok(result);
@@ -437,8 +433,8 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
         }
         _ => {}
     }
-    let result = runtime.heap.alloc_vector(target, length)?;
-    runtime.heap.root(result);
+    let result = runtime().heap.alloc_vector(target, length)?;
+    runtime().heap.root(result);
     let mut lost = false;
     let mut out_of_range = false;
     let mut raw_out_of_range = false;
@@ -460,7 +456,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     }
                     SexpType::String => {
                         let element = sexp_elt(object, index)?;
-                        if element == runtime.heap.known().na_string {
+                        if element == runtime().heap.known().na_string {
                             NA_LOGICAL
                         } else {
                             string_to_logical(element.bytes())
@@ -487,7 +483,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     }
                     SexpType::String => {
                         let element = sexp_elt(object, index)?;
-                        if element == runtime.heap.known().na_string {
+                        if element == runtime().heap.known().na_string {
                             NA_INTEGER
                         } else {
                             match parse_real(element.bytes()) {
@@ -517,7 +513,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     }
                     SexpType::String => {
                         let element = sexp_elt(object, index)?;
-                        if element == runtime.heap.known().na_string {
+                        if element == runtime().heap.known().na_string {
                             NA_REAL
                         } else {
                             parse_real(element.bytes()).unwrap_or_else(|| {
@@ -537,7 +533,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     SexpType::Real => real_elt(object, index)?,
                     SexpType::String => {
                         let element = sexp_elt(object, index)?;
-                        if element == runtime.heap.known().na_string {
+                        if element == runtime().heap.known().na_string {
                             NA_REAL
                         } else {
                             parse_real(element.bytes()).unwrap_or_else(|| {
@@ -557,7 +553,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
             }
             SexpType::String => {
                 let element = element_as_charsxp(object, index)?;
-                runtime.heap.set_element(result, index, element);
+                runtime().heap.set_element(result, index, element);
             }
             SexpType::Raw => {
                 let value = match object.kind() {
@@ -613,7 +609,6 @@ unsafe fn element_vector(object: Sexp, index: usize) -> ApiResult<Sexp> {
 }
 
 unsafe fn coerce_list(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
-    let runtime = runtime();
     let length = xlength(object)?;
     match target {
         SexpType::List | SexpType::Expression => {
@@ -621,10 +616,10 @@ unsafe fn coerce_list(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
             let result = if result.kind() == target {
                 result
             } else {
-                let converted = runtime.heap.alloc_vector(target, length)?;
-                runtime.heap.root(converted);
+                let converted = runtime().heap.alloc_vector(target, length)?;
+                runtime().heap.root(converted);
                 for index in 0..length as usize {
-                    runtime
+                    runtime()
                         .heap
                         .set_element(converted, index, object.element(index));
                 }
@@ -642,8 +637,8 @@ unsafe fn coerce_list(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
         }
         _ => {}
     }
-    let result = runtime.heap.alloc_vector(target, length)?;
-    runtime.heap.root(result);
+    let result = runtime().heap.alloc_vector(target, length)?;
+    runtime().heap.root(result);
     for index in 0..length as usize {
         let element = sexp_elt(object, index)?;
         let ok = element.kind().is_atomic() && xlength(element)? == 1;
@@ -654,9 +649,9 @@ unsafe fn coerce_list(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
             )));
         }
         let converted = coerce_vector(element, target)?;
-        runtime.heap.root(converted);
+        runtime().heap.root(converted);
         match target {
-            SexpType::String => runtime
+            SexpType::String => runtime()
                 .heap
                 .set_element(result, index, converted.element(0)),
             _ => {
@@ -670,7 +665,7 @@ unsafe fn coerce_list(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
         }
     }
     let names = get_attrib(object, R_NamesSymbol.get())?;
-    if names != runtime.nil() {
+    if names != runtime().nil() {
         set_names_from(result, names)?;
     }
     Ok(result)
@@ -681,25 +676,24 @@ pub unsafe fn as_character_factor(factor: Sexp) -> ApiResult<Sexp> {
     if !(factor.kind() == SexpType::Integer && inherits(factor, "factor")?) {
         return Err(error("attempting to coerce non-factor"));
     }
-    let runtime = runtime();
     let levels = get_attrib(factor, R_LevelsSymbol.get())?;
     if levels.kind() != SexpType::String {
         return Err(error("malformed factor"));
     }
     let length = xlength(factor)?;
-    let result = runtime.heap.alloc_vector(SexpType::String, length)?;
-    runtime.heap.root(result);
+    let result = runtime().heap.alloc_vector(SexpType::String, length)?;
+    runtime().heap.root(result);
     let level_count = levels.length();
     for index in 0..length as usize {
         let code = int_elt(factor, index)?;
         let value = if code == NA_INTEGER {
-            runtime.heap.known().na_string
+            runtime().heap.known().na_string
         } else if code >= 1 && code as isize <= level_count {
             levels.element(code as usize - 1)
         } else {
             return Err(error("malformed factor"));
         };
-        runtime.heap.set_element(result, index, value);
+        runtime().heap.set_element(result, index, value);
     }
     Ok(result)
 }
@@ -1289,10 +1283,6 @@ pub unsafe extern "C" fn Rf_nrows(object: Sexp) -> c_int {
             }
             return Ok(xlength(object)? as c_int);
         }
-        if inherits(object, "data.frame")? {
-            let row_names = get_attrib(object, R_RowNamesSymbol.get())?;
-            return Ok(generic_length(row_names)? as c_int);
-        }
         Err(error("object is not a matrix"))
     })
 }
@@ -1305,9 +1295,6 @@ pub unsafe extern "C" fn Rf_ncols(object: Sexp) -> c_int {
                 Some(dims) if dims.len() >= 2 => dims[1],
                 _ => 1,
             });
-        }
-        if inherits(object, "data.frame")? {
-            return Ok(generic_length(object)? as c_int);
         }
         Err(error("object is not a matrix"))
     })

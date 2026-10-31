@@ -95,7 +95,7 @@ unsafe extern "C" {
         method: SexpEltMethod,
         x: Sexp,
         index: R_xlen_t,
-        result: *mut Sexp,
+        result: *mut *mut heap::object::Header,
     ) -> c_int;
     fn ry_altrep_set_elt(method: SetEltMethod, x: Sexp, index: R_xlen_t, value: Sexp) -> c_int;
     fn ry_altrep_int_query(method: QueryMethod, x: Sexp, result: *mut c_int) -> c_int;
@@ -169,9 +169,9 @@ pub unsafe fn real_elt(object: Sexp, index: R_xlen_t) -> ApiResult<f64> {
 pub unsafe fn sexp_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
     match methods(object).sexp_elt {
         Some(method) => {
-            let mut result = runtime().nil();
+            let mut result = std::ptr::null_mut();
             with_native_scope(|| ry_altrep_sexp_elt(method, object, index, &mut result))?;
-            Ok(result)
+            Sexp::from_raw(result).ok_or_else(|| error("an ALTREP Elt method returned NULL"))
         }
         None => Ok(*(dataptr(object, false)? as *const Sexp).add(index as usize)),
     }
@@ -283,9 +283,8 @@ unsafe fn query(
 pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
     let kind = object.kind();
     let count = length(object)?;
-    let runtime = runtime();
-    let copy = runtime.heap.alloc_vector(kind, count)?;
-    runtime.heap.root(copy);
+    let copy = runtime().heap.alloc_vector(kind, count)?;
+    runtime().heap.root(copy);
     for index in 0..count {
         let position = index as usize;
         match kind {
@@ -299,7 +298,7 @@ pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
             }
             SexpType::String | SexpType::List => {
                 let element = sexp_elt(object, index)?;
-                runtime.heap.set_element(copy, position, element);
+                runtime().heap.set_element(copy, position, element);
             }
             _ => return Err(error("cannot materialize this ALTREP object")),
         }

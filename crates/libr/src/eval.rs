@@ -58,8 +58,7 @@ pub fn primitive_name(index: u32) -> &'static str {
 }
 
 pub unsafe fn eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
-    let runtime = runtime();
-    let known = *runtime.heap.known();
+    let known = *runtime().heap.known();
     match expression.kind() {
         SexpType::Symbol => {
             if expression == R_DotsSymbol.get() {
@@ -96,7 +95,7 @@ pub unsafe fn eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
             } else {
                 eval(head, env)?
             };
-            runtime.heap.root(function);
+            runtime().heap.root(function);
             apply(expression, function, expression.cdr(), env)
         }
         SexpType::Dots => Err(error("'...' used in an incorrect context")),
@@ -106,26 +105,24 @@ pub unsafe fn eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
 }
 
 pub unsafe fn force_promise(promise: Sexp) -> ApiResult<Sexp> {
-    let runtime = runtime();
-    let unbound = runtime.heap.known().unbound;
+    let unbound = runtime().heap.known().unbound;
     if promise.car() != unbound {
         return Ok(promise.car());
     }
     let value = eval(promise.cdr(), promise.tag())?;
-    runtime.heap.set_car(promise, value);
-    runtime.heap.set_tag(promise, runtime.nil());
+    runtime().heap.set_car(promise, value);
+    runtime().heap.set_tag(promise, runtime().nil());
     Ok(value)
 }
 
 unsafe fn apply(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp) -> ApiResult<Sexp> {
-    let runtime = runtime();
     match function.kind() {
         SexpType::Builtin => {
             let mut evaluated = Vec::new();
             let mut cell = arguments;
             while cell.kind() == SexpType::Pairlist {
                 let value = eval(cell.car(), env)?;
-                runtime.heap.root(value);
+                runtime().heap.root(value);
                 evaluated.push((cell.tag(), value));
                 cell = cell.cdr();
             }
@@ -268,19 +265,18 @@ unsafe fn native_call(
             call_native(function, &args, what)
         }
         RoutineKind::External => {
-            let runtime = runtime();
-            let nil = runtime.nil();
+            let nil = runtime().nil();
             let mut list = nil;
             for &(tag, value) in values.iter().rev() {
-                list = runtime
+                list = runtime()
                     .heap
                     .alloc_triple(SexpType::Pairlist, value, list, tag)?;
-                runtime.heap.root(list);
+                runtime().heap.root(list);
             }
-            let list = runtime
+            let list = runtime()
                 .heap
                 .alloc_triple(SexpType::Language, *name, list, nil)?;
-            runtime.heap.root(list);
+            runtime().heap.root(list);
             call_native(function, &[list], what)
         }
     }
@@ -602,7 +598,7 @@ pub unsafe extern "C" fn R_MakeUnwindCont() -> Sexp {
 pub unsafe extern "C" fn R_ShowMessage(message: *const c_char) {
     let mut text = crate::strings::c_bytes(message).to_vec();
     text.push(b'\n');
-    (runtime().console)(&text, true);
+    crate::boundary::write_console(&text, true);
 }
 
 impl crate::boundary::Handout for Option<Sexp> {

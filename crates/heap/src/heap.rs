@@ -157,6 +157,8 @@ pub enum HeapError {
     EmbeddedNul { text: String },
     StringTooLong,
     SymbolTooLong,
+    EmptySymbol,
+    EmptyEnvironment,
     LockedBinding { name: String },
     LockedEnvironment,
     LockedEnvironmentRemove,
@@ -213,6 +215,10 @@ impl fmt::Display for HeapError {
             }
             HeapError::SymbolTooLong => {
                 write!(formatter, "variable names are limited to 10000 bytes")
+            }
+            HeapError::EmptySymbol => write!(formatter, "attempt to use zero-length variable name"),
+            HeapError::EmptyEnvironment => {
+                write!(formatter, "cannot assign values in the empty environment")
             }
             HeapError::LockedBinding { name } => {
                 write!(
@@ -576,6 +582,9 @@ impl Heap {
         if name.len() > 10_000 {
             return Err(HeapError::SymbolTooLong);
         }
+        if name.is_empty() {
+            return Err(HeapError::EmptySymbol);
+        }
         let name = self.mk_char(name, Encoding::Native)?;
         self.install_char(name)
     }
@@ -691,7 +700,10 @@ impl Heap {
         if let Some(cell) = self.frame_cell(env, symbol) {
             return self.set_binding_value(cell, value);
         }
-        if env.has_gp(gp::FRAME_LOCKED) || env == self.known.empty_env {
+        if env == self.known.empty_env {
+            return Err(HeapError::EmptyEnvironment);
+        }
+        if env.has_gp(gp::FRAME_LOCKED) {
             return Err(HeapError::LockedEnvironment);
         }
         let cell =
@@ -943,6 +955,8 @@ impl Heap {
         }
         self.drain();
         self.process_weak_refs();
+        // Before the sweep, while a mark still means "survives".
+        self.escaped.retain(|object| object.is_marked());
         match kind {
             Collection::Minor => {
                 self.strings.remove_dead_young();
@@ -959,7 +973,6 @@ impl Heap {
         for parent in self.remembered.drain(..) {
             parent.set_gc_bit(gc_bits::REMEMBERED, false);
         }
-        self.escaped.retain(|object| object.is_marked());
         self.young_bytes = 0;
         self.inhibit -= 1;
     }
@@ -1218,7 +1231,9 @@ impl Heap {
         let slot_size = SLOT_SIZES[class as usize];
         let memory = NonNull::new_unchecked(object.as_ptr().cast::<u8>());
         std::ptr::write_bytes(memory.as_ptr(), POISON, slot_size);
+        // The kind and collector bytes stay meaningful: a free slot reads as `FREESXP` and unmarked.
         *memory.as_ptr() = SexpType::Free as u8;
+        *memory.as_ptr().add(1) = 0;
         self.classes[class as usize].free.push(memory);
     }
 

@@ -68,7 +68,7 @@ unsafe extern "C" {
         function: DlFunc,
         count: c_int,
         args: *const Sexp,
-        result: *mut Sexp,
+        result: *mut *mut heap::object::Header,
     ) -> c_int;
     fn ry_call_finalizer(function: unsafe extern "C" fn(Sexp), object: Sexp) -> c_int;
     /// `info` is a `Dll`, which C sees only as the opaque `DllInfo *`.
@@ -120,10 +120,11 @@ pub unsafe fn enter<T: Handout>(body: impl FnOnce() -> ApiResult<T>) -> T {
             value
         }
         Ok(Err(unwind)) => raise(unwind),
-        Err(payload) => raise(error(format!(
-            "internal error in ry: {}",
-            panic_message(&payload)
-        ))),
+        Err(payload) => {
+            let unwind = error(format!("internal error in ry: {}", panic_message(&payload)));
+            drop(payload);
+            raise(unwind)
+        }
     }
 }
 
@@ -183,8 +184,13 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
         runtime.native_depth += 1;
         (mark, saved_base, runtime.arena.watermark(), entry_depth)
     };
-    let mut result = runtime().nil();
-    let status = ry_call_native(function, args.len() as c_int, args.as_ptr(), &mut result);
+    let mut raw_result = std::ptr::null_mut();
+    let status = ry_call_native(
+        function,
+        args.len() as c_int,
+        args.as_ptr(),
+        &mut raw_result,
+    );
     let runtime = runtime();
     runtime.native_depth -= 1;
     let exit_depth = runtime.heap.roots.protect.leave(saved_base);
@@ -198,6 +204,14 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
             "stack imbalance in '{what}', {entry_depth} then {exit_depth}"
         ));
     }
+    // GNU R accepts a routine that returns C `NULL` and reads it as `R_NilValue`.
+    let result = match Sexp::from_raw(raw_result) {
+        Some(result) => result,
+        None => {
+            warn("converting NULL pointer to R NULL");
+            runtime.nil()
+        }
+    };
     runtime.heap.root(result);
     run_pending_finalizers();
     Ok(result)
@@ -267,6 +281,11 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     let key = weak.weak_key();
     let c_finalizer = weak.weak_c_finalizer();
     let finalizer = weak.weak_finalizer();
+    // The key is dead by definition, so only these roots keep it and the finalizer alive while
+    // the finalizer runs.
+    let mark = runtime().heap.handle_mark();
+    runtime().heap.root(key);
+    runtime().heap.root(finalizer);
     runtime().heap.clear_weak_ref(weak);
     let result = if c_finalizer != 0 {
         // SAFETY: the address came from an `R_CFinalizer_t` at registration.
@@ -282,6 +301,7 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     } else {
         Ok(())
     };
+    runtime().heap.release_handles(mark);
     if let Err(unwind) = result {
         report(&unwind, "Error in finalizer");
     }
@@ -299,7 +319,7 @@ pub fn report(unwind: &Unwind, prefix: &str) {
     };
     let runtime = runtime();
     runtime.error_buffer = text.clone().into_bytes();
-    (runtime.console)(text.as_bytes(), true);
+    write_console(text.as_bytes(), true);
 }
 
 /// `Error in <call> : <message>`, moving the message to its own line when the two would not fit
@@ -318,6 +338,14 @@ pub fn format_error(prefix: &str, error: &RError) -> String {
             }
         }
     }
+}
+
+/// Writes to the console. The callback is taken out of the runtime while it runs, so one that
+/// prints through the API again finds the default console instead of aliasing itself.
+pub fn write_console(text: &[u8], is_error: bool) {
+    let mut console = std::mem::replace(&mut runtime().console, Box::new(default_console));
+    console(text, is_error);
+    runtime().console = console;
 }
 
 pub fn default_console(text: &[u8], is_error: bool) {
@@ -383,7 +411,7 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
             Some(call) => format!("Warning in {call} : {message}\n"),
             None => format!("Warning: {message}\n"),
         };
-        (runtime().console)(text.as_bytes(), true);
+        write_console(text.as_bytes(), true);
     }
     warn(message);
 }
@@ -391,7 +419,7 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_write_console(text: *const c_char, length: usize, is_error: c_int) {
     let bytes = std::slice::from_raw_parts(text as *const u8, length);
-    (runtime().console)(bytes, is_error != 0);
+    write_console(bytes, is_error != 0);
 }
 
 #[unsafe(no_mangle)]
@@ -452,7 +480,11 @@ pub unsafe extern "C" fn ry_pending_condition(classes: Sexp) -> *mut c_void {
     }
     match crate::eval::make_condition(unwind) {
         Ok(condition) => condition.as_ptr().cast(),
-        Err(_) => std::ptr::null_mut(),
+        // Building the condition failed, so that failure replaces the unwind and propagates.
+        Err(failure) => {
+            set_pending(failure);
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -461,7 +493,7 @@ pub unsafe extern "C" fn ry_fatal_without_context() -> ! {
     let unwind = take_pending();
     report(&unwind, "Error");
     let message = b"ry: an R error was raised outside of any native call or context, so there is nowhere to return to\n";
-    (runtime().console)(message, true);
+    write_console(message, true);
     std::process::abort()
 }
 

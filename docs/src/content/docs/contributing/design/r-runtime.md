@@ -409,8 +409,8 @@ boundary is a thin C layer with two directions:
   pending destructors is ever crossed.
 
 `R_UnwindProtect`, `R_ToplevelExec`, `R_ExecWithCleanup` and `R_tryCatch` are C contexts of their
-own, because the callbacks native code hands them are native code too, and a C++ exception thrown
-from an `R_UnwindProtect` cleanup (how cpp11 and Rcpp run destructors) must unwind only C frames.
+own, because the callbacks native code hands them are native code too, and a C++ exception that a
+binding throws from an `R_UnwindProtect` cleanup to run its destructors must unwind only C frames.
 `R_tryEval` is plain Rust, because inside Rust an error is already a value. R conditions, restarts
 and `on.exit` are implemented natively in Rust, with the C layer only as the bridge. The variadic
 functions (`Rf_error`, `Rprintf` and their family) are C too, because stable Rust cannot define a C

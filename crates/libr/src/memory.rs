@@ -67,7 +67,6 @@ pub unsafe fn scalar_string(charsxp: Sexp) -> ApiResult<Sexp> {
 
 /// `Rf_duplicate` and `Rf_shallow_duplicate`.
 pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
-    let runtime = runtime();
     if object.is_altrep() {
         let copy = crate::altrep::materialize(object)?;
         copy_attributes(copy, object, deep)?;
@@ -88,13 +87,13 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
         | SexpType::Any
         | SexpType::Free => return Ok(object),
         SexpType::Closure | SexpType::Object => {
-            let copy = runtime.heap.alloc_triple(
+            let copy = runtime().heap.alloc_triple(
                 object.kind(),
                 object.car(),
                 object.cdr(),
                 object.tag(),
             )?;
-            runtime.heap.root(copy);
+            runtime().heap.root(copy);
             copy
         }
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
@@ -114,11 +113,11 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
                 } else {
                     original.car()
                 };
-                runtime.heap.root(car);
-                copy = runtime
+                runtime().heap.root(car);
+                copy = runtime()
                     .heap
                     .alloc_triple(original.kind(), car, copy, original.tag())?;
-                runtime.heap.root(copy);
+                runtime().heap.root(copy);
                 copy_attributes(copy, original, deep)?;
                 copy.set_gp(original.gp());
             }
@@ -126,12 +125,14 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
         }
         kind => {
             let length = object.length();
-            let copy = runtime.heap.alloc_vector(kind, length)?;
-            runtime.heap.root(copy);
+            let copy = runtime().heap.alloc_vector(kind, length)?;
+            runtime().heap.root(copy);
             match kind {
                 SexpType::String => {
                     for index in 0..length as usize {
-                        runtime.heap.set_element(copy, index, object.element(index));
+                        runtime()
+                            .heap
+                            .set_element(copy, index, object.element(index));
                     }
                 }
                 SexpType::List | SexpType::Expression => {
@@ -142,7 +143,7 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
                         } else {
                             element
                         };
-                        runtime.heap.set_element(copy, index, element);
+                        runtime().heap.set_element(copy, index, element);
                     }
                 }
                 _ => {
@@ -175,7 +176,6 @@ pub unsafe fn copy_attributes(to: Sexp, from: Sexp, deep: bool) -> ApiResult<()>
 /// `Rf_xlengthgets`: a copy of `object` with `length` elements, padded with `NA` (or `NULL` in
 /// a list) and keeping only the names.
 pub unsafe fn length_gets(object: Sexp, length: R_xlen_t) -> ApiResult<Sexp> {
-    let runtime = runtime();
     let kind = object.kind();
     if kind == SexpType::Nil {
         if length > 0 {
@@ -196,8 +196,8 @@ pub unsafe fn length_gets(object: Sexp, length: R_xlen_t) -> ApiResult<Sexp> {
         return length_gets(vector, length);
     }
     let old_length = crate::vectors::xlength(object)?;
-    let copy = runtime.heap.alloc_vector(kind, length)?;
-    runtime.heap.root(copy);
+    let copy = runtime().heap.alloc_vector(kind, length)?;
+    runtime().heap.root(copy);
     let kept = old_length.min(length) as usize;
     for index in 0..length as usize {
         let present = index < kept;
@@ -241,29 +241,29 @@ pub unsafe fn length_gets(object: Sexp, length: R_xlen_t) -> ApiResult<Sexp> {
                 let value = if present {
                     crate::vectors::sexp_elt(object, index)?
                 } else {
-                    runtime.heap.known().na_string
+                    runtime().heap.known().na_string
                 };
-                runtime.heap.set_element(copy, index, value);
+                runtime().heap.set_element(copy, index, value);
             }
             SexpType::List | SexpType::Expression if present => {
                 let value = crate::vectors::sexp_elt(object, index)?;
-                runtime.heap.set_element(copy, index, value);
+                runtime().heap.set_element(copy, index, value);
             }
             _ => {}
         }
     }
     let names = crate::attributes::get_attrib(object, crate::globals::R_NamesSymbol.get())?;
-    if names != runtime.nil() {
-        let blank = runtime.heap.known().blank_string;
-        let new_names = runtime.heap.alloc_vector(SexpType::String, length)?;
-        runtime.heap.root(new_names);
+    if names != runtime().nil() {
+        let blank = runtime().heap.known().blank_string;
+        let new_names = runtime().heap.alloc_vector(SexpType::String, length)?;
+        runtime().heap.root(new_names);
         for index in 0..length as usize {
             let name = if index < kept {
                 names.element(index)
             } else {
                 blank
             };
-            runtime.heap.set_element(new_names, index, name);
+            runtime().heap.set_element(new_names, index, name);
         }
         set_names_from(copy, new_names)?;
     }
@@ -623,6 +623,7 @@ pub unsafe extern "C" fn R_PreserveInMSet(object: Sexp, set: Sexp) {
         if object == runtime.nil() || object.kind() == SexpType::Symbol {
             return Ok(());
         }
+        runtime.heap.root(object);
         let count = *(set.tag().data() as *const i32) as usize;
         let mut store = set.car();
         let capacity = if store == runtime.nil() {

@@ -311,7 +311,6 @@ non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`,
 `R_UnwindProtect`, `R_ExecWithCleanup` and a cpp11-style C++ unwind) around values and errors, and
 checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
 released. A second battery drives random API sequences under collection stress against a model.
-Its first run found a missing root.
 
 ### Coverage-guided fuzzing
 

@@ -230,6 +230,50 @@ SEXP rytest_exec_with_cleanup(SEXP call)
     return R_ExecWithCleanup(eval_body, call, plain_cleanup, NULL);
 }
 
+static SEXP failing_handler(SEXP condition, void *data)
+{
+    error("from the handler");
+    return R_NilValue;
+}
+
+static void count_finally(void *data)
+{
+    cleanup_count++;
+}
+
+SEXP rytest_try_catch_failing_handler(SEXP call)
+{
+    SEXP conds = PROTECT(mkString("error"));
+    SEXP result = R_tryCatch(eval_body, call, conds, failing_handler, NULL, count_finally, NULL);
+    UNPROTECT(1);
+    return result;
+}
+
+/* Edge cases GNU R accepts. */
+
+SEXP rytest_escaped_temporary(void)
+{
+    SEXP list = allocVector(VECSXP, 3);
+    DATAPTR(list);
+    SEXP strings = allocVector(STRSXP, 3);
+    STRING_PTR(strings);
+    return ScalarLogical(TRUE);
+}
+
+SEXP rytest_return_null(void)
+{
+    return NULL;
+}
+
+SEXP rytest_setcdr_any(void)
+{
+    SEXP cell = PROTECT(cons(ScalarInteger(1), R_NilValue));
+    SETCDR(cell, ScalarInteger(2));
+    SEXP tail = CDR(cell);
+    UNPROTECT(1);
+    return tail;
+}
+
 /* R_alloc. */
 
 SEXP rytest_r_alloc(SEXP count)
@@ -265,6 +309,11 @@ static int finalized = 0;
 
 static void finalize_counter(SEXP pointer)
 {
+    /* Collect inside the finalizer: the dying key must stay valid until the finalizer returns. */
+    allocVector(REALSXP, 1000);
+    R_gc();
+    if (TYPEOF(pointer) != EXTPTRSXP)
+        error("the finalizer's key was collected");
     int *value = (int *) R_ExternalPtrAddr(pointer);
     if (value != NULL) {
         finalized += *value;
@@ -524,6 +573,10 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_unif", (DL_FUNC) &rytest_unif, 1},
     {"rytest_sample", (DL_FUNC) &rytest_sample, 2},
     {"rytest_cpp_unwind", (DL_FUNC) &rytest_cpp_unwind, 1},
+    {"rytest_try_catch_failing_handler", (DL_FUNC) &rytest_try_catch_failing_handler, 1},
+    {"rytest_escaped_temporary", (DL_FUNC) &rytest_escaped_temporary, 0},
+    {"rytest_return_null", (DL_FUNC) &rytest_return_null, 0},
+    {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {NULL, NULL, 0}
 };

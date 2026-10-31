@@ -666,3 +666,44 @@ fn the_most_used_api_names_are_exported() {
         "the most-used names that libR lacks: {missing:?}"
     );
 }
+
+/// Inputs GNU R accepts that ry once mishandled: escaped temporaries in the next collection, a
+/// routine that returns C `NULL`, a non-list `CDR`, and `finally` when a handler raises.
+#[test]
+fn edge_cases_gnu_r_accepts() {
+    let r = r();
+    rytest(&r);
+    r.call("rytest_escaped_temporary", &[])
+        .expect("escaped temporaries");
+    unsafe {
+        (r.api().ry_collect)(0);
+        (r.api().ry_collect)(0);
+        (r.api().ry_collect)(1);
+    }
+    let value = r.call("rytest_return_null", &[]).expect("a NULL return");
+    assert_eq!(value, r.nil());
+    assert_eq!(
+        r.warnings(),
+        vec!["converting NULL pointer to R NULL".to_owned()]
+    );
+    let tail = r
+        .call("rytest_setcdr_any", &[])
+        .expect("SETCDR with a vector");
+    assert_eq!(r.integers(tail), vec![2]);
+
+    let message = r.string("inner");
+    let inner = r.call_expression(
+        ".Call",
+        &[(None, r.string("rytest_error")), (None, message)],
+    );
+    let inner = r.quote(inner);
+    let before = r.integers(r.call("rytest_cleanup_state", &[]).expect("state"))[0];
+    let error = r
+        .call("rytest_try_catch_failing_handler", &[inner])
+        .expect_err("the handler's error continues");
+    assert_eq!(error, "Error: from the handler\n");
+    assert_eq!(
+        r.integers(r.call("rytest_cleanup_state", &[]).expect("state"))[0],
+        before + 1
+    );
+}

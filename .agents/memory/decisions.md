@@ -1631,7 +1631,8 @@ remembered set and the escaped set, and sweeps only the young list (every object
 the last collection), so its cost is proportional to young data, not the heap. A major collection
 clears the marks first and sweeps every page. Small objects live in 64 KiB pages of 17 size
 classes, the 40-byte class being a triple; larger objects are allocated one by one. Freed slots are
-poisoned as `FREESXP`, so a stale handle reads as freed. The write barrier records an old parent
+poisoned, with the kind byte set to `FREESXP` and the collector byte cleared, so a stale handle
+reads as freed and unmarked; any set of handles kept across a sweep is filtered before it. The write barrier records an old parent
 that receives a young child. A vector whose writable element pointer escaped (`STRING_PTR`,
 `DATAPTR` on a list) bypasses the barrier from then on, so it joins the escaped set and every minor
 collection rescans it. Weak references follow ephemeron rules, and the `CHARSXP` intern table is
@@ -1641,8 +1642,8 @@ profiling can revisit without changing the API.
 
 **Roots.** The `PROTECT` stack, the precious multiset, the handle stack, registered globals, every
 interned symbol, the weak-reference list, and any `RootSource` an interpreter or JIT registers. A
-function that allocates while it holds a handle that nothing else roots must root it first: the
-fuzz battery's first run found exactly that in `scalar_string`.
+function that allocates while it holds a handle that nothing else roots must root it first, and collection stress is what
+exposes a miss.
 
 **The handle scope roots what the API hands out, not every allocation.** While a native call is on
 the stack, every handle an API function returns to native code is pushed to the handle stack, and

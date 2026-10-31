@@ -121,7 +121,8 @@ nothing about C.
 ## `libr`
 
 The crate root is `src/libr.rs`, and the crate builds `libR.so` as well as an rlib. It holds the
-runtime state and R's C API. Each exported function runs its body through `boundary::enter`.
+runtime state and R's C API. Each exported function that can fail runs its body through
+`boundary::enter`.
 
 - **`libr.rs`**: the process-wide `Runtime` and its start-up.
 - **`boundary.rs`**: the native boundary: `Unwind`, `enter` and `raise`, the trampolines that call

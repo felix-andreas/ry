@@ -39,7 +39,7 @@ impl Frame {
         match &self.index {
             Some(index) => index
                 .get(&symbol)
-                .map(|&position| self.cells[position as usize]),
+                .and_then(|&position| self.cells.get(position as usize).copied()),
             None => unsafe { self.cells.iter().copied().find(|cell| cell.car() == symbol) },
         }
     }

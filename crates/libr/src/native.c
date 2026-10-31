@@ -555,7 +555,17 @@ RY_EXPORT SEXP R_tryCatch(SEXP (*body)(void *), void *bdata, SEXP conds,
         }
         PROTECT(condition);
         ry_discard_pending();
+        /* The handler may raise in turn; `finally` runs on that path too. */
+        RyContext handling;
+        ry_context_push(&handling);
+        if (setjmp(handling.buffer)) {
+            ry_context_land(&handling);
+            if (finally != NULL)
+                finally(fdata);
+            ry_jump();
+        }
         SEXP result = handler(condition, hdata);
+        ry_context_pop(&handling);
         UNPROTECT(2);
         if (finally != NULL)
             finally(fdata);
