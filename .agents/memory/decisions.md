@@ -1852,6 +1852,24 @@ primitives, and nothing built or installed packages.
   `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript` runs GNU R's
   `Rscript` for the R snippets configure scripts and `Makevars` evaluate: an explicit build-time
   delegation that the interpreter replaces, not a fallback on failure.
+- **Rmath, Applic, LINPACK and the Fortran helpers are Rust written from the published
+  algorithms** (`rmath.rs`, `applic.rs`, `linpack.rs`, `utils.rs`), never translated from GNU R,
+  which is GPL. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random
+  streams through the `rmathtest` package, and `test_rmath` replays them in ry's libR with a
+  per-function tolerance that names its reason. The random variates draw uniforms in GNU R's
+  order, so seeded streams match. `R_binom_kind` reports `BUGGY_BTPE` and `R_sample_kind`
+  `REJECTION`, the defaults of the R version the corpus was recorded with.
+- **An error raised while `dlopen` runs a library's static initializers surfaces as a
+  `dyn.load` error,** as in GNU R: `ry_call_dlopen` sets a jump target around `dlopen`
+  (Rcpp's `Function c("c")` globals call `Rf_findFun` there). Longjmping out of an initializer
+  leaves glibc's recursive loader lock with that thread, as it does in GNU R, so a process that
+  exits from another thread deadlocks in `_dl_fini`; R runs on the main thread, and the tests
+  that provoke it (`test_load_errors`) do too.
+- **`getNamespace` is a built-in of the native-call evaluator,** answered by the serializer's
+  namespace resolver, because Rcpp's initializers look it up before any interpreter exists.
+- **The headers keep declaring the names R 4.6 removed** (`SETLENGTH`, `SET_TRUELENGTH`,
+  `FRAME`, ...) and ship an empty `R_ext/PrtUtil.h`, because pinned package sources (readr,
+  isoband, yaml) still use them and `legacy.rs` exports them anyway.
 
 # Decision record: the package-development loader
 

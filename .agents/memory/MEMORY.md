@@ -37,6 +37,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **The corpus tests (`test_corpus_binaries`, `test_corpus_calls`, `RY_SOURCE_PACKAGES` in `test_install`) need `.corpus/library`** from `tools/corpus/install.R` and skip without it. Re-record `tests/data/corpus_calls/cases.rds` under `LC_ALL=C.UTF-8`, or string routines record C-locale results.
 - **`cargo test` writes the fresh `libR.so` to `target/<profile>/deps`**; the copy in `target/<profile>` is only refreshed by `cargo build`, so a harness that loads it tests stale code.
 - **A C function native code calls must be marked `RY_EXPORT` in `native.c`**, because rustc's version script hides C symbols in a cdylib and `build.rs` exports only the marked ones.
+- **Translate a C `do { ... } while (a > b)` that can meet NaN as `if !(a > b) { break }`**, never `if a <= b { break }`: a NaN comparison is false, so the C loop ends and the inverted one spins forever (`rmath.rs`).
 - **Never copy GNU R's GPL code into the repository** (`decisions.md`, "runtime licensing"). Headers and implementation are written independently; vendored test packages carry their own license (brio is MIT).
 
 ### Performance traps
