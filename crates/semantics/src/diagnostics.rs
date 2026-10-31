@@ -3,7 +3,7 @@ use crate::annotations::{
     lower_annotation, lower_inline_annotation, statement_inline_site,
 };
 use crate::check::{ItemCheck, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind};
-use crate::hir::{ExprId, ExpressionKind};
+use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
 use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
@@ -224,7 +224,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
 /// Name → index of the earliest item whose top-level frame writes it. Conditional
 /// writes count: they create the document's slot just like unconditional ones.
 #[salsa::tracked(returns(ref))]
-fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> FxHashMap<String, usize> {
+fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> FxHashMap<Symbol, usize> {
     let mut positions = FxHashMap::default();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
         let Some(naming) = item_naming(db, item) else {
@@ -1244,11 +1244,11 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
 /// Names written by `<<-` with no enclosing binding anywhere in the file: R
 /// creates them in the global environment, so reads of them resolve.
 #[salsa::tracked(returns(ref))]
-fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
+fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();
     for &item in item_tree(db, file) {
         if let Some(naming) = item_naming(db, item) {
-            names.extend(naming.super_globals.iter().cloned());
+            names.extend(naming.super_globals.iter().copied());
         }
     }
     names
@@ -1287,7 +1287,7 @@ fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<
             if let ExpressionKind::Literal(LiteralKind::String(value)) = &module.expression(id).kind
                 && !value.is_empty()
             {
-                declared.insert(value.clone());
+                declared.insert(value.to_string());
             }
         };
         match &module.expression(first).kind {
@@ -1474,14 +1474,14 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect();
     struct Definer {
         item_index: usize,
-        name: String,
+        name: Symbol,
         range: TextRange,
         used: bool,
         /// Rebinds only on some runs, so it does not end earlier definers' liveness.
         conditional: bool,
     }
     let mut definers: Vec<Definer> = Vec::new();
-    let mut reads: Vec<(usize, String, bool)> = Vec::new();
+    let mut reads: Vec<(usize, Symbol, bool)> = Vec::new();
     for (index, span) in item_spans(db, file).iter().enumerate() {
         let item = span.item;
         let offset = span.range.start();
@@ -1508,7 +1508,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if !broken(statement_range) {
                 definers.push(Definer {
                     item_index: index,
-                    name,
+                    name: Symbol::new(&name),
                     range: name_range,
                     used: false,
                     conditional: false,
@@ -1525,7 +1525,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if !broken(range) {
                 definers.push(Definer {
                     item_index: index,
-                    name: binding.name.clone(),
+                    name: binding.name,
                     range,
                     // A read within the item itself already keeps it alive.
                     used: naming.used_top_level_names.contains(&binding.name),
@@ -1535,18 +1535,18 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         for (expression, name) in &naming.non_locals {
             let deferred = naming.deferred_non_locals.contains(expression);
-            reads.push((index, name.clone(), deferred));
+            reads.push((index, *name, deferred));
         }
         // Quiet reads are never reported unresolved, but at run time they fall back to
         // enclosing bindings, so they keep definers alive.
         for (expression, name) in &naming.quiet_reads {
             let deferred = naming.deferred_quiet_reads.contains(expression);
-            reads.push((index, name.clone(), deferred));
+            reads.push((index, *name, deferred));
         }
         // R resolves `%op%` when the expression runs and helper operators are used
         // project-wide, so operator reads count as deferred.
         for name in &naming.quiet_operator_reads {
-            reads.push((index, name.clone(), true));
+            reads.push((index, *name, true));
         }
         // A loop's first iteration reads the earlier binding of its carried variable.
         for expression in &naming.maybe_undefined {
@@ -1557,7 +1557,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             if binding.kind == BindingKind::TopLevel {
-                reads.push((index, binding.name.clone(), false));
+                reads.push((index, binding.name, false));
             }
         }
     }

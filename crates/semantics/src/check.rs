@@ -6,7 +6,7 @@ use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
 use crate::hir::{
     Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
-    Parameter as Formal, UnaryOperator, destructure_leaves, integer_literal_position,
+    Parameter as Formal, Symbol, UnaryOperator, destructure_leaves, integer_literal_position,
     is_whole_number_double,
 };
 use crate::infer::{
@@ -123,7 +123,7 @@ pub enum TypeErrorKind<'db> {
     /// frame lacks. `frame` is the frame variable's name when there is one.
     ColumnDoesNotExist {
         column: String,
-        frame: Option<String>,
+        frame: Option<Symbol>,
         columns: Vec<String>,
         suggestion: Option<String>,
     },
@@ -164,7 +164,7 @@ pub enum OperandExpectation {
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemCheck<'db> {
-    pub expression_types: FxHashMap<ExprId, Ty<'db>>,
+    pub expression_types: ExpressionTypes<'db>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -179,13 +179,25 @@ pub struct ItemCheck<'db> {
     pub column_misses: FxHashMap<ExprId, ColumnMiss>,
     /// Settled scheme of every name the top-level frame binds, so a statement item's
     /// conditional write serves cross-item reads; a definition resolves via `scheme`.
-    pub top_level_bindings: Vec<(String, TypeScheme<'db>)>,
+    pub top_level_bindings: Vec<(Symbol, TypeScheme<'db>)>,
+}
+
+/// Settled type of every expression the checker recorded, indexed by expression id.
+/// Ids are dense within an item, so a slot per expression costs one word where a hash
+/// entry costs several.
+#[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
+pub struct ExpressionTypes<'db>(Box<[Option<Ty<'db>>]>);
+
+impl<'db> ExpressionTypes<'db> {
+    pub fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
+        self.0.get(id.0 as usize)?.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ColumnMiss {
     /// The queried variable's name, when the frame is a plain variable.
-    pub frame: Option<String>,
+    pub frame: Option<Symbol>,
     pub columns: Vec<String>,
 }
 
@@ -411,11 +423,14 @@ pub fn check_item_with_annotation<'db>(
             }
         }
     }
-    let expression_types = context
-        .recorded
-        .iter()
-        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
-        .collect();
+    let mut expression_types = vec![None; module.expressions.len()];
+    for (&id, &ty) in &context.recorded {
+        let slot = expression_types
+            .get_mut(id.0 as usize)
+            .unwrap_or_else(|| panic!("recorded type for {id:?} outside the item's module"));
+        *slot = Some(context.table.resolve(context.db, ty));
+    }
+    let expression_types = ExpressionTypes(expression_types.into_boxed_slice());
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -447,7 +462,7 @@ pub fn check_item_with_annotation<'db>(
         } else {
             TypeScheme::monomorphic(unknown(db))
         };
-        top_level_bindings.push((info.name.clone(), binding_scheme));
+        top_level_bindings.push((info.name, binding_scheme));
     }
     ItemCheck {
         expression_types,
@@ -683,7 +698,7 @@ struct Checker<'db, 'a> {
     no_default_formals: FxHashSet<BindingId>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
-    non_local_slots: FxHashMap<String, BindingId>,
+    non_local_slots: FxHashMap<Symbol, BindingId>,
     next_non_local_slot: u32,
 }
 
@@ -691,7 +706,7 @@ struct Checker<'db, 'a> {
 struct ColumnScope<'db> {
     /// `None` when the frame's columns are not known, which makes every bare name silent.
     columns: Option<Vec<RecordField<'db>>>,
-    frame: Option<String>,
+    frame: Option<Symbol>,
     /// A binding made inside the bracket (a closure's parameter in `j`) stays lexical.
     bracket: TextRange,
     subset_data: Ty<'db>,
@@ -1233,7 +1248,7 @@ impl<'db> Checker<'db, '_> {
                         if let Some(name) = name {
                             self.record_strict_origin(
                                 id,
-                                StrictOriginKind::UndeterminedReference(name),
+                                StrictOriginKind::UndeterminedReference(name.to_string()),
                             );
                         }
                         unknown(self.db)
@@ -1278,7 +1293,7 @@ impl<'db> Checker<'db, '_> {
                     let parameter_ty = self.fresh(Constraint::Unconstrained);
                     let entry = named.len();
                     named.push(Parameter {
-                        name: Name::new(self.db, parameter.name.clone()),
+                        name: Name::new(self.db, parameter.name.as_str()),
                         ty: parameter_ty,
                         optional: parameter.default.is_some()
                             || missing_tested.contains(&parameter.name),
@@ -1519,7 +1534,7 @@ impl<'db> Checker<'db, '_> {
             let origin = StrictOrigin {
                 expression: function,
                 range: parameter.range,
-                kind: StrictOriginKind::UntypedParameter(parameter.name.clone()),
+                kind: StrictOriginKind::UntypedParameter(parameter.name.to_string()),
             };
             if !self.strict_origins.contains(&origin) {
                 self.strict_origins.push(origin);
@@ -1589,7 +1604,7 @@ impl<'db> Checker<'db, '_> {
                 {
                     self.record_strict_origin(
                         id,
-                        StrictOriginKind::UndeterminedReference(name.clone()),
+                        StrictOriginKind::UndeterminedReference(name.to_string()),
                     );
                 }
                 return instantiated;
@@ -1613,7 +1628,7 @@ impl<'db> Checker<'db, '_> {
                     .naming
                     .bindings
                     .get(&slot)
-                    .map(|info| info.name.clone())
+                    .map(|info| info.name.to_string())
                     .unwrap_or_default();
                 let range = self.module.expression(id).range;
                 self.errors.push(TypeError {
@@ -2029,18 +2044,18 @@ impl<'db> Checker<'db, '_> {
                 target,
                 name,
                 ..
-            } if *target == base => name.clone(),
+            } if *target == base => name.map(|name| name.to_string()),
             ExpressionKind::Index {
                 double: true,
                 target,
                 arguments,
-            } if *target == base => match arguments.as_slice() {
+            } if *target == base => match &arguments[..] {
                 [argument] if argument.name.is_none() => {
                     argument
                         .value
                         .and_then(|value| match &self.module.expression(value).kind {
                             ExpressionKind::Literal(LiteralKind::String(name)) => {
-                                Some(name.clone())
+                                Some(name.to_string())
                             }
                             _ => None,
                         })
@@ -2109,7 +2124,7 @@ impl<'db> Checker<'db, '_> {
             &kind,
             ExpressionKind::Index { double: true, target, arguments }
                 if *target == base
-                    && matches!(arguments.as_slice(), [argument] if argument.name.is_none())
+                    && matches!(&arguments[..], [argument] if argument.name.is_none())
         );
         if !is_computed_extract {
             return prior;
@@ -2316,7 +2331,7 @@ impl<'db> Checker<'db, '_> {
                     {
                         self.record_strict_origin(
                             loop_expression,
-                            StrictOriginKind::LoopWidened(name),
+                            StrictOriginKind::LoopWidened(name.to_string()),
                         );
                     }
                 }
@@ -2330,7 +2345,7 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// Nested function bodies are excluded: their tests cover their own formals.
-    fn collect_missing_tested(&self, id: ExprId, tested: &mut FxHashSet<String>) {
+    fn collect_missing_tested(&self, id: ExprId, tested: &mut FxHashSet<Symbol>) {
         let kind = &self.module.expression(id).kind;
         if matches!(kind, ExpressionKind::Function { .. }) {
             return;
@@ -2340,12 +2355,12 @@ impl<'db> Checker<'db, '_> {
                 &self.module.expression(*callee).kind,
                 ExpressionKind::NameRef(name) if name == "missing"
             )
-            && let [argument] = arguments.as_slice()
+            && let [argument] = &arguments[..]
             && argument.name.is_none()
             && let Some(value) = argument.value
             && let ExpressionKind::NameRef(name) = &self.module.expression(value).kind
         {
-            tested.insert(name.clone());
+            tested.insert(*name);
         }
         for child in kind.child_ids() {
             self.collect_missing_tested(child, tested);
@@ -2437,7 +2452,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(callee) {
                     return None;
                 }
-                let [argument] = arguments.as_slice() else {
+                let [argument] = &arguments[..] else {
                     return None;
                 };
                 if argument.name.is_some() {
@@ -2486,7 +2501,7 @@ impl<'db> Checker<'db, '_> {
 
     /// Seeded with the observed type so the guard has a union to filter.
     fn non_local_guard_slot(&mut self, read: ExprId, observed: Ty<'db>) -> Option<BindingId> {
-        let name = self.naming.non_locals.get(&read)?.clone();
+        let name = *self.naming.non_locals.get(&read)?;
         let slot = self.non_local_slot(name);
         if self.environment.get(slot).is_none() {
             self.environment.set(slot, EnvEntry::Mono(observed));
@@ -2494,7 +2509,7 @@ impl<'db> Checker<'db, '_> {
         Some(slot)
     }
 
-    fn non_local_slot(&mut self, name: String) -> BindingId {
+    fn non_local_slot(&mut self, name: Symbol) -> BindingId {
         if let Some(&slot) = self.non_local_slots.get(&name) {
             return slot;
         }
@@ -3409,7 +3424,7 @@ impl<'db> Checker<'db, '_> {
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
             formal_types.push((parameter_ty, declared_ty.is_some()));
             signature.named.push(Parameter {
-                name: Name::new(self.db, parameter.name.clone()),
+                name: Name::new(self.db, parameter.name.as_str()),
                 ty: parameter_ty,
                 optional: is_optional(parameter),
                 default: parameter.default.map(|default| self.infer(default)),
@@ -3520,7 +3535,7 @@ impl<'db> Checker<'db, '_> {
                         self.errors.push(TypeError {
                             range: default_range,
                             kind: TypeErrorKind::NullDefaultNotAdmitted {
-                                name: parameter.name.clone(),
+                                name: parameter.name.to_string(),
                                 declared: parameter_ty,
                             },
                         });
@@ -4002,7 +4017,7 @@ impl<'db> Checker<'db, '_> {
             };
             match &argument.name {
                 Some(name) => fields.push(RecordField {
-                    name: Name::new(self.db, name.clone()),
+                    name: Name::new(self.db, name.as_str()),
                     ty,
                     optional: false,
                 }),
@@ -4125,7 +4140,7 @@ impl<'db> Checker<'db, '_> {
                 if self.naming.resolutions.contains_key(&callee) {
                     return None;
                 }
-                name.clone()
+                name.to_string()
             }
             // Namespace access cannot be shadowed by a local binding.
             ExpressionKind::Namespace {
@@ -4390,7 +4405,7 @@ impl<'db> Checker<'db, '_> {
                         )
                     });
                 CallArgument {
-                    name: argument.name.clone(),
+                    name: argument.name.map(|name| name.to_string()),
                     name_range: argument.name_range,
                     ty,
                     range: argument_range,
@@ -5097,7 +5112,7 @@ impl<'db> Checker<'db, '_> {
         {
             // A frame bound elsewhere binds nothing here, but the update still changes the
             // frame the name refers to, so later reads in this flow see the new columns.
-            let slot = self.non_local_slot(name.clone());
+            let slot = self.non_local_slot(*name);
             self.environment.set(slot, EnvEntry::Mono(result));
         }
         result
@@ -5366,8 +5381,8 @@ impl<'db> Checker<'db, '_> {
     fn join_columns(
         &mut self,
         keys: &[JoinKey],
-        (x_name, x_columns): (Option<String>, Option<&[RecordField<'db>]>),
-        (y_name, y_columns): (Option<String>, Option<&[RecordField<'db>]>),
+        (x_name, x_columns): (Option<Symbol>, Option<&[RecordField<'db>]>),
+        (y_name, y_columns): (Option<Symbol>, Option<&[RecordField<'db>]>),
     ) -> Option<Vec<RecordField<'db>>> {
         let db = self.db;
         let mut complete = true;
@@ -5443,7 +5458,7 @@ impl<'db> Checker<'db, '_> {
                     .map(|field| vec![field])
             }
             ExpressionKind::Literal(LiteralKind::String(text)) => {
-                self.literal_groups(&[(text.as_str(), module.expression(value).range)])
+                self.literal_groups(&[(&**text, module.expression(value).range)])
             }
             ExpressionKind::Call { callee, arguments } => {
                 match variable_name(module, *callee).as_deref() {
@@ -5453,7 +5468,7 @@ impl<'db> Checker<'db, '_> {
                             .filter_map(|argument| argument.value)
                             .filter_map(|item| match &module.expression(item).kind {
                                 ExpressionKind::Literal(LiteralKind::String(text)) => {
-                                    Some((text.as_str(), module.expression(item).range))
+                                    Some((&**text, module.expression(item).range))
                                 }
                                 _ => None,
                             })
@@ -5552,7 +5567,7 @@ impl<'db> Checker<'db, '_> {
                     .name
                     .clone()
                     .or_else(|| variable_name(module, value))
-                    .unwrap_or_else(|| format!("V{}", position + 1));
+                    .unwrap_or_else(|| Symbol::from(format!("V{}", position + 1)));
                 let field = self.column_field(&name, ty);
                 if let Some(columns) = columns.as_mut() {
                     columns.push(field);
@@ -5627,9 +5642,9 @@ impl<'db> Checker<'db, '_> {
                 // The left side names columns; it is never read.
                 let names: Option<Vec<String>> =
                     match left.value.map(|value| &module.expression(value).kind) {
-                        Some(ExpressionKind::NameRef(name))
-                        | Some(ExpressionKind::Literal(LiteralKind::String(name))) => {
-                            Some(vec![name.clone()])
+                        Some(ExpressionKind::NameRef(name)) => Some(vec![name.to_string()]),
+                        Some(ExpressionKind::Literal(LiteralKind::String(name))) => {
+                            Some(vec![name.to_string()])
                         }
                         Some(ExpressionKind::Call { callee, arguments })
                             if variable_name(module, *callee).as_deref() == Some("c") =>
@@ -5692,7 +5707,7 @@ impl<'db> Checker<'db, '_> {
                     };
                     let ty = self.infer(value);
                     match (argument.name.clone(), updates.as_mut()) {
-                        (Some(name), Some(updates)) => updates.push((name, ty)),
+                        (Some(name), Some(updates)) => updates.push((name.to_string(), ty)),
                         _ => updates = None,
                     }
                 }
@@ -5766,7 +5781,7 @@ impl<'db> Checker<'db, '_> {
         }
         let literal_position = index.and_then(integer_literal_position);
         let literal_name = match index {
-            Some(ExpressionKind::Literal(LiteralKind::String(name))) => Some(name.clone()),
+            Some(ExpressionKind::Literal(LiteralKind::String(name))) => Some(name.to_string()),
             _ => None,
         };
         match subject.kind(self.db) {
@@ -5985,7 +6000,7 @@ impl<'db> Checker<'db, '_> {
         name_range: TextRange,
         at: bool,
         target: ExprId,
-        name: Option<String>,
+        name: Option<Symbol>,
     ) -> Ty<'db> {
         let target_ty = self.infer(target);
         if at {
@@ -6330,7 +6345,7 @@ fn name_frame<'db>(mut error: TypeError<'db>, module: &Module, target: ExprId) -
 fn column_does_not_exist<'db>(
     db: &'db dyn Db,
     column: &str,
-    frame: Option<String>,
+    frame: Option<Symbol>,
     columns: &[RecordField<'db>],
 ) -> TypeErrorKind<'db> {
     let names: Vec<String> = columns
@@ -6345,9 +6360,9 @@ fn column_does_not_exist<'db>(
     }
 }
 
-fn variable_name(module: &Module, id: ExprId) -> Option<String> {
+fn variable_name(module: &Module, id: ExprId) -> Option<Symbol> {
     match &module.expression(id).kind {
-        ExpressionKind::NameRef(name) => Some(name.clone()),
+        ExpressionKind::NameRef(name) => Some(*name),
         _ => None,
     }
 }
@@ -6368,7 +6383,7 @@ fn string_literals(module: &Module, arguments: &[Argument]) -> Option<Vec<String
                 Some(ExpressionKind::Literal(LiteralKind::String(text)))
                     if argument.name.is_none() =>
                 {
-                    Some(text.clone())
+                    Some(text.to_string())
                 }
                 _ => None,
             },
@@ -6433,7 +6448,7 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                         match &argument.name {
                             Some(_) if !is_join_operator_free(text) => return None,
                             Some(x) => keys.push(JoinKey {
-                                x: x.clone(),
+                                x: x.to_string(),
                                 y: text.trim().to_owned(),
                                 x_range,
                                 y_range: value_range,
@@ -6442,8 +6457,8 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                         }
                     }
                     ("." | "list", ExpressionKind::NameRef(y)) => keys.push(JoinKey {
-                        x: argument.name.clone().unwrap_or_else(|| y.clone()),
-                        y: y.clone(),
+                        x: argument.name.map_or_else(|| y.to_string(), |name| name.to_string()),
+                        y: y.to_string(),
                         x_range,
                         y_range: value_range,
                     }),
@@ -6551,22 +6566,22 @@ fn alias_cycle_walk<'db>(
 fn validated_namespace_name(
     db: &dyn Db,
     internal: bool,
-    package: &Option<String>,
-    name: &Option<String>,
+    package: &Option<Symbol>,
+    name: &Option<Symbol>,
 ) -> Option<String> {
-    let name = name.clone()?;
+    let name = name.as_ref()?.to_string();
     let Some(package) = package else {
         return Some(name);
     };
     // The project's own package resolves through globals and wins over a same-named stub namespace.
-    if is_own_package(db, package) {
+    if is_own_package(db, package.as_str()) {
         return Some(name);
     }
-    match namespace_known(db, package) {
+    match namespace_known(db, package.as_str()) {
         None => Some(name),
         Some(false) => None,
         Some(true) => {
-            if internal || namespace_exports(db, package, &name) {
+            if internal || namespace_exports(db, package.as_str(), &name) {
                 Some(name)
             } else {
                 None
