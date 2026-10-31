@@ -25,6 +25,7 @@ pub mod environments;
 pub mod eval;
 pub mod extptr;
 pub mod globals;
+pub mod linpack;
 pub mod lists;
 pub mod memory;
 pub mod strings;
