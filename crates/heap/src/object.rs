@@ -286,6 +286,9 @@ pub(crate) mod flag_bits {
     /// The object was preallocated by the heap (`R_NilValue`, `NA_STRING`, the environments).
     /// Allocated by `R_allocResizableVector`, so its length may change within its capacity.
     pub const RESIZABLE: u8 = 1 << 2;
+    /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
+    /// `*tmp*` value of a complex assignment, which must not make the target look shared.
+    pub const UNTRACKED: u8 = 1 << 3;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.

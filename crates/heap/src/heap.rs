@@ -623,9 +623,22 @@ impl Heap {
 
     #[inline]
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
-        new.increment_refcount();
-        old.decrement_refcount();
+        if parent.flags() & flag_bits::UNTRACKED == 0 {
+            new.increment_refcount();
+            old.decrement_refcount();
+        }
         self.write_barrier(parent, new);
+    }
+
+    /// Stops a cons-like object's fields from counting as references to what they hold.
+    pub unsafe fn untrack_references(&mut self, object: Sexp) {
+        if object.flags() & flag_bits::UNTRACKED != 0 || object.kind().shape() != Shape::Triple {
+            return;
+        }
+        object.car().decrement_refcount();
+        object.cdr().decrement_refcount();
+        object.tag().decrement_refcount();
+        object.set_flag(flag_bits::UNTRACKED, true);
     }
 
     pub unsafe fn set_car(&mut self, cell: Sexp, value: Sexp) {

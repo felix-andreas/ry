@@ -1763,6 +1763,7 @@ pub unsafe fn complex_assign(
     for getter in getters.iter().skip(1).rev() {
         let previous = *levels.last().unwrap_or(&base);
         let promise = forced_promise(tmp_symbol, previous)?;
+        crate::heap().untrack_references(promise);
         let getter_call = values::lcons(getter.car(), values::cons_tagged(promise, getter.cdr().cdr(), getter.cdr().tag())?)?;
         let mut level = eval(getter_call, env)?;
         if values::maybe_shared(level) || shared {
@@ -1780,7 +1781,10 @@ pub unsafe fn complex_assign(
         } else {
             getters[depth + 1]
         };
+        // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
+        // the replacement function would always see its target as shared and copy it.
         let object_promise = forced_promise(object_code, object)?;
+        crate::heap().untrack_references(object_promise);
         let value_promise = forced_promise(replacement, replacement)?;
         let mut items = vec![(nil(), setter), (nil(), object_promise)];
         for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {
