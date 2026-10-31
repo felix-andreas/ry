@@ -1,5 +1,5 @@
 ---
-title: NULL
+title: "`NULL`"
 description: How ry makes you handle a value that may be NULL
 ---
 
