@@ -1258,7 +1258,10 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
         let list = values::pairlist_to_list(object)?;
         let result = subassign2(list, indices, value, call)?;
-        return values::list_to_pairlist(result, object.kind());
+        let result = values::list_to_pairlist(result, object.kind())?;
+        // The call keeps its attributes, such as a formula's class and environment.
+        values::copy_most_attributes(object, result, false)?;
+        return Ok(result);
     }
     if indices.len() == 1 && length(indices[0]) > 1 && matches!(object.kind(), SexpType::List | SexpType::Expression) {
         // Recursive assignment.

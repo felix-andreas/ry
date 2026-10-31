@@ -9,6 +9,7 @@
 
 use crate::{
     builtin_libraries::{NativeCall, NativeFn, c_result},
+    linalg,
     coerce::coerce_vector,
     stats_cluster, stats_deriv, stats_models, stats_optimize, stats_tests,
     unwind::R,
@@ -180,35 +181,32 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
         _ => values::alloc(SexpType::Real, p)?,
     };
     values::reals_mut(coefficients).fill(0.0);
-    let mut qraux = vec![0.0; p];
-    let mut pivot: Vec<i32> = (1..=p as i32).collect();
-    let rank = {
-        let matrix = values::reals_mut(qr);
-        let rank = dqrdc2(matrix, n, n, p, tolerance, &mut qraux, &mut pivot);
-        let y_data = values::reals(effects).to_vec();
-        let qty = values::reals_mut(effects);
-        let rsd = values::reals_mut(residuals);
+    // LINPACK's dqrls: base's dqrdc2, then Q'y, the coefficients and the residuals of every
+    // column of `y` from the first `rank` columns of the decomposition.
+    let integer = |value: usize| values::scalar_integer(value as i32);
+    let qraux = values::alloc(SexpType::Real, p)?;
+    let pivot = values::integer_vector(&(1..=p as i32).collect::<Vec<_>>())?;
+    let rank_slot = values::scalar_integer(0)?;
+    let work = values::alloc(SexpType::Real, 2 * p)?;
+    let tolerance_value = values::scalar_real(tolerance)?;
+    linalg::dqrdc2(&[qr, integer(n)?, integer(n)?, integer(p)?, tolerance_value, rank_slot, qraux, pivot, work])?;
+    let rank = values::ints(rank_slot)[0].max(0) as usize;
+    if rank > 0 {
+        let size = integer(rank)?;
+        let columns = integer(ny)?;
+        let solved = values::alloc(SexpType::Real, rank * ny)?;
+        let info = values::scalar_integer(0)?;
+        linalg::dqrcf(&[qr, integer(n)?, size, qraux, effects, columns, solved, info])?;
+        let y_copy = values::duplicate(as_reals(y)?)?;
+        linalg::dqrrsd(&[qr, integer(n)?, size, qraux, y_copy, columns, residuals])?;
         let b = values::reals_mut(coefficients);
-        if rank > 0 {
-            for column in 0..ny {
-                let range = column * n..(column + 1) * n;
-                let mut coefficient = vec![0.0; rank];
-                dqrsl(
-                    matrix,
-                    n,
-                    n,
-                    rank,
-                    &qraux,
-                    &y_data[range.clone()],
-                    QrOutputs { qy: None, qty: Some(&mut qty[range.clone()]), b: Some(&mut coefficient), rsd: Some(&mut rsd[range.clone()]), xb: None },
-                );
-                b[column * p..column * p + rank].copy_from_slice(&coefficient);
-            }
-        } else {
-            rsd.copy_from_slice(&y_data);
+        let solved = values::reals(solved);
+        for column in 0..ny {
+            b[column * p..column * p + rank].copy_from_slice(&solved[column * rank..(column + 1) * rank]);
         }
-        rank
-    };
+    }
+    let qraux = values::reals(qraux).to_vec();
+    let pivot = values::ints(pivot).to_vec();
     let pivoted = pivot.iter().enumerate().any(|(index, &column)| column != index as i32 + 1);
     values::named_list(&[
         ("qr", qr),
@@ -221,232 +219,6 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
         ("tol", values::scalar_real(tolerance)?),
         ("pivoted", values::scalar_bool(pivoted)?),
     ])
-}
-
-/// The reference BLAS `dnrm2` (Anderson's algorithm, used since LAPACK 3.10): the Euclidean
-/// norm, with entries too small or too large to square safely accumulated separately and
-/// scaled. Ordinary entries are squared and summed directly, which is what fixes the last bits
-/// of GNU R's QR results.
-pub(crate) fn dnrm2(values: &[f64]) -> f64 {
-    let small_threshold = 2f64.powi(-511);
-    let big_threshold = 2f64.powi(486);
-    let small_scale = 2f64.powi(537);
-    let big_scale = 2f64.powi(-538);
-    let (mut small, mut medium, mut big) = (0.0_f64, 0.0_f64, 0.0_f64);
-    let mut not_big = true;
-    for &value in values {
-        let absolute = value.abs();
-        if absolute > big_threshold {
-            big += (absolute * big_scale) * (absolute * big_scale);
-            not_big = false;
-        } else if absolute < small_threshold {
-            if not_big {
-                small += (absolute * small_scale) * (absolute * small_scale);
-            }
-        } else {
-            medium += absolute * absolute;
-        }
-    }
-    let (scale, sum) = if big > 0.0 {
-        if medium > 0.0 || medium.is_nan() {
-            big += (medium * big_scale) * big_scale;
-        }
-        (1.0 / big_scale, big)
-    } else if small > 0.0 {
-        if medium > 0.0 || medium.is_nan() {
-            let medium = medium.sqrt();
-            let small = small.sqrt() / small_scale;
-            let (low, high) = if small > medium { (medium, small) } else { (small, medium) };
-            (1.0, high * high * (1.0 + (low / high) * (low / high)))
-        } else {
-            (1.0 / small_scale, small)
-        }
-    } else {
-        (1.0, medium)
-    };
-    scale * sum.sqrt()
-}
-
-fn ddot(left: &[f64], right: &[f64]) -> f64 {
-    left.iter().zip(right).map(|(a, b)| a * b).sum()
-}
-
-/// The Householder QR decomposition of the `n` by `p` matrix `x` (leading dimension `ldx`), in
-/// LINPACK's compact form, with GNU R's limited pivoting: a column whose norm has fallen below
-/// `tolerance` times its original norm is moved to the end, so the first `rank` columns are the
-/// linearly independent ones. Returns the rank.
-pub(crate) fn dqrdc2(
-    x: &mut [f64],
-    ldx: usize,
-    n: usize,
-    p: usize,
-    tolerance: f64,
-    qraux: &mut [f64],
-    pivot: &mut [i32],
-) -> usize {
-    let at = |row: usize, column: usize| row + column * ldx;
-    let mut norms = vec![0.0; p];
-    let mut original = vec![0.0; p];
-    for column in 0..p {
-        let norm = dnrm2(&x[at(0, column)..at(n, column)]);
-        qraux[column] = norm;
-        norms[column] = norm;
-        original[column] = if norm == 0.0 { 1.0 } else { norm };
-    }
-    let steps = n.min(p);
-    // `limit` is one past the last column still considered independent.
-    let mut limit = p + 1;
-    for l in 0..steps {
-        while l + 1 < limit && qraux[l] < original[l] * tolerance {
-            for row in 0..n {
-                let moved = x[at(row, l)];
-                for column in l + 1..p {
-                    x[at(row, column - 1)] = x[at(row, column)];
-                }
-                x[at(row, p - 1)] = moved;
-            }
-            pivot[l..p].rotate_left(1);
-            qraux[l..p].rotate_left(1);
-            norms[l..p].rotate_left(1);
-            original[l..p].rotate_left(1);
-            limit -= 1;
-        }
-        if l + 1 == n {
-            break;
-        }
-        let mut norm = dnrm2(&x[at(l, l)..at(n, l)]);
-        if norm == 0.0 {
-            continue;
-        }
-        if x[at(l, l)] != 0.0 {
-            norm = norm.abs().copysign(x[at(l, l)]);
-        }
-        for row in l..n {
-            x[at(row, l)] *= 1.0 / norm;
-        }
-        x[at(l, l)] += 1.0;
-        for column in l + 1..p {
-            let t = -ddot(&x[at(l, l)..at(n, l)], &x[at(l, column)..at(n, column)]) / x[at(l, l)];
-            for row in l..n {
-                x[at(row, column)] += t * x[at(row, l)];
-            }
-            if qraux[column] != 0.0 {
-                let ratio = x[at(l, column)].abs() / qraux[column];
-                let remaining = (1.0 - ratio * ratio).max(0.0);
-                if remaining.abs() < 1e-6 {
-                    qraux[column] = dnrm2(&x[at(l + 1, column)..at(n, column)]);
-                    norms[column] = qraux[column];
-                } else {
-                    qraux[column] *= remaining.sqrt();
-                }
-            }
-        }
-        qraux[l] = x[at(l, l)];
-        x[at(l, l)] = -norm;
-    }
-    (limit - 1).min(n)
-}
-
-/// The outputs `dqrsl` can compute; each is filled when present.
-pub(crate) struct QrOutputs<'a> {
-    pub qy: Option<&'a mut [f64]>,
-    pub qty: Option<&'a mut [f64]>,
-    pub b: Option<&'a mut [f64]>,
-    pub rsd: Option<&'a mut [f64]>,
-    pub xb: Option<&'a mut [f64]>,
-}
-
-/// LINPACK's `dqrsl`: applies the QR decomposition from [`dqrdc2`] (its first `k` columns) to
-/// `y`, computing Qy, Q'y, the coefficients, the residuals and the fitted values. Returns the
-/// index (1-based) of a zero diagonal element of R that stopped the back substitution, or 0.
-pub(crate) fn dqrsl(x: &mut [f64], ldx: usize, n: usize, k: usize, qraux: &[f64], y: &[f64], outputs: QrOutputs<'_>) -> usize {
-    let at = |row: usize, column: usize| row + column * ldx;
-    let QrOutputs { qy, qty, b, rsd, xb } = outputs;
-    let mut info = 0;
-    let steps = k.min(n.saturating_sub(1));
-    let reflect = |x: &mut [f64], j: usize, target: &mut [f64]| {
-        if qraux[j] != 0.0 {
-            let diagonal = x[at(j, j)];
-            x[at(j, j)] = qraux[j];
-            let t = -ddot(&x[at(j, j)..at(n, j)], &target[j..n]) / x[at(j, j)];
-            for row in j..n {
-                target[row] += t * x[at(row, j)];
-            }
-            x[at(j, j)] = diagonal;
-        }
-    };
-    if steps == 0 {
-        if let Some(qy) = qy {
-            qy[0] = y[0];
-        }
-        if let Some(qty) = qty {
-            qty[0] = y[0];
-        }
-        if let Some(xb) = xb {
-            xb[0] = y[0];
-        }
-        if let Some(b) = b {
-            if x[0] == 0.0 {
-                info = 1;
-            } else {
-                b[0] = y[0] / x[0];
-            }
-        }
-        if let Some(rsd) = rsd {
-            rsd[0] = 0.0;
-        }
-        return info;
-    }
-    if let Some(qy) = qy {
-        qy[..n].copy_from_slice(&y[..n]);
-        for j in (0..steps).rev() {
-            reflect(x, j, qy);
-        }
-    }
-    let mut transformed = y[..n].to_vec();
-    for j in 0..steps {
-        reflect(x, j, &mut transformed);
-    }
-    if let Some(qty) = qty {
-        qty[..n].copy_from_slice(&transformed);
-    }
-    let mut rsd = rsd;
-    let mut xb = xb;
-    if let Some(rsd) = rsd.as_deref_mut() {
-        rsd[..k].fill(0.0);
-        rsd[k..n].copy_from_slice(&transformed[k..n]);
-    }
-    if let Some(xb) = xb.as_deref_mut() {
-        xb[..k].copy_from_slice(&transformed[..k]);
-        xb[k..n].fill(0.0);
-    }
-    if let Some(b) = b {
-        b[..k].copy_from_slice(&transformed[..k]);
-        for j in (0..k).rev() {
-            if x[at(j, j)] == 0.0 {
-                info = j + 1;
-                break;
-            }
-            b[j] /= x[at(j, j)];
-            if j != 0 {
-                let t = -b[j];
-                for row in 0..j {
-                    b[row] += t * x[at(row, j)];
-                }
-            }
-        }
-    }
-    if rsd.is_some() || xb.is_some() {
-        for j in (0..steps).rev() {
-            if let Some(rsd) = rsd.as_deref_mut() {
-                reflect(x, j, rsd);
-            }
-            if let Some(xb) = xb.as_deref_mut() {
-                reflect(x, j, xb);
-            }
-        }
-    }
-    info
 }
 
 // The binomial family's link helpers.
