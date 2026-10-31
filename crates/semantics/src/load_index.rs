@@ -6,16 +6,17 @@
 //! one item re-derives that item alone. `package_index` only joins those per-item results.
 
 use crate::metadata::{
-    NamespaceSpec, argument_name, description_field, parse_description_depends,
+    Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
     parse_namespace_spec,
 };
 use crate::{Db, Item, ItemKind, SourceFile, item_naming, item_spans, item_syntax, parse};
-use rowan::{NodeOrToken, WalkEvent};
+use rowan::{GreenNodeData, Language, NodeOrToken};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use syntax::ast::{self, BinaryExpr, is_expression_kind};
-use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
+use std::sync::Arc;
+use syntax::ast::{self, BinaryExpr};
+use syntax::{RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 /// A package as the loader sees it: its `R/` files in collation order, plus `NAMESPACE` and
 /// `DESCRIPTION`. Separate fields, so a `NAMESPACE` edit never re-derives an item.
@@ -129,8 +130,12 @@ pub struct SourceSpan {
     pub line: u32,
     /// Characters before the start on its line.
     pub column: u32,
+    /// Byte offsets.
     pub start: u32,
     pub end: u32,
+    /// Character offsets, which is how R's `substr` counts.
+    pub char_start: u32,
+    pub char_end: u32,
 }
 
 impl SourceSpan {
@@ -163,11 +168,15 @@ pub fn file_load_index<'db>(db: &'db dyn Db, file: SourceFile) -> FileLoadIndex<
     }
     let (text, offsets) = erase_for_r(&root, &marks);
     let lines = LineStarts::new(&text);
+    let characters = character_offsets(&text, offsets.values().copied());
     let position = |offset: TextSize| offsets.get(&offset).copied().unwrap_or(0);
     let span_of = |range: TextRange| {
         let start = position(range.start());
         let end = position(range.end()).max(start);
-        lines.span(&text, start, end)
+        let mut span = lines.span(&text, start, end);
+        span.char_start = characters.get(&start).copied().unwrap_or(start);
+        span.char_end = characters.get(&end).copied().unwrap_or(end);
+        span
     };
     let items = spans
         .iter()
@@ -204,51 +213,88 @@ pub struct PackageIndex {
     /// `Depends` packages, which a load attaches.
     pub depends: Vec<String>,
     pub namespace: NamespaceSpec,
-    /// Collation order.
-    pub files: Vec<IndexedFile>,
     /// Collation order, which is the order R runs top-level code in.
-    pub items: Vec<IndexedItem>,
-    /// `(path, line, message)` for R syntax errors, which R would refuse to source.
-    pub syntax_errors: Vec<(String, u32, String)>,
+    pub files: Vec<IndexedFile>,
+    /// Every top-level name the package binds, mapped to whether it is bound lazily: a name is
+    /// lazy when its one writer defines a function. Any other writer, including conditional or
+    /// replacement code (`f <- memoise(f)`), makes every writer of the name run eagerly.
+    pub names: FxHashMap<String, bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexedFile {
     pub path: String,
+    pub items: Arc<FileItems>,
+}
+
+/// One file's items. They depend on that file alone, so a reload compares a file by its hash
+/// and looks inside only the files that changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileItems {
     /// Of the text R reads, so an edit anywhere in the file changes it.
     pub hash: u64,
+    pub items: Vec<IndexedItem>,
+    /// `(line, message)` for R syntax errors, which R would refuse to source.
+    pub syntax_errors: Vec<(u32, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexedItem {
-    pub path: String,
-    /// Stable across insertions elsewhere: the analysis' item identity without the file handle.
+    /// The analysis' item identity without the file handle, for display; a reload matches
+    /// items by name or content instead.
     pub key: ItemKey,
     pub hash: u64,
     pub span: SourceSpan,
-    pub binding: Binding,
+    /// For `name <- function(...) ...`, the name and the function literal. Such an item is
+    /// bound lazily unless another item writes the name too ([`PackageIndex::names`]).
+    pub function: Option<(String, SourceSpan)>,
+    /// Top-level names it writes.
+    pub binds: Vec<String>,
+    /// Names it reads while running (see [`item_immediate_reads`]). A function definition
+    /// reads nothing until it is called.
+    pub reads: Vec<String>,
     pub registrations: Vec<Registration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ItemKey {
-    pub kind: String,
+    pub kind: ItemKind,
     pub name: Option<String>,
     pub disambiguator: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Binding {
-    /// A function definition whose name no other item writes: the loader binds it lazily,
-    /// and nothing runs until the first use.
-    Lazy { name: String, function: SourceSpan },
-    /// Top-level code that runs at load time, in collation order.
-    Eager {
-        /// Top-level names it writes.
-        binds: Vec<String>,
-        /// Names it reads while running (see [`item_immediate_reads`]).
-        reads: Vec<String>,
-    },
+impl PackageIndex {
+    /// The name `item` binds lazily, if it is a definition no other item writes.
+    pub fn lazy_name<'a>(&self, item: &'a IndexedItem) -> Option<&'a str> {
+        item.function
+            .as_ref()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| self.is_lazy(name))
+    }
+
+    pub fn is_lazy(&self, name: &str) -> bool {
+        self.names.get(name).copied().unwrap_or(false)
+    }
+
+    /// Every item with its file's path, in collation order.
+    pub fn items(&self) -> impl Iterator<Item = (&str, &IndexedItem)> {
+        self.files.iter().flat_map(|file| {
+            file.items
+                .items
+                .iter()
+                .map(move |item| (file.path.as_str(), item))
+        })
+    }
+
+    /// `(path, line, message)` for every R syntax error.
+    pub fn syntax_errors(&self) -> impl Iterator<Item = (&str, u32, &str)> {
+        self.files.iter().flat_map(|file| {
+            file.items
+                .syntax_errors
+                .iter()
+                .map(move |(line, message)| (file.path.as_str(), *line, message.as_str()))
+        })
+    }
 }
 
 #[salsa::tracked(returns(ref))]
@@ -256,87 +302,84 @@ pub fn namespace_spec(db: &dyn Db, sources: PackageSources) -> NamespaceSpec {
     parse_namespace_spec(sources.namespace(db))
 }
 
-#[salsa::tracked(returns(ref))]
-pub fn package_index(db: &dyn Db, sources: PackageSources) -> PackageIndex {
-    let description = sources.description(db);
-    let files = sources.files(db);
-    // A name with one writer that defines a function is lazy; any other writer, including
-    // conditional or replacement code (`f <- memoise(f)`), makes every writer eager.
-    let mut writers: FxHashMap<&str, u32> = FxHashMap::default();
-    let mut loads = Vec::new();
-    for package_file in files {
-        let index = file_load_index(db, package_file.file);
-        for loaded in &index.items {
-            let load = item_load(db, loaded.item);
-            let binds: Vec<&str> = match &load.function {
-                Some(name) => vec![name.as_str()],
-                None => top_level_writes(db, loaded.item),
+/// The per-file layer between the per-item queries and [`package_index`], so re-deriving the
+/// package touches one memo per file rather than one per item.
+#[salsa::tracked(returns(clone))]
+pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
+    let index = file_load_index(db, file);
+    let items = index
+        .items
+        .iter()
+        .map(|loaded| {
+            let item = loaded.item;
+            let load = item_load(db, item);
+            let function = load.function.clone().zip(loaded.function);
+            let (binds, reads) = match &function {
+                Some((name, _)) => (vec![name.clone()], Vec::new()),
+                None => (
+                    top_level_writes(db, item)
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    item_immediate_reads(db, item).iter().cloned().collect(),
+                ),
             };
-            for name in &binds {
-                *writers.entry(name).or_default() += 1;
-            }
-            loads.push((package_file, loaded, load, binds));
-        }
-    }
-    let mut items = Vec::with_capacity(loads.len());
-    for (package_file, loaded, load, binds) in &loads {
-        let lazy = load
-            .function
-            .as_deref()
-            .zip(loaded.function)
-            .filter(|(name, _)| writers.get(name) == Some(&1));
-        let binding = match lazy {
-            Some((name, function)) => Binding::Lazy {
-                name: name.to_owned(),
+            IndexedItem {
+                key: ItemKey {
+                    kind: *item.kind(db),
+                    name: item.name(db).clone(),
+                    disambiguator: *item.disambiguator(db),
+                },
+                hash: load.hash,
+                span: loaded.span,
                 function,
-            },
-            None => Binding::Eager {
-                binds: binds.iter().map(|name| (*name).to_owned()).collect(),
-                reads: item_immediate_reads(db, loaded.item)
-                    .iter()
-                    .cloned()
-                    .collect(),
-            },
-        };
-        let item = loaded.item;
-        items.push(IndexedItem {
-            path: package_file.path.clone(),
-            key: ItemKey {
-                kind: format!("{:?}", item.kind(db)).to_lowercase(),
-                name: item.name(db).clone(),
-                disambiguator: *item.disambiguator(db),
-            },
-            hash: load.hash,
-            span: loaded.span,
-            binding,
-            registrations: load.registrations.clone(),
-        });
-    }
-    let files_index = files
+                binds,
+                reads,
+                registrations: load.registrations.clone(),
+            }
+        })
+        .collect();
+    Arc::new(FileItems {
+        hash: fnv1a(index.text.as_bytes()),
+        items,
+        syntax_errors: index.syntax_errors.clone(),
+    })
+}
+
+/// Shared, so a host keeps the index it loaded without copying it.
+#[salsa::tracked(returns(clone))]
+pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> {
+    let description = sources.description(db);
+    let files: Vec<IndexedFile> = sources
+        .files(db)
         .iter()
         .map(|package_file| IndexedFile {
             path: package_file.path.clone(),
-            hash: fnv1a(file_load_index(db, package_file.file).text.as_bytes()),
+            items: file_items(db, package_file.file),
         })
         .collect();
-    let syntax_errors = files
-        .iter()
-        .flat_map(|package_file| {
-            file_load_index(db, package_file.file)
-                .syntax_errors
-                .iter()
-                .map(|(line, message)| (package_file.path.clone(), *line, message.clone()))
-        })
-        .collect();
-    PackageIndex {
+    // Seen once and from a function definition: lazy. Seen again: eager.
+    let mut names: FxHashMap<String, bool> = FxHashMap::default();
+    for file in &files {
+        for item in &file.items.items {
+            for name in &item.binds {
+                match names.get_mut(name.as_str()) {
+                    Some(lazy) => *lazy = false,
+                    None => {
+                        names.insert(name.clone(), item.function.is_some());
+                    }
+                }
+            }
+        }
+    }
+    Arc::new(PackageIndex {
         package: description_field(description, "Package").unwrap_or_default(),
         version: description_field(description, "Version").unwrap_or_else(|| "0.0.0".to_owned()),
         depends: parse_description_depends(description),
         namespace: namespace_spec(db, sources).clone(),
-        files: files_index,
-        items,
-        syntax_errors,
-    }
+        names,
+        files,
+    })
 }
 
 /// The names a statement writes at top level. A `setGeneric` item counts its generic, which
@@ -413,20 +456,23 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
         }
         None => (node.clone(), None),
     };
-    let Some((callee, arguments)) = call_parts(&call) else {
+    let Some(Call {
+        callee, arguments, ..
+    }) = call_parts(&call)
+    else {
         return Vec::new();
     };
     let argument = |position: usize, name: &str| -> Option<&SyntaxNode> {
         arguments
             .iter()
-            .find(|(argument_name, _)| argument_name.as_deref() == Some(name))
+            .find(|argument| argument.name.as_deref() == Some(name))
             .or_else(|| {
                 arguments
                     .iter()
-                    .filter(|(argument_name, _)| argument_name.is_none())
+                    .filter(|argument| argument.name.is_none())
                     .nth(position)
             })
-            .map(|(_, value)| value)
+            .map(|argument| &argument.value)
     };
     let string_argument =
         |position: usize, name: &str| argument(position, name).and_then(string_literal);
@@ -443,10 +489,10 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
                     string_literal(value).map_or_else(
                         || {
                             call_parts(value)
-                                .map(|(_, arguments)| {
-                                    arguments
+                                .map(|call| {
+                                    call.arguments
                                         .iter()
-                                        .filter_map(|(_, value)| string_literal(value))
+                                        .filter_map(|argument| string_literal(&argument.value))
                                         .collect()
                                 })
                                 .unwrap_or_default()
@@ -476,78 +522,75 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
     registration.into_iter().collect()
 }
 
-/// A call's callee name (the last part of `pkg::name`) and its arguments.
-fn call_parts(node: &SyntaxNode) -> Option<(String, Vec<(Option<String>, SyntaxNode)>)> {
-    if node.kind() != SyntaxKind::CALL_EXPR {
-        return None;
-    }
-    let callee = node.children().next()?;
-    let callee_name = match callee.kind() {
-        SyntaxKind::NAME => ast::Name::cast(callee)?.text()?,
-        SyntaxKind::NAMESPACE_EXPR => callee
-            .children()
-            .filter(|child| child.kind() == SyntaxKind::NAME)
-            .last()
-            .and_then(ast::Name::cast)?
-            .text()?,
-        _ => return None,
-    };
-    let arguments = node
-        .children()
-        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
-        .map(|list| {
-            list.children()
-                .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
-                .filter_map(|argument| {
-                    let value = argument
-                        .children()
-                        .filter(|child| is_expression_kind(child.kind()))
-                        .last()?;
-                    Some((argument_name(&argument), value))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some((callee_name, arguments))
-}
-
 /// The text R evaluates for `node`: inline annotations erased, with their line breaks kept so
 /// line numbers survive. Also maps each offset in `marks` (token boundaries of `node`) to its
-/// offset in the erased text.
+/// offset in the erased text. Walks the green tree, which allocates nothing per node.
 fn erase_for_r(node: &SyntaxNode, marks: &[TextSize]) -> (String, FxHashMap<TextSize, u32>) {
-    let wanted: FxHashSet<TextSize> = marks.iter().copied().collect();
-    let mut offsets = FxHashMap::default();
-    let mut out = String::with_capacity(usize::from(node.text_range().len()));
-    let mut record = |offset: TextSize, out: &String| {
-        if wanted.contains(&offset) {
-            offsets.entry(offset).or_insert(out.len() as u32);
-        }
+    let mut eraser = Eraser {
+        wanted: marks.iter().copied().collect(),
+        offsets: FxHashMap::default(),
+        out: String::with_capacity(usize::from(node.text_range().len())),
     };
-    let mut preorder = node.preorder_with_tokens();
-    while let Some(event) = preorder.next() {
-        match event {
-            WalkEvent::Enter(NodeOrToken::Token(token)) => {
-                record(token.text_range().start(), &out);
-                out.push_str(token.text());
-                record(token.text_range().end(), &out);
-            }
-            WalkEvent::Enter(NodeOrToken::Node(child)) if syntax::is_inline_annotation(&child) => {
-                record(child.text_range().start(), &out);
-                let breaks = child.text().to_string().matches('\n').count();
-                out.extend(std::iter::repeat_n('\n', breaks));
-                record(child.text_range().end(), &out);
-                preorder.skip_subtree();
-            }
-            WalkEvent::Enter(NodeOrToken::Node(child)) => {
-                record(child.text_range().start(), &out);
-            }
-            WalkEvent::Leave(NodeOrToken::Node(child)) => {
-                record(child.text_range().end(), &out);
-            }
-            WalkEvent::Leave(NodeOrToken::Token(_)) => {}
+    eraser.node(node.green().as_ref(), None, node.text_range().start());
+    (eraser.out, eraser.offsets)
+}
+
+struct Eraser {
+    wanted: FxHashSet<TextSize>,
+    offsets: FxHashMap<TextSize, u32>,
+    out: String,
+}
+
+impl Eraser {
+    fn record(&mut self, offset: TextSize) {
+        if self.wanted.contains(&offset) {
+            self.offsets.entry(offset).or_insert(self.out.len() as u32);
         }
     }
-    (out, offsets)
+
+    fn node(&mut self, green: &GreenNodeData, parent: Option<SyntaxKind>, start: TextSize) {
+        let kind = RLanguage::kind_from_raw(green.kind());
+        self.record(start);
+        let end = start + green.text_len();
+        // Mirrors `syntax::is_inline_annotation`, on kinds.
+        let annotation = match kind {
+            SyntaxKind::TYPE_ASCRIPTION | SyntaxKind::RETURN_TYPE => true,
+            SyntaxKind::TYPE_BINDER_LIST => parent == Some(SyntaxKind::FUNCTION_DEF),
+            _ => false,
+        };
+        if annotation {
+            let breaks = count_breaks(green);
+            self.out.extend(std::iter::repeat_n('\n', breaks));
+            self.record(end);
+            return;
+        }
+        let mut offset = start;
+        for child in green.children() {
+            match child {
+                NodeOrToken::Node(child) => {
+                    self.node(child, Some(kind), offset);
+                    offset += child.text_len();
+                }
+                NodeOrToken::Token(token) => {
+                    self.record(offset);
+                    self.out.push_str(token.text());
+                    offset += token.text_len();
+                    self.record(offset);
+                }
+            }
+        }
+        self.record(end);
+    }
+}
+
+fn count_breaks(green: &GreenNodeData) -> usize {
+    green
+        .children()
+        .map(|child| match child {
+            NodeOrToken::Node(child) => count_breaks(child),
+            NodeOrToken::Token(token) => token.text().matches('\n').count(),
+        })
+        .sum()
 }
 
 struct LineStarts(Vec<u32>);
@@ -580,8 +623,37 @@ impl LineStarts {
             column,
             start,
             end,
+            char_start: start,
+            char_end: end,
         }
     }
+}
+
+/// The character offset of each byte offset, in one pass over the text.
+fn character_offsets(text: &str, bytes: impl Iterator<Item = u32>) -> FxHashMap<u32, u32> {
+    let mut wanted: Vec<u32> = bytes.collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut result = FxHashMap::default();
+    if text.is_ascii() {
+        result.extend(wanted.into_iter().map(|offset| (offset, offset)));
+        return result;
+    }
+    let mut next = wanted.into_iter().peekable();
+    let boundaries = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain([text.len()]);
+    for (characters, index) in boundaries.enumerate() {
+        while let Some(&offset) = next.peek() {
+            if offset as usize > index {
+                break;
+            }
+            result.insert(offset, characters as u32);
+            next.next();
+        }
+    }
+    result
 }
 
 /// FNV-1a: stable across processes and Rust versions, which a persisted index needs.

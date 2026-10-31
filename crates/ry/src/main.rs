@@ -49,6 +49,8 @@ fn main() -> ExitCode {
             })
         }
         Command::Run { file } => Some(repl::RunOptions {
+            routines: load::call_routines(),
+            startup: vec![load::embedded_runtime()],
             file: Some(file.clone()),
             batch: true,
             ..repl::RunOptions::default()

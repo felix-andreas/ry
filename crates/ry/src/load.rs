@@ -69,17 +69,42 @@ pub fn process_runtime() -> String {
     ))
 }
 
+/// Installs the runtime in `tools:ry`. Its functions are byte-compiled once per runtime and R
+/// version and cached, because R would otherwise compile each one the first time it runs,
+/// which costs more than a typical reload.
 fn runtime(transport: &str) -> String {
+    let source = format!("{transport}\n{RUNTIME}");
+    let cache = dirs::cache_dir()
+        .map(|directory| directory.join("ry").to_string_lossy().into_owned())
+        .unwrap_or_default();
     format!(
         r#"local({{
   if ("tools:ry" %in% search()) detach("tools:ry", character.only = TRUE)
-  environment <- attach(NULL, name = "tools:ry", warn.conflicts = FALSE)
-  eval(parse(text = {transport}, keep.source = FALSE), environment)
-  eval(parse(text = {runtime}, keep.source = FALSE), environment)
+  cache <- {cache}
+  cache <- if (nzchar(cache)) file.path(cache, paste0("runtime-{hash:016x}-", getRversion(), ".rds"))
+  runtime <- if (length(cache) && file.exists(cache)) tryCatch(readRDS(cache), error = function(error) NULL)
+  if (!is.environment(runtime)) {{
+    runtime <- new.env(parent = baseenv())
+    eval(parse(text = {source}, keep.source = FALSE), runtime)
+    for (name in ls(runtime, all.names = TRUE)) {{
+      if (is.function(runtime[[name]])) runtime[[name]] <- compiler::cmpfun(runtime[[name]])
+    }}
+    if (length(cache)) {{
+      dir.create(dirname(cache), recursive = TRUE, showWarnings = FALSE)
+      partial <- tempfile(tmpdir = dirname(cache))
+      saved <- tryCatch({{ saveRDS(runtime, partial); TRUE }}, error = function(error) FALSE)
+      if (saved) file.rename(partial, cache) else unlink(partial)
+    }}
+  }}
+  runtime$.ry_packages <- new.env(parent = emptyenv())
+  runtime$.ry_timing <- new.env(parent = emptyenv())
+  runtime$.ry_timing$last <- 0
+  attach(runtime, name = "tools:ry", warn.conflicts = FALSE)
   invisible()
 }})"#,
-        transport = r_string(transport),
-        runtime = r_string(RUNTIME),
+        cache = r_string(&cache),
+        hash = semantics::load_index::fnv1a(source.as_bytes()),
+        source = r_string(&source),
     )
 }
 
@@ -122,13 +147,17 @@ pub fn call_routines() -> Vec<CallRoutine> {
 /// Plans a load into `plan_file`, returning `NULL`, or an error message R raises.
 extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let (Some(root), Some(plan_file)) = (
-            libr::string_argument(root),
-            libr::string_argument(plan_file),
-        ) else {
+        // SAFETY: R passes R objects to a `.Call` routine.
+        let arguments = unsafe {
+            (
+                libr::string_argument(root),
+                libr::string_argument(plan_file),
+                libr::logical_argument(full),
+            )
+        };
+        let (Some(root), Some(plan_file), full) = arguments else {
             return Err("ry_loader_plan needs a root and a plan file".to_owned());
         };
-        let full = libr::logical_argument(full);
         let root = PathBuf::from(root);
         let value = on_analysis_thread(|| {
             let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
@@ -154,7 +183,8 @@ extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
 
 extern "C" fn ry_loader_commit(root: Sexp) -> Sexp {
     let committed = catch_unwind(|| {
-        let root = libr::string_argument(root)?;
+        // SAFETY: R passes R objects to a `.Call` routine.
+        let root = unsafe { libr::string_argument(root) }?;
         let root = loader::find_package_root(Path::new(&root)).ok()?;
         let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
         if session.loader.commit(&root)

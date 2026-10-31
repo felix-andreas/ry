@@ -499,7 +499,11 @@ fn call_api(library: &'static Library, library_path: &Path) -> Result<CallApi, R
 }
 
 /// The first string of a character vector, for a `.Call` routine's argument.
-pub fn string_argument(value: Sexp) -> Option<String> {
+///
+/// # Safety
+///
+/// `value` must be an R object, such as an argument R passed to a `.Call` routine.
+pub unsafe fn string_argument(value: Sexp) -> Option<String> {
     let api = CALL_API.get()?;
     unsafe {
         if (api.is_string)(value) == 0 || (api.length)(value) < 1 {
@@ -511,7 +515,11 @@ pub fn string_argument(value: Sexp) -> Option<String> {
 }
 
 /// `TRUE` only for a logical (or coercible) `TRUE`.
-pub fn logical_argument(value: Sexp) -> bool {
+///
+/// # Safety
+///
+/// `value` must be an R object, such as an argument R passed to a `.Call` routine.
+pub unsafe fn logical_argument(value: Sexp) -> bool {
     CALL_API
         .get()
         .is_some_and(|api| unsafe { (api.as_logical)(value) } == 1)

@@ -11,7 +11,7 @@ path = "src/loader.rs"
 rustc-hash.workspace = true
 salsa.workspace = true
 semantics = { path = "../semantics" }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive", "rc"] }
 serde_json.workspace = true
 
 [dev-dependencies]

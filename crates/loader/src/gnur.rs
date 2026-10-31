@@ -115,19 +115,19 @@ pub fn plan_value(plan: &Plan) -> RValue {
             "bind_column".into(),
             integers(&plan.bind, |code| code.column),
         ),
-        (
-            "bind_text".into(),
-            column(&plan.bind, |code| code.text.clone()),
-        ),
+        ("bind_start".into(), integers(&plan.bind, |code| code.start)),
+        ("bind_end".into(), integers(&plan.bind, |code| code.end)),
         (
             "run_path".into(),
             column(&plan.run, |code| code.path.clone()),
         ),
         ("run_line".into(), integers(&plan.run, |code| code.line)),
         ("run_column".into(), integers(&plan.run, |code| code.column)),
+        ("run_start".into(), integers(&plan.run, |code| code.start)),
+        ("run_end".into(), integers(&plan.run, |code| code.end)),
         (
-            "run_text".into(),
-            column(&plan.run, |code| code.text.clone()),
+            "touched".into(),
+            plan.touched_names().map_or(RValue::Null, RValue::Character),
         ),
         (
             "registers_s4".into(),

@@ -297,21 +297,26 @@ pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
         if !is_expression_kind(node.kind()) {
             continue;
         }
-        let Some((directive, arguments)) = directive_call(&node) else {
+        let Some(Call {
+            callee: directive,
+            qualified: false,
+            arguments,
+        }) = call_parts(&node)
+        else {
             spec.unsupported.push(node.text().to_string());
             continue;
         };
         let positional = || {
             arguments
                 .iter()
-                .filter(|(name, _)| name.is_none())
-                .filter_map(|(_, value)| name_argument(value).map(|(name, _)| name))
+                .filter(|argument| argument.name.is_none())
+                .filter_map(|argument| name_argument(&argument.value).map(|(name, _)| name))
         };
         let named = |wanted: &str| {
             arguments
                 .iter()
-                .find(|(name, _)| name.as_deref() == Some(wanted))
-                .map(|(_, value)| value)
+                .find(|argument| argument.name.as_deref() == Some(wanted))
+                .map(|argument| &argument.value)
         };
         match directive.as_str() {
             "import" => {
@@ -359,7 +364,7 @@ pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
                 let Some((library, symbols)) = arguments.split_first() else {
                     continue;
                 };
-                let Some((library, _)) = name_argument(&library.1) else {
+                let Some((library, _)) = name_argument(&library.value) else {
                     continue;
                 };
                 let flag = |wanted: &str| {
@@ -373,10 +378,16 @@ pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
                     .unwrap_or_default();
                 let symbols = symbols
                     .iter()
-                    .filter(|(name, _)| !name.as_deref().is_some_and(|name| name.starts_with('.')))
-                    .filter_map(|(name, value)| {
-                        let (symbol, _) = name_argument(value)?;
-                        Some((name.clone().unwrap_or_else(|| symbol.clone()), symbol))
+                    .filter(|argument| {
+                        !argument
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with('.'))
+                    })
+                    .filter_map(|argument| {
+                        let (symbol, _) = name_argument(&argument.value)?;
+                        let binding = argument.name.clone().unwrap_or_else(|| symbol.clone());
+                        Some((binding, symbol))
                     })
                     .collect();
                 spec.dynamic_libraries.push(DynamicLibraryDirective {
@@ -392,15 +403,36 @@ pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
     spec
 }
 
-/// A directive call's name and its arguments, each with its name when it has one.
-fn directive_call(node: &SyntaxNode) -> Option<(String, Vec<(Option<String>, SyntaxNode)>)> {
+/// A call as the loader and `NAMESPACE` read it.
+pub struct Call {
+    /// The function name, without a `pkg::` qualifier.
+    pub callee: String,
+    pub qualified: bool,
+    pub arguments: Vec<CallArgument>,
+}
+
+pub struct CallArgument {
+    pub name: Option<String>,
+    pub value: SyntaxNode,
+}
+
+/// `callee(...)` or `pkg::callee(...)`; anything else is not a call this reads.
+pub fn call_parts(node: &SyntaxNode) -> Option<Call> {
     if node.kind() != SyntaxKind::CALL_EXPR {
         return None;
     }
-    let callee = node
-        .children()
-        .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
-        .filter(|callee| callee.kind() == SyntaxKind::NAME)?;
+    let callee = node.children().next()?;
+    let (callee, qualified) = match callee.kind() {
+        SyntaxKind::NAME => (callee, false),
+        SyntaxKind::NAMESPACE_EXPR => (
+            callee
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::NAME)
+                .last()?,
+            true,
+        ),
+        _ => return None,
+    };
     let arguments = node
         .children()
         .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
@@ -412,12 +444,19 @@ fn directive_call(node: &SyntaxNode) -> Option<(String, Vec<(Option<String>, Syn
                         .children()
                         .filter(|child| is_expression_kind(child.kind()))
                         .last()?;
-                    Some((argument_name(&argument), value))
+                    Some(CallArgument {
+                        name: argument_name(&argument),
+                        value,
+                    })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Some((callee.text().to_string(), arguments))
+    Some(Call {
+        callee: unquote(&callee.text().to_string()),
+        qualified,
+        arguments,
+    })
 }
 
 /// The `name` of a `name = value` argument, unquoted. A bare `value` has none.
@@ -445,10 +484,11 @@ fn name_list(value: &SyntaxNode) -> Vec<String> {
     if let Some((name, _)) = name_argument(value) {
         return vec![name];
     }
-    match directive_call(value) {
-        Some((callee, arguments)) if callee == "c" => arguments
+    match call_parts(value) {
+        Some(call) if call.callee == "c" => call
+            .arguments
             .iter()
-            .filter_map(|(_, value)| name_argument(value).map(|(name, _)| name))
+            .filter_map(|argument| name_argument(&argument.value).map(|(name, _)| name))
             .collect(),
         _ => Vec::new(),
     }

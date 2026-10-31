@@ -3,11 +3,11 @@
 # definition on first use, and other top-level code runs in collation order. A reload applies
 # a plan that touches only the items that changed.
 #
-# This file is evaluated once per session into the environment attached as `tools:ry`.
-# `.ry_request` and `.ry_commit` are defined by the host before it is evaluated: inside
-# `ry repl` they call into the ry process, and from plain R they run the `ry` executable.
-
-.ry_packages <- new.env(parent = emptyenv())
+# The host evaluates this file, compiles its functions, and installs them in the environment
+# it attaches as `tools:ry`, together with `.ry_request` and `.ry_commit`: inside `ry repl` those
+# call into the ry process, and from plain R they run the `ry` executable. The host also
+# creates the session's state, `.ry_packages` (one entry per loaded package root) and
+# `.ry_timing`, since compiled functions are cached across sessions and state must not be.
 
 .ry_stoplist <- c(
   ".__NAMESPACE__.", ".__S3MethodsTable__.", ".packageName", ".First.lib", ".onLoad",
@@ -25,10 +25,13 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     identical(asNamespace(state$name), state$ns)
   full <- isTRUE(full) || !current
   started <- proc.time()[["elapsed"]]
+  .ry_phase(NULL)
   plan_file <- tempfile("ry-plan-", fileext = ".rds")
   on.exit(unlink(plan_file), add = TRUE)
   .ry_request(root, plan_file, full)
+  .ry_phase("plan")
   plan <- readRDS(plan_file)
+  .ry_phase("read plan")
   if (!is.null(plan$error)) {
     stop(plan$error, call. = FALSE)
   }
@@ -50,14 +53,24 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {
-    .ry_sync_package_env(state)
+    .ry_sync_package_env(state, plan$touched)
   }
+  .ry_phase("attach")
   .ry_commit(root)
   if (!quiet) {
     elapsed <- proc.time()[["elapsed"]] - started
     message(.ry_summary(plan, elapsed))
   }
   invisible(state$ns)
+}
+
+# With `options(ry.load.verbose = TRUE)`, reports how long each phase of a load took.
+.ry_phase <- function(label) {
+  now <- proc.time()[["elapsed"]]
+  if (!is.null(label) && isTRUE(getOption("ry.load.verbose"))) {
+    message(sprintf("  %-14s %7.1f ms", label, (now - .ry_timing$last) * 1000))
+  }
+  .ry_timing$last <- now
 }
 
 # Reloads every package loaded through ry whose sources changed. `ry repl` calls it before
@@ -93,7 +106,10 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 }
 
 .ry_internal <- function(name, ...) {
-  eval(as.call(list(quote(.Internal), as.call(c(list(as.name(name)), list(...))))))
+  arguments <- lapply(list(...), function(argument) {
+    if (is.language(argument)) call("quote", argument) else argument
+  })
+  eval(as.call(list(quote(.Internal), as.call(c(list(as.name(name)), arguments)))))
 }
 
 .ry_new_package <- function(plan, root) {
@@ -130,7 +146,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   state$name <- name
   state$root <- root
   state$ns <- ns
-  state$sources <- new.env(parent = emptyenv())
+  state$texts <- new.env(parent = emptyenv())
+  state$srcfiles <- new.env(parent = emptyenv())
   state$sysdata <- character()
   state$dlls <- list()
   state$package_env <- NULL
@@ -163,14 +180,16 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (!is.null(plan$imports)) {
     .ry_import(ns, state$name, plan$imports)
   }
+  .ry_phase("imports")
   for (path in plan$dropped_sources) {
-    if (exists(path, envir = state$sources, inherits = FALSE)) rm(list = path, envir = state$sources)
+    for (table in list(state$texts, state$srcfiles)) {
+      if (exists(path, envir = table, inherits = FALSE)) rm(list = path, envir = table)
+    }
   }
   for (i in seq_along(plan$source_path)) {
     path <- plan$source_path[[i]]
-    lines <- strsplit(plan$source_text[[i]], "\n", fixed = TRUE)[[1L]]
-    assign(path, srcfilecopy(file.path(state$root, path), lines, isFile = TRUE),
-           envir = state$sources)
+    assign(path, plan$source_text[[i]], envir = state$texts)
+    if (exists(path, envir = state$srcfiles, inherits = FALSE)) rm(list = path, envir = state$srcfiles)
   }
   if (length(plan$remove)) {
     rm(list = intersect(plan$remove, ls(ns, all.names = TRUE)), envir = ns)
@@ -178,22 +197,20 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   for (registration in plan$unregister) {
     .ry_unregister(ns, registration)
   }
-  for (i in seq_along(plan$bind_name)) {
-    .ry_bind_lazily(
-      ns, plan$bind_name[[i]], state$sources[[plan$bind_path[[i]]]],
-      plan$bind_line[[i]], plan$bind_column[[i]], plan$bind_text[[i]], keep
-    )
+  .ry_phase("sources")
+  if (length(plan$bind_name)) {
+    .ry_bind_lazily(state, plan, keep)
   }
+  .ry_phase("bind lazily")
   if (length(plan$run_path)) {
     previous <- options(topLevelEnvironment = ns)
     on.exit(options(previous), add = TRUE)
     for (i in seq_along(plan$run_path)) {
-      .ry_run(
-        ns, plan$run_path[[i]], state$sources[[plan$run_path[[i]]]],
-        plan$run_line[[i]], plan$run_column[[i]], plan$run_text[[i]], keep
-      )
+      .ry_run(state, plan$run_path[[i]], plan$run_line[[i]], plan$run_column[[i]],
+              plan$run_start[[i]], plan$run_end[[i]], keep)
     }
   }
+  .ry_phase("run")
   if (!identical(plan$sysdata, "keep")) {
     if (length(state$sysdata)) {
       rm(list = intersect(state$sysdata, ls(ns, all.names = TRUE)), envir = ns)
@@ -208,6 +225,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       .ry_has_s4_metadata(ns)) {
     methods::cacheMetaData(ns, TRUE, ns)
   }
+  .ry_phase("S4 caches")
   for (method in plan$s3_unregister) {
     .ry_unregister_s3(ns, method)
   }
@@ -228,7 +246,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (!is.null(plan$dynamic_libraries)) {
     .ry_load_compiled(state, plan$dynamic_libraries)
   }
+  .ry_phase("S3")
   .ry_sync_exports(ns, plan$namespace, state$export_all)
+  .ry_phase("exports")
   if (isTRUE(plan$run_on_load) && exists(".onLoad", envir = ns, inherits = FALSE)) {
     get(".onLoad", envir = ns, inherits = FALSE)(dirname(state$root), state$name)
   }
@@ -261,31 +281,58 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 
 # Parses one item at its real position in the file, so its source references, and with them
 # tracebacks and debuggers, point into the file on disk.
-.ry_parse <- function(srcfile, line, column, text, keep) {
-  if (keep && !is.null(srcfile)) {
+.ry_parse <- function(state, path, line, column, text, keep) {
+  if (keep) {
     previous <- options(keep.parse.data = FALSE)
     on.exit(options(previous))
     padded <- c(character(line - 1L), paste0(strrep(" ", column), text))
-    parse(text = padded, srcfile = srcfile, keep.source = TRUE)
+    parse(text = padded, srcfile = .ry_srcfile(state, path), keep.source = TRUE)
   } else {
     parse(text = text, keep.source = FALSE)
   }
 }
 
-.ry_bind_lazily <- function(ns, name, srcfile, line, column, text, keep) {
-  force(srcfile)
-  force(line)
-  force(column)
-  force(text)
-  force(keep)
-  delayedAssign(name, eval(.ry_parse(srcfile, line, column, text, keep)[[1L]], ns),
-                assign.env = ns)
+# Built on first use: only a definition that is forced needs its file's lines.
+.ry_srcfile <- function(state, path) {
+  srcfile <- state$srcfiles[[path]]
+  if (is.null(srcfile)) {
+    lines <- strsplit(state$texts[[path]], "\n", fixed = TRUE)[[1L]]
+    srcfile <- srcfilecopy(file.path(state$root, path), lines, isFile = TRUE)
+    assign(path, srcfile, envir = state$srcfiles)
+  }
+  srcfile
 }
 
-.ry_run <- function(ns, path, srcfile, line, column, text, keep) {
-  expressions <- .ry_parse(srcfile, line, column, text, keep)
+# One promise per definition, made in C by the same internal that installed packages use for
+# their lazy-load databases. A promise evaluates `.ry_force(i, batch)`, and `batch` keeps the
+# file text each definition was cut from, so a later edit of the file cannot shift it.
+.ry_bind_lazily <- function(state, plan, keep) {
+  batch <- new.env(parent = environment(.ry_bind_lazily))
+  batch$batch <- batch
+  batch$state <- state
+  batch$keep <- keep
+  batch$path <- plan$bind_path
+  batch$text <- unlist(mget(plan$bind_path, envir = state$texts), use.names = FALSE)
+  batch$line <- plan$bind_line
+  batch$column <- plan$bind_column
+  batch$start <- plan$bind_start
+  batch$end <- plan$bind_end
+  keys <- as.list(seq_along(plan$bind_name))
+  .ry_internal("makeLazy", plan$bind_name, keys, quote(.ry_force(key, batch)), batch, state$ns)
+}
+
+.ry_force <- function(i, batch) {
+  text <- substr(batch$text[[i]], batch$start[[i]] + 1L, batch$end[[i]])
+  expressions <- .ry_parse(batch$state, batch$path[[i]], batch$line[[i]], batch$column[[i]],
+                           text, batch$keep)
+  eval(expressions[[1L]], batch$state$ns)
+}
+
+.ry_run <- function(state, path, line, column, start, end, keep) {
+  text <- substr(state$texts[[path]], start + 1L, end)
+  expressions <- .ry_parse(state, path, line, column, text, keep)
   withCallingHandlers(
-    for (expression in expressions) eval(expression, ns),
+    for (expression in expressions) eval(expression, state$ns),
     error = function(error) {
       message(sprintf("Error while loading %s:%d", path, line))
     }
@@ -410,9 +457,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 }
 
 .ry_export_names <- function(ns, spec, export_all) {
-  all_names <- ls(ns, all.names = TRUE)
+  all_names <- names(ns)
   if (isTRUE(export_all)) {
-    return(setdiff(all_names, .ry_stoplist))
+    return(all_names[!(all_names %in% .ry_stoplist)])
   }
   names <- spec$exports
   for (pattern in spec$export_patterns) {
@@ -428,15 +475,17 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     names <- c(names, intersect(generic, all_names),
                grep(paste0("^\\.__T__", generic, ":"), all_names, value = TRUE))
   }
-  unique(setdiff(intersect(names, all_names), .ry_stoplist))
+  names <- unique(names[names %in% all_names])
+  names[!(names %in% .ry_stoplist)]
 }
 
 .ry_sync_exports <- function(ns, spec, export_all) {
   exports <- getNamespaceInfo(ns, "exports")
   wanted <- .ry_export_names(ns, spec, export_all)
-  stale <- setdiff(ls(exports, all.names = TRUE), wanted)
+  have <- names(exports)
+  stale <- have[!(have %in% wanted)]
   if (length(stale)) rm(list = stale, envir = exports)
-  fresh <- setdiff(wanted, ls(exports, all.names = TRUE))
+  fresh <- wanted[!(wanted %in% have)]
   if (length(fresh)) list2env(stats::setNames(as.list(fresh), fresh), envir = exports)
 }
 
@@ -452,20 +501,30 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 }
 
 # Copies bindings, not values, so a lazy definition stays a promise on the search path too:
-# whichever environment forces it first, both see the value.
-.ry_sync_package_env <- function(state) {
+# whichever environment forces it first, both see the value. `touched` limits the sync to the
+# bindings a plan changed; without it, everything is resynced.
+.ry_sync_package_env <- function(state, touched = NULL) {
   environment <- state$package_env
   ns <- state$ns
-  names <- ls(getNamespaceInfo(ns, "exports"), all.names = TRUE)
-  imported <- if (isTRUE(state$export_all)) ls(parent.env(ns), all.names = TRUE) else character()
-  stale <- setdiff(ls(environment, all.names = TRUE), c(names, imported))
+  exported <- names(getNamespaceInfo(ns, "exports"))
+  present <- names(environment)
+  if (!is.null(touched)) {
+    gone <- touched[!(touched %in% exported) & touched %in% present]
+    if (length(gone)) rm(list = gone, envir = environment)
+    names <- touched[touched %in% exported]
+    names <- c(names, exported[!(exported %in% present)])
+    if (length(names)) .ry_internal("importIntoEnv", environment, names, ns, names)
+    return(invisible())
+  }
+  imported <- if (isTRUE(state$export_all)) names(parent.env(ns)) else character()
+  stale <- present[!(present %in% exported) & !(present %in% imported)]
   if (length(stale)) rm(list = stale, envir = environment)
-  imported <- setdiff(imported, names)
+  imported <- imported[!(imported %in% exported)]
   if (length(imported)) {
     .ry_internal("importIntoEnv", environment, imported, parent.env(ns), imported)
   }
-  if (length(names)) {
-    .ry_internal("importIntoEnv", environment, names, ns, names)
+  if (length(exported)) {
+    .ry_internal("importIntoEnv", environment, exported, ns, exported)
   }
 }
 
