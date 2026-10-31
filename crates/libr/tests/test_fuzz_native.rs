@@ -149,6 +149,7 @@ fn fuzz_nested_non_local_exits() {
     let arena = unsafe { (r.api().ry_arena_bytes)() };
     let mut rng = SplitMix64(0x5eed);
     for iteration in 0..fuzz_iterations(150) {
+        let mark = r.protected.get();
         r.stress(iteration % 10 == 9);
         let expression = generate(&mut rng, 5);
         let mut expected_effects = Effects::default();
@@ -180,6 +181,7 @@ fn fuzz_nested_non_local_exits() {
             arena,
             "{expression:?} kept R_alloc memory"
         );
+        r.release_to(mark);
     }
 }
 
@@ -196,6 +198,7 @@ fn fuzz_api_sequences_keep_objects_intact() {
     let names = r.data::<Sexp>("R_NamesSymbol");
     for seed in 0..fuzz_iterations(12) as u64 {
         let mut rng = SplitMix64(seed);
+        let mark = r.protected.get();
         r.stress(seed % 3 == 2);
         const SLOTS: usize = 16;
         let store = r.keep(unsafe { (r.api().Rf_allocVector)(VECSXP, SLOTS as isize) });
@@ -269,5 +272,6 @@ fn fuzz_api_sequences_keep_objects_intact() {
             }
         }
         r.stress(false);
+        r.release_to(mark);
     }
 }

@@ -251,6 +251,12 @@ impl R<'_> {
         self.keep(unsafe { (self.api().Rf_lcons)(head, list) })
     }
 
+    /// Unprotects what this session protected after `mark`, a value `protected` had earlier.
+    pub fn release_to(&self, mark: c_int) {
+        unsafe { (self.api().Rf_unprotect)(self.protected.get() - mark) };
+        self.protected.set(mark);
+    }
+
     /// `quote(expression)`, so `.Call` passes the expression itself instead of its value.
     pub fn quote(&self, expression: Sexp) -> Sexp {
         self.call_expression("quote", &[(None, expression)])
