@@ -290,11 +290,13 @@ pub fn check_item_with_annotation<'db>(
             }
         });
         match (&module.expression(root).kind, declared_fn) {
+            // A function literal with its own signature is typed by it, and the binding's
+            // declared type is then checked against that like any other value.
             (ExpressionKind::Assign { value, .. }, Some((declared, function)))
                 if matches!(
                     module.expression(*value).kind,
                     ExpressionKind::Function { .. }
-                ) =>
+                ) && !context.expression_annotations.contains_key(value) =>
             {
                 for (name, constraint) in &declared.binders {
                     context.table.rigid_constraints.insert(*name, *constraint);
@@ -1065,7 +1067,7 @@ impl<'db> Checker<'db, '_> {
                     matches!(
                         self.module.expression(value).kind,
                         ExpressionKind::Function { .. }
-                    )
+                    ) && !self.expression_annotations.contains_key(&value)
                 });
                 let value_ty = match declares_function {
                     Some(declared) => {

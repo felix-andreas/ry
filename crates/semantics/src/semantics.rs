@@ -358,8 +358,27 @@ fn file_item_annotations<'db>(
         .collect()
 }
 
-/// Annotations attached below the item root, keyed by HIR id. Not tracked: `Annotation`
-/// carries `TextRange`s, and callers already depend on `item_syntax`/`item_hir`.
+/// The annotation the checker applies to an item's root: its `#:` block merged with the
+/// root statement's inline annotation. Not tracked, for the reason
+/// [`item_expression_annotations`] gives.
+pub fn item_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations::Annotation<'db>> {
+    let comment = item_annotation_syntax(db, item)
+        .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
+    let root = item_syntax(db, item)?.syntax_node();
+    let Some(site) = annotations::statement_inline_site(&root) else {
+        return comment;
+    };
+    if !inline_annotations_enabled(db) {
+        return comment;
+    }
+    let inline = annotations::lower_inline_annotation(db, &site);
+    annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+}
+
+/// Annotations attached below the item root, keyed by HIR id: each annotated statement's
+/// `#:` block merged with its inline annotation, plus the signature of every function
+/// literal no statement claims, such as one passed as an argument. Not tracked:
+/// `Annotation` carries `TextRange`s, and callers already depend on `item_syntax`/`item_hir`.
 pub fn item_expression_annotations<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
@@ -371,6 +390,8 @@ pub fn item_expression_annotations<'db>(
         return Vec::new();
     };
     let root = syntax.syntax_node();
+    // Each annotated statement once, in source order, with its `#:` block if it has one.
+    let mut targets: Vec<(SyntaxNode, Option<SyntaxNode>)> = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
     for node in root
         .descendants()
@@ -382,27 +403,73 @@ pub fn item_expression_annotations<'db>(
             parents.push(parent);
         }
     }
-    let mut attachments = Vec::new();
     for parent in parents {
         for (annotation, target) in statement_annotations(&parent) {
-            let AnnotationTarget::Attached(target) = target else {
-                continue;
-            };
-            let Some(index) = module
-                .expressions
-                .iter()
-                .position(|expression| expression.range == target.text_range())
-            else {
-                continue;
-            };
-            let lowered = annotations::lower_annotation(db, &annotation);
-            if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
-                continue;
+            if let AnnotationTarget::Attached(target) = target {
+                targets.push((target, Some(annotation)));
             }
-            attachments.push((hir::ExprId(index as u32), lowered));
         }
     }
+    let inline_sites: Vec<SyntaxNode> = root
+        .descendants()
+        .filter(annotations::is_inline_site)
+        .collect();
+    let inline_enabled = !inline_sites.is_empty() && inline_annotations_enabled(db);
+    if inline_enabled {
+        for site in inline_sites {
+            // A signature belongs to the statement assigning its function, unless that
+            // statement types its binding itself.
+            let statement = site
+                .parent()
+                .filter(|parent| {
+                    annotations::statement_inline_site(parent).as_ref() == Some(&site)
+                })
+                .unwrap_or(site);
+            if statement == root || targets.iter().any(|(target, _)| *target == statement) {
+                continue;
+            }
+            targets.push((statement, None));
+        }
+    }
+    let mut attachments = Vec::new();
+    for (statement, comment) in targets {
+        let range = hir::significant_range(&statement);
+        let Some(index) = module
+            .expressions
+            .iter()
+            .position(|expression| expression.range == range)
+        else {
+            continue;
+        };
+        let comment = comment.map(|comment| annotations::lower_annotation(db, &comment));
+        let site = annotations::statement_inline_site(&statement).filter(|_| inline_enabled);
+        let inline = site
+            .as_ref()
+            .map(|site| annotations::lower_inline_annotation(db, site));
+        let Some(lowered) = annotations::merge_annotations(db, comment, inline, site.as_ref())
+        else {
+            continue;
+        };
+        if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
+            continue;
+        }
+        attachments.push((hir::ExprId(index as u32), lowered));
+    }
     attachments
+}
+
+/// Settings that change what the analysis means rather than which findings a host
+/// publishes. Unset, every setting takes its default.
+#[salsa::input(singleton, debug)]
+pub struct AnalysisSettings {
+    /// `[check] inline-annotations`. Off, inline annotations type nothing.
+    pub inline_annotations: bool,
+}
+
+/// Read only where an inline annotation exists, so a project without any never
+/// depends on the setting.
+pub fn inline_annotations_enabled(db: &dyn Db) -> bool {
+    AnalysisSettings::try_get(db).is_none_or(|settings| *settings.inline_annotations(db))
 }
 
 /// Package files first, in path order; the order decides last-writer-wins winners.
@@ -932,8 +999,7 @@ fn check_item_against<'db>(
 ) -> Option<check::ItemCheck<'db>> {
     let module = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
-    let annotation = item_annotation_syntax(db, item)
-        .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
+    let annotation = item_annotation(db, item);
     Some(check::check_item_with_annotation(
         db,
         module,

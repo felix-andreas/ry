@@ -64,9 +64,11 @@ y <- x
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: character
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 y: character
 
@@ -82,9 +84,11 @@ y <- x
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: character
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 y: integer
 16..17 error[type-mismatch] expected `integer`, found `character`
@@ -100,9 +104,11 @@ r <- f("x")
 == R/a.R
 f: <T> fn(value: T) -> T
 0..1 warning[duplicate] Top-level binding `f` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 f: <T: numeric> fn(x: T) -> T
 0..1 warning[duplicate] Top-level binding `f` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 r: Unknown
 7..10 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
@@ -244,8 +250,10 @@ r: integer
 #++++
 == R/a.R
 3..24 error[annotation] the type name `Shape` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..27 another declaration of this name is here.
 == R/b.R
 3..27 error[annotation] the type name `Shape` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..24 another declaration of this name is here.
 
 #==== cross_file_scripts
 #---- script_polymorphic_package_function
