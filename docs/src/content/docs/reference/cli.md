@@ -14,7 +14,7 @@ ry load [PATH]     # load an R package from source, run code against it, and exi
 
 `format` and `lsp` are aliases for `fmt` and `server`. Only `repl`, `run`, and `load` need R: they
 use the R in `R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must
-be R 4.2 or newer, built as a shared library, which every CRAN build is.
+be built as a shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer.
 
 ## check
 
@@ -54,18 +54,16 @@ are in [Formatting rules](/reference/formatting-rules).
 file.
 
 `ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
-before the first prompt. Started inside an R package, `ry repl` [loads it](/loading-packages) and
-reloads what changed before each command; `--no-load` turns that off. Completion comes from
-type-checking what you typed, not from the live session, so completing `account$` lists a record's
-fields with their types, but data frame columns and objects created by `source()` do not complete.
+before the first prompt. [The console guide](/guides/console) describes what its completion knows.
+Started inside an R package, `ry repl` [loads it](/guides/loading-packages) and reloads what changed
+before each command; `--no-load` turns that off.
 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
-`Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE` and code
-that branches on it takes the interactive path. R's startup banner is not printed, so the output is
-only what the script prints.
+`Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`. R's
+startup banner is not printed, so the output is only what the script prints.
 
-`ry load` [loads the package](/loading-packages) at `PATH` (default: the one containing the current
-directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
+`ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
+current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
 `ry load --r-entry` prints the R code that gives a plain R session the same `load_all()`, for
 `source(pipe("ry load --r-entry"))`. `load_all()` is available in `ry repl` and `ry run` sessions
 too.

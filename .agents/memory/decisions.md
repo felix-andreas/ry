@@ -1691,7 +1691,7 @@ there was no previous source of truth; the choices that settle architecture are 
 # Decision record: the package-development loader
 
 Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and the user page
-`loading-packages.md` describe the result. These choices settle architecture.
+`guides/loading-packages.md` describe the result. These choices settle architecture.
 
 - **The index lives in `semantics`, the diff in `crates/loader`, and only a backend knows the
   runtime.** `semantics::load_index` derives per-item facts (`item_load`, `item_immediate_reads`),

@@ -3,41 +3,32 @@ title: Authoring stubs
 description: The .Rtypes declaration format, overload sets, export manifests, and the scope rules for what belongs in the corpus
 ---
 
-:::note[Status]
-The stub format for the standard library ships. The corpus holds about 950 typed declarations in
-eleven `.Rtypes` files in the repository's top-level `types/` directory, and generated `.exports`
-[manifests](#export-manifests) cover every namespace R ships plus fifteen CRAN namespaces without
-typed declarations. What is not built yet is listed [at the end of this page](#what-is-not-built-yet).
-The typing contract itself is the [typing reference](/reference/type-system); this page describes
-how the standard library feeds into it.
-:::
+This page is for contributors who edit the shipped stub corpus, and for anyone writing a project's
+own stubs. The corpus lives in the repository's top-level `types/` directory: about 950 typed
+declarations in eleven `.Rtypes` files, plus an `.exports` [manifest](#export-manifests) for every
+namespace R ships and for fifteen CRAN namespaces. The typing rules the stubs feed are in the
+[typing reference](/reference/type-system), and the user-facing introduction is
+[Stubs](/type-checking/stubs).
 
 ## Why stubs exist
 
-The checker has only a small kernel built in: the operators, plus `c` and `list`. Without stubs,
-everything else in the standard library would be `Unknown`. `T`, `F`, and `pi` would have no type,
-`length`, `nchar`, `seq_len`, `paste`, and the rest would have no signature, and every call through
-them would lose all type information.
-
-Stubs fill that gap. A stub is a declaration-only description of base R or another package, loaded
-as an immutable input, so the checker knows the standard library the way rust-analyzer knows `core`
-and `std`.
+The checker has only a small kernel built in: the operators, plus `c` and `list`. Everything else in
+the standard library, from `T` and `pi` to `length`, `paste`, and `seq_len`, gets its type from a
+stub: a declaration-only description of a package, loaded as an immutable input.
 
 ## Stub format
 
-A stub file is a declaration-only file with the extension `.Rtypes` ("R type information"). Every
-line that is not blank or a comment is one declaration:
+A stub file has the extension `.Rtypes` ("R type information"), which echoes R's `.Rd` without
+colliding with `.Rd`, `.Rmd`, `.Rda`, or `.RData`. Every line that is not blank or a comment is one declaration:
 
 ```
 name : <type-expr>
 ```
 
 The type expression uses exactly the `#:` annotation grammar, read by the same parser, so there is
-no second notation to build or to keep in sync. A stub file has nowhere to write a function body,
-which makes "declaration-only" a structural fact rather than a convention, just as it is for
-TypeScript's `.d.ts` and Python's `.pyi` files. Blank lines and `#` comments are ignored, whether a
-comment fills a whole line or trails a declaration, and the loader turns each type expression
-directly into a `TypeScheme`.
+no second notation to keep in sync. A stub file has nowhere to write a function body, which makes
+"declaration-only" a structural fact, as it is for TypeScript's `.d.ts` and Python's `.pyi` files.
+Blank lines and `#` comments, whole-line or trailing, are ignored.
 
 A declared `name` can be an R identifier, an infix operator such as `%in%` (or a project's own
 `%||%`), or an S3 operator method such as `+.Date`, `-.POSIXct`, `Arith.difftime`, `Compare.Date`,
@@ -80,18 +71,6 @@ A type name may contain an interior dot, as `data.frame` does, and a project's o
 `@type NAME {REPRESENTATION}` cannot be written in `.Rtypes`: the opaque nominal is the only stub
 form, and a `@type` line whose name is not a plain identifier is reported as an error on its own
 line.
-
-### Why a dedicated format
-
-Stubs used to be ordinary R files with placeholder bodies, such as `length <- function(x) 0L`, from
-which the loader harvested the `#:` annotation and ignored the rest. That let a stub carry a
-meaningless, unreachable body, and it meant a full parse and lowering just to reach the annotation.
-A dedicated declaration file fixes both: a body cannot be written, so it cannot creep back in, and
-the loader parses nothing but declarations.
-
-The extension `.Rtypes` echoes R's own `.Rd` convention without colliding with `.Rd`, `.Rmd`,
-`.Rda`, or `.RData`. A JSON or TOML format was rejected because it would need a second type
-notation; reusing the `#:` grammar keeps one source of truth for type syntax, inline and in stubs.
 
 ### Data-masking functions
 
@@ -174,28 +153,26 @@ A project overrides or extends the shipped stubs with its own `.Rtypes` files un
 `<project>/stubs/`. The loader folds the project's files over the shipped corpus in sorted path
 order, so a project declaration replaces the shipped declaration of the same name. That is how a
 project corrects a return type or adds a name the corpus lacks. A missing directory is ignored, and a
-malformed line is dropped, because overrides are optional and one bad line
-must never block analysis.
+malformed line is dropped, because one bad line must never block analysis.
 
-A project stub file's name declares its namespace. `stubs/dplyr.Rtypes` declares the namespace
-`dplyr`, so its declarations type bare reads and also validate qualified ones: `dplyr::mutate` is a
-known-namespace read with the stub's type, while `dplyr::filter` warns "not exported" until the file
-declares `filter`. This is how a project types a third-party package today, by hand, since
-generating a stub from an installed library is not built. Exports are tracked per declaration, not
+A project stub file's name declares its namespace. `stubs/arrow.Rtypes` declares the namespace
+`arrow`, so its declarations type bare reads and also validate qualified ones: with only
+`read_parquet` declared, `arrow::read_parquet` has the stub's type, while `arrow::write_parquet`
+warns that it is not exported by `arrow`. This is how a project types a third-party package today,
+by hand. Exports are tracked per declaration, not
 per winning declaration, so overriding a shipped name's type does not remove the name from its
 shipped namespace, and `stats::sd` stays valid under an `sd` override. Hover shows a name's origin as
 the namespace of its winning declaration.
 
-`ry check` reports every dropped override declaration as an
-error on its own stub line: a line that fails to parse, a declaration naming a type that does not
+`ry check` reports every dropped override declaration as a `stub` error on its own line: a line that fails to parse, a declaration naming a type that does not
 resolve, and a `@type` line whose name is not an identifier. An unreadable override file is an IO
 failure. While a `.Rtypes` file is open, the editor shows the same problems as diagnostics.
 
 ## Export manifests
 
-Base R alone exports 1,408 names, and the typed corpus deliberately covers only a curated,
-high-value subset. On its own, that would make every real export outside the subset warn as
-unresolved, because the checker could not tell `recover`, a real `utils` export, from a typo.
+Base R alone exports about 1,400 names, and the typed corpus deliberately covers only a curated
+subset. On its own, that would make every real export outside the subset warn as unresolved,
+because the checker could not tell `recover`, a real `utils` export, from a typo.
 
 Export manifests close the gap. Every shipped namespace's `.Rtypes` file is paired with a
 `types/<namespace>.exports` file listing, one per line, every name the namespace really exports.
@@ -208,11 +185,10 @@ false `unresolved` finding.
 A manifest does not need an `.Rtypes` file beside it. Fifteen namespaces have a manifest and no
 typed declarations at all, so every name from them is `Unknown`: `tibble`, `tidyr`, `readr`, `purrr`,
 `stringr`, `forcats`, `lubridate`, `magrittr`, `rlang`, `glue`, `scales`, `knitr`, `jsonlite`, `R6`,
-and `tidyverse`. What they contribute is a *known export set*, and that matters more than it sounds.
-Attaching a package whose exports the checker cannot list turns off unresolved-name detection for
-the whole project, as the [typing reference](/reference/type-system#naming-and-scoping) specifies.
-Before these manifests existed, a single `library(stringr)` meant that a clean run said nothing
-about typos anywhere. Adding typed declarations for any of these packages later is purely additive:
+and `tidyverse`. What they contribute is a *known export set*. Attaching a package whose exports the
+checker cannot list turns off unresolved-name detection for the whole project, as the
+[typing reference](/reference/type-system#naming-and-scoping) specifies, so without its manifest a
+single `library(stringr)` would silence every typo. Adding typed declarations for any of these packages later is purely additive:
 the manifest stays the export set, and the `.Rtypes` file supplies the types.
 
 A manifest name is a known global that makes the weakest possible claim:
@@ -355,11 +331,9 @@ only when the project uses the package, and any one of these signals is enough:
 - A meta-package that attaches it is active: `library(tidyverse)` activates the nine packages it
   attaches, because attaching is how R makes their names reachable.
 
-`testthat` is in the set for a different reason than the data packages. A package's `tests/`
-directory is often a third of its source, and every line of it calls these names. Without typed
-stubs, the only way to quiet them was the blanket tolerance that an unknowable export set earns, and
-that tolerance also silenced typos in the package's own functions. With the stubs, `expect_eqaul` is
-reported, along with a suggestion. An expectation's `object` parameter is `Any`, because an
+`testthat` is in the set because a package's `tests/` directory is often a third of its source,
+and without a known export set, attaching testthat would silence typos in the package's own
+functions. With the stubs, `expect_eqaul` is reported, along with a suggestion. An expectation's `object` parameter is `Any`, because an
 expectation compares whatever the code under test produced, and each `expect_*` returns its
 `object`, which is the value testthat passes through invisibly.
 
@@ -384,24 +358,14 @@ as an `export()` of a name the package never defines. A namespace without stubs 
 because stubs are the only export source the checker has. Resolution itself is unchanged, and a
 stubbed name resolves bare with or without an import.
 
-The check needs no interner, because it reads a string-keyed export table built once from the loaded
-corpus. That is what lets an open `NAMESPACE` buffer be validated live without touching the
-engine's shared interner, the same isolation the `.Rtypes` buffer path keeps.
-
-Not built:
-
-- A separate name-to-scheme table per namespace, instead of one flat fold. Today two shipped
-  packages cannot declare the same name with different types.
-- `library(pkg)` attaching a namespace on demand for a package outside the shipped set.
-- Gating bare third-party names on `NAMESPACE` imports. That would be R-correct, and whether to do it
-  is a deliberate strictness decision; today's flat fold is intentionally permissive.
+The check reads a string-keyed export table built once from the loaded corpus, not the engine's
+interner, which is what lets an open `NAMESPACE` buffer be validated live in isolation.
 
 ### Incremental hygiene
 
-In the [query engine](/contributing/architecture#the-semantics-database), the `StubSources` input
-is set once, and the library derived from it changes only when a conditional namespace switches on or
-off. An ordinary edit therefore never invalidates a query that reads the stubs, and no separate check
-is needed to make that so.
+The `StubSources` input is set once, and the library derived from it changes only when a
+conditional namespace switches on or off, so an ordinary edit never invalidates a query that reads
+the stubs, and a document pays inference time only for the stub names it uses.
 
 A package binding that shadows a stub name is an ordinary structural edit. It changes which
 definition wins that name in the package symbol index, and that change flows through the per-symbol
@@ -489,9 +453,6 @@ half <- pi / 2                 # double, from the operator kernel
 flag <- T                      # logical, from the stub value binding
 ```
 
-The stubs and the kernel work together here: `length`'s scheme types `n`, the operator kernel
-promotes `pi / 2`, and the `T` value binding types `flag`.
-
 `paste`'s variadic arguments and its `sep` and `collapse` named formals can be declared directly,
 just like `seq_len`'s dotted `length.out`:
 
@@ -502,23 +463,16 @@ paste : fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]:
 Where the rest parameter sits among the named ones is part of the signature, because it decides
 which parameters a positional argument can still fill.
 
-## Per-edit cost
-
-Because an ordinary edit never invalidates the [stub library](#incremental-hygiene), merely having it loaded
-adds nothing to the cost of an edit, and rechecking a body still touches
-only the edited document and whatever refers to it. A document pays inference time only for the
-base names it actually uses, which is the feature doing its job rather than bookkeeping overhead,
-and a document that uses no base name pays nothing at all.
-
 ## What is not built yet
 
-These extensions are designed but not built, and their absence shows:
-
-- **Third-party packages beyond the shipped set.** The corpus covers the namespaces R itself ships,
-  plus conditional stubs for `data.table`, `dplyr`, `ggplot2`, and `testthat`. Any other CRAN
-  package's names are `Unknown`, with an unknown-namespace warning. A project can close the gap for
-  itself today by writing its own `stubs/<pkg>.Rtypes`. The intended long-term answer is generating
-  stubs by introspecting the installed library, because which packages and versions are installed
-  is a property of the project, not of ry.
-- **Keying the corpus to an R version.** Base R evolves: functions appear and signatures change, and
-  the shipped corpus describes one snapshot rather than whichever version a given project runs.
+- **Third-party packages beyond the shipped set.** Any other CRAN package's names are `Unknown`,
+  with an unknown-namespace warning, unless the project writes its own `stubs/<pkg>.Rtypes`. The
+  intended answer is generating stubs by introspecting the installed library, because which
+  packages and versions are installed is a property of the project, not of ry.
+- **Keying the corpus to an R version.** The shipped corpus describes one snapshot of base R rather
+  than whichever version a project runs.
+- **A name-to-scheme table per namespace**, instead of one flat fold. Today two shipped packages
+  cannot declare the same name with different types.
+- **`library(pkg)` attaching a namespace on demand** for a package outside the shipped set.
+- **Gating bare third-party names on `NAMESPACE` imports.** That would be R-correct, and whether to
+  do it is a deliberate strictness decision; today's flat fold is intentionally permissive.

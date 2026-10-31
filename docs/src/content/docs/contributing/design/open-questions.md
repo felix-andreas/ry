@@ -3,22 +3,10 @@ title: Open type-system questions
 description: "Type-system design questions that are not yet decided, with the options on the table"
 ---
 
-This page collects the type-system questions that are still open. For each one it states the
-question, the options on the table, and the stopgap ry uses in the meantime.
-
-It is not the decision log. `.agents/memory/decisions.md` records what has been settled, while an
-entry here is a live deliberation. When a question is resolved, move the decision and its rationale
-into `decisions.md` and delete the entry here. Nothing on this page is contract until it lands in the
-[type system reference](/reference/type-system/).
-
-Four questions have already made that journey:
-
-- Generic vector element types became an atomic-element constraint on the existing constraint
-  mechanism.
-- Ad-hoc overloading became ordered overload sets with probe-then-rollback, confined to declaration
-  files.
-- Multi-member unions are join-only and annotation-only, and never bind into a unification variable.
-- R's variable model is mutable slots, with a union wherever a read sees several writes.
+Each entry states a type-system question that is still open, the options on the table, and the
+stopgap ry uses meanwhile. Nothing here is contract until it lands in the
+[type system reference](/reference/type-system/). When a question is resolved, record the decision
+in `.agents/memory/decisions.md` and delete the entry here.
 
 ## 1. Tags and discriminated unions through a ry standard library
 
@@ -27,7 +15,7 @@ variants? The shape under discussion is a library the checker knows about specia
 constructors and a `match` function with exhaustiveness checking.
 
 **The maintainer's direction.** Provide them through that specially known library, not through new
-R syntax, so that annotated R stays ordinary R. This comes after the beta.
+R syntax, so that annotated R stays ordinary R.
 
 **An unresolved tension.** [Inline type syntax](/contributing/design/inline-type-syntax/) proposes
 the opposite route to the same capability: real syntax, in a compiled dialect. Both routes reach
@@ -68,8 +56,8 @@ that do ship, such as `+.Date` and `Arith.difftime`, show what a per-class answe
 **Notes.** ry ships `data.frame` as an opaque nominal, declared with `@type` in a `.Rtypes` file,
 which is honest but shallow. Column typing probably wants row-polymorphic records over an opaque
 carrier, while a matrix wants an element type first, with no dimension tracking. Both interact with
-the semantics of `[` and `[[`, and with how `x[i, j]` lowers. Design this after the beta semantics
-settle.
+the semantics of `[` and `[[`, and with how `x[i, j]` lowers. The built-in typed table type that the
+project mandate calls for will need the same answer.
 
 ## 4. Traits and typeclasses: closed, and declined
 
@@ -111,9 +99,11 @@ signature is bridged. The full semantics of `...`, including compatibility when 
 **The question.** How should library scoping work: what `library(pkg)` attaches, what `importFrom`
 in a `NAMESPACE` file imports, the order of the search path, and masking warnings?
 
-**Notes.** ry ships `pkg::name` resolution against namespace-partitioned stubs, but the attach and
-import model is not designed yet. It decides when an unresolved name is really unresolved, so it
-directly decides how useful strict mode is on a real project.
+**Notes.** ry validates `pkg::name` against each namespace's export set, and `NAMESPACE` and
+`DESCRIPTION` metadata only widen what resolves (an imported name is quiet, a declared dependency is
+a known namespace). Bare names are deliberately not gated on imports; `decisions.md` records why.
+Per-file visibility, attach order, and masking warnings still need the full model, which decides
+when an unresolved name is really unresolved, and so how useful strict mode is on a real project.
 
 ## 7. Non-standard evaluation
 

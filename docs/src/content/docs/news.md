@@ -10,11 +10,10 @@ description: Release announcements and project news
 Version 0.3.0 replaces the previous implementation end to end, with a new parser, a new analysis
 engine, and a static type checker, the first one for R.
 
-- **The project is renamed from Roughly to ry.** The binary is `ry`, the
-  configuration file is `ry.toml`, and a suppression comment reads
-  `# ry: allow(...)`. The crate is published as `ry-lang`.
+- **The project is renamed from Roughly to ry.** The binary is `ry`, the configuration file is
+  `ry.toml`, and a suppression comment reads `# ry: allow(...)`. The crate is published as `ry-lang`.
 - **R gets a static type checker**, new and experimental: Hindley-Milner inference with numeric
-  constraints and generics, guided by [`#:` annotation comments](/type-checking/tour#annotations). Type
+  constraints and generics, guided by [`#:` annotation comments](/type-checking/annotations). Type
   errors are opt-in through `[check] typing`, but hover, completion, signature help, and inlay hints
   use the inferred types either way.
 - **The R parser is hand-written.** It builds lossless syntax trees, recovers from broken input, and
@@ -27,14 +26,8 @@ engine, and a static type checker, the first one for R.
 - **The editor features run on the new analysis**: hover, completion, go-to-definition, references,
   rename, document and workspace symbols, inlay hints, signature help, and semantic highlighting of
   `#:` annotations.
-- **The formatter and the linter read the same syntax trees as the analysis**, so every tool sees
-  your code the same way.
 - **ry ships an R console.** `ry repl` and `ry run` load your system R (they are the only commands
   that do), and completion in the console is backed by the project analysis.
-- **The documentation is new**, at [ry-lang.org](https://ry-lang.org), with a type-checking tutorial,
-  guides, and reference pages.
 
-Binaries are on
-[GitHub Releases](https://github.com/felix-andreas/ry/releases). The VS Code
-extension is on the
-[Marketplace](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry).
+Binaries are on [GitHub Releases](https://github.com/felix-andreas/ry/releases), and the VS Code
+extension is on the [Marketplace](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry).
