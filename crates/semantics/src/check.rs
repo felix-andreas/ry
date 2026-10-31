@@ -2387,9 +2387,17 @@ impl<'db> Checker<'db, '_> {
                 {
                     innermost = operand;
                 }
-                self.infer(innermost);
-                self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
-                unknown(self.db)
+                let inner = self.infer(innermost);
+                let inner = self.structural(inner);
+                match inner.kind(self.db) {
+                    TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {
+                        scalar(self.db, Atomic::Logical)
+                    }
+                    _ => {
+                        self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
+                        unknown(self.db)
+                    }
+                }
             }
             UnaryOperator::Not => self.infer_unary_not(operand),
             UnaryOperator::Plus | UnaryOperator::Tilde | UnaryOperator::Help => {
@@ -3782,6 +3790,18 @@ impl<'db> Checker<'db, '_> {
             .collect()
     }
 
+    /// Overload results that differ only in container shape (`lapply` over an unchecked
+    /// vector) stay guessable; a differing `integer` against `double` would mislead.
+    fn is_numeric_result(&self, ty: Ty<'db>) -> bool {
+        match ty.kind(self.db) {
+            TyKind::Scalar(Atomic::Integer | Atomic::Double) => true,
+            TyKind::Vector(element) => {
+                matches!(element.kind(self.db), TyKind::Scalar(Atomic::Integer | Atomic::Double))
+            }
+            _ => false,
+        }
+    }
+
     fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
         entries
             .iter()
@@ -3905,6 +3925,9 @@ impl<'db> Checker<'db, '_> {
         if unchecked_argument
             && let Some((_, _, first)) = fits.first()
             && fits.iter().any(|(_, _, results)| results != first)
+            && fits.iter().any(|(_, _, results)| {
+                results.iter().any(|&result| self.is_numeric_result(result))
+            })
         {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return Some(unknown(self.db));
@@ -4172,6 +4195,11 @@ impl<'db> Checker<'db, '_> {
                     matches!(
                         self.table.shallow_resolve(self.db, member).kind(self.db),
                         TyKind::Function(_)
+                    )
+                }) && members.iter().any(|&member| {
+                    matches!(
+                        self.table.shallow_resolve(self.db, member).kind(self.db),
+                        TyKind::Var(_)
                     )
                 }) && members.iter().all(|&member| {
                     matches!(
