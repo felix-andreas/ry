@@ -67,7 +67,7 @@ installed <- function() rownames(installed.packages(lib.loc = library_dir))
 
 with_warnings({
   install.packages(c("remotes", "pak"), lib = library_dir)
-  install.packages(roots, lib = library_dir, dependencies = c("Depends", "Imports", "LinkingTo", "Suggests"))
+  install.packages(roots, lib = library_dir, dependencies = TRUE)
 })
 
 for (remote in remotes) {
@@ -78,7 +78,7 @@ for (remote in remotes) {
   }
   if (dir.exists(checkout)) {
     with_warnings({
-      remotes::install_deps(checkout, lib = library_dir, dependencies = c("Depends", "Imports", "LinkingTo", "Suggests"))
+      remotes::install_deps(checkout, lib = library_dir, dependencies = TRUE)
       install.packages(checkout, repos = NULL, type = "source", lib = library_dir)
     })
   }

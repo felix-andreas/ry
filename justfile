@@ -256,3 +256,7 @@ oracle *args:
 # Generate the synthetic benchmark code bases, e.g. `just bench-gen --out .bench --lines 10000`.
 bench-gen *args:
     python3 -I tools/bench/generate.py {{ args }}
+
+# Run a generated package's tests under GNU R, e.g. `just bench-test .bench/finbench`.
+bench-test package reporter="summary":
+    Rscript tools/bench/run-tests.R {{ package }} {{ reporter }}

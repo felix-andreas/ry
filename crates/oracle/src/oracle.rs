@@ -9,6 +9,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Deserialize;
 use similar::TextDiff;
@@ -149,7 +150,9 @@ impl Engine for ProcessEngine {
 
 fn scratch_directory(script: &Path) -> Result<PathBuf, String> {
     let stem = script.file_stem().and_then(|stem| stem.to_str()).unwrap_or("case");
-    let directory = std::env::temp_dir().join(format!("ry-oracle-{}-{stem}", std::process::id()));
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let run = RUNS.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!("ry-oracle-{}-{run}-{stem}", std::process::id()));
     std::fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     Ok(directory)
 }
