@@ -5,6 +5,7 @@
 use crate::cli::{MinSeverity, OutputFormat, render_findings, report, warn_config};
 use crate::config::Config;
 use crate::diagnostics::{apply_suppressions, document_diagnostics};
+use repl::{Filtered, InputFilter};
 use salsa::Setter;
 use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::stubs::install_shipped_stubs;
@@ -13,7 +14,7 @@ use semantics::{
 };
 use std::path::{Path, PathBuf};
 use std::thread;
-use syntax::{SyntaxNode, erase_inline_annotations, is_inline_annotation};
+use syntax::{SyntaxNode, TextSize, erase_inline_annotations, is_inline_annotation};
 
 /// Analysis state for one run or one console session. A console session is checked as one
 /// growing script, so a command sees the definitions earlier commands made.
@@ -175,27 +176,62 @@ fn has_inline_annotation(root: &SyntaxNode) -> bool {
 /// GNU R reads the plain program an annotated one means.
 pub struct Erase;
 
-impl repl::InputFilter for Erase {
-    fn filter(&mut self, input: &str) -> Option<String> {
-        Some(erase(input))
+impl InputFilter for Erase {
+    fn filter(&mut self, input: &str) -> Filtered {
+        Filtered::Run(erase(input))
     }
 }
 
-/// The console's filter: checks each command, then hands the runtime either the command as
-/// typed (ry's runtime reads annotations) or its erasure (GNU R cannot).
+/// The console's filter. The console hands it one line at a time, so it holds lines until they
+/// form a whole command, checks the command, then releases it either as typed (ry's runtime
+/// reads annotations) or erased (GNU R cannot).
 pub struct ConsoleFilter {
-    pub preflight: Preflight,
-    pub erase: bool,
+    preflight: Preflight,
+    erase: bool,
+    /// The lines of an unfinished command, each newline-terminated.
+    held: String,
 }
 
-impl repl::InputFilter for ConsoleFilter {
-    fn filter(&mut self, input: &str) -> Option<String> {
-        match self.preflight.check(input) {
-            Verdict::Refuse => None,
-            Verdict::Run if self.erase => Some(erase(input)),
-            Verdict::Run => Some(input.to_owned()),
+impl ConsoleFilter {
+    pub fn new(preflight: Preflight, erase: bool) -> ConsoleFilter {
+        ConsoleFilter {
+            preflight,
+            erase,
+            held: String::new(),
         }
     }
+}
+
+impl InputFilter for ConsoleFilter {
+    fn filter(&mut self, input: &str) -> Filtered {
+        self.held.push_str(input);
+        if is_unfinished(&self.held) {
+            self.held.push('\n');
+            return Filtered::Hold;
+        }
+        let command = std::mem::take(&mut self.held);
+        match self.preflight.check(&command) {
+            Verdict::Refuse => Filtered::Refuse,
+            Verdict::Run if self.erase => Filtered::Run(erase(&command)),
+            Verdict::Run => Filtered::Run(command),
+        }
+    }
+
+    fn interrupt(&mut self) {
+        self.held.clear();
+    }
+}
+
+/// R's console rule: input is unfinished when its first syntax error is that it ended early.
+/// A broken `#:` comment is only a comment to R, so it never holds input back.
+fn is_unfinished(text: &str) -> bool {
+    let parse = syntax::parse(text);
+    let end = TextSize::of(text.trim_end());
+    parse
+        .errors()
+        .iter()
+        .find(|failure| !failure.in_annotation)
+        .is_some_and(|failure| failure.range.start() >= end)
 }
 
 pub fn erase(input: &str) -> String {

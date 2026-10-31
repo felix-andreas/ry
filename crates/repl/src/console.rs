@@ -3,7 +3,9 @@
 //! whose console loop calls the callback the same way.
 
 use crate::libr::{self, RApi};
-use crate::{ConsoleHooks, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter};
+use crate::{
+    ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
+};
 use crossterm::terminal;
 use nu_ansi_term::{Color, Style};
 use reedline::{
@@ -141,10 +143,12 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
     let mut filter = options.filter;
     if let Some(script) = script {
         let script = normalize_line_endings(&script);
-        // A script whose filter refuses it does not run at all.
-        let script = match filter.as_mut() {
-            Some(filter) => filter.filter(&script).unwrap_or_default(),
-            None => script,
+        // A script whose filter refuses it does not run at all, and an unfinished one is R's
+        // to report.
+        let script = match filter.as_mut().map(|filter| filter.filter(&script)) {
+            Some(Filtered::Run(script)) => script,
+            Some(Filtered::Refuse) => String::new(),
+            Some(Filtered::Hold) | None => script,
         };
         pending.extend(script.into_bytes());
         pending.push_back(b'\n');
@@ -157,6 +161,7 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
             completer,
             hooks: options.hooks,
             filter,
+            held: false,
             ry_runtime,
         });
     });
@@ -193,6 +198,8 @@ struct Console {
     hooks: Option<Box<dyn ConsoleHooks>>,
     /// Sees each top-level command before R does, and may rewrite or refuse it.
     filter: Option<Box<dyn InputFilter>>,
+    /// The filter holds an unfinished command, so the next read continues it.
+    held: bool,
     /// Driving ry's own runtime, whose console reads only at the top-level prompt.
     ry_runtime: bool,
 }
@@ -244,12 +251,26 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 return 0;
             }
             // R hands its hook a valid NUL-terminated prompt (or null).
-            let prompt_text = unsafe { libr::prompt_text(prompt) };
+            let prompt_text = match console.held {
+                true => "+ ".to_owned(),
+                false => unsafe { libr::prompt_text(prompt) },
+            };
             // Input for `readline()`, `menu()` or the browser must reach them untouched.
             let at_top_level = console.ry_runtime || libr::at_top_level();
             match console.editor.read_line(&RPrompt { text: prompt_text }) {
                 Ok(Signal::Success(line)) => {
                     let line = normalize_line_endings(&line);
+                    let line = match console.filter.as_mut() {
+                        Some(filter) if at_top_level => {
+                            let filtered = filter.filter(&line);
+                            console.held = filtered == Filtered::Hold;
+                            match filtered {
+                                Filtered::Run(line) => line,
+                                Filtered::Hold | Filtered::Refuse => continue,
+                            }
+                        }
+                        _ => line,
+                    };
                     if at_top_level
                         && let Some(hooks) = console.hooks.as_mut()
                         && let Some(code) = hooks.before_command()
@@ -257,13 +278,6 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                         console.pending.extend(code.into_bytes());
                         console.pending.push_back(b'\n');
                     }
-                    let line = match console.filter.as_mut() {
-                        Some(filter) if at_top_level => match filter.filter(&line) {
-                            Some(line) => line,
-                            None => continue,
-                        },
-                        _ => line,
-                    };
                     if let Some(completer) = &console.completer {
                         completer
                             .lock()
@@ -272,6 +286,12 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                     }
                     console.pending.extend(line.into_bytes());
                     console.pending.push_back(b'\n');
+                }
+                Ok(Signal::CtrlC) if console.held => {
+                    console.held = false;
+                    if let Some(filter) = console.filter.as_mut() {
+                        filter.interrupt();
+                    }
                 }
                 Ok(Signal::CtrlC) => continue,
                 // A terminal the editor can no longer drive ends the session like Ctrl-D.

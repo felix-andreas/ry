@@ -49,10 +49,8 @@ fn main() -> ExitCode {
                 ReplKeybindings::Emacs => repl::Keybindings::Emacs,
                 ReplKeybindings::Vi => repl::Keybindings::Vi,
             };
-            let filter: Box<dyn repl::InputFilter> = Box::new(ConsoleFilter {
-                preflight,
-                erase: !on_ry_runtime,
-            });
+            let filter: Box<dyn repl::InputFilter> =
+                Box::new(ConsoleFilter::new(preflight, !on_ry_runtime));
             if on_ry_runtime {
                 // ry's runtime has no `.Call` routines or package loader of ry's yet, so the
                 // console starts bare.

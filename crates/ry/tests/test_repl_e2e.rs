@@ -41,6 +41,10 @@ impl ReplSession {
     }
 
     fn start_in(directory: Option<&std::path::Path>) -> ReplSession {
+        ReplSession::start_with(directory, &[])
+    }
+
+    fn start_with(directory: Option<&std::path::Path>, arguments: &[&str]) -> ReplSession {
         let lock = SESSION_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -54,6 +58,7 @@ impl ReplSession {
             .expect("openpty");
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ry"));
         command.arg("repl");
+        command.args(arguments);
         if let Some(directory) = directory {
             command.cwd(directory);
         }
@@ -402,4 +407,190 @@ fn run_error_exits_nonzero() {
         !stdout.contains("unreached"),
         "the error must halt the script: {stdout}"
     );
+}
+
+/// ry's runtime is the `libR` built beside the binary, which `cargo test -p ry-lang` does not
+/// build, so these tests skip without it: `cargo build -p libr` first.
+fn ry_runtime_available() -> bool {
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_ry"));
+    let library = if cfg!(target_os = "macos") {
+        "libR.dylib"
+    } else {
+        "libR.so"
+    };
+    let available = std::env::var_os("RY_LIBR").is_some()
+        || binary
+            .parent()
+            .is_some_and(|directory| directory.join(library).exists());
+    if !available {
+        eprintln!("skipped: ry's runtime library is not built");
+    }
+    available
+}
+
+/// Runs `files[0]` with `ry run`, in a project made of `files` (name, text), on `runtime`.
+fn run_project(runtime: &str, files: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    let directory = tempfile::tempdir().expect("temp dir");
+    for (name, text) in files {
+        fs::write(directory.path().join(name), text).expect("write project file");
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("run")
+        .arg("--runtime")
+        .arg(runtime)
+        .arg(files[0].0)
+        .current_dir(directory.path())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run the binary");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The runtimes available here: GNU R when installed, ry's when built.
+fn runtimes() -> Vec<&'static str> {
+    let mut runtimes = Vec::new();
+    if r_available() {
+        runtimes.push("gnu-r");
+    }
+    if ry_runtime_available() {
+        runtimes.push("ry");
+    }
+    runtimes
+}
+
+const DISCOUNT: &str = "apply_discount <- function(price: double, rate: double = 0.2) -> double {\n  price * (1 - rate)\n}\ncount: integer <- 3L\nprint(apply_discount(100))\nprint(count)\n";
+
+#[test]
+fn run_executes_annotated_code_on_both_runtimes() {
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = run_project(runtime, &[("script.R", DISCOUNT)]);
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(
+            stdout.contains("[1] 80") && stdout.contains("[1] 3"),
+            "{runtime}: {stdout}"
+        );
+        assert!(
+            stderr.is_empty(),
+            "{runtime}: a satisfied annotation prints nothing: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn ry_runtime_checks_arguments_and_returns_at_the_boundary() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let script = "f <- function(x: integer) -> integer x\n\
+        print(tryCatch(f(\"a\"), error = conditionMessage))\n\
+        g <- function() -> character { 1 }\n\
+        print(tryCatch(g(), error = conditionMessage))\n\
+        lazy <- function(x: integer, y: integer) x\n\
+        print(lazy(1L, stop(\"never forced\")))\n";
+    let (status, stdout, stderr) = run_project("ry", &[("script.R", script)]);
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(
+        stdout.contains("argument `x` must be `integer`, not `character`"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("the function must return `character`, not `double`"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("[1] 1"),
+        "an unforced parameter stays unchecked: {stdout}"
+    );
+}
+
+#[test]
+fn run_warns_when_a_comment_and_an_inline_annotation_disagree() {
+    let script = "#: fn(x: character) -> character\nf <- function(x: integer) x\nprint(f(2L))\n";
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = run_project(runtime, &[("script.R", script)]);
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(stdout.contains("[1] 2"), "{runtime}: {stdout}");
+        assert!(
+            stderr.contains("annotation-mismatch"),
+            "{runtime}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn run_with_inline_annotations_off_warns_and_skips_the_checks() {
+    let config = "[check]\ninline-annotations = false\n";
+    let script = "f <- function(x: integer) is.character(x)\nprint(f(\"a\"))\n";
+    for runtime in runtimes() {
+        let (status, stdout, stderr) =
+            run_project(runtime, &[("script.R", script), ("ry.toml", config)]);
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(
+            stdout.contains("[1] TRUE"),
+            "{runtime}: nothing checks `x`: {stdout}"
+        );
+        assert!(
+            stderr.contains("inline type annotations are turned off"),
+            "{runtime}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn run_in_strict_mode_refuses_untyped_code() {
+    let config = "[check]\ntyping = true\nstrict = true\n";
+    let untyped = "describe <- function(x) cat(\"a value\\n\")\ndescribe(1)\n";
+    let typed = "describe <- function(x: double) cat(\"a value\\n\")\ndescribe(1)\n";
+    for runtime in runtimes() {
+        let (status, stdout, stderr) =
+            run_project(runtime, &[("script.R", untyped), ("ry.toml", config)]);
+        assert_eq!(status, Some(1), "{runtime}: {stderr}");
+        assert!(
+            !stdout.contains("a value"),
+            "{runtime}: refused code must not run: {stdout}"
+        );
+        assert!(
+            stderr.contains("strict mode found 1 error"),
+            "{runtime}: {stderr}"
+        );
+        let (status, stdout, stderr) =
+            run_project(runtime, &[("script.R", typed), ("ry.toml", config)]);
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(stdout.contains("a value"), "{runtime}: {stdout}");
+    }
+}
+
+#[test]
+fn the_console_holds_a_multiline_command_and_refuses_it_in_strict_mode() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("ry.toml"),
+        "[check]\ntyping = true\nstrict = true\n",
+    )
+    .expect("write config");
+    for runtime in runtimes() {
+        let mut session =
+            ReplSession::start_with(Some(directory.path()), &["--no-load", "--runtime", runtime]);
+        session.expect("console");
+        // Input typed before the editor takes the terminal would arrive as one paste.
+        for line in [
+            "f <- function(x: integer) {\r",
+            "x * 2L\r",
+            "}\r",
+            "f(21L)\r",
+        ] {
+            session.settle(Duration::from_millis(400));
+            session.send(line);
+        }
+        session.expect("[1] 42");
+        session.send("g <- function(y) cat(\"hi\\n\")\r");
+        session.expect("strict mode found 1 error");
+        session.send("exists(\"g\")\r");
+        session.expect("[1] FALSE");
+        session.quit();
+    }
 }

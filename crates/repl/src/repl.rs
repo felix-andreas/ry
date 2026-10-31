@@ -46,8 +46,20 @@ pub trait ConsoleHooks: Send {
 /// Sees R input before the engine parses it: each top-level command typed at the console, and a
 /// script fed whole.
 pub trait InputFilter: Send {
-    /// The text to evaluate in place of `input`, or `None` to drop the input unevaluated.
-    fn filter(&mut self, input: &str) -> Option<String>;
+    fn filter(&mut self, input: &str) -> Filtered;
+    /// Ctrl-C at the console drops the input the filter holds.
+    fn interrupt(&mut self) {}
+}
+
+/// What an [`InputFilter`] does with a piece of input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Filtered {
+    /// Evaluate this text in place of the input, and of any input held before it.
+    Run(String),
+    /// The command is unfinished: keep it and read its next line at a continuation prompt.
+    Hold,
+    /// Drop the input, and any held before it, unevaluated.
+    Refuse,
 }
 
 #[derive(Default)]
