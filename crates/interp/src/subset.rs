@@ -2283,20 +2283,18 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
 unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let deparse_level = values::as_integer_scalar(call.arg(0));
     let items: Vec<Arg> = call.args[1..].to_vec();
-    // Dispatch: any data frame (or other classed argument with a method) takes over.
+    // S3 dispatch, as GNU R's `do_bind` does it: the first classed argument with a method
+    // picks it, and the method gets the `...` arguments alone, never `deparse.level`.
     let generic = if by_row { "rbind" } else { "cbind" };
     for arg in &items {
-        if arg.value.is_object() {
-            let classes = crate::dispatch::implicit_class(arg.value)?;
-            for index in 0..length(classes) {
-                let method_name = format!("{generic}.{}", char_str(classes.element(index)));
-                let symbol = values::install(&method_name)?;
-                if let Some(method) = crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())? {
-                    let mut args = vec![Arg { tag: values::install("deparse.level")?, value: call.arg(0) }];
-                    args.extend(items.iter().copied());
-                    let promised: Vec<Arg> = args.iter().map(|arg| Arg { tag: arg.tag, value: arg.value }).collect();
-                    return eval::apply(nil(), method, &promised, call.env);
-                }
+        if !arg.value.is_object() {
+            continue;
+        }
+        let classes = crate::dispatch::implicit_class(arg.value)?;
+        for index in 0..length(classes) {
+            let symbol = values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
+            if let Some(method) = crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())? {
+                return eval::apply(call.call, method, &items, call.env);
             }
         }
     }

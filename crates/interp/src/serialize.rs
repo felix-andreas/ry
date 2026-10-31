@@ -229,10 +229,14 @@ impl Reader<'_> {
             NAMESPACESXP => {
                 let names = self.string_vector()?;
                 let function = eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                // GNU R names the object being read when it knows it, else "<unknown>", which
+                // `..getNamespace` compares as a string when the namespace fails to load.
+                let location = values::scalar_string("<unknown>")?;
+                crate::heap().root(location);
                 let env = eval::apply(
                     nil(),
                     function,
-                    &eval::value_args(&[names, nil()]),
+                    &eval::value_args(&[names, location]),
                     values::global_env(),
                 )?;
                 self.add_reference(env);
@@ -287,6 +291,9 @@ impl Reader<'_> {
                 } else {
                     (car, cdr)
                 };
+                if matches!(object_kind, SexpType::Pairlist | SexpType::Language) {
+                    argument_cells(cdr)?;
+                }
                 let object = values::triple(object_kind, car, cdr, tag)?;
                 if attributes != nil() {
                     crate::heap().set_attrib(object, attributes);
@@ -521,12 +528,24 @@ impl Reader<'_> {
                 crate::heap().set_car(object, car);
                 let cdr_kind = self.integer()? as u32;
                 let cdr = self.bytecode_language(cdr_kind, reps)?;
+                argument_cells(cdr)?;
                 crate::heap().set_cdr(object, cdr);
                 Ok(object)
             }
             _ => self.item(),
         }
     }
+}
+
+/// Makes the rest of a call or pairlist a pairlist. GNU R walks argument lists by `CDR` alone,
+/// so it never notices a call cell (`LANGSXP`) in an argument position, and its streams carry
+/// some, notably in byte-code constants. ry's argument loops stop at the first cell that is not
+/// a pairlist, so such a call would silently lose its arguments.
+unsafe fn argument_cells(rest: Sexp) -> R<()> {
+    if rest.kind() == SexpType::Language {
+        crate::heap().retype(rest, SexpType::Pairlist)?;
+    }
+    Ok(())
 }
 
 /// A closure body or promise code that GNU R compiled: its expression.

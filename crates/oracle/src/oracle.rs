@@ -125,13 +125,13 @@ impl ProcessEngine {
 }
 
 /// The `ry` binary: `$ORACLE_RY`, else the workspace's debug build.
+/// A relative `ORACLE_RY` resolves against the current directory, because the engines run
+/// each case from the case's own directory.
 pub fn ry_program() -> String {
-    std::env::var("ORACLE_RY").unwrap_or_else(|_| {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/debug/ry")
-            .display()
-            .to_string()
-    })
+    let program = std::env::var("ORACLE_RY").map(PathBuf::from).unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry")
+    });
+    std::fs::canonicalize(&program).unwrap_or(program).display().to_string()
 }
 
 impl Engine for ProcessEngine {
