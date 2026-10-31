@@ -6,7 +6,7 @@
 
 use crate::{
     Rboolean,
-    boundary::{ApiResult, DlFunc, enter, error, ry_call_init, with_native_scope},
+    boundary::{ApiResult, DlFunc, enter, error, ry_call_dlopen, ry_call_init, with_native_scope},
     globals::{R_ClassSymbol, R_NamesSymbol},
     runtime,
     strings::c_bytes,
@@ -38,8 +38,21 @@ pub struct Routine {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RoutineKind {
+    C,
     Call,
+    Fortran,
     External,
+}
+
+impl RoutineKind {
+    pub fn interface(self) -> &'static str {
+        match self {
+            RoutineKind::C => ".C",
+            RoutineKind::Call => ".Call",
+            RoutineKind::Fortran => ".Fortran",
+            RoutineKind::External => ".External",
+        }
+    }
 }
 
 /// `R_CallMethodDef` and `R_ExternalMethodDef`.
@@ -76,7 +89,9 @@ impl Dll {
 
     fn registered(&self, kind: RoutineKind) -> &[Routine] {
         match kind {
+            RoutineKind::C => &self.c_routines,
             RoutineKind::Call => &self.call_routines,
+            RoutineKind::Fortran => &self.fortran_routines,
             RoutineKind::External => &self.external_routines,
         }
     }
@@ -92,8 +107,10 @@ unsafe fn dlerror_text() -> String {
 }
 
 /// `dyn.load`: opens the library, runs its initialization routine, and returns its record. A
-/// library that is already loaded is returned as it is.
-pub unsafe fn load_library(path: &str) -> ApiResult<*mut Dll> {
+/// library that is already loaded is returned as it is. With `local` false, its symbols become
+/// visible to libraries loaded later, as `dyn.load(local = FALSE)` asks (RcppParallel loads
+/// itself that way so packages linking to it resolve its functions).
+pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     let runtime = runtime();
     let canonical = std::fs::canonicalize(path)
         .map(|path| path.to_string_lossy().into_owned())
@@ -102,7 +119,17 @@ pub unsafe fn load_library(path: &str) -> ApiResult<*mut Dll> {
         return Ok(&mut **dll);
     }
     let c_path = CString::new(canonical.clone()).map_err(|_| error("invalid library path"))?;
-    let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+    let visibility = if local {
+        libc::RTLD_LOCAL
+    } else {
+        libc::RTLD_GLOBAL
+    };
+    let mut handle = std::ptr::null_mut();
+    with_native_scope(|| {
+        let mut status = 0;
+        handle = ry_call_dlopen(c_path.as_ptr(), libc::RTLD_NOW | visibility, &mut status);
+        status
+    })?;
     if handle.is_null() {
         return Err(error(format!(
             "unable to load shared object '{canonical}':\n  {}",
@@ -113,7 +140,12 @@ pub unsafe fn load_library(path: &str) -> ApiResult<*mut Dll> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let name = file_name.split('.').next().unwrap_or(&file_name).to_owned();
+    // The library's name is its file name without the extension (`data_table.so` is
+    // `data_table`), which `R_init_<name>` and `PACKAGE =` use.
+    let name = file_name
+        .rsplit_once('.')
+        .map_or(file_name.as_str(), |(stem, _)| stem)
+        .to_owned();
     runtime
         .dlls
         .push(Box::new(Dll::new(canonical, name.clone(), handle)));
@@ -176,17 +208,20 @@ pub unsafe fn find_routine(
             return Ok((routine.function, Some(routine.arity)));
         }
         if dll.use_dynamic_symbols {
-            let c_name = CString::new(name).map_err(|_| error("invalid routine name"))?;
+            // Fortran compilers append an underscore to external names.
+            let symbol_name = if kind == RoutineKind::Fortran {
+                format!("{}_", name.to_ascii_lowercase())
+            } else {
+                name.to_owned()
+            };
+            let c_name = CString::new(symbol_name).map_err(|_| error("invalid routine name"))?;
             let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
             if !symbol.is_null() {
                 return Ok((std::mem::transmute::<*mut c_void, DlFunc>(symbol), None));
             }
         }
     }
-    let interface = match kind {
-        RoutineKind::Call => ".Call",
-        RoutineKind::External => ".External",
-    };
+    let interface = kind.interface();
     Err(match package {
         Some(package) => error(format!(
             "\"{name}\" not available for {interface}() for package \"{package}\""
@@ -348,8 +383,9 @@ pub unsafe extern "C" fn R_RegisterCCallable(
     runtime().c_callables.insert(key, address);
 }
 
-/// `R_GetCCallable`. GNU R loads the providing namespace when the callable is missing; without
-/// the interpreter that cannot happen yet, so a missing callable is an error.
+/// `R_GetCCallable`. A callable that is not registered yet makes GNU R load the providing
+/// package's namespace, whose initialization registers it; ry does the same through the
+/// interpreter when one is installed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GetCCallable(
     package: *const c_char,
@@ -358,13 +394,165 @@ pub unsafe extern "C" fn R_GetCCallable(
     enter(|| {
         let package = String::from_utf8_lossy(c_bytes(package)).into_owned();
         let name = String::from_utf8_lossy(c_bytes(name)).into_owned();
-        match runtime().c_callables.get(&(package.clone(), name.clone())) {
-            Some(&address) if address != 0 => {
-                Ok(Some(std::mem::transmute::<usize, DlFunc>(address)))
-            }
-            _ => Err(error(format!(
-                "function '{name}' not provided by package '{package}'"
-            ))),
+        let key = (package.clone(), name.clone());
+        let registered = |key: &(String, String)| match runtime().c_callables.get(key) {
+            Some(&address) if address != 0 => Some(std::mem::transmute::<usize, DlFunc>(address)),
+            _ => None,
+        };
+        if let Some(function) = registered(&key) {
+            return Ok(Some(function));
         }
+        if crate::eval::evaluator().is_some()
+            && crate::environments::registered_namespace(package.as_bytes())?.kind()
+                == SexpType::Nil
+        {
+            let package_name = crate::strings::mk_char(package.as_bytes(), Encoding::Utf8)?;
+            let package_name = crate::memory::scalar_string(package_name)?;
+            runtime().heap.root(package_name);
+            crate::eval::call_namespaced("base", "loadNamespace", &[package_name])?;
+            if let Some(function) = registered(&key) {
+                return Ok(Some(function));
+            }
+        }
+        Err(error(format!(
+            "function '{name}' not provided by package '{package}'"
+        )))
+    })
+}
+
+/// The loaded libraries, oldest first, as `getLoadedDLLs()` lists them.
+pub fn loaded_libraries() -> Vec<(String, String)> {
+    runtime()
+        .dlls
+        .iter()
+        .map(|dll| (dll.name.clone(), dll.path.clone()))
+        .collect()
+}
+
+/// How many routines of each interface a library registered: `.C`, `.Call`, `.Fortran` and
+/// `.External`.
+pub fn registered_counts(name: &str) -> Option<[usize; 4]> {
+    runtime()
+        .dlls
+        .iter()
+        .find(|dll| dll.name == name)
+        .map(|dll| {
+            [
+                dll.c_routines.len(),
+                dll.call_routines.len(),
+                dll.fortran_routines.len(),
+                dll.external_routines.len(),
+            ]
+        })
+}
+
+/// The registered routine `name` of the library `package` (any interface), as
+/// `getNativeSymbolInfo` finds it: registered routines are found even when the library forces
+/// symbols, because that only forbids lookup by a name string in `.Call` itself.
+/// An unregistered routine comes from the library's dynamic symbol table, as with GNU R's
+/// lookup, with an unknown arity (-1).
+pub unsafe fn registered_routine(
+    name: &str,
+    package: &str,
+) -> Option<(RoutineKind, DlFunc, c_int)> {
+    let runtime = runtime();
+    let dll = runtime.dlls.iter().rev().find(|dll| dll.name == package)?;
+    for kind in [
+        RoutineKind::Call,
+        RoutineKind::External,
+        RoutineKind::C,
+        RoutineKind::Fortran,
+    ] {
+        if let Some(routine) = dll
+            .registered(kind)
+            .iter()
+            .find(|routine| routine.name == name)
+        {
+            return Some((kind, routine.function, routine.arity));
+        }
+    }
+    let c_name = CString::new(name).ok()?;
+    let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
+    (!symbol.is_null()).then(|| {
+        (
+            RoutineKind::Call,
+            std::mem::transmute::<*mut c_void, DlFunc>(symbol),
+            -1,
+        )
+    })
+}
+
+/// A `NativeSymbolInfo` object for a registered routine: a list of `name`, `address` (an
+/// external pointer of class `RegisteredNativeSymbol`), `dll` and `numParameters`, as
+/// `getNativeSymbolInfo` returns, which `.Call` accepts in place of a name.
+pub unsafe fn native_symbol_info(name: &str, package: &str) -> ApiResult<Sexp> {
+    let (kind, function, arity) = registered_routine(name, package)
+        .ok_or_else(|| error(format!("no such symbol {name} in package {package}")))?;
+    let runtime = runtime();
+    let nil = runtime.nil();
+    let address = runtime
+        .heap
+        .alloc_external_ptr(function as *mut c_void, nil, nil)?;
+    runtime.heap.root(address);
+    let class = crate::strings::mk_char(b"RegisteredNativeSymbol", Encoding::Native)?;
+    let class = crate::memory::scalar_string(class)?;
+    crate::attributes::install_attribute(address, R_ClassSymbol.get(), class)?;
+    address.set_object(true);
+    let info = runtime.heap.alloc_vector(SexpType::List, 4)?;
+    runtime.heap.root(info);
+    let name_value =
+        crate::memory::scalar_string(crate::strings::mk_char(name.as_bytes(), Encoding::Utf8)?)?;
+    runtime.heap.set_element(info, 0, name_value);
+    runtime.heap.set_element(info, 1, address);
+    let dll = runtime
+        .dlls
+        .iter_mut()
+        .rev()
+        .find(|dll| dll.name == package)
+        .map(|dll| &mut **dll as *mut Dll)
+        .ok_or_else(|| error(format!("package {package} is not loaded")))?;
+    let dll_value = dll_info_object(dll)?;
+    runtime.heap.set_element(info, 2, dll_value);
+    runtime
+        .heap
+        .set_element(info, 3, crate::memory::scalar(SexpType::Integer, arity)?);
+    let names = runtime.heap.alloc_vector(SexpType::String, 4)?;
+    runtime.heap.root(names);
+    for (index, label) in ["name", "address", "dll", "numParameters"]
+        .iter()
+        .enumerate()
+    {
+        let label = runtime.heap.mk_char(label.as_bytes(), Encoding::Native)?;
+        runtime.heap.set_element(names, index, label);
+    }
+    crate::attributes::install_attribute(info, R_NamesSymbol.get(), names)?;
+    let class_name = match kind {
+        RoutineKind::Call => "CallRoutine",
+        RoutineKind::External => "ExternalRoutine",
+        RoutineKind::C => "CRoutine",
+        RoutineKind::Fortran => "FortranRoutine",
+    };
+    let classes = runtime.heap.alloc_vector(SexpType::String, 3)?;
+    runtime.heap.root(classes);
+    for (index, label) in [class_name, "NativeSymbolInfo", "RegisteredNativeSymbol"]
+        .iter()
+        .enumerate()
+    {
+        let label = runtime.heap.mk_char(label.as_bytes(), Encoding::Native)?;
+        runtime.heap.set_element(classes, index, label);
+    }
+    crate::attributes::install_attribute(info, R_ClassSymbol.get(), classes)?;
+    info.set_object(true);
+    Ok(info)
+}
+
+/// `ry_native_symbol(name, package)`: `native_symbol_info` for hosts and tests.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_native_symbol(name: *const c_char, package: *const c_char) -> Sexp {
+    enter(|| {
+        native_symbol_info(
+            &String::from_utf8_lossy(c_bytes(name)),
+            &String::from_utf8_lossy(c_bytes(package)),
+        )
     })
 }

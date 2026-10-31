@@ -92,6 +92,16 @@ unsafe fn typed_data(
     wanted: &str,
     writable: bool,
 ) -> ApiResult<*mut u8> {
+    check_type(object, accepted, accessor, wanted)?;
+    data_pointer(object, writable)
+}
+
+unsafe fn check_type(
+    object: Sexp,
+    accepted: &[SexpType],
+    accessor: &str,
+    wanted: &str,
+) -> ApiResult<()> {
     let kind = object.kind();
     if !accepted.contains(&kind) {
         return Err(error(format!(
@@ -99,7 +109,7 @@ unsafe fn typed_data(
             kind.name()
         )));
     }
-    data_pointer(object, writable)
+    Ok(())
 }
 
 const INTEGER_TYPES: &[SexpType] = &[SexpType::Integer, SexpType::Logical];
@@ -306,11 +316,7 @@ pub fn format_complex(value: Rcomplex) -> String {
         return "NA".into();
     }
     let imaginary = format_real(value.i.abs());
-    let sign = if value.i < 0.0 || (value.i == 0.0 && value.i.is_sign_negative()) {
-        '-'
-    } else {
-        '+'
-    };
+    let sign = if value.i < 0.0 { '-' } else { '+' };
     format!("{}{sign}{imaginary}i", format_real(value.r))
 }
 
@@ -336,13 +342,13 @@ pub unsafe fn element_as_charsxp(object: Sexp, index: usize) -> ApiResult<Sexp> 
             format_real(value)
         }
         SexpType::Complex => {
-            let value = *(data_pointer(object, false)? as *const Rcomplex).add(index);
+            let value = altrep::elt::<Rcomplex>(object, index as R_xlen_t)?;
             if is_na_real(value.r) || is_na_real(value.i) {
                 return Ok(na);
             }
             format_complex(value)
         }
-        SexpType::Raw => format!("{:02x}", *data_pointer(object, false)?.add(index)),
+        SexpType::Raw => format!("{:02x}", altrep::elt::<u8>(object, index as R_xlen_t)?),
         kind => {
             return Err(error(format!(
                 "cannot coerce type '{}' to character",
@@ -379,6 +385,19 @@ pub unsafe fn coerce_vector(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
     }
     if target == SexpType::String && source == SexpType::Integer && inherits(object, "factor")? {
         return as_character_factor(object);
+    }
+    if object.is_altrep()
+        && let Some(converted) = altrep::coerce(object, target)?
+    {
+        return Ok(converted);
+    }
+    // As in GNU R, a number vector without attributes converts to character lazily, which
+    // makes `as.character(1:n)` cheap when only some elements are read.
+    if target == SexpType::String
+        && matches!(source, SexpType::Integer | SexpType::Real)
+        && object.attrib() == runtime.nil()
+    {
+        return altrep::deferred_string(object);
     }
     match source {
         SexpType::Nil => alloc_vector(target, 0),
@@ -447,7 +466,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     }
                     SexpType::Real => real_to_logical(real_elt(object, index)?),
                     SexpType::Complex => {
-                        let value = *(data_pointer(object, false)? as *const Rcomplex).add(index);
+                        let value = altrep::elt::<Rcomplex>(object, index as R_xlen_t)?;
                         if value.r.is_nan() || value.i.is_nan() {
                             NA_LOGICAL
                         } else {
@@ -462,7 +481,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             string_to_logical(element.bytes())
                         }
                     }
-                    SexpType::Raw => (*data_pointer(object, false)?.add(index) != 0) as i32,
+                    SexpType::Raw => (altrep::elt::<u8>(object, index as R_xlen_t)? != 0) as i32,
                     _ => NA_LOGICAL,
                 };
                 *(result.data() as *mut i32).add(index) = value;
@@ -476,7 +495,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                         value
                     }
                     SexpType::Complex => {
-                        let value = *(data_pointer(object, false)? as *const Rcomplex).add(index);
+                        let value = altrep::elt::<Rcomplex>(object, index as R_xlen_t)?;
                         let (converted, range) = real_to_int(value.r);
                         out_of_range |= range;
                         converted
@@ -499,7 +518,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             }
                         }
                     }
-                    SexpType::Raw => *data_pointer(object, false)?.add(index) as i32,
+                    SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as i32,
                     _ => NA_INTEGER,
                 };
                 *(result.data() as *mut i32).add(index) = value;
@@ -508,9 +527,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                 let value = match object.kind() {
                     SexpType::Integer | SexpType::Logical => int_to_real(int_elt(object, index)?),
                     SexpType::Real => real_elt(object, index)?,
-                    SexpType::Complex => {
-                        (*(data_pointer(object, false)? as *const Rcomplex).add(index)).r
-                    }
+                    SexpType::Complex => altrep::elt::<Rcomplex>(object, index as R_xlen_t)?.r,
                     SexpType::String => {
                         let element = sexp_elt(object, index)?;
                         if element == runtime().heap.known().na_string {
@@ -522,7 +539,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             })
                         }
                     }
-                    SexpType::Raw => *data_pointer(object, false)?.add(index) as f64,
+                    SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
                     _ => NA_REAL,
                 };
                 *(result.data() as *mut f64).add(index) = value;
@@ -542,7 +559,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             })
                         }
                     }
-                    SexpType::Raw => *data_pointer(object, false)?.add(index) as f64,
+                    SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
                     _ => NA_REAL,
                 };
                 let imaginary = if is_na_real(real) { NA_REAL } else { 0.0 };
@@ -599,11 +616,15 @@ unsafe fn element_vector(object: Sexp, index: usize) -> ApiResult<Sexp> {
         SexpType::String => runtime
             .heap
             .set_element(element, 0, sexp_elt(object, index)?),
-        _ => {
-            let size = kind.element_size().unwrap_or(0);
-            let source = data_pointer(object, false)?.add(index * size);
-            std::ptr::copy_nonoverlapping(source, element.data(), size);
+        SexpType::Integer | SexpType::Logical => {
+            *(element.data() as *mut i32) = int_elt(object, index)?
         }
+        SexpType::Real => *(element.data() as *mut f64) = real_elt(object, index)?,
+        SexpType::Complex => {
+            *(element.data() as *mut Rcomplex) = altrep::elt(object, index as R_xlen_t)?
+        }
+        SexpType::Raw => *element.data() = altrep::elt(object, index as R_xlen_t)?,
+        _ => return Err(error("cannot take an element of this vector")),
     }
     Ok(element)
 }
@@ -619,9 +640,8 @@ unsafe fn coerce_list(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                 let converted = runtime().heap.alloc_vector(target, length)?;
                 runtime().heap.root(converted);
                 for index in 0..length as usize {
-                    runtime()
-                        .heap
-                        .set_element(converted, index, object.element(index));
+                    let element = sexp_elt(object, index)?;
+                    runtime().heap.set_element(converted, index, element);
                 }
                 crate::memory::copy_attributes(converted, object, false)?;
                 converted
@@ -832,11 +852,15 @@ pub unsafe fn identical(left: Sexp, right: Sexp, flags: c_int) -> ApiResult<bool
                     single_na,
                 ),
                 SexpType::Complex => {
-                    let a = *(data_pointer(left, false)? as *const Rcomplex).add(index);
-                    let b = *(data_pointer(right, false)? as *const Rcomplex).add(index);
+                    let a = altrep::elt::<Rcomplex>(left, index as R_xlen_t)?;
+                    let b = altrep::elt::<Rcomplex>(right, index as R_xlen_t)?;
                     same_real(a.r, b.r, num_eq, single_na) && same_real(a.i, b.i, num_eq, single_na)
                 }
-                SexpType::Raw | SexpType::Char => {
+                SexpType::Raw => {
+                    altrep::elt::<u8>(left, index as R_xlen_t)?
+                        == altrep::elt::<u8>(right, index as R_xlen_t)?
+                }
+                SexpType::Char => {
                     *data_pointer(left, false)?.add(index)
                         == *data_pointer(right, false)?.add(index)
                 }
@@ -1039,6 +1063,67 @@ pub unsafe extern "C" fn DATAPTR_OR_NULL(object: Sexp) -> *const c_void {
     })
 }
 
+/// `DATAPTR_RW`, which GNU R declares for implementing `Dataptr` methods.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn DATAPTR_RW(object: Sexp) -> *mut c_void {
+    enter(|| Ok(data_pointer(object, true)? as *mut c_void))
+}
+
+/// Binaries built against older headers call this after checking `ALTREP(x)`; an ALTREP
+/// object still dispatches, so a stale check cannot read the instance's triple as data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn STDVEC_DATAPTR(object: Sexp) -> *mut c_void {
+    enter(|| Ok(data_pointer(object, true)? as *mut c_void))
+}
+
+/// GNU R refuses this for safety; ry hands out the writable pointer, which the collector
+/// tolerates because the vector joins the escaped set, so binaries that import it keep working.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn VECTOR_PTR(object: Sexp) -> *mut Sexp {
+    enter(|| {
+        Ok(typed_data(
+            object,
+            &[SexpType::List, SexpType::Expression],
+            "VECTOR_PTR",
+            "list",
+            true,
+        )? as *mut Sexp)
+    })
+}
+
+macro_rules! or_null_api {
+    ($name:ident, $type:ty, $accepted:expr, $accessor:literal, $wanted:literal) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(object: Sexp) -> *const $type {
+            enter(|| {
+                check_type(object, &$accepted, $accessor, $wanted)?;
+                if object.is_altrep() {
+                    return Ok(altrep::dataptr_or_null(object)? as *const $type);
+                }
+                Ok(object.data() as *const $type)
+            })
+        }
+    };
+}
+
+or_null_api!(
+    LOGICAL_OR_NULL,
+    c_int,
+    [SexpType::Logical],
+    "LOGICAL",
+    "logical"
+);
+or_null_api!(INTEGER_OR_NULL, c_int, INTEGER_TYPES, "INTEGER", "integer");
+or_null_api!(REAL_OR_NULL, f64, [SexpType::Real], "REAL", "numeric");
+or_null_api!(
+    COMPLEX_OR_NULL,
+    Rcomplex,
+    [SexpType::Complex],
+    "COMPLEX",
+    "complex"
+);
+or_null_api!(RAW_OR_NULL, u8, [SexpType::Raw], "RAW", "raw");
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
     enter(|| {
@@ -1229,21 +1314,7 @@ macro_rules! region_api {
                         " applied to the wrong type"
                     )));
                 }
-                if object.is_altrep() {
-                    if let Some(copied) = altrep::get_region::<$type>(object, start, count, buffer)?
-                    {
-                        return Ok(copied);
-                    }
-                }
-                let length = xlength(object)?;
-                if start < 0 || start > length || count < 0 {
-                    return Ok(0);
-                }
-                let copied = count.min(length - start);
-                for index in 0..copied {
-                    *buffer.add(index as usize) = altrep::elt::<$type>(object, start + index)?;
-                }
-                Ok(copied)
+                altrep::get_region::<$type>(object, start, count, buffer)
             })
         }
     };
@@ -1604,5 +1675,633 @@ pub unsafe extern "C" fn Rf_match(table: Sexp, x: Sexp, no_match: c_int) -> Sexp
             }
         }
         Ok(result)
+    })
+}
+
+/// One element of an atomic vector as a hashable value with R's equality: `NA` equals `NA`,
+/// `NaN` equals `NaN` but not `NA`, `-0` equals `0`, and strings compare by their text.
+#[derive(Hash, PartialEq, Eq)]
+enum ElementKey {
+    Integer(i32),
+    Real(u64),
+    Complex(u64, u64),
+    String(Option<Vec<u8>>),
+    Raw(u8),
+    /// Lists compare elementwise with `identical`, so their key is only a bucket.
+    Bucket(SexpType, i64),
+}
+
+fn real_key(value: f64) -> u64 {
+    if is_na_real(value) {
+        NA_REAL.to_bits()
+    } else if value.is_nan() {
+        f64::NAN.to_bits()
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
+
+unsafe fn element_key(object: Sexp, index: usize) -> ApiResult<ElementKey> {
+    Ok(match object.kind() {
+        SexpType::Logical | SexpType::Integer => ElementKey::Integer(int_elt(object, index)?),
+        SexpType::Real => ElementKey::Real(real_key(real_elt(object, index)?)),
+        SexpType::Complex => {
+            let value = altrep::elt::<Rcomplex>(object, index as R_xlen_t)?;
+            ElementKey::Complex(real_key(value.r), real_key(value.i))
+        }
+        SexpType::String => {
+            let element = sexp_elt(object, index)?;
+            if element == runtime().heap.known().na_string {
+                ElementKey::String(None)
+            } else {
+                ElementKey::String(Some(utf8_text(element)?.into_owned().into_bytes()))
+            }
+        }
+        SexpType::Raw => ElementKey::Raw(altrep::elt::<u8>(object, index as R_xlen_t)?),
+        SexpType::List | SexpType::Expression => {
+            let element = sexp_elt(object, index)?;
+            let length = if element.kind().is_vector() {
+                xlength(element)? as i64
+            } else {
+                -1
+            };
+            ElementKey::Bucket(element.kind(), length)
+        }
+        kind => {
+            return Err(error(format!("{} is not a vector type", kind.name())));
+        }
+    })
+}
+
+/// For each element (scanning from the end with `from_last`), whether an equal element came
+/// before it; `incomparables` are never duplicates.
+unsafe fn duplicated_flags(
+    object: Sexp,
+    incomparables: Option<Sexp>,
+    from_last: bool,
+    stop_at_first: bool,
+) -> ApiResult<Vec<bool>> {
+    let length = if object.kind() == SexpType::Nil {
+        0
+    } else {
+        xlength(object)? as usize
+    };
+    let mut flags = vec![false; length];
+    let mut seen: rustc_hash::FxHashMap<ElementKey, Vec<usize>> = rustc_hash::FxHashMap::default();
+    let mut excluded = Vec::new();
+    if let Some(incomparables) = incomparables
+        && incomparables.kind() != SexpType::Nil
+        && !(incomparables.kind() == SexpType::Logical
+            && xlength(incomparables)? == 1
+            && int_elt(incomparables, 0)? == 0)
+    {
+        let incomparables = coerce_vector(incomparables, object.kind())?;
+        runtime().heap.root(incomparables);
+        for index in 0..xlength(incomparables)? as usize {
+            excluded.push(element_key(incomparables, index)?);
+        }
+    }
+    let list = matches!(object.kind(), SexpType::List | SexpType::Expression);
+    let order: Box<dyn Iterator<Item = usize>> = if from_last {
+        Box::new((0..length).rev())
+    } else {
+        Box::new(0..length)
+    };
+    for index in order {
+        let key = element_key(object, index)?;
+        if excluded.contains(&key) {
+            continue;
+        }
+        let earlier = seen.entry(key).or_default();
+        let duplicate = if list {
+            // An ALTREP list's `Elt` may allocate each element afresh, so the element compared
+            // against is rooted while the next one is fetched.
+            let mark = runtime().heap.handle_mark();
+            let element = sexp_elt(object, index)?;
+            runtime().heap.root(element);
+            let mut found = false;
+            for &other in earlier.iter() {
+                if identical(element, sexp_elt(object, other)?, 0)? {
+                    found = true;
+                    break;
+                }
+            }
+            runtime().heap.release_handles(mark);
+            found
+        } else {
+            !earlier.is_empty()
+        };
+        if duplicate {
+            flags[index] = true;
+            if stop_at_first {
+                break;
+            }
+        } else if list || earlier.is_empty() {
+            earlier.push(index);
+        }
+    }
+    Ok(flags)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_duplicated(object: Sexp, from_last: Rboolean) -> Sexp {
+    enter(|| {
+        let flags = duplicated_flags(object, None, from_last != 0, false)?;
+        let runtime = runtime();
+        let result = runtime
+            .heap
+            .alloc_vector(SexpType::Logical, flags.len() as isize)?;
+        let values = std::slice::from_raw_parts_mut(result.data() as *mut i32, flags.len());
+        for (value, flag) in values.iter_mut().zip(flags) {
+            *value = flag as i32;
+        }
+        Ok(result)
+    })
+}
+
+unsafe fn first_duplicate(
+    object: Sexp,
+    incomparables: Option<Sexp>,
+    from_last: bool,
+) -> ApiResult<R_xlen_t> {
+    let flags = duplicated_flags(object, incomparables, from_last, true)?;
+    Ok(flags
+        .iter()
+        .position(|&flag| flag)
+        .map_or(0, |index| index as R_xlen_t + 1))
+}
+
+/// `Rf_any_duplicated(x, from_last)`: the 1-based position of the first duplicated element, or
+/// 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_any_duplicated(object: Sexp, from_last: Rboolean) -> R_xlen_t {
+    enter(|| first_duplicate(object, None, from_last != 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_any_duplicated3(
+    object: Sexp,
+    incomparables: Sexp,
+    from_last: Rboolean,
+) -> R_xlen_t {
+    enter(|| first_duplicate(object, Some(incomparables), from_last != 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_asComplex(object: Sexp) -> Rcomplex {
+    enter(|| {
+        let na = Rcomplex {
+            r: NA_REAL,
+            i: NA_REAL,
+        };
+        if !object.kind().is_atomic() || xlength(object)? < 1 {
+            if object.kind() == SexpType::Char {
+                let value = parse_real(object.bytes()).unwrap_or(NA_REAL);
+                return Ok(Rcomplex { r: value, i: 0.0 });
+            }
+            return Ok(na);
+        }
+        let first = coerce_vector(object, SexpType::Complex)?;
+        Ok(altrep::elt::<Rcomplex>(first, 0)?)
+    })
+}
+
+/// `Rf_asRboolean(x)`: `x` as a single `TRUE` or `FALSE`; `NA` and an empty or non-logical
+/// value are errors.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_asRboolean(object: Sexp) -> Rboolean {
+    enter(|| as_rboolean(object))
+}
+
+unsafe fn as_rboolean(object: Sexp) -> ApiResult<Rboolean> {
+    let value = as_logical(object)?;
+    if value == NA_LOGICAL {
+        return Err(error("NA in coercion to boolean"));
+    }
+    Ok((value != 0) as Rboolean)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_asBool(object: Sexp) -> bool {
+    enter(|| Ok(as_rboolean(object)? != 0))
+}
+
+/// `R_isTRUE(x)`: whether `x` is a length-one logical `TRUE` without attributes other than
+/// names, as `isTRUE()` asks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_isTRUE(object: Sexp) -> Rboolean {
+    enter(|| {
+        Ok(
+            (object.kind() == SexpType::Logical
+                && xlength(object)? == 1
+                && int_elt(object, 0)? == 1) as Rboolean,
+        )
+    })
+}
+
+/// `Rf_copyVector(target, source)`: fills `target` with the elements of `source`, recycled.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_copyVector(target: Sexp, source: Sexp) {
+    enter(|| {
+        if target.kind() != source.kind() {
+            return Err(error("vector types do not match in copyVector"));
+        }
+        let target_length = xlength(target)? as usize;
+        let source_length = xlength(source)? as usize;
+        if source_length == 0 {
+            return Ok(());
+        }
+        for index in 0..target_length {
+            copy_element(target, index, source, index % source_length)?;
+        }
+        Ok(())
+    })
+}
+
+unsafe fn copy_element(target: Sexp, to: usize, source: Sexp, from: usize) -> ApiResult<()> {
+    match target.kind() {
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            set_sexp_elt(target, to, sexp_elt(source, from)?)
+        }
+        kind => {
+            let size = kind.element_size().ok_or_else(|| error("not a vector"))?;
+            let to_data = data_pointer(target, true)?;
+            let from_data = data_pointer(source, false)?;
+            std::ptr::copy_nonoverlapping(from_data.add(from * size), to_data.add(to * size), size);
+            Ok(())
+        }
+    }
+}
+
+unsafe fn copy_matrix(target: Sexp, source: Sexp, by_row: bool) -> ApiResult<()> {
+    let rows = Rf_nrows(target) as usize;
+    let columns = Rf_ncols(target) as usize;
+    let source_length = xlength(source)? as usize;
+    if source_length == 0 {
+        return Ok(());
+    }
+    if !by_row {
+        for index in 0..rows * columns {
+            copy_element(target, index, source, index % source_length)?;
+        }
+        return Ok(());
+    }
+    let mut from = 0;
+    for row in 0..rows {
+        for column in 0..columns {
+            copy_element(target, row + column * rows, source, from % source_length)?;
+            from += 1;
+        }
+    }
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_copyMatrix(target: Sexp, source: Sexp, by_row: Rboolean) {
+    enter(|| copy_matrix(target, source, by_row != 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_copyListMatrix(target: Sexp, source: Sexp, by_row: Rboolean) {
+    enter(|| {
+        let source = if source.kind() == SexpType::Pairlist {
+            let vector = crate::lists::pairlist_to_vector(source)?;
+            runtime().heap.root(vector);
+            vector
+        } else {
+            source
+        };
+        copy_matrix(target, source, by_row != 0)
+    })
+}
+
+/// `Rf_isVectorizable(x)`: `NULL`, or a list whose elements are all vectors of length at most
+/// one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_isVectorizable(object: Sexp) -> Rboolean {
+    enter(|| {
+        Ok(match object.kind() {
+            SexpType::Nil => 1,
+            SexpType::List | SexpType::Expression => {
+                let mut all = true;
+                for index in 0..xlength(object)? as usize {
+                    let element = sexp_elt(object, index)?;
+                    if !element.kind().is_vector() || xlength(element)? > 1 {
+                        all = false;
+                        break;
+                    }
+                }
+                all as Rboolean
+            }
+            SexpType::Pairlist => {
+                let mut cell = object;
+                let mut all = true;
+                while cell.kind() == SexpType::Pairlist {
+                    let element = cell.car();
+                    if !element.kind().is_vector() || xlength(element)? > 1 {
+                        all = false;
+                        break;
+                    }
+                    cell = cell.cdr();
+                }
+                all as Rboolean
+            }
+            _ => 0,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_isScalarString(object: Sexp) -> Rboolean {
+    (object.kind() == SexpType::String && !object.is_altrep() && object.length() == 1) as Rboolean
+}
+
+/// `Rf_psmatch(formal, tag, exact)`: whether `tag` matches `formal` exactly, or as a prefix of
+/// it when `exact` is false.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_psmatch(
+    formal: *const c_char,
+    tag: *const c_char,
+    exact: Rboolean,
+) -> Rboolean {
+    let formal = c_bytes(formal);
+    let tag = c_bytes(tag);
+    (if exact != 0 {
+        formal == tag
+    } else {
+        formal.starts_with(tag)
+    }) as Rboolean
+}
+
+unsafe fn match_text(object: Sexp) -> ApiResult<Vec<u8>> {
+    Ok(match object.kind() {
+        SexpType::Symbol => object.car().bytes().to_vec(),
+        SexpType::Char => utf8_text(object)?.into_owned().into_bytes(),
+        SexpType::String if xlength(object)? >= 1 => {
+            utf8_text(sexp_elt(object, 0)?)?.into_owned().into_bytes()
+        }
+        _ => return Err(error("invalid partial string match")),
+    })
+}
+
+/// `Rf_pmatch(formal, tag, exact)`: `Rf_psmatch` for symbols, `CHARSXP`s or strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_pmatch(formal: Sexp, tag: Sexp, exact: Rboolean) -> Rboolean {
+    enter(|| {
+        let formal = match_text(formal)?;
+        let tag = match_text(tag)?;
+        Ok((if exact != 0 {
+            formal == tag
+        } else {
+            formal.starts_with(&tag)
+        }) as Rboolean)
+    })
+}
+
+/// `Rf_NonNullStringMatch(s, t)`: whether two `CHARSXP`s are equal, neither being `NA` or
+/// empty.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_NonNullStringMatch(left: Sexp, right: Sexp) -> Rboolean {
+    enter(|| {
+        let na = runtime().heap.known().na_string;
+        if left == na || right == na || left.bytes().is_empty() || right.bytes().is_empty() {
+            return Ok(0);
+        }
+        Ok((left == right || utf8_text(left)? == utf8_text(right)?) as Rboolean)
+    })
+}
+
+/// `Rf_acopy_string(s)`: a copy of a C string in `R_alloc` memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_acopy_string(text: *const c_char) -> *mut c_char {
+    enter(|| Ok(crate::strings::arena_c_string(c_bytes(text))? as *mut c_char))
+}
+
+/// `Rf_isUnsorted(x, strictly)`: whether `x` is not in increasing order (strictly increasing
+/// with `strictly`). `NA`s make the answer `TRUE`, as in GNU R's internal check.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_isUnsorted(object: Sexp, strictly: Rboolean) -> Rboolean {
+    enter(|| {
+        if !object.kind().is_atomic() {
+            return Err(error("only atomic vectors can be tested to be sorted"));
+        }
+        let length = xlength(object)? as usize;
+        let strictly = strictly != 0;
+        for index in 1..length {
+            let ordering = compare_elements(object, index - 1, object, index, true)?;
+            let unsorted = match ordering {
+                None => true,
+                Some(std::cmp::Ordering::Greater) => true,
+                Some(std::cmp::Ordering::Equal) => strictly,
+                Some(std::cmp::Ordering::Less) => false,
+            };
+            if unsorted {
+                return Ok(1);
+            }
+        }
+        Ok(0)
+    })
+}
+
+/// Compares two elements; `None` when either is `NA` (or `NaN`).
+unsafe fn compare_elements(
+    left: Sexp,
+    left_index: usize,
+    right: Sexp,
+    right_index: usize,
+    _na_last: bool,
+) -> ApiResult<Option<std::cmp::Ordering>> {
+    Ok(match left.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            let a = int_elt(left, left_index)?;
+            let b = int_elt(right, right_index)?;
+            if a == NA_INTEGER || b == NA_INTEGER {
+                None
+            } else {
+                Some(a.cmp(&b))
+            }
+        }
+        SexpType::Real => {
+            let a = real_elt(left, left_index)?;
+            let b = real_elt(right, right_index)?;
+            a.partial_cmp(&b)
+        }
+        SexpType::Complex => {
+            let a = altrep::elt::<Rcomplex>(left, left_index as R_xlen_t)?;
+            let b = altrep::elt::<Rcomplex>(right, right_index as R_xlen_t)?;
+            match (a.r.partial_cmp(&b.r), a.i.partial_cmp(&b.i)) {
+                (Some(std::cmp::Ordering::Equal), imaginary) => imaginary,
+                (real, Some(_)) => real,
+                _ => None,
+            }
+        }
+        SexpType::String => {
+            let na = runtime().heap.known().na_string;
+            let a = sexp_elt(left, left_index)?;
+            let b = sexp_elt(right, right_index)?;
+            if a == na || b == na {
+                None
+            } else {
+                Some(crate::strings::collate(&utf8_text(a)?, &utf8_text(b)?))
+            }
+        }
+        SexpType::Raw => {
+            let a = altrep::elt::<u8>(left, left_index as R_xlen_t)?;
+            let b = altrep::elt::<u8>(right, right_index as R_xlen_t)?;
+            Some(a.cmp(&b))
+        }
+        _ => None,
+    })
+}
+
+/// Orders `indices` by the keys in `keys` (each a vector of the same length), stably, with
+/// `NA`s last or first.
+unsafe fn order_by(
+    indices: &mut [c_int],
+    keys: &[Sexp],
+    na_last: bool,
+    decreasing: bool,
+) -> ApiResult<()> {
+    let mut failure = None;
+    indices.sort_by(|&a, &b| {
+        for &key in keys {
+            let ordering = match compare_elements(key, a as usize, key, b as usize, na_last) {
+                Ok(ordering) => ordering,
+                Err(unwind) => {
+                    failure.get_or_insert(unwind);
+                    return std::cmp::Ordering::Equal;
+                }
+            };
+            let ordering = match ordering {
+                Some(ordering) if decreasing => ordering.reverse(),
+                Some(ordering) => ordering,
+                None => {
+                    let a_na = compare_elements(key, a as usize, key, a as usize, na_last)
+                        .ok()
+                        .flatten()
+                        .is_none();
+                    let b_na = compare_elements(key, b as usize, key, b as usize, na_last)
+                        .ok()
+                        .flatten()
+                        .is_none();
+                    match (a_na, b_na) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) if na_last => std::cmp::Ordering::Greater,
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) if na_last => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        (false, false) => std::cmp::Ordering::Equal,
+                    }
+                }
+            };
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    match failure {
+        Some(unwind) => Err(unwind),
+        None => Ok(()),
+    }
+}
+
+/// `R_orderVector(indx, n, arglist, nalast, decreasing)`: fills `indx` with the 0-based
+/// ordering permutation of the keys in the list `arglist`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_orderVector(
+    indices: *mut c_int,
+    count: c_int,
+    arguments: Sexp,
+    na_last: Rboolean,
+    decreasing: Rboolean,
+) {
+    enter(|| {
+        let mut keys = Vec::new();
+        if arguments.kind() == SexpType::Pairlist {
+            let mut cell = arguments;
+            while cell.kind() == SexpType::Pairlist {
+                keys.push(cell.car());
+                cell = cell.cdr();
+            }
+        } else {
+            for index in 0..xlength(arguments)? as usize {
+                keys.push(sexp_elt(arguments, index)?);
+            }
+        }
+        let indices = std::slice::from_raw_parts_mut(indices, count.max(0) as usize);
+        for (position, index) in indices.iter_mut().enumerate() {
+            *index = position as c_int;
+        }
+        order_by(indices, &keys, na_last != 0, decreasing != 0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_orderVector1(
+    indices: *mut c_int,
+    count: c_int,
+    key: Sexp,
+    na_last: Rboolean,
+    decreasing: Rboolean,
+) {
+    enter(|| {
+        let indices = std::slice::from_raw_parts_mut(indices, count.max(0) as usize);
+        for (position, index) in indices.iter_mut().enumerate() {
+            *index = position as c_int;
+        }
+        order_by(indices, &[key], na_last != 0, decreasing != 0)
+    })
+}
+
+/// `R_duplicateAsResizable(x)`: a copy of `x` that `R_resizeVector` can grow, up to the next
+/// power of two at or above its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_duplicateAsResizable(object: Sexp) -> Sexp {
+    enter(|| {
+        if !object.kind().is_vector() || object.kind() == SexpType::Char {
+            return Err(error("cannot make a resizable copy of a non-vector"));
+        }
+        let runtime = runtime();
+        let length = xlength(object)?;
+        let capacity = (length.max(1) as usize).next_power_of_two() as isize;
+        let copy = runtime
+            .heap
+            .alloc_resizable_vector(object.kind(), capacity)?;
+        runtime.heap.root(copy);
+        runtime.heap.resize_vector(copy, length)?;
+        for index in 0..length as usize {
+            copy_element(copy, index, object, index)?;
+        }
+        crate::memory::copy_attributes(copy, object, true)?;
+        Ok(copy)
+    })
+}
+
+/// `nchar_type` of `R_nchar`, with GNU R's numbering.
+const NCHAR_BYTES: c_int = 0;
+const NCHAR_CHARS: c_int = 1;
+
+/// `R_nchar(string, type, allowNA, keepNA, msg_name)`: the length of a `CHARSXP` in bytes,
+/// characters or display width, with `NA` giving 2 unless `keepNA`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_nchar(
+    string: Sexp,
+    kind: c_int,
+    _allow_na: Rboolean,
+    keep_na: Rboolean,
+    _message_name: *const c_char,
+) -> c_int {
+    enter(|| {
+        if string == runtime().heap.known().na_string {
+            return Ok(if keep_na != 0 { NA_INTEGER } else { 2 });
+        }
+        Ok(match kind {
+            NCHAR_BYTES => string.bytes().len() as c_int,
+            NCHAR_CHARS => utf8_text(string)?.chars().count() as c_int,
+            _ => crate::strings::display_width(&utf8_text(string)?) as c_int,
+        })
     })
 }

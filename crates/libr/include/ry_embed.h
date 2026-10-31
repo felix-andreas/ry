@@ -30,6 +30,8 @@ const char *ry_warning_message(int index);
 void ry_clear_warnings(void);
 void ry_set_console(void (*callback)(const char *text, size_t length, int is_error, void *data), void *data);
 void ry_set_seed(int seed);
+/* The value of first:last as a SEXP, a compact sequence where GNU R would make one. */
+void *ry_compact_intrange(ptrdiff_t first, ptrdiff_t last);
 
 #ifdef __cplusplus
 }

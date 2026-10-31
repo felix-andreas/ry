@@ -1766,26 +1766,52 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the runtime
 
-What step 2 of `contributing/design/r-runtime.md` left for later steps, most pressing first.
+What steps 2 and 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
 
-- **`Rf_eval` evaluates only constants, symbols, promises and calls to nine primitives.** Closures,
-  `R_ParseVector` and `Rf_PrintValue` wait for the interpreter (step 3).
-- **The rest of the measured API surface.** Of the 409 measured API and experimental names, 310 are
-  exported. The missing ones include Rmath (`Rf_sign`, the distribution functions), the S4 slot
-  functions, connections, `.C` and `.Fortran`, BLAS and LAPACK, and the graphics engine.
-- **`R_GetCCallable` cannot load the providing namespace**, so a callable registered by a package
-  that is not loaded yet is an error instead of a namespace load.
-- **ALTREP `Duplicate`, `Inspect` and `Extract_subset` are stored but never called**; duplication
-  materializes a regular vector.
-- **R-level finalizers** (`R_RegisterFinalizer` with a closure) cannot run until closures can, and a
-  finalized weak reference stays in the weak list with a `NULL` key.
+- **Evaluation needs the interpreter.** `Rf_eval`, `R_ParseVector`, `Rf_PrintValue`, R-level
+  finalizers, S4 class lookup and namespace loading all go through `libr::eval::Evaluator`; until
+  the interpreter installs one, only the built-in evaluator of native calls and nine primitives
+  runs. Packages whose `R_init_*` evaluates R code (S7, yaml, nanoarrow) cannot load before then.
+- **Task callbacks need a caller.** The interpreter must call `libr::eval::run_task_callbacks`
+  after each top-level task; nothing runs `Rf_addTaskCallback` callbacks before then, and the
+  runner has no direct test because it is reachable only from Rust.
+- **Base packages' own libraries** (utils, tools, methods, grDevices, stats) import GNU R
+  internals (`R_print`, `getPRIMNAME`, `R_ParseContextLast`, `Rf_utf8towcs`, ...). ry implements
+  those packages' internals in Rust instead, so their `.so` files are not a target; decide per
+  name when the interpreter reaches them.
+- **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
+  compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
+  exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
+  GNU R until then, because configure scripts run R code through them.
+- **Graphics devices.** The engine is exported and errors when used (`graphics.rs`).
+- **Connections gaps:** bzip2 and xz file connections, sockets, and `pipe()` are not implemented.
+- **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
+  interpreter's `.Internal(inspect)` and subsetting.
+- **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
+- **R-level finalizers** cannot run until closures can, and a finalized weak reference stays in the
+  weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
   push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
   `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
 - **The handle scope retains a native loop's dropped temporaries until the call returns.** If a real
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
-- **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
-  only loader, so macOS and Windows need their own paths.
+- **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
+  unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
+  length enough to allocate before the read fails. Bound the allocation by the bytes remaining
+  when the source can tell.
+- **Slow numerical cases inherited from GNU R.** `phyper`, `qhyper`, `qnbinom`, `qnbinom_mu`
+  and `bessel_i` with huge arguments take tens of seconds, as in GNU R (`phyper` 32 s and
+  `qhyper` 74 s there), and `nmmin` with an infinite start loops as GNU R's does. Fix them with
+  asymptotic expansions or argument limits when a package hits them.
+- **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
+  that needs closures from the interpreter.
+- **Routines left to audit clean room:** `lbfgsb`, the `optif9`/UNCMIN helpers, `fdhess`, the
+  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
+  `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
+  `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
+- **Platforms.** The C symbol export relies on lld merging two version scripts, `dlopen` is the
+  only loader, and the `rcmd` toolchain assumes gcc and gfortran on Linux, so macOS and Windows
+  need their own paths.
 
 ## Explicitly out of scope for now
 
