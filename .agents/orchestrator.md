@@ -59,17 +59,17 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 ## In flight
 
-- Runtime step 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): tier-0 bytecode interpreter and base R loaded from the user's GNU R installation.
-- Table performance: beat data.table on every db-benchmark query (session_0111kWqB9LKMquDanx18xVTC, Opus).
+- Runtime step 3 follow-up (session_0111kWqCeajgVo7m8XVxpfDk, Opus): stats natives, review fixes, GNU R `tests/*.R`, connection builtins, stringi, task callbacks.
+- Table performance (session_0111kWqB9LKMquDanx18xVTC, Opus): beat data.table on every db-benchmark query.
+- Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4): all 232 corpus packages pass their tests.
+- Lazy loader on ry's interpreter (session_0111kWqEkieA316rHiKNpGxB).
+- Inline syntax, agreement warnings and strict mode in the runtime (session_0111kWqCdRHRmiRddvo18cnG).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
 
-1. Finish step 4 once the interpreter lands: all 232 corpus packages install and pass their own tests under ry. #110 delivered the interpreter-independent part (all 444 header names, 192/199 corpus binaries load, 111/113 source builds).
-2. Move the lazy loader from the GNU R backend onto ry's own interpreter once step 3 lands.
-3. Wire the table engine into ry's interpreter once step 3 (#111) lands.
-4. Inline syntax in the runtime.
-5. The Cranelift JIT.
+1. Wire the table engine into the interpreter.
+2. The Cranelift JIT.
 
 Follow-ups:
 
