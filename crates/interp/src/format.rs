@@ -472,8 +472,6 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
             settings.scipen = values::as_integer_scalar(scientific);
         }
     }
-    let count = length(vector);
-    let result = alloc(SexpType::String, count)?;
     let min_width = if width == nil() {
         0
     } else {
@@ -522,8 +520,10 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
             .map(Some)
             .collect(),
         SexpType::Nil => Vec::new(),
+        SexpType::Environment => vec![Some(crate::print::environment_label(vector)?)],
         _ => return Err(call.error("Found no format() method for class \"".to_string() + vector.kind().name() + "\"")),
     };
+    let result = alloc(SexpType::String, items.len())?;
     for (index, item) in items.into_iter().enumerate() {
         let charsxp = match item {
             Some(text) => values::mkchar(&text)?,

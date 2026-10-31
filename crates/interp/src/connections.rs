@@ -29,7 +29,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("readLines", 6, do_read_lines),
     internal("readDCF", 3, do_read_dcf),
     internal("writeLines", 4, do_write_lines).invisible(),
-    internal("readChar", 4, do_read_char),
+    internal("readChar", 3, do_read_char),
     internal("writeChar", 5, |call| unsafe { Err(call.error("writeChar is not supported")) }),
     internal("readBin", 6, do_read_bin),
     internal("writeBin", 5, |call| unsafe { Err(call.error("writeBin is not supported")) }),
