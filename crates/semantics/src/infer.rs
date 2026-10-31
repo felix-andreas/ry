@@ -755,13 +755,8 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            // A frame's run-time class is `c("frame", "data.frame")`, and it is a list of
-            // its columns.
-            (TyKind::Frame(_), TyKind::Named(name, arguments))
-                if arguments.is_empty() && name.text(db) == "data.frame" =>
-            {
-                true
-            }
+            // A frame is no data.frame, but `as.list` turns it into the list of its columns,
+            // which is how `lapply`, `Map` and `Filter` iterate one.
             (TyKind::Frame(None), TyKind::List(_) | TyKind::NamedList(_)) => true,
             (TyKind::Frame(Some(columns)), TyKind::List(element) | TyKind::NamedList(element))
                 if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>

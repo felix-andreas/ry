@@ -1,0 +1,12 @@
+# ry: the functions ry's runtime attaches as `package:ry`, which every session has.
+#
+# `frame()` itself is typed structurally by the checker, and so are queries on a frame
+# (`f[i, j, by]`). These declarations cover the conversions and file IO around them.
+
+as.frame : fn(x: Any) -> frame
+is.frame : fn(x: Any) -> logical
+frame_type : fn(x: frame) -> character
+frame_read_csv : fn(path: character, [strings_as_factors]: logical) -> frame
+frame_read_parquet : fn(path: character) -> frame
+frame_write_csv : fn(x: frame, path: character) -> NULL
+frame_write_parquet : fn(x: frame, path: character) -> NULL

@@ -12,6 +12,7 @@ path = "src/interp.rs"
 [dependencies]
 heap = { path = "../heap" }
 syntax = { path = "../syntax" }
+table = { path = "../table" }
 rowan.workspace = true
 rustc-hash.workspace = true
 regex.workspace = true

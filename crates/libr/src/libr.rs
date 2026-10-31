@@ -27,6 +27,7 @@ pub mod embed;
 pub mod environments;
 pub mod eval;
 pub mod extptr;
+pub mod frame_altrep;
 pub mod globals;
 pub mod graphics;
 pub mod hashtab;

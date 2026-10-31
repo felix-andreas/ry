@@ -1,0 +1,13 @@
+# Exports of ry's runtime package, `package:ry`. Kept by hand beside crates/interp/src/frame.rs.
+as.frame
+copy
+frame
+frame_read_csv
+frame_read_parquet
+frame_type
+frame_write_csv
+frame_write_parquet
+is.frame
+key
+setkey
+setkeyv

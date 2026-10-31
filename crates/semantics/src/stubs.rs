@@ -84,6 +84,7 @@ pub fn shipped_stub_sources() -> Vec<(String, String)> {
         ("graphics", include_str!("../../../types/graphics.Rtypes")),
         ("grDevices", include_str!("../../../types/grDevices.Rtypes")),
         ("datasets", include_str!("../../../types/datasets.Rtypes")),
+        ("ry", include_str!("../../../types/ry.Rtypes")),
         (
             "data.table",
             include_str!("../../../types/data.table.Rtypes"),
@@ -110,6 +111,7 @@ pub fn shipped_export_manifests() -> Vec<(String, String)> {
             include_str!("../../../types/grDevices.exports"),
         ),
         ("datasets", include_str!("../../../types/datasets.exports")),
+        ("ry", include_str!("../../../types/ry.exports")),
         ("tools", include_str!("../../../types/tools.exports")),
         ("parallel", include_str!("../../../types/parallel.exports")),
         ("compiler", include_str!("../../../types/compiler.exports")),

@@ -202,9 +202,13 @@ enum Op {
     LogicRight,
     /// `dst formals body`
     Closure,
+    /// `function src dst call target`: when `function` is the `[` builtin and `src` holds a
+    /// frame, runs `call` as a frame query into `dst` and jumps to `target`. The query reads the
+    /// remaining arguments unevaluated, because they name columns.
+    FrameQuery,
 }
 
-const OPS: [Op; 20] = [
+const OPS: [Op; 21] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -225,6 +229,7 @@ const OPS: [Op; 20] = [
     Op::LogicLeft,
     Op::LogicRight,
     Op::Closure,
+    Op::FrameQuery,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -746,12 +751,20 @@ impl Compiler {
             for _ in &args {
                 self.allocate();
             }
+            let subset = head == symbols().bracket;
+            let mut frame_query = None;
             for (index, (_, value)) in args.iter().enumerate() {
                 if *value == missing_arg() {
                     let constant = self.constant(missing_arg());
                     self.emit(Op::Constant, &[base + index as u32, constant]);
                 } else {
                     self.expression(*value, base + index as u32)?;
+                    if subset && index == 0 && args.len() > 1 {
+                        frame_query = Some(self.emit_patchable(
+                            Op::FrameQuery,
+                            &[function, base, dst, call_constant, 0],
+                        ));
+                    }
                 }
             }
             self.emit(Op::CallBuiltin, &[dst, function, call_constant, base, args.len() as u32]);
@@ -759,6 +772,9 @@ impl Compiler {
             self.patch(generic);
             self.emit(Op::CallGeneric, &[dst, function, call_constant]);
             self.patch(done);
+            if let Some(position) = frame_query {
+                self.patch(position);
+            }
         } else {
             self.emit(Op::CallGeneric, &[dst, function, call_constant]);
         }
@@ -791,6 +807,7 @@ fn operand_count(op: Op) -> usize {
         Op::LogicLeft => 5,
         Op::LogicRight => 5,
         Op::Closure => 3,
+        Op::FrameQuery => 5,
     }
 }
 
@@ -905,6 +922,17 @@ unsafe fn step(
             let symbol = constants.element(operand(1));
             let function = lookup_function(symbol, env, constants, caches, operand(2))?;
             set(operand(0), function);
+        }
+        Op::FrameQuery => {
+            let function = register(operand(0));
+            let subject = register(operand(1));
+            if crate::frame::is_frame(subject) && eval::builtin_def(function)?.name == "[" {
+                let call = constants.element(operand(3));
+                let value = crate::frame::run(call, subject, env)?;
+                set(operand(2), value);
+                *pc = operand(4);
+                return Ok(None);
+            }
         }
         Op::BranchUnlessBuiltin => {
             if register(operand(0)).kind() != SexpType::Builtin {

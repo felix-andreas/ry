@@ -1865,9 +1865,11 @@ price_of <- function(prices) prices$price
 
 A column is always a vector, so a scalar column type broadens: `frame{id: integer}` is
 `frame{id: integer[]}`. A bare `frame` is a frame whose columns are unknown, and every column
-reference on it is a silent `Unknown`. Because a frame's run-time class is `c("frame", "data.frame")`,
-a frame satisfies a `data.frame` parameter. The name is `frame`, not `table`, so that base `table()`
-keeps working.
+reference on it is a silent `Unknown`. A frame is no `data.frame`: its run-time class is `"frame"`
+alone, so passing one to a `data.frame` parameter is a type error, and `as.data.frame()` and
+`as.frame()` convert between the two. A frame does satisfy a `list` parameter, because `as.list()`
+turns it into the list of its columns, which is how `lapply()` and `Map()` iterate it. The name is
+`frame`, not `table`, so that base `table()` keeps working.
 
 `frame()` builds one without any import. Each named argument becomes a column of its vector type, and
 an unnamed variable keeps its name:

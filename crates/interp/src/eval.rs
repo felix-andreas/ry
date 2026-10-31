@@ -285,7 +285,15 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         }
         SexpType::Builtin => {
             let definition = builtin_def(function)?;
-            let args = evaluate_args(arguments, env, definition.keep_missing, call)?;
+            // A frame query names columns in `i`, `j` and `by`, so it must see them unevaluated.
+            let args = if definition.name == "[" {
+                match crate::frame::intercept(call, arguments, env, definition.keep_missing)? {
+                    crate::frame::Intercepted::Value(value) => return Ok(value),
+                    crate::frame::Intercepted::Args(args) => args,
+                }
+            } else {
+                evaluate_args(arguments, env, definition.keep_missing, call)?
+            };
             if definition.generic != Generic::None
                 && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
             {

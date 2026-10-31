@@ -35,6 +35,7 @@ pub mod dispatch;
 pub mod envir;
 pub mod eval;
 pub mod format;
+pub mod frame;
 pub mod linalg;
 pub mod graphics;
 pub mod lower;

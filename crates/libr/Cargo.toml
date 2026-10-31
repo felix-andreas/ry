@@ -23,9 +23,12 @@ heap = { path = "../heap" }
 interp = { path = "../interp" }
 libc = "0.2"
 lzma-rs = "0.3.0"
+polars = { version = "0.55", default-features = false }
+polars-arrow = { version = "0.55", default-features = false }
 rustc-hash.workspace = true
 unicode-width.workspace = true
 stacker.workspace = true
+table = { path = "../table" }
 
 [build-dependencies]
 cc = "1.2"
@@ -34,6 +37,10 @@ cc = "1.2"
 libloading = "0.8"
 rcmd = { path = "../rcmd" }
 syntax = { path = "../syntax" }
+
+[[test]]
+name = "test_frame_altrep"
+path = "tests/test_frame_altrep.rs"
 
 [[test]]
 name = "test_native"
