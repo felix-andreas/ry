@@ -1,167 +1,109 @@
 ---
 title: Development
-description: How to contribute to ry
+description: How to build, test, and debug ry
 ---
 
-## Project layout
-
-ry is a Rust workspace of six product crates, described file by file in
-[Structure](/contributing/structure) and as a system in [Architecture](/contributing/architecture).
-
-The console embeds R without linking against it at build time. It finds R's shared library through
-`R_HOME` (or by asking `R RHOME` on the `PATH`) and loads it at runtime, so the whole workspace
-builds, and its unit tests run, on a machine with no R at all. Only running the console needs R. On
-Unix the console hooks in through the `ptr_R_ReadConsole` globals, and on Windows through the
-`Rstart` callback struct. Its end-to-end tests drive the real binary through a pseudo-terminal (a
-Unix pty or a Windows ConPTY) and skip cleanly where R is missing. Run `just repl-e2e` locally before
-you touch the console.
-
-[Architecture](/contributing/architecture) describes how the analysis works, and
-[Structure](/contributing/structure) maps every source file. The editor extensions live under
-`editors/`: `code` is the VS Code extension, and `zed` is the Zed extension.
+ry is a Rust workspace of six crates under `crates/`. [Structure](/contributing/structure) maps
+every source file, and [Architecture](/contributing/architecture) explains how the analysis fits
+together. The editor extensions live in `editors/code` (VS Code) and `editors/zed` (Zed).
 
 ## Build and test
 
-The `justfile` at the repository root names every day-to-day action, and running `just` with no
-arguments lists them. These are the ones you will reach for most:
+The `justfile` at the repository root names every day-to-day action, and `just` with no arguments
+lists them all. The common ones:
 
 ```sh
-just gate                # the full gate: battery, clippy -D warnings, fmt check
-just battery             # the workspace test battery, excluding zed_ry
-just fixture <group__case>          # one focused fixture case
-just bless -p semantics --test ...  # re-bless fixture expectations
-just fuzz-deep           # the long-running seeded fuzz pass
-just stats <path>        # the workspace performance diagnosis
-just perf                # the corpus-wide perf and memory budgets (needs corpus/)
+just gate                           # tests, clippy -D warnings, and fmt --check
+just battery                        # all workspace tests, excluding zed_ry
+just fixture <group__case>          # one fixture case
+just bless -p semantics --test ...  # rewrite fixture expectations from current output
+just fuzz-deep                      # the long seeded fuzz run
+just stats <path>                   # phase timings and memory for one workspace
+just perf                           # corpus perf and memory budgets (needs corpus/)
+just repl-e2e                       # drive `ry repl` through a pty against the system R
 ```
 
 `just fixture` runs a case from the `test_typing_fixtures` target in `semantics` unless you pass a
-different target and package as its second and third arguments. Whenever you bless expectations,
-review the diff before you commit it.
+different target and package as its second and third arguments. Review the diff after every bless:
+bless records whatever the code produces, right or wrong.
 
-Without `just`, these are the raw commands:
+Without `just`:
 
 ```sh
-cargo build                                   # the product crate, the workspace default member
-cargo test                                    # the product crate's suites
-cargo test --workspace --exclude zed_ry       # everything: all six crates
-cargo test -p semantics                       # the analysis core's fixture and fuzz suites
-cargo test -p format --test test_format_fixtures
+cargo build                              # the ry binary (the workspace default member)
+cargo test                               # the ry crate's tests
+cargo test --workspace --exclude zed_ry  # every crate
+cargo test -p semantics                  # the analysis core, the usual loop while iterating
 ```
 
-Most behavior is verified by fixture tests: human-readable `.test` files, each rendered and compared
-to its expected output. Read [Testing](/contributing/testing) for the fixture contract before you
-add or change one. Two environment variables come up every day:
+Most behavior is pinned by fixture tests, plain-text `.test` files whose rendered output is compared
+to an expected block. Read [Testing](/contributing/testing) before you add or change one. Two
+environment variables come up every day:
 
-- `RY_BLESS=1` rewrites the expected `#++++` blocks in place from the current output.
-- `FIXTURE_FILTER=group__case` runs a single fixture case.
+- `RY_BLESS=1` rewrites the expected `#++++` blocks in place.
+- `FIXTURE_FILTER=group__case` runs a single case.
 
-Some suites, and every measurement instrument, read a corpus of real-world R code. Fetch it with
-`scripts/fetch-corpus.rs`, a single-file script that needs `cargo +nightly -Zscript` and writes into
-the gitignored `corpus/` directory. The resolved inventory is committed as
-`scripts/corpus-manifest.txt`. The performance and memory witness is
-`crates/semantics/tests/test_perf.rs`, and [Testing](/contributing/testing) documents it.
+Some suites and every performance instrument read a corpus of real-world R code. Fetch it with
+`cargo +nightly -Zscript scripts/fetch-corpus.rs`, which writes into the gitignored `corpus/`
+directory. The resolved inventory is committed as `scripts/corpus-manifest.txt`.
 
-## Debug mode
+### The R console needs no R to build
 
-`ry server --debug` surfaces internal analysis facts in the editor: every hover gains a "Debug"
-section showing the Lowering, Naming, and Parsing views of the expression under the cursor. Setting
-`RY_DEBUG=1` in the server's environment does the same, for setups where changing the server's
-arguments is awkward. It is deliberately not a `ry.toml` key, because the configuration file is a
-user-facing contract and this switch is a tool for people working on ry itself.
+The `repl` crate loads R's shared library at runtime instead of linking against it, so the whole
+workspace builds and its tests run on a machine with no R. Only running the console needs R. The
+end-to-end tests skip cleanly where R is missing; run `just repl-e2e` before you touch the console.
+[REPL design](/contributing/design/repl/) records how the embedding works.
 
-## Diagnosing a slow workspace
+## Debugging
 
-`ry debug analysis-stats [path]` runs the full analysis pipeline over a workspace, through the same
-queries the language server uses, and reports where the time and memory go. For each phase (load,
-parse, lowering and naming, type checking, diagnostics) it prints the wall time and how much the
-resident set grew. After that come the slowest files by type-checking time, and an incremental probe
-on representative files that reports keystroke latency, item rechecks and resolve steps per
-keystroke, and the raw re-parse time as a floor to compare against.
+- `ry server --debug`, or `RY_DEBUG=1` in the server's environment, adds a "Debug" section to every
+  hover with the Lowering, Naming, and Parsing views of the expression under the cursor. It is
+  deliberately not a `ry.toml` key, because the configuration file is a user-facing contract.
+- `ry debug ast <file>` prints a file's syntax tree.
+- `ry debug analysis-stats [path]` (or `just stats`) runs the full pipeline over a workspace,
+  through the same queries the language server uses. It prints the wall time and resident-memory
+  growth of each phase, the slowest files by type-checking time, and an incremental probe that
+  reports keystroke latency and rechecks per keystroke. It forces `[check] typing` on. Build with
+  `--release` when absolute numbers matter; a debug build still gives honest ratios.
 
-The command forces `[check] typing` on, since a diagnosis without the type checker measures nothing
-interesting, and it tells you when your configuration had it off. Build with `--release` when the
-absolute numbers matter; a debug build still gives honest ratios.
+## The docs site
 
-`ry debug ast <file>` prints a file's syntax tree.
+Run `just docs` for a live preview, and `cd docs && bun run build` for a full build, which needs
+Node 22.23.4 or newer.
 
-## Working on this site
+[Formatting rules](/reference/formatting-rules) is generated, so do not edit it by hand. Edit
+`crates/format/tests/formatter.template.md` and regenerate the page with `just format-docs`.
 
-Run `just docs` for a live preview, and `cd docs && bun run build` for a full build. The docs build needs Node 22.23.4 or newer (Astro 7 refuses older versions).
+## The VS Code extension
 
-The formatter reference at `docs/src/content/docs/reference/formatting-rules.md` is generated, so
-do not edit it by hand. Edit `crates/format/tests/formatter.template.md` instead, and regenerate the
-page with `just format-docs`.
-
-## Setting up the VS Code extension
-
-1. Run `cd editors/code && bun install` to install the npm modules.
-2. Press Ctrl+Shift+B in VS Code to compile the client in
-   [watch mode](https://code.visualstudio.com/docs/editor/tasks#:~:text=The%20first%20entry%20executes,the%20HelloWorld.js%20file.).
-3. Open the Run and Debug view with Ctrl+Shift+D.
-4. Select `Launch Client` from the drop-down, if it is not already selected.
-5. Press F5 to run the launch configuration.
-6. In the
-   [Extension Development Host](https://code.visualstudio.com/api/get-started/your-first-extension#:~:text=Then%2C%20inside%20the%20editor%2C%20press%20F5.%20This%20will%20compile%20and%20run%20the%20extension%20in%20a%20new%20Extension%20Development%20Host%20window.)
-   window that opens, open any `.R` file.
+1. Run `cd editors/code && bun install`.
+2. Open the repository in VS Code and press Ctrl+Shift+B to compile the client in watch mode.
+3. In the Run and Debug view (Ctrl+Shift+D), select `Launch Client` and press F5.
+4. Open any `.R` file in the Extension Development Host window that appears.
 
 ## Why the formatter code is imperative
 
-The hard part of formatting R is comments. A comment can sit between any two tokens: inside an `if`
-header, between a call and its argument list, after an operator. A concise "format each field" style
-drops such a comment without a word, so the formatter walks the concrete children token by token and
-decides placement at the token level.
-
-The rowan tree adds a twist. A trailing comment attaches *inside* an expression node, so any
-decision about where a closing token goes has to look at tokens, never at whole elements. See
-`crates/format/src/format.rs` and the formatter fixtures under `crates/format/tests/format/`.
+A comment in R can sit between any two tokens: inside an `if` header, between a call and its
+argument list, after an operator. A declarative "format each field" style silently drops such a
+comment, so the formatter walks the concrete children token by token and decides placement at the
+token level. Rowan attaches a trailing comment *inside* an expression node, so a decision about
+where a closing token goes has to look at tokens, never at whole elements. See
+`crates/format/src/format.rs` and the fixtures under `crates/format/tests/format/`.
 
 ## References
 
-### R
-
-- https://github.com/wch/r-source/blob/trunk/src/main/gram.y
-- https://cran.r-project.org/doc/manuals/r-release/R-lang.html
-- https://www.reddit.com/r/rust/comments/uu47mk/comment/i9dn0yg/
-
-### VS Code extensions
-
-- docs:
-  - https://code.visualstudio.com/api/references/vscode-api
-  - https://code.visualstudio.com/api/language-extensions
-- examples:
-  - https://github.com/microsoft/vscode-extension-samples/tree/main/lsp-sample
-  - https://github.com/semanticart/lsp-from-scratch
-  - https://github.com/nix-community/vscode-nix-ide
-  - https://github.com/ziglang/vscode-zig/
-
-### Other language servers written in Rust
-
-- https://github.com/gleam-lang/gleam/tree/main/compiler-core/src/language_server
-- https://github.com/supabase-community/postgres-language-server
-- tower-lsp
-  - https://github.com/FuelLabs/sway
-  - https://github.com/IWANABETHATGUY/tower-lsp-boilerplate
-  - https://github.com/TenStrings/glicol-lsp/blob/77e97d9c687dc5d66871ad5ec91b6f049de2b8e8/src/main.rs#L16
-  - https://github.com/Automattic/harper
-  - https://github.com/jfecher/ante/blob/5f7446375bc1c6c94b44a44bfb89777c1437aaf5/ante-ls/src/main.rs#L163
-- async_lsp
-  - https://github.com/oxalica/nil
-
-### Formatting
-
-- https://homepages.inf.ed.ac.uk/wadler/papers/prettier/prettier.pdf
-
-### Language design and typing
-
-- https://github.com/Glyphack/enderpy
-- https://github.com/dgkf/R
-- https://github.com/fabriceHategekimana/typr
-- https://github.com/salsa-rs/salsa/blob/master/examples/calc/type_check.rs
-
-### Out-of-order issues
-
-- https://github.com/ebkalderon/tower-lsp/issues/284
-- https://github.com/ethereum/fe/pull/1022
-- https://github.com/oxalica/async-lsp
-- https://github.com/tower-lsp-community/tower-lsp-server/issues/36
+- R grammar and language: [gram.y](https://github.com/wch/r-source/blob/trunk/src/main/gram.y),
+  [R Language Definition](https://cran.r-project.org/doc/manuals/r-release/R-lang.html)
+- Formatting: [Wadler, A prettier printer](https://homepages.inf.ed.ac.uk/wadler/papers/prettier/prettier.pdf)
+- VS Code extensions: [API reference](https://code.visualstudio.com/api/references/vscode-api),
+  [language extensions](https://code.visualstudio.com/api/language-extensions),
+  [lsp-sample](https://github.com/microsoft/vscode-extension-samples/tree/main/lsp-sample)
+- Language servers in Rust: [gleam](https://github.com/gleam-lang/gleam/tree/main/compiler-core/src/language_server),
+  [postgres-language-server](https://github.com/supabase-community/postgres-language-server),
+  [nil](https://github.com/oxalica/nil) (async-lsp), [harper](https://github.com/Automattic/harper)
+- Typing R and related languages: [enderpy](https://github.com/Glyphack/enderpy),
+  [dgkf/R](https://github.com/dgkf/R), [typr](https://github.com/fabriceHategekimana/typr),
+  [salsa's type-check example](https://github.com/salsa-rs/salsa/blob/master/examples/calc/type_check.rs)
+- Out-of-order LSP messages: [tower-lsp#284](https://github.com/ebkalderon/tower-lsp/issues/284),
+  [fe#1022](https://github.com/ethereum/fe/pull/1022),
+  [tower-lsp-server#36](https://github.com/tower-lsp-community/tower-lsp-server/issues/36)

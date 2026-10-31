@@ -1,29 +1,32 @@
 ---
 title: Getting started
-description: Install ry and run it on a project
+description: What ry is, how to install it, and your first check
 ---
 
-ry is a language server, checker, formatter, and console for R, written in Rust. It works on the code
-you already have, with nothing to annotate or configure first.
+ry is a fast checker, language server, and formatter for R, written in Rust. It finds mistakes in
+your R code before it runs (a misspelled name, a wrong argument, a `NULL` you forgot) and works on
+the code you already have, with nothing to annotate or configure first.
 
 ## Install
 
 - **VS Code:** install the
   [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry), which bundles
   the binary for Linux x86_64, macOS on Apple silicon, and Windows x86_64.
-- **Command line:** download
-  [0.3.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.1-beta), or build it with
+- **Command line:** download the binary for your platform from
+  [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta), or build it with
   `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
-- **Linux:** the 0.3.1-beta binary, also the one the extension bundles, starts only under Nix, so
-  build from source and point the extension's `ry.path` setting at it.
-- **Zed, RStudio, other platforms:** see [installation](/installation).
 
-## Run it
+[Installation](/installation) covers Zed, RStudio, Nix, and the remaining cases.
 
-In a project directory:
+## Check a project
 
-```sh
-ry check
+Run `ry check` in a project directory:
+
+```r
+# R/discount.R
+apply_discount <- function(price, rate) {
+  price * ratee
+}
 ```
 
 ```text
@@ -34,19 +37,45 @@ unresolved
  1 | apply_discount <- function(price, rate) {
  2 |   price * ratee
    |           ^^^^^
+ 3 | }
+
+1 problem in 1 file
 ```
 
-Files under `R/` are read as a package and share one namespace, as R loads them. Every other file is
-a script, read from top to bottom, that can use the package's functions. To also report type errors,
-add a `ry.toml`:
+R itself would report this only when the line runs. Files under `R/` are read as a package that
+shares one namespace, as R loads them, and every other `.R` file is a script read from top to
+bottom.
+
+## Turn on type checking
+
+Type errors are opt-in. Add a `ry.toml` to the project root:
 
 ```toml
 [check]
 typing = true
 ```
 
+ry already infers a type for every value from how it is used. Now it also reports the mismatches:
+
+```r
+apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+```
+
+```text
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+   --[R/discount.R:2:21]
+ 1 | apply_discount <- function(price, rate) price * (1 - rate)
+ 2 | apply_discount(100, "0.2")
+   |                     ^^^^^
+
+1 problem in 1 file
+```
+
 ## Next
 
-- [Tour](/type-checking/tour): every feature, and why it works the way it does
-- [Limitations](/type-checking/limitations): what is not checked, and the known false reports
-- [Configuration](/reference/configuration): every `ry.toml` key
+- [Why ry](/why-ry): what it is good at, and what it deliberately leaves out
+- [Checking code](/guides/checking): every kind of finding, and how to silence one
+- [Type checking](/type-checking/overview): how inference and annotations work

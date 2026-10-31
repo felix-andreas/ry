@@ -32,9 +32,8 @@ R reports the same mistake as `Error: unexpected string constant in "planets <- 
 
 - **VS Code:** the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
   bundles the binary.
-- **Binary:** download [0.3.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.1-beta).
-  GitHub's "latest" release is an old build from when ry was called Roughly. The 0.3.1-beta Linux
-  binary, also bundled in the extension, starts only under Nix, so build from source on Linux.
+- **Binary:** download [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta).
+  GitHub's "latest" release is an old build from when ry was called Roughly.
 - **Cargo:** `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 
 ```sh
@@ -56,7 +55,7 @@ typing = true
 ```
 
 R is too dynamic to check completely, so ry checks what can be described statically and treats the
-rest as `Unknown`, which never causes an error by itself. The [tour](https://ry-lang.org/type-checking/tour/) shows the
+rest as `Unknown`, which never causes an error by itself. The [type-checking pages](https://ry-lang.org/type-checking/overview/) show the
 type system in short examples, and [limitations](https://ry-lang.org/type-checking/limitations/) says
 what it cannot check.
 
