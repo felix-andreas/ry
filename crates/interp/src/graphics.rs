@@ -1,10 +1,14 @@
 //! The native routines of grDevices and graphics: colours, palettes, axis ticks, convex hulls
 //! and contour lines, which need no device, and the device and plotting routines.
 //!
-//! ry has no graphics devices yet, so a session behaves as one in which only the null device
-//! exists: `dev.cur()` is device 1, and every routine that would open or draw on a device fails
-//! with [`NO_DEVICES`]. The session reports neither cairo nor X11, as a headless build does,
-//! which makes the default device `pdf`, so loading the packages succeeds.
+//! The device table follows GNU R's: device 1 is the null device, `pdf()` opens a device in the
+//! lowest free slot and makes it current, and closing one makes the next open device current.
+//! `.Devices` and `.Device` in base mirror the table exactly as GNU R keeps them. A pdf device
+//! cannot draw yet, so every routine that would draw fails with [`NO_DEVICES`], and closing the
+//! device writes a valid PDF without pages, as GNU R writes for a device nothing was drawn on.
+//! This is what code that only opens and closes a device needs, such as testthat's snapshots,
+//! which open one around every snapshot. The session reports neither cairo nor X11, as a
+//! headless build does, which makes the default device `pdf`.
 
 use crate::{
     builtin_libraries::{NativeCall, NativeFn},
@@ -41,18 +45,18 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("makeQuartzDefault", |_| unsafe { scalar_bool(false) }),
     ("Type1FontInUse", |_| unsafe { scalar_bool(false) }),
     ("CIDFontInUse", |_| unsafe { scalar_bool(false) }),
-    ("devcur", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devnext", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devprev", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devset", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devoff", |_| Ok(nil())),
+    ("devcur", |_| unsafe { scalar_integer(DEVICES.with_borrow(|table| table.current) as i32 + 1) }),
+    ("devnext", |call| unsafe { scalar_integer(DEVICES.with_borrow(|table| table.next(device_argument(call))) as i32 + 1) }),
+    ("devprev", |call| unsafe { scalar_integer(DEVICES.with_borrow(|table| table.previous(device_argument(call))) as i32 + 1) }),
+    ("devset", do_dev_set),
+    ("devoff", do_dev_off),
     ("devholdflush", |_| unsafe { scalar_integer(0) }),
     ("devAskNewPage", do_ask_new_page),
     ("getGraphicsEventEnv", |_| Ok(nil())),
     ("PicTeX", no_devices),
     ("PostScript", no_devices),
     ("XFig", no_devices),
-    ("PDF", no_devices),
+    ("PDF", do_pdf),
     ("devCairo", no_devices),
     ("Quartz", no_devices),
     ("X11", no_devices),
@@ -86,16 +90,220 @@ pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
 /// The error of every routine that needs a graphics device.
 pub const NO_DEVICES: &str = "graphics devices are not supported in ry yet";
 
-const NULL_DEVICE: i32 = 1;
+/// GNU R's `R_MaxDevices`: the null device and 63 others.
+const MAX_DEVICES: usize = 64;
 
-/// Binds `.Device` and `.Devices` in base as GNU R does at startup, for a session whose only
-/// device is the null device.
+/// The open devices by 0-based slot, as GNU R numbers them internally; R code sees slot `i` as
+/// device `i + 1`. Slot 0, the null device, is always open.
+struct DeviceTable {
+    slots: Vec<Option<Device>>,
+    current: usize,
+}
+
+struct Device {
+    /// Where closing the device writes its file, if anywhere.
+    file: Option<String>,
+}
+
+thread_local! {
+    static DEVICES: RefCell<DeviceTable> = RefCell::new(DeviceTable {
+        slots: std::iter::once(Some(Device { file: None })).chain(std::iter::repeat_with(|| None).take(MAX_DEVICES - 1)).collect(),
+        current: 0,
+    });
+}
+
+impl DeviceTable {
+    fn is_open(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(Option::is_some)
+    }
+
+    fn open_count(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// GNU R's `nextDevice`: the first open device after `from`, wrapping past the last slot to
+    /// the first, and the null device when no other is open.
+    fn next(&self, from: usize) -> usize {
+        if self.open_count() == 1 {
+            return 0;
+        }
+        (from + 1..MAX_DEVICES).chain(1..MAX_DEVICES).find(|&slot| self.is_open(slot)).unwrap_or(0)
+    }
+
+    /// GNU R's `prevDevice`, the mirror of [`DeviceTable::next`].
+    fn previous(&self, from: usize) -> usize {
+        if self.open_count() == 1 {
+            return 0;
+        }
+        (1..from.min(MAX_DEVICES)).rev().chain((1..MAX_DEVICES).rev()).find(|&slot| self.is_open(slot)).unwrap_or(0)
+    }
+}
+
+/// Binds `.Device` and `.Devices` in base as GNU R does at startup: the null device is current,
+/// and `.Devices` is a pairlist of device names.
 pub unsafe fn define_device_variables() -> R<()> {
     let name = scalar_string("null device")?;
     crate::eval::define(symbols().dot_device, name, values::base_env())?;
-    let devices = values::list_vector(&[name])?;
+    let devices = values::cons(name, nil())?;
     crate::eval::define(values::install(".Devices")?, devices, values::base_env())?;
     Ok(())
+}
+
+/// The 0-based slot of the device a routine's first argument names.
+unsafe fn device_argument(call: &NativeCall<'_>) -> usize {
+    (values::as_integer_scalar(call.arg(0)) - 1).clamp(0, MAX_DEVICES as i32 - 1) as usize
+}
+
+/// `.External(C_PDF, file, paper, ...)`: opens a pdf device on `file`, or on nothing for
+/// `file = NULL`.
+unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
+    let file = match call.arg(0) {
+        file if file == nil() => None,
+        file => Some(values::require_string(file, "file")?),
+    };
+    let slot = DEVICES.with_borrow(|table| (1..MAX_DEVICES).find(|&slot| !table.is_open(slot)));
+    let Some(slot) = slot else {
+        return Err(call.error("too many open devices"));
+    };
+    let name = scalar_string("pdf")?;
+    if let Some(file) = &file {
+        values::set_attr(name, values::install("filepath")?, scalar_string(file)?)?;
+    }
+    set_device_name(slot, name)?;
+    DEVICES.with_borrow_mut(|table| {
+        table.slots[slot] = Some(Device { file });
+        table.current = slot;
+    });
+    crate::eval::define(symbols().dot_device, scalar_string("pdf")?, values::base_env())?;
+    crate::interp().visible = false;
+    Ok(nil())
+}
+
+/// `.External(C_devset, which)`: makes device `which` current, or the next open one after it
+/// if it is not open, and returns the device made current.
+unsafe fn do_dev_set(call: &NativeCall<'_>) -> R<Sexp> {
+    let wanted = device_argument(call);
+    let slot = DEVICES.with_borrow_mut(|table| {
+        table.current = if table.is_open(wanted) { wanted } else { table.next(wanted) };
+        table.current
+    });
+    crate::eval::define(symbols().dot_device, plain_device_name(slot)?, values::base_env())?;
+    if slot == 0 {
+        // GNU R's `selectDevice` asks for the current device, which starts the default one
+        // when the null device is current, but still reports the null device as selected.
+        start_default_device()?;
+    }
+    scalar_integer(slot as i32 + 1)
+}
+
+/// GNU R's `GEcurrentDevice` for a session whose current device is the null device: calls
+/// `getOption("device")`, a function or the name of one in the global environment or
+/// grDevices.
+unsafe fn start_default_device() -> R<()> {
+    let text = "local({
+        device <- getOption('device')
+        if (is.character(device)) {
+            device <- if (exists(device, envir = globalenv())) get(device, envir = globalenv())
+                else getExportedValue('grDevices', device)
+        }
+        if (!is.function(device)) stop('no active or default device')
+        device()
+    })";
+    let expressions = crate::lower::parse_text(text, "<device>")?;
+    crate::heap().root(expressions);
+    for index in 0..length(expressions) {
+        crate::eval::eval(expressions.element(index), values::base_env())?;
+    }
+    Ok(())
+}
+
+/// `.External(C_devoff, which)`: closes device `which`, writing its file, and makes the next
+/// open device current.
+unsafe fn do_dev_off(call: &NativeCall<'_>) -> R<Sexp> {
+    let slot = device_argument(call);
+    if slot == 0 {
+        return Ok(nil());
+    }
+    let Some(device) = DEVICES.with_borrow_mut(|table| table.slots[slot].take()) else {
+        return Ok(nil());
+    };
+    if let Some(file) = device.file {
+        let path = page_file_name(&file);
+        std::fs::write(&path, empty_pdf()).map_err(|failure| call.error(format!("cannot open file '{path}': {failure}")))?;
+    }
+    set_device_name(slot, scalar_string("")?)?;
+    let current = DEVICES.with_borrow_mut(|table| {
+        if table.current == slot {
+            table.current = table.next(slot);
+        }
+        table.current
+    });
+    crate::eval::define(symbols().dot_device, plain_device_name(current)?, values::base_env())?;
+    crate::interp().visible = false;
+    Ok(nil())
+}
+
+/// The name of the device in `slot`, without the attributes its `.Devices` entry carries, as
+/// GNU R binds `.Device`.
+unsafe fn plain_device_name(slot: usize) -> R<Sexp> {
+    let mut cell = crate::eval::find_var(values::install(".Devices")?, values::base_env())?;
+    for _ in 0..slot {
+        cell = cell.cdr();
+    }
+    let name = if cell.kind() == SexpType::Pairlist { values::first_string(cell.car()).map(|name| name.into_owned()) } else { None };
+    scalar_string(name.as_deref().unwrap_or(""))
+}
+
+/// Sets the entry of `.Devices` for `slot`, extending the pairlist by one cell when `slot` is
+/// past its end, which the lowest-free-slot rule guarantees is the only way it grows.
+unsafe fn set_device_name(slot: usize, name: Sexp) -> R<()> {
+    let symbol = values::install(".Devices")?;
+    let mut cell = crate::eval::find_var(symbol, values::base_env())?;
+    if cell.kind() != SexpType::Pairlist {
+        define_device_variables()?;
+        cell = crate::eval::find_var(symbol, values::base_env())?;
+    }
+    for _ in 0..slot {
+        if cell.cdr().kind() != SexpType::Pairlist {
+            crate::heap().set_cdr(cell, values::cons(scalar_string("")?, nil())?);
+        }
+        cell = cell.cdr();
+    }
+    crate::heap().set_car(cell, name);
+    Ok(())
+}
+
+/// The file of the first page: GNU R formats the device's file name with the page number, so
+/// `Rplot%03d.pdf` writes `Rplot001.pdf`.
+fn page_file_name(file: &str) -> String {
+    let Some(start) = file.find('%') else {
+        return file.to_owned();
+    };
+    let rest = &file[start + 1..];
+    let digits_end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
+    if !rest[digits_end..].starts_with('d') {
+        return file.to_owned();
+    }
+    let width: usize = rest[..digits_end].parse().unwrap_or(0);
+    let number = if rest.starts_with('0') { format!("{:0width$}", 1) } else { format!("{:width$}", 1) };
+    format!("{}{}{}", &file[..start], number, &rest[digits_end + 1..])
+}
+
+/// A valid PDF document without pages.
+fn empty_pdf() -> Vec<u8> {
+    let mut document = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for object in ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>"] {
+        offsets.push(document.len());
+        document.extend(format!("{} 0 obj\n{object}\nendobj\n", offsets.len()).as_bytes());
+    }
+    let xref = document.len();
+    document.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+    for offset in offsets {
+        document.extend(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    document.extend(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    document
 }
 
 /// The routines that draw on or query a device, which are every graphics routine the table

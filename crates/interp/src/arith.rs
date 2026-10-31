@@ -547,10 +547,20 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     Ok(result)
 }
 
-/// The result attributes of a binary operation: dims must agree, names come from the operand
-/// as long as the result, and other attributes are copied from both, the first taking
+/// The result attributes of a binary arithmetic operation: dims must agree, names come from the
+/// operand as long as the result, and other attributes are copied from both, the first taking
 /// precedence.
 pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
+    result_attributes(left, right, result, call, true)
+}
+
+/// The result attributes of a comparison or a logical `&` or `|`: as for arithmetic, but GNU R
+/// keeps only names, dims and dimnames, so a class or any other attribute is dropped.
+unsafe fn comparison_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
+    result_attributes(left, right, result, call, false)
+}
+
+unsafe fn result_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp, copy_most: bool) -> R<()> {
     let left_dims = get_attr(left, symbols().dim);
     let right_dims = get_attr(right, symbols().dim);
     if left_dims != nil() && right_dims != nil() {
@@ -569,10 +579,10 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
     if !left_attributes && !right_attributes {
         return Ok(());
     }
-    if right_attributes && length(right) == result_length {
+    if copy_most && right_attributes && length(right) == result_length {
         values::copy_most_attributes(right, result, false)?;
     }
-    if left_attributes && length(left) == result_length {
+    if copy_most && left_attributes && length(left) == result_length {
         values::copy_most_attributes(left, result, false)?;
     }
     for symbol in [symbols().dim, symbols().dimnames] {
@@ -992,7 +1002,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
             }
         }
     }
-    binary_attributes(call.arg(0), call.arg(1), result, call.call)?;
+    comparison_attributes(call.arg(0), call.arg(1), result, call.call)?;
     Ok(result)
 }
 
@@ -1067,7 +1077,7 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
             0
         };
     }
-    binary_attributes(left, right, result, call.call)?;
+    comparison_attributes(left, right, result, call.call)?;
     Ok(result)
 }
 
