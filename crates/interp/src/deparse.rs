@@ -738,7 +738,7 @@ impl Deparser {
                     String::new()
                 };
                 match (head_name.as_str(), ry_call_form(pattern)) {
-                    (_, Some(RyForm::Record | RyForm::Tuple)) => {
+                    (".ry_record" | ".ry_tuple", _) => {
                         self.print("(");
                         self.pattern_items(arguments);
                         let items = values::pairlist_items(arguments);
