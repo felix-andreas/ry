@@ -177,6 +177,54 @@ pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
     Outcome::Completed
 }
 
+/// Runs a read-eval-print loop: `read` returns the next chunk of input after showing a prompt,
+/// or `None` at the end of input. Input that ends inside an unfinished expression is
+/// continued on the next chunk, and each complete expression runs as its own top-level call.
+pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
+    let mut buffer = String::new();
+    loop {
+        let prompt = if buffer.is_empty() { "> " } else { "+ " };
+        let Some(chunk) = read(prompt) else {
+            break;
+        };
+        buffer.push_str(&chunk);
+        if !buffer.ends_with('\n') {
+            buffer.push('\n');
+        }
+        if input_is_unfinished(&buffer) {
+            continue;
+        }
+        let text = std::mem::take(&mut buffer);
+        let mark = crate::heap().handle_mark();
+        match crate::lower::parse_text(&text, "<text>") {
+            Ok(expressions) => {
+                crate::heap().root(expressions);
+                for index in 0..length(expressions) {
+                    if !run_toplevel(expressions.element(index)) {
+                        break;
+                    }
+                }
+            }
+            Err(Unwind::Error(failure)) => {
+                write_console(format!("Error: {}\n", failure.message).as_bytes(), true);
+            }
+            Err(_) => {}
+        }
+        crate::heap().release_handles(mark);
+    }
+}
+
+/// Whether the parse of `text` fails only because the text ends too early.
+fn input_is_unfinished(text: &str) -> bool {
+    let parse = syntax::parse(text);
+    let end = syntax::TextSize::of(text.trim_end());
+    parse
+        .errors()
+        .iter()
+        .find(|failure| !failure.in_annotation)
+        .is_some_and(|failure| failure.range.start() >= end)
+}
+
 /// Evaluates one top-level expression, prints it if visible, and reports deferred warnings.
 /// Returns whether it succeeded.
 pub unsafe fn run_toplevel(expression: Sexp) -> bool {

@@ -1,8 +1,9 @@
 //! A `reedline` editor running inside R's `ReadConsole` callback; R itself still
-//! parses, evaluates, and autoprints the fed input.
+//! parses, evaluates, and autoprints the fed input. The same editor drives ry's own runtime,
+//! whose console loop calls the callback the same way.
 
 use crate::libr::{self, RApi};
-use crate::{ConsoleHooks, Keybindings, ReplError, RunOptions, SessionCompleter};
+use crate::{ConsoleHooks, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter};
 use crossterm::terminal;
 use nu_ansi_term::{Color, Style};
 use reedline::{
@@ -24,7 +25,54 @@ use std::{fs, slice};
 use syntax::SyntaxKind::{self, *};
 use syntax::{TextSize, lex};
 
-pub fn run(api: RApi, options: RunOptions) -> Result<(), ReplError> {
+pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
+    let batch = options.batch;
+    let routines = std::mem::take(&mut options.routines);
+    let startup = std::mem::take(&mut options.startup);
+    install(options, false)?;
+    install_sigint_handler();
+    // A batch run prints only what its code prints.
+    api.initialize(read_console, write_console_ex, batch)?;
+    api.register_call_routines(&routines);
+    for statement in &startup {
+        api.eval(statement);
+    }
+    if !batch {
+        // R's `width` defaults to 80 whatever the terminal is, and R exports no setter.
+        // Evaluated directly: fed input taken before the first prompt leaves the terminal
+        // in R's state. Profiles have run, so only R's untouched default is replaced.
+        if let Ok((columns, _)) = terminal::size()
+            && columns > 0
+        {
+            api.eval(&format!(
+                "if (isTRUE(getOption(\"width\") == 80L)) options(width = {columns}L)"
+            ));
+        }
+        eprintln!(
+            "ry R console, R at {}. Type q() or Ctrl-D to quit.",
+            api.r_home.display()
+        );
+    }
+    api.run_main_loop();
+    Ok(())
+}
+
+/// Installs the console for ry's own runtime, whose console loop reads through
+/// [`ry_read_console`]. Every read it makes is at the top-level prompt.
+pub fn install_for_ry_runtime(options: RunOptions) -> Result<(), ReplError> {
+    install(options, true)
+}
+
+/// The read hook ry's runtime calls: GNU R's `R_ReadConsole` without the history flag.
+pub extern "C" fn ry_read_console(
+    prompt: *const c_char,
+    buffer: *mut c_uchar,
+    length: c_int,
+) -> c_int {
+    catch_unwind(|| read_console_inner(prompt, buffer, length)).unwrap_or(0)
+}
+
+fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
     let completion_menu_binding = ReedlineEvent::UntilFound(vec![
         ReedlineEvent::Menu("completion_menu".to_owned()),
         ReedlineEvent::MenuNext,
@@ -90,8 +138,15 @@ pub fn run(api: RApi, options: RunOptions) -> Result<(), ReplError> {
         pending.extend(normalize_line_endings(&options.input).into_bytes());
         pending.push_back(b'\n');
     }
+    let mut filter = options.filter;
     if let Some(script) = script {
-        pending.extend(normalize_line_endings(&script).into_bytes());
+        let script = normalize_line_endings(&script);
+        // A script whose filter refuses it does not run at all.
+        let script = match filter.as_mut() {
+            Some(filter) => filter.filter(&script).unwrap_or_default(),
+            None => script,
+        };
+        pending.extend(script.into_bytes());
         pending.push_back(b'\n');
     }
     CONSOLE.with(|slot| {
@@ -101,32 +156,10 @@ pub fn run(api: RApi, options: RunOptions) -> Result<(), ReplError> {
             batch: options.batch,
             completer,
             hooks: options.hooks,
+            filter,
+            ry_runtime,
         });
     });
-    install_sigint_handler();
-    // A batch run prints only what its code prints.
-    api.initialize(read_console, write_console_ex, options.batch)?;
-    api.register_call_routines(&options.routines);
-    for statement in &options.startup {
-        api.eval(statement);
-    }
-    if !options.batch {
-        // R's `width` defaults to 80 whatever the terminal is, and R exports no setter.
-        // Evaluated directly: fed input taken before the first prompt leaves the terminal
-        // in R's state. Profiles have run, so only R's untouched default is replaced.
-        if let Ok((columns, _)) = terminal::size()
-            && columns > 0
-        {
-            api.eval(&format!(
-                "if (isTRUE(getOption(\"width\") == 80L)) options(width = {columns}L)"
-            ));
-        }
-        eprintln!(
-            "ry R console, R at {}. Type q() or Ctrl-D to quit.",
-            api.r_home.display()
-        );
-    }
-    api.run_main_loop();
     Ok(())
 }
 
@@ -158,6 +191,10 @@ struct Console {
     batch: bool,
     completer: Option<SharedSessionCompleter>,
     hooks: Option<Box<dyn ConsoleHooks>>,
+    /// Sees each top-level command before R does, and may rewrite or refuse it.
+    filter: Option<Box<dyn InputFilter>>,
+    /// Driving ry's own runtime, whose console reads only at the top-level prompt.
+    ry_runtime: bool,
 }
 
 /// R's parser rejects a raw `\r`, but scripts and the editor buffer carry CRLF on
@@ -209,7 +246,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
             // R hands its hook a valid NUL-terminated prompt (or null).
             let prompt_text = unsafe { libr::prompt_text(prompt) };
             // Input for `readline()`, `menu()` or the browser must reach them untouched.
-            let at_top_level = libr::at_top_level();
+            let at_top_level = console.ry_runtime || libr::at_top_level();
             match console.editor.read_line(&RPrompt { text: prompt_text }) {
                 Ok(Signal::Success(line)) => {
                     let line = normalize_line_endings(&line);
@@ -220,6 +257,13 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                         console.pending.extend(code.into_bytes());
                         console.pending.push_back(b'\n');
                     }
+                    let line = match console.filter.as_mut() {
+                        Some(filter) if at_top_level => match filter.filter(&line) {
+                            Some(line) => line,
+                            None => continue,
+                        },
+                        _ => line,
+                    };
                     if let Some(completer) = &console.completer {
                         completer
                             .lock()

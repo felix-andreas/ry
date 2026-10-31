@@ -43,6 +43,13 @@ pub trait ConsoleHooks: Send {
     fn before_command(&mut self) -> Option<String>;
 }
 
+/// Sees R input before the engine parses it: each top-level command typed at the console, and a
+/// script fed whole.
+pub trait InputFilter: Send {
+    /// The text to evaluate in place of `input`, or `None` to drop the input unevaluated.
+    fn filter(&mut self, input: &str) -> Option<String>;
+}
+
 #[derive(Default)]
 pub struct RunOptions {
     pub keybindings: Keybindings,
@@ -60,6 +67,7 @@ pub struct RunOptions {
     pub batch: bool,
     pub completer: Option<Box<dyn SessionCompleter>>,
     pub hooks: Option<Box<dyn ConsoleHooks>>,
+    pub filter: Option<Box<dyn InputFilter>>,
 }
 
 /// Returns only when R ends. R assumes it owns the thread it initializes on, so
@@ -71,8 +79,65 @@ pub fn run(options: RunOptions) -> Result<(), ReplError> {
 
 /// Runs an R script on ry's own runtime instead of GNU R: loads ry's `libR` (from `RY_LIBR`, or
 /// beside the executable) and hands it the script. Returns the script's exit status.
-pub fn run_on_ry_runtime(file: &std::path::Path, arguments: &[String]) -> Result<i32, ReplError> {
+pub fn run_on_ry_runtime(
+    file: &std::path::Path,
+    arguments: &[String],
+    flags: RuntimeFlags,
+) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int};
+    let library = ry_runtime()?;
+    type RunFile = unsafe extern "C" fn(*const c_char, c_int, *const *const c_char, c_int) -> c_int;
+    let run = runtime_entry::<RunFile>(library, "ry_run_file")?;
+    let path = CString::new(file.to_string_lossy().as_bytes())
+        .map_err(|_| ReplError("the script path contains a NUL byte".into()))?;
+    let arguments: Vec<CString> = arguments
+        .iter()
+        .map(|argument| CString::new(argument.as_bytes()))
+        .collect::<Result<_, _>>()
+        .map_err(|_| ReplError("an argument contains a NUL byte".into()))?;
+    let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
+    Ok(unsafe {
+        run(
+            path.as_ptr(),
+            pointers.len() as c_int,
+            pointers.as_ptr(),
+            flags.bits(),
+        )
+    })
+}
+
+/// What ry's runtime does with inline type annotations; mirrors the `RUN_FLAG_*` bits of
+/// `libr::eval`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeFlags {
+    /// Inline annotations become checks at function boundaries.
+    pub annotation_checks: bool,
+}
+
+impl RuntimeFlags {
+    fn bits(self) -> std::ffi::c_int {
+        std::ffi::c_int::from(self.annotation_checks)
+    }
+}
+
+/// Runs the interactive console on ry's own runtime instead of GNU R. Only the editor, the
+/// completer and the filter of `options` apply: ry's runtime has no `.Call` routines to register
+/// and runs no startup code.
+pub fn run_console_on_ry_runtime(
+    options: RunOptions,
+    flags: RuntimeFlags,
+) -> Result<i32, ReplError> {
+    use std::ffi::{c_char, c_int, c_uchar};
+    let library = ry_runtime()?;
+    type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
+    type Repl = unsafe extern "C" fn(ReadConsole, c_int) -> c_int;
+    let repl = runtime_entry::<Repl>(library, "ry_repl")?;
+    console::install_for_ry_runtime(options)?;
+    eprintln!("ry console on ry's runtime. Type q() or Ctrl-D to quit.");
+    Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
+}
+
+fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
     let library_path = ry_runtime_library()?;
     // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
     // dynamic linker satisfy them from it.
@@ -88,23 +153,17 @@ pub fn run_on_ry_runtime(file: &std::path::Path, arguments: &[String]) -> Result
             library_path.display()
         ))
     })?;
-    let library: &'static libloading::os::unix::Library = Box::leak(Box::new(library));
-    type RunFile = unsafe extern "C" fn(*const c_char, c_int, *const *const c_char) -> c_int;
-    let run = unsafe { library.get::<RunFile>(b"ry_run_file\0") }.map_err(|error| {
-        ReplError(format!(
-            "{} is not ry's runtime: {error}",
-            library_path.display()
-        ))
-    })?;
-    let path = CString::new(file.to_string_lossy().as_bytes())
-        .map_err(|_| ReplError("the script path contains a NUL byte".into()))?;
-    let arguments: Vec<CString> = arguments
-        .iter()
-        .map(|argument| CString::new(argument.as_bytes()))
-        .collect::<Result<_, _>>()
-        .map_err(|_| ReplError("an argument contains a NUL byte".into()))?;
-    let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
-    Ok(unsafe { run(path.as_ptr(), pointers.len() as c_int, pointers.as_ptr()) })
+    Ok(Box::leak(Box::new(library)))
+}
+
+fn runtime_entry<T: Copy>(
+    library: &'static libloading::os::unix::Library,
+    name: &str,
+) -> Result<T, ReplError> {
+    let symbol = format!("{name}\0");
+    unsafe { library.get::<T>(symbol.as_bytes()) }
+        .map(|symbol| *symbol)
+        .map_err(|error| ReplError(format!("the loaded libR is not ry's runtime: {error}")))
 }
 
 fn ry_runtime_library() -> Result<PathBuf, ReplError> {
