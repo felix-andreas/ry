@@ -46,6 +46,7 @@ pub mod serialize;
 pub mod session;
 pub mod sort;
 pub mod stats;
+pub mod stats_cluster;
 pub mod stats_deriv;
 pub mod stats_lbfgsb;
 pub mod stats_models;

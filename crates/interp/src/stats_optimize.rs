@@ -609,7 +609,7 @@ unsafe fn nelder_mead(problem: &mut Problem<'_>, start: &[f64], control: &Contro
     if trace {
         print("  Nelder-Mead direct search function minimizer\n");
     }
-    let mut value = problem.value(start)?;
+    let value = problem.value(start)?;
     if !value.is_finite() {
         return Err(problem.call.error("function cannot be evaluated at initial parameters"));
     }

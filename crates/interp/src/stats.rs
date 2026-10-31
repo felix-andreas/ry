@@ -10,7 +10,7 @@
 use crate::{
     builtin_libraries::{NativeCall, NativeFn, c_result},
     coerce::coerce_vector,
-    stats_deriv, stats_models, stats_optimize,
+    stats_cluster, stats_deriv, stats_models, stats_optimize,
     unwind::R,
     values::{self, length, symbols},
 };
@@ -68,7 +68,14 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pp_sum", pp_sum),
     ("TSconv", ts_conv),
     ("isoreg", isoreg),
-    ("cutree", cutree),
+    ("cutree", stats_cluster::cutree),
+    ("kmeans_Lloyd", stats_cluster::kmeans_lloyd),
+    ("kmeans_MacQueen", stats_cluster::kmeans_macqueen),
+    ("kmns", stats_cluster::kmns),
+    ("hclust", stats_cluster::hclust),
+    ("hcass2", stats_cluster::hcass2),
+    ("numeric_deriv", stats_models::numeric_deriv),
+    ("nls_iter", stats_models::nls_iter),
 ];
 
 /// The arguments of a `.C` or `.Fortran` call, coerced as the routine's declared types, ready
@@ -2172,7 +2179,7 @@ unsafe fn ts_conv(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&product)
 }
 
-// Isotonic regression and trees.
+// Isotonic regression.
 
 /// `isoreg(y)`: the isotonic (monotone increasing) least squares fit, as the slopes of the
 /// greatest convex minorant of the cumulative sums.
@@ -2211,52 +2218,4 @@ unsafe fn isoreg(call: &NativeCall<'_>) -> R<Sexp> {
         ("yf", values::real_vector(&fitted)?),
         ("iKnots", values::integer_vector(&knots)?),
     ])
-}
-
-/// `cutree(merge, which)`: the cluster of each observation when an `hclust` tree is cut into
-/// each number of groups in `which`. Clusters are numbered in order of their first
-/// observation.
-unsafe fn cutree(call: &NativeCall<'_>) -> R<Sexp> {
-    let merge = integer_values(call.arg(0))?;
-    let which = integer_values(call.arg(1))?;
-    let steps = merge.len() / 2;
-    let n = steps + 1;
-    let mut result = vec![0; n * which.len()];
-    for (column, &groups) in which.iter().enumerate() {
-        if groups == NA_INTEGER || groups < 1 || groups as usize > n {
-            return Err(call.error(format!("elements of 'k' must be between 1 and {n}")));
-        }
-        let mut parent: Vec<usize> = (0..n).collect();
-        fn root(parent: &mut [usize], mut node: usize) -> usize {
-            while parent[node] != node {
-                parent[node] = parent[parent[node]];
-                node = parent[node];
-            }
-            node
-        }
-        // The cluster (as an observation in it) each merge step formed.
-        let mut formed = vec![0usize; steps];
-        for step in 0..n - groups as usize {
-            let member = |entry: i32, formed: &[usize]| if entry < 0 { (-entry - 1) as usize } else { formed[entry as usize - 1] };
-            let left = member(merge[step], &formed);
-            let right = member(merge[step + steps], &formed);
-            let (left_root, right_root) = (root(&mut parent, left), root(&mut parent, right));
-            parent[right_root] = left_root;
-            formed[step] = left_root;
-        }
-        let mut labels: Vec<Option<i32>> = vec![None; n];
-        let mut next = 0;
-        for observation in 0..n {
-            let cluster = root(&mut parent, observation);
-            let label = *labels[cluster].get_or_insert_with(|| {
-                next += 1;
-                next
-            });
-            result[observation + column * n] = label;
-        }
-    }
-    let answer = values::integer_vector(&result)?;
-    let dim = values::integer_vector(&[n as i32, which.len() as i32])?;
-    values::set_attr(answer, symbols().dim, dim)?;
-    Ok(answer)
 }

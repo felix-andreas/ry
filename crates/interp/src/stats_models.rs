@@ -851,3 +851,226 @@ unsafe fn copy_most_attributes_no_ts(from: Sexp, to: Sexp) -> R<()> {
     }
     Ok(())
 }
+
+// Nonlinear least squares.
+
+/// `numeric_deriv(expr, theta, rho, dir, eps, central)`: the value of the model `expr` in
+/// `rho`, with the forward (or central) difference gradient with respect to the parameters
+/// named in `theta` as its `gradient` attribute.
+pub unsafe fn numeric_deriv(call: &NativeCall<'_>) -> R<Sexp> {
+    let expression = call.arg(0);
+    let theta = call.arg(1);
+    let env = call.arg(2);
+    let directions = crate::stats::real_values(call.arg(3))?;
+    let epsilon = values::as_real_scalar(call.arg(4));
+    let central = values::as_integer_scalar(call.arg(5)) == 1;
+    if theta.kind() != SexpType::String {
+        return Err(call.error("'theta' should be of type character"));
+    }
+    if env.kind() != SexpType::Environment {
+        return Err(call.error("use of NULL environment is defunct"));
+    }
+    let names = values::strings(theta);
+    if directions.len() != names.len() {
+        return Err(call.error("'dir' is not a numeric vector of the correct length"));
+    }
+    let evaluate = || -> R<Sexp> {
+        let value = eval::eval(expression, env)?;
+        let value = if value.kind() == SexpType::Real { values::duplicate(value)? } else { crate::coerce::coerce_vector(value, SexpType::Real)? };
+        Ok(value)
+    };
+    let answer = evaluate()?;
+    if values::reals(answer).iter().any(|value| !value.is_finite()) {
+        return Err(call.error("Missing value or an infinity produced when evaluating the model"));
+    }
+    let mut parameters = Vec::with_capacity(names.len());
+    for name in &names {
+        let name = name.clone().unwrap_or_default();
+        let symbol = values::install(&name)?;
+        let value = eval::find_var(symbol, env)?;
+        let value = eval::value_of(value)?;
+        if value.kind() == SexpType::Integer {
+            return Err(call.error(format!("variable '{name}' is integer, not numeric")));
+        }
+        if value.kind() != SexpType::Real {
+            return Err(call.error(format!("variable '{name}' is not numeric")));
+        }
+        // The parameter is perturbed in place, so it must not be shared.
+        let own = values::duplicate(value)?;
+        eval::define(symbol, own, env)?;
+        parameters.push(own);
+    }
+    let rows = length(answer);
+    let total: usize = parameters.iter().map(|&parameter| length(parameter)).sum();
+    let mut gradient = vec![0.0; rows * total];
+    let base = values::reals(answer).to_vec();
+    let mut column = 0;
+    for (index, &parameter) in parameters.iter().enumerate() {
+        for j in 0..length(parameter) {
+            let original = values::reals(parameter)[j];
+            let delta = if original == 0.0 { epsilon } else { original.abs() * epsilon };
+            values::reals_mut(parameter)[j] = original + directions[index] * delta;
+            let forward = crate::scope(|| Ok(ValueVector(values::reals(evaluate()?).to_vec())))?.0;
+            if central {
+                values::reals_mut(parameter)[j] = original - directions[index] * delta;
+                let backward = crate::scope(|| Ok(ValueVector(values::reals(evaluate()?).to_vec())))?.0;
+                for k in 0..rows {
+                    if !forward[k].is_finite() || !backward[k].is_finite() {
+                        return Err(call.error("Missing value or an infinity produced when evaluating the model"));
+                    }
+                    gradient[column * rows + k] = directions[index] * (forward[k] - backward[k]) / (2.0 * delta);
+                }
+            } else {
+                for k in 0..rows {
+                    if !forward[k].is_finite() {
+                        return Err(call.error("Missing value or an infinity produced when evaluating the model"));
+                    }
+                    gradient[column * rows + k] = directions[index] * (forward[k] - base[k]) / delta;
+                }
+            }
+            values::reals_mut(parameter)[j] = original;
+            column += 1;
+        }
+    }
+    let matrix = crate::stats::real_matrix(&gradient, rows, total)?;
+    values::set_attr(answer, values::install("gradient")?, matrix)?;
+    Ok(answer)
+}
+
+/// A vector of numbers, which holds no handles.
+struct ValueVector(Vec<f64>);
+
+impl crate::unwind::Rooted for ValueVector {}
+
+/// `nls_iter(m, control, trace)`: Gauss-Newton iterations of an `nlsModel`, halving the step
+/// until the deviance does not increase.
+pub unsafe fn nls_iter(call: &NativeCall<'_>) -> R<Sexp> {
+    let model = call.arg(0);
+    let control = call.arg(1);
+    let trace_on = values::as_logical_scalar(call.arg(2)) == 1;
+    if control.kind() != SexpType::List {
+        return Err(call.error("'control' must be a list"));
+    }
+    if model.kind() != SexpType::List {
+        return Err(call.error("'m' must be a list"));
+    }
+    let setting = |name: &str| -> R<Sexp> {
+        let value = values::list_get(control, name);
+        if value == nil() {
+            return Err(call.error(format!("'control${name}' absent")));
+        }
+        Ok(value)
+    };
+    let max_iterations = values::as_integer_scalar(setting("maxiter")?);
+    let tolerance = values::as_real_scalar(setting("tol")?);
+    let min_factor = values::as_real_scalar(setting("minFactor")?);
+    let warn_only = values::as_logical_scalar(setting("warnOnly")?) == 1;
+    let print_eval = values::as_logical_scalar(setting("printEval")?) == 1;
+    let component = |name: &str| -> R<Sexp> {
+        let value = values::list_get(model, name);
+        if value == nil() {
+            return Err(call.error(format!("'m${name}()' absent")));
+        }
+        values::call(value, &[])
+    };
+    let convergence = component("conv")?;
+    let increment = component("incr")?;
+    let deviance_call = component("deviance")?;
+    let trace = component("trace")?;
+    let set_parameters = values::list_get(model, "setPars");
+    if set_parameters == nil() {
+        return Err(call.error("'m$setPars()' absent"));
+    }
+    let get_parameters = component("getPars")?;
+    let global = values::global_env();
+    let scalar = |expression: Sexp| -> R<f64> { crate::scope(|| Ok(values::as_real_scalar(eval::eval(expression, global)?))) };
+    let mut parameters = crate::stats::real_values(eval::eval(get_parameters, global)?)?;
+    let mut deviance = scalar(deviance_call)?;
+    if trace_on {
+        eval::eval(trace, global)?;
+    }
+    let mut factor = 1.0_f64;
+    let mut converged = false;
+    let mut total_evaluations = 1;
+    let mut criterion = -1.0;
+    let mut iteration = 0;
+    let finish = |message: String, code: i32, iteration: i32, criterion: f64| -> R<Sexp> {
+        values::named_list(&[
+            ("isConv", values::scalar_bool(code == 0)?),
+            ("finIter", values::scalar_integer(iteration)?),
+            ("finTol", values::scalar_real(criterion)?),
+            ("stopCode", values::scalar_integer(code)?),
+            ("stopMessage", values::scalar_string(&message)?),
+        ])
+    };
+    let fail = |message: String, code: i32, iteration: i32, criterion: f64| -> R<Sexp> {
+        if warn_only {
+            call.warning(message.clone())?;
+            finish(message, code, iteration, criterion)
+        } else {
+            Err(call.error(message))
+        }
+    };
+    while iteration < max_iterations {
+        criterion = scalar(convergence)?;
+        if criterion <= tolerance {
+            converged = true;
+            break;
+        }
+        let step = crate::stats::real_values(eval::eval(increment, global)?)?;
+        let mut evaluations = if print_eval { 1 } else { -1 };
+        while factor >= min_factor {
+            if print_eval {
+                crate::write_console(
+                    format!(
+                        "  It. {:3}, fac= {:>11}, eval (no.,total): ({:2},{:3}):",
+                        iteration + 1,
+                        crate::format::c_general(factor, 6, false),
+                        evaluations,
+                        total_evaluations
+                    )
+                    .as_bytes(),
+                    false,
+                );
+                evaluations += 1;
+                total_evaluations += 1;
+            }
+            let trial: Vec<f64> = parameters.iter().zip(&step).map(|(value, change)| value + factor * change).collect();
+            let singular = crate::scope(|| {
+                let argument = values::real_vector(&trial)?;
+                let expression = values::call(set_parameters, &[argument])?;
+                Ok(values::as_logical_scalar(eval::eval(expression, global)?) == 1)
+            })?;
+            if singular {
+                return fail("singular gradient".to_owned(), 1, iteration, criterion);
+            }
+            let new_deviance = scalar(deviance_call)?;
+            if print_eval {
+                crate::write_console(format!(" new dev = {}\n", crate::format::c_general(new_deviance, 6, false)).as_bytes(), false);
+            }
+            if new_deviance <= deviance {
+                deviance = new_deviance;
+                parameters = trial;
+                factor = (2.0 * factor).min(1.0);
+                break;
+            }
+            factor /= 2.0;
+        }
+        if trace_on {
+            eval::eval(trace, global)?;
+        }
+        if factor < min_factor {
+            let message = format!(
+                "step factor {} reduced below 'minFactor' of {}",
+                crate::format::c_general(factor, 6, false),
+                crate::format::c_general(min_factor, 6, false)
+            );
+            return fail(message, 2, iteration, criterion);
+        }
+        iteration += 1;
+    }
+    if !converged {
+        return fail(format!("number of iterations exceeded maximum of {max_iterations}"), 3, iteration, criterion);
+    }
+    finish("converged".to_owned(), 0, iteration, criterion)
+}
