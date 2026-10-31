@@ -2000,17 +2000,20 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   node is found without text.
 - **Why a tree, not text:** the analysis already parsed every file, the rowan green tree is shared
   and cheap to clone, and lowering a node skips the lexer and parser entirely. Memory is the trees
-  the analysis already holds; the finalizer drops a tree once no promise of its file remains.
+  the analysis already holds. The finalizer drops a tree after no promise of its file remains, at the
+  collector's next finalizer point (a native call's return, `gc()`, or exit), not immediately.
 - **Why `.Internal`s and not `.Call`:** the interpreter registers Rust builtins directly, so the
   backend needs no `DllInfo`, no RDS round trip and no source strings in R memory.
 - **Planning runs on its own thread** with `ANALYSIS_STACK_SIZE`, as every analysis entry point
   does, because the analysis recurses as deeply as the code nests.
 - **Runtime fixes the load path needed, each pinned by an oracle case:** `readDCF`, `load()`/`save()`
-  of XDR workspaces (`R/sysdata.rda`), `readChar` on a connection, comparisons and `&`/`|` keeping
+  of XDR workspaces (`R/sysdata.rda`, gzip, bzip2 or xz through `gzfile()`), `readChar` on a connection, comparisons and `&`/`|` keeping
   only names, dim and dimnames, and two hot paths (`match()` on interned ASCII strings by pointer,
   `names(env)` and `ls()` from print names without a string round trip).
-- **Impact:** on the 326,000-line bench package a cold load and a one-function reload match or beat
-  the GNU R backend on the same machine (932 ms and 58 ms against 1,036 ms and 53 ms). Correctness
+- **Impact:** on the 326,000-line bench package a cold load is faster than the GNU R backend on the
+  same machine and a one-function reload slightly slower (932 ms and 58 ms against 1,036 ms and
+  53 ms); on the 14,000-line package the cold load is slower (104 ms against 82 ms), because the
+  interpreter evaluates the eager statements more slowly than GNU R. Correctness
   and the reload logic are shared, because both backends apply the same plan; `test_load.rs` runs its
   namespace, S3/S4, collation and reload tests on both runtimes.
 

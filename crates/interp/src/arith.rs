@@ -706,6 +706,19 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
         if !equal {
             return Err(crate::unwind::error_in(call, "non-conformable arrays"));
         }
+        return Ok(());
+    }
+    for (array, dims, other) in [(left, left_dims, right), (right, right_dims, left)] {
+        if dims != nil() && length(array) != 1 && length(other) > length(array) {
+            return Err(crate::unwind::error_in(
+                call,
+                format!(
+                    "dims [product {}] do not match the length of object [{}]",
+                    length(array),
+                    length(other)
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -722,6 +735,11 @@ unsafe fn copy_array_structure(left: Sexp, right: Sexp, result: Sexp) -> R<()> {
         } else if from_right != nil() && length(right) == result_length {
             values::set_attr(result, symbol, from_right)?;
         }
+    }
+    // An array result takes no names, as in GNU R, which copies names only when neither
+    // operand is an array.
+    if get_attr(result, symbols().dim) != nil() {
+        return Ok(());
     }
     let left_names = get_attr(left, symbols().names);
     let right_names = get_attr(right, symbols().names);

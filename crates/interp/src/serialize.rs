@@ -27,7 +27,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Err(call.error("lazyLoadDBinsertValue is not supported"))
     }),
     internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("loadFromConn2", 3, do_load_from_conn),
+    internal("loadFromConn2", 3, do_load_from_conn).invisible(),
     internal("saveToConn", 6, do_save_to_conn).invisible(),
 ];
 
@@ -1055,9 +1055,9 @@ fn decompress(record: &[u8], kind: i32) -> R<Vec<u8>> {
                 .map_err(|failure| corrupt(&failure))?;
         }
         b'2' => {
-            return Err(error(
-                "bzip2-compressed lazy-load databases are not supported yet",
-            ));
+            bzip2_rs::DecoderReader::new(payload)
+                .read_to_end(&mut output)
+                .map_err(|failure| corrupt(&failure))?;
         }
         _ => {
             ZlibDecoder::new(body)
@@ -1150,7 +1150,7 @@ unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
             return Err(call.error("invalid 'list' argument"));
         };
         let symbol = values::install(&name)?;
-        let mut value = eval::find_var_in_frame(symbol, environment)?;
+        let mut value = eval::find_var(symbol, environment)?;
         if value == values::unbound() {
             return Err(call.error(format!("object '{name}' not found")));
         }

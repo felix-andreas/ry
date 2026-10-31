@@ -200,14 +200,24 @@ fn read_file_bytes(path: &str, gzip: bool) -> R<Vec<u8>> {
             io_reason(&failure)
         ))
     })?;
-    if gzip && bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut decoded = Vec::new();
-        MultiGzDecoder::new(&bytes[..])
-            .read_to_end(&mut decoded)
-            .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
-        return Ok(decoded);
+    if !gzip {
+        return Ok(bytes);
     }
-    Ok(bytes)
+    // `gzfile()` reads all three of R's compressions, as GNU R's does, because `save()` and
+    // `usethis::use_data()` write bzip2 or xz `.rda` files through it.
+    let mut decoded = Vec::new();
+    let result = if bytes.starts_with(&[0x1f, 0x8b]) {
+        MultiGzDecoder::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
+    } else if bytes.starts_with(b"BZh") {
+        bzip2_rs::DecoderReader::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
+    } else if bytes.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+        lzma_rs::xz_decompress(&mut &bytes[..], &mut decoded)
+            .map_err(|failure| std::io::Error::other(failure.to_string()))
+    } else {
+        return Ok(bytes);
+    };
+    result.map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
+    Ok(decoded)
 }
 
 fn io_reason(failure: &std::io::Error) -> &'static str {
@@ -665,9 +675,9 @@ unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
         }
         if line.starts_with([' ', '\t']) {
             let Some((tag, value)) = record.last_mut() else {
+                let start: String = line.chars().take(20).collect();
                 return Err(call.error(format!(
-                    "Found continuation line starting '{}' at begin of record.",
-                    line
+                    "Found continuation line starting '{start} ...' at begin of record."
                 )));
             };
             let line = if line.trim() == "." { "" } else { line };
@@ -678,7 +688,7 @@ unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
             value.push_str(if keep { line } else { line.trim() });
             continue;
         }
-        let Some((tag, value)) = line.split_once(':') else {
+        let Some((tag, value)) = line.split_once(':').filter(|(tag, _)| !tag.is_empty()) else {
             let start: String = line.chars().take(20).collect();
             return Err(call.error(format!("Line starting '{start} ...' is malformed!")));
         };

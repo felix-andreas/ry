@@ -1506,6 +1506,7 @@ checksum = "f4c7245a08504955605670dbf141fceab975f15ca21570696aebe9d2e71576bd"
 name = "interp"
 version = "0.3.2-beta"
 dependencies = [
+ "bzip2-rs",
  "fancy-regex",
  "flate2",
  "heap",

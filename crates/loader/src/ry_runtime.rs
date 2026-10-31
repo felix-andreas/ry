@@ -94,10 +94,9 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
             .name("ry-loader".to_owned())
             .stack_size(ANALYSIS_STACK_SIZE)
             .spawn_scoped(threads, || plan(&root, full))
-            .expect("the loader thread should spawn")
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .map(|thread| thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
     });
+    let value = value.map_err(|failure| error(format!("cannot start the loader's thread: {failure}")))?;
     scope(|| r_value(&value))
 }
 
@@ -218,16 +217,21 @@ unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
     // SAFETY: the address is a `Box<Parse>` that `tree_handle` leaked, and its finalizer only
     // runs once nothing references the handle, which this call does.
     let tree = &*address;
-    let start = values::as_integer_scalar(call.arg(1));
-    let end = values::as_integer_scalar(call.arg(2));
-    let function = lower_range(tree, start as u32, end as u32)?;
+    let offset = |argument: Sexp| u32::try_from(values::as_integer_scalar(argument)).ok();
+    let (Some(start), Some(end)) = (offset(call.arg(1)), offset(call.arg(2))) else {
+        return Err(error("ryLoaderForce needs two byte offsets"));
+    };
+    let function = lower_range(tree, start, end)?;
     eval(function, call.env)
 }
 
 /// Lowers the outermost node spanning exactly `start..end` of `tree`.
 unsafe fn lower_range(tree: &Parse, start: u32, end: u32) -> R<Sexp> {
-    let range = TextRange::new(TextSize::from(start), TextSize::from(end));
     let root = SyntaxNode::new_root(tree.green().clone());
+    if start > end || !root.text_range().contains_range(TextRange::new(start.into(), end.into())) {
+        return Err(error("a definition's code is not in its syntax tree"));
+    }
+    let range = TextRange::new(TextSize::from(start), TextSize::from(end));
     let element = root.covering_element(range);
     let mut node = match element.as_node() {
         Some(node) => node.clone(),

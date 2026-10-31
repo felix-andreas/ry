@@ -61,16 +61,16 @@ generated packages (`tools/loader-bench` regenerates them). The GNU R numbers ar
 | --- | --- | --- | --- |
 | 80 files, 14,000 lines | `devtools::load_all()` | 868 ms | 435 ms |
 | | `loadfast::load_fast()` | 282 ms | 10 ms |
-| | ry on GNU R | 90 ms | 7 ms |
+| | ry on GNU R | 82 ms | 6 ms |
 | | ry on its own runtime | 104 ms | 5 ms |
 | 500 files, 326,000 lines | `devtools::load_all()` | 7,385 ms | 6,581 ms |
 | | `loadfast::load_fast()` | 3,064 ms | 81 ms |
-| | ry on GNU R | 867 ms | 59 ms |
+| | ry on GNU R | 1,036 ms | 53 ms |
 | | ry on its own runtime | 932 ms | 58 ms |
 
-The two ry rows of each package were measured on a different, slower machine than the rest, where
-ry on GNU R took 82 ms and 1,036 ms cold, so compare the ry runtime with that rather than with the
-row above it.
+The two ry rows of each package were measured together on one machine, and the other loaders on a
+different one, where ry on GNU R took 90 ms and 867 ms cold. Compare the ry rows with each other,
+and the other loaders with those 90 and 867 ms.
 
 Keeping source references, as an interactive session does by default, adds 10 to 20% to a cold
 load.
