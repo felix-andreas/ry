@@ -160,6 +160,7 @@ impl BuiltinDef {
 }
 
 pub(crate) unsafe fn install_all() {
+    let mut seen = rustc_hash::FxHashSet::default();
     for table in [
         crate::eval::BUILTINS,
         crate::envir::BUILTINS,
@@ -185,6 +186,16 @@ pub(crate) unsafe fn install_all() {
         crate::native::BUILTINS,
         crate::utils::BUILTINS,
     ] {
+        // `register` lets a later definition replace an earlier one, which the host relies on;
+        // within the interpreter's own tables a repeated name is a stale copy shadowing the real
+        // one, so it is a bug to catch at start-up.
+        for definition in table {
+            assert!(
+                seen.insert((definition.name, definition.is_internal())),
+                "`{}` is defined twice in the interpreter's builtin tables",
+                definition.name
+            );
+        }
         register(table);
     }
 }

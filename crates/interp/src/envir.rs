@@ -52,7 +52,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("sys.parents", 0, |call| unsafe { do_sys(call, SysKind::Parents) }),
     internal("sys.on.exit", 0, |call| unsafe { do_sys(call, SysKind::OnExit) }),
     internal("parent.frame", 1, do_parent_frame),
-    builtin("is.environment", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Environment) }),
     builtin("as.environment", 1, do_as_environment),
     builtin("pos.to.env", 1, do_pos_to_env),
     internal("search", 0, do_search),
@@ -92,7 +91,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bodyCode", 1, do_body),
     internal("match.call", 4, do_match_call),
     internal("sys.source", -1, |_| unsafe { Ok(nil()) }),
-    internal("Sys.setenv", 2, |_| unsafe { Ok(nil()) }),
 ];
 
 unsafe fn environment_arg(value: Sexp, what: &str) -> R<Sexp> {

@@ -657,6 +657,11 @@ impl Deparser {
         self.in_list += 1;
         let mut broken = false;
         for index in 0..count {
+            // GNU R's vector deparse breaks a line that is past the cutoff before the next element
+            // (and before the closing parenthesis), without indenting the continuation.
+            if index > 0 && self.length > self.cutoff {
+                self.write_line();
+            }
             if nice {
                 self.name_prefix(names, index);
             }
@@ -757,8 +762,12 @@ impl Deparser {
         if wrap {
             self.print("c(");
         }
-        let mut broken = false;
         for index in 0..count {
+            // GNU R's vector deparse breaks a line that is past the cutoff before the next element
+            // (and before the closing parenthesis), without indenting the continuation.
+            if index > 0 && self.length > self.cutoff {
+                self.write_line();
+            }
             if nice {
                 self.name_prefix(names, index);
             }
@@ -813,17 +822,16 @@ impl Deparser {
             self.print(&text);
             if index + 1 < count {
                 self.print(", ");
-                self.line_break(&mut broken);
             }
         }
         if wrap {
+            if self.length > self.cutoff {
+                self.write_line();
+            }
             self.print(")");
         }
         if surround_double {
             self.print(")");
-        }
-        if broken {
-            self.indent -= 1;
         }
     }
 
@@ -998,7 +1006,7 @@ unsafe fn do_dput(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let file = call.arg(1);
     let opts = values::as_integer_scalar(call.arg(2)).max(0) as u32;
-    let lines = deparse_lines(object, 70, opts);
+    let lines = deparse_lines(object, 60, opts);
     let mut text = lines.join("\n");
     text.push('\n');
     crate::connections::write_text(file, &text)?;

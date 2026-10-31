@@ -158,14 +158,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("balancePOSIXlt", 3, |call| unsafe { Ok(call.arg(0)) }),
     internal("format.Date", 2, |call| unsafe { Err(call.error("format.Date is not supported")) }),
     internal("tzone_name", 0, |_| unsafe { scalar_string("UTC") }),
-    internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }),
     internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
     internal("gettext", 3, |call| unsafe { Ok(call.arg(1)) }),
     internal("ngettext", 4, do_ngettext),
     internal("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
     internal("crc64", 1, |call| unsafe { scalar_string(&crc64_hex(values::first_string(call.arg(0)).unwrap_or_default().as_bytes())) }),
     internal("mkjunction", 2, |_| unsafe { scalar_bool(false) }),
-    internal("Sys.setenv", 2, do_sys_setenv),
     internal("pkgload", -1, |_| unsafe { Ok(nil()) }),
 ];
 

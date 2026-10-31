@@ -27,6 +27,7 @@ use std::{
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    internal("merge", 4, do_merge),
     internal("sort", 2, do_sort),
     internal("psort", 2, do_psort),
     internal("qsort", 2, do_qsort),
@@ -1290,4 +1291,57 @@ unsafe fn chars_equal(left: Sexp, right: Sexp) -> bool {
     }
     let na = na_string();
     left != na && right != na && char_str(left) == char_str(right)
+}
+
+/// `.Internal(merge(xinds, yinds, all.x, all.y))`: `merge.data.frame` codes each row by its key's
+/// position among the keys both sides share (0 for none), and this pairs the rows with equal
+/// codes, in order of the `x` row and then the `y` row. With `all.x` (`all.y`) the rows of that
+/// side that matched nothing are listed too.
+unsafe fn do_merge(call: &Call<'_>) -> R<Sexp> {
+    let x_codes = call.arg(0);
+    let y_codes = call.arg(1);
+    if x_codes.kind() != SexpType::Integer || y_codes.kind() != SexpType::Integer {
+        return Err(call.error("invalid 'xinds' or 'yinds' argument"));
+    }
+    let all_x = as_logical_scalar(call.arg(2));
+    let all_y = as_logical_scalar(call.arg(3));
+    if all_x == NA_LOGICAL || all_y == NA_LOGICAL {
+        return Err(call.error("'all.x' must be TRUE or FALSE"));
+    }
+    let x = values::ints(x_codes);
+    let y = values::ints(y_codes);
+    let mut rows_of_code: FxHashMap<i32, Vec<usize>> = FxHashMap::default();
+    for (row, &code) in y.iter().enumerate() {
+        if code > 0 {
+            rows_of_code.entry(code).or_default().push(row + 1);
+        }
+    }
+    let mut x_rows = Vec::new();
+    let mut y_rows = Vec::new();
+    for (row, &code) in x.iter().enumerate() {
+        if let Some(matches) = rows_of_code.get(&code).filter(|_| code > 0) {
+            for &y_row in matches {
+                x_rows.push(row as i32 + 1);
+                y_rows.push(y_row as i32);
+            }
+        }
+    }
+    let alone = |codes: &[i32], wanted: bool| -> R<Sexp> {
+        if !wanted {
+            return Ok(nil());
+        }
+        let rows: Vec<i32> = codes
+            .iter()
+            .enumerate()
+            .filter(|(_, code)| **code <= 0)
+            .map(|(row, _)| row as i32 + 1)
+            .collect();
+        values::integer_vector(&rows)
+    };
+    values::named_list(&[
+        ("xi", values::integer_vector(&x_rows)?),
+        ("yi", values::integer_vector(&y_rows)?),
+        ("x.alone", alone(x, all_x == 1)?),
+        ("y.alone", alone(y, all_y == 1)?),
+    ])
 }

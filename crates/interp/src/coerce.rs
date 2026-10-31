@@ -862,11 +862,11 @@ unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let mode = values::require_string(call.arg(1), "value")?;
     let kind = mode_type(&mode).ok_or_else(|| call.error("invalid value"))?;
-    if values::inherits(object, "factor") {
-        return Err(call.error("invalid to change the storage mode of a factor"));
-    }
     if object.kind() == kind {
         return Ok(object);
+    }
+    if values::inherits(object, "factor") {
+        return Err(call.error("invalid to change the storage mode of a factor"));
     }
     coerce_vector(object, kind)
 }

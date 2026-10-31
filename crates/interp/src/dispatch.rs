@@ -316,7 +316,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
         let shown = if classes.len() == 1 {
             format!("\"{}\"", classes[0])
         } else {
-            format!("c('{}')", classes.join("', '"))
+            format!("\"c('{}')\"", classes.join("', '"))
         };
         return Err(error(format!(
             "no applicable method for '{generic_name}' applied to an object of class {shown}"

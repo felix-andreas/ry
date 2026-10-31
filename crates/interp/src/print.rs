@@ -263,15 +263,17 @@ fn label_width(count: usize) -> usize {
 pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     let count = length(vector);
     if count == 0 {
-        out(match vector.kind() {
-            SexpType::Logical => "logical(0)\n",
-            SexpType::Integer => "integer(0)\n",
-            SexpType::Real => "numeric(0)\n",
-            SexpType::Complex => "complex(0)\n",
-            SexpType::String => "character(0)\n",
-            SexpType::Raw => "raw(0)\n",
-            _ => "NULL\n",
-        });
+        let empty = match vector.kind() {
+            SexpType::Logical => "logical(0)",
+            SexpType::Integer => "integer(0)",
+            SexpType::Real => "numeric(0)",
+            SexpType::Complex => "complex(0)",
+            SexpType::String => "character(0)",
+            SexpType::Raw => "raw(0)",
+            _ => "NULL",
+        };
+        let named = values::get_attr(vector, symbols().names) != nil();
+        out(&format!("{}{empty}\n", if named { "named " } else { "" }));
         return Ok(());
     }
     let shown = count.min(options.max);

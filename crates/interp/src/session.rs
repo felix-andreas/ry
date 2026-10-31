@@ -15,7 +15,6 @@ use heap::object::{Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("mkUnbound", 1, do_mk_unbound).invisible(),
-    internal("Sys.setenv", 2, |call| unsafe { Ok(call.arg(0)) }),
 ];
 
 /// How a session starts.
