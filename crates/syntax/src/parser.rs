@@ -936,7 +936,9 @@ impl Parser<'_, '_> {
                 }
             }
             if items == 0 {
-                self.error_here("a tag type without a payload is written without parentheses, as in `:None`");
+                self.error_here(
+                    "a tag type without a payload is written without parentheses, as in `:None`",
+                );
             }
             self.finish();
         }
@@ -1400,7 +1402,7 @@ impl Parser<'_, '_> {
                 self.start(REPEAT_EXPR);
                 self.bump();
                 self.eat_trivia(true);
-                if !self.expression(0) {
+                if !self.statement() {
                     self.error_here("expected a body after `repeat`");
                 }
                 self.finish();
@@ -1435,7 +1437,7 @@ impl Parser<'_, '_> {
         self.eat_trivia(true);
         self.condition_parens("if");
         self.eat_trivia(true);
-        if !self.expression(0) {
+        if !self.statement() {
             self.error_expected("a branch after the `if` condition");
         }
         let across = self.else_allowed_across_newline();
@@ -1444,7 +1446,7 @@ impl Parser<'_, '_> {
             debug_assert!(self.at(ELSE_KW));
             self.bump();
             self.eat_trivia(true);
-            if !self.expression(0) {
+            if !self.statement() {
                 self.error_expected("an expression after `else`");
             }
         }
@@ -1489,7 +1491,7 @@ impl Parser<'_, '_> {
             self.error_expected("`(` after `for`");
         }
         self.eat_trivia(true);
-        if !self.expression(0) {
+        if !self.statement() {
             self.error_here("expected a body for the `for` loop");
         }
         self.finish();
@@ -1501,7 +1503,7 @@ impl Parser<'_, '_> {
         self.eat_trivia(true);
         self.condition_parens("while");
         self.eat_trivia(true);
-        if !self.expression(0) {
+        if !self.statement() {
             self.error_here("expected a body for the `while` loop");
         }
         self.finish();
@@ -1553,7 +1555,7 @@ impl Parser<'_, '_> {
             self.finish();
             self.eat_trivia(true);
         }
-        if !self.expression(0) && !self.statement_left_group_open {
+        if !self.statement() && !self.statement_left_group_open {
             // Blamed on the keyword: where the body search stopped can be a
             // zero-width spot past the last statement.
             self.error_at(keyword_range, "expected a function body");
@@ -1725,10 +1727,12 @@ impl Parser<'_, '_> {
             return;
         };
         let start = self.pos;
-        let named = matches!(self.current(), Some(IDENT | STRING | DOTS | DOTDOTI | NULL_KW))
-            && self
-                .peek_significant(self.pos + 1, true)
-                .is_some_and(|(kind, _)| kind == EQ);
+        let named = matches!(
+            self.current(),
+            Some(IDENT | STRING | DOTS | DOTDOTI | NULL_KW)
+        ) && self
+            .peek_significant(self.pos + 1, true)
+            .is_some_and(|(kind, _)| kind == EQ);
         let dots = self.at(DOTS)
             && self
                 .peek_significant(self.pos + 1, true)
@@ -1754,8 +1758,14 @@ impl Parser<'_, '_> {
         let end = (start..self.pos)
             .rev()
             .find(|&index| !matches!(self.tokens[index].kind, WHITESPACE | COMMENT | NEWLINE))
-            .map_or_else(|| self.token_range(start).end(), |index| self.token_range(index).end());
-        TextRange::new(self.token_range(start).start(), end.max(self.token_range(start).start()))
+            .map_or_else(
+                || self.token_range(start).end(),
+                |index| self.token_range(index).end(),
+            );
+        TextRange::new(
+            self.token_range(start).start(),
+            end.max(self.token_range(start).start()),
+        )
     }
 
     fn argument(&mut self, closer: SyntaxKind) {
@@ -1934,7 +1944,10 @@ impl Parser<'_, '_> {
     fn validate_items(&mut self, items: &[Item], what: &str) -> bool {
         let named = matches!(
             items.iter().find(|item| item.kind != ItemKind::Empty),
-            Some(Item { kind: ItemKind::Named(_), .. })
+            Some(Item {
+                kind: ItemKind::Named(_),
+                ..
+            })
         );
         let mut seen: Vec<&str> = Vec::new();
         for item in items {
@@ -2030,7 +2043,10 @@ impl Parser<'_, '_> {
         if self.at(R_BRACE) {
             self.bump();
         } else {
-            self.error_at(open_range, "unclosed `{` in this `match`; expected a matching `}`");
+            self.error_at(
+                open_range,
+                "unclosed `{` in this `match`; expected a matching `}`",
+            );
         }
         self.finish();
     }
@@ -2090,7 +2106,10 @@ impl Parser<'_, '_> {
             let mut alternatives = 1usize;
             loop {
                 let across_newlines = !self.newlines_significant();
-                if !matches!(self.peek_significant(self.pos, across_newlines), Some((PIPE, _))) {
+                if !matches!(
+                    self.peek_significant(self.pos, across_newlines),
+                    Some((PIPE, _))
+                ) {
                     break;
                 }
                 self.eat_trivia(false);
@@ -2126,7 +2145,11 @@ impl Parser<'_, '_> {
             }
             IDENT => {
                 if matches!(self.token_str(self.pos), "T" | "F") {
-                    let suggestion = if self.token_str(self.pos) == "T" { "TRUE" } else { "FALSE" };
+                    let suggestion = if self.token_str(self.pos) == "T" {
+                        "TRUE"
+                    } else {
+                        "FALSE"
+                    };
                     self.error_here(format!(
                         "`{}` in a pattern would bind any value to a variable; write `{suggestion}` to match the logical value",
                         self.token_str(self.pos)
@@ -2178,14 +2201,22 @@ impl Parser<'_, '_> {
             L_PAREN => {
                 let checkpoint = self.checkpoint();
                 let shape = self.pattern_list(false);
-                let grouping = shape.items == 1 && !shape.trailing_comma && !shape.named && !shape.rest;
+                let grouping =
+                    shape.items == 1 && !shape.trailing_comma && !shape.named && !shape.rest;
                 if shape.items == 1 && !shape.trailing_comma && shape.named {
                     self.error_at(
                         shape.range,
                         "a one-field record pattern needs a trailing comma, as in `(name = p,)`",
                     );
                 }
-                self.start_at(checkpoint, if grouping { PATTERN_PAREN } else { PATTERN_LIST });
+                self.start_at(
+                    checkpoint,
+                    if grouping {
+                        PATTERN_PAREN
+                    } else {
+                        PATTERN_LIST
+                    },
+                );
                 self.finish();
             }
             _ => {
@@ -2248,10 +2279,7 @@ impl Parser<'_, '_> {
             }
             if shape.named && positional > 0 {
                 let range = self.range_from(item_start);
-                self.error_at(
-                    range,
-                    "a pattern cannot mix named fields and unnamed items",
-                );
+                self.error_at(range, "a pattern cannot mix named fields and unnamed items");
                 positional = 0;
             }
             self.eat_trivia(true);
@@ -2280,7 +2308,10 @@ impl Parser<'_, '_> {
         if self.at(R_PAREN) {
             self.bump();
         } else {
-            self.error_at(open_range, "unclosed `(` in this pattern; expected a matching `)`");
+            self.error_at(
+                open_range,
+                "unclosed `(` in this pattern; expected a matching `)`",
+            );
         }
         shape.range = self.range_from(open);
         if shape.rest && !shape.named && !(payload && shape.items == 0) {

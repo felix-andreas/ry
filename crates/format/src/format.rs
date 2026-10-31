@@ -393,7 +393,12 @@ impl Formatter<'_> {
             return;
         };
         let operator = &elements[operator_index];
-        let has_spacing = !matches!(operator.kind(), COLON | CARET);
+        // `x : :None` keeps its spaces: `x::None` would lex as `::`.
+        let has_spacing = !matches!(operator.kind(), COLON | CARET)
+            || (operator.kind() == COLON
+                && elements[operator_index + 1..]
+                    .iter()
+                    .any(|element| element.kind() == TAG_EXPR));
         let break_after_operator = elements[operator_index + 1..]
             .iter()
             .find(|element| element.as_node().is_some())
@@ -869,11 +874,17 @@ impl Formatter<'_> {
 
     /// An inline annotation renders on one line with the spacing a `#:` type gets, so a
     /// type reads the same written either way. One holding a comment is copied as
-    /// written: joining it onto one line would comment out the code after it.
+    /// written: joining it onto one line would comment out the code after it. So
+    /// is one with a syntax error, whose tokens may glue into different ones.
     fn inline_annotation(&mut self, node: &SyntaxNode) {
+        let range = node.text_range();
         if node
             .descendants_with_tokens()
             .any(|element| element.kind() == COMMENT)
+            || self
+                .error_ranges
+                .iter()
+                .any(|error| range.contains_inclusive(error.start()))
         {
             self.out.push_str(&self.source[node.text_range()]);
             return;

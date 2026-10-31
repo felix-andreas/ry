@@ -20,6 +20,13 @@ syntax/tests/syntax::quoting__escape_soup
 # `match` are ry's own syntax and are chosen to be text R rejects, so no R
 # program changes meaning. `()` is the empty tuple.
 union.R__empty_group
+format/tests/format::records_and_tags__literals_space_like_calls
+format/tests/format::records_and_tags__one_item_literals_keep_a_hugged_comma
+format/tests/format::records_and_tags__tags_hug_their_payload
+format/tests/format::records_and_tags__match_puts_one_arm_per_line
+format/tests/format::records_and_tags__match_keeps_comma_separators_and_comments
+format/tests/format::records_and_tags__pattern_strings_use_double_quotes
+format/tests/format::records_and_tags__tag_and_record_types
 syntax/tests/syntax::literals__record_literal
 syntax/tests/syntax::literals__one_field_record
 syntax/tests/syntax::literals__tuple_literal
