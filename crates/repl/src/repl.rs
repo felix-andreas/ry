@@ -69,9 +69,14 @@ pub fn run(options: RunOptions) -> Result<(), ReplError> {
     console::run(api, options)
 }
 
-/// Runs an R script on ry's own runtime instead of GNU R: loads ry's `libR` (from `RY_LIBR`, or
-/// beside the executable) and hands it the script. Returns the script's exit status.
-pub fn run_on_ry_runtime(file: &std::path::Path, arguments: &[String]) -> Result<i32, ReplError> {
+/// Runs R code on ry's own runtime instead of GNU R: loads ry's `libR` (from `RY_LIBR`, or
+/// beside the executable), evaluates `input`, then the script `file`. Both are optional, and
+/// `load_all()` is attached before either runs. Returns the exit status.
+pub fn run_on_ry_runtime(
+    file: Option<&std::path::Path>,
+    input: Option<&str>,
+    arguments: &[String],
+) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int};
     let library_path = ry_runtime_library()?;
     // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
@@ -89,22 +94,38 @@ pub fn run_on_ry_runtime(file: &std::path::Path, arguments: &[String]) -> Result
         ))
     })?;
     let library: &'static libloading::os::unix::Library = Box::leak(Box::new(library));
-    type RunFile = unsafe extern "C" fn(*const c_char, c_int, *const *const c_char) -> c_int;
-    let run = unsafe { library.get::<RunFile>(b"ry_run_file\0") }.map_err(|error| {
+    type Run =
+        unsafe extern "C" fn(*const c_char, *const c_char, c_int, *const *const c_char) -> c_int;
+    let run = unsafe { library.get::<Run>(b"ry_run\0") }.map_err(|error| {
         ReplError(format!(
             "{} is not ry's runtime: {error}",
             library_path.display()
         ))
     })?;
-    let path = CString::new(file.to_string_lossy().as_bytes())
+    let path = file
+        .map(|file| CString::new(file.to_string_lossy().as_bytes()))
+        .transpose()
         .map_err(|_| ReplError("the script path contains a NUL byte".into()))?;
+    let input = input
+        .map(CString::new)
+        .transpose()
+        .map_err(|_| ReplError("the R input contains a NUL byte".into()))?;
     let arguments: Vec<CString> = arguments
         .iter()
         .map(|argument| CString::new(argument.as_bytes()))
         .collect::<Result<_, _>>()
         .map_err(|_| ReplError("an argument contains a NUL byte".into()))?;
     let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
-    Ok(unsafe { run(path.as_ptr(), pointers.len() as c_int, pointers.as_ptr()) })
+    let nullable =
+        |value: &Option<CString>| value.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
+    Ok(unsafe {
+        run(
+            nullable(&path),
+            nullable(&input),
+            pointers.len() as c_int,
+            pointers.as_ptr(),
+        )
+    })
 }
 
 fn ry_runtime_library() -> Result<PathBuf, ReplError> {

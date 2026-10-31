@@ -56,8 +56,8 @@ fn main() -> ExitCode {
             file,
             runtime,
             arguments,
-        } if runtime.resolve() == Runtime::Ry => {
-            return match repl::run_on_ry_runtime(file, arguments) {
+        } if runtime.resolve(Runtime::GnuR) == Runtime::Ry => {
+            return match repl::run_on_ry_runtime(Some(file), None, arguments) {
                 Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),
                 Err(error) => {
                     eprintln!("error: {error}");
@@ -76,6 +76,7 @@ fn main() -> ExitCode {
             path,
             expressions,
             file,
+            runtime,
             emit_plan: None,
             r_entry: false,
             ..
@@ -92,6 +93,15 @@ fn main() -> ExitCode {
             for expression in expressions {
                 input.push('\n');
                 input.push_str(expression);
+            }
+            if runtime.resolve(Runtime::Ry) == Runtime::Ry {
+                return match repl::run_on_ry_runtime(file.as_deref(), Some(&input), &[]) {
+                    Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        ExitCode::from(2)
+                    }
+                };
             }
             Some(repl::RunOptions {
                 routines: load::call_routines(),
@@ -287,6 +297,10 @@ enum Command {
         /// With `--emit-plan`, plan a full load whatever the state says
         #[clap(long, hide = true, default_value_t = false)]
         full: bool,
+        /// The R implementation that loads the package: ry's own runtime (the default), or GNU R
+        /// (also `RY_RUNTIME`)
+        #[clap(long, value_enum)]
+        runtime: Option<Runtime>,
         /// R code to run after loading (repeatable)
         #[clap(long = "expr", short = 'e')]
         expressions: Vec<String>,
@@ -331,17 +345,18 @@ enum Runtime {
 }
 
 trait ResolveRuntime {
-    fn resolve(&self) -> Runtime;
+    fn resolve(&self, default: Runtime) -> Runtime;
 }
 
 impl ResolveRuntime for Option<Runtime> {
-    /// The flag wins, then `RY_RUNTIME`, then GNU R.
-    fn resolve(&self) -> Runtime {
+    /// The flag wins, then `RY_RUNTIME`, then the command's default.
+    fn resolve(&self, default: Runtime) -> Runtime {
         match self {
             Some(runtime) => *runtime,
             None => match env::var("RY_RUNTIME").as_deref() {
                 Ok("ry") => Runtime::Ry,
-                _ => Runtime::GnuR,
+                Ok("gnu-r") => Runtime::GnuR,
+                _ => default,
             },
         }
     }
