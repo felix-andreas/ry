@@ -21,7 +21,7 @@ use table::{
         SerReader,
     },
     query::{
-        Aggregate, BinaryOp, Expr, Join, Output, Query, Roll, Rows, Select, SortKey,
+        Aggregate, BinaryOp, Expr, Join, Mult, Output, Query, Roll, Rows, Select, SortKey,
         build::{aggregate, binary, column},
         execute,
     },
@@ -264,6 +264,7 @@ fn rolling_join(dir: &Path) -> Result<()> {
             ],
             drop_unmatched: false,
             roll: Roll::Backward(None),
+            mult: Mult::All,
         });
         answer(execute(
             &mut prices,
@@ -397,6 +398,7 @@ fn equi_join(other: &Table, on: &str, drop_unmatched: bool) -> Rows {
         on: vec![(on.into(), on.into())],
         drop_unmatched,
         roll: Roll::None,
+        mult: Mult::All,
     })
 }
 

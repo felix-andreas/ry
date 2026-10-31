@@ -12,6 +12,9 @@
 
 pub mod convert;
 pub mod ffi;
+mod group;
+mod join;
+mod kernel;
 pub mod query;
 
 #[cfg(feature = "runtime")]
@@ -295,7 +298,13 @@ impl Table {
     /// The values of an `Int32` column without nulls stored in one chunk, which R can read in
     /// place because the layouts agree. This is what makes `INTEGER_RO` on a table column free.
     pub fn column_slice_i32(&self, name: &str) -> Option<&[i32]> {
-        let chunked = self.frame.column(name).ok()?.as_materialized_series().i32().ok()?;
+        let chunked = self
+            .frame
+            .column(name)
+            .ok()?
+            .as_materialized_series()
+            .i32()
+            .ok()?;
         if chunked.null_count() > 0 {
             return None;
         }
@@ -305,7 +314,13 @@ impl Table {
     /// As [`Table::column_slice_i32`], for `Float64`. A `NaN` is fine, because R's `NaN` is the
     /// same value; only a null needs R's `NA_real_` bit pattern.
     pub fn column_slice_f64(&self, name: &str) -> Option<&[f64]> {
-        let chunked = self.frame.column(name).ok()?.as_materialized_series().f64().ok()?;
+        let chunked = self
+            .frame
+            .column(name)
+            .ok()?
+            .as_materialized_series()
+            .f64()
+            .ok()?;
         if chunked.null_count() > 0 {
             return None;
         }
@@ -329,6 +344,29 @@ impl Table {
                 found: column.len(),
             });
         }
+        self.forget_key(column.name().clone().as_str());
+        self.frame.with_column(column)?;
+        Ok(())
+    }
+
+    /// Moves a column out of the table, leaving an all-`NA` placeholder until
+    /// [`put_column`](Table::put_column) brings it back. Nothing else then shares the column's
+    /// buffers if nothing shared the table, so a kernel can write into them in place.
+    pub(crate) fn take_column(&mut self, name: &str) -> Result<Column> {
+        let height = self.frame.height();
+        // SAFETY: the placeholder has the frame's height, so every column keeps it.
+        let columns = unsafe { self.frame.columns_mut() };
+        let slot = columns
+            .iter_mut()
+            .find(|column| column.name() == name)
+            .ok_or_else(|| Error::NoColumn(name.to_string()))?;
+        let placeholder = Column::full_null(slot.name().clone(), height, &DataType::Boolean);
+        Ok(std::mem::replace(slot, placeholder))
+    }
+
+    /// Adds or replaces a column that a kernel built, which holds no valid `i32::MIN` and has an
+    /// R dtype already, so it skips [`set_column`](Table::set_column)'s normalizing scan.
+    pub(crate) fn put_column(&mut self, column: Column) -> Result<()> {
         self.forget_key(column.name().clone().as_str());
         self.frame.with_column(column)?;
         Ok(())
@@ -385,10 +423,7 @@ fn normalize(column: Column) -> Result<Column> {
                 .collect();
             return Ok(cleaned.with_name(column.name().clone()).into_column());
         }
-        DataType::Boolean
-        | DataType::Float64
-        | DataType::String
-        | DataType::Enum(..) => {
+        DataType::Boolean | DataType::Float64 | DataType::String | DataType::Enum(..) => {
             return Ok(column);
         }
         DataType::Int8 | DataType::Int16 | DataType::UInt8 | DataType::UInt16 => DataType::Int32,

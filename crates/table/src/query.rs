@@ -9,13 +9,15 @@
 //! runs as a grouped Polars kernel rather than as R code once per group.
 
 use crate::convert::{enum_dtype, factor_levels};
+use crate::kernel::{Evaluator, Vector, scatter, selected_rows};
 use crate::{ColumnType, Error, Result, Schema, Table};
-use std::collections::HashSet;
+use crate::{group, join};
 use polars::prelude::{
-    AsOfOptions, ChunkAgg, AsofStrategy, Column, DataFrame, DataType, ExplodeOptions, Expr as PolarsExpr, IntoLazy,
-    JoinType, LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
-    SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
+    AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
+    Expr as PolarsExpr, IntoLazy, JoinType, LazyFrame, MaintainOrderJoin, NULL, NamedFrom,
+    PlSmallStr, Scalar, Series, SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
 };
+use std::collections::HashSet;
 
 /// One `tbl[i, j, by]` call.
 #[derive(Clone, Debug, Default)]
@@ -65,6 +67,16 @@ pub struct Join {
     /// `nomatch = NULL`: drop the rows of `i` that match nothing, which makes the join inner.
     pub drop_unmatched: bool,
     pub roll: Roll,
+    pub mult: Mult,
+}
+
+/// data.table's `mult =` argument: which of several rows of `x` matching one row of `i` to keep.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Mult {
+    #[default]
+    All,
+    First,
+    Last,
 }
 
 /// data.table's `roll =` argument. The last join column is the one that rolls.
@@ -197,10 +209,35 @@ pub enum Output {
 /// an unshared table, forking a shared one first, as copy-on-modify requires; every other query
 /// leaves `table` unchanged.
 pub fn execute(table: &mut Table, query: Query) -> Result<Output> {
+    run(table, query, true)
+}
+
+/// [`execute`] with every query running as a Polars plan, bypassing the kernels. Both must give
+/// the same answer, which the differential tests check through this.
+#[doc(hidden)]
+pub fn execute_with_plans_only(table: &mut Table, query: Query) -> Result<Output> {
+    run(table, query, false)
+}
+
+fn run(table: &mut Table, query: Query, kernels: bool) -> Result<Output> {
     let schema = table.schema();
     if let Select::Assign(assignments) = &query.select {
-        return assign(table, &schema, &query.rows, &query.by, assignments)
+        return assign(table, &schema, &query.rows, &query.by, assignments, kernels)
             .map(|()| Output::Updated);
+    }
+    if kernels && let Rows::Join(join) = &query.rows {
+        let on = join_columns(join, table.key())?;
+        if let Some(frame) = join::join(table, join, &on)? {
+            let mut joined = Table::new(frame)?;
+            let query = Query {
+                rows: Rows::All,
+                ..query
+            };
+            if matches!(query.select, Select::All) && query.by.is_empty() {
+                return Ok(Output::Table(joined));
+            }
+            return run(&mut joined, query, kernels);
+        }
     }
     let value = matches!(query.select, Select::Value(_)) && query.by.is_empty();
     let keyed = query.keyed;
@@ -217,8 +254,18 @@ pub fn execute(table: &mut Table, query: Query) -> Result<Output> {
             Rows::Positions(positions) => positions.is_sorted(),
             Rows::Order(_) | Rows::Join(_) => false,
         };
-    let plan = plan(table, query)?;
-    let frame = narrow_sums(plan.collect()?)?;
+    let kernel = if kernels {
+        group::aggregate(table, &schema, &query)?
+    } else {
+        None
+    };
+    let frame = match kernel {
+        Some(frame) => frame,
+        None => match staged(table, &schema, &query)? {
+            Some(frame) => frame,
+            None => narrow_sums(plan(table, query)?.collect()?)?,
+        },
+    };
     if value {
         let column = frame
             .columns()
@@ -259,6 +306,110 @@ fn narrow_sums(frame: DataFrame) -> Result<DataFrame> {
         columns.push(column.cast(&target)?);
     }
     Ok(DataFrame::new(height, columns)?)
+}
+
+/// Evaluates a query whose output nests an integer `sum` inside an expression, such as
+/// `sum(v) - 1L`, in two stages: the aggregates first, each integer sum narrowed to an integer or a
+/// double once its totals are known, and then the expressions over them. A single plan would have
+/// to fix the sum's type before seeing the data, and R's sum is a double exactly when a total
+/// overflows. `None` when the query has no such sum or an output does not collapse per group.
+fn staged(table: &Table, schema: &Schema, query: &Query) -> Result<Option<DataFrame>> {
+    let outputs: Vec<(PlSmallStr, &Expr)> = match &query.select {
+        Select::Value(expr) => vec![(PlSmallStr::from_static("V1"), expr)],
+        Select::Columns(columns) => columns
+            .iter()
+            .map(|(name, expr)| (name.clone(), expr))
+            .collect(),
+        Select::All | Select::Assign(_) => return Ok(None),
+    };
+    let typer = Typer { schema };
+    let mut nested = false;
+    for (_, expr) in &outputs {
+        if !matches!(expr, Expr::Aggregate { .. }) {
+            nested |= has_integer_sum(&typer, expr)?;
+        }
+    }
+    if !nested || matches!(query.rows, Rows::Join(_)) {
+        return Ok(None);
+    }
+    let mut aggregates = Vec::new();
+    let mut rewritten = Vec::with_capacity(outputs.len());
+    for (name, expr) in &outputs {
+        match group::rewrite(expr, &mut aggregates) {
+            Some(expr) => rewritten.push((name.clone(), expr)),
+            None => return Ok(None),
+        }
+    }
+    let nulls = NullCounts::of(table.frame());
+    let (plan, rows_schema) = rows(
+        table.frame().clone().lazy(),
+        schema,
+        table.key(),
+        &nulls,
+        &query.rows,
+    )?;
+    let lower = Lowering {
+        schema: &rows_schema,
+        nulls: &nulls,
+    };
+    let temporaries: Vec<(PlSmallStr, Expr)> = aggregates
+        .into_iter()
+        .enumerate()
+        .map(|(index, expr)| (group::temporary(index), expr))
+        .collect();
+    let first = if query.by.is_empty() {
+        let mut exprs = Vec::with_capacity(temporaries.len());
+        for (name, expr) in &temporaries {
+            exprs.push(lower.expr(expr)?.alias(name.clone()));
+        }
+        plan.select(exprs)
+    } else {
+        grouped(plan, &lower, &query.by, query.keyed, &temporaries)?
+    };
+    let first = narrow_sums(first.collect()?)?;
+    let first_schema = Table::new(first.clone())?.schema();
+    let first_nulls = NullCounts::of(&first);
+    let lower = Lowering {
+        schema: &first_schema,
+        nulls: &first_nulls,
+    };
+    let mut exprs = Vec::with_capacity(query.by.len() + rewritten.len());
+    for (name, _) in &query.by {
+        exprs.push(col(name.clone()));
+    }
+    for (name, expr) in &rewritten {
+        exprs.push(lower.expr(expr)?.alias(name.clone()));
+    }
+    Ok(Some(first.lazy().select(exprs).collect()?))
+}
+
+/// Whether `expr` sums an integer or logical vector anywhere.
+fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
+    Ok(match expr {
+        Expr::Aggregate {
+            function: Aggregate::Sum,
+            arg,
+            ..
+        } => typer.expr(arg)? != ColumnType::Double,
+        Expr::Aggregate { arg, .. } | Expr::Unary(_, arg) | Expr::Head(arg, _) => {
+            has_integer_sum(typer, arg)?
+        }
+        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+            has_integer_sum(typer, left)? || has_integer_sum(typer, right)?
+        }
+        Expr::IfElse(test, yes, no) => {
+            has_integer_sum(typer, test)?
+                || has_integer_sum(typer, yes)?
+                || has_integer_sum(typer, no)?
+        }
+        Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Na(_)
+        | Expr::Column(_)
+        | Expr::Count => false,
+    })
 }
 
 /// The lazy plan for a query that does not assign, so tests and `explain` can inspect what the
@@ -461,7 +612,7 @@ fn join_columns(join: &Join, key: &[PlSmallStr]) -> Result<Vec<(PlSmallStr, PlSm
 }
 
 /// The prefix data.table gives a column of `i` whose name `x` already uses.
-const I_PREFIX: &str = "i.";
+pub(crate) const I_PREFIX: &str = "i.";
 /// The suffix Polars gives the clashing column of the right side, chosen so that it cannot
 /// collide with a real column name.
 const CLASH_SUFFIX: &str = "\u{1}x";
@@ -513,6 +664,14 @@ fn join_plan(
         Roll::Backward(limit) => Some((AsofStrategy::Backward, limit)),
         Roll::Forward(limit) => Some((AsofStrategy::Forward, limit)),
         Roll::Nearest => Some((AsofStrategy::Nearest, None)),
+    };
+    // `mult = "first"` or `"last"` keeps one match per row of `i`, and the matches of a row are
+    // adjacent in the join's output, so a numbered `i` tells where each row's matches start and end.
+    const I_ROW: &str = "\u{1}i_row";
+    let i = if join.mult == Mult::All || rolling.is_some() {
+        i
+    } else {
+        i.with_row_index(I_ROW, None)
     };
     let joined = match rolling {
         // data.table matches an `NA` key to an `NA` key, which Polars does only when asked.
@@ -586,6 +745,17 @@ fn join_plan(
                 matched = matched.filter(col(MATCHED).is_not_null());
             }
             matched
+        }
+    };
+    let joined = match (join.mult, rolling) {
+        (Mult::All, _) | (_, Some(_)) => joined,
+        (mult, None) => {
+            let neighbour = if mult == Mult::First { 1 } else { -1 };
+            joined.filter(
+                col(I_ROW)
+                    .neq(col(I_ROW).shift(lit(neighbour)))
+                    .fill_null(lit(true)),
+            )
         }
     };
     // Reorder into data.table's layout: `x`'s columns with join columns taking `i`'s values,
@@ -718,7 +888,11 @@ fn assign(
     rows: &Rows,
     by: &[(PlSmallStr, Expr)],
     assignments: &[(PlSmallStr, Option<Expr>)],
+    kernels: bool,
 ) -> Result<()> {
+    if kernels && by.is_empty() && assign_with_kernels(table, schema, rows, assignments)? {
+        return drop_removed(table, assignments);
+    }
     let frame = table.frame().clone();
     let nulls = NullCounts::of(&frame);
     let lower = Lowering {
@@ -757,16 +931,27 @@ fn assign(
         let replaces = whole && !collapses(expr);
         let kind = assigned_type(existing, typer.expr(expr)?, replaces)?;
         let levels = match existing {
-            Some(ColumnType::Factor) if !replaces => {
-                factor_levels(frame.column(name)?.dtype())
-            }
+            Some(ColumnType::Factor) if !replaces => factor_levels(frame.column(name)?.dtype()),
             _ => None,
         };
+        // A new column holding an integer sum is a double when a total overflows, as data.table's
+        // gsum makes it, so the sum stays 64-bit until the result is narrowed below. Written into
+        // an existing column, the value is coerced to that column's type instead.
+        let widens = existing.is_none()
+            && matches!(
+                expr,
+                Expr::Aggregate {
+                    function: Aggregate::Sum,
+                    arg,
+                    ..
+                } if typer.expr(arg)? != ColumnType::Double
+            );
         targets.push(Target {
             name: name.clone(),
             expr,
             kind,
             levels,
+            widens,
         });
     }
     let result = match &filter {
@@ -777,7 +962,13 @@ fn assign(
         Some(filter)
             if !groups.is_empty() || targets.iter().any(|target| !row_wise(target.expr)) =>
         {
-            Some(assign_filtered(&frame, &lower, filter.clone(), &groups, &targets)?)
+            Some(assign_filtered(
+                &frame,
+                &lower,
+                filter.clone(),
+                &groups,
+                &targets,
+            )?)
         }
         _ => {
             let mut computed = Vec::with_capacity(targets.len());
@@ -798,13 +989,22 @@ fn assign(
                 computed.push(value.alias(target.name.clone()));
             }
             // `with_columns` broadcasts a value that collapses to one row, where `select` would not.
-            let names: Vec<PolarsExpr> =
-                targets.iter().map(|target| col(target.name.clone())).collect();
-            Some(frame.lazy().with_columns(computed).select(names).collect()?)
+            let names: Vec<PolarsExpr> = targets
+                .iter()
+                .map(|target| col(target.name.clone()))
+                .collect();
+            Some(
+                frame
+                    .lazy()
+                    .with_columns(computed)
+                    .select(names)
+                    .collect()?,
+            )
         }
     };
     let mut columns = Vec::with_capacity(targets.len());
     if let Some(result) = result {
+        let result = narrow_sums(result)?;
         for (column, target) in result.into_columns().into_iter().zip(&targets) {
             columns.push(match &target.levels {
                 Some(levels) => relevel(column, levels)?,
@@ -815,12 +1015,105 @@ fn assign(
     for column in columns {
         table.set_column(column)?;
     }
+    drop_removed(table, assignments)
+}
+
+fn drop_removed(table: &mut Table, assignments: &[(PlSmallStr, Option<Expr>)]) -> Result<()> {
     for (name, expr) in assignments {
         if expr.is_none() {
             table.drop_column(name)?;
         }
     }
     Ok(())
+}
+
+/// A row-wise `:=` into logical, integer or double columns, evaluated by the kernels instead of
+/// a Polars plan. A filtered update writes the selected rows into the column's buffer in place,
+/// so a loop of small updates costs what the rows it touches cost, not the whole column. Gives
+/// `false`, having changed nothing, when an expression or a target is outside what the kernels
+/// cover, and the caller then runs the Polars plan.
+fn assign_with_kernels(
+    table: &mut Table,
+    schema: &Schema,
+    rows: &Rows,
+    assignments: &[(PlSmallStr, Option<Expr>)],
+) -> Result<bool> {
+    let typer = Typer { schema };
+    let height = table.height();
+    // Every value is computed before any column changes, because each one reads the table as it
+    // was before the update.
+    let mut values = Vec::with_capacity(assignments.len());
+    let selected = {
+        let frame = table.frame();
+        let selected = match rows {
+            Rows::All => None,
+            Rows::Filter(filter) => {
+                expect_logical(typer.expr(filter)?, "a row filter")?;
+                let evaluator = Evaluator {
+                    frame,
+                    schema,
+                    rows: None,
+                };
+                let Some(selected) = evaluator
+                    .eval(filter)
+                    .and_then(|value| selected_rows(value, height))
+                else {
+                    return Ok(false);
+                };
+                Some(selected)
+            }
+            _ => return Ok(false),
+        };
+        let evaluator = Evaluator {
+            frame,
+            schema,
+            rows: selected.as_deref(),
+        };
+        for (name, expr) in assignments {
+            let existing = schema.column(name);
+            let Some(expr) = expr else {
+                if existing.is_none() {
+                    return Err(Error::Query(format!(
+                        "cannot remove `{name}`: the table has no such column"
+                    )));
+                }
+                continue;
+            };
+            if !row_wise(expr)
+                || matches!(existing, Some(ColumnType::Factor | ColumnType::Character))
+            {
+                return Ok(false);
+            }
+            let replaces = selected.is_none() && !collapses(expr);
+            let kind = assigned_type(existing, typer.expr(expr)?, replaces)?;
+            let Some(value) = evaluator.eval(expr).and_then(|value| value.cast(kind)) else {
+                return Ok(false);
+            };
+            values.push((name, kind, existing.is_some(), value));
+        }
+        selected
+    };
+    for (name, kind, exists, value) in values {
+        let column = match &selected {
+            None => value
+                .into_vector(height)
+                .ok_or_else(|| Error::Query(format!("cannot write into column `{name}`")))?
+                .into_column(name.clone()),
+            Some(selected) => {
+                let column = if exists {
+                    table.take_column(name)?
+                } else {
+                    // A new column is `NA` outside the selected rows.
+                    Vector::null(kind, height)
+                        .ok_or_else(|| Error::Query(format!("cannot write into column `{name}`")))?
+                        .into_column(name.clone())
+                };
+                scatter(column, selected, value)?
+            }
+        };
+        table.put_column(column)?;
+    }
+    Ok(true)
 }
 
 /// One column that `:=` writes.
@@ -831,6 +1124,8 @@ struct Target<'a> {
     /// The levels of an existing factor column that the value is written into by label. A label
     /// the factor lacks becomes a new level, as data.table adds it.
     levels: Option<Vec<String>>,
+    /// The value is an integer sum kept in 64 bits, narrowed once its totals are known.
+    widens: bool,
 }
 
 impl Target<'_> {
@@ -838,6 +1133,7 @@ impl Target<'_> {
     /// its labels, and a factor that becomes the whole column keeps its own levels.
     fn store(&self, value: PolarsExpr) -> PolarsExpr {
         match (&self.levels, self.kind) {
+            _ if self.widens => value.cast(DataType::Int64),
             (Some(_), _) => value.cast(DataType::String),
             (None, ColumnType::Factor) => value,
             (None, kind) => value.cast(dtype(kind)),
@@ -994,13 +1290,13 @@ impl NullCounts {
     }
 }
 
-struct Typer<'a> {
-    schema: &'a Schema,
+pub(crate) struct Typer<'a> {
+    pub(crate) schema: &'a Schema,
 }
 
 impl Typer<'_> {
     /// The R type of an expression's elements, checking every column reference.
-    fn expr(&self, expr: &Expr) -> Result<ColumnType> {
+    pub(crate) fn expr(&self, expr: &Expr) -> Result<ColumnType> {
         Ok(match expr {
             Expr::Column(name) => self
                 .schema
@@ -1126,9 +1422,11 @@ fn expect_truthy(kind: ColumnType, what: &str) -> Result<()> {
 /// formatting the number; ry formats logicals and integers as R does, but a double's R
 /// formatting (`1e+06`, fifteen significant digits) has no Polars equivalent, so that mix is
 /// refused rather than compared wrongly.
-fn comparison(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+pub(crate) fn comparison(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
     let textual = |kind| matches!(kind, ColumnType::Character | ColumnType::Factor);
-    if (textual(left) && right == ColumnType::Double) || (left == ColumnType::Double && textual(right)) {
+    if (textual(left) && right == ColumnType::Double)
+        || (left == ColumnType::Double && textual(right))
+    {
         return Err(Error::Query(
             "comparing a double with a string is not supported".to_string(),
         ));
@@ -1158,7 +1456,7 @@ fn dtype(kind: ColumnType) -> DataType {
 }
 
 struct Lowering<'a> {
-    schema: &'a Schema,
+    pub(crate) schema: &'a Schema,
     nulls: &'a NullCounts,
 }
 
@@ -1209,15 +1507,20 @@ impl Lowering<'_> {
                 {
                     value = value.cast(DataType::Int32);
                 }
-                // `na.rm = TRUE` drops `NaN` as well as `NA`. Polars skips nulls on its own.
+                // `na.rm = TRUE` drops `NaN` as well as `NA`. Polars' reductions skip nulls on
+                // their own, but `first` and `last` do not.
                 if *na_rm && kind == ColumnType::Double {
                     value = value.clone().filter(value.is_not_nan());
+                } else if *na_rm && matches!(function, Aggregate::First | Aggregate::Last) {
+                    value = value.drop_nulls();
                 }
                 let aggregated = match function {
                     // R's integer sum is exact: an integer when it fits and a double when it does
                     // not. It is summed in 64 bits here and narrowed once the result is known
                     // (see `narrow_sums`).
-                    Aggregate::Sum if kind != ColumnType::Double => value.cast(DataType::Int64).sum(),
+                    Aggregate::Sum if kind != ColumnType::Double => {
+                        value.cast(DataType::Int64).sum()
+                    }
                     Aggregate::Sum => value.sum(),
                     // With `na.rm = TRUE` a group with no values left has the mean `0 / 0`, which
                     // is `NaN` in R, where Polars gives null.
@@ -1311,9 +1614,13 @@ impl Lowering<'_> {
     fn compared(&self, expr: &Expr, kind: ColumnType) -> Result<PolarsExpr> {
         let value = self.expr(expr)?;
         Ok(match (self.typer().expr(expr)?, kind) {
-            (ColumnType::Logical, ColumnType::Character) => when(value.clone())
-                .then(lit("TRUE"))
-                .otherwise(when(value.not()).then(lit("FALSE")).otherwise(lit(NULL).cast(DataType::String))),
+            (ColumnType::Logical, ColumnType::Character) => {
+                when(value.clone()).then(lit("TRUE")).otherwise(
+                    when(value.not())
+                        .then(lit("FALSE"))
+                        .otherwise(lit(NULL).cast(DataType::String)),
+                )
+            }
             _ => value.cast(dtype(kind)),
         })
     }
@@ -1351,9 +1658,16 @@ impl Lowering<'_> {
             BinaryOp::Divide => {
                 self.numeric(left, ColumnType::Double)? / self.numeric(right, ColumnType::Double)?
             }
-            BinaryOp::Power => self
-                .numeric(left, ColumnType::Double)?
-                .pow(self.numeric(right, ColumnType::Double)?),
+            BinaryOp::Power => {
+                let (l, r) = (
+                    self.numeric(left, ColumnType::Double)?,
+                    self.numeric(right, ColumnType::Double)?,
+                );
+                // `1^y` and `x^0` are 1 in R even when the other side is `NA`.
+                when(l.clone().eq(lit(1.0)).or(r.clone().eq(lit(0.0))))
+                    .then(lit(1.0))
+                    .otherwise(l.pow(r))
+            }
             BinaryOp::IntegerDivide if kind == ColumnType::Integer => {
                 let (l, r) = (self.numeric(left, kind)?, self.numeric(right, kind)?);
                 // R gives `NA` for an integer division by zero.
