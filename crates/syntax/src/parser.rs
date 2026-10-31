@@ -5,9 +5,31 @@
 use crate::kind::SyntaxKind::{self, *};
 use crate::lexer::{Token, lex};
 use crate::{Parse, SyntaxError};
-use rowan::{Checkpoint, GreenNodeBuilder, TextRange, TextSize};
+use rowan::{Checkpoint, GreenNodeBuilder, NodeCache, TextRange, TextSize};
+use std::cell::RefCell;
+
+/// Parses that share one node cache before it is dropped. Sharing makes identical tokens
+/// and small nodes (whitespace, punctuation, common names) one allocation across files;
+/// the cache keeps its entries alive, so the bound stops a long-running server from
+/// pinning the garbage of trees it has already replaced.
+const NODE_CACHE_PARSES: u32 = 256;
+
+thread_local! {
+    static NODE_CACHE: RefCell<(NodeCache, u32)> = RefCell::new((NodeCache::default(), 0));
+}
 
 pub fn parse(text: &str) -> Parse {
+    NODE_CACHE.with_borrow_mut(|(cache, parses)| {
+        if *parses >= NODE_CACHE_PARSES {
+            *cache = NodeCache::default();
+            *parses = 0;
+        }
+        *parses += 1;
+        parse_with_cache(text, cache)
+    })
+}
+
+fn parse_with_cache(text: &str, cache: &mut NodeCache) -> Parse {
     let (tokens, lexer_errors) = lex(text);
     let mut offsets = Vec::with_capacity(tokens.len() + 1);
     let mut offset = 0usize;
@@ -22,7 +44,7 @@ pub fn parse(text: &str) -> Parse {
         tokens,
         offsets,
         pos: 0,
-        builder: GreenNodeBuilder::new(),
+        builder: GreenNodeBuilder::with_cache(cache),
         errors: lexer_errors,
         groups: vec![0],
         depth: 0,
@@ -43,13 +65,13 @@ pub fn parse(text: &str) -> Parse {
 /// Deeper nesting reports an error instead of overflowing the stack.
 const MAX_DEPTH: u32 = 500;
 
-struct Parser<'a> {
+struct Parser<'a, 'cache> {
     text: &'a str,
     tokens: Vec<Token>,
     /// One extra trailing entry: the total length.
     offsets: Vec<usize>,
     pos: usize,
-    builder: GreenNodeBuilder<'static>,
+    builder: GreenNodeBuilder<'cache>,
     errors: Vec<SyntaxError>,
     /// `{` pushes 0, `(`/`[`/`[[` increment the top, closers undo; newlines are
     /// significant iff the top is 0.
@@ -78,7 +100,7 @@ struct Parser<'a> {
     statement_left_group_open: bool,
 }
 
-impl Parser<'_> {
+impl Parser<'_, '_> {
     fn current(&self) -> Option<SyntaxKind> {
         self.tokens.get(self.pos).map(|token| token.kind)
     }

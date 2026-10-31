@@ -98,7 +98,9 @@ equal, and salsa's early cutoff prunes all the work downstream of them.
 An item's green subtree lowers to HIR, with spans relative to the item. Its annotations lower
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
-(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Naming
+(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names in HIR and naming are interned `Symbol`s (two words, `Copy`), lists are boxed slices, and
+the arena is shrunk after lowering, so a memoized item carries no spelling copies or spare capacity.
+Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.

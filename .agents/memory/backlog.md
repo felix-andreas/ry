@@ -2405,12 +2405,24 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 6.1 s | 997 MiB | 1005 `unused` (genuine) | 3 / 118 ms | 3 / 112 ms |
-| data science | 6.7 s | 1006 MiB | none | 5 / 116 ms | 3 / 122 ms |
-| biostatistics | 6.2 s | 1020 MiB | none | 3 / 94 ms | 3 / 105 ms |
+| finance | 3.4 s | 760 MiB | 1005 `unused` (genuine) | 2 / 47 ms | 3 / 48 ms |
+| data science | 3.6 s | 756 MiB | none | 2 / 55 ms | 2 / 56 ms |
+| biostatistics | 2.8 s | 790 MiB | none | 2 / 45 ms | 2 / 44 ms |
+
+Before the cold-path work the same machine measured 6.1, 6.7 and 6.2 s, about 1 GiB each, and
+3 to 5 ms / 95 to 120 ms edit latency.
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak memory is about 2.4 KiB per line with tests, above the 2 KiB budget in `test_perf.rs`.
+- Peak memory is about 1.8 KiB per line with tests, with no single dominant holder left: rowan
+  trees, then per-item naming `BTreeMap`s (`resolutions`, `non_locals`, `bindings`), check memos
+  (`errors`, `selected_overloads`, `masked_reads` as hash maps), and a second copy of each file's
+  source text (`SourceFile` and the checked document). Next steps: dense `Vec`s indexed by `ExprId`
+  for the naming maps, one source copy, `CallArgument.name` and `StrictOriginKind` as `Symbol`, and
+  a smaller `Expression` layout. Salsa's LRU eviction runs only at revision boundaries, so it cannot
+  shrink a single cold CLI pass; the CLI stays at memoize-everything.
+- Parses outside salsa remain in `server.rs` range formatting (re-parses the document text per request instead of reading `semantics::parse`) and the `ry debug` dumps; route range formatting through the memoized tree.
+- The CLI forgets the database instead of dropping it (about 0.9 s of frees on these code bases), so
+  `check` cannot reuse a process for a second analysis without leaking the first.
 - "Settled" includes the server's idle delay, so it is an upper bound on the semantic wave.
 - An `Unknown` argument to an overloaded call now yields `Unknown` when numeric results disagree
   (`sum(x[[i]])`); other disagreements still take the first candidate.
