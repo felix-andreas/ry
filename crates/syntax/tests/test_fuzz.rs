@@ -43,6 +43,12 @@ const SEEDS: &[&str] = &[
     "switch(t, NULL = , chr = 1)",
     "#: <T: numeric> fn(x: T, [d]: integer, ...r: T) -> T[]\nround2 <- function(x, d = 0L, ...) x",
     "{\n  if (a) 1\n  else 2\n}",
+    "count: integer <- 1L",
+    "label: character | NULL = NULL",
+    "f <- function(x: integer, y: list[named: double] = list()) -> double { x }",
+    "g <- function<T: numeric>(...: T) -> T[] c(...)",
+    "lapply(xs, \\(x: integer) -> integer x + 1L)",
+    "{\n  step: fn(x: integer) -> integer <- function(x) x\n}",
 ];
 
 const ALPHABET: &[&str] = &[

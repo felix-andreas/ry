@@ -27,6 +27,8 @@ pub fn parse(text: &str) -> Parse {
         groups: vec![0],
         depth: 0,
         in_annotation: false,
+        type_region: false,
+        inline_type: false,
         annotation_reported: false,
         annotation_unclosed_reported: false,
         statement_had_lexer_error: false,
@@ -53,8 +55,13 @@ struct Parser<'a> {
     groups: Vec<u32>,
     depth: u32,
     in_annotation: bool,
-    /// The type grammar cannot resynchronize inside a `#:` region, so only its
-    /// first error is reported; the rest are consequences.
+    /// Set while parsing type grammar, in a `#:` region or inline. The type grammar
+    /// cannot resynchronize, so only a region's first error is reported; the rest
+    /// are consequences.
+    type_region: bool,
+    /// Inline type grammar sits in R code, so its trivia follows R's newline rules
+    /// instead of a `#:` region's.
+    inline_type: bool,
     annotation_reported: bool,
     /// Unclosed openers are found only at the end of their construct, after the
     /// inner consequences, so one such report gets through regardless.
@@ -174,7 +181,7 @@ impl Parser<'_> {
     }
 
     fn error_at(&mut self, range: TextRange, message: impl Into<String>) {
-        if self.in_annotation {
+        if self.type_region {
             if self.annotation_reported {
                 return;
             }
@@ -184,7 +191,7 @@ impl Parser<'_> {
     }
 
     fn error_unclosed(&mut self, range: TextRange, message: impl Into<String>) {
-        if !self.in_annotation {
+        if !self.type_region {
             self.error_at(range, message);
         } else if !self.annotation_unclosed_reported {
             self.annotation_unclosed_reported = true;
@@ -246,11 +253,13 @@ impl Parser<'_> {
     fn starts_new_statement(&self) -> bool {
         match self.current() {
             Some(IF_KW | FOR_KW | WHILE_KW | REPEAT_KW) => true,
-            Some(IDENT | STRING) => matches!(
-                self.peek_significant(self.pos + 1, false)
-                    .map(|(kind, _)| kind),
-                Some(LESS_MINUS | LESS2_MINUS)
-            ),
+            Some(IDENT | STRING) => {
+                matches!(
+                    self.peek_significant(self.pos + 1, false)
+                        .map(|(kind, _)| kind),
+                    Some(LESS_MINUS | LESS2_MINUS)
+                ) || self.annotated_binding_ahead().is_some()
+            }
             _ => false,
         }
     }
@@ -278,6 +287,7 @@ impl Parser<'_> {
     fn annotation(&mut self) {
         self.start(ANNOTATION);
         self.in_annotation = true;
+        self.type_region = true;
         self.annotation_reported = false;
         self.annotation_unclosed_reported = false;
         let end = self.annotation_region_end(self.pos);
@@ -297,10 +307,20 @@ impl Parser<'_> {
             }
         }
         self.in_annotation = false;
+        self.type_region = false;
         self.finish();
     }
 
     fn ann_trivia(&mut self, end: usize) {
+        if self.inline_type {
+            loop {
+                match self.current() {
+                    Some(WHITESPACE) => self.bump(),
+                    Some(NEWLINE | COMMENT) if !self.newlines_significant() => self.bump(),
+                    _ => return,
+                }
+            }
+        }
         while self.pos < end
             && matches!(
                 self.current(),
@@ -670,7 +690,8 @@ impl Parser<'_> {
     }
 
     fn ann_next_significant(&self, end: usize) -> Option<SyntaxKind> {
-        let (kind, pos) = self.peek_significant(self.pos + 1, true)?;
+        let across_newlines = !(self.inline_type && self.newlines_significant());
+        let (kind, pos) = self.peek_significant(self.pos + 1, across_newlines)?;
         (pos < end).then_some(kind)
     }
 
@@ -927,7 +948,7 @@ impl Parser<'_> {
             }
 
             let statement_start = self.pos;
-            if !self.expression(0) {
+            if !self.statement() {
                 match self.current() {
                     Some(ELSE_KW) => self.error_here(
                         "unexpected `else`: it must stay on the same line as the `if` branch it belongs to (or the `if` must be inside braces)",
@@ -1001,6 +1022,90 @@ impl Parser<'_> {
         }
     }
 
+    /// A statement is an expression, or an annotated binding `name: TYPE <- value`.
+    /// R reads that binding as `` `:<-` `` on `name:TYPE`, a replacement function
+    /// base R does not define, so no working R program has this shape.
+    fn statement(&mut self) -> bool {
+        let Some(assignment) = self.annotated_binding_ahead() else {
+            return self.expression(0);
+        };
+        if self.depth >= MAX_DEPTH {
+            self.error_here("expression nesting is too deep");
+            return false;
+        }
+        self.depth += 1;
+        let checkpoint = self.checkpoint();
+        self.wrap(NAME);
+        while self.at(WHITESPACE) {
+            self.bump();
+        }
+        self.start(TYPE_ASCRIPTION);
+        self.bump();
+        self.inline_type(|parser, end| parser.ann_type(end, false));
+        if self.pos < assignment {
+            if !self.annotation_reported {
+                let found = self.describe_current();
+                self.error_here(format!(
+                    "unexpected {found} in this type annotation; expected `<-` after the type"
+                ));
+            }
+            self.start(ERROR);
+            while self.pos < assignment {
+                self.bump();
+            }
+            self.finish();
+        }
+        self.finish();
+        self.operators(checkpoint, 0);
+        self.depth -= 1;
+        true
+    }
+
+    /// The position of the `<-` or `=` closing an annotated binding that starts
+    /// here. The type is scanned shallowly: the grammar reports its own errors once
+    /// the statement is committed to being a binding.
+    fn annotated_binding_ahead(&self) -> Option<usize> {
+        if !self.at(IDENT) {
+            return None;
+        }
+        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let mut pos = self.pos + 1;
+        while kind_at(pos) == Some(WHITESPACE) {
+            pos += 1;
+        }
+        if kind_at(pos) != Some(COLON) {
+            return None;
+        }
+        pos += 1;
+        let mut depth = 0u32;
+        loop {
+            match kind_at(pos)? {
+                WHITESPACE | COMMENT => {}
+                NEWLINE if depth > 0 => {}
+                L_PAREN | L_BRACKET | L_BRACE | LESS => depth += 1,
+                R_PAREN | R_BRACKET | R_BRACE | GREATER => depth = depth.checked_sub(1)?,
+                LESS_MINUS | EQ if depth == 0 => return Some(pos),
+                IDENT | NULL_KW | PIPE | COMMA | COLON | MINUS_GREATER | DOTS => {}
+                _ => return None,
+            }
+            pos += 1;
+        }
+    }
+
+    /// Runs type grammar on R's token stream: errors are R syntax errors, and
+    /// trivia follows R's newline rules.
+    fn inline_type(&mut self, parse: impl FnOnce(&mut Self, usize)) {
+        let saved = (self.inline_type, self.type_region);
+        self.inline_type = true;
+        self.type_region = true;
+        self.annotation_reported = false;
+        self.annotation_unclosed_reported = false;
+        let end = self.tokens.len();
+        self.ann_trivia(end);
+        parse(self, end);
+        (self.inline_type, self.type_region) = saved;
+    }
+
     /// Returns false, consuming nothing, when no expression starts here; the
     /// caller reports the context-specific error.
     fn expression(&mut self, min_bp: u8) -> bool {
@@ -1019,7 +1124,13 @@ impl Parser<'_> {
         if !self.primary() {
             return false;
         }
+        self.operators(checkpoint, min_bp);
+        true
+    }
 
+    /// The postfix and infix operators applying to the operand that starts at
+    /// `checkpoint`.
+    fn operators(&mut self, checkpoint: Checkpoint, min_bp: u8) {
         loop {
             self.eat_trivia(false);
             let Some(kind) = self.current() else { break };
@@ -1076,7 +1187,6 @@ impl Parser<'_> {
                 }
             }
         }
-        true
     }
 
     fn field_name(&mut self, operator: SyntaxKind) {
@@ -1279,12 +1389,23 @@ impl Parser<'_> {
         let keyword_range = self.token_range(self.pos);
         self.bump();
         self.eat_trivia(true);
+        if self.at(LESS) {
+            self.inline_type(|parser, end| parser.ann_binder_list(end));
+            self.eat_trivia(true);
+        }
         if self.at(L_PAREN) {
             self.parameter_list();
         } else {
             self.error_expected("`(` to open the parameter list");
         }
         self.eat_trivia(true);
+        if self.at(MINUS_GREATER) {
+            self.start(RETURN_TYPE);
+            self.bump();
+            self.inline_type(|parser, end| parser.ann_type(end, false));
+            self.finish();
+            self.eat_trivia(true);
+        }
         if !self.expression(0) && !self.statement_left_group_open {
             // Blamed on the keyword: where the body search stopped can be a
             // zero-width spot past the last statement.
@@ -1306,6 +1427,13 @@ impl Parser<'_> {
                     self.start(PARAMETER);
                     self.bump();
                     self.eat_trivia(true);
+                    if self.at(COLON) {
+                        self.start(TYPE_ASCRIPTION);
+                        self.bump();
+                        self.inline_type(|parser, end| parser.ann_type(end, false));
+                        self.finish();
+                        self.eat_trivia(true);
+                    }
                     if self.at(EQ) {
                         self.bump();
                         self.eat_trivia(true);
