@@ -306,17 +306,32 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                 let directory = std::env::current_dir().map_err(io_error(Path::new(".")))?;
                 let mut output = None;
                 let mut files = Vec::new();
+                let mut link_flags = Vec::new();
                 let mut rest = rest.iter();
                 while let Some(argument) = rest.next() {
                     if argument == "-o" {
                         output = rest.next().cloned();
                     } else if let Some(name) = argument.strip_prefix("--output=") {
                         output = Some(name.to_owned());
-                    } else {
+                    } else if argument.starts_with("-l")
+                        || argument.starts_with("-L")
+                        || argument.ends_with(".a")
+                    {
+                        // Configure scripts probe for a system library with
+                        // `R CMD SHLIB conftest.c -lfoo`, which links it in.
+                        link_flags.push(argument.clone());
+                    } else if !argument.starts_with('-') {
                         files.push(argument.clone());
                     }
                 }
-                let library = shlib(home, &directory, &files, output.as_deref(), &[])?;
+                let library = shlib(
+                    home,
+                    &directory,
+                    &files,
+                    output.as_deref(),
+                    &[],
+                    &link_flags,
+                )?;
                 Ok(format!("{}\n", library.display()))
             }
             "INSTALL" => {
@@ -644,7 +659,7 @@ fn install_source(
             .map_err(|error| Error::Package(format!("compilation failed for package '{name}'\n{error}")))?;
             src.join(&library_name)
         } else {
-            shlib(home, &src, &[], Some(&library_name), &include_flags)
+            shlib(home, &src, &[], Some(&library_name), &include_flags, &[])
                 .map_err(|error| Error::Package(format!("compilation failed for package '{name}'\n{error}")))?
         };
         if built.exists() {
@@ -778,13 +793,14 @@ fn cxx_standard(makevars: &str) -> Option<String> {
 /// Compiles the sources in `directory` into a shared object, as `R CMD SHLIB` does: `make` with
 /// the package's `Makevars`, the R home's `Makeconf` and `shlib.mk`. With no `files`, every
 /// C, C++ and Fortran source in the directory is compiled, unless `Makevars` names its own
-/// `OBJECTS`.
+/// `OBJECTS`. `link_flags` (`-l`, `-L` and archives) are added to the link line.
 pub fn shlib(
     home: &Path,
     directory: &Path,
     files: &[String],
     output: Option<&str>,
     include_flags: &[String],
+    link_flags: &[String],
 ) -> Result<PathBuf> {
     let makevars = ["Makevars", "Makevars.in"]
         .iter()
@@ -871,8 +887,13 @@ pub fn shlib(
         "$(SHLIB_LD) $(SHLIB_LDFLAGS) $(LDFLAGS)"
     };
     command.arg(format!("SHLIB_LINK={linker}"));
+    let mut library_additions = Vec::new();
     if fortran {
-        command.arg("SHLIB_LIBADD=$(FLIBS)");
+        library_additions.push("$(FLIBS)".to_owned());
+    }
+    library_additions.extend(link_flags.iter().cloned());
+    if !library_additions.is_empty() {
+        command.arg(format!("SHLIB_LIBADD={}", library_additions.join(" ")));
     }
     if !include_flags.is_empty() {
         command.arg(format!("CLINK_CPPFLAGS={}", include_flags.join(" ")));

@@ -1054,7 +1054,8 @@ pub unsafe extern "C" fn dpodi_(
         let (mut mantissa, mut exponent) = (1.0f64, 0.0f64);
         for i in 1..=n {
             mantissa *= a.get(i, i) * a.get(i, i);
-            if mantissa == 0.0 {
+            // An overflowed diagonal never scales back below 10.
+            if mantissa == 0.0 || !mantissa.is_finite() {
                 break;
             }
             while mantissa < 1.0 {

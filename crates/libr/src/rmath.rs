@@ -29,7 +29,7 @@ use crate::{
     boundary::{self, ApiResult, enter, error},
     runtime,
 };
-use std::ffi::c_int;
+use std::{cell::RefCell, ffi::c_int, rc::Rc};
 
 const DBL_EPSILON: f64 = f64::EPSILON;
 const DBL_MIN: f64 = f64::MIN_POSITIVE;
@@ -206,6 +206,7 @@ export_random! {
     Rf_runif(a, b) => runif;
     Rf_rgamma(shape, scale) => rgamma;
     Rf_rbeta(a, b) => rbeta;
+    Rf_rnbeta(a, b, ncp) => rnbeta;
     Rf_rlnorm(meanlog, sdlog) => rlnorm;
     Rf_rchisq(df) => rchisq;
     Rf_rnchisq(df, ncp) => rnchisq;
@@ -6168,7 +6169,8 @@ pub fn qnchisq(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         let c = (df + 3.0 * ncp) / (df + 2.0 * ncp);
         let ff = (df + 2.0 * ncp) / (c * c);
         let ux = b + c * qchisq(p, ff, lower, log);
-        if ux < 0.0 { 1.0 } else { ux }
+        // A zero bracket would never grow by doubling.
+        if ux > 0.0 { ux } else { 1.0 }
     };
     let ux0 = ux;
     let mut lower = lower;
@@ -6241,6 +6243,11 @@ pub fn dnbeta(x: f64, a: f64, b: f64, ncp: f64, log: bool) -> f64 {
         let big_d = (d + big_d.sqrt()).ceil();
         if big_d > 0.0 { big_d.trunc() } else { 0.0 }
     };
+    // Past the integers, `k -= 1.0` stops changing `k` and the sum below never ends.
+    if k_max > f64::from(i32::MAX) {
+        precision_warning("dnbeta");
+        return f64::NAN;
+    }
     let term = dbeta(x, a + k_max, b, true);
     let mut p_k = dpois_raw(k_max, ncp2, true);
     if x == 0.0 || !finite(term) || !finite(p_k) {
@@ -6916,11 +6923,30 @@ pub fn qtukey(p: f64, rr: f64, cc: f64, df: f64, lower: bool, log: bool) -> f64 
 
 // The Wilcoxon rank sum and signed rank statistics, by counting.
 
+/// The largest counting table the Wilcoxon distributions build, in cells. GNU R fails its
+/// allocation somewhere above this; an unchecked size would abort the process instead.
+const MAX_COUNT_CELLS: f64 = (1u64 << 27) as f64;
+
+thread_local! {
+    /// The last Mann-Whitney table, because vectorised calls repeat the same `m` and `n` and
+    /// a table costs `O(m n (m + n))` to build.
+    static WILCOX_CACHE: RefCell<Option<((usize, usize), Rc<[f64]>)>> = const { RefCell::new(None) };
+}
+
 /// The number of ways the Mann-Whitney statistic of samples of sizes `m` and `n` takes each
 /// value from 0 to `m n`: the coefficients of the Gaussian binomial `[m + n choose m]_q`,
 /// built by Pascal's rule `[N, k] = [N-1, k-1] + q^k [N-1, k]`, which only adds counts.
-fn wilcox_counts(m: usize, n: usize) -> Vec<f64> {
-    let small = m.min(n);
+fn wilcox_counts(m: usize, n: usize) -> Rc<[f64]> {
+    let key = (m.min(n), m.max(n));
+    if let Some(counts) = WILCOX_CACHE.with_borrow(|cache| {
+        cache
+            .as_ref()
+            .filter(|(cached, _)| *cached == key)
+            .map(|(_, counts)| Rc::clone(counts))
+    }) {
+        return counts;
+    }
+    let small = key.0;
     let mut polynomials: Vec<Vec<f64>> = vec![Vec::new(); small + 1];
     polynomials[0] = vec![1.0];
     for total in 1..=m + n {
@@ -6935,13 +6961,22 @@ fn wilcox_counts(m: usize, n: usize) -> Vec<f64> {
             polynomials[k] = next;
         }
     }
-    polynomials.swap_remove(small)
+    let counts: Rc<[f64]> = polynomials.swap_remove(small).into();
+    WILCOX_CACHE.with_borrow_mut(|cache| *cache = Some((key, Rc::clone(&counts))));
+    counts
 }
 
+/// The sample sizes as table dimensions, or `None` (a `NaN` result) when they are not
+/// positive, not finite, or need a table larger than `MAX_COUNT_CELLS`.
 fn wilcox_valid(m: f64, n: f64) -> Option<(usize, usize)> {
     let m = forceint(m);
     let n = forceint(n);
-    if m <= 0.0 || n <= 0.0 {
+    if !(m > 0.0 && n > 0.0 && m.is_finite() && n.is_finite()) {
+        return None;
+    }
+    let small = m.min(n);
+    if small * small * (m + n) > MAX_COUNT_CELLS {
+        warning(format!("wilcox: samples of sizes {m} and {n} are too large"));
         return None;
     }
     Some((m as usize, n as usize))
@@ -7055,8 +7090,18 @@ pub fn qwilcox(x: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
     }
 }
 
+/// Whether `signrank_counts(n)` fits in `MAX_COUNT_CELLS`; a larger `n` gives `NaN`.
+fn signrank_valid(n: f64) -> bool {
+    if n.is_finite() && n * (n + 1.0) / 2.0 <= MAX_COUNT_CELLS {
+        return true;
+    }
+    warning(format!("signrank: n = {n} is too large"));
+    false
+}
+
 /// The number of subsets of `1..=n` with each sum from 0 to `n (n + 1) / 2`.
 fn signrank_counts(n: usize) -> Vec<f64> {
+    debug_assert!(signrank_valid(n as f64));
     let total = n * (n + 1) / 2;
     let mut counts = vec![0.0; total + 1];
     counts[0] = 1.0;
@@ -7075,7 +7120,7 @@ pub fn dsignrank(x: f64, n: f64, log: bool) -> f64 {
         return x + n;
     }
     let n = forceint(n);
-    if n <= 0.0 {
+    if n <= 0.0 || !signrank_valid(n) {
         return f64::NAN;
     }
     if (x - forceint(x)).abs() > 1e-7 {
@@ -7097,7 +7142,7 @@ pub fn psignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
         return f64::NAN;
     }
     let n = forceint(n);
-    if n <= 0.0 {
+    if n <= 0.0 || !signrank_valid(n) {
         return f64::NAN;
     }
     let x = forceint(x + 1e-7);
@@ -7133,7 +7178,7 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
         return f64::NAN;
     }
     let n = forceint(n);
-    if n <= 0.0 {
+    if n <= 0.0 || !signrank_valid(n) {
         return f64::NAN;
     }
     if x == dt0(lower, log) {
@@ -8085,6 +8130,14 @@ pub fn rnchisq(rng: &mut Rng, df: f64, lambda: f64) -> f64 {
     r
 }
 
+/// A noncentral beta variate as `X / (X + Y)`, with `X` a noncentral chi-squared on `2 a`
+/// degrees of freedom and `Y` a central one on `2 b`. GNU R declares this function but leaves
+/// it undefined, so `rbeta(n, a, b, ncp)` there is R code drawing the same construction.
+pub fn rnbeta(rng: &mut Rng, a: f64, b: f64, ncp: f64) -> f64 {
+    let x = rnchisq(rng, 2.0 * a, ncp);
+    x / (x + rchisq(rng, 2.0 * b))
+}
+
 /// Beta variates by Cheng's algorithms BB (both parameters above one) and BC (1978).
 pub fn rbeta(rng: &mut Rng, aa: f64, bb: f64) -> f64 {
     const EXPMAX: f64 = f64::MAX_EXP as f64 * M_LN2;
@@ -8806,6 +8859,10 @@ pub fn rwilcox(rng: &mut Rng, m: f64, n: f64) -> f64 {
     }
     if m == 0.0 || n == 0.0 {
         return 0.0;
+    }
+    // The draw shuffles an `m + n` array, which GNU R also sizes with a C `int`.
+    if !(m + n <= f64::from(i32::MAX)) {
+        return f64::NAN;
     }
     let mut k = (m + n) as usize;
     let mut x: Vec<i32> = (0..k as i32).collect();

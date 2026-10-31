@@ -131,6 +131,7 @@ const Rcomplex *(COMPLEX_RO)(SEXP x);
 void *(DATAPTR)(SEXP x);
 const void *(DATAPTR_RO)(SEXP x);
 const void *(DATAPTR_OR_NULL)(SEXP x);
+void *(STDVEC_DATAPTR)(SEXP x);
 const int *(LOGICAL_OR_NULL)(SEXP x);
 const int *(INTEGER_OR_NULL)(SEXP x);
 const double *(REAL_OR_NULL)(SEXP x);

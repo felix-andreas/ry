@@ -391,8 +391,9 @@ pub unsafe extern "C" fn nmmin(
 ) {
     enter(|| {
         let objective = Objective::new(fminfn, None, ex)?;
+        // C callers may pass the same array for `bvec` and `x_out`, so `x_out` is written through
+        // its pointer once `bvec` is no longer used rather than held as a second `&mut` slice.
         let bvec = vector(bvec, n);
-        let x_out = vector(x_out, n);
         let n = bvec.len();
         *fail = 0;
         if maxit <= 0 {
@@ -591,7 +592,7 @@ pub unsafe extern "C" fn nmmin(
         }
         *fmin = simplex[n][lowest - 1];
         for i in 0..n {
-            x_out[i] = simplex[i][lowest - 1];
+            x_out.add(i).write(simplex[i][lowest - 1]);
         }
         if function_count > maxit {
             *fail = 1;
@@ -623,9 +624,16 @@ pub unsafe extern "C" fn cgmin(
 ) {
     enter(|| {
         let objective = Objective::new(fminfn, fmingr, ex)?;
+        // `x` is a private copy written back through `x_out` at each exit, because C callers may
+        // pass the same array for `bvec` and `x_out`.
         let bvec = vector(bvec, n);
-        let x = vector(x_out, n);
         let n = bvec.len();
+        let mut x = vec![0.0; n];
+        let store = |x: &[f64]| {
+            for (i, value) in x.iter().enumerate() {
+                x_out.add(i).write(*value);
+            }
+        };
         if maxit <= 0 {
             *fmin = objective.value(bvec)?;
             *fncount = 0;
@@ -678,6 +686,9 @@ pub unsafe extern "C" fn cgmin(
                     *fncount = function_count;
                     *grcount = gradient_count;
                     *fail = 1;
+                    if gradient_count > 1 {
+                        store(&x);
+                    }
                     return Ok(());
                 }
                 objective.gradient(bvec, &mut g)?;
@@ -779,6 +790,7 @@ pub unsafe extern "C" fn cgmin(
         }
         *fncount = function_count;
         *grcount = gradient_count;
+        store(&x);
         Ok(())
     })
 }
@@ -1606,7 +1618,7 @@ unsafe fn subintervals<'a>(
     work: *mut f64,
 ) -> Option<(usize, Subintervals<'a>)> {
     let limit = *limit;
-    if limit < 1 || *lenw < limit * 4 {
+    if limit < 1 || i64::from(*lenw) < i64::from(limit) * 4 {
         return None;
     }
     let limit = limit as usize;
@@ -2196,6 +2208,9 @@ pub unsafe extern "C" fn optif9(
             steptl,
         };
         let size = n.max(0);
+        // C callers may pass the same array for `x` and `xpls`, so the start point is copied
+        // before `xpls` becomes a `&mut` slice.
+        let mut start = vector(x, size).to_vec();
         let outputs = Outputs {
             xpls: vector(xpls, size),
             fpls: &mut *fpls,
@@ -2212,7 +2227,7 @@ pub unsafe extern "C" fn optif9(
             problem,
             a,
             n,
-            vector(x, size),
+            &mut start,
             vector(typsiz, size),
             settings,
             outputs,

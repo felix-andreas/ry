@@ -267,6 +267,7 @@ typedef enum { FALSE = 0, TRUE } Rboolean;
 #define rlnorm Rf_rlnorm
 #define rlogis Rf_rlogis
 #define rmultinom Rf_rmultinom
+#define rnbeta Rf_rnbeta
 #define rnbinom Rf_rnbinom
 #define rnbinom_mu Rf_rnbinom_mu
 #define rnchisq Rf_rnchisq
@@ -439,6 +440,8 @@ double rlogis(double, double);
 double dnbeta(double, double, double, double, int);
 double pnbeta(double, double, double, double, int, int);
 double qnbeta(double, double, double, double, int, int);
+/* Declared for source compatibility; GNU R's library does not define it either. */
+double rnbeta(double, double, double);
 double dnf(double, double, double, double, int);
 double pnf(double, double, double, double, int, int);
 double qnf(double, double, double, double, int, int);
@@ -643,6 +646,7 @@ double Rtanpi(double);
 #undef rlnorm
 #undef rlogis
 #undef rmultinom
+#undef rnbeta
 #undef rnbinom
 #undef rnbinom_mu
 #undef rnchisq
