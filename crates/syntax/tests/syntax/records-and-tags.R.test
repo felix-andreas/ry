@@ -252,7 +252,7 @@ SOURCE_FILE@0..136
     NEWLINE@88..89 "\n"
     WHITESPACE@89..91 "  "
     MATCH_ARM@91..111
-      PATTERN_OR@91..107
+      PATTERN_OR@91..106
         PATTERN_LIST@91..97
           L_PAREN@91..92 "("
           PATTERN_BIND@92..93
@@ -276,7 +276,7 @@ SOURCE_FILE@0..136
             NAME@104..105
               IDENT@104..105 "a"
           R_PAREN@105..106 ")"
-        WHITESPACE@106..107 " "
+      WHITESPACE@106..107 " "
       FAT_ARROW@107..109 "=>"
       WHITESPACE@109..110 " "
       NAME@110..111
