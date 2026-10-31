@@ -55,6 +55,12 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 ## In flight
 
-- Research session session_0111kWqBCyqwWYwvbAi7TQGr: R runtime and C API architecture, delivering `r-runtime.md`.
+- Runtime step 1 session session_0111kWqDPNiugVJPvUec1xKs: corpus, differential oracle, benchmark generator.
+- Runtime step 2 session session_0111kWqDWCzM9zgtXPN1prpJ: object model, GC, libR skeleton.
 - Typing session session_0111kWqDjwjNJcGFMYNSyybM: inline annotation syntax, the comment/inline disagreement warning, and strict mode. It delivers one large PR.
 - Docs session session_0111kWqCgbHESLzg96ct5Rm8: restructuring the introduction and type-checking sections.
+- Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
+
+## Next
+
+- Step 3 (interpreter and base R) starts when step 2 merges; steps 5-8 follow `r-runtime.md`'s build order.

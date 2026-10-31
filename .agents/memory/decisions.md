@@ -1584,3 +1584,13 @@ NixOS without nix-ld. NixOS users install the flake's `default`, and Alpine user
 **Field practice.** rust-analyzer's main Linux binary targets glibc 2.28. uv and ruff default to
 glibc builds (2.17 and 2.31) and fall back to static musl only where glibc is missing or too old.
 rustc's Linux toolchain targets glibc 2.17.
+
+# Decision record: runtime licensing
+
+ry is UPL-1.0, so no GPL code from GNU R is copied into the repository. The runtime's headers and
+implementation are written independently.
+
+Base R's R-level sources (the open question in `contributing/design/r-runtime.md`, section 11) are
+GPL-2-or-later. The default is to load them at runtime from the user's own GNU R installation
+rather than vendor them, the way the `repl` crate already loads R at runtime. Relicensing the
+project is the owner's call and is not assumed.

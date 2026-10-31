@@ -783,8 +783,9 @@ JIT fits around them.
   but it costs install time.
 - **How much of base R to reimplement natively versus reuse as R source.** The plan above reuses the
   R sources, which is less work but ties ry to GNU R's base implementation details.
-- **Licensing.** Reusing base R's R sources brings their GPL-2-or-later license into the runtime
-  crates, which must be decided before step 3.
+- **Licensing.** Reusing base R's R sources would bring their GPL-2-or-later license into the
+  runtime crates. The default, recorded in `.agents/memory/decisions.md` ("runtime licensing"), is
+  to load them at runtime from the user's own GNU R installation instead of vendoring them.
 
 ## Sources
 
