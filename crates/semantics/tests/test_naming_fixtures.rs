@@ -9,11 +9,12 @@ use semantics::{DocumentKind, item_hir, item_naming, item_tree};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use syntax::TextRange;
+use syntax::testing::run_fixture_suite;
 
 #[test]
 fn naming_fixtures() {
     let suite = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/naming");
-    syntax::testing::run_fixture_suite(&suite, &render);
+    run_fixture_suite(&suite, &render);
 }
 
 fn render(source: &str) -> String {

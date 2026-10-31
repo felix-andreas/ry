@@ -11,10 +11,13 @@ mod lexer;
 mod parser;
 mod reparse;
 
+use rowan::{GreenNode, NodeOrToken};
+use std::mem;
 use std::sync::Arc;
 
 pub use kind::SyntaxKind;
 pub use lexer::{Token, is_syntactic_name, lex};
+pub use parser::parse;
 pub use rowan::{TextRange, TextSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -31,7 +34,7 @@ impl rowan::Language for RLanguage {
         );
         // SAFETY: `SyntaxKind` is `repr(u16)` with dense discriminants `0..=ERROR`,
         // and the bound was just checked.
-        unsafe { std::mem::transmute::<u16, SyntaxKind>(raw.0) }
+        unsafe { mem::transmute::<u16, SyntaxKind>(raw.0) }
     }
 
     fn kind_to_raw(kind: SyntaxKind) -> rowan::SyntaxKind {
@@ -65,12 +68,12 @@ impl SyntaxError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parse {
-    green: rowan::GreenNode,
+    green: GreenNode,
     errors: Arc<Vec<SyntaxError>>,
 }
 
 impl Parse {
-    pub fn new(green: rowan::GreenNode, mut errors: Vec<SyntaxError>) -> Parse {
+    pub fn new(green: GreenNode, mut errors: Vec<SyntaxError>) -> Parse {
         // Canonical order, so a splice reparse compares equal to a full parse.
         errors.sort_by_key(|error| (error.range.start(), error.range.end()));
         Parse {
@@ -79,7 +82,7 @@ impl Parse {
         }
     }
 
-    pub fn green(&self) -> &rowan::GreenNode {
+    pub fn green(&self) -> &GreenNode {
         &self.green
     }
 
@@ -110,14 +113,10 @@ impl Parse {
     }
 }
 
-pub fn parse(text: &str) -> Parse {
-    parser::parse(text)
-}
-
 /// `deleted` is a range in `old`'s text and `inserted` the replacement's length
 /// in `new_text`; the result always equals `parse(new_text)`.
 pub fn reparse(old: &Parse, new_text: &str, deleted: TextRange, inserted: TextSize) -> Parse {
-    reparse::reparse(old, new_text, deleted, inserted)
+    reparse::try_splice(old, new_text, deleted, inserted).unwrap_or_else(|| parse(new_text))
 }
 
 fn dump_node(out: &mut String, node: &SyntaxNode, depth: usize) {
@@ -129,8 +128,8 @@ fn dump_node(out: &mut String, node: &SyntaxNode, depth: usize) {
     ));
     for child in node.children_with_tokens() {
         match child {
-            rowan::NodeOrToken::Node(child) => dump_node(out, &child, depth + 1),
-            rowan::NodeOrToken::Token(token) => {
+            NodeOrToken::Node(child) => dump_node(out, &child, depth + 1),
+            NodeOrToken::Token(token) => {
                 let indent = "  ".repeat(depth + 1);
                 out.push_str(&format!(
                     "{indent}{:?}@{:?} {:?}\n",

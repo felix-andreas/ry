@@ -8,8 +8,7 @@ use crate::types::{
 };
 use rustc_hash::FxHashSet;
 use std::mem::take;
-use syntax::ast::{self, AstNode as _};
-use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Annotation<'db> {

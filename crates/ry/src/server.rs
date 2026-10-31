@@ -1,10 +1,12 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
+use crate::cli::{project_order, project_stub_paths, shares_a_namespace};
 use crate::config::{
     CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures, suggested_table,
 };
 use crate::diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics};
+use crate::namespace::namespace_import_problems;
 use crate::position::{LineColumn, LineIndex};
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::lsp_types::{self, request};
@@ -14,25 +16,38 @@ use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
 use async_lsp::{ClientSocket, ErrorCode, LanguageClient, LanguageServer, ResponseError};
 use futures::future::BoxFuture;
+use ide::{
+    CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
+    HoverDefinition, NavigationTarget, SignatureData, StubTarget,
+};
 use salsa::Setter;
 use semantics::diagnostics::{Diagnostic, Severity};
-use semantics::metadata::PackageMetadata;
-use semantics::stubs::StubSources;
+use semantics::metadata::{
+    PackageMetadata, file_attached_namespaces, normalized_imports, parse_description_collate,
+    parse_description_dependencies, parse_description_package, parse_namespace_imports,
+};
+use semantics::stubs::{
+    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+    shipped_stub_sources, stub_source_problems,
+};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
-use std::ops::ControlFlow;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::{ControlFlow, Range};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::mpsc;
-use syntax::{SyntaxKind, TextRange, TextSize};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
+use std::{env, fs, panic, process, thread};
+use syntax::{SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_syntactic_name};
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
     install_panic_hook();
-    let runtime = tokio::runtime::Handle::current();
+    let runtime = Handle::current();
 
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
         let (sender, receiver) = mpsc::channel::<Job>();
@@ -45,7 +60,7 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
             cancel: cancel.clone(),
             runtime: runtime.clone(),
         };
-        std::thread::Builder::new()
+        thread::Builder::new()
             .name("ry-analysis".to_owned())
             .stack_size(crate::ANALYSIS_STACK_SIZE)
             .spawn(move || run_worker(seed, receiver))
@@ -82,7 +97,7 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
 /// through the shared slot.
 #[derive(Clone, Default)]
 struct CancelHandle {
-    token: Arc<std::sync::Mutex<Option<salsa::CancellationToken>>>,
+    token: Arc<Mutex<Option<salsa::CancellationToken>>>,
 }
 
 impl CancelHandle {
@@ -98,8 +113,8 @@ impl CancelHandle {
 }
 
 fn install_panic_hook() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
         // Cancellation is not a fault; process death is the worker loop's decision, not the hook's.
         if info.payload().is::<salsa::Cancelled>() {
             return;
@@ -123,7 +138,7 @@ struct WorkerSeed {
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
-    runtime: tokio::runtime::Handle,
+    runtime: Handle,
 }
 
 fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
@@ -142,7 +157,7 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
                 Err(_) => return,
             }
         };
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match job {
             Some(Job::Initialize(params, reply)) => {
                 let seed = seed.take().expect("initialize arrives exactly once");
                 let (initialized, result) = Worker::initialize(seed, *params);
@@ -166,7 +181,7 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
             // A read catches its own cancellation, so this is a coherence panic; serving a
             // corrupted analysis state is worse than dying.
             tracing::error!("analysis worker panicked; exiting");
-            std::process::exit(1);
+            process::exit(1);
         }
     }
 }
@@ -227,7 +242,7 @@ enum PositionEncoding {
 
 struct Worker {
     client: ClientSocket,
-    runtime: tokio::runtime::Handle,
+    runtime: Handle,
     cancel: CancelHandle,
     current_token: salsa::CancellationToken,
     experimental_features: ExperimentalFeatures,
@@ -381,10 +396,10 @@ impl Worker {
     }
 
     fn install_stubs(&mut self) {
-        let mut sources = semantics::stubs::shipped_stub_sources();
+        let mut sources = shipped_stub_sources();
         self.stub_source_paths = materialize_shipped_stubs(&sources);
-        for (path, stem) in crate::cli::project_stub_paths(&self.workspace_root) {
-            match std::fs::read_to_string(&path) {
+        for (path, stem) in project_stub_paths(&self.workspace_root) {
+            match fs::read_to_string(&path) {
                 Ok(text) => {
                     sources.push((stem, text));
                     self.stub_source_paths.push(Some(path));
@@ -397,11 +412,7 @@ impl Worker {
                 }
             }
         }
-        StubSources::new(
-            &self.db,
-            sources,
-            semantics::stubs::shipped_export_manifests(),
-        );
+        StubSources::new(&self.db, sources, shipped_export_manifests());
     }
 
     /// The open NAMESPACE buffer wins over disk; DESCRIPTION is not a tracked
@@ -412,28 +423,24 @@ impl Worker {
             .namespace_documents
             .get(&namespace_path)
             .cloned()
-            .or_else(|| std::fs::read_to_string(&namespace_path).ok());
+            .or_else(|| fs::read_to_string(&namespace_path).ok());
         let imports = namespace_text
             .as_deref()
-            .map(|text| {
-                semantics::metadata::normalized_imports(
-                    &semantics::metadata::parse_namespace_imports(text),
-                )
-            })
+            .map(|text| normalized_imports(&parse_namespace_imports(text)))
             .unwrap_or_default();
-        let description_text = std::fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
+        let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
         let dependencies = description_text
             .as_deref()
-            .map(semantics::metadata::parse_description_dependencies)
+            .map(parse_description_dependencies)
             .unwrap_or_default();
         let collate = description_text
             .as_deref()
-            .map(semantics::metadata::parse_description_collate)
+            .map(parse_description_collate)
             .unwrap_or_default();
         let package = description_text
             .as_deref()
             .ok()
-            .and_then(semantics::metadata::parse_description_package);
+            .and_then(parse_description_package);
         WorkspaceMetadata {
             imports,
             dependencies,
@@ -454,9 +461,7 @@ impl Worker {
     fn refresh_attached(&mut self, path: &Path) {
         let scanned = match self.files.get(path) {
             Some(&file) => {
-                let scan = self.cancellable(|worker| {
-                    semantics::metadata::file_attached_namespaces(&worker.db, file)
-                });
+                let scan = self.cancellable(|worker| file_attached_namespaces(&worker.db, file));
                 match scan {
                     Ok(scanned) => scanned,
                     // A newer edit is already queued; its own sync re-scans.
@@ -513,7 +518,7 @@ impl Worker {
         let r_path = self.workspace_root.join("R");
         if r_path.is_dir() {
             let entries =
-                std::fs::read_dir(&r_path).expect("listing the workspace R directory must succeed");
+                fs::read_dir(&r_path).expect("listing the workspace R directory must succeed");
             let mut paths: Vec<PathBuf> = entries
                 .flatten()
                 .map(|entry| entry.path())
@@ -526,7 +531,7 @@ impl Worker {
                 .collect();
             paths.sort();
             for path in paths {
-                let text = std::fs::read_to_string(&path)
+                let text = fs::read_to_string(&path)
                     .expect("reading a workspace source file must succeed");
                 let file = SourceFile::new(&self.db, text, DocumentKind::Package);
                 self.files.insert(path.clone(), file);
@@ -538,7 +543,7 @@ impl Worker {
 
     /// In the order the last-writer-wins symbol index and the CLI agree on.
     fn rebuild_project_files(&mut self) {
-        let order = crate::cli::project_order(&self.workspace_root, &self.collate_order);
+        let order = project_order(&self.workspace_root, &self.collate_order);
         let mut ordered: Vec<(&PathBuf, &SourceFile)> = self.files.iter().collect();
         ordered.sort_by_cached_key(|(path, _)| order(path));
         let files: Vec<SourceFile> = ordered.into_iter().map(|(_, file)| *file).collect();
@@ -603,7 +608,7 @@ impl Worker {
         &mut self,
         body: impl FnOnce(&mut Worker) -> T,
     ) -> Result<T, salsa::Cancelled> {
-        salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| body(self)))
+        salsa::Cancelled::catch(AssertUnwindSafe(|| body(self)))
     }
 
     fn document_path(&mut self, uri: &lsp_types::Url) -> Option<PathBuf> {
@@ -650,7 +655,7 @@ impl Worker {
     }
 
     fn is_package_path(&self, path: &Path) -> bool {
-        crate::cli::shares_a_namespace(path, &self.workspace_root)
+        shares_a_namespace(path, &self.workspace_root)
     }
 
     fn text(&self, file: SourceFile) -> String {
@@ -704,9 +709,9 @@ impl Worker {
             .map(|(path, _)| path)
     }
 
-    fn render_hover_definition(&self, definition: &ide::HoverDefinition) -> Option<String> {
+    fn render_hover_definition(&self, definition: &HoverDefinition) -> Option<String> {
         match definition {
-            ide::HoverDefinition::Local {
+            HoverDefinition::Local {
                 target,
                 maybe_undefined,
             } => {
@@ -717,11 +722,11 @@ impl Worker {
                 }
                 Some(summary)
             }
-            ide::HoverDefinition::Global { target } => {
+            HoverDefinition::Global { target } => {
                 let location = self.render_source_location(target)?;
                 Some(format!("Package global, defined at `{location}`"))
             }
-            ide::HoverDefinition::Stub {
+            HoverDefinition::Stub {
                 namespace,
                 overloads,
                 declaration,
@@ -745,7 +750,7 @@ impl Worker {
     }
 
     /// Just the file name: goto-definition does the jumping.
-    fn render_stub_source_location(&self, target: ide::StubTarget) -> Option<String> {
+    fn render_stub_source_location(&self, target: StubTarget) -> Option<String> {
         let path = self.stub_source_paths.get(target.source_index)?.as_ref()?;
         let sources = StubSources::get(&self.db);
         let (_, text) = sources.sources(&self.db).get(target.source_index)?;
@@ -759,20 +764,20 @@ impl Worker {
         ))
     }
 
-    fn definition_location(&self, target: ide::DefinitionTarget) -> Option<lsp_types::Location> {
+    fn definition_location(&self, target: DefinitionTarget) -> Option<lsp_types::Location> {
         match target {
-            ide::DefinitionTarget::Project(target) => {
+            DefinitionTarget::Project(target) => {
                 let path = self.path_of(target.file)?;
                 Some(lsp_types::Location {
                     uri: self.document_uri(path),
                     range: self.to_range_in(target.file, target.range),
                 })
             }
-            ide::DefinitionTarget::Stub(target) => self.stub_location(target),
+            DefinitionTarget::Stub(target) => self.stub_location(target),
         }
     }
 
-    fn stub_location(&self, target: ide::StubTarget) -> Option<lsp_types::Location> {
+    fn stub_location(&self, target: StubTarget) -> Option<lsp_types::Location> {
         let path = self.stub_source_paths.get(target.source_index)?.as_ref()?;
         let sources = StubSources::get(&self.db);
         let (_, text) = sources.sources(&self.db).get(target.source_index)?;
@@ -782,7 +787,7 @@ impl Worker {
         })
     }
 
-    fn render_source_location(&self, target: &ide::NavigationTarget) -> Option<String> {
+    fn render_source_location(&self, target: &NavigationTarget) -> Option<String> {
         let path = self.path_of(target.file)?;
         let display = path
             .strip_prefix(&self.workspace_root)
@@ -909,7 +914,7 @@ impl Worker {
                 None => text = change.text.clone(),
                 Some(range) => {
                     let range = self.to_text_range(&text, range);
-                    text.replace_range(std::ops::Range::<usize>::from(range), &change.text);
+                    text.replace_range(Range::<usize>::from(range), &change.text);
                 }
             }
         }
@@ -949,7 +954,7 @@ impl Worker {
 
         if self.is_package_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.
-            match std::fs::read_to_string(&path) {
+            match fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Some(&file) = self.files.get(&path) {
                         file.set_text(&mut self.db).to(text);
@@ -1011,7 +1016,7 @@ impl Worker {
                     .is_some_and(|extension| extension == "R" || extension == "r")
                 && !self.open_documents.contains(&path)
             {
-                match std::fs::read_to_string(&path) {
+                match fs::read_to_string(&path) {
                     Ok(text) => match self.files.get(&path) {
                         Some(&file) => {
                             file.set_text(&mut self.db).to(text);
@@ -1213,7 +1218,7 @@ impl Worker {
 
     fn stub_diagnostics(&self, text: &str) -> Vec<lsp_types::Diagnostic> {
         let index = LineIndex::new(text);
-        semantics::stubs::stub_source_problems(&self.db, text)
+        stub_source_problems(&self.db, text)
             .into_iter()
             .map(|problem| {
                 let start = index.line_start(problem.line as u32);
@@ -1232,13 +1237,10 @@ impl Worker {
     }
 
     fn namespace_diagnostics(&self, text: &str) -> Vec<lsp_types::Diagnostic> {
-        let imports = semantics::metadata::parse_namespace_imports(text);
-        let knows =
-            |package: &str| semantics::stubs::namespace_known(&self.db, package).unwrap_or(false);
-        let exports = |package: &str, name: &str| {
-            semantics::stubs::namespace_exports(&self.db, package, name)
-        };
-        crate::namespace::namespace_import_problems(&imports, &knows, &exports)
+        let imports = parse_namespace_imports(text);
+        let knows = |package: &str| namespace_known(&self.db, package).unwrap_or(false);
+        let exports = |package: &str, name: &str| namespace_exports(&self.db, package, name);
+        namespace_import_problems(&imports, &knows, &exports)
             .into_iter()
             .map(|diagnostic| self.convert_diagnostic(text, diagnostic))
             .collect()
@@ -1665,10 +1667,20 @@ impl LanguageServer for ServerState {
     ) -> BoxFuture<'static, Result<Option<lsp_types::WorkspaceEdit>, Self::Error>> {
         self.read(move |worker| {
             let new_name = params.new_name;
-            if !is_valid_r_identifier(&new_name) {
+            if !is_syntactic_name(&new_name) {
                 return Err(ResponseError::new(
                     ErrorCode::INVALID_PARAMS,
                     format!("`{new_name}` is not a valid R identifier"),
+                ));
+            }
+            // `..1` is syntactic, but it names an element of `...`, so a binding of it could
+            // never be read back.
+            if new_name.strip_prefix("..").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+            }) {
+                return Err(ResponseError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("`{new_name}` refers to an element of `...` and cannot name a binding"),
                 ));
             }
             let Some((file, _, offset)) = worker.document_at(&params.text_document_position) else {
@@ -2059,17 +2071,17 @@ impl LanguageServer for ServerState {
             // Fault injection for the cancelled-pull test: the marker file lets the test
             // order its edit strictly after this pull started, so the cancellation flip
             // targets this pull's token rather than one a queued job would refresh away.
-            if let Some(delay) = std::env::var("RY_TEST_DELAY_PULL_MS")
+            if let Some(delay) = env::var("RY_TEST_DELAY_PULL_MS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
             {
-                if let Ok(marker) = std::env::var("RY_TEST_PULL_MARKER") {
-                    std::fs::write(&marker, b"pulling")
+                if let Ok(marker) = env::var("RY_TEST_PULL_MARKER") {
+                    fs::write(&marker, b"pulling")
                         .expect("the cancelled-pull test marker must be writable");
                 }
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(delay);
-                while !worker.current_token.is_cancelled() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                let deadline = Instant::now() + Duration::from_millis(delay);
+                while !worker.current_token.is_cancelled() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(5));
                 }
             }
             match worker.cancellable(|worker| worker.settled_diagnostics(&path)) {
@@ -2090,7 +2102,7 @@ impl LanguageServer for ServerState {
 fn to_lsp_document_symbol(
     worker: &Worker,
     text: &str,
-    symbol: ide::DocumentSymbol,
+    symbol: DocumentSymbol,
 ) -> Option<lsp_types::DocumentSymbol> {
     if symbol.name.is_empty() {
         return None;
@@ -2112,30 +2124,28 @@ fn to_lsp_document_symbol(
     })
 }
 
-fn lsp_document_symbol_kind(kind: ide::DocumentSymbolKind) -> lsp_types::SymbolKind {
+fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
     match kind {
-        ide::DocumentSymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
-        ide::DocumentSymbolKind::Value => lsp_types::SymbolKind::VARIABLE,
-        ide::DocumentSymbolKind::TypeDefinition => lsp_types::SymbolKind::STRUCT,
-        ide::DocumentSymbolKind::AliasDefinition | ide::DocumentSymbolKind::S4Generic => {
+        DocumentSymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
+        DocumentSymbolKind::Value => lsp_types::SymbolKind::VARIABLE,
+        DocumentSymbolKind::TypeDefinition => lsp_types::SymbolKind::STRUCT,
+        DocumentSymbolKind::AliasDefinition | DocumentSymbolKind::S4Generic => {
             lsp_types::SymbolKind::INTERFACE
         }
-        ide::DocumentSymbolKind::S4Class | ide::DocumentSymbolKind::R6Class => {
-            lsp_types::SymbolKind::CLASS
-        }
-        ide::DocumentSymbolKind::S4Method | ide::DocumentSymbolKind::R6Method => {
+        DocumentSymbolKind::S4Class | DocumentSymbolKind::R6Class => lsp_types::SymbolKind::CLASS,
+        DocumentSymbolKind::S4Method | DocumentSymbolKind::R6Method => {
             lsp_types::SymbolKind::METHOD
         }
-        ide::DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
     }
 }
 
-fn convert_completion_item(item: ide::CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
+fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
     let kind = match item.kind {
-        ide::CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
-        ide::CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
-        ide::CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
-        ide::CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
+        CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
+        CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
+        CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
+        CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
     };
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),
@@ -2149,7 +2159,7 @@ fn convert_completion_item(item: ide::CompletionItem, snippets: bool) -> lsp_typ
         }),
         ..Default::default()
     };
-    if snippets && item.kind == ide::CompletionKind::Function {
+    if snippets && item.kind == CompletionKind::Function {
         // A known zero-argument signature drops the cursor past the parens;
         // everything else (arguments or unknown) drops it between them.
         converted.insert_text = Some(if item.takes_arguments == Some(false) {
@@ -2170,7 +2180,7 @@ fn convert_completion_item(item: ide::CompletionItem, snippets: bool) -> lsp_typ
 /// Label offsets are always UTF-16 code units per the LSP spec, independent
 /// of the negotiated document encoding.
 fn convert_signature(
-    signature: ide::SignatureData,
+    signature: SignatureData,
     label_offsets: bool,
 ) -> lsp_types::SignatureInformation {
     let parameters: Vec<lsp_types::ParameterInformation> = signature
@@ -2218,7 +2228,7 @@ fn diagnostic_report(
     items: Vec<lsp_types::Diagnostic>,
     previous_result_id: Option<String>,
 ) -> lsp_types::DocumentDiagnosticReportResult {
-    let mut hasher = std::hash::DefaultHasher::new();
+    let mut hasher = DefaultHasher::new();
     serde_json::to_string(&items)
         .unwrap_or_default()
         .hash(&mut hasher);
@@ -2256,52 +2266,6 @@ fn diagnostics_cancelled_error() -> ResponseError {
         })
         .expect("cancellation data serializes"),
     )
-}
-
-/// Valid R identifier: a letter or `.` (not followed by a digit) first, then
-/// alphanumerics, `.`, `_`; reserved words excluded.
-fn is_valid_r_identifier(name: &str) -> bool {
-    const RESERVED: &[&str] = &[
-        "if",
-        "else",
-        "repeat",
-        "while",
-        "function",
-        "for",
-        "in",
-        "next",
-        "break",
-        "TRUE",
-        "FALSE",
-        "NULL",
-        "Inf",
-        "NaN",
-        "NA",
-        "NA_integer_",
-        "NA_real_",
-        "NA_character_",
-        "NA_complex_",
-    ];
-    if RESERVED.contains(&name) {
-        return false;
-    }
-    let mut characters = name.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    if !(first.is_alphabetic() || first == '.') {
-        return false;
-    }
-    if first == '.'
-        && name
-            .chars()
-            .nth(1)
-            .is_some_and(|second| second.is_ascii_digit())
-    {
-        return false;
-    }
-    name.chars()
-        .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
 }
 
 /// Brace/paren/argument-list folds keep the closing delimiter visible;
@@ -2375,7 +2339,7 @@ fn annotation_semantic_tokens(
         .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
         for element in annotation.descendants_with_tokens() {
-            let syntax::SyntaxElement::Token(token) = element else {
+            let SyntaxElement::Token(token) = element else {
                 continue;
             };
             if let Some(token_type) = classify_annotation_token(&token)
@@ -2390,7 +2354,7 @@ fn annotation_semantic_tokens(
 
 /// Indices into the advertised legend: type names 0, `<T>` binders 1,
 /// field/parameter names 2, punctuation 3, `@` directives 4.
-fn classify_annotation_token(token: &syntax::SyntaxToken) -> Option<u32> {
+fn classify_annotation_token(token: &SyntaxToken) -> Option<u32> {
     let parent_kind = token.parent().map(|parent| parent.kind());
     match token.kind() {
         SyntaxKind::IDENT => match parent_kind {
@@ -2470,7 +2434,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
         // The wrapped parse prefixes "#: " (3 bytes) before the type text.
         let parse = syntax::parse(&format!("#: {type_text}\n"));
         for element in parse.syntax_node().descendants_with_tokens() {
-            let syntax::SyntaxElement::Token(token) = element else {
+            let SyntaxElement::Token(token) = element else {
                 continue;
             };
             let range = token.text_range();
@@ -2540,7 +2504,7 @@ fn materialize_shipped_stubs(shipped: &[(String, String)]) -> Vec<Option<PathBuf
         .join("ry")
         .join("stubs")
         .join(env!("CARGO_PKG_VERSION"));
-    if let Err(error) = std::fs::create_dir_all(&directory) {
+    if let Err(error) = fs::create_dir_all(&directory) {
         tracing::warn!(
             "stub locations unavailable: cannot create {}: {error}",
             directory.display()
@@ -2551,9 +2515,9 @@ fn materialize_shipped_stubs(shipped: &[(String, String)]) -> Vec<Option<PathBuf
         .iter()
         .map(|(namespace, text)| {
             let path = directory.join(format!("{namespace}.Rtypes"));
-            let current = std::fs::read_to_string(&path).ok();
+            let current = fs::read_to_string(&path).ok();
             if current.as_deref() != Some(text.as_str())
-                && let Err(error) = std::fs::write(&path, text)
+                && let Err(error) = fs::write(&path, text)
             {
                 tracing::warn!("stub location unavailable: {}: {error}", path.display());
                 return None;

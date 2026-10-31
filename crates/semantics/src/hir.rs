@@ -1,8 +1,9 @@
 //! Spans are item-relative, so an edit elsewhere in the file reproduces an
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
-use syntax::ast::AstNode as _;
-use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use std::iter;
+use syntax::ast::{BinaryExpr, Name, is_expression_kind};
+use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
 pub struct ExprId(pub u32);
@@ -267,7 +268,7 @@ impl Module {
         let range = significant_range(node);
         match node.kind() {
             SyntaxKind::NAME => {
-                let text = syntax::ast::Name::cast(node.clone())
+                let text = Name::cast(node.clone())
                     .and_then(|name| name.text())
                     .unwrap_or_default();
                 self.allocate(ExpressionKind::NameRef(text), range)
@@ -315,7 +316,7 @@ impl Module {
                 let callee_node = expression_children(node).next();
                 let is_local = callee_node.as_ref().is_some_and(|callee| {
                     callee.kind() == SyntaxKind::NAME
-                        && syntax::ast::Name::cast(callee.clone())
+                        && Name::cast(callee.clone())
                             .and_then(|name| name.text())
                             .is_some_and(|text| text == "local")
                 });
@@ -416,7 +417,7 @@ impl Module {
                 let variable_node = children.next();
                 let (variable, variable_range) = match &variable_node {
                     Some(node) if node.kind() == SyntaxKind::NAME => (
-                        syntax::ast::Name::cast(node.clone()).and_then(|name| name.text()),
+                        Name::cast(node.clone()).and_then(|name| name.text()),
                         Some(node.text_range()),
                     ),
                     _ => (None, None),
@@ -455,7 +456,7 @@ impl Module {
     }
 
     fn lower_binary(&mut self, node: &SyntaxNode, range: TextRange) -> ExprId {
-        let Some(binary) = syntax::ast::BinaryExpr::cast(node.clone()) else {
+        let Some(binary) = BinaryExpr::cast(node.clone()) else {
             return self.missing(range);
         };
         let Some(operator_token) = binary.operator() else {
@@ -675,7 +676,7 @@ impl Module {
 
 fn expression_children(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
     node.children()
-        .filter(|child| syntax::ast::is_expression_kind(child.kind()))
+        .filter(|child| is_expression_kind(child.kind()))
 }
 
 /// Excludes the trailing trivia (including `#:` annotations) rowan attaches
@@ -767,7 +768,7 @@ fn string_value(text: &str) -> String {
                 Some('[') => ']',
                 _ => '}',
             });
-            closer.extend(std::iter::repeat_n('-', dashes));
+            closer.extend(iter::repeat_n('-', dashes));
             closer.push(quote);
             let body = &inner[body_start..];
             return body
@@ -782,7 +783,7 @@ fn string_value(text: &str) -> String {
 
 fn field_name_text(node: &SyntaxNode) -> Option<String> {
     match node.kind() {
-        SyntaxKind::NAME => syntax::ast::Name::cast(node.clone()).and_then(|name| name.text()),
+        SyntaxKind::NAME => Name::cast(node.clone()).and_then(|name| name.text()),
         SyntaxKind::LITERAL => {
             let token = node.first_token()?;
             (token.kind() == SyntaxKind::STRING).then(|| string_value(token.text()))
@@ -799,7 +800,7 @@ enum PipeShape {
 /// R's placeholder rules: `_` may appear exactly once, as the whole value of a
 /// named argument of this call. Any other use is an R error (`None`).
 fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
-    let underscores: Vec<syntax::SyntaxToken> = call
+    let underscores: Vec<SyntaxToken> = call
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
         .filter(|token| token.kind() == SyntaxKind::UNDERSCORE)

@@ -2,6 +2,8 @@
 //! time). Prose is blanked byte-for-byte to spaces, so every offset matches the
 //! original and ranges need no translation.
 
+use std::ops::Range;
+
 pub fn is_literate_extension(extension: &str) -> bool {
     matches!(
         extension,
@@ -12,22 +14,15 @@ pub fn is_literate_extension(extension: &str) -> bool {
 pub fn r_source_of_literate(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_chunk = false;
-    for line in split_keeping_terminators(text) {
+    for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         let terminator = &line[body.len()..];
         let trimmed = body.trim_start();
-        let keep = if in_chunk {
-            if is_chunk_end(trimmed) {
-                in_chunk = false;
-                false
-            } else {
-                true
-            }
+        let keep = in_chunk && !is_chunk_end(trimmed);
+        in_chunk = if in_chunk {
+            keep
         } else {
-            if is_chunk_start(trimmed) {
-                in_chunk = true;
-            }
-            false
+            is_chunk_start(trimmed)
         };
         if keep {
             out.push_str(body);
@@ -47,26 +42,21 @@ fn blank_prose(body: &str, out: &mut String) {
         if let Some((expression, end)) = inline_expression(body, index) {
             // The closing backtick becomes `;` so two inline expressions on one
             // line parse as two statements.
-            for _ in index..expression.start {
-                out.push(' ');
-            }
+            out.push_str(&" ".repeat(expression.start - index));
             out.push_str(&body[expression.clone()]);
             out.push(';');
             index = end;
             continue;
         }
-        let character = body[index..].chars().next().unwrap_or(' ');
-        for _ in 0..character.len_utf8() {
-            out.push(' ');
-        }
-        index += character.len_utf8();
-        debug_assert!(body.is_char_boundary(index));
+        let width = body[index..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&" ".repeat(width));
+        index += width;
     }
 }
 
 /// Returns the expression's byte range and the index just past the closing
 /// backtick.
-fn inline_expression(body: &str, index: usize) -> Option<(std::ops::Range<usize>, usize)> {
+fn inline_expression(body: &str, index: usize) -> Option<(Range<usize>, usize)> {
     let rest = body.get(index..)?;
     let after_tick = rest.strip_prefix('`')?;
     if after_tick.starts_with('`') {
@@ -115,28 +105,20 @@ fn fence_body(trimmed: &str) -> Option<&str> {
     (backticks >= 3).then(|| trimmed[backticks..].trim())
 }
 
-fn split_keeping_terminators(text: &str) -> impl Iterator<Item = &str> {
-    let mut rest = text;
-    std::iter::from_fn(move || {
-        if rest.is_empty() {
-            return None;
-        }
-        let end = rest.find('\n').map_or(rest.len(), |index| index + 1);
-        let (line, remainder) = rest.split_at(end);
-        rest = remainder;
-        Some(line)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn convert(document: &str) -> String {
+        let converted = r_source_of_literate(document);
+        assert_eq!(converted.len(), document.len(), "{converted:?}");
+        converted
+    }
+
     #[test]
     fn conversion_preserves_length_and_keeps_chunk_code() {
         let document = "# Title\n\nSome prose.\n\n```{r setup}\nx <- 1L\n```\n\nMore prose.\n\n```{r}\nprint(x)\n```\n";
-        let converted = r_source_of_literate(document);
-        assert_eq!(converted.len(), document.len(), "{converted:?}");
+        let converted = convert(document);
         assert!(converted.contains("x <- 1L"));
         assert!(converted.contains("print(x)"));
         assert!(!converted.contains("Title"));
@@ -151,7 +133,7 @@ mod tests {
     #[test]
     fn a_fence_for_another_language_is_prose() {
         let document = "```{python}\nx = 1\n```\n```{r}\ny <- 2L\n```\n";
-        let converted = r_source_of_literate(document);
+        let converted = convert(document);
         assert!(!converted.contains("x = 1"));
         assert!(converted.contains("y <- 2L"));
     }
@@ -159,8 +141,7 @@ mod tests {
     #[test]
     fn sweave_chunks_convert() {
         let document = "\\section{One}\n<<setup, echo=FALSE>>=\nz <- 3L\n@\ntext\n";
-        let converted = r_source_of_literate(document);
-        assert_eq!(converted.len(), document.len());
+        let converted = convert(document);
         assert!(converted.contains("z <- 3L"));
         assert!(!converted.contains("section"));
     }
@@ -168,8 +149,7 @@ mod tests {
     #[test]
     fn multibyte_prose_keeps_byte_offsets_aligned() {
         let document = "prosé — ünicode\n```{r}\nx <- 1L\n```\n";
-        let converted = r_source_of_literate(document);
-        assert_eq!(converted.len(), document.len(), "{converted:?}");
+        let converted = convert(document);
         assert_eq!(
             document.find("x <- 1L"),
             converted.find("x <- 1L"),
@@ -180,8 +160,7 @@ mod tests {
     #[test]
     fn exotic_whitespace_in_prose_is_blanked() {
         let document = "texte\u{a0}ins\u{e9}cable\n```{r}\nx <- 1L\n```\n";
-        let converted = r_source_of_literate(document);
-        assert_eq!(converted.len(), document.len(), "{converted:?}");
+        let converted = convert(document);
         assert!(
             !converted.contains('\u{a0}'),
             "prose must not survive: {converted:?}"
@@ -193,8 +172,7 @@ mod tests {
     fn inline_expressions_are_code() {
         let document =
             "```{r}\ntotal <- 42L\n```\n\nWe sold `r total` units and `r nchar(total)` digits.\n";
-        let converted = r_source_of_literate(document);
-        assert_eq!(converted.len(), document.len(), "{converted:?}");
+        let converted = convert(document);
         assert_eq!(
             document.find("total)"),
             converted.find("total)"),
@@ -208,8 +186,7 @@ mod tests {
     #[test]
     fn a_code_span_that_is_not_inline_r_stays_prose() {
         let document = "See `total` and `rate` and `python x` and `r unclosed\n";
-        let converted = r_source_of_literate(document);
-        assert_eq!(converted.len(), document.len(), "{converted:?}");
+        let converted = convert(document);
         assert_eq!(
             converted.trim(),
             "",
@@ -220,6 +197,6 @@ mod tests {
     #[test]
     fn an_unclosed_chunk_still_yields_its_code() {
         let document = "```{r}\nx <- 1L\n";
-        assert!(r_source_of_literate(document).contains("x <- 1L"));
+        assert!(convert(document).contains("x <- 1L"));
     }
 }

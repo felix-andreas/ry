@@ -2,6 +2,7 @@
 //! `cargo test -p semantics --release --test test_perf -- --ignored --nocapture`.
 //! One test, so the resident-set reading is not polluted by a sibling test thread.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -119,7 +120,7 @@ fn package(sources: &[String]) -> (RootDatabase, Vec<SourceFile>) {
 }
 
 fn proc_status_kb(key: &str) -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let status = fs::read_to_string("/proc/self/status").ok()?;
     status
         .lines()
         .find(|line| line.starts_with(key))?
@@ -133,7 +134,7 @@ fn corpus_packages() -> Vec<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus");
     let mut packages = Vec::new();
     for top in ["r-base", "cran"] {
-        let Ok(entries) = std::fs::read_dir(root.join(top)) else {
+        let Ok(entries) = fs::read_dir(root.join(top)) else {
             continue;
         };
         let mut directories: Vec<PathBuf> = entries
@@ -148,7 +149,7 @@ fn corpus_packages() -> Vec<Vec<String>> {
             paths.sort();
             let sources: Vec<String> = paths
                 .iter()
-                .filter_map(|path| std::fs::read(path).ok())
+                .filter_map(|path| fs::read(path).ok())
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .collect();
             if !sources.is_empty() {
@@ -160,7 +161,7 @@ fn corpus_packages() -> Vec<Vec<String>> {
 }
 
 fn collect_r_files(directory: &Path, paths: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
+    let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {

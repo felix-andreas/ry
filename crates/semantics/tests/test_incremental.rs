@@ -2,6 +2,7 @@ use semantics::diagnostics::file_diagnostics;
 use semantics::testing::ProbeDatabase;
 use semantics::types::{Atomic, scalar, unknown};
 use semantics::{DocumentKind, Item, ProjectFiles, SourceFile, global_scheme, package_definitions};
+use std::thread;
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
     for &file in files {
@@ -172,7 +173,7 @@ fn a_deep_reexport_chain_resolves_fully() {
         let head = definition(&db, "link_0");
         assert_eq!(global_scheme(&db, head).body, scalar(&db, Atomic::Double));
     };
-    std::thread::Builder::new()
+    thread::Builder::new()
         .stack_size(ANALYSIS_STACK_SIZE)
         .spawn(run)
         .expect("spawn the analysis thread")

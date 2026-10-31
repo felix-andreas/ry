@@ -2,11 +2,12 @@
 //! as `#:` above its own definition must add no finding.
 
 use salsa::Setter as _;
-use semantics::diagnostics::TypeRenderer;
-use semantics::diagnostics::file_diagnostics;
+use semantics::diagnostics::{TypeRenderer, file_diagnostics};
+use semantics::stubs::install_shipped_stubs;
 use semantics::{
     DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_spans,
 };
+use syntax::testing::fixture_case_sources;
 
 /// `id :: name` schemes known not to round-trip; keep it empty.
 const KNOWN_UNWRITABLE: [&str; 0] = [];
@@ -16,13 +17,13 @@ fn rendered_schemes_are_writable_annotations() {
     // One database re-pointed with the salsa setter: a fresh one re-parses the stub corpus,
     // and the fuzz battery already pins setter-equals-fresh.
     let mut db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let file = SourceFile::new(&db, String::new(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
 
     let mut checked = 0usize;
     let mut violations = Vec::new();
-    for (id, source) in syntax::testing::fixture_case_sources() {
+    for (id, source) in fixture_case_sources() {
         // The oracle "re-declaring adds no finding" needs a baseline with no findings.
         file.set_text(&mut db).to(source.clone());
         if !file_diagnostics(&db, file).is_empty() {

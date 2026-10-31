@@ -11,6 +11,7 @@ use crate::{
 use salsa::Setter as _;
 use salsa::plumbing::AsId as _;
 use std::cell::RefCell;
+use std::mem;
 use std::sync::{Arc, Mutex};
 
 /// Renders schemes, diagnostics, and every lint (all enabled) for a file, asserting each range
@@ -201,7 +202,7 @@ impl ProbeDatabase {
 
     /// Names of the items whose `item_check` ran since the previous call; drains the log.
     pub fn checked_since(&self) -> Vec<String> {
-        let executed = std::mem::take(&mut *self.executed.lock().expect("probe log"));
+        let executed = mem::take(&mut *self.executed.lock().expect("probe log"));
         let mut names: Vec<String> = ProjectFiles::get(self)
             .files(self)
             .iter()

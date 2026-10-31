@@ -3,8 +3,11 @@
 
 use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode, SourceSpan};
 use semantics::lints::{LintConfig, NameStyle};
-use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use serde::de::{self, DeserializeOwned, Deserializer, Visitor};
+use serde::{Deserialize, forward_to_deserialize_any};
+use std::fs;
+use std::iter::once;
+use std::path::{Component, Path, PathBuf, absolute};
 use std::{fmt, io};
 use thiserror::Error;
 
@@ -72,7 +75,7 @@ impl Config {
 
     pub fn from_path(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
         let path = path.as_ref();
-        match std::fs::read_to_string(path) {
+        match fs::read_to_string(path) {
             Ok(text) => Config::parse(&text, Some(path)).map(|mut config| {
                 config.source_directory = path.parent().map(Path::to_path_buf);
                 config
@@ -115,7 +118,7 @@ impl Config {
 fn find_config_file(target: &Path) -> Result<Option<PathBuf>, ConfigError> {
     // A relative path's lexical parent chain ends at the empty path, never reaching
     // the real ancestors.
-    let target = std::path::absolute(target).map_err(|error| ConfigError::Resolve {
+    let target = absolute(target).map_err(|error| ConfigError::Resolve {
         path: target.to_path_buf(),
         source: error,
     })?;
@@ -189,9 +192,9 @@ impl Diagnostic for ConfigError {
         };
         // An empty label at the start still names the file in the snippet header.
         let span = error.span.unwrap_or_else(|| SourceSpan::from(0..0));
-        Some(Box::new(std::iter::once(
-            LabeledSpan::new_primary_with_span(None, span),
-        )))
+        Some(Box::new(once(LabeledSpan::new_primary_with_span(
+            None, span,
+        ))))
     }
 }
 
@@ -261,40 +264,54 @@ pub fn suggested_table(unknown_key: &str) -> Option<&'static str> {
     if unknown_key.contains('.') {
         return None;
     }
-    TABLE_KEYS
-        .iter()
-        .find(|(_, keys)| keys.contains(&unknown_key))
-        .map(|(table, _)| *table)
+    [
+        ("format", field_names::<format::Config>()),
+        ("lint", field_names::<LintConfig>()),
+        ("check", field_names::<CheckConfig>()),
+    ]
+    .into_iter()
+    .find(|(_, keys)| keys.contains(&unknown_key))
+    .map(|(table, _)| table)
 }
 
-/// Serde cannot enumerate field names at run time;
-/// `table_keys_match_the_config_structs` pins this list to the structs.
-const TABLE_KEYS: [(&str, &[&str]); 3] = [
-    ("format", &["indent-width", "line-ending"]),
-    (
-        "lint",
-        &[
-            "naming-style",
-            "assignment-operator",
-            "boolean-shorthand",
-            "missing-comma",
-            "trailing-comma",
-            "unused-parameter",
-            "unused-import",
-            "shadows-builtin",
-            "shadows-namespace",
-        ],
-    ),
-    (
-        "check",
-        &["unused", "maybe-undefined", "typing", "strict", "exclude"],
-    ),
-];
+/// Serde cannot enumerate a struct's fields directly, but a derived `Deserialize` hands
+/// its serialized field names to `deserialize_struct`, so the structs stay the only list.
+fn field_names<T: DeserializeOwned>() -> &'static [&'static str] {
+    let mut fields: &'static [&'static str] = &[];
+    // The recorder always fails once it has the names; the error carries nothing.
+    T::deserialize(FieldRecorder(&mut fields)).ok();
+    fields
+}
+
+struct FieldRecorder<'a>(&'a mut &'static [&'static str]);
+
+impl<'de> Deserializer<'de> for FieldRecorder<'_> {
+    type Error = de::value::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Self::Error> {
+        Err(de::Error::custom("only a struct records its field names"))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        fields: &'static [&'static str],
+        _visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        *self.0 = fields;
+        Err(de::Error::custom("field names recorded"))
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier
+        ignored_any
+    }
+}
 
 /// Lexical, so an ancestor walk visits only true ancestors; when `..` crosses a
 /// symlink this prefers the path as the user spelled it.
 fn normalize_lexically(path: &Path) -> PathBuf {
-    use std::path::Component;
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -467,39 +484,10 @@ mod tests {
         assert_eq!(suggested_table("typing"), Some("check"));
         assert_eq!(suggested_table("indent-width"), Some("format"));
         assert_eq!(suggested_table("naming-style"), Some("lint"));
+        assert_eq!(suggested_table("shadows-namespace"), Some("lint"));
+        assert_eq!(suggested_table("maybe-undefined"), Some("check"));
         assert_eq!(suggested_table("typng"), None);
         assert_eq!(suggested_table("check.typing"), None);
-    }
-
-    #[test]
-    fn every_check_field_has_a_placement_hint() {
-        // Guards the direction `table_keys_match_the_config_structs` cannot
-        // see: a field added to `CheckConfig` but not to TABLE_KEYS. Written
-        // out because serde cannot enumerate the struct's fields.
-        for key in ["unused", "maybe-undefined", "typing", "strict", "exclude"] {
-            assert_eq!(
-                suggested_table(key),
-                Some("check"),
-                "`{key}` is a `[check]` field with no placement hint"
-            );
-        }
-    }
-
-    #[test]
-    fn table_keys_match_the_config_structs() {
-        for (table, keys) in TABLE_KEYS {
-            for key in keys {
-                // A known key rejects a wrong type as a hard error; only an unknown key is
-                // skipped and recorded, which means the list drifted.
-                let text = format!("[{table}]\n{key} = 0\n");
-                if let Ok(config) = Config::from_toml_str(&text) {
-                    assert!(
-                        config.unknown_keys.is_empty(),
-                        "`{table}.{key}` is listed in TABLE_KEYS but the struct does not have it"
-                    );
-                }
-            }
-        }
     }
 
     #[test]
@@ -527,7 +515,7 @@ mod tests {
     fn from_path_records_the_source_directory() {
         let directory = tempfile::tempdir().expect("temp dir");
         let config_path = directory.path().join(CONFIG_FILE_NAME);
-        std::fs::write(&config_path, "[check]\nunused = false\n").expect("write config");
+        fs::write(&config_path, "[check]\nunused = false\n").expect("write config");
         let config = Config::from_path(&config_path).expect("config parses");
         assert_eq!(config.source_directory.as_deref(), Some(directory.path()));
     }
@@ -546,7 +534,7 @@ mod tests {
     fn from_path_names_the_file_in_errors() {
         let directory = tempfile::tempdir().expect("temp dir");
         let config_path = directory.path().join(CONFIG_FILE_NAME);
-        std::fs::write(&config_path, "[check]\ntyping = 1\n").expect("write config");
+        fs::write(&config_path, "[check]\ntyping = 1\n").expect("write config");
         let error =
             Config::from_path(&config_path).expect_err("expected the config to be rejected");
         assert_eq!(error.parse_location(), Some((2, 10)));
@@ -563,11 +551,11 @@ mod tests {
     fn discover_walks_ancestors_from_a_file_target() {
         let directory = tempfile::tempdir().expect("temp dir");
         let root = directory.path();
-        std::fs::write(root.join(CONFIG_FILE_NAME), "[format]\nindent-width = 7\n")
+        fs::write(root.join(CONFIG_FILE_NAME), "[format]\nindent-width = 7\n")
             .expect("write config");
         let nested = root.join("a").join("b");
-        std::fs::create_dir_all(&nested).expect("create nested dirs");
-        std::fs::write(nested.join("script.R"), "x <- 1\n").expect("write script");
+        fs::create_dir_all(&nested).expect("create nested dirs");
+        fs::write(nested.join("script.R"), "x <- 1\n").expect("write script");
         let config = Config::discover(nested.join("script.R")).expect("discover config");
         assert_eq!(config.format.indent_width, 7);
     }
@@ -576,11 +564,11 @@ mod tests {
     fn discover_prefers_the_nearest_config() {
         let directory = tempfile::tempdir().expect("temp dir");
         let root = directory.path();
-        std::fs::write(root.join(CONFIG_FILE_NAME), "[format]\nindent-width = 7\n")
+        fs::write(root.join(CONFIG_FILE_NAME), "[format]\nindent-width = 7\n")
             .expect("write outer config");
         let nested = root.join("inner");
-        std::fs::create_dir_all(&nested).expect("create nested dir");
-        std::fs::write(
+        fs::create_dir_all(&nested).expect("create nested dir");
+        fs::write(
             nested.join(CONFIG_FILE_NAME),
             "[format]\nindent-width = 3\n",
         )
@@ -601,13 +589,13 @@ mod tests {
         let directory = tempfile::tempdir().expect("temp dir");
         let root = directory.path();
         let project = root.join("project");
-        std::fs::create_dir_all(&project).expect("create project dir");
-        std::fs::write(
+        fs::create_dir_all(&project).expect("create project dir");
+        fs::write(
             project.join(CONFIG_FILE_NAME),
             "[format]\nindent-width = 7\n",
         )
         .expect("write project config");
-        std::fs::write(root.join("outside.R"), "x <- 1\n").expect("write outside script");
+        fs::write(root.join("outside.R"), "x <- 1\n").expect("write outside script");
         let config = Config::discover(project.join("..").join("outside.R"))
             .expect("discover through dot-dot");
         assert_eq!(config, Config::default());

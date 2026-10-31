@@ -1,5 +1,6 @@
 use format::{Config, format};
 use std::path::Path;
+use syntax::testing::run_fixture_suite;
 
 fn render(source: &str) -> String {
     match format(source, Config::default()) {
@@ -17,5 +18,5 @@ fn render(source: &str) -> String {
 #[test]
 fn format_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/format");
-    syntax::testing::run_fixture_suite(&suite, &render);
+    run_fixture_suite(&suite, &render);
 }

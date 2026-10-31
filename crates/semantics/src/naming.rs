@@ -8,6 +8,7 @@ use crate::hir::{
 use rustc_hash::FxHashMap;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
 use syntax::TextRange;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -444,7 +445,7 @@ impl Context<'_> {
                     kind: ScopeKind::Function,
                     slots: BTreeMap::new(),
                 });
-                let saved_flow = std::mem::take(&mut self.flow);
+                let saved_flow = mem::take(&mut self.flow);
                 for parameter in parameters {
                     let slot =
                         self.mint_binding(&parameter.name, parameter.range, BindingKind::Parameter);
@@ -471,7 +472,7 @@ impl Context<'_> {
                 self.resolve(*condition);
                 let entry = self.flow.clone();
                 self.resolve(*then_branch);
-                let after_then = std::mem::replace(&mut self.flow, entry);
+                let after_then = mem::replace(&mut self.flow, entry);
                 if let Some(else_branch) = else_branch {
                     self.resolve(*else_branch);
                 }
@@ -564,7 +565,7 @@ impl Context<'_> {
             }
             match &mut joined {
                 Some(state) => join_flow(state, &self.flow),
-                None => joined = Some(std::mem::take(&mut self.flow)),
+                None => joined = Some(mem::take(&mut self.flow)),
             }
         }
 
@@ -592,7 +593,7 @@ impl Context<'_> {
     fn loop_body(&mut self, body: ExprId, may_skip: bool) {
         let entry = self.flow.clone();
         let saved_emit = self.emit;
-        let enclosing_exits = std::mem::take(&mut self.loop_exits);
+        let enclosing_exits = mem::take(&mut self.loop_exits);
         self.emit = false;
         loop {
             let before = self.flow.clone();
@@ -606,7 +607,7 @@ impl Context<'_> {
         // Only the final pass's `break` states describe the converged loop.
         self.loop_exits.clear();
         self.resolve(body);
-        let breaks = std::mem::replace(&mut self.loop_exits, enclosing_exits);
+        let breaks = mem::replace(&mut self.loop_exits, enclosing_exits);
 
         for exit in &breaks {
             join_flow(&mut self.flow, exit);

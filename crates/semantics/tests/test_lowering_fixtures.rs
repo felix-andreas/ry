@@ -6,11 +6,12 @@ use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
 use semantics::testing::with_fixture_project;
 use semantics::{DocumentKind, item_hir, item_tree};
 use std::path::PathBuf;
+use syntax::testing::run_fixture_suite;
 
 #[test]
 fn lowering_fixtures() {
     let suite = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/lowering");
-    syntax::testing::run_fixture_suite(&suite, &render);
+    run_fixture_suite(&suite, &render);
 }
 
 fn render(source: &str) -> String {

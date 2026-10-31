@@ -33,6 +33,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
+use tokio::time;
 use tokio::time::{Instant, timeout};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tower::ServiceBuilder;
@@ -170,7 +171,7 @@ async fn launch(options: Launch<'_>) -> TestContext {
     server
         .initialized(InitializedParams {})
         .expect("initialized notification failed");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    time::sleep(Duration::from_millis(200)).await;
 
     TestContext {
         server,
@@ -1021,7 +1022,7 @@ async fn pull_client_without_refresh_support_gets_neither_push_nor_refresh() {
     context.open("R/warn.R", "x = 1\n");
     let uri = context.open("R/dep.R", "y <- 1\n");
     context.save(&uri);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    time::sleep(Duration::from_millis(400)).await;
     assert!(
         context.diagnostics.try_recv().is_err(),
         "push must be suppressed for pull clients"
@@ -1524,7 +1525,7 @@ async fn cancelled_pull_is_retryable_and_recovers() {
         .document_diagnostic(diagnostic_params(&uri, None));
     timeout(TIMEOUT, async {
         while !marker.exists() {
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -1749,6 +1750,21 @@ async fn rename_and_references_use_analysis_across_files() {
     let file_b_edits = changes.get(&file_b).expect("missing file B edits");
     assert_eq!(file_b_edits.len(), 1);
     assert_eq!(file_b_edits[0].range.start, Position::new(0, 10));
+
+    for refused in ["..1", "..12", "if", "_x", "1x"] {
+        let result = context.rename(&file_a, 0, 1, refused).await;
+        let Err(async_lsp::Error::Response(error)) = result else {
+            panic!("expected `{refused}` to be refused, got {result:?}");
+        };
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS, "{error:?}");
+    }
+    for accepted in ["...", "..x", ".x", "x_1.y"] {
+        let edit = context
+            .rename(&file_a, 0, 1, accepted)
+            .await
+            .expect("rename request failed");
+        assert!(edit.is_some(), "expected `{accepted}` to be accepted");
+    }
 
     let locations = context
         .references(&file_a, 0, 1, true)

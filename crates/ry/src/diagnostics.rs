@@ -1,7 +1,10 @@
 //! Shared by the language server and `ry check` so their gating cannot drift.
 
 use crate::config::Config;
-use semantics::diagnostics::{Diagnostic, Severity, file_diagnostics, strict_diagnostics};
+use crate::position::LineIndex;
+use semantics::diagnostics::{
+    Diagnostic, Severity, file_diagnostics, parse_stage_diagnostics, strict_diagnostics,
+};
 use semantics::lints::lint_file;
 use semantics::{Db, SourceFile, TypingMode, file_typing_mode};
 
@@ -38,7 +41,7 @@ pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> V
 /// The parse-only classes, published immediately on edit. For identical text this
 /// is a subset of [`document_diagnostics`]: the settled set only adds findings.
 pub fn first_wave_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
-    let mut rendered = semantics::diagnostics::parse_stage_diagnostics(db, file);
+    let mut rendered = parse_stage_diagnostics(db, file);
     rendered.extend(lint_file(db, file, &config.lint));
     rendered.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     rendered
@@ -89,7 +92,7 @@ pub fn apply_suppressions(diagnostics: Vec<Diagnostic>, source: &str) -> Vec<Dia
     if allowed_by_line.is_empty() {
         return diagnostics;
     }
-    let index = crate::position::LineIndex::new(source);
+    let index = LineIndex::new(source);
     diagnostics
         .into_iter()
         .filter(|diagnostic| {

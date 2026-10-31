@@ -7,7 +7,9 @@ pub mod libr;
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
 pub use reedline;
 
+use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct ReplError(pub String);
@@ -18,7 +20,7 @@ impl fmt::Display for ReplError {
     }
 }
 
-impl std::error::Error for ReplError {}
+impl Error for ReplError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Keybindings {
@@ -38,7 +40,7 @@ pub trait SessionCompleter: Send {
 pub struct RunOptions {
     pub keybindings: Keybindings,
     /// Fed to R before the first prompt.
-    pub file: Option<std::path::PathBuf>,
+    pub file: Option<PathBuf>,
     /// End the session when the script is consumed; a top-level error quits with
     /// a failing status.
     pub batch: bool,

@@ -1,23 +1,12 @@
 //! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
-use std::path::PathBuf;
-use syntax::testing::check_parse_invariants as check_invariants;
-
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        (self.next() % bound.max(1) as u64) as usize
-    }
-}
+use std::panic::catch_unwind;
+use syntax::literate::r_source_of_literate;
+use syntax::testing::{
+    SplitMix64, check_parse_invariants as check_invariants, corpus_sample, fuzz_iterations,
+    mutate_bytes, mutate_seed, program_corpus_sources, random_bytes, token_soup,
+};
+use syntax::{TextRange, TextSize, lex, parse, reparse};
 
 const SEEDS: &[&str] = &[
     "x <- 1L",
@@ -140,10 +129,7 @@ const ALPHABET: &[&str] = &[
 ];
 
 fn iterations() -> usize {
-    std::env::var("FUZZ_ITERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(1500)
+    fuzz_iterations(1500)
 }
 
 #[test]
@@ -155,14 +141,14 @@ fn seeds_hold_invariants() {
 
 #[test]
 fn program_corpus_holds_invariants() {
-    let sources = syntax::testing::program_corpus_sources();
+    let sources = program_corpus_sources();
     assert!(
         sources.len() > 1_000,
         "expected the mined corpus, found {}",
         sources.len()
     );
     for (id, source) in &sources {
-        std::panic::catch_unwind(|| check_invariants(source))
+        catch_unwind(|| check_invariants(source))
             .unwrap_or_else(|_| panic!("program corpus case `{id}` broke a parse invariant"));
     }
 }
@@ -194,18 +180,17 @@ fn literate_conversion_never_moves_a_byte() {
         for _ in 0..rng.below(12) {
             document.push_str(PIECES[rng.below(PIECES.len())]);
         }
-        let converted = syntax::literate::r_source_of_literate(&document);
+        let converted = r_source_of_literate(&document);
         assert_eq!(
             converted.len(),
             document.len(),
             "length changed for {document:?} -> {converted:?}"
         );
-        let original_newlines: Vec<usize> =
-            document.match_indices('\n').map(|(at, _)| at).collect();
-        let converted_newlines: Vec<usize> =
-            converted.match_indices('\n').map(|(at, _)| at).collect();
+        let newlines =
+            |text: &str| -> Vec<usize> { text.match_indices('\n').map(|(at, _)| at).collect() };
         assert_eq!(
-            original_newlines, converted_newlines,
+            newlines(&document),
+            newlines(&converted),
             "newlines moved for {document:?} -> {converted:?}"
         );
         check_invariants(&converted);
@@ -244,34 +229,13 @@ fn fuzz_corpus_seeded() {
         return;
     };
     let mut rng = SplitMix64(0xC0_2B_05);
-    let budget = iterations() / 3;
-    for _ in 0..budget {
+    for _ in 0..iterations() / 3 {
         let source = &files[rng.below(files.len())];
-        let mut bytes = source.as_bytes().to_vec();
-        for _ in 0..(1 + rng.below(6)) {
-            if bytes.is_empty() {
-                break;
-            }
-            match rng.below(3) {
-                0 => {
-                    let at = rng.below(bytes.len());
-                    bytes.remove(at);
-                }
-                1 => {
-                    let at = rng.below(bytes.len() + 1);
-                    bytes.insert(at, (rng.next() & 0x7F) as u8);
-                }
-                _ => {
-                    let at = rng.below(bytes.len());
-                    bytes[at] = (rng.next() & 0x7F) as u8;
-                }
-            }
-        }
+        let mut bytes = mutate_bytes(&mut rng, source);
         if rng.below(2) == 0 && !bytes.is_empty() {
             bytes.truncate(rng.below(bytes.len()));
         }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        check_invariants(&text);
+        check_invariants(&String::from_utf8_lossy(&bytes));
     }
 }
 
@@ -286,63 +250,40 @@ fn fuzz_deep() {
     run_edit_stream(budget / 20);
 }
 
+#[test]
+fn deep_nesting_is_refused_not_fatal() {
+    let deep = "(".repeat(2000) + "1" + &")".repeat(2000);
+    let deep_parse = parse(&deep);
+    assert_eq!(deep_parse.text(), deep);
+    assert!(
+        deep_parse
+            .errors()
+            .iter()
+            .any(|error| error.message.contains("too deep"))
+    );
+
+    let deep_annotation = format!("#: {}integer{}", "(".repeat(2000), ")".repeat(2000));
+    assert_eq!(parse(&deep_annotation).text(), deep_annotation);
+}
+
 fn run_random_bytes(budget: usize) {
     let mut rng = SplitMix64(0xDEC0_DE01);
     for _ in 0..budget {
-        let len = rng.below(160);
-        let bytes: Vec<u8> = (0..len).map(|_| (rng.next() & 0xFF) as u8).collect();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        check_invariants(&text);
+        check_invariants(&random_bytes(&mut rng));
     }
 }
 
 fn run_token_soup(budget: usize) {
     let mut rng = SplitMix64(0x50_D4_11);
     for _ in 0..budget {
-        let pieces = rng.below(48);
-        let mut text = String::new();
-        for _ in 0..pieces {
-            text.push_str(ALPHABET[rng.below(ALPHABET.len())]);
-            if rng.below(3) == 0 {
-                text.push(' ');
-            }
-        }
-        check_invariants(&text);
+        check_invariants(&token_soup(&mut rng, ALPHABET));
     }
 }
 
 fn run_seed_mutations(budget: usize) {
     let mut rng = SplitMix64(0x5EED_F00D);
     for _ in 0..budget {
-        let seed = SEEDS[rng.below(SEEDS.len())];
-        let mut text = seed.as_bytes().to_vec();
-        for _ in 0..(1 + rng.below(4)) {
-            match rng.below(4) {
-                0 if !text.is_empty() => {
-                    let at = rng.below(text.len());
-                    text.remove(at);
-                }
-                1 => {
-                    let at = rng.below(text.len() + 1);
-                    text.insert(at, (rng.next() & 0x7F) as u8);
-                }
-                2 if !text.is_empty() => {
-                    let at = rng.below(text.len());
-                    text[at] = (rng.next() & 0x7F) as u8;
-                }
-                _ => {
-                    let donor = SEEDS[rng.below(SEEDS.len())].as_bytes();
-                    let from = rng.below(donor.len());
-                    let to = (from + rng.below(16)).min(donor.len());
-                    let at = rng.below(text.len() + 1);
-                    for (offset, &byte) in donor[from..to].iter().enumerate() {
-                        text.insert(at + offset, byte);
-                    }
-                }
-            }
-        }
-        let text = String::from_utf8_lossy(&text).into_owned();
-        check_invariants(&text);
+        check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
     }
 }
 
@@ -350,7 +291,7 @@ fn run_token_level_mutations(budget: usize) {
     let mut rng = SplitMix64(0x70C3_2015);
     for _ in 0..budget {
         let seed = SEEDS[rng.below(SEEDS.len())];
-        let (tokens, _) = syntax::lex(seed);
+        let (tokens, _) = lex(seed);
         if tokens.is_empty() {
             continue;
         }
@@ -369,26 +310,24 @@ fn run_token_level_mutations(budget: usize) {
                 }
                 1 => {
                     let at = rng.below(spans.len());
-                    let duplicate = spans[at];
-                    spans.insert(at, duplicate);
+                    spans.insert(at, spans[at]);
                 }
                 _ if spans.len() > 1 => {
-                    let a = rng.below(spans.len());
-                    let b = rng.below(spans.len());
-                    spans.swap(a, b);
+                    let first = rng.below(spans.len());
+                    let second = rng.below(spans.len());
+                    spans.swap(first, second);
                 }
                 _ => {}
             }
         }
-        let text: String = spans.concat();
-        check_invariants(&text);
+        check_invariants(&spans.concat());
     }
 }
 
 fn run_edit_stream(steps: usize) {
     let mut rng = SplitMix64(0xED17_57EA);
     let mut buffer = String::from("f <- function(x, y) {\n  total <- x + y\n  total * 2\n}\n");
-    let mut previous = syntax::parse(&buffer);
+    let mut previous = parse(&buffer);
     for _ in 0..steps {
         let (deleted, inserted) = match rng.below(4) {
             0 if !buffer.is_empty() => {
@@ -405,9 +344,9 @@ fn run_edit_stream(steps: usize) {
             }
             2 => {
                 let at = buffer.floor_char_boundary(rng.below(buffer.len() + 1));
-                let ch = (0x20 + (rng.next() % 0x5F) as u8) as char;
-                buffer.insert(at, ch);
-                (at..at, ch.len_utf8())
+                let character = (0x20 + (rng.next_u64() % 0x5F) as u8) as char;
+                buffer.insert(at, character);
+                (at..at, character.len_utf8())
             }
             _ => {
                 let seed = SEEDS[rng.below(SEEDS.len())];
@@ -418,17 +357,17 @@ fn run_edit_stream(steps: usize) {
         };
         check_invariants(&buffer);
 
-        let deleted_range = rowan::TextRange::new(
-            rowan::TextSize::from(deleted.start as u32),
-            rowan::TextSize::from(deleted.end as u32),
+        let deleted_range = TextRange::new(
+            TextSize::from(deleted.start as u32),
+            TextSize::from(deleted.end as u32),
         );
-        let spliced = syntax::reparse(
+        let spliced = reparse(
             &previous,
             &buffer,
             deleted_range,
-            rowan::TextSize::from(inserted as u32),
+            TextSize::from(inserted as u32),
         );
-        let scratch = syntax::parse(&buffer);
+        let scratch = parse(&buffer);
         assert_eq!(
             spliced.green(),
             scratch.green(),
@@ -446,60 +385,7 @@ fn run_edit_stream(steps: usize) {
         if buffer.len() > 4096 {
             let cut = buffer.floor_char_boundary(2048);
             buffer.truncate(cut);
-            previous = syntax::parse(&buffer);
+            previous = parse(&buffer);
         }
     }
-}
-
-#[test]
-fn deep_nesting_is_refused_not_fatal() {
-    let deep = "(".repeat(2000) + "1" + &")".repeat(2000);
-    let parse = syntax::parse(&deep);
-    assert_eq!(parse.text(), deep);
-    assert!(
-        parse
-            .errors()
-            .iter()
-            .any(|error| error.message.contains("too deep"))
-    );
-
-    let deep_annotation = format!("#: {}integer{}", "(".repeat(2000), ")".repeat(2000));
-    let parse = syntax::parse(&deep_annotation);
-    assert_eq!(parse.text(), deep_annotation);
-}
-
-fn corpus_sample(count: usize) -> Option<Vec<String>> {
-    let root = {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidate = syntax::testing::env_var("CORPUS_DIR")
-            .ok_or(std::env::VarError::NotPresent)
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| manifest.join("../../corpus"));
-        candidate.is_dir().then_some(candidate)?
-    };
-    let mut files = Vec::new();
-    let mut stack = vec![root.join("r-base"), root.join("cran")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "R") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    let step = (files.len() / count.max(1)).max(1);
-    let sample: Vec<String> = files
-        .iter()
-        .step_by(step)
-        .take(count)
-        .filter_map(|path| std::fs::read(path).ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .collect();
-    (!sample.is_empty()).then_some(sample)
 }

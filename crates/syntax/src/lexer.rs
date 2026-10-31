@@ -4,6 +4,7 @@
 
 use crate::SyntaxError;
 use crate::kind::SyntaxKind;
+use SyntaxKind::*;
 use rowan::{TextRange, TextSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,8 +21,31 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
         errors: Vec::new(),
         in_annotation: false,
     };
-    lexer.run();
+    while lexer.pos < text.len() {
+        let start = lexer.pos;
+        let kind = lexer.next_token();
+        debug_assert!(lexer.pos > start, "lexer must always make progress");
+        let len = TextSize::from((lexer.pos - start) as u32);
+        lexer.tokens.push(Token { kind, len });
+        if kind == NEWLINE {
+            lexer.in_annotation = false;
+        }
+    }
     (lexer.tokens, lexer.errors)
+}
+
+pub fn is_syntactic_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !is_ident_start(first) {
+        return false;
+    }
+    if first == '.' && text.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    chars.all(is_ident_continue) && SyntaxKind::from_keyword(text).is_none()
 }
 
 struct Lexer<'a> {
@@ -34,23 +58,6 @@ struct Lexer<'a> {
 }
 
 impl Lexer<'_> {
-    fn run(&mut self) {
-        while self.pos < self.text.len() {
-            let start = self.pos;
-            let kind = self.next_token();
-            debug_assert!(self.pos > start, "lexer must always make progress");
-            self.push(kind, start);
-        }
-    }
-
-    fn push(&mut self, kind: SyntaxKind, start: usize) {
-        let len = TextSize::from((self.pos - start) as u32);
-        self.tokens.push(Token { kind, len });
-        if kind == SyntaxKind::NEWLINE {
-            self.in_annotation = false;
-        }
-    }
-
     fn error(&mut self, message: impl Into<String>, start: usize) {
         let range = TextRange::new(
             TextSize::from(start as u32),
@@ -63,28 +70,13 @@ impl Lexer<'_> {
         self.text[self.pos..].chars().next()
     }
 
-    fn peek_second(&self) -> Option<char> {
-        let mut chars = self.text[self.pos..].chars();
-        chars.next();
-        chars.next()
-    }
-
     fn bump(&mut self) -> Option<char> {
         let ch = self.peek()?;
         self.pos += ch.len_utf8();
         Some(ch)
     }
 
-    fn eat(&mut self, expected: char) -> bool {
-        if self.peek() == Some(expected) {
-            self.pos += expected.len_utf8();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn eat_str(&mut self, expected: &str) -> bool {
+    fn eat(&mut self, expected: &str) -> bool {
         if self.text[self.pos..].starts_with(expected) {
             self.pos += expected.len();
             true
@@ -94,17 +86,20 @@ impl Lexer<'_> {
     }
 
     fn eat_while(&mut self, predicate: impl Fn(char) -> bool) {
-        while let Some(ch) = self.peek() {
-            if predicate(ch) {
-                self.pos += ch.len_utf8();
-            } else {
-                break;
-            }
+        while self.peek().is_some_and(&predicate) {
+            self.bump();
         }
     }
 
+    /// The first suffix that follows wins, so a longer one must come first.
+    fn operator(&mut self, suffixes: &[(&str, SyntaxKind)], otherwise: SyntaxKind) -> SyntaxKind {
+        suffixes
+            .iter()
+            .find(|(suffix, _)| self.eat(suffix))
+            .map_or(otherwise, |(_, kind)| *kind)
+    }
+
     fn next_token(&mut self) -> SyntaxKind {
-        use SyntaxKind::*;
         let start = self.pos;
         let first = self.bump().expect("next_token called at end of input");
         match first {
@@ -114,11 +109,11 @@ impl Lexer<'_> {
             }
             '\n' => NEWLINE,
             '\r' => {
-                self.eat('\n');
+                self.eat("\n");
                 NEWLINE
             }
             '#' => {
-                if !self.in_annotation && self.eat(':') {
+                if !self.in_annotation && self.eat(":") {
                     self.in_annotation = true;
                     ANNOTATION_MARKER
                 } else {
@@ -126,27 +121,27 @@ impl Lexer<'_> {
                     COMMENT
                 }
             }
-            '\'' | '"' => self.string(start, first),
+            '\'' | '"' => self.quoted(
+                start,
+                first,
+                STRING,
+                "unterminated string; expected a closing quote",
+            ),
             'r' | 'R' if matches!(self.peek(), Some('"' | '\'')) => self.raw_string(start),
             c if is_ident_start(c) => self.ident_or_number(start, c),
             c if c.is_ascii_digit() => self.number(start),
-            '`' => self.backtick_name(start),
+            '`' => self.quoted(
+                start,
+                '`',
+                IDENT,
+                "unterminated backtick name; expected a closing `` ` ``",
+            ),
             '%' => self.special(start),
             '_' => UNDERSCORE,
             '+' => PLUS,
-            '-' => {
-                if self.eat_str(">>") {
-                    MINUS_GREATER2
-                } else if self.eat('>') {
-                    MINUS_GREATER
-                } else {
-                    MINUS
-                }
-            }
-            '*' => {
-                // R accepts `**` as a synonym for `^`.
-                if self.eat('*') { CARET } else { STAR }
-            }
+            '-' => self.operator(&[(">>", MINUS_GREATER2), (">", MINUS_GREATER)], MINUS),
+            // R accepts `**` as a synonym for `^`.
+            '*' => self.operator(&[("*", CARET)], STAR),
             '/' => SLASH,
             '^' => CARET,
             '~' => TILDE,
@@ -155,78 +150,23 @@ impl Lexer<'_> {
             ')' => R_PAREN,
             '{' => L_BRACE,
             '}' => R_BRACE,
-            '[' => {
-                if self.eat('[') {
-                    L_BRACKET2
-                } else {
-                    L_BRACKET
-                }
-            }
+            '[' => self.operator(&[("[", L_BRACKET2)], L_BRACKET),
             ']' => R_BRACKET,
             ',' => COMMA,
             ';' => SEMICOLON,
             '\\' => BACKSLASH,
             '$' => DOLLAR,
             '@' => AT,
-            '<' => {
-                if self.eat_str("<-") {
-                    LESS2_MINUS
-                } else if self.eat('-') {
-                    LESS_MINUS
-                } else if self.eat('=') {
-                    LESS_EQ
-                } else {
-                    LESS
-                }
-            }
-            '>' => {
-                if self.eat('=') {
-                    GREATER_EQ
-                } else {
-                    GREATER
-                }
-            }
-            '=' => {
-                if self.eat('=') {
-                    EQ2
-                } else {
-                    EQ
-                }
-            }
-            '!' => {
-                if self.eat('=') {
-                    BANG_EQ
-                } else {
-                    BANG
-                }
-            }
-            '&' => {
-                if self.eat('&') {
-                    AMP2
-                } else {
-                    AMP
-                }
-            }
-            '|' => {
-                if self.eat('|') {
-                    PIPE2
-                } else if self.eat('>') {
-                    PIPE_GREATER
-                } else {
-                    PIPE
-                }
-            }
-            ':' => {
-                if self.eat_str("::") {
-                    COLON3
-                } else if self.eat(':') {
-                    COLON2
-                } else if self.eat('=') {
-                    COLON_EQ
-                } else {
-                    COLON
-                }
-            }
+            '<' => self.operator(
+                &[("<-", LESS2_MINUS), ("-", LESS_MINUS), ("=", LESS_EQ)],
+                LESS,
+            ),
+            '>' => self.operator(&[("=", GREATER_EQ)], GREATER),
+            '=' => self.operator(&[("=", EQ2)], EQ),
+            '!' => self.operator(&[("=", BANG_EQ)], BANG),
+            '&' => self.operator(&[("&", AMP2)], AMP),
+            '|' => self.operator(&[("|", PIPE2), (">", PIPE_GREATER)], PIPE),
+            ':' => self.operator(&[("::", COLON3), (":", COLON2), ("=", COLON_EQ)], COLON),
             _ => {
                 self.error(unexpected_character_message(first), start);
                 ERROR_TOKEN
@@ -235,14 +175,16 @@ impl Lexer<'_> {
     }
 
     fn ident_or_number(&mut self, start: usize, first: char) -> SyntaxKind {
-        use SyntaxKind::*;
         if first == '.' {
             if self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                self.pos = start;
-                self.bump();
                 return self.number(start);
             }
-            if self.peek() == Some('.') && self.peek_second().is_some_and(|c| c.is_ascii_digit()) {
+            if self.peek() == Some('.')
+                && self.text[self.pos..]
+                    .chars()
+                    .nth(1)
+                    .is_some_and(|c| c.is_ascii_digit())
+            {
                 self.bump();
                 self.eat_while(|c| c.is_ascii_digit());
                 // R has no dot-dot token (`..2` is an ordinary symbol), so a
@@ -261,7 +203,6 @@ impl Lexer<'_> {
     }
 
     fn number(&mut self, start: usize) -> SyntaxKind {
-        use SyntaxKind::*;
         let hex = self.text[start..].starts_with("0x") || self.text[start..].starts_with("0X");
         if hex {
             self.bump();
@@ -272,44 +213,38 @@ impl Lexer<'_> {
                 return ERROR_TOKEN;
             }
             // Hex-float exponent: `0x1Fp3`.
-            if matches!(self.peek(), Some('p' | 'P')) {
-                let before = self.pos;
-                self.bump();
-                if matches!(self.peek(), Some('+' | '-')) {
-                    self.bump();
-                }
-                let exp_start = self.pos;
-                self.eat_while(|c| c.is_ascii_digit());
-                if self.pos == exp_start {
-                    self.pos = before;
-                }
-            }
+            self.exponent(['p', 'P']);
         } else {
             self.eat_while(|c| c.is_ascii_digit());
-            if self.peek() == Some('.') {
-                self.bump();
+            if self.eat(".") {
                 self.eat_while(|c| c.is_ascii_digit());
             }
-            if matches!(self.peek(), Some('e' | 'E')) {
-                // `1e` lexes as `1` then the name `e`.
-                let before = self.pos;
-                self.bump();
-                if matches!(self.peek(), Some('+' | '-')) {
-                    self.bump();
-                }
-                let exp_start = self.pos;
-                self.eat_while(|c| c.is_ascii_digit());
-                if self.pos == exp_start {
-                    self.pos = before;
-                }
-            }
+            // `1e` lexes as `1` then the name `e`.
+            self.exponent(['e', 'E']);
         }
-        if self.eat('L') {
+        if self.eat("L") {
             INTEGER
-        } else if self.eat('i') {
+        } else if self.eat("i") {
             COMPLEX
         } else {
             DOUBLE
+        }
+    }
+
+    /// An exponent marker with no digits after it is left for the next token.
+    fn exponent(&mut self, markers: [char; 2]) {
+        if !self.peek().is_some_and(|c| markers.contains(&c)) {
+            return;
+        }
+        let before = self.pos;
+        self.bump();
+        if matches!(self.peek(), Some('+' | '-')) {
+            self.bump();
+        }
+        let digits_start = self.pos;
+        self.eat_while(|c| c.is_ascii_digit());
+        if self.pos == digits_start {
+            self.pos = before;
         }
     }
 
@@ -322,22 +257,27 @@ impl Lexer<'_> {
         }
     }
 
-    fn string(&mut self, start: usize, quote: char) -> SyntaxKind {
+    /// Backtick names follow string escape rules: `` \` `` does not end the name.
+    fn quoted(
+        &mut self,
+        start: usize,
+        quote: char,
+        kind: SyntaxKind,
+        unterminated: &str,
+    ) -> SyntaxKind {
         loop {
             match self.bump() {
-                None => {
-                    self.end_unterminated_at_line_break(start);
-                    self.error("unterminated string; expected a closing quote", start);
-                    break;
-                }
                 Some('\\') => {
                     self.bump();
                 }
-                Some(c) if c == quote => break,
+                Some(c) if c == quote => return kind,
                 Some(_) => {}
+                None => break,
             }
         }
-        SyntaxKind::STRING
+        self.end_unterminated_at_line_break(start);
+        self.error(unterminated, start);
+        kind
     }
 
     fn raw_string(&mut self, start: usize) -> SyntaxKind {
@@ -345,8 +285,7 @@ impl Lexer<'_> {
         let dash_start = self.pos;
         self.eat_while(|c| c == '-');
         let dashes = self.pos - dash_start;
-        let open = self.peek();
-        let close = match open {
+        let close = match self.peek() {
             Some('(') => ')',
             Some('[') => ']',
             Some('{') => '}',
@@ -355,20 +294,15 @@ impl Lexer<'_> {
                     "malformed raw string: expected `(`, `[`, or `{` after the quote",
                     start,
                 );
-                return SyntaxKind::ERROR_TOKEN;
+                return ERROR_TOKEN;
             }
         };
         self.bump();
-        let mut closer = String::with_capacity(dashes + 2);
-        closer.push(close);
-        for _ in 0..dashes {
-            closer.push('-');
-        }
-        closer.push(quote);
+        let closer = format!("{close}{}{quote}", "-".repeat(dashes));
         match self.text[self.pos..].find(&closer) {
             Some(offset) => {
                 self.pos += offset + closer.len();
-                SyntaxKind::RAW_STRING
+                RAW_STRING
             }
             None => {
                 self.pos = self.text.len();
@@ -377,95 +311,20 @@ impl Lexer<'_> {
                     format!("unterminated raw string; expected `{closer}`"),
                     start,
                 );
-                SyntaxKind::RAW_STRING
+                RAW_STRING
             }
         }
-    }
-
-    fn backtick_name(&mut self, start: usize) -> SyntaxKind {
-        loop {
-            match self.bump() {
-                None => {
-                    self.end_unterminated_at_line_break(start);
-                    self.error(
-                        "unterminated backtick name; expected a closing `` ` ``",
-                        start,
-                    );
-                    break;
-                }
-                // Backtick names use string escape rules: `` \` `` does not end
-                // the name.
-                Some('\\') => {
-                    if self.bump().is_none() {
-                        self.end_unterminated_at_line_break(start);
-                        self.error(
-                            "unterminated backtick name; expected a closing `` ` ``",
-                            start,
-                        );
-                        break;
-                    }
-                }
-                Some('`') => break,
-                Some(_) => {}
-            }
-        }
-        SyntaxKind::IDENT
     }
 
     fn special(&mut self, start: usize) -> SyntaxKind {
-        loop {
-            match self.peek() {
-                None | Some('\n') | Some('\r') => {
-                    self.error("unterminated `%` operator; expected a closing `%`", start);
-                    return SyntaxKind::ERROR_TOKEN;
-                }
-                Some('%') => {
-                    self.bump();
-                    return SyntaxKind::SPECIAL;
-                }
-                Some(_) => {
-                    self.bump();
-                }
-            }
+        self.eat_while(|c| !matches!(c, '%' | '\n' | '\r'));
+        if self.eat("%") {
+            SPECIAL
+        } else {
+            self.error("unterminated `%` operator; expected a closing `%`", start);
+            ERROR_TOKEN
         }
     }
-}
-
-pub fn is_syntactic_name(text: &str) -> bool {
-    let mut chars = text.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !is_ident_start(first) {
-        return false;
-    }
-    if first == '.' && text.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
-        return false;
-    }
-    if !chars.all(is_ident_continue) {
-        return false;
-    }
-    !matches!(
-        text,
-        "if" | "else"
-            | "repeat"
-            | "while"
-            | "function"
-            | "for"
-            | "next"
-            | "break"
-            | "TRUE"
-            | "FALSE"
-            | "NULL"
-            | "Inf"
-            | "NaN"
-            | "NA"
-            | "NA_integer_"
-            | "NA_real_"
-            | "NA_complex_"
-            | "NA_character_"
-            | "in"
-    )
 }
 
 fn is_ident_start(c: char) -> bool {

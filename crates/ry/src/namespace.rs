@@ -4,7 +4,7 @@ use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::{LintLevel, lint_severity};
 use semantics::metadata::NamespaceImport;
 use std::collections::BTreeSet;
-use syntax::{SyntaxKind, TextRange};
+use syntax::{SyntaxElement, SyntaxKind, TextRange};
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
 /// error, not a warning, because R refuses to load the package.
@@ -89,7 +89,7 @@ pub fn unused_import_diagnostics(
 pub fn collect_used_tokens(source: &str, out: &mut BTreeSet<String>) {
     let parse = syntax::parse(source);
     for element in parse.syntax_node().descendants_with_tokens() {
-        if let syntax::SyntaxElement::Token(token) = element {
+        if let SyntaxElement::Token(token) = element {
             if token.kind().is_trivia() {
                 continue;
             }
@@ -110,27 +110,25 @@ pub fn collect_used_tokens(source: &str, out: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use semantics::RootDatabase;
     use semantics::metadata::parse_namespace_imports;
+    use semantics::stubs::{install_shipped_stubs, namespace_exports, namespace_known};
 
     fn stub_backed<'db>(
-        db: &'db semantics::RootDatabase,
+        db: &'db RootDatabase,
     ) -> (
         impl Fn(&str) -> bool + 'db,
         impl Fn(&str, &str) -> bool + 'db,
     ) {
         (
-            move |namespace: &str| {
-                semantics::stubs::namespace_known(db, namespace).unwrap_or(false)
-            },
-            move |namespace: &str, name: &str| {
-                semantics::stubs::namespace_exports(db, namespace, name)
-            },
+            move |namespace: &str| namespace_known(db, namespace).unwrap_or(false),
+            move |namespace: &str, name: &str| namespace_exports(db, namespace, name),
         )
     }
 
     fn problems_for(source: &str) -> Vec<String> {
-        let db = semantics::RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
+        let db = RootDatabase::default();
+        install_shipped_stubs(&db);
         let (knows, exports) = stub_backed(&db);
         namespace_import_problems(&parse_namespace_imports(source), &knows, &exports)
             .into_iter()
@@ -146,8 +144,8 @@ mod tests {
 
     #[test]
     fn known_namespace_with_a_typo_is_an_error() {
-        let db = semantics::RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
+        let db = RootDatabase::default();
+        install_shipped_stubs(&db);
         let (knows, exports) = stub_backed(&db);
         let problems = namespace_import_problems(
             &parse_namespace_imports("importFrom(stats, sd, medain)\n"),

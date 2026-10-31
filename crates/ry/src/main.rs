@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
 use ry::cli::{self, CommandError, Outcome, OutputFormat};
+use ry::server;
+use ry::stats::analysis_stats;
+use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing_subscriber::prelude::*;
@@ -66,14 +69,14 @@ fn main() -> ExitCode {
             verbose: _,
             debug,
         } => {
-            let debug = debug || matches!(std::env::var("RY_DEBUG").as_deref(), Ok("1"));
-            ry::server::run(experimental_features, debug);
+            let debug = debug || matches!(env::var("RY_DEBUG").as_deref(), Ok("1"));
+            server::run(experimental_features, debug);
             ExitCode::SUCCESS
         }
         Command::Debug(debug) => match debug {
             Debug::Ast { path } => exit_code(cli::ast(&path).map(|()| Outcome::Clean)),
             Debug::AnalysisStats { path } => {
-                exit_code(ry::stats::analysis_stats(path.as_deref()).map(|()| Outcome::Clean))
+                exit_code(analysis_stats(path.as_deref()).map(|()| Outcome::Clean))
             }
         },
         Command::Repl { .. } | Command::Run { .. } => {

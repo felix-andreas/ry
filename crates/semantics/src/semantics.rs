@@ -12,8 +12,9 @@ pub mod types;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
-use syntax::Parse;
-use syntax::ast::AstNode as _;
+use std::sync::{Arc, Mutex};
+use syntax::ast::{self, BinaryExpr, is_expression_kind};
+use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 #[salsa::db]
 pub trait Db: salsa::Database {
@@ -26,7 +27,7 @@ pub trait Db: salsa::Database {
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     /// Shared across storage-handle clones so fresh handles keep the warm entries.
-    splice_cache: std::sync::Arc<SpliceCache>,
+    splice_cache: Arc<SpliceCache>,
 }
 
 #[salsa::db]
@@ -62,7 +63,7 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
 /// session's open set stays resident.
 #[derive(Default)]
 pub struct SpliceCache {
-    entries: std::sync::Mutex<FxHashMap<SourceFile, (std::sync::Arc<str>, Parse)>>,
+    entries: Mutex<FxHashMap<SourceFile, (Arc<str>, Parse)>>,
 }
 
 const SPLICE_CACHE_CAPACITY: usize = 64;
@@ -89,14 +90,14 @@ impl SpliceCache {
         if entries.len() >= SPLICE_CACHE_CAPACITY && !entries.contains_key(&file) {
             entries.clear();
         }
-        entries.insert(file, (std::sync::Arc::from(new_text), parse.clone()));
+        entries.insert(file, (Arc::from(new_text), parse.clone()));
         parse
     }
 }
 
 /// The one edit turning `old` into `new` (replaced range in `old`, replacement
 /// length); several accumulated edits collapse into one region.
-fn derived_edit(old: &str, new: &str) -> (syntax::TextRange, syntax::TextSize) {
+fn derived_edit(old: &str, new: &str) -> (TextRange, TextSize) {
     let mut prefix = old
         .as_bytes()
         .iter()
@@ -119,11 +120,11 @@ fn derived_edit(old: &str, new: &str) -> (syntax::TextRange, syntax::TextSize) {
         suffix -= 1;
     }
     (
-        syntax::TextRange::new(
-            syntax::TextSize::from(prefix as u32),
-            syntax::TextSize::from((old.len() - suffix) as u32),
+        TextRange::new(
+            TextSize::from(prefix as u32),
+            TextSize::from((old.len() - suffix) as u32),
         ),
-        syntax::TextSize::from((new.len() - suffix - prefix) as u32),
+        TextSize::from((new.len() - suffix - prefix) as u32),
     )
 }
 
@@ -164,7 +165,7 @@ pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemSpan<'db> {
     pub item: Item<'db>,
-    pub range: syntax::TextRange,
+    pub range: TextRange,
 }
 
 /// One memoized walk; a per-item lookup would re-classify the file per item.
@@ -175,8 +176,7 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
     let mut counts: FxHashMap<(ItemKind, Option<String>), u32> = FxHashMap::default();
     let mut spans = Vec::new();
     for node in root.children() {
-        if !syntax::ast::is_expression_kind(node.kind()) && node.kind() != syntax::SyntaxKind::ERROR
-        {
+        if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
             continue;
         }
         let (kind, name) = match top_level_definition(&node) {
@@ -199,7 +199,7 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
 
 /// Absolute offsets, for the rendering edge and position-addressed IDE features
 /// only; derived per-item values must use `item_syntax` to keep cutting off.
-pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::SyntaxNode> {
+pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<SyntaxNode> {
     let file = *item.file(db);
     let index = *item_span_positions(db, file).get(&item)?;
     let range = item_spans(db, file).get(index)?.range;
@@ -235,8 +235,8 @@ pub struct ItemSyntax(pub rowan::GreenNode);
 
 impl ItemSyntax {
     /// Offsets start at 0 (item-relative).
-    pub fn syntax_node(&self) -> syntax::SyntaxNode {
-        syntax::SyntaxNode::new_root(self.0.clone())
+    pub fn syntax_node(&self) -> SyntaxNode {
+        SyntaxNode::new_root(self.0.clone())
     }
 }
 
@@ -280,35 +280,33 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
 /// An annotation applies only to the expression starting on the very next line;
 /// a blank line, a plain comment, or the end of the sequence breaks the association.
 pub enum AnnotationTarget {
-    Attached(syntax::SyntaxNode),
+    Attached(SyntaxNode),
     BlankLineSeparated,
     Dangling,
 }
 
 /// The single source of the annotation association rule for a statement sequence.
-pub fn statement_annotations(
-    parent: &syntax::SyntaxNode,
-) -> Vec<(syntax::SyntaxNode, AnnotationTarget)> {
+pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, AnnotationTarget)> {
     let mut associations = Vec::new();
-    let mut pending: Option<(syntax::SyntaxNode, usize)> = None;
+    let mut pending: Option<(SyntaxNode, usize)> = None;
     for child in parent.children_with_tokens() {
         let kind = child.kind();
-        if kind == syntax::SyntaxKind::WHITESPACE {
+        if kind == SyntaxKind::WHITESPACE {
             continue;
         }
-        if kind == syntax::SyntaxKind::NEWLINE {
+        if kind == SyntaxKind::NEWLINE {
             if let Some((_, newlines)) = pending.as_mut() {
                 *newlines += 1;
             }
             continue;
         }
         if let Some((annotation, newlines)) = pending.take() {
-            let target = if child.as_token().is_some() && kind != syntax::SyntaxKind::COMMENT {
+            let target = if child.as_token().is_some() && kind != SyntaxKind::COMMENT {
                 AnnotationTarget::Dangling
             } else if newlines >= 2 {
                 AnnotationTarget::BlankLineSeparated
             } else if let Some(node) = child.as_node()
-                && (syntax::ast::is_expression_kind(kind) || kind == syntax::SyntaxKind::ERROR)
+                && (is_expression_kind(kind) || kind == SyntaxKind::ERROR)
             {
                 AnnotationTarget::Attached(node.clone())
             } else {
@@ -317,7 +315,7 @@ pub fn statement_annotations(
             associations.push((annotation, target));
         }
         if let rowan::NodeOrToken::Node(node) = child
-            && kind == syntax::SyntaxKind::ANNOTATION
+            && kind == SyntaxKind::ANNOTATION
         {
             pending = Some((node, 0));
         }
@@ -344,7 +342,7 @@ fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> FxHashMap<Item<'db>, ItemSyntax> {
-    let item_by_range: FxHashMap<syntax::TextRange, Item<'db>> = item_spans(db, file)
+    let item_by_range: FxHashMap<TextRange, Item<'db>> = item_spans(db, file)
         .iter()
         .map(|span| (span.range, span.item))
         .collect();
@@ -373,10 +371,10 @@ pub fn item_expression_annotations<'db>(
         return Vec::new();
     };
     let root = syntax.syntax_node();
-    let mut parents: Vec<syntax::SyntaxNode> = Vec::new();
+    let mut parents: Vec<SyntaxNode> = Vec::new();
     for node in root
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
@@ -433,14 +431,14 @@ pub fn file_typing_mode(db: &dyn Db, file: SourceFile) -> Option<TypingMode> {
 pub fn file_typing_directives(
     db: &dyn Db,
     file: SourceFile,
-) -> (Option<TypingMode>, Vec<(syntax::TextRange, String)>) {
+) -> (Option<TypingMode>, Vec<(TextRange, String)>) {
     let parse = parse(db, file);
     let root = parse.syntax_node();
     let mut mode = None;
     let mut invalid = Vec::new();
     for element in root.children_with_tokens() {
         match element {
-            rowan::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::COMMENT => {
+            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
                 let Some(rest) = token
                     .text()
                     .trim_start_matches('#')
@@ -457,7 +455,7 @@ pub fn file_typing_directives(
                     other => invalid.push((token.text_range(), other.to_owned())),
                 }
             }
-            rowan::NodeOrToken::Node(node) if node.kind() == syntax::SyntaxKind::ANNOTATION => {
+            rowan::NodeOrToken::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
                 if let Some(strict) = annotations::lower_annotation(db, &node).strict {
                     mode = Some(if strict {
                         TypingMode::Strict
@@ -482,7 +480,7 @@ pub fn file_type_definitions<'db>(
     let mut definitions = Vec::new();
     for node in root
         .children()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
         definitions.extend(annotations::lower_annotation(db, &node).definitions);
     }
@@ -1357,7 +1355,7 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
 /// `setGeneric` name string.
-pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::TextRange> {
+pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let node = item_node(db, item)?;
     top_level_definition(&node).map(|definition| definition.name_range)
 }
@@ -1366,10 +1364,10 @@ pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::
 struct TopLevelDefinition {
     kind: ItemKind,
     name: String,
-    name_range: syntax::TextRange,
+    name_range: TextRange,
 }
 
-fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition> {
+fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     use syntax::SyntaxKind;
     if let Some((name, name_range)) = set_generic_target(node) {
         return Some(TopLevelDefinition {
@@ -1381,7 +1379,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
     if node.kind() != SyntaxKind::BINARY_EXPR {
         return None;
     }
-    let binary = syntax::ast::BinaryExpr::cast(node.clone())?;
+    let binary = BinaryExpr::cast(node.clone())?;
     let operator = binary.operator()?;
     // `:=` binds nothing: R calls a function of that name (data.table, rlang).
     let (target, value) = match operator.kind() {
@@ -1392,7 +1390,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
         _ => return None,
     };
     let target = target?;
-    let name = syntax::ast::Name::cast(target.clone())
+    let name = ast::Name::cast(target.clone())
         .and_then(|name| name.text())
         .or_else(|| {
             (target.kind() == SyntaxKind::LITERAL
@@ -1417,7 +1415,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
 
 /// The name a top-level `setGeneric` binds, with its range inside the string: the only S4
 /// registration that creates a bare-name binding (`setClass`/`setMethod` bind nothing).
-fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::TextRange)> {
+fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
     use syntax::SyntaxKind;
     if node.kind() != SyntaxKind::CALL_EXPR {
         return None;
@@ -1439,7 +1437,7 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
     let arguments = node
         .children()
         .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
-    let is_named_argument = |argument: &syntax::SyntaxNode| {
+    let is_named_argument = |argument: &SyntaxNode| {
         argument.children_with_tokens().any(|element| {
             element
                 .as_token()
@@ -1473,9 +1471,9 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
     let name = text[1..text.len() - 1].to_owned();
     // Without the quotes: the span a rename rewrites.
     let range = string.text_range();
-    let content = syntax::TextRange::new(
-        range.start() + syntax::TextSize::from(1),
-        range.end() - syntax::TextSize::from(1),
+    let content = TextRange::new(
+        range.start() + TextSize::from(1),
+        range.end() - TextSize::from(1),
     );
     (!name.is_empty()).then_some((name, content))
 }

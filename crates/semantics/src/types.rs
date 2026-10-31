@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use std::iter;
 
 use crate::Db;
 
@@ -78,7 +79,7 @@ impl<'db> Parameter<'db> {
     /// Walks must go through here: one that skipped the default would make an
     /// occurs check or level adjustment unsound.
     pub fn types(&self) -> impl Iterator<Item = Ty<'db>> + '_ {
-        std::iter::once(self.ty).chain(self.default)
+        iter::once(self.ty).chain(self.default)
     }
 }
 

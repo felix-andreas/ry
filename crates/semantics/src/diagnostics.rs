@@ -2,8 +2,9 @@ use crate::annotations::{NamedDefinition, lower_annotation};
 use crate::check::{ItemCheck, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind};
 use crate::hir::{ExprId, ExpressionKind};
 use crate::infer::{FunctionMismatch, RecordMismatch};
+use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::stubs::stubs;
+use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, TypeScheme};
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
@@ -12,8 +13,8 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem;
-use syntax::{SyntaxKind, TextRange};
+use std::{iter, mem};
+use syntax::{SyntaxKind, TextRange, is_syntactic_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -110,7 +111,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let parsed = parse(db, file);
     let root = parsed.syntax_node();
     let mut diagnostics = Vec::new();
-    let sequences = std::iter::once(root.clone()).chain(
+    let sequences = iter::once(root.clone()).chain(
         root.descendants()
             .filter(|node| node.kind() == SyntaxKind::BRACE_EXPR),
     );
@@ -364,7 +365,7 @@ fn classify_non_local_read(
     if crate::package_scheme_exists(db, name)
         || super_globals(db, file).contains(name)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
-        || crate::metadata::imported_by_name(db, name)
+        || imported_by_name(db, name)
     {
         return NonLocalRead::Resolvable;
     }
@@ -389,7 +390,7 @@ fn classify_non_local_read(
                     .map(|binding| binding.name.as_str()),
             )
         });
-    if project_typo.is_none() && crate::metadata::imports_every_name(db) {
+    if project_typo.is_none() && imports_every_name(db) {
         return NonLocalRead::Tolerated;
     }
     NonLocalRead::Unresolved {
@@ -897,16 +898,16 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
     // A package's export set is not the names its sources bind (re-exports, S4
     // generics, lazy-loaded data, `.onLoad` bindings), so its own qualified reads
     // are never validated.
-    if crate::metadata::is_own_package(db, &read.package) {
+    if is_own_package(db, &read.package) {
         return None;
     }
-    match crate::stubs::namespace_known(db, &read.package)? {
+    match namespace_known(db, &read.package)? {
         // A declared dependency without stubs is real, just undescribed.
-        false if crate::metadata::declared_dependency(db, &read.package) => None,
+        false if declared_dependency(db, &read.package) => None,
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
             let name = read.name.as_ref()?;
-            if !read.internal && !crate::stubs::namespace_exports(db, &read.package, name) {
+            if !read.internal && !namespace_exports(db, &read.package, name) {
                 Some(format!("`{name}` is not exported by `{}`.", read.package))
             } else {
                 None
@@ -1677,7 +1678,7 @@ impl<'db> TypeRenderer<'db> {
                         // Rendered types must be copyable into annotations, and an unquoted
                         // non-syntactic name can even parse as a different type
                         // (`list{a,b: integer}`).
-                        if syntax::is_syntactic_name(name) {
+                        if is_syntactic_name(name) {
                             format!("{name}: {}", self.render(db, field.ty))
                         } else {
                             format!("`{name}`: {}", self.render(db, field.ty))

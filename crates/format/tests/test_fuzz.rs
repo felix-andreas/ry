@@ -2,23 +2,11 @@
 
 use format::check_format_invariants as check_invariants;
 use format::{Config, format};
-use std::path::PathBuf;
-
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        (self.next() % bound.max(1) as u64) as usize
-    }
-}
+use std::panic::catch_unwind;
+use syntax::testing::{
+    SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes, mutate_seed,
+    program_corpus_sources, random_bytes, token_soup,
+};
 
 const SEEDS: &[&str] = &[
     "x <- 1L\n",
@@ -151,10 +139,7 @@ const REGRESSIONS: &[&str] = &[
 ];
 
 fn iterations() -> usize {
-    std::env::var("FUZZ_ITERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(1500)
+    fuzz_iterations(1500)
 }
 
 #[test]
@@ -177,7 +162,7 @@ fn fuzz_regressions_hold_invariants() {
 
 #[test]
 fn fixture_sources_hold_invariants() {
-    let sources = syntax::testing::fixture_case_sources();
+    let sources = fixture_case_sources();
     for (_, source) in &sources {
         check_invariants(source);
     }
@@ -190,14 +175,14 @@ fn fixture_sources_hold_invariants() {
 
 #[test]
 fn program_corpus_holds_invariants() {
-    let sources = syntax::testing::program_corpus_sources();
+    let sources = program_corpus_sources();
     assert!(
         sources.len() > 1_000,
         "expected the mined corpus, found {}",
         sources.len()
     );
     for (id, source) in &sources {
-        std::panic::catch_unwind(|| check_invariants(source))
+        catch_unwind(|| check_invariants(source))
             .unwrap_or_else(|_| panic!("program corpus case `{id}` broke a format invariant"));
     }
 }
@@ -227,31 +212,9 @@ fn fuzz_corpus_seeded() {
         check_invariants(source);
     }
     let mut rng = SplitMix64(0xF0_44_A7);
-    let budget = iterations() / 3;
-    for _ in 0..budget {
+    for _ in 0..iterations() / 3 {
         let source = &files[rng.below(files.len())];
-        let mut bytes = source.as_bytes().to_vec();
-        for _ in 0..(1 + rng.below(6)) {
-            if bytes.is_empty() {
-                break;
-            }
-            match rng.below(3) {
-                0 => {
-                    let at = rng.below(bytes.len());
-                    bytes.remove(at);
-                }
-                1 => {
-                    let at = rng.below(bytes.len() + 1);
-                    bytes.insert(at, (rng.next() & 0x7F) as u8);
-                }
-                _ => {
-                    let at = rng.below(bytes.len());
-                    bytes[at] = (rng.next() & 0x7F) as u8;
-                }
-            }
-        }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        check_invariants(&text);
+        check_invariants(&String::from_utf8_lossy(&mutate_bytes(&mut rng, source)));
     }
 }
 
@@ -267,95 +230,20 @@ fn fuzz_deep() {
 fn run_random_bytes(budget: usize) {
     let mut rng = SplitMix64(0xF0_12_34);
     for _ in 0..budget {
-        let len = rng.below(160);
-        let bytes: Vec<u8> = (0..len).map(|_| (rng.next() & 0xFF) as u8).collect();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        check_invariants(&text);
+        check_invariants(&random_bytes(&mut rng));
     }
 }
 
 fn run_token_soup(budget: usize) {
     let mut rng = SplitMix64(0xF0_50_42);
     for _ in 0..budget {
-        let pieces = rng.below(48);
-        let mut text = String::new();
-        for _ in 0..pieces {
-            text.push_str(ALPHABET[rng.below(ALPHABET.len())]);
-            if rng.below(3) == 0 {
-                text.push(' ');
-            }
-        }
-        check_invariants(&text);
+        check_invariants(&token_soup(&mut rng, ALPHABET));
     }
 }
 
 fn run_seed_mutations(budget: usize) {
     let mut rng = SplitMix64(0xF0_5E_ED);
     for _ in 0..budget {
-        let seed = SEEDS[rng.below(SEEDS.len())];
-        let mut text = seed.as_bytes().to_vec();
-        for _ in 0..(1 + rng.below(4)) {
-            match rng.below(4) {
-                0 if !text.is_empty() => {
-                    let at = rng.below(text.len());
-                    text.remove(at);
-                }
-                1 => {
-                    let at = rng.below(text.len() + 1);
-                    text.insert(at, (rng.next() & 0x7F) as u8);
-                }
-                2 if !text.is_empty() => {
-                    let at = rng.below(text.len());
-                    text[at] = (rng.next() & 0x7F) as u8;
-                }
-                _ => {
-                    let donor = SEEDS[rng.below(SEEDS.len())].as_bytes();
-                    let from = rng.below(donor.len());
-                    let to = (from + rng.below(16)).min(donor.len());
-                    let at = rng.below(text.len() + 1);
-                    for (offset, &byte) in donor[from..to].iter().enumerate() {
-                        text.insert(at + offset, byte);
-                    }
-                }
-            }
-        }
-        let text = String::from_utf8_lossy(&text).into_owned();
-        check_invariants(&text);
+        check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
     }
-}
-
-fn corpus_sample(count: usize) -> Option<Vec<String>> {
-    let root = {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidate = syntax::testing::env_var("CORPUS_DIR")
-            .ok_or(std::env::VarError::NotPresent)
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| manifest.join("../../corpus"));
-        candidate.is_dir().then_some(candidate)?
-    };
-    let mut files = Vec::new();
-    let mut stack = vec![root.join("r-base"), root.join("cran")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "R") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    let step = (files.len() / count.max(1)).max(1);
-    let sample: Vec<String> = files
-        .iter()
-        .step_by(step)
-        .take(count)
-        .filter_map(|path| std::fs::read(path).ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .collect();
-    (!sample.is_empty()).then_some(sample)
 }

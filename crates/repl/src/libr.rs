@@ -3,9 +3,15 @@
 //! globals are only valid after `setup_Rmainloop`.
 
 use crate::ReplError;
+use libloading::Library;
+use std::env;
 use std::ffi::{CStr, CString, c_char, c_int, c_uchar, c_void};
+#[cfg(unix)]
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Fill `buffer` (capacity `length`, NUL-terminated, newline included) and
 /// return 1, or return 0 for EOF.
@@ -16,7 +22,7 @@ pub type WriteConsoleEx = unsafe extern "C" fn(*const c_char, c_int, c_int);
 /// Function pointers are required; globals are raw addresses into the loaded library.
 pub struct RApi {
     /// Held for the process lifetime; the symbols point into it.
-    _library: &'static libloading::Library,
+    _library: &'static Library,
     pub r_home: PathBuf,
 
     setup_mainloop: unsafe extern "C" fn(),
@@ -120,21 +126,27 @@ const SA_NOSAVE: c_int = 3;
 
 /// Stashed for the SIGINT handler: writing an aligned `c_int` is async-signal-safe,
 /// and the address is set once before the handler is installed.
-pub static INTERRUPTS_PENDING: std::sync::atomic::AtomicPtr<c_int> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+pub static INTERRUPTS_PENDING: AtomicPtr<c_int> = AtomicPtr::new(ptr::null_mut());
 
 /// R's Windows front-end break flag (`UserBreak`).
 #[cfg(windows)]
-pub static USER_BREAK: std::sync::atomic::AtomicPtr<c_int> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+pub static USER_BREAK: AtomicPtr<c_int> = AtomicPtr::new(ptr::null_mut());
 
 #[cfg(windows)]
 pub fn interrupt_r() {
-    for flag_slot in [&INTERRUPTS_PENDING, &USER_BREAK] {
-        let flag = flag_slot.load(std::sync::atomic::Ordering::SeqCst);
-        if !flag.is_null() {
-            unsafe { *flag = 1 };
-        }
+    raise(&INTERRUPTS_PENDING);
+    raise(&USER_BREAK);
+}
+
+#[cfg(unix)]
+pub extern "C" fn sigint_to_r_flag(_signal: c_int) {
+    raise(&INTERRUPTS_PENDING);
+}
+
+fn raise(flag: &AtomicPtr<c_int>) {
+    let flag = flag.load(Ordering::SeqCst);
+    if !flag.is_null() {
+        unsafe { *flag = 1 };
     }
 }
 
@@ -150,7 +162,7 @@ pub fn load() -> Result<RApi, ReplError> {
             libloading::os::unix::RTLD_LAZY | libloading::os::unix::RTLD_GLOBAL,
         )
     }
-    .map(libloading::Library::from)
+    .map(Library::from)
     .map_err(|error| {
         ReplError(format!(
             "failed to load the R shared library at {}: {error}",
@@ -158,8 +170,8 @@ pub fn load() -> Result<RApi, ReplError> {
         ))
     })?;
 
-    let library: &'static libloading::Library = Box::leak(Box::new(library));
-    let api = RApi {
+    let library: &'static Library = Box::leak(Box::new(library));
+    Ok(RApi {
         r_home,
         initialize: symbol(library, &library_path, "Rf_initialize_R")?,
         setup_mainloop: symbol(library, &library_path, "setup_Rmainloop")?,
@@ -176,8 +188,7 @@ pub fn load() -> Result<RApi, ReplError> {
         write_console_hook: symbol(library, &library_path, "ptr_R_WriteConsole")?,
         write_console_ex_hook: symbol(library, &library_path, "ptr_R_WriteConsoleEx")?,
         _library: library,
-    };
-    Ok(api)
+    })
 }
 
 /// Sibling DLLs are preloaded so compiled-package imports resolve, and the DLL
@@ -187,16 +198,16 @@ pub fn load() -> Result<RApi, ReplError> {
     let r_home = discover_r_home()?;
     let library_path = shared_library_path(&r_home)?;
     let library_directory = library_path.parent().unwrap_or(&r_home).to_path_buf();
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = env::var_os("PATH").unwrap_or_default();
     let mut entries = vec![library_directory.clone()];
-    entries.extend(std::env::split_paths(&path));
-    if let Ok(joined) = std::env::join_paths(entries) {
-        unsafe { std::env::set_var("PATH", joined) };
+    entries.extend(env::split_paths(&path));
+    if let Ok(joined) = env::join_paths(entries) {
+        unsafe { env::set_var("PATH", joined) };
     }
     for sibling in ["Rblas.dll", "Rlapack.dll", "Riconv.dll"] {
         let candidate = library_directory.join(sibling);
         if candidate.exists()
-            && let Ok(loaded) = unsafe { libloading::Library::new(&candidate) }
+            && let Ok(loaded) = unsafe { Library::new(&candidate) }
         {
             Box::leak(Box::new(loaded));
         }
@@ -204,21 +215,21 @@ pub fn load() -> Result<RApi, ReplError> {
     // A hard requirement: `GA_initapp` is exported here, not by R.dll, and console
     // setup crashes when it never ran.
     let graphapp_path = library_directory.join("Rgraphapp.dll");
-    let graphapp = unsafe { libloading::Library::new(&graphapp_path) }.map_err(|error| {
+    let graphapp = unsafe { Library::new(&graphapp_path) }.map_err(|error| {
         ReplError(format!(
             "failed to load the R graphapp library at {}: {error}",
             graphapp_path.display()
         ))
     })?;
-    let graphapp: &'static libloading::Library = Box::leak(Box::new(graphapp));
-    let library = unsafe { libloading::Library::new(&library_path) }.map_err(|error| {
+    let graphapp: &'static Library = Box::leak(Box::new(graphapp));
+    let library = unsafe { Library::new(&library_path) }.map_err(|error| {
         ReplError(format!(
             "failed to load the R library at {}: {error}",
             library_path.display()
         ))
     })?;
-    let library: &'static libloading::Library = Box::leak(Box::new(library));
-    let api = RApi {
+    let library: &'static Library = Box::leak(Box::new(library));
+    Ok(RApi {
         r_home,
         setup_mainloop: symbol(library, &library_path, "setup_Rmainloop")?,
         run_mainloop: symbol(library, &library_path, "run_Rmainloop")?,
@@ -234,8 +245,7 @@ pub fn load() -> Result<RApi, ReplError> {
         character_mode: symbol(library, &library_path, "CharacterMode")?,
         user_break: symbol(library, &library_path, "UserBreak")?,
         _library: library,
-    };
-    Ok(api)
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -248,7 +258,7 @@ pub fn load() -> Result<RApi, ReplError> {
 /// A function type yields the function pointer, a `*mut T` the global's address.
 /// The library is leaked, so the value outliving the `Symbol` guard is sound.
 fn symbol<T: Copy>(
-    library: &'static libloading::Library,
+    library: &'static Library,
     library_path: &Path,
     name: &str,
 ) -> Result<T, ReplError> {
@@ -274,18 +284,16 @@ impl RApi {
         write_console_ex: WriteConsoleEx,
     ) -> Result<(), ReplError> {
         // R re-derives R_HOME through its own lookup; export ours so both agree.
-        unsafe { std::env::set_var("R_HOME", &self.r_home) };
+        unsafe { env::set_var("R_HOME", &self.r_home) };
         export_wrapper_path_vars(&self.r_home);
 
-        let arguments = ["repl", "--interactive", "--no-save", "--no-restore-data"];
-        let owned: Vec<CString> = arguments
-            .iter()
-            .map(|argument| CString::new(*argument).expect("static argv strings have no NUL"))
-            .collect();
-        let mut argv: Vec<*mut c_char> = owned
-            .iter()
-            .map(|argument| argument.as_ptr() as *mut c_char)
-            .collect();
+        let mut argv = [
+            c"repl",
+            c"--interactive",
+            c"--no-save",
+            c"--no-restore-data",
+        ]
+        .map(|argument| argument.as_ptr() as *mut c_char);
 
         unsafe {
             *self.running_as_main_program = 1;
@@ -295,13 +303,13 @@ impl RApi {
             (self.initialize)(argv.len() as c_int, argv.as_mut_ptr());
             *self.interactive = 1;
             // NULL console files route all output through the hooks below.
-            *self.consolefile = std::ptr::null_mut();
-            *self.outputfile = std::ptr::null_mut();
+            *self.consolefile = ptr::null_mut();
+            *self.outputfile = ptr::null_mut();
             *self.read_console_hook = Some(read_console);
             // The plain hook must be cleared for the Ex hook to be consulted.
             *self.write_console_hook = None;
             *self.write_console_ex_hook = Some(write_console_ex);
-            INTERRUPTS_PENDING.store(self.interrupts_pending, std::sync::atomic::Ordering::SeqCst);
+            INTERRUPTS_PENDING.store(self.interrupts_pending, Ordering::SeqCst);
             (self.setup_mainloop)();
         }
         Ok(())
@@ -315,9 +323,8 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
     ) -> Result<(), ReplError> {
-        unsafe { std::env::set_var("R_HOME", &self.r_home) };
-        let program = CString::new("ry").expect("static argv string has no NUL");
-        let mut argv = [program.as_ptr() as *mut c_char];
+        unsafe { env::set_var("R_HOME", &self.r_home) };
+        let mut argv = [c"ry".as_ptr() as *mut c_char];
 
         let rhome = CString::new(self.r_home.to_string_lossy().into_owned())
             .map_err(|_| ReplError("R_HOME contains a NUL byte".to_owned()))?;
@@ -326,11 +333,10 @@ impl RApi {
         // native encoding.
         let r_user = unsafe { (self.get_r_user)() };
         let home = if r_user.is_null() {
-            CString::new(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_owned()))
+            CString::new(env::var("USERPROFILE").unwrap_or_else(|_| ".".to_owned()))
                 .map_err(|_| ReplError("USERPROFILE contains a NUL byte".to_owned()))?
         } else {
-            CString::new(unsafe { CStr::from_ptr(r_user) }.to_bytes())
-                .expect("a C string has no interior NUL")
+            unsafe { CStr::from_ptr(r_user) }.to_owned()
         };
         // R keeps the pointers; the strings live for the process.
         let rhome: &'static CString = Box::leak(Box::new(rhome));
@@ -361,13 +367,13 @@ impl RApi {
             start.busy = Some(no_op_busy);
             start.character_mode = UI_MODE_R_GUI;
             (self.set_params)(&mut start);
-            (self.ga_initapp)(0, std::ptr::null_mut());
+            (self.ga_initapp)(0, ptr::null_mut());
             (self.readconsolecfg)();
             // Under `RGui`, `do_system` invalidates the standard handles before spawning,
             // which hangs `system()`; `LinkDLL` keeps the RGui callback wiring.
             *self.character_mode = UI_MODE_LINK_DLL;
-            INTERRUPTS_PENDING.store(self.interrupts_pending, std::sync::atomic::Ordering::SeqCst);
-            USER_BREAK.store(self.user_break, std::sync::atomic::Ordering::SeqCst);
+            INTERRUPTS_PENDING.store(self.interrupts_pending, Ordering::SeqCst);
+            USER_BREAK.store(self.user_break, Ordering::SeqCst);
             (self.setup_mainloop)();
         }
         Ok(())
@@ -407,41 +413,29 @@ unsafe extern "C" fn yes_no_cancel_default(question: *const c_char) -> c_int {
     -1
 }
 
-pub extern "C" fn sigint_to_r_flag(_signal: c_int) {
-    let flag = INTERRUPTS_PENDING.load(std::sync::atomic::Ordering::SeqCst);
-    if !flag.is_null() {
-        unsafe { *flag = 1 };
-    }
-}
-
 fn discover_r_home() -> Result<PathBuf, ReplError> {
-    if let Ok(home) = std::env::var("R_HOME")
-        && !home.is_empty()
-    {
-        let path = PathBuf::from(&home);
-        if path.is_dir() {
-            return Ok(path);
+    let (home, origin) = match env::var("R_HOME") {
+        Ok(home) if !home.is_empty() => (home, "R_HOME is set to"),
+        _ => {
+            let output = Command::new("R").arg("RHOME").output().map_err(|error| {
+                ReplError(format!(
+                    "no R found: R_HOME is not set and running `R RHOME` failed ({error}). \
+                     Install R or set R_HOME to an R installation."
+                ))
+            })?;
+            let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if home.is_empty() {
+                return Err(ReplError(
+                    "`R RHOME` printed nothing. Set R_HOME to an R installation".to_owned(),
+                ));
+            }
+            (home, "`R RHOME` reported")
         }
-        return Err(ReplError(format!(
-            "R_HOME is set to {home}, but that directory does not exist"
-        )));
-    }
-    let output = Command::new("R").arg("RHOME").output().map_err(|error| {
-        ReplError(format!(
-            "no R found: R_HOME is not set and running `R RHOME` failed ({error}). \
-                 Install R or set R_HOME to an R installation."
-        ))
-    })?;
-    let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if home.is_empty() {
-        return Err(ReplError(
-            "`R RHOME` printed nothing. Set R_HOME to an R installation".to_owned(),
-        ));
-    }
+    };
     let path = PathBuf::from(&home);
     if !path.is_dir() {
         return Err(ReplError(format!(
-            "`R RHOME` reported {home}, but that directory does not exist"
+            "{origin} {home}, but that directory does not exist"
         )));
     }
     Ok(path)
@@ -452,15 +446,14 @@ fn discover_r_home() -> Result<PathBuf, ReplError> {
 /// RHEL) need them recovered from its `VAR=value` lines. Faster than asking R.
 #[cfg(unix)]
 fn export_wrapper_path_vars(r_home: &Path) {
-    let Ok(wrapper) = std::fs::read_to_string(r_home.join("bin").join("R")) else {
+    let Ok(wrapper) = fs::read_to_string(r_home.join("bin").join("R")) else {
         return;
     };
     for name in ["R_SHARE_DIR", "R_INCLUDE_DIR", "R_DOC_DIR"] {
-        if std::env::var_os(name).is_some() {
-            continue;
-        }
-        if let Some(value) = wrapper_path_var(&wrapper, name) {
-            unsafe { std::env::set_var(name, value) };
+        if env::var_os(name).is_none()
+            && let Some(value) = wrapper_path_var(&wrapper, name)
+        {
+            unsafe { env::set_var(name, value) };
         }
     }
 }
@@ -526,17 +519,18 @@ pub unsafe fn prompt_text(prompt: *const c_char) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::process;
 
     #[test]
     fn missing_r_is_an_actionable_error() {
         // Must pass with and without R: force the env-var path with a nonexistent directory.
-        let previous = std::env::var_os("R_HOME");
-        unsafe { std::env::set_var("R_HOME", "/nonexistent/ry-test-r-home") };
+        let previous = env::var_os("R_HOME");
+        unsafe { env::set_var("R_HOME", "/nonexistent/ry-test-r-home") };
         let error = discover_r_home().expect_err("a bogus R_HOME must fail");
         assert!(error.0.contains("does not exist"), "{}", error.0);
         match previous {
-            Some(value) => unsafe { std::env::set_var("R_HOME", value) },
-            None => unsafe { std::env::remove_var("R_HOME") },
+            Some(value) => unsafe { env::set_var("R_HOME", value) },
+            None => unsafe { env::remove_var("R_HOME") },
         }
     }
 
@@ -561,15 +555,10 @@ mod tests {
 
     #[test]
     fn shared_library_error_names_the_fix() {
-        let directory = tempfile_like_dir();
+        let directory = env::temp_dir().join(format!("ry-repl-test-{}", process::id()));
+        fs::create_dir_all(&directory).expect("create temp dir");
         let error = shared_library_path(&directory).expect_err("empty dir has no libR");
         assert!(error.0.contains("--enable-R-shlib"), "{}", error.0);
-        std::fs::remove_dir_all(&directory).ok();
-    }
-
-    fn tempfile_like_dir() -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("ry-repl-test-{}", std::process::id(),));
-        std::fs::create_dir_all(&directory).expect("create temp dir");
-        directory
+        fs::remove_dir_all(&directory).ok();
     }
 }

@@ -378,49 +378,6 @@ that position barely matters, from two 20,501-line projects with 500 findings ea
 8.0 s. Those projects are analysis-bound, at 4.6 s for JSON against 41 ms for the reporter, so they
 were never evidence about the reporter at all.
 
-## Open: abstraction and duplication
-
-An independent review looked for duplicated sources of truth and for abstractions that earn nothing.
-These are the findings that are still open.
-
-### Rename accepts `..1` as a new name, and the identifier rule is written twice
-
-The server's `is_valid_r_identifier` restates a rule that `syntax::is_syntactic_name` already owns.
-Same reserved-word list, same start and continue classes, same `.5` exclusion. Call the lexer's rule
-instead of keeping a second copy, which removes about 60 lines.
-
-The dot-dot part of the finding as originally filed was wrong, and it was checked against R. Both
-`... <- 1` and `..1 <- 1` run, and `... <- 5` genuinely binds, because `get("...")` returns 5. They
-are not invalid assignment targets.
-
-The real defect is narrower and is only about a `..1`-style name. The assignment succeeds but the
-read cannot, because `..1` resolves as a positional slot of an enclosing `...` rather than as a
-variable. `..1 <- 7; ..1` fails with "..1 used in an incorrect context, no ... to look in". Renaming
-a variable to `..1` therefore turns every one of its reads into a run-time error silently, and
-rename must refuse it. `...` is a legal name, so refusing that one needs a different justification,
-such as shadowing the forwarding mechanism, or none at all.
-
-Moving to `is_syntactic_name` does not fix this on its own, because the lexer's rule accepts both
-spellings too.
-
-### A dead-code batch, all of it hidden behind `let _ =`
-
-Seven items, compile-verified as unreachable, across 44 lines. They survive because a `let _ = ...`
-keeps the binding alive, which is also why the compiler never flagged them. That is the pattern to
-grep for.
-
-### One rule table, written twice
-
-The lint rule metadata is restated rather than derived, so a rule can be added to one table and not
-the other. Make one the single source of truth and generate the second view from it.
-
-### A `use`-qualification sweep
-
-About 80 sites fully qualify a function whose module is not imported at all, which is against the
-house style. A type is imported directly, and a function gets at least one module-level import
-unless ambiguity forces qualification. The change is mechanical, so do it as its own pass to keep
-the diff readable.
-
 ## Open: oracles, or what the fuzzers never ask
 
 The next section measures what the fuzzers *feed* the code. This one is about what they *ask* of it.
@@ -804,21 +761,9 @@ feature returns lies inside the file. `definition`, `references`, `rename`, `typ
 in-bounds ranges and determinism for every range-returning feature, and pay for it with the offset
 sampling the economics review costs out. That is the same wall clock for several times the oracle.
 
-### About 280 lines of fuzz harness are copy-pasted across four crates
-
-`SplitMix64` exists four times, three of them byte-identical and the fourth adding `chance()`.
-`iterations()` exists four times identically. `corpus_sample()` exists twice, byte-identical apart
-from one comment. The byte-mutation loop exists three times.
-
-All four test crates already depend on `syntax::testing` for `env_var`, so the shared home exists.
-Put `rng`, `iterations`, `corpus_sample` and `mutate_bytes` there. That replaces four copies with
-one, and it is not a new abstraction.
-
 ### Seeds are hand-maintained while 1,183 fixture sources sit unused
 
-`syntax::testing::parse_fixture_files` is public with no callers outside its module.
-
-Meanwhile the batteries seed from 81 hand-written strings and never see the 1,183 fixture cases,
+The batteries seed from 81 hand-written strings and never see the 1,183 fixture cases,
 which are the richest R corpus in the repo and the one that grows with every change. Seed the
 `syntax` and `format` batteries from it, delete the three `SEEDS` lists, which is about 110 lines,
 and keep a hand seed only where it encodes something the fixtures do not. For `semantics`, use

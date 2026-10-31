@@ -9,11 +9,25 @@ use miette::{
     Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
 };
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
+use semantics::metadata::{
+    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+    parse_description_dependencies, parse_description_package, parse_namespace_exports,
+    parse_namespace_imports,
+};
+use semantics::stubs::{
+    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+    shipped_stub_sources, stub_source_problems, stubs,
+};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+use std::{env, fmt, fs, iter, thread};
 use syntax::TextRange;
+use syntax::literate::{is_literate_extension, r_source_of_literate};
 
 /// A run summary: not a finding, so a plain line rather than a report.
 pub fn info(message: &str) {
@@ -88,7 +102,7 @@ pub fn check(
             }
         };
         warn_unknown_config_keys(&config);
-        let target = std::fs::canonicalize(file).map_err(|err| {
+        let target = fs::canonicalize(file).map_err(|err| {
             error_because(&format!("failed to resolve: {}", file.display()), &err);
             CommandError
         })?;
@@ -125,7 +139,7 @@ pub fn check(
                 Vec::new()
             }
         };
-        let mut stub_sources = semantics::stubs::shipped_stub_sources();
+        let mut stub_sources = shipped_stub_sources();
         stub_sources.extend(
             project_stubs
                 .iter()
@@ -133,18 +147,14 @@ pub fn check(
         );
 
         let mut db = RootDatabase::default();
-        semantics::stubs::StubSources::new(
-            &db,
-            stub_sources,
-            semantics::stubs::shipped_export_manifests(),
-        );
+        StubSources::new(&db, stub_sources, shipped_export_manifests());
 
         // A broken override stub silently changes what every file checks against, so
         // its dropped declarations are reported as findings.
         for stub in &project_stubs {
             let stub_text = &stub.text;
             let stub_index = LineIndex::new(stub_text);
-            let problems: Vec<Diagnostic> = semantics::stubs::stub_source_problems(&db, stub_text)
+            let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
                 .into_iter()
                 .map(|problem| {
                     let start = stub_index.line_start(problem.line as u32);
@@ -168,35 +178,35 @@ pub fn check(
         }
 
         let namespace_path = root.join("NAMESPACE");
-        let namespace_source = std::fs::read_to_string(&namespace_path).ok();
+        let namespace_source = fs::read_to_string(&namespace_path).ok();
         let namespace_imports = namespace_source
             .as_deref()
-            .map(semantics::metadata::parse_namespace_imports)
+            .map(parse_namespace_imports)
             .unwrap_or_default();
-        let description_source = std::fs::read_to_string(root.join("DESCRIPTION")).ok();
+        let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
         let dependencies = description_source
             .as_deref()
-            .map(semantics::metadata::parse_description_dependencies)
+            .map(parse_description_dependencies)
             .unwrap_or_default();
         let collate = description_source
             .as_deref()
-            .map(semantics::metadata::parse_description_collate)
+            .map(parse_description_collate)
             .unwrap_or_default();
-        let metadata = semantics::metadata::PackageMetadata::new(
+        let metadata = PackageMetadata::new(
             &db,
-            semantics::metadata::normalized_imports(&namespace_imports),
+            normalized_imports(&namespace_imports),
             dependencies,
             BTreeSet::new(),
             description_source
                 .as_deref()
-                .and_then(semantics::metadata::parse_description_package),
+                .and_then(parse_description_package),
         );
 
         let mut used_tokens = BTreeSet::new();
         let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
         let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
         for path in paths {
-            let source = match std::fs::read_to_string(&path) {
+            let source = match fs::read_to_string(&path) {
                 Ok(source) => analysable_source(&path, source),
                 Err(err) => {
                     n_failures += 1;
@@ -234,7 +244,7 @@ pub fn check(
         }
         let files: Vec<SourceFile> = files.into_iter().flatten().collect();
         ProjectFiles::new(&db, project.clone());
-        let attached = semantics::metadata::attached_union(&db, project);
+        let attached = attached_union(&db, project);
         if !attached.is_empty() {
             use salsa::Setter;
             metadata.set_attached(&mut db).to(attached);
@@ -246,25 +256,25 @@ pub fn check(
             .map(|(&file, (path, _))| (file, path))
             .collect();
         // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
-        let workers = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
+        let workers = thread::available_parallelism()
+            .map(NonZero::get)
             .unwrap_or(1)
             .min(checked.len().max(1));
         // Warm per-item naming across cores first: inside the project-wide interface walk
         // it would serialize on one thread. Largest files first so one cannot skew a chunk.
         // Workers need the analysis stack: interface resolution recurses per dependency edge.
-        std::thread::scope(|scope| {
+        thread::scope(|scope| {
             {
                 let db = db.clone();
-                std::thread::Builder::new()
+                thread::Builder::new()
                     .stack_size(crate::ANALYSIS_STACK_SIZE)
                     .spawn_scoped(scope, move || {
-                        let _ = semantics::stubs::stubs(&db);
+                        let _ = stubs(&db);
                     })
                     .expect("check worker thread should spawn");
             }
             let mut by_size: Vec<usize> = (0..checked.len()).collect();
-            by_size.sort_by_key(|&index| std::cmp::Reverse(checked[index].1.len()));
+            by_size.sort_by_key(|&index| Reverse(checked[index].1.len()));
             for worker in 0..workers {
                 let db = db.clone();
                 let files = &files;
@@ -274,7 +284,7 @@ pub fn check(
                     .skip(worker)
                     .step_by(workers)
                     .collect();
-                std::thread::Builder::new()
+                thread::Builder::new()
                     .stack_size(crate::ANALYSIS_STACK_SIZE)
                     .spawn_scoped(scope, move || {
                         for index in deal {
@@ -287,7 +297,7 @@ pub fn check(
             }
         });
         let mut per_file: Vec<Vec<Diagnostic>> = (0..checked.len()).map(|_| Vec::new()).collect();
-        std::thread::scope(|scope| {
+        thread::scope(|scope| {
             let mut pending: Vec<(usize, &mut Vec<Diagnostic>)> =
                 per_file.iter_mut().enumerate().collect();
             let chunk_size = pending.len().div_ceil(workers.max(1)).max(1);
@@ -301,7 +311,7 @@ pub fn check(
                 let checked = &checked;
                 let files = &files;
                 let config = &config;
-                let worker = std::thread::Builder::new()
+                let worker = thread::Builder::new()
                     .stack_size(crate::ANALYSIS_STACK_SIZE)
                     .spawn_scoped(scope, move || {
                         for (index, slot) in chunk {
@@ -336,19 +346,17 @@ pub fn check(
 
         // Emitted last so the `unused-import` lint sees the whole package.
         if let Some(namespace_source) = &namespace_source {
-            let knows =
-                |package: &str| semantics::stubs::namespace_known(&db, package).unwrap_or(false);
-            let exports =
-                |package: &str, name: &str| semantics::stubs::namespace_exports(&db, package, name);
+            let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
+            let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
             let mut problems =
                 namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
             let defines = |name: &str| {
-                semantics::ProjectFiles::try_get(&db).is_some_and(|files| {
+                ProjectFiles::try_get(&db).is_some_and(|files| {
                     semantics::package_definitions(&db, files).contains_key(name)
                 })
             };
             problems.extend(namespace::namespace_export_problems(
-                &semantics::metadata::parse_namespace_exports(namespace_source),
+                &parse_namespace_exports(namespace_source),
                 &defines,
             ));
             problems.extend(namespace::unused_import_diagnostics(
@@ -402,9 +410,9 @@ pub(crate) fn analysable_source(path: &Path, text: String) -> String {
     let literate = path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(syntax::literate::is_literate_extension);
+        .is_some_and(is_literate_extension);
     if literate {
-        syntax::literate::r_source_of_literate(&text)
+        r_source_of_literate(&text)
     } else {
         text
     }
@@ -440,7 +448,7 @@ pub(crate) fn exclude_matcher(
             target.parent().unwrap_or(target).to_path_buf()
         }
     });
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let root = fs::canonicalize(&root).unwrap_or(root);
     let mut builder = GitignoreBuilder::new(&root);
     for pattern in &config.check.exclude {
         if let Err(err) = builder.add_line(None, pattern) {
@@ -513,9 +521,7 @@ pub(crate) fn collect_r_files(
                 path.extension()
                     .and_then(|extension| extension.to_str())
                     .is_some_and(|extension| {
-                        extension == "R"
-                            || extension == "r"
-                            || syntax::literate::is_literate_extension(extension)
+                        extension == "R" || extension == "r" || is_literate_extension(extension)
                     })
                     .then_some(Ok(path))
             }
@@ -529,7 +535,7 @@ pub(crate) fn collect_r_files(
 
 /// `<root>/stubs/*.Rtypes` in path order, each with its file stem (the namespace label).
 pub(crate) fn project_stub_paths(root: &Path) -> Vec<(PathBuf, String)> {
-    let Ok(entries) = std::fs::read_dir(root.join("stubs")) else {
+    let Ok(entries) = fs::read_dir(root.join("stubs")) else {
         return Vec::new();
     };
     let mut stubs: Vec<(PathBuf, String)> = entries
@@ -564,7 +570,7 @@ pub(crate) fn read_project_stubs(
 ) -> Result<Vec<ProjectStub>, (PathBuf, std::io::Error)> {
     project_stub_paths(root)
         .into_iter()
-        .map(|(path, stem)| match std::fs::read_to_string(&path) {
+        .map(|(path, stem)| match fs::read_to_string(&path) {
             Ok(text) => Ok(ProjectStub { path, stem, text }),
             Err(err) => Err((path, err)),
         })
@@ -788,8 +794,8 @@ impl<'a> Default for Report<'a> {
     }
 }
 
-impl std::fmt::Display for Report<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Report<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.message)
     }
 }
@@ -801,9 +807,9 @@ impl std::error::Error for Report<'_> {
 }
 
 impl miette::Diagnostic for Report<'_> {
-    fn code(&self) -> Option<Box<dyn std::fmt::Display + '_>> {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
         self.code
-            .map(|code| Box::new(code) as Box<dyn std::fmt::Display>)
+            .map(|code| Box::new(code) as Box<dyn fmt::Display>)
     }
 
     fn severity(&self) -> Option<ReportSeverity> {
@@ -818,7 +824,7 @@ impl miette::Diagnostic for Report<'_> {
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
         let snippet = self.snippet.as_ref()?;
-        Some(Box::new(std::iter::once(snippet.label.clone())))
+        Some(Box::new(iter::once(snippet.label.clone())))
     }
 
     fn related(&self) -> Option<Box<dyn Iterator<Item = &dyn miette::Diagnostic> + '_>> {
@@ -960,7 +966,7 @@ struct NamedText<'a> {
 impl<'a> NamedText<'a> {
     fn new(path: &Path, text: &'a str, lines: &'a LineStarts) -> NamedText<'a> {
         static WORKING_DIRECTORY: LazyLock<Option<PathBuf>> =
-            LazyLock::new(|| std::env::current_dir().ok());
+            LazyLock::new(|| env::current_dir().ok());
         let name = WORKING_DIRECTORY
             .as_deref()
             .and_then(|directory| path.strip_prefix(directory).ok())
@@ -1090,15 +1096,15 @@ pub fn fmt(
                     !path
                         .extension()
                         .and_then(|extension| extension.to_str())
-                        .is_some_and(syntax::literate::is_literate_extension)
+                        .is_some_and(is_literate_extension)
                 })
                 .collect();
             Ok((paths, config))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let start_global = std::time::Instant::now();
-    let mut elapsed_total = std::time::Duration::ZERO;
+    let start_global = Instant::now();
+    let mut elapsed_total = Duration::ZERO;
     let mut bytes_total = 0usize;
 
     let mut n_files = 0;
@@ -1107,7 +1113,7 @@ pub fn fmt(
     for (paths, config) in paths_with_config {
         for path in paths {
             n_files += 1;
-            let initial = match std::fs::read_to_string(&path) {
+            let initial = match fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(err) => {
                     n_errors += 1;
@@ -1116,7 +1122,7 @@ pub fn fmt(
                 }
             };
 
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             let new = match format::format(&initial, config.format) {
                 Ok(new) => new,
                 Err(err) => {
@@ -1135,7 +1141,7 @@ pub fn fmt(
                     print_diff(&initial, &new);
                 } else if check {
                     eprintln!("Would reformat: {}", style(path.display()).bold());
-                } else if let Err(err) = std::fs::write(&path, &new) {
+                } else if let Err(err) = fs::write(&path, &new) {
                     n_errors += 1;
                     error_because(
                         &format!("failed to write to file: {}", path.display()),
@@ -1203,7 +1209,7 @@ pub fn fmt(
 }
 
 pub fn ast(path: &Path) -> Result<(), CommandError> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
             error(&err.to_string());
@@ -1256,8 +1262,8 @@ fn print_diff(old: &str, new: &str) {
     use similar::{ChangeTag, TextDiff};
 
     struct Line(Option<usize>);
-    impl std::fmt::Display for Line {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    impl fmt::Display for Line {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             match self.0 {
                 None => write!(f, "    "),
                 Some(index) => write!(f, "{:<4}", index + 1),

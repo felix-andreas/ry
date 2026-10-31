@@ -6,10 +6,14 @@ use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
 use crate::hir::{
     Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
-    UnaryOperator,
+    UnaryOperator, integer_literal_position, is_whole_number_double,
 };
-use crate::infer::{Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError};
+use crate::infer::{
+    Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
+};
+use crate::metadata::is_own_package;
 use crate::naming::{BindingId, BindingKind, ItemNaming};
+use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, Parameter, RecordField, RestParameter,
     TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, contains_inference_var, erase_vars,
@@ -2412,7 +2416,7 @@ impl<'db> Checker<'db, '_> {
         lhs: ExprId,
         rhs: ExprId,
     ) -> Option<Ty<'db>> {
-        let library = crate::stubs::stubs(self.db)?;
+        let library = stubs(self.db)?;
         if !library.schemes.contains_key(name) {
             return None;
         }
@@ -3905,9 +3909,7 @@ impl<'db> Checker<'db, '_> {
 
     fn is_whole_double(&self, value: ExprId) -> bool {
         match &self.module.expression(value).kind {
-            ExpressionKind::Literal(LiteralKind::Double(text)) => {
-                crate::hir::is_whole_number_double(text)
-            }
+            ExpressionKind::Literal(LiteralKind::Double(text)) => is_whole_number_double(text),
             _ => false,
         }
     }
@@ -4498,7 +4500,7 @@ impl<'db> Checker<'db, '_> {
         };
         let nominal = Ty::new(self.db, TyKind::Named(name, arguments.clone()));
         if !matches!(definition.body.kind(self.db), TyKind::Unknown) {
-            let representation = crate::infer::apply_definition(self.db, &definition, &arguments);
+            let representation = apply_definition(self.db, &definition, &arguments);
             let resolved_value = self.table.resolve(self.db, value_ty);
             if !self
                 .table
@@ -4664,7 +4666,7 @@ impl<'db> Checker<'db, '_> {
             }
             return Ok(union_of(self.db, results));
         }
-        let literal_position = index.and_then(crate::hir::integer_literal_position);
+        let literal_position = index.and_then(integer_literal_position);
         let literal_name = match index {
             Some(ExpressionKind::Literal(LiteralKind::String(name))) => Some(name.clone()),
             _ => None,
@@ -5286,14 +5288,14 @@ fn validated_namespace_name(
         return Some(name);
     };
     // The project's own package resolves through globals and wins over a same-named stub namespace.
-    if crate::metadata::is_own_package(db, package) {
+    if is_own_package(db, package) {
         return Some(name);
     }
-    match crate::stubs::namespace_known(db, package) {
+    match namespace_known(db, package) {
         None => Some(name),
         Some(false) => None,
         Some(true) => {
-            if internal || crate::stubs::namespace_exports(db, package, &name) {
+            if internal || namespace_exports(db, package, &name) {
                 Some(name)
             } else {
                 None
@@ -5306,19 +5308,22 @@ fn validated_namespace_name(
 mod tests {
     use super::*;
     use crate::RootDatabase;
+    use crate::annotations::lower_annotation;
     use crate::hir::lower_item;
     use crate::naming::resolve_item;
+    use syntax::SyntaxKind;
+    use syntax::ast::is_expression_kind;
 
     fn check_source<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
         let parse = syntax::parse(source);
         let root = parse.syntax_node();
         let annotation = root
             .children()
-            .find(|child| child.kind() == syntax::SyntaxKind::ANNOTATION)
-            .map(|node| crate::annotations::lower_annotation(db, &node));
+            .find(|child| child.kind() == SyntaxKind::ANNOTATION)
+            .map(|node| lower_annotation(db, &node));
         let item = root
             .children()
-            .find(|child| syntax::ast::is_expression_kind(child.kind()))
+            .find(|child| is_expression_kind(child.kind()))
             .expect("one top-level item");
         let module = lower_item(&item);
         let naming = resolve_item(&module, &FxHashMap::default());

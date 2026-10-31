@@ -9,26 +9,7 @@ use semantics::testing::{
 };
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        (self.next() % bound.max(1) as u64) as usize
-    }
-
-    fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
-        self.next() % denominator < numerator
-    }
-}
+use syntax::testing::{SplitMix64, fuzz_iterations, program_corpus_sources};
 
 const NAMES: &[&str] = &["a", "b", "f", "g", "x", "helper"];
 
@@ -85,10 +66,7 @@ const SOUP: &[&str] = &[
 ];
 
 fn iterations() -> usize {
-    std::env::var("FUZZ_ITERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(250)
+    fuzz_iterations(250)
 }
 
 fn generate_program(rng: &mut SplitMix64) -> String {
@@ -186,7 +164,7 @@ const REGRESSIONS: &[&str] = &["foo$\n", "f)\nla<- function()"];
 /// never-panic and range geometry; the generated arms cover determinism and equivalence.
 #[test]
 fn program_corpus_holds_invariants() {
-    let sources = syntax::testing::program_corpus_sources();
+    let sources = program_corpus_sources();
     assert!(
         sources.len() > 1_000,
         "expected the mined corpus, found {}",

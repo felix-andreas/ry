@@ -4,8 +4,8 @@
 use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
 use semantics::stubs::install_shipped_stubs;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree};
-use std::slice;
 use std::time::{Duration, Instant};
+use std::{slice, thread};
 
 fn project(sources: &[String]) -> (RootDatabase, Vec<SourceFile>) {
     let db = RootDatabase::default();
@@ -70,7 +70,7 @@ fn concurrent_cycle_queries_agree_with_the_baseline() {
     let baseline = all_diagnostics(&baseline_db, &baseline_files);
 
     let started = Instant::now();
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         let mut workers = Vec::new();
         for worker in 0..8 {
             let db = db.clone();
@@ -119,7 +119,7 @@ fn parallel_cold_prime_matches_sequential() {
     sources.push("shared_helper <- function() 1L\n".to_owned());
 
     let (db, files) = project(&sources);
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         for chunk in files.chunks(4) {
             let db = db.clone();
             let chunk = chunk.to_vec();

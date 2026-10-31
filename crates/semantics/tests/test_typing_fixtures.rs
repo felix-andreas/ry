@@ -14,6 +14,7 @@ use semantics::{
     item_hir, item_tree,
 };
 use std::path::Path;
+use syntax::SyntaxKind;
 use syntax::testing::{run_fixture_suite, split_files};
 
 fn render_case(
@@ -205,7 +206,7 @@ fn render_annotation_block(source: &str) -> String {
     let Some(node) = parse
         .syntax_node()
         .descendants()
-        .find(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .find(|node| node.kind() == SyntaxKind::ANNOTATION)
     else {
         return "no annotation".to_owned();
     };

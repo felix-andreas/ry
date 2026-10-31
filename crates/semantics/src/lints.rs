@@ -3,7 +3,7 @@ use crate::naming::BindingKind;
 use crate::stubs::{declaring_namespace, stubs};
 use crate::{Db, SourceFile, is_s3_method_name, item_naming, item_spans, parse, s3_generics};
 use rowan::{NodeOrToken, WalkEvent};
-use syntax::ast::{AstNode, BinaryExpr};
+use syntax::ast::BinaryExpr;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 /// `Default` keeps the lint's built-in severity, which is off for opt-in lints.

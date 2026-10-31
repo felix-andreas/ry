@@ -4,11 +4,14 @@
 
 use salsa::Setter as _;
 use semantics::diagnostics::file_diagnostics;
-use semantics::{DocumentKind, ProjectFiles, SourceFile, SpliceCache};
+use semantics::stubs::install_shipped_stubs;
+use semantics::{Db, DocumentKind, ProjectFiles, SourceFile, SpliceCache};
+use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::{env, fs, mem};
 
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static WALK_EXECUTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -50,14 +53,14 @@ impl Default for ProbeDatabase {
 impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
-impl semantics::Db for ProbeDatabase {
+impl Db for ProbeDatabase {
     fn splice_cache(&self) -> &SpliceCache {
         &self.splice_cache
     }
 }
 
 fn main() {
-    let roots: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    let roots: Vec<PathBuf> = env::args().skip(1).map(PathBuf::from).collect();
     assert!(!roots.is_empty(), "pass package directories");
     let sources = collect_sources(&roots);
     let lines: usize = sources
@@ -67,7 +70,7 @@ fn main() {
     println!("{} files, {} lines", sources.len(), lines);
 
     let mut db = ProbeDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let files: Vec<SourceFile> = sources
         .iter()
         .map(|(_, source)| SourceFile::new(&db, source.clone(), DocumentKind::Package))
@@ -82,7 +85,7 @@ fn main() {
     println!("cold prime: {:?} ({findings} findings)", start.elapsed());
 
     let mut by_size: Vec<usize> = (0..sources.len()).collect();
-    by_size.sort_by_key(|&index| std::cmp::Reverse(sources[index].1.len()));
+    by_size.sort_by_key(|&index| Reverse(sources[index].1.len()));
     let editable: Vec<usize> = by_size
         .into_iter()
         .filter(|&index| body_literal_offset(&sources[index].1).is_some())
@@ -140,7 +143,7 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
     let mut sources = Vec::new();
     let mut stack: Vec<PathBuf> = roots.to_vec();
     while let Some(directory) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
+        let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -150,7 +153,7 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
             } else if path
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("r"))
-                && let Ok(bytes) = std::fs::read(&path)
+                && let Ok(bytes) = fs::read(&path)
             {
                 sources.push((path, String::from_utf8_lossy(&bytes).into_owned()));
             }
@@ -168,5 +171,5 @@ fn body_literal_offset(source: &str) -> Option<usize> {
 }
 
 fn drain_walks() -> Vec<String> {
-    std::mem::take(&mut *WALK_EXECUTES.lock().expect("probe lock"))
+    mem::take(&mut *WALK_EXECUTES.lock().expect("probe lock"))
 }

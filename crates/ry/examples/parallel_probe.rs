@@ -3,16 +3,19 @@
 //! Usage: `WORKERS=4 cargo run --release -p ry-lang --example parallel_probe <package-dir>...`
 
 use semantics::diagnostics::file_diagnostics;
-use semantics::types::{Name, Ty, TyKind};
+use semantics::stubs::install_shipped_stubs;
+use semantics::types::{Name, Ty, TyKind, unknown};
 use semantics::{
-    DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache, global_scheme,
+    Db, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache, global_scheme,
     interface_sccs, item_naming, item_tree, package_definitions,
 };
 use std::collections::HashMap;
+use std::num::NonZero;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use std::{env, fs, thread};
 
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static BLOCKS: AtomicUsize = AtomicUsize::new(0);
@@ -47,24 +50,24 @@ impl Default for ProbeDatabase {
 impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
-impl semantics::Db for ProbeDatabase {
+impl Db for ProbeDatabase {
     fn splice_cache(&self) -> &SpliceCache {
         &self.splice_cache
     }
 }
 
 fn main() {
-    let roots: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    let roots: Vec<PathBuf> = env::args().skip(1).map(PathBuf::from).collect();
     assert!(!roots.is_empty(), "pass package directories");
     let sources = collect_sources(&roots);
     let lines: usize = sources.iter().map(|source| source.lines().count()).sum();
     println!("{} files, {} lines", sources.len(), lines);
-    let workers = std::env::var("WORKERS")
+    let workers = env::var("WORKERS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(std::num::NonZero::get)
+            thread::available_parallelism()
+                .map(NonZero::get)
                 .unwrap_or(1)
         });
 
@@ -228,7 +231,7 @@ fn main() {
     ] {
         for threads in [1usize, workers] {
             let start = Instant::now();
-            std::thread::scope(|scope| {
+            thread::scope(|scope| {
                 for thread in 0..threads {
                     let db = db.clone();
                     scope.spawn(move || {
@@ -237,7 +240,7 @@ fn main() {
                                 let name = Name::new(&db, format!("t{thread}_{}", i % 4096));
                                 Ty::new(&db, TyKind::Named(name, Vec::new()));
                             } else {
-                                semantics::types::unknown(&db);
+                                unknown(&db);
                             }
                         }
                     });
@@ -256,7 +259,7 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<String> {
     let mut sources = Vec::new();
     let mut stack: Vec<PathBuf> = roots.to_vec();
     while let Some(directory) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
+        let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -266,7 +269,7 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<String> {
             } else if path
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("r"))
-                && let Ok(bytes) = std::fs::read(&path)
+                && let Ok(bytes) = fs::read(&path)
             {
                 sources.push((path, String::from_utf8_lossy(&bytes).into_owned()));
             }
@@ -276,9 +279,9 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<String> {
     sources.into_iter().map(|(_, source)| source).collect()
 }
 
-fn setup<D: semantics::Db + Default>(sources: &[String]) -> (D, Vec<SourceFile>) {
+fn setup<D: Db + Default>(sources: &[String]) -> (D, Vec<SourceFile>) {
     let db = D::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let files: Vec<SourceFile> = sources
         .iter()
         .map(|source| SourceFile::new(&db, source.clone(), DocumentKind::Package))
@@ -287,7 +290,7 @@ fn setup<D: semantics::Db + Default>(sources: &[String]) -> (D, Vec<SourceFile>)
     (db, files)
 }
 
-fn full_check<D: semantics::Db>(db: &D, files: &[SourceFile]) -> usize {
+fn full_check<D: Db>(db: &D, files: &[SourceFile]) -> usize {
     files
         .iter()
         .map(|&file| file_diagnostics(db, file).len())
@@ -298,12 +301,12 @@ fn full_check<D: semantics::Db>(db: &D, files: &[SourceFile]) -> usize {
 /// worker on its own database handle.
 fn fan_out<D, T, F>(db: &D, items: &[T], workers: usize, work: F)
 where
-    D: semantics::Db + Clone + Send,
+    D: Db + Clone + Send,
     T: Sync,
     F: Fn(&D, &T) + Sync,
 {
     let chunk = items.len().div_ceil(workers).max(1);
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         for chunk_items in items.chunks(chunk) {
             let db = db.clone();
             let work = &work;
@@ -316,7 +319,7 @@ where
     });
 }
 
-fn warm_naming<D: semantics::Db + Clone + Send>(db: &D, files: &[SourceFile], workers: usize) {
+fn warm_naming<D: Db + Clone + Send>(db: &D, files: &[SourceFile], workers: usize) {
     fan_out(db, files, workers, |db, &file| {
         for &item in item_tree(db, file) {
             item_naming(db, item);
@@ -324,11 +327,7 @@ fn warm_naming<D: semantics::Db + Clone + Send>(db: &D, files: &[SourceFile], wo
     });
 }
 
-fn parallel_check<D: semantics::Db + Clone + Send>(
-    db: &D,
-    files: &[SourceFile],
-    workers: usize,
-) -> usize {
+fn parallel_check<D: Db + Clone + Send>(db: &D, files: &[SourceFile], workers: usize) -> usize {
     let total = AtomicUsize::new(0);
     fan_out(db, files, workers, |db, &file| {
         total.fetch_add(file_diagnostics(db, file).len(), Ordering::Relaxed);
@@ -339,7 +338,7 @@ fn parallel_check<D: semantics::Db + Clone + Send>(
 /// (utime, stime) in clock ticks, counting /proc/self/stat fields after the
 /// parenthesized comm.
 fn cpu_ticks() -> (u64, u64) {
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let stat = fs::read_to_string("/proc/self/stat").unwrap_or_default();
     let after_comm = stat.rsplit(')').next().unwrap_or("");
     let fields: Vec<&str> = after_comm.split_whitespace().collect();
     let field = |index: usize| {

@@ -2,7 +2,9 @@
 
 use repl::reedline::{Span, Suggestion};
 use salsa::Setter;
+use semantics::stubs::install_shipped_stubs;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use syntax::TextSize;
 
 pub struct AnalysisCompleter {
     db: RootDatabase,
@@ -15,7 +17,7 @@ pub struct AnalysisCompleter {
 impl AnalysisCompleter {
     pub fn new() -> AnalysisCompleter {
         let db = RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
+        install_shipped_stubs(&db);
         let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
         let files = ProjectFiles::new(&db, vec![file]);
         AnalysisCompleter {
@@ -48,7 +50,7 @@ impl repl::SessionCompleter for AnalysisCompleter {
             &self.db,
             self.files,
             self.file,
-            syntax::TextSize::new(offset as u32),
+            TextSize::new(offset as u32),
         ) else {
             return Vec::new();
         };

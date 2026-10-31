@@ -6,7 +6,9 @@
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 fn r_available() -> bool {
     let available = std::process::Command::new("R")
@@ -26,7 +28,7 @@ struct ReplSession {
     _lock: std::sync::MutexGuard<'static, ()>,
     _pair: portable_pty::PtyPair,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    chunks: std::sync::mpsc::Receiver<Vec<u8>>,
+    chunks: mpsc::Receiver<Vec<u8>>,
     writer: Box<dyn Write + Send>,
     seen: String,
     /// So a terminal query split over a read boundary is still recognized.
@@ -53,8 +55,8 @@ impl ReplSession {
         let writer = pair.master.take_writer().expect("pty writer");
         // The pty read blocks with no timeout, so it gets its own thread and a silent
         // session fails instead of hanging.
-        let (sender, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
-        std::thread::spawn(move || {
+        let (sender, chunks) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             loop {
                 match reader.read(&mut buffer) {
@@ -200,7 +202,7 @@ fn run_script(body: &str) -> Option<(std::process::Output, String)> {
     }
     let directory = tempfile::tempdir().expect("temp dir");
     let script = directory.path().join("script.R");
-    std::fs::write(&script, body).expect("write script");
+    fs::write(&script, body).expect("write script");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
         .arg("run")
         .arg(&script)

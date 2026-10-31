@@ -5,8 +5,18 @@ use crate::cli::{self, CommandError};
 use crate::config::Config;
 use crate::diagnostics::document_diagnostics;
 use semantics::check::CHECK_EXECUTIONS;
+use semantics::diagnostics::file_diagnostics;
 use semantics::infer::RESOLVE_CALLS;
+use semantics::lints::lint_file;
+use semantics::metadata::{
+    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+    parse_description_dependencies, parse_namespace_imports,
+};
+use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use std::cmp::Reverse;
+use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -21,7 +31,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         CommandError
     })?;
     cli::warn_unknown_config_keys(&config);
-    let target = std::fs::canonicalize(target).map_err(|error| {
+    let target = fs::canonicalize(target).map_err(|error| {
         cli::error(&format!("failed to resolve {}: {error}", target.display()));
         CommandError
     })?;
@@ -30,7 +40,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     let typing_was_off = !config.check.typing;
     config.check.typing = true;
 
-    let mut stub_sources = semantics::stubs::shipped_stub_sources();
+    let mut stub_sources = shipped_stub_sources();
     match cli::read_project_stubs(&root) {
         Ok(project_stubs) => {
             stub_sources.extend(project_stubs.into_iter().map(|stub| (stub.stem, stub.text)));
@@ -42,14 +52,14 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             ));
         }
     }
-    let namespace_imports = std::fs::read_to_string(root.join("NAMESPACE"))
+    let namespace_imports = fs::read_to_string(root.join("NAMESPACE"))
         .ok()
-        .map(|source| semantics::metadata::parse_namespace_imports(&source))
+        .map(|source| parse_namespace_imports(&source))
         .unwrap_or_default();
-    let description_source = std::fs::read_to_string(root.join("DESCRIPTION")).ok();
+    let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let collate = description_source
         .as_deref()
-        .map(semantics::metadata::parse_description_collate)
+        .map(parse_description_collate)
         .unwrap_or_default();
 
     // File order and the `[check] exclude` scope must match the CLI and server.
@@ -64,26 +74,22 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
 
     let rss_baseline = proc_status_field("VmRSS:");
     let mut db = RootDatabase::default();
-    semantics::stubs::StubSources::new(
+    StubSources::new(&db, stub_sources, shipped_export_manifests());
+    let metadata = PackageMetadata::new(
         &db,
-        stub_sources,
-        semantics::stubs::shipped_export_manifests(),
-    );
-    let metadata = semantics::metadata::PackageMetadata::new(
-        &db,
-        semantics::metadata::normalized_imports(&namespace_imports),
+        normalized_imports(&namespace_imports),
         description_source
             .as_deref()
-            .map(semantics::metadata::parse_description_dependencies)
+            .map(parse_description_dependencies)
             .unwrap_or_default(),
-        std::collections::BTreeSet::new(),
+        BTreeSet::new(),
         None,
     );
     let mut records: Vec<FileRecord> = Vec::with_capacity(paths.len());
     let mut package_count = 0usize;
     let mut load_total = Duration::ZERO;
     for path in paths {
-        let source = match std::fs::read_to_string(&path) {
+        let source = match fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
                 cli::warn(&format!("failed to read {}: {error}", path.display()));
@@ -124,8 +130,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     let rss_after_parse = proc_status_field("VmRSS:");
     // Must land before naming so conditional stub namespaces resolve as the real
     // hosts see them.
-    let attached =
-        semantics::metadata::attached_union(&db, records.iter().map(|record| record.file));
+    let attached = attached_union(&db, records.iter().map(|record| record.file));
     if !attached.is_empty() {
         use salsa::Setter;
         metadata.set_attached(&mut db).to(attached);
@@ -155,13 +160,13 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     let mut semantic_render_total = Duration::ZERO;
     for record in &records {
         let start = Instant::now();
-        let _ = semantics::diagnostics::file_diagnostics(&db, record.file);
+        let _ = file_diagnostics(&db, record.file);
         semantic_render_total += start.elapsed();
     }
     let mut lint_total = Duration::ZERO;
     for record in &records {
         let start = Instant::now();
-        let _ = semantics::lints::lint_file(&db, record.file, &config.lint);
+        let _ = lint_file(&db, record.file, &config.lint);
         lint_total += start.elapsed();
     }
     let mut assemble_total = Duration::ZERO;
@@ -246,7 +251,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     println!();
     println!("slowest files (typecheck):");
     let mut by_typecheck: Vec<usize> = (0..records.len()).collect();
-    by_typecheck.sort_by_key(|&index| std::cmp::Reverse(records[index].typecheck));
+    by_typecheck.sort_by_key(|&index| Reverse(records[index].typecheck));
     for &index in by_typecheck.iter().take(SLOWEST_FILES) {
         let record = &records[index];
         println!(
@@ -380,7 +385,7 @@ const MEBIBYTE: f64 = 1024.0 * 1024.0;
 /// In bytes. The resident set includes allocator-held freed pages, so a phase with
 /// heavy transient allocation reads slightly high.
 fn proc_status_field(field: &str) -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let status = fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|line| line.starts_with(field))?;
     let kibibytes: u64 = line
         .strip_prefix(field)?
