@@ -17,15 +17,21 @@ path = "src/libr.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+bzip2-rs = "0.1.2"
+flate2 = "1.1.9"
 heap = { path = "../heap" }
 libc = "0.2"
+lzma-rs = "0.3.0"
 rustc-hash.workspace = true
+unicode-width.workspace = true
+stacker.workspace = true
 
 [build-dependencies]
 cc = "1.2"
 
 [dev-dependencies]
 libloading = "0.8"
+rcmd = { path = "../rcmd" }
 syntax = { path = "../syntax" }
 
 [[test]]
@@ -39,3 +45,64 @@ path = "tests/test_gnu_r_binaries.rs"
 [[test]]
 name = "test_fuzz_native"
 path = "tests/test_fuzz_native.rs"
+
+[[test]]
+name = "test_corpus_binaries"
+path = "tests/test_corpus_binaries.rs"
+
+[[test]]
+name = "test_altrep"
+path = "tests/test_altrep.rs"
+
+[[test]]
+name = "test_altrep_api"
+path = "tests/test_altrep_api.rs"
+
+[[test]]
+name = "test_serialize"
+path = "tests/test_serialize.rs"
+
+[[test]]
+name = "test_serialize_native"
+path = "tests/test_serialize_native.rs"
+
+[[test]]
+name = "test_connections"
+path = "tests/test_connections.rs"
+
+[[test]]
+name = "test_connections_gnu_binary"
+path = "tests/test_connections_gnu_binary.rs"
+
+[[test]]
+name = "test_install"
+path = "tests/test_install.rs"
+
+[[test]]
+name = "test_headers"
+path = "tests/test_headers.rs"
+
+[[test]]
+name = "test_corpus_calls"
+path = "tests/test_corpus_calls.rs"
+
+[[test]]
+name = "test_numerics"
+path = "tests/test_numerics.rs"
+
+[[test]]
+name = "test_linpack"
+path = "tests/test_linpack.rs"
+
+[[test]]
+name = "test_rmath"
+path = "tests/test_rmath.rs"
+
+[[test]]
+name = "test_fuzz_rmath"
+path = "tests/test_fuzz_rmath.rs"
+
+[[test]]
+name = "test_load_errors"
+path = "tests/test_load_errors.rs"
+harness = false

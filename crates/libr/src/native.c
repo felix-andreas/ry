@@ -12,6 +12,12 @@
  */
 
 #include <setjmp.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdint.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +27,7 @@
 #include <R_ext/Rdynload.h>
 
 #define RY_EXPORT __attribute__((visibility("default")))
+#define RY_EXPORT_DATA __attribute__((visibility("default")))
 
 /* Implemented in Rust (crates/libr/src/boundary.rs). */
 extern void ry_state_save(size_t *protect, size_t *vmax);
@@ -190,6 +197,26 @@ int ry_call_init(void (*function)(DllInfo *), DllInfo *info)
     function(info);
     ry_context_pop(&context);
     return 0;
+}
+
+/*
+ * A library's static initializers run inside dlopen and may call the API (Rcpp's
+ * `Function c("c")` looks up `c`). An error there jumps out of dlopen, as it does in GNU R;
+ * the loader lock is recursive and stays with this thread, so later loads still work.
+ */
+void *ry_call_dlopen(const char *path, int flags, int *status)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        *status = 1;
+        return NULL;
+    }
+    void *handle = dlopen(path, flags);
+    ry_context_pop(&context);
+    *status = 0;
+    return handle;
 }
 
 int ry_call_finalizer(R_CFinalizer_t function, SEXP object)
@@ -586,4 +613,839 @@ RY_EXPORT SEXP R_tryCatchError(SEXP (*body)(void *), void *bdata,
     SEXP result = R_tryCatch(body, bdata, conds, handler, hdata, NULL, NULL);
     UNPROTECT(1);
     return result;
+}
+
+/*
+ * The front-end interface (Rinterface.h, Rembedded.h, R_ext/eventloop.h, R_ext/Callbacks.h).
+ * GNU R exports these as data and as hooks a front end replaces; packages such as later share
+ * the event loop through them. The variables are plain C data, so they live here.
+ */
+
+typedef void (*RyInputHandlerProc)(void *);
+
+typedef struct RyInputHandler {
+    int activity;
+    int fileDescriptor;
+    RyInputHandlerProc handler;
+    struct RyInputHandler *next;
+    int active;
+    void *userData;
+} RyInputHandler;
+
+RY_EXPORT_DATA RyInputHandler *R_InputHandlers = NULL;
+RY_EXPORT_DATA void (*R_PolledEvents)(void) = NULL;
+RY_EXPORT_DATA int R_wait_usec = 0;
+
+RY_EXPORT RyInputHandler *addInputHandler(RyInputHandler *handlers, int fd,
+                                          RyInputHandlerProc handler, int activity)
+{
+    RyInputHandler *input = calloc(1, sizeof *input);
+    if (input == NULL)
+        return NULL;
+    input->activity = activity;
+    input->fileDescriptor = fd;
+    input->handler = handler;
+    input->active = 1;
+    if (handlers == NULL) {
+        R_InputHandlers = input;
+        return input;
+    }
+    RyInputHandler *last = handlers;
+    while (last->next != NULL)
+        last = last->next;
+    last->next = input;
+    return input;
+}
+
+RY_EXPORT RyInputHandler *getInputHandler(RyInputHandler *handlers, int fd)
+{
+    for (RyInputHandler *input = handlers; input != NULL; input = input->next)
+        if (input->fileDescriptor == fd)
+            return input;
+    return NULL;
+}
+
+RY_EXPORT int removeInputHandler(RyInputHandler **handlers, RyInputHandler *it)
+{
+    if (handlers == NULL || it == NULL)
+        return 0;
+    for (RyInputHandler **link = handlers; *link != NULL; link = &(*link)->next) {
+        if (*link == it) {
+            *link = it->next;
+            free(it);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+RY_EXPORT RyInputHandler *getSelectedHandler(RyInputHandler *handlers, fd_set *mask)
+{
+    for (RyInputHandler *input = handlers; input != NULL; input = input->next)
+        if (input->active && FD_ISSET(input->fileDescriptor, mask)) {
+            FD_CLR(input->fileDescriptor, mask);
+            return input;
+        }
+    return NULL;
+}
+
+RY_EXPORT int R_SelectEx(int n, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                         struct timeval *timeout, void (*intr)(void))
+{
+    (void) intr;
+    return select(n, readfds, writefds, exceptfds, timeout);
+}
+
+/* The descriptors with input pending, waiting at most `usec` microseconds (forever if negative). */
+RY_EXPORT fd_set *R_checkActivity(int usec, int ignore_stdin)
+{
+    static fd_set ready;
+    struct timeval wait;
+    int highest = -1;
+    FD_ZERO(&ready);
+    if (!ignore_stdin) {
+        FD_SET(STDIN_FILENO, &ready);
+        highest = STDIN_FILENO;
+    }
+    for (RyInputHandler *input = R_InputHandlers; input != NULL; input = input->next) {
+        /* An fd_set holds descriptors below FD_SETSIZE only; a larger one would write past it. */
+        if (input->active && input->fileDescriptor >= 0 && input->fileDescriptor < FD_SETSIZE) {
+            FD_SET(input->fileDescriptor, &ready);
+            if (input->fileDescriptor > highest)
+                highest = input->fileDescriptor;
+        }
+    }
+    if (R_wait_usec > 0 && (usec < 0 || R_wait_usec < usec))
+        usec = R_wait_usec;
+    wait.tv_sec = usec < 0 ? 0 : usec / 1000000;
+    wait.tv_usec = usec < 0 ? 0 : usec % 1000000;
+    int found = select(highest + 1, &ready, NULL, NULL, usec < 0 ? NULL : &wait);
+    return found > 0 ? &ready : NULL;
+}
+
+RY_EXPORT void R_runHandlers(RyInputHandler *handlers, fd_set *mask)
+{
+    if (mask == NULL) {
+        if (R_PolledEvents != NULL)
+            R_PolledEvents();
+        return;
+    }
+    RyInputHandler *input = handlers;
+    while (input != NULL) {
+        RyInputHandler *next = input->next;
+        if (input->active && input->fileDescriptor >= 0 && FD_ISSET(input->fileDescriptor, mask))
+            input->handler(input->userData);
+        input = next;
+    }
+}
+
+/* R_ProcessEvents runs the polled-events hook and acts on a pending interrupt. */
+RY_EXPORT void R_ProcessEvents(void)
+{
+    if (R_PolledEvents != NULL)
+        R_PolledEvents();
+    R_CheckUserInterrupt();
+}
+
+/* Console and front-end hooks a front end may replace. */
+
+typedef enum { RY_SA_NORESTORE, RY_SA_RESTORE, RY_SA_DEFAULT, RY_SA_NOSAVE, RY_SA_SAVE,
+               RY_SA_SAVEASK, RY_SA_SUICIDE } RySaveAction;
+
+RY_EXPORT_DATA char *R_Home = NULL;
+RY_EXPORT_DATA char *R_TempDir = NULL;
+RY_EXPORT_DATA char *R_GUIType = "unknown";
+RY_EXPORT_DATA char *R_HistoryFile = ".Rhistory";
+RY_EXPORT_DATA int R_HistorySize = 512;
+RY_EXPORT_DATA int R_RestoreHistory = 0;
+RY_EXPORT_DATA int R_DirtyImage = 0;
+RY_EXPORT_DATA Rboolean R_NoEcho = FALSE;
+RY_EXPORT_DATA FILE *R_Consolefile = NULL;
+RY_EXPORT_DATA FILE *R_Outputfile = NULL;
+RY_EXPORT_DATA int R_running_as_main_program = 0;
+RY_EXPORT_DATA int R_SignalHandlers = 0;
+RY_EXPORT_DATA int R_isForkedChild = 0;
+/* No C stack checking: the limit is the largest address, as when GNU R disables the check. */
+RY_EXPORT_DATA uintptr_t R_CStackLimit = (uintptr_t) -1;
+RY_EXPORT_DATA uintptr_t R_CStackStart = (uintptr_t) -1;
+RY_EXPORT_DATA int R_CStackDir = 1;
+RY_EXPORT_DATA int (*R_timeout_handler)(void) = NULL;
+RY_EXPORT_DATA long R_timeout_val = 0;
+RY_EXPORT_DATA Rboolean UserBreak = FALSE;
+RY_EXPORT_DATA int R_num_math_threads = 1;
+RY_EXPORT_DATA int R_max_num_math_threads = 1;
+
+/*
+ * GNU R's context stack is opaque to packages; later declares R_GlobalContext itself and only
+ * compares it with the top-level context, so both point at one zeroed block that reads as "at
+ * top level".
+ */
+static char ry_toplevel_context[1024];
+RY_EXPORT_DATA void *R_GlobalContext = ry_toplevel_context;
+RY_EXPORT_DATA void *R_ToplevelContext = ry_toplevel_context;
+
+RY_EXPORT_DATA void (*ptr_R_Suicide)(const char *) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ShowMessage)(const char *) = NULL;
+RY_EXPORT_DATA int (*ptr_R_ReadConsole)(const char *, unsigned char *, int, int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_WriteConsole)(const char *, int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_WriteConsoleEx)(const char *, int, int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ResetConsole)(void) = NULL;
+RY_EXPORT_DATA void (*ptr_R_FlushConsole)(void) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ClearerrConsole)(void) = NULL;
+RY_EXPORT_DATA void (*ptr_R_Busy)(int) = NULL;
+RY_EXPORT_DATA void (*ptr_R_CleanUp)(RySaveAction, int, int) = NULL;
+RY_EXPORT_DATA int (*ptr_R_ShowFiles)(int, const char **, const char **, const char *,
+                                      Rboolean, const char *) = NULL;
+RY_EXPORT_DATA int (*ptr_R_ChooseFile)(int, char *, int) = NULL;
+RY_EXPORT_DATA int (*ptr_R_EditFile)(const char *) = NULL;
+RY_EXPORT_DATA void (*ptr_R_loadhistory)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA void (*ptr_R_savehistory)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA void (*ptr_R_addhistory)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA int (*ptr_R_EditFiles)(int, const char **, const char **, const char *) = NULL;
+RY_EXPORT_DATA SEXP (*ptr_do_selectlist)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA SEXP (*ptr_do_dataentry)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA SEXP (*ptr_do_dataviewer)(SEXP, SEXP, SEXP, SEXP) = NULL;
+RY_EXPORT_DATA void (*ptr_R_ProcessEvents)(void) = NULL;
+
+/* Called once when the runtime starts: the streams are only known at run time. */
+void ry_frontend_start(const char *home, const char *temp_dir)
+{
+    R_Consolefile = stderr;
+    R_Outputfile = stdout;
+    if (home != NULL)
+        R_Home = strdup(home);
+    if (temp_dir != NULL)
+        R_TempDir = strdup(temp_dir);
+}
+
+RY_EXPORT void R_Busy(int which)
+{
+    if (ptr_R_Busy != NULL)
+        ptr_R_Busy(which);
+}
+
+/* Reads a line of console input into buf (len bytes, including the newline); 0 at end of input. */
+RY_EXPORT int R_ReadConsole(const char *prompt, unsigned char *buf, int len, int addtohistory)
+{
+    if (ptr_R_ReadConsole != NULL)
+        return ptr_R_ReadConsole(prompt, buf, len, addtohistory);
+    if (prompt != NULL) {
+        fputs(prompt, stdout);
+        fflush(stdout);
+    }
+    if (len <= 0 || fgets((char *) buf, len, stdin) == NULL)
+        return 0;
+    return 1;
+}
+
+RY_EXPORT void R_WriteConsole(const char *buf, int len)
+{
+    if (ptr_R_WriteConsole != NULL) {
+        ptr_R_WriteConsole(buf, len);
+        return;
+    }
+    ry_write_console(buf, (size_t) len, 0);
+}
+
+RY_EXPORT void R_WriteConsoleEx(const char *buf, int len, int otype)
+{
+    if (ptr_R_WriteConsoleEx != NULL) {
+        ptr_R_WriteConsoleEx(buf, len, otype);
+        return;
+    }
+    ry_write_console(buf, (size_t) len, otype != 0);
+}
+
+RY_EXPORT void R_ResetConsole(void)
+{
+    if (ptr_R_ResetConsole != NULL)
+        ptr_R_ResetConsole();
+}
+
+RY_EXPORT void R_ClearerrConsole(void)
+{
+    if (ptr_R_ClearerrConsole != NULL)
+        ptr_R_ClearerrConsole();
+    clearerr(stdin);
+}
+
+RY_EXPORT char *R_HomeDir(void)
+{
+    return R_Home;
+}
+
+extern void ry_run_exit_finalizers(void);
+
+RY_EXPORT void R_Suicide(const char *message)
+{
+    if (ptr_R_Suicide != NULL)
+        ptr_R_Suicide(message);
+    fprintf(stderr, "Fatal error: %s\n", message);
+    exit(2);
+}
+
+RY_EXPORT void R_CleanUp(RySaveAction save, int status, int run_last)
+{
+    (void) save;
+    (void) run_last;
+    if (ptr_R_CleanUp != NULL)
+        ptr_R_CleanUp(save, status, run_last);
+    ry_run_exit_finalizers();
+    exit(status);
+}
+
+RY_EXPORT void R_setStartTime(void) {}
+
+RY_EXPORT void fpu_setup(Rboolean start) { (void) start; }
+
+RY_EXPORT int R_EditFiles(int nfile, const char **file, const char **title, const char *editor)
+{
+    if (ptr_R_EditFiles != NULL)
+        return ptr_R_EditFiles(nfile, file, title, editor);
+    return 1;
+}
+
+RY_EXPORT void R_CleanTempDir(void)
+{
+    /* The runtime removes its session directory itself at exit. */
+}
+
+RY_EXPORT void R_SaveGlobalEnv(void) {}
+RY_EXPORT void R_RestoreGlobalEnv(void) {}
+RY_EXPORT void R_SaveGlobalEnvToFile(const char *name) { (void) name; }
+RY_EXPORT void R_RestoreGlobalEnvFromFile(const char *name, Rboolean quiet)
+{
+    (void) name;
+    (void) quiet;
+}
+RY_EXPORT void R_setupHistory(void) {}
+RY_EXPORT void CleanEd(void) {}
+
+/* Reading Renviron files is the front end's job; the `ry` binary does it before libR starts. */
+RY_EXPORT void process_site_Renviron(void) {}
+RY_EXPORT void process_system_Renviron(void) {}
+RY_EXPORT void process_user_Renviron(void) {}
+
+/* Abandons the current computation, as an error with an empty message does. */
+RY_EXPORT void Rf_jump_to_toplevel(void)
+{
+    Rf_error("%s", "");
+}
+
+/* Task callbacks run after each top-level task, when the interpreter calls
+   eval::run_task_callbacks. A callback may remove callbacks, its own included, while the list
+   runs, so removal during a run only marks the node and the run frees it afterwards. */
+
+typedef Rboolean (*RyTaskCallback)(SEXP, SEXP, Rboolean, Rboolean, void *);
+
+typedef struct RyToplevelCallback {
+    RyTaskCallback cb;
+    void *data;
+    void (*finalizer)(void *data);
+    char *name;
+    int removed;
+    struct RyToplevelCallback *next;
+} RyToplevelCallback;
+
+static RyToplevelCallback *ry_task_callbacks = NULL;
+static int ry_task_callbacks_running = 0;
+
+static void ry_free_task_callback(RyToplevelCallback *callback)
+{
+    if (callback->finalizer != NULL)
+        callback->finalizer(callback->data);
+    free(callback->name);
+    free(callback);
+}
+
+/* Unlinks and frees `*link`, or only marks it while a run holds pointers to the nodes. */
+static void ry_remove_task_callback(RyToplevelCallback **link)
+{
+    RyToplevelCallback *callback = *link;
+    if (ry_task_callbacks_running) {
+        callback->removed = 1;
+        return;
+    }
+    *link = callback->next;
+    ry_free_task_callback(callback);
+}
+
+static void ry_sweep_task_callbacks(void)
+{
+    RyToplevelCallback **link = &ry_task_callbacks;
+    while (*link != NULL) {
+        if ((*link)->removed)
+            ry_remove_task_callback(link);
+        else
+            link = &(*link)->next;
+    }
+}
+
+RY_EXPORT RyToplevelCallback *Rf_addTaskCallback(RyTaskCallback cb, void *data,
+                                                 void (*finalizer)(void *), const char *name,
+                                                 int *pos)
+{
+    RyToplevelCallback *callback = calloc(1, sizeof *callback);
+    if (callback == NULL)
+        Rf_error("cannot allocate a task callback");
+    callback->cb = cb;
+    callback->data = data;
+    callback->finalizer = finalizer;
+    int position = 1;
+    RyToplevelCallback **link = &ry_task_callbacks;
+    while (*link != NULL) {
+        if (!(*link)->removed)
+            position++;
+        link = &(*link)->next;
+    }
+    if (name != NULL) {
+        callback->name = strdup(name);
+    } else {
+        char generated[32];
+        snprintf(generated, sizeof generated, "%d", position);
+        callback->name = strdup(generated);
+    }
+    if (callback->name == NULL) {
+        free(callback);
+        Rf_error("cannot allocate a task callback");
+    }
+    *link = callback;
+    if (pos != NULL)
+        *pos = position;
+    return callback;
+}
+
+RY_EXPORT Rboolean Rf_removeTaskCallbackByIndex(int index)
+{
+    int position = 1;
+    for (RyToplevelCallback **link = &ry_task_callbacks; *link != NULL; link = &(*link)->next) {
+        if ((*link)->removed)
+            continue;
+        if (position == index) {
+            ry_remove_task_callback(link);
+            return TRUE;
+        }
+        position++;
+    }
+    return FALSE;
+}
+
+RY_EXPORT Rboolean Rf_removeTaskCallbackByName(const char *name)
+{
+    if (name == NULL)
+        return FALSE;
+    for (RyToplevelCallback **link = &ry_task_callbacks; *link != NULL; link = &(*link)->next) {
+        if (!(*link)->removed && strcmp((*link)->name, name) == 0) {
+            ry_remove_task_callback(link);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* Runs every task callback once; one that returns FALSE is removed. A callback that raises an
+   error ends the run with status 1, after the removed nodes are freed. Callbacks added during
+   the run first run after the next task. */
+void ry_run_task_callbacks(SEXP expr, SEXP value, Rboolean succeeded, Rboolean visible,
+                           int *status)
+{
+    *status = 0;
+    if (ry_task_callbacks_running)
+        return;
+    RyToplevelCallback *last = NULL;
+    for (RyToplevelCallback *node = ry_task_callbacks; node != NULL; node = node->next)
+        last = node;
+    if (last == NULL)
+        return;
+    /* `volatile` because the loop variables are read again after a longjmp lands here. */
+    RyToplevelCallback *volatile callback = ry_task_callbacks;
+    RyToplevelCallback *const end = last;
+    RyContext context;
+    ry_context_push(&context);
+    ry_task_callbacks_running = 1;
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        ry_task_callbacks_running = 0;
+        ry_sweep_task_callbacks();
+        *status = 1;
+        return;
+    }
+    for (;;) {
+        RyToplevelCallback *current = callback;
+        if (!current->removed &&
+            !current->cb(expr, value, succeeded, visible, current->data))
+            current->removed = 1;
+        if (current == end)
+            break;
+        callback = current->next;
+    }
+    ry_context_pop(&context);
+    ry_task_callbacks_running = 0;
+    ry_sweep_task_callbacks();
+}
+
+/* R_maphashC's callback is native code; the status is unused because an error jumps instead. */
+SEXP ry_maphash_call(SEXP (*function)(SEXP, SEXP, void *), SEXP key, SEXP value, void *data,
+                     int *status)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        *status = 1;
+        return NULL;
+    }
+    SEXP result = function(key, value, data);
+    ry_context_pop(&context);
+    *status = 0;
+    return result;
+}
+
+/*
+ * R_withCallingErrorHandler: the handler sees an error raised in the body and the error then
+ * continues outward. GNU R runs a calling handler before the stack unwinds; here the native
+ * frames between the error and this context are already gone when the handler runs, which only
+ * matters to a handler that inspects them.
+ */
+RY_EXPORT SEXP R_withCallingErrorHandler(SEXP (*body)(void *), void *bdata,
+                                         SEXP (*handler)(SEXP, void *), void *hdata)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        SEXP classes = PROTECT(Rf_mkString("error"));
+        SEXP condition = ry_pending_condition(classes);
+        if (condition != NULL) {
+            PROTECT(condition);
+            handler(condition, hdata);
+            UNPROTECT(1);
+        }
+        UNPROTECT(1);
+        ry_jump();
+    }
+    SEXP result = body(bdata);
+    ry_context_pop(&context);
+    return result;
+}
+/* ALTREP methods with SEXP results (crates/libr/src/altrep.rs). A method may return C NULL,
+   which means "use the default", so the result is passed back as a raw pointer. */
+
+#define RY_ALTREP_TRAMPOLINE(name, parameters, call)                                         \
+    int name parameters                                                                      \
+    {                                                                                        \
+        RyContext context;                                                                   \
+        ry_context_push(&context);                                                           \
+        if (setjmp(context.buffer)) {                                                        \
+            ry_context_land(&context);                                                       \
+            return 1;                                                                        \
+        }                                                                                    \
+        *result = call;                                                                      \
+        ry_context_pop(&context);                                                            \
+        return 0;                                                                            \
+    }
+
+RY_ALTREP_TRAMPOLINE(ry_altrep_with_flag,
+                     (SEXP (*method)(SEXP, Rboolean), SEXP x, int flag, SEXP *result),
+                     method(x, flag ? TRUE : FALSE))
+RY_ALTREP_TRAMPOLINE(ry_altrep_coerce, (SEXP (*method)(SEXP, int), SEXP x, int type, SEXP *result),
+                     method(x, type))
+RY_ALTREP_TRAMPOLINE(ry_altrep_state, (SEXP (*method)(SEXP), SEXP x, SEXP *result), method(x))
+RY_ALTREP_TRAMPOLINE(ry_altrep_unserialize,
+                     (SEXP (*method)(SEXP, SEXP), SEXP class, SEXP state, SEXP *result),
+                     method(class, state))
+RY_ALTREP_TRAMPOLINE(ry_altrep_unserialize_ex,
+                     (SEXP (*method)(SEXP, SEXP, SEXP, int, int), SEXP class, SEXP state,
+                      SEXP attributes, int object, int levels, SEXP *result),
+                     method(class, state, attributes, object, levels))
+RY_ALTREP_TRAMPOLINE(ry_altrep_extract_subset,
+                     (SEXP (*method)(SEXP, SEXP, SEXP), SEXP x, SEXP indices, SEXP call,
+                      SEXP *result),
+                     method(x, indices, call))
+RY_ALTREP_TRAMPOLINE(ry_altrep_inspect,
+                     (Rboolean (*method)(SEXP, int, int, int, void (*)(SEXP, int, int, int)),
+                      SEXP x, int pre, int deep, int pvec, void (*subtree)(SEXP, int, int, int),
+                      int *result),
+                     method(x, pre, deep, pvec, subtree))
+
+/* Serialization streams (crates/libr/src/serialize.rs). A stream's callbacks and persistence
+ * hooks are native code, so each runs inside its own context. */
+
+int ry_stream_out_bytes(void (*function)(R_outpstream_t, void *, int), R_outpstream_t stream,
+                        void *bytes, int length)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    function(stream, bytes, length);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_stream_in_bytes(void (*function)(R_inpstream_t, void *, int), R_inpstream_t stream,
+                       void *bytes, int length)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    function(stream, bytes, length);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_stream_in_char(int (*function)(R_inpstream_t), R_inpstream_t stream, int *result)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    *result = function(stream);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_stream_hook(SEXP (*function)(SEXP, SEXP), SEXP object, SEXP data, SEXP *result)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    *result = function(object, data);
+    ry_context_pop(&context);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * Connections (crates/libr/src/connections.rs).
+ *
+ * The methods of a custom connection are package code, so Rust reaches them only through these
+ * trampolines. The default vfprintf lives here because it takes a va_list.
+ * ------------------------------------------------------------------------------------------ */
+
+#include <R_ext/Connections.h>
+
+#define RY_CONNECTION_ENTER                                                                     \
+    RyContext context;                                                                          \
+    ry_context_push(&context);                                                                  \
+    if (setjmp(context.buffer)) {                                                               \
+        ry_context_land(&context);                                                              \
+        return 1;                                                                               \
+    }
+
+#define RY_CONNECTION_LEAVE                                                                     \
+    ry_context_pop(&context);                                                                   \
+    return 0;
+
+/* Formats into R_alloc memory, which the enclosing native scope reclaims even when write
+   raises an error, and hands the text to the connection's write method. */
+int ry_connection_vfprintf(Rconnection con, const char *format, va_list arguments)
+{
+    char small[1024];
+    va_list copy;
+    va_copy(copy, arguments);
+    int length = vsnprintf(small, sizeof small, format, arguments);
+    char *text = small;
+    if (length >= (int) sizeof small) {
+        text = R_alloc((size_t) length + 1, 1);
+        vsnprintf(text, (size_t) length + 1, format, copy);
+    }
+    va_end(copy);
+    if (length > 0)
+        con->write(text, 1, (size_t) length, con);
+    return length;
+}
+
+int ry_connection_open(Rboolean (*method)(Rconnection), Rconnection con, int *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_void(void (*method)(Rconnection), Rconnection con)
+{
+    RY_CONNECTION_ENTER
+    method(con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_int(int (*method)(Rconnection), Rconnection con, int *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_seek(double (*method)(Rconnection, double, int, int), Rconnection con,
+                       double position, int origin, int rw, double *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(con, position, origin, rw);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_read(size_t (*method)(void *, size_t, size_t, Rconnection), void *buffer,
+                       size_t size, size_t count, Rconnection con, size_t *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(buffer, size, count, con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_write(size_t (*method)(const void *, size_t, size_t, Rconnection),
+                        const void *buffer, size_t size, size_t count, Rconnection con,
+                        size_t *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(buffer, size, count, con);
+    RY_CONNECTION_LEAVE
+}
+
+static int ry_connection_printf(int (*method)(Rconnection, const char *, va_list), Rconnection con,
+                                const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    int result = method(con, format, arguments);
+    va_end(arguments);
+    return result;
+}
+
+int ry_connection_print(int (*method)(Rconnection, const char *, va_list), Rconnection con,
+                        const char *text, int *result)
+{
+    RY_CONNECTION_ENTER
+    *result = ry_connection_printf(method, con, "%s", text);
+    RY_CONNECTION_LEAVE
+}
+
+/*
+ * Numerical routines (applic.rs). The objective functions, gradients and integrands that
+ * packages hand to the optimizers and to the quadrature are native code, so each kind runs in
+ * a context of its own: an error inside one returns here as status 1 and unwinds through the
+ * Rust optimizer as an ordinary Err.
+ */
+
+#include <R_ext/Applic.h>
+
+int ry_call_optimfn(optimfn *fn, int n, double *par, void *ex, double *result)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    *result = fn(n, par, ex);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_optimgr(optimgr *gr, int n, double *par, double *gradient, void *ex)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    gr(n, par, gradient, ex);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_integrand(integr_fn *f, double *x, int n, void *ex)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    f(x, n, ex);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_fcn(fcn_p fcn, int n, double *x, double *value, void *state)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    fcn(n, x, value, state);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_call_d2fcn(d2fcn_p d2fcn, int nr, int n, double *x, double *h, void *state)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    d2fcn(nr, n, x, h, state);
+    ry_context_pop(&context);
+    return 0;
+}
+
+/*
+ * samin draws its Gaussian steps from norm_rand, which the Rmath module defines. The weak
+ * reference lets this library link without that module; samin then reports the gap as an
+ * error instead of crashing.
+ */
+extern double norm_rand(void) __attribute__((weak));
+
+int ry_norm_rand_available(void)
+{
+    return norm_rand != NULL;
+}
+
+double ry_norm_rand(void)
+{
+    return norm_rand();
+}
+
+/* Fortran's error and warning calls. GNU R caps the message at 255 characters. */
+
+static int ry_fortran_length(const char *message, int length)
+{
+    if (length < 0)
+        length = (int) strlen(message);
+    return length > 255 ? 255 : length;
+}
+
+RY_EXPORT void rexitc_(char *message, int *length)
+{
+    Rf_error("%.*s", ry_fortran_length(message, *length), message);
+}
+
+RY_EXPORT void rwarnc_(char *message, int *length)
+{
+    Rf_warning("%.*s", ry_fortran_length(message, *length), message);
+}
+
+/* The forms without a length take it from Fortran's hidden trailing argument. */
+RY_EXPORT void rexit_(char *message, size_t length)
+{
+    Rf_error("%.*s", ry_fortran_length(message, (int) length), message);
+}
+
+RY_EXPORT void rwarn_(char *message, size_t length)
+{
+    Rf_warning("%.*s", ry_fortran_length(message, (int) length), message);
 }

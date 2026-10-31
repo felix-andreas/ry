@@ -28,7 +28,7 @@ use crate::{
     convert::{RVector, to_r, to_series},
 };
 use heap::{
-    object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
+    object::{Header, NA_INTEGER, NA_REAL, Sexp, SexpType},
     strings::Encoding,
 };
 use libr::{
@@ -492,8 +492,9 @@ unsafe extern "C" fn real_elt_method(vector: Sexp, index: R_xlen_t) -> f64 {
     }
 }
 
-unsafe extern "C" fn string_elt_method(vector: Sexp, index: R_xlen_t) -> Sexp {
-    unsafe {
+/// R declares the element method as returning a nullable `SEXP`; this one never returns null.
+unsafe extern "C" fn string_elt_method(vector: Sexp, index: R_xlen_t) -> *mut Header {
+    let element = unsafe {
         enter(|| {
             let strings = materialized(vector)?;
             if index < 0 || index >= strings.length() {
@@ -501,7 +502,8 @@ unsafe extern "C" fn string_elt_method(vector: Sexp, index: R_xlen_t) -> Sexp {
             }
             Ok(strings.element(index as usize))
         })
-    }
+    };
+    element.as_ptr()
 }
 
 unsafe extern "C" fn int_region_method(

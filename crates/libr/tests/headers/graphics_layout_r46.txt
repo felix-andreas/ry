@@ -1,0 +1,129 @@
+DevDesc 656
+DevDesc.left 0 8
+DevDesc.right 8 8
+DevDesc.bottom 16 8
+DevDesc.top 24 8
+DevDesc.clipLeft 32 8
+DevDesc.clipRight 40 8
+DevDesc.clipBottom 48 8
+DevDesc.clipTop 56 8
+DevDesc.xCharOffset 64 8
+DevDesc.yCharOffset 72 8
+DevDesc.yLineBias 80 8
+DevDesc.ipr 88 16
+DevDesc.cra 104 16
+DevDesc.gamma 120 8
+DevDesc.canClip 128 4
+DevDesc.canChangeGamma 132 4
+DevDesc.canHAdj 136 4
+DevDesc.startps 144 8
+DevDesc.startcol 152 4
+DevDesc.startfill 156 4
+DevDesc.startlty 160 4
+DevDesc.startfont 164 4
+DevDesc.startgamma 168 8
+DevDesc.deviceSpecific 176 8
+DevDesc.displayListOn 184 4
+DevDesc.canGenMouseDown 188 4
+DevDesc.canGenMouseMove 192 4
+DevDesc.canGenMouseUp 196 4
+DevDesc.canGenKeybd 200 4
+DevDesc.canGenIdle 204 4
+DevDesc.gettingEvent 208 4
+DevDesc.activate 216 8
+DevDesc.circle 224 8
+DevDesc.clip 232 8
+DevDesc.close 240 8
+DevDesc.deactivate 248 8
+DevDesc.locator 256 8
+DevDesc.line 264 8
+DevDesc.metricInfo 272 8
+DevDesc.mode 280 8
+DevDesc.newPage 288 8
+DevDesc.polygon 296 8
+DevDesc.polyline 304 8
+DevDesc.rect 312 8
+DevDesc.path 320 8
+DevDesc.raster 328 8
+DevDesc.cap 336 8
+DevDesc.size 344 8
+DevDesc.strWidth 352 8
+DevDesc.text 360 8
+DevDesc.onExit 368 8
+DevDesc.getEvent 376 8
+DevDesc.newFrameConfirm 384 8
+DevDesc.hasTextUTF8 392 4
+DevDesc.textUTF8 400 8
+DevDesc.strWidthUTF8 408 8
+DevDesc.wantSymbolUTF8 416 4
+DevDesc.useRotatedTextInContour 420 4
+DevDesc.eventEnv 424 8
+DevDesc.eventHelper 432 8
+DevDesc.holdflush 440 8
+DevDesc.haveTransparency 448 4
+DevDesc.haveTransparentBg 452 4
+DevDesc.haveRaster 456 4
+DevDesc.haveCapture 460 4
+DevDesc.haveLocator 464 4
+DevDesc.setPattern 472 8
+DevDesc.releasePattern 480 8
+DevDesc.setClipPath 488 8
+DevDesc.releaseClipPath 496 8
+DevDesc.setMask 504 8
+DevDesc.releaseMask 512 8
+DevDesc.deviceVersion 520 4
+DevDesc.deviceClip 524 4
+DevDesc.defineGroup 528 8
+DevDesc.useGroup 536 8
+DevDesc.releaseGroup 544 8
+DevDesc.stroke 552 8
+DevDesc.fill 560 8
+DevDesc.fillStroke 568 8
+DevDesc.capabilities 576 8
+DevDesc.glyph 584 8
+DevDesc.reserved 592 64
+R_GE_gcontext 288
+R_GE_gcontext.col 0 4
+R_GE_gcontext.fill 4 4
+R_GE_gcontext.gamma 8 8
+R_GE_gcontext.lwd 16 8
+R_GE_gcontext.lty 24 4
+R_GE_gcontext.lend 28 4
+R_GE_gcontext.ljoin 32 4
+R_GE_gcontext.lmitre 40 8
+R_GE_gcontext.cex 48 8
+R_GE_gcontext.ps 56 8
+R_GE_gcontext.lineheight 64 8
+R_GE_gcontext.fontface 72 4
+R_GE_gcontext.fontfamily 76 201
+R_GE_gcontext.patternFill 280 8
+GESystemDesc 16
+GESystemDesc.systemSpecific 0 8
+GESystemDesc.callback 8 8
+GEDevDesc 256
+GEDevDesc.dev 0 8
+GEDevDesc.displayListOn 8 4
+GEDevDesc.displayList 16 8
+GEDevDesc.DLlastElt 24 8
+GEDevDesc.savedSnapshot 32 8
+GEDevDesc.dirty 40 4
+GEDevDesc.recordGraphics 44 4
+GEDevDesc.lock 48 4
+GEDevDesc.gesd 56 192
+GEDevDesc.ask 248 4
+GEDevDesc.appending 252 4
+R_GE_version 17
+MAX_GRAPHICS_SYSTEMS 24
+GE_ScalePS 8
+GE_RestoreState 6
+GE_SQUARE_CAP 3
+GE_BEVEL_JOIN 3
+GE_CM 3
+knDEL 21
+meMouseMove 2
+LTY_DOTDASH 13361
+LTY_TWODASH 9762
+R_TRANWHITE 16777215
+R_RGB 4278387201
+R_GE_compositeExclusion 25
+R_GE_capability_glyphs 12

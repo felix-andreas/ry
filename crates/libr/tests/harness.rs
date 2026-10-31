@@ -103,6 +103,8 @@ api! {
     Rf_setAttrib: fn(Sexp, Sexp, Sexp) -> Sexp;
     Rf_coerceVector: fn(Sexp, u32) -> Sexp;
     R_compute_identical: fn(Sexp, Sexp, c_int) -> c_int;
+    ry_read_rds: fn(*const c_char) -> Sexp;
+    ry_native_symbol: fn(*const c_char, *const c_char) -> Sexp;
 }
 
 pub struct Session {
@@ -558,4 +560,160 @@ pub fn brio_round_trip(r: &R) {
         error,
         "Error: Could not open file: /nonexistent/brio-file\n"
     );
+}
+
+// The installed corpus: packages that ship a shared object, and their load order.
+
+/// An installed package that ships a shared object.
+#[derive(Clone, Debug)]
+pub struct Package {
+    pub directory: PathBuf,
+    /// A base package (`Priority: base`) ships with GNU R and is built from R's own sources
+    /// against its internal headers, so it is reported apart from the benchmark closure.
+    pub base: bool,
+    pub library: PathBuf,
+    pub dependencies: Vec<String>,
+}
+
+pub fn corpus_libraries() -> Vec<PathBuf> {
+    let mut libraries = Vec::new();
+    let corpus = std::env::var_os("RY_CORPUS_LIBRARY").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.corpus/library"),
+        PathBuf::from,
+    );
+    if corpus.is_dir() {
+        libraries.push(corpus);
+    }
+    if let Ok(output) = Command::new("R").arg("RHOME").output()
+        && output.status.success()
+    {
+        let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let system = Path::new(&home).join("library");
+        if system.is_dir() {
+            libraries.push(system);
+        }
+    }
+    libraries
+}
+
+/// The DESCRIPTION fields that name packages whose code must be loaded first.
+fn dependencies(description: &str) -> Vec<String> {
+    let mut fields: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in description.lines() {
+        if line.starts_with([' ', '\t']) {
+            if let Some(field) = &current {
+                fields.entry(field.clone()).or_default().push_str(line);
+            }
+        } else if let Some((field, value)) = line.split_once(':') {
+            current = Some(field.trim().to_owned());
+            fields.insert(field.trim().to_owned(), value.to_owned());
+        }
+    }
+    let mut names = Vec::new();
+    for field in ["Depends", "Imports", "LinkingTo"] {
+        if let Some(value) = fields.get(field) {
+            for entry in value.split(',') {
+                let name = entry
+                    .trim()
+                    .split(|character: char| character.is_whitespace() || character == '(')
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                if !name.is_empty() && name != "R" {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
+}
+
+pub fn scan(libraries: &[PathBuf]) -> std::collections::BTreeMap<String, Package> {
+    let mut packages = std::collections::BTreeMap::new();
+    for library in libraries {
+        let Ok(entries) = std::fs::read_dir(library) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let directory = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if packages.contains_key(&name) {
+                continue;
+            }
+            let Ok(description) = std::fs::read_to_string(directory.join("DESCRIPTION")) else {
+                continue;
+            };
+            let Ok(objects) = std::fs::read_dir(directory.join("libs")) else {
+                continue;
+            };
+            let mut objects: Vec<PathBuf> = objects
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|extension| extension == "so"))
+                .collect();
+            objects.sort();
+            // The package's own object is named after it, with dots as underscores in a few
+            // packages (data.table builds data_table.so).
+            let wanted = [
+                format!("{name}.so"),
+                format!("{}.so", name.replace('.', "_")),
+            ];
+            let Some(library) = objects
+                .iter()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|file| wanted.iter().any(|wanted| file == wanted.as_str()))
+                })
+                .or(objects.first())
+                .cloned()
+            else {
+                continue;
+            };
+            let base = description
+                .lines()
+                .any(|line| line.trim() == "Priority: base");
+            packages.insert(
+                name,
+                Package {
+                    base,
+                    directory,
+                    library,
+                    dependencies: dependencies(&description),
+                },
+            );
+        }
+    }
+    packages
+}
+
+/// `name` and the packages it depends on, dependencies first.
+pub fn load_order(
+    name: &str,
+    packages: &std::collections::BTreeMap<String, Package>,
+) -> Vec<String> {
+    fn visit(
+        name: &str,
+        packages: &std::collections::BTreeMap<String, Package>,
+        seen: &mut std::collections::BTreeSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        if !seen.insert(name.to_owned()) {
+            return;
+        }
+        if let Some(package) = packages.get(name) {
+            for dependency in &package.dependencies {
+                visit(dependency, packages, seen, order);
+            }
+            order.push(name.to_owned());
+        }
+    }
+    let mut order = Vec::new();
+    visit(
+        name,
+        packages,
+        &mut std::collections::BTreeSet::new(),
+        &mut order,
+    );
+    order
 }

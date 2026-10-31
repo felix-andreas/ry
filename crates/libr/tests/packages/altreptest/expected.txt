@@ -1,0 +1,115 @@
+elt_only, length 6
+  altrep: elt_only/altreptest integer, class handle raw
+  LENGTH: 6, XLENGTH: 6, length: 6
+  INTEGER_ELT: [0,2,4,6,8,10]
+  DATAPTR_OR_NULL: NULL, INTEGER_OR_NULL: NULL
+  INTEGER_GET_REGION(2, 8): 4 [4,6,8,10]
+  sorted: unknown, no_na: 0
+  R_altrep_inherits: 1
+  INTEGER: error: cannot access data pointer for this ALTVEC object [class: elt_only, pkg: altreptest]
+  SET_INTEGER_ELT: error: cannot access data pointer for this ALTVEC object [class: elt_only, pkg: altreptest]
+  ALTINTEGER_SUM: NULL
+  altrep: no
+  as double: [0,2,4,6,8,10]
+  altrep: deferred_string/base character, class handle raw
+  as character: [0,2,4,6,8,10]
+pointer, length 5
+  altrep: pointer/altreptest double, class handle raw
+  DATAPTR_OR_NULL before: NULL
+  REAL_ELT: [0.5,1.5,2.5,3.5,4.5]
+  DATAPTR_OR_NULL after: pointer, REAL_OR_NULL: pointer
+  data2 materialized: yes
+  sorted: 1, no_na: 1
+  sum 12.5, min 0.5, max 4.5
+  after SET_REAL_ELT: 9
+  REAL_GET_REGION(3, 3): 2 [3.5,4.5]
+  altrep: no
+  copy: [0.5,9,2.5,3.5,4.5]
+  altrep: no
+  as integer: [0,9,2,3,4]
+  altrep: deferred_string/base character, class handle raw
+  as character: [0.5,9,2.5,3.5,4.5]
+string
+  altrep: string/altreptest character, class handle raw
+  STRING_ELT: [b,a,NA]
+  sorted: 0, no_na: 0
+  after SET_STRING_ELT: [b,a,c]
+  sorted: 0, no_na: 1
+  DATAPTR_OR_NULL: NULL
+  STRING_PTR_RO: error: cannot access data pointer for this ALTVEC object [class: string, pkg: altreptest]
+list
+  altrep: list/altreptest list, class handle raw
+  VECTOR_ELT[1]: two
+  after SET_VECTOR_ELT: one
+  DATAPTR_RO[1]: two
+  altrep: no
+  copy length: 2
+logical, length 5
+  altrep: logical/altreptest logical, class handle raw
+  LOGICAL_ELT: [1,0,1,0,1]
+  LOGICAL_GET_REGION(2, 4): 3 [1,0,1]
+  sorted: 0, no_na: 1
+  sum: 3
+  altrep: no
+  as integer: [1,0,1,0,1]
+raw, length 4
+  altrep: raw/altreptest raw, class handle raw
+  RAW_ELT: 0 7 14 21
+  RAW_GET_REGION(1, 4): 3 [7,14,21]
+  RAW_OR_NULL: NULL
+  RAW: error: cannot access data pointer for this ALTVEC object [class: raw, pkg: altreptest]
+  altrep: no
+  as integer: [0,7,14,21]
+complex, length 3
+  altrep: complex/altreptest complex, class handle raw
+  COMPLEX_ELT[2]: 2-2i
+  COMPLEX_GET_REGION(1, 5): 2 [1-1i,2-2i]
+  COMPLEX_OR_NULL: NULL
+  altrep: no
+  as character: [0+0i,1-1i,2-2i]
+failing
+  LENGTH: 6
+  INTEGER_ELT: error: element 3 is unavailable
+  region: error: element 3 is unavailable
+  INTEGER: error: no data pointer for a failing vector
+  sum: error: cannot sum a failing vector
+allocating
+  altrep: allocating/altreptest integer, class handle raw
+  INTEGER_ELT: [10,20,30,40]
+  altrep: allocating/altreptest integer, class handle raw
+  copy: [10,20,30,40]
+  copy keeps attribute tag = kept
+  altrep: no
+  as double: [10.25,20.25,30.25,40.25]
+  altrep: no
+  as character: [10,20,30,40]
+wrapper
+  altrep: wrap_integer/base integer, class handle raw
+  INTEGER_ELT: [3,1,2]
+  sorted: unknown, no_na: 0
+  metadata: integer 2
+  wraps the source: yes
+  DATAPTR_OR_NULL: pointer
+  altrep: wrap_integer/base integer, class handle raw
+  copy: [3,1,2]
+  after SET_INTEGER_ELT: 77
+  source after the write: [3,77,2]
+  R_tryWrap(list) is the list: yes
+  altrep: wrap_string/base character, class handle raw
+deferred string
+  altrep: deferred_string/base character, class handle raw
+  LENGTH: 3
+  STRING_ELT[0]: 10
+  DATAPTR_OR_NULL: NULL
+  sorted: unknown, no_na: 0
+  STRING_ELT: [10,NA,-4]
+  STRING_PTR_RO[2]: -4
+  DATAPTR_OR_NULL after STRING_PTR_RO: pointer
+  after SET_STRING_ELT: [ten,NA,-4]
+  altrep: deferred_string/base character, class handle raw
+  doubles: [1.5,1e+05,1e-20,123456789012]
+  sorted: unknown, no_na: 0
+  with names:
+  altrep: no
+  from logical:
+  altrep: no

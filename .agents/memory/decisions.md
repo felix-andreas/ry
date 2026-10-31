@@ -1786,6 +1786,111 @@ there was no previous source of truth; the choices that settle architecture are 
 - **The corpus is pinned with renv** on a dated P3M snapshot in build step 1, because renv is in the
   benchmark set and R's own installer cannot backtrack to older compatible versions.
 
+# Decision record: the full C API surface and package installation
+
+This settles the part of step 4 of `contributing/design/r-runtime.md` that does not need the
+interpreter. Before it, `libr` exported the top 150 measured names, `Rf_eval` evaluated nine
+primitives, and nothing built or installed packages.
+
+- **Evaluation is a hook the interpreter installs, not a dependency.** `libr::eval::Evaluator`
+  (eval, apply, parse, force_and_call, print_value, current_env, current_srcref, dot_last) is set
+  once with `install_evaluator`; every evaluation entry point of the C API (`Rf_eval`,
+  `R_tryEval`, `R_forceAndCall`, `R_ParseVector`, `Rf_PrintValue`, R-level finalizers,
+  `R_GetCurrentEnv`, the S4 class functions through `methods`, namespace loading in
+  `R_GetCCallable` and the unserializer) goes through it. The interpreter calls libR back as
+  ordinary Rust (`native_call`, `connections::*`, `serialize::*`, `altrep::*`). Without an
+  evaluator the built-in evaluator of native calls runs, so libR stays testable alone.
+- **BLAS and LAPACK are header-only.** `R_ext/BLAS.h` and `Lapack.h` declare the system
+  libraries, which packages link themselves (`R CMD config BLAS_LIBS` is `-lblas`), as Debian's
+  GNU R and every corpus binary do (they record `libblas.so.3`/`liblapack.so.3`). A Rust LAPACK
+  does not exist at reference quality, and re-exporting the routines from libR would duplicate
+  the system's. Where R 4.6's declarations contradict the reference routine (missing or stale
+  arguments, pointer-to-pointer typos), ry's headers follow the routine; hidden string-length
+  arguments always follow R.
+- **libR depends on zlib, bzip2 and xz,** as GNU R's does, because binaries (gert, httpuv) call
+  zlib without linking it and find it through libR.
+- **Names R 4.6 dropped stay exported** (`legacy.rs`), because binaries built for older R import
+  them and a missing symbol stops a library from loading at all. `TRUELENGTH` is the capacity of a
+  shrunk vector; any other value lives in `Runtime::truelengths`, and its object is preserved
+  while it has one, so no address is reused under a stale value. `SETLENGTH` makes the vector
+  resizable. `FRAME` returns a snapshot pairlist (frames are hashed). `R_PPStack` is a real array
+  that a root source scans up to `R_PPStackTop`, for code compiled with R's internal macros.
+- **The graphics engine is exported and errors when used.** Device packages (ragg, systemfonts)
+  must load and register; the colour and text helpers work. Implementing devices stays the open
+  question it was.
+- **`.C` and `.Fortran` copy their arguments** and pass data pointers through the same
+  dispatcher as `.Call` (all arguments are pointers), returning the copies as a named list.
+  `.Call` accepts `NativeSymbolInfo` objects, which packages that call `R_forceSymbols` require.
+- **`R_withCallingErrorHandler` runs its handler on the unwinding error,** after the native frames
+  between the error and the handler are gone. GNU R runs it before unwinding; the difference shows
+  only to a handler that inspects those frames.
+- **Hash tables (`R_mkhashtab`) live entirely in heap objects** (an external pointer whose tag
+  is `c(type, count)` and whose protected value is the bucket list), so the collector traces
+  them and nothing is freed by hand.
+- **ALTREP methods have three states:** default, native (through a C trampoline) and built in
+  (Rust returning `ApiResult`, no `setjmp`), so ry's own compact sequences cost nothing at the
+  boundary. A class handle has GNU R's layout (a raw vector whose attribute is the class,
+  package and type), registered by (class, package) symbols. `Rf_coerceVector` of a plain
+  integer or double vector to character returns a deferred string, as GNU R does.
+- **Serialization writes ALTREP objects as `ALTREP_SXP` in version 3** and reads them through
+  the class registry (loading the package's namespace for an unknown class when an interpreter is
+  installed), so compact sequences round-trip byte for byte with GNU R. GNU R bytecode reads as
+  the expression in its constant pool, because ry does not run GNU R bytecode. Environments are
+  written unhashed. Namespace and package references go through a resolver the interpreter
+  replaces; the default creates registered placeholders.
+- **A connection's `conn_id` external pointer holds its `Rconn` address,** validated on use, so
+  a stale connection object errors with "invalid connection" instead of reaching a reused slot.
+  Buffering lives in each connection kind, not in `Rconn`'s `buff` fields, so
+  `R_ReadConnection` after `readLines` sees exactly the unread bytes.
+- **Header export coverage is checked by the compiler** (`-aux-info` and `-E` in
+  `tests/test_headers.rs`), not by scanning header text, because rename macros and struct fields
+  defeat a text scan.
+- **Package installation is the `rcmd` crate.** ry's R home has ry's headers and `libR.so`, an
+  `etc/Makeconf` written for ry, `share/make/shlib.mk`, and a `bin/R` that runs `ry-rcmd`, so
+  `configure` scripts asking `R CMD config` get ry's toolchain. A source install compiles `src/`
+  as `R CMD INSTALL` does and records `RyBuilt:`; the R-level half (lazy-load database, help,
+  `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript`, and `bin/R`
+  for anything but `R CMD` and `R RHOME`, run GNU R for the R code configure scripts and
+  `Makevars` evaluate (`R -f tools/examples.R`): an explicit build-time delegation that the
+  interpreter replaces, not a fallback on failure.
+- **Rmath, Applic, LINPACK and the Fortran helpers are Rust written from the published
+  algorithms** (`rmath.rs`, `applic.rs`, `linpack.rs`, `utils.rs`), never translated from GNU R,
+  which is GPL. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random
+  streams through the `rmathtest` package, and `test_rmath` replays them in ry's libR with a
+  per-function tolerance that names its reason. The random variates draw uniforms in GNU R's
+  order, so seeded streams match. `R_binom_kind` reports `BUGGY_BTPE` and `R_sample_kind`
+  `REJECTION`, the defaults of the R version the corpus was recorded with.
+- **An error raised while `dlopen` runs a library's static initializers surfaces as a
+  `dyn.load` error,** as in GNU R: `ry_call_dlopen` sets a jump target around `dlopen`
+  (Rcpp's `Function c("c")` globals call `Rf_findFun` there). Longjmping out of an initializer
+  leaves glibc's recursive loader lock with that thread, as it does in GNU R, so a process that
+  exits from another thread deadlocks in `_dl_fini`; R runs on the main thread, and the tests
+  that provoke it (`test_load_errors`) do too.
+- **`getNamespace` is a built-in of the native-call evaluator,** answered by the serializer's
+  namespace resolver, because Rcpp's initializers look it up before any interpreter exists.
+- **The headers keep declaring the names R 4.6 removed** (`SETLENGTH`, `SET_TRUELENGTH`,
+  `FRAME`, ...) and ship an empty `R_ext/PrtUtil.h`, because pinned package sources (readr,
+  isoband, yaml) still use them and `legacy.rs` exports them anyway.
+- **The numerical routines were audited and rewritten clean room.** A review flagged routines
+  whose structure tracked GNU R's C closely (the LINPACK QR family `dqrdc2`/`dqrls` and friends,
+  the optimizers `vmmin`, `nmmin`, `cgmin`, `samin`, plus `R_max_col`, `R_pretty`, and parts of
+  Rmath). Their bodies were deleted and rewritten by agents that never read GNU R's sources, from
+  the published algorithms (LINPACK's users' guide, Nash's *Compact Numerical Methods*, Nelder
+  and Mead, the Wilcoxon and signed-rank recurrences) and R's documentation, with GNU R used only
+  as a black-box oracle through recorded cases. Results match GNU R exactly except where the
+  system BLAS (OpenBLAS) reorders sums; those cases carry a named tolerance. The rewritten incomplete
+  gamma, noncentral chi-squared and beta, and discrete quantiles are more accurate than GNU R in
+  far tails (checked with mpmath), so `test_rmath` accepts a quantile when ry's own distribution
+  function maps GNU R's answer back to p within GNU R's error, and a noncentral function whose
+  Poisson index exceeds i32 returns NaN with a precision warning. SANN does not accept a
+  custom candidate generator and always takes the Gaussian step.
+- **`R CMD SHLIB` passes `-l`, `-L` and `.a` arguments through to the link,** because configure
+  scripts probe for system libraries with `R CMD SHLIB conftest.c -lfoo` (Rglpk). Other options
+  are ignored, as before.
+- **`Rf_rnbeta` is exported** although GNU R's library does not define it, because R's `Rmath.h`
+  declares `rnbeta` and Rcpp's sugar headers refer to `::Rf_rnbeta`, so a declaration with no
+  symbol fails the header coverage test and a missing declaration breaks Rcpp builds.
+
 # Decision record: the package-development loader
 
 Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and the user page

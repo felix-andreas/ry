@@ -1,0 +1,942 @@
+# file_reading
+> con <- file(file.path(.dir, "a.txt"))
+integer[1] class=file,connection 3
+> summary.connection(con)
+list[7]
+  $description
+    character[1] "<dir>/a.txt"
+  $class
+    character[1] "file"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "closed"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "yes"
+> isOpen(con)
+logical[1] FALSE
+> readLines(con)
+character[2] "a" "b"
+> isOpen(con)
+logical[1] FALSE
+> open(con, "r")
+NULL
+> summary.connection(con)
+list[7]
+  $description
+    character[1] "<dir>/a.txt"
+  $class
+    character[1] "file"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "no"
+> seek(con)
+double[1] 0
+> readLines(con, n = 1L)
+character[1] "a"
+> seek(con)
+double[1] 2
+> readLines(con)
+character[1] "b"
+> readLines(con)
+character[0]
+> open(con, "r")
+NULL
+warning: connection is already open
+> seek(con, 0)
+double[1] 4
+> readLines(con)
+character[2] "a" "b"
+> close(con)
+integer[1] 0
+> readLines(con)
+error: invalid connection
+> summary.connection(con)
+error: invalid connection
+# file_writing
+> con <- file(file.path(.dir, "b.txt"), "w")
+integer[1] class=file,connection 3
+> writeLines(c("x", "y"), con, sep = "|")
+NULL
+> isOpen(con, "write")
+logical[1] TRUE
+> isOpen(con, "read")
+logical[1] FALSE
+> readLines(con)
+error: cannot read from this connection
+> flush(con)
+NULL
+> close(con)
+integer[1] 0
+> readLines(file.path(.dir, "b.txt"))
+character[1] "x|y|"
+warning: incomplete final line found on '<dir>/b.txt'
+> con <- file(file.path(.dir, "b.txt"), "a")
+integer[1] class=file,connection 3
+> summary.connection(con)
+list[7]
+  $description
+    character[1] "<dir>/b.txt"
+  $class
+    character[1] "file"
+  $mode
+    character[1] "a"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "no"
+  $can write
+    character[1] "yes"
+> writeLines("z", con)
+NULL
+> close(con)
+integer[1] 0
+> readChar(file.path(.dir, "b.txt"), 100L)
+character[1] "x|y|z\n"
+> writeLines(c("one", "two"), file.path(.dir, "c.txt"))
+NULL
+> readLines(file.path(.dir, "c.txt"))
+character[2] "one" "two"
+> con <- file(file.path(.dir, "b.txt"))
+integer[1] class=file,connection 3
+> open(con, "r+")
+NULL
+> readLines(con, n = 1L)
+character[1] "x|y|z"
+> writeLines("Q", con)
+NULL
+> seek(con, rw = "write")
+double[1] 2
+> seek(con, rw = "read")
+double[1] 6
+> close(con)
+integer[1] 0
+> readChar(file.path(.dir, "b.txt"), 100L)
+character[1] "Q\ny|z\n"
+> con <- file(file.path(.dir, "b.txt"), "r+")
+integer[1] class=file,connection 3
+> seek(con, 2)
+double[1] 0
+> truncate(con)
+NULL
+> close(con)
+integer[1] 0
+> readChar(file.path(.dir, "b.txt"), 100L)
+character[1] "Q\n"
+# anonymous_file
+> con <- file("")
+integer[1] class=file,connection 3
+> summary.connection(con)
+list[7]
+  $description
+    character[1] ""
+  $class
+    character[1] "file"
+  $mode
+    character[1] "w+"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "yes"
+> writeLines(c("zz", "yy"), con)
+NULL
+> seek(con, 0)
+double[1] 6
+> readLines(con)
+character[2] "zz" "yy"
+> close(con)
+integer[1] 0
+# file_errors
+> file(file.path(.dir, "missing/x"), "r")
+error: cannot open the connection
+warning: cannot open file '<dir>/missing/x': No such file or directory
+> readLines(file.path(.dir, "missing/x"))
+error: cannot open the connection
+warning: cannot open file '<dir>/missing/x': No such file or directory
+> con <- file(file.path(.dir, "missing/x"))
+integer[1] class=file,connection 3
+> open(con, "q")
+error: cannot open the connection
+warning: cannot open file '<dir>/missing/x': Invalid argument
+> summary.connection(con)
+list[7]
+  $description
+    character[1] "<dir>/missing/x"
+  $class
+    character[1] "file"
+  $mode
+    character[1] "q"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "closed"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "yes"
+> readLines(5L)
+error: 'con' is not a connection
+> getConnection(99L)
+error: there is no connection 99
+> close(stdout())
+error: cannot close standard connections
+> seek(con)
+error: connection is not open
+> close(con)
+NULL
+> close(con)
+error: invalid connection
+# line_endings_and_nul
+> readLines(file.path(.dir, "d.txt"))
+character[4] "" "A" "B" "C"
+warning: incomplete final line found on '<dir>/d.txt'
+> readLines(file.path(.dir, "d.txt"), warn = FALSE)
+character[4] "" "A" "B" "C"
+> readLines(file.path(.dir, "d.txt"), n = 5L, ok = FALSE)
+error: too few lines read in readLines
+warning: incomplete final line found on '<dir>/d.txt'
+> readLines(file.path(.dir, "d.txt"), n = 2L)
+character[2] "" "A"
+> readLines(file.path(.dir, "e.txt"))
+character[2] "a" "c"
+warning: line 1 appears to contain an embedded nul
+> readLines(file.path(.dir, "e.txt"), skipNul = TRUE)
+character[2] "ab" "c"
+> readLines(file.path(.dir, "empty.txt"))
+character[0]
+# push_back
+> con <- file(file.path(.dir, "a.txt"), "r")
+integer[1] class=file,connection 3
+> pushBack(c("one", "two"), con)
+NULL
+> pushBackLength(con)
+integer[1] 2
+> readLines(con, n = 1L)
+character[1] "one"
+> pushBackLength(con)
+integer[1] 1
+> pushBack("pp", con, newLine = FALSE)
+NULL
+> readLines(con)
+character[3] "pptwo" "a" "b"
+> pushBack(c("gone"), con)
+NULL
+> clearPushBack(con)
+NULL
+> pushBackLength(con)
+integer[1] 0
+> readLines(con)
+character[0]
+> close(con)
+integer[1] 0
+# raw_connections
+> r <- rawConnection(bytes)
+integer[1] class=rawConnection,connection 3
+> summary.connection(r)
+list[7]
+  $description
+    character[1] "bytes"
+  $class
+    character[1] "rawConnection"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "binary"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "no"
+> readBin(r, "raw", 2L)
+raw[2] 01 02
+> seek(r)
+double[1] 2
+> seek(r, -1, origin = "end")
+double[1] 2
+> readBin(r, "raw", 10L)
+raw[1] 05
+> seek(r, 9)
+error: attempt to seek outside the range of the raw connection
+> rawConnectionValue(r)
+error: 'con' is not an output rawConnection
+> writeBin(as.raw(c(0x01)), r)
+error: cannot write to this connection
+> close(r)
+NULL
+> w <- rawConnection(nothing, "w")
+integer[1] class=rawConnection,connection 3
+> summary.connection(w)
+list[7]
+  $description
+    character[1] "nothing"
+  $class
+    character[1] "rawConnection"
+  $mode
+    character[1] "w"
+  $text
+    character[1] "binary"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "no"
+  $can write
+    character[1] "yes"
+> writeBin(c(1.5, -2), w)
+NULL
+> writeBin(c(1L, 2L), w)
+NULL
+> writeBin(c(TRUE, NA), w)
+NULL
+> writeBin(c("ab", "c"), w)
+NULL
+> writeBin(1L, w, size = 2L, endian = "big")
+NULL
+> v <- rawConnectionValue(w)
+raw[39] 00 00 00 00 00 00 f8 3f 00 00 00 00 00 00 00 c0 01 00 00 00 02 00 00 00 01 00 00 00 00 00 00 80 61 62 00 63 00 00 01
+> readLines(w)
+error: cannot read from this connection
+> close(w)
+NULL
+> r <- rawConnection(v)
+integer[1] class=rawConnection,connection 3
+> readBin(r, "double", 2L)
+double[2] 1.5 -2
+> readBin(r, "integer", 2L)
+integer[2] 1 2
+> readBin(r, "logical", 2L)
+logical[2] TRUE NA
+> readBin(r, "character", 2L)
+character[2] "ab" "c"
+> readBin(r, "integer", 1L, size = 2L, endian = "big")
+integer[1] 1
+> readBin(r, "integer", 1L)
+integer[0]
+> close(r)
+NULL
+> a <- rawConnection(bytes, "a")
+integer[1] class=rawConnection,connection 3
+> writeBin(as.raw(c(0x09)), a)
+NULL
+> rawConnectionValue(a)
+raw[6] 01 02 03 04 05 09
+> seek(a)
+double[1] 6
+> close(a)
+NULL
+> s <- rawConnection(signed)
+integer[1] class=rawConnection,connection 3
+> readBin(s, "integer", 2L, size = 1L, signed = FALSE)
+integer[2] 255 255
+> readBin(s, "int", 5L, size = 1L)
+integer[4] 1 2 3 4
+> close(s)
+NULL
+> readBin(signed, "integer", 3L, size = 2L)
+integer[3] -1 513 1027
+> readBin(signed, "integer", 1L, size = 3L)
+error: size 3 is unknown on this machine
+> writeBin(c(7L, 8L), nothing)
+raw[8] 07 00 00 00 08 00 00 00
+> h <- rawConnection(hello)
+integer[1] class=rawConnection,connection 3
+> readChar(h, c(2L, 3L, 100L, 4L))
+character[3] "he" "llo" " world"
+> close(h)
+NULL
+> h <- rawConnection(hello)
+integer[1] class=rawConnection,connection 3
+> readLines(h)
+character[1] "hello world"
+warning: incomplete final line found on 'hello'
+> close(h)
+NULL
+# text_connections
+> t <- textConnection(lines)
+integer[1] class=textConnection,connection 3
+> summary.connection(t)
+list[7]
+  $description
+    character[1] "lines"
+  $class
+    character[1] "textConnection"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "no"
+> seek(t)
+double[1] 0
+> seek(t, 1)
+error: seek is not relevant for text connection
+> writeLines("a", t)
+error: cannot write to this connection
+> readLines(t, n = 2L)
+character[2] "x" "y"
+> textConnectionValue(t)
+error: 'con' is not an output textConnection
+> readLines(t)
+character[1] "z"
+> readLines(t)
+character[0]
+> close(t)
+NULL
+> out <- textConnection(NULL, "w")
+integer[1] class=textConnection,connection 3
+> summary.connection(out)
+list[7]
+  $description
+    character[1] "NULL"
+  $class
+    character[1] "textConnection"
+  $mode
+    character[1] "w"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "no"
+  $can write
+    character[1] "yes"
+> writeLines(c("p", "q"), out)
+NULL
+> writeLines("part", out, sep = "")
+NULL
+> textConnectionValue(out)
+character[2] "p" "q"
+> close(out)
+NULL
+> named <- textConnection("captured", "w")
+integer[1] class=textConnection,connection 3
+> identity(captured)
+character[0]
+> writeLines(c("l1", "l2"), named)
+NULL
+> identity(captured)
+character[2] "l1" "l2"
+> writeLines("tail", named, sep = "")
+NULL
+> close(named)
+NULL
+> identity(captured)
+character[3] "l1" "l2" "tail"
+# standard_connections
+> summary.connection(stdin())
+list[7]
+  $description
+    character[1] "stdin"
+  $class
+    character[1] "terminal"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "no"
+> summary.connection(stdout())
+list[7]
+  $description
+    character[1] "stdout"
+  $class
+    character[1] "terminal"
+  $mode
+    character[1] "w"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "no"
+  $can write
+    character[1] "yes"
+> summary.connection(stderr())
+list[7]
+  $description
+    character[1] "stderr"
+  $class
+    character[1] "terminal"
+  $mode
+    character[1] "w"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "no"
+  $can write
+    character[1] "yes"
+> stdout()
+integer[1] class=terminal,connection 1
+> getAllConnections()
+integer[3] 0 1 2
+> isIncomplete(stdin())
+logical[1] FALSE
+> seek(stdin())
+error: 'seek' not enabled for this connection
+> writeLines("x", stdin())
+error: cannot write to this connection
+> textConnectionValue(stdout())
+error: 'con' is not a textConnection
+> rawConnectionValue(stdout())
+error: 'con' is not a rawConnection
+> getConnection(2L)
+integer[1] class=terminal,connection 2
+> open(stdin())
+error: cannot open standard connections
+# slots
+> first <- textConnection(lines)
+integer[1] class=textConnection,connection 3
+> second <- textConnection(lines)
+integer[1] class=textConnection,connection 4
+> third <- textConnection(lines)
+integer[1] class=textConnection,connection 5
+> getAllConnections()
+integer[6] 0 1 2 3 4 5
+> close(second)
+NULL
+> getAllConnections()
+integer[5] 0 1 2 3 5
+> again <- textConnection(lines)
+integer[1] class=textConnection,connection 4
+> getConnection(4L)
+integer[1] class=textConnection,connection 4
+> readLines(again)
+character[1] "x"
+> closeAllConnections()
+NULL
+> getAllConnections()
+integer[3] 0 1 2
+# gzip
+> z <- gzfile(file.path(.dir, "g.gz"), "w")
+integer[1] class=gzfile,connection 3
+> summary.connection(z)
+list[7]
+  $description
+    character[1] "<dir>/g.gz"
+  $class
+    character[1] "gzfile"
+  $mode
+    character[1] "w"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "no"
+  $can write
+    character[1] "yes"
+> writeLines(c("gz", "line"), z)
+NULL
+> close(z)
+NULL
+> z <- gzfile(file.path(.dir, "g.gz"))
+integer[1] class=gzfile,connection 3
+> summary.connection(z)
+list[7]
+  $description
+    character[1] "<dir>/g.gz"
+  $class
+    character[1] "gzfile"
+  $mode
+    character[1] "rb"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "closed"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "yes"
+> readLines(z)
+character[2] "gz" "line"
+> open(z)
+NULL
+> readChar(z, 3L)
+character[1] "gz\n"
+warning: text connection used with readChar(), results may be incorrect
+> seek(z)
+double[1] 3
+> seek(z, 1)
+double[1] 3
+> readLines(z)
+character[2] "z" "line"
+> close(z)
+NULL
+> readLines(file.path(.dir, "g.gz"))
+character[2] "gz" "line"
+> f <- file(file.path(.dir, "g.gz"), "r")
+integer[1] class=file,connection 3
+> summary.connection(f)
+list[7]
+  $description
+    character[1] "<dir>/g.gz"
+  $class
+    character[1] "gzfile"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "opened"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "no"
+> close(f)
+NULL
+> readLines(gzfile(file.path(.dir, "plain.txt")))
+character[1] "not compressed"
+# pipes
+> p <- pipe("echo hi; echo there")
+integer[1] class=pipe,connection 3
+> summary.connection(p)
+list[7]
+  $description
+    character[1] "echo hi; echo there"
+  $class
+    character[1] "pipe"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "closed"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "yes"
+> readLines(p)
+character[2] "hi" "there"
+> close(p)
+integer[1] 0
+> q <- pipe("printf 'a\\nb'; exit 3", "r")
+integer[1] class=pipe,connection 3
+> readLines(q)
+character[1] "a"
+> close(q)
+integer[1] 768
+# custom_defaults
+> b <- .Call("ryconn_bare", "r")
+integer[1] class=ryconn,connection 3
+> summary.connection(b)
+list[7]
+  $description
+    character[1] "bare"
+  $class
+    character[1] "ryconn"
+  $mode
+    character[1] "r"
+  $text
+    character[1] "text"
+  $opened
+    character[1] "closed"
+  $can read
+    character[1] "yes"
+  $can write
+    character[1] "yes"
+> .Call("ryconn_fields", b)
+list[11]
+  $class
+    character[1] "ryconn"
+  $description
+    character[1] "bare"
+  $mode
+    character[1] "r"
+  $text
+    logical[1] TRUE
+  $isopen
+    logical[1] FALSE
+  $canread
+    logical[1] TRUE
+  $canwrite
+    logical[1] TRUE
+  $canseek
+    logical[1] FALSE
+  $blocking
+    logical[1] FALSE
+  $incomplete
+    logical[1] FALSE
+  $has_vfprintf
+    logical[1] TRUE
+> .Call("ryconn_call_method", b, "open")
+error: open not enabled for this connection
+> .Call("ryconn_call_method", b, "close")
+logical[1] FALSE
+> .Call("ryconn_call_method", b, "fgetc")
+error: 'getc' not enabled for this connection
+> .Call("ryconn_call_method", b, "fgetc_internal")
+error: 'getc' not enabled for this connection
+> .Call("ryconn_call_method", b, "seek")
+error: 'seek' not enabled for this connection
+> .Call("ryconn_call_method", b, "truncate")
+error: truncation not enabled for this connection
+> .Call("ryconn_call_method", b, "fflush")
+integer[1] 0
+> .Call("ryconn_call_method", b, "read")
+error: 'read' not enabled for this connection
+> .Call("ryconn_call_method", b, "write")
+error: 'write' not enabled for this connection
+> open(b)
+error: open not enabled for this connection
+> readLines(b)
+error: open not enabled for this connection
+> .Call("ryconn_mark_open", b)
+NULL
+> readLines(b)
+error: 'getc' not enabled for this connection
+> writeLines("x", b)
+error: 'write' not enabled for this connection
+> .Call("ryconn_read", b, 4L)
+error: 'read' not enabled for this connection
+> .Call("ryconn_write", b, as.raw(c(0x01, 0x02, 0x03)), 2L)
+error: 'write' not enabled for this connection
+> .Call("ryconn_printf", b, "k", 1L)
+error: 'write' not enabled for this connection
+> close(b)
+NULL
+> summary.connection(b)
+error: invalid connection
+# custom_memory
+> m <- .Call("ryconn_new", "mem", "r", as.raw(c(0x6f, 0x6e, 0x65, 0x0a, 0x74, 0x77, 0x6f, 0x0a, 0x74, 0x68, 0x72, 0x65, 0x65)), 2L, 0L)
+integer[1] class=ryconn,connection 3
+> .Call("ryconn_fields", m)
+list[11]
+  $class
+    character[1] "ryconn"
+  $description
+    character[1] "mem"
+  $mode
+    character[1] "r"
+  $text
+    logical[1] TRUE
+  $isopen
+    logical[1] FALSE
+  $canread
+    logical[1] TRUE
+  $canwrite
+    logical[1] TRUE
+  $canseek
+    logical[1] FALSE
+  $blocking
+    logical[1] FALSE
+  $incomplete
+    logical[1] FALSE
+  $has_vfprintf
+    logical[1] TRUE
+> readLines(m)
+character[2] "one" "two"
+> isIncomplete(m)
+logical[1] TRUE
+> pushBackLength(m)
+integer[1] 1
+> .Call("ryconn_fields", m)
+list[11]
+  $class
+    character[1] "ryconn"
+  $description
+    character[1] "mem"
+  $mode
+    character[1] "r"
+  $text
+    logical[1] TRUE
+  $isopen
+    logical[1] FALSE
+  $canread
+    logical[1] TRUE
+  $canwrite
+    logical[1] FALSE
+  $canseek
+    logical[1] FALSE
+  $blocking
+    logical[1] FALSE
+  $incomplete
+    logical[1] TRUE
+  $has_vfprintf
+    logical[1] TRUE
+> open(m)
+NULL
+> readLines(m, n = 1L)
+character[1] "threeone"
+> .Call("ryconn_read_all", m, 3L)
+raw[9] 74 77 6f 0a 74 68 72 65 65
+> .Call("ryconn_read", m, 3L)
+raw[0]
+> close(m)
+NULL
+> w <- .Call("ryconn_new", "mem", "w", raw(0), 0L, 0L)
+integer[1] class=ryconn,connection 3
+> open(w, "w")
+NULL
+> writeLines(c("a", "b"), w)
+NULL
+> .Call("ryconn_write", w, as.raw(c(0x78, 0x79, 0x7a)), 2L)
+integer[1] 3
+> .Call("ryconn_printf", w, "k", 7L)
+integer[1] 4
+> writeBin(as.raw(c(0x21)), w)
+error: can only write to a binary connection
+> .Call("ryconn_contents", w)
+raw[11] 61 0a 62 0a 78 79 7a 6b 3d 37 0a
+> .Call("ryconn_read", w, 3L)
+error: cannot read from this connection
+> close(w)
+NULL
+> c5 <- .Call("ryconn_new", "mem", "r", as.raw(c(0x61, 0x62, 0x0a, 0x63, 0x64)), 0L, 0L)
+integer[1] class=ryconn,connection 3
+> open(c5)
+NULL
+> .Call("ryconn_fgetc", c5, 6L)
+integer[6] 97 98 10 99 100 -1
+> close(c5)
+NULL
+# custom_errors
+> f <- .Call("ryconn_new", "fail", "r", as.raw(c(0x78)), 0L, 1L)
+integer[1] class=ryconn,connection 3
+> open(f)
+NULL
+> readLines(f)
+error: custom read failed
+> .Call("ryconn_read", f, 1L)
+error: custom read failed
+> readBin(f, "raw", 1L)
+error: can only read from a binary connection
+> close(f)
+NULL
+> g <- .Call("ryconn_new", "fail", "r", as.raw(c(0x78)), 0L, 2L)
+integer[1] class=ryconn,connection 3
+> open(g)
+error: custom open failed
+> readLines(g)
+error: custom open failed
+> isOpen(g)
+logical[1] FALSE
+> close(g)
+NULL
+> h <- .Call("ryconn_new", "fail", "w", raw(0), 0L, 3L)
+integer[1] class=ryconn,connection 3
+> writeLines("x", h)
+error: custom write failed
+> isOpen(h)
+logical[1] FALSE
+> close(h)
+NULL
+# c_readers_and_writers
+> f <- file(file.path(.dir, "hw.txt"), "rb")
+integer[1] class=file,connection 3
+> .Call("ryconn_fgetc", f, 3L)
+integer[3] 104 101 108
+> .Call("ryconn_seek", f, -1)
+double[1] 3
+> .Call("ryconn_read_all", f, 4L)
+raw[9] 6c 6f 0a 77 6f 72 6c 64 0a
+> .Call("ryconn_seek", f, 1)
+double[1] 12
+> .Call("ryconn_read", f, 3L)
+raw[3] 65 6c 6c
+> .Call("ryconn_fields", f)
+list[11]
+  $class
+    character[1] "file"
+  $description
+    character[1] "<dir>/hw.txt"
+  $mode
+    character[1] "rb"
+  $text
+    logical[1] FALSE
+  $isopen
+    logical[1] TRUE
+  $canread
+    logical[1] TRUE
+  $canwrite
+    logical[1] FALSE
+  $canseek
+    logical[1] TRUE
+  $blocking
+    logical[1] TRUE
+  $incomplete
+    logical[1] FALSE
+  $has_vfprintf
+    logical[1] TRUE
+> close(f)
+integer[1] 0
+> f <- file(file.path(.dir, "hw.txt"))
+integer[1] class=file,connection 3
+> .Call("ryconn_read", f, 3L)
+error: connection is not open
+> close(f)
+NULL
+> f <- file(file.path(.dir, "hw.txt"), "w")
+integer[1] class=file,connection 3
+> .Call("ryconn_write", f, as.raw(c(0x61, 0x62, 0x63, 0x64, 0x65, 0x66)), 4L)
+integer[1] 6
+> .Call("ryconn_printf", f, "n", 3L)
+integer[1] 4
+> close(f)
+integer[1] 0
+> readLines(file.path(.dir, "hw.txt"))
+character[1] "abcdefn=3"
+> f <- file(file.path(.dir, "hw.txt"), "r")
+integer[1] class=file,connection 3
+> .Call("ryconn_write", f, as.raw(c(0x01)), 1L)
+error: cannot write to this connection
+> close(f)
+integer[1] 0
+> .Call("ryconn_fields", 3L)
+error: invalid connection
+> f <- file(file.path(.dir, "hw.txt"))
+integer[1] class=file,connection 3
+> close(f)
+NULL
+> .Call("ryconn_fields", f)
+error: invalid connection
+> r <- rawConnection(bytes)
+integer[1] class=rawConnection,connection 3
+> .Call("ryconn_read_all", r, 3L)
+raw[10] 30 31 32 33 34 35 36 37 38 39
+> close(r)
+NULL
+> out <- textConnection(NULL, "w")
+integer[1] class=textConnection,connection 3
+> .Call("ryconn_write", out, as.raw(c(0x61, 0x62, 0x0a, 0x63, 0x64, 0x0a, 0x65, 0x66)), 3L)
+error: 'write' not enabled for this connection
+> textConnectionValue(out)
+character[0]
+> close(out)
+NULL
+> f <- file(file.path(.dir, "hw.txt"), "r")
+integer[1] class=file,connection 3
+> pushBack("pushed", f)
+NULL
+> .Call("ryconn_read", f, 100L)
+raw[10] 61 62 63 64 65 66 6e 3d 33 0a
+> readLines(f)
+character[1] "pushed"
+> close(f)
+integer[1] 0

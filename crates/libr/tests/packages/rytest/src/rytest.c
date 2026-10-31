@@ -532,11 +532,63 @@ SEXP rytest_sample(SEXP range, SEXP count)
     return out;
 }
 
+/* R_maphashC with a callback that removes every later entry and then collects: the entries
+   still to be visited must survive, because the walk promised to visit them. Returns how many
+   visited entries were not the integer key and string value stored. */
+static R_hashtab_type maphash_table;
+static int maphash_visits;
+static int maphash_corrupt;
+
+static SEXP maphash_visit(SEXP key, SEXP value, void *data)
+{
+    (void) data;
+    if (maphash_visits++ == 0) {
+        for (int i = 0; i < 50; i++)
+            R_remhash(maphash_table, PROTECT(ScalarInteger(i))), UNPROTECT(1);
+        for (int i = 0; i < 2000; i++)
+            allocVector(INTSXP, 1000);
+        R_gc();
+        for (int i = 0; i < 2000; i++)
+            INTEGER(allocVector(INTSXP, 4))[0] = -777;
+        return R_NilValue;
+    }
+    if (TYPEOF(key) != INTSXP || TYPEOF(value) != STRSXP ||
+        strncmp(CHAR(STRING_ELT(value, 0)), "v", 1) != 0)
+        maphash_corrupt++;
+    return R_NilValue;
+}
+
+/* The table is filled in one call and walked in another, because everything a call allocates
+   stays reachable until that call returns. */
+SEXP rytest_maphash_fill(void)
+{
+    maphash_table = R_mkhashtab(HT_TYPE_IDENTICAL, 0);
+    R_PreserveObject(R_HashtabSEXP(maphash_table));
+    for (int i = 0; i < 50; i++) {
+        char text[16];
+        snprintf(text, sizeof text, "v%d", i);
+        R_sethash(maphash_table, PROTECT(ScalarInteger(i)), PROTECT(mkString(text)));
+        UNPROTECT(2);
+    }
+    return R_NilValue;
+}
+
+SEXP rytest_maphash(void)
+{
+    maphash_visits = 0;
+    maphash_corrupt = 0;
+    R_maphashC(maphash_table, maphash_visit, NULL);
+    R_ReleaseObject(R_HashtabSEXP(maphash_table));
+    return ScalarInteger(maphash_visits == 50 ? maphash_corrupt : -1);
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
 static const R_CallMethodDef call_entries[] = {
     {"rytest_sum", (DL_FUNC) &rytest_sum, 1},
+    {"rytest_maphash_fill", (DL_FUNC) &rytest_maphash_fill, 0},
+    {"rytest_maphash", (DL_FUNC) &rytest_maphash, 0},
     {"rytest_make_list", (DL_FUNC) &rytest_make_list, 1},
     {"rytest_gc_churn", (DL_FUNC) &rytest_gc_churn, 1},
     {"rytest_unprotected_temporaries", (DL_FUNC) &rytest_unprotected_temporaries, 1},
