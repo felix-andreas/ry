@@ -2654,13 +2654,10 @@ unsafe fn do_identify(_: &NativeCall<'_>) -> R<Sexp> {
 
 /// `plot.xy(xy, type, ...)`.
 unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
-    let kind = values::first_string(call.arg(1)).map_or_else(String::new, |kind| kind.into_owned());
     with_plot(|_| Ok(()))?;
-    if !matches!(
-        kind.as_str(),
-        "l" | "o" | "b" | "c" | "s" | "S" | "h" | "p" | "n"
-    ) {
-        return Err(error(format!("invalid plot type '{kind}'")));
+    let pch = call.arg(2);
+    if pch.kind() == SexpType::Logical && values::ints(pch).iter().any(|flag| *flag != NA_INTEGER) {
+        return Err(error("only NA allowed in logical plotting symbol"));
     }
     Ok(nil())
 }
@@ -3359,6 +3356,11 @@ fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
         first = (log_low - 0.5).ceil();
         last = (log_high + 0.5).floor();
     }
+    // Subnormal numbers are too coarse for decades or pretty steps, so the axis keeps its
+    // limits and ticks once per decade.
+    if 10f64.powf(first.min(last)) < f64::MIN_POSITIVE {
+        return (low, high, 1);
+    }
     if last <= first {
         let (first, last, count) = linear_axis(low, high, intervals);
         return (first, last, -count);
@@ -3411,6 +3413,9 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
             })
             .collect();
     }
+    if !(first > 0.0 && last.is_finite() && last >= first) {
+        return Vec::new();
+    }
     let (low, high) = (usr[0].min(usr[1]), usr[0].max(usr[1]));
     let inside = |tick: f64| tick >= low * (1.0 - 1e-7) && tick <= high * (1.0 + 1e-7);
     let multiples: &[f64] = match count {
@@ -3441,8 +3446,8 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
         }
         return ticks;
     }
-    let mut decade = 10f64.powf(first.log10().floor() - 1.0);
-    while decade <= high * 10.0 {
+    let mut decade = 10f64.powf(first.log10().floor() - 1.0).max(f64::MIN_POSITIVE);
+    while decade.is_finite() && decade <= high * 10.0 {
         for multiple in multiples {
             let tick = decade * multiple;
             if inside(tick) {
