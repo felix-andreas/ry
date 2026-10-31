@@ -116,6 +116,14 @@ fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
             diagnostic.code,
             diagnostic.message
         ));
+        for related in &diagnostic.related {
+            output.push_str(&format!(
+                "  = {}..{} {}\n",
+                u32::from(related.range.start()),
+                u32::from(related.range.end()),
+                related.message
+            ));
+        }
     }
 }
 

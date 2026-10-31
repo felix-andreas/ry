@@ -1,0 +1,91 @@
+#==== inline_annotations
+#---- binding_type_spacing
+count:integer<-1L
+label :  character|NULL = NULL
+#++++
+count: integer <- 1L
+label: character | NULL = NULL
+
+#---- parameter_and_return_types
+add<-function(x:integer,y:  list[ named:double ]=list())->double{x}
+#++++
+add <- function(x: integer, y: list[named: double] = list()) -> double { x }
+
+#---- type_parameters_hug_the_keyword
+pick <- function <T:numeric , U> (x : T, y: U) -> T x
+#++++
+pick <- function<T: numeric, U>(x: T, y: U) -> T x
+
+#---- lambda_spelling
+lapply(xs, \(x:integer)->integer x+1L)
+#++++
+lapply(xs, \(x: integer) -> integer x + 1L)
+
+#---- multiline_signature_keeps_one_parameter_per_line
+f <- function(
+  x: integer,
+  y: double = 1
+)   ->   double {
+  x + y
+}
+#++++
+f <- function(
+  x: integer,
+  y: double = 1
+) -> double {
+  x + y
+}
+
+#---- record_and_function_types
+person : list{ name:character,age:integer } <- list(name = "Ada", age = 36L)
+step: fn( x:integer )->integer <- function(x) x + 1L
+#++++
+person: list{name: character, age: integer} <- list(name = "Ada", age = 36L)
+step: fn(x: integer) -> integer <- function(x) x + 1L
+
+#---- multiline_type_joins_one_line
+f <- function(
+  config: list{
+    retries: integer
+  }
+) config$retries
+#++++
+f <- function(
+  config: list{retries: integer}
+) {
+  config$retries
+}
+
+#---- comment_inside_a_type_is_kept_as_written
+f <- function(
+  x: list{retries: integer, # how often
+          delay: double}
+) x
+#++++
+f <- function(
+  x: list{retries: integer, # how often
+          delay: double}
+) {
+  x
+}
+
+#---- annotated_binding_in_a_body
+f <- function() {
+total:double<-0
+total
+}
+#++++
+f <- function() {
+  total: double <- 0
+  total
+}
+
+#---- list_return_type_before_a_body_on_the_next_line
+g <- function(x) -> list
+{
+  list(x)
+}
+#++++
+g <- function(x) -> list {
+  list(x)
+}

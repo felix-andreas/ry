@@ -9,7 +9,8 @@ CI always agree. This is every key, with its default:
 ```toml
 [check]
 typing = false           # report type errors
-strict = false           # report unknown types (needs typing for type errors)
+strict = false           # report unknown types and untyped parameters (needs typing for type errors)
+inline-annotations = true  # type inline annotations such as `x: integer <- 1L`
 unused = true            # report values that are never read
 maybe-undefined = false  # report reads some path reaches before a write
 exclude = []             # gitignore-style patterns that ry check skips
@@ -48,6 +49,19 @@ The project root is a separate question: it decides which files see each other's
 the nearest directory with a `ry.toml` or a `DESCRIPTION`. Without one, it is the directory you
 named, or the parent of `R/` for a file directly inside `R/`, or else the file's own directory. In
 the editor it is the first workspace folder.
+
+## `inline-annotations`
+
+Inline annotations, such as `count: integer <- 0L` and `function(x: integer) -> integer`, are on by
+default. R itself cannot run them, so a project that must stay runnable by R can set
+`inline-annotations = false`. Inline annotations then type nothing, each one is reported as an
+`inline-annotation` warning, and a `#:` comment on the same statement applies alone. For as long as
+the setting is off, `ry check` warns about it once per run, and the language server once whenever it
+loads `ry.toml`:
+
+```text
+! inline type annotations are turned off (`[check] inline-annotations = false`), so ry does not check them and reports each one it finds
+```
 
 ## `exclude`
 

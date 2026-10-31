@@ -83,12 +83,18 @@ off, because hover, completion, and inlay hints are built on it.
 
 ## Annotations
 
-R has no syntax for types, so annotations are `#:` comments. The file stays valid R that every other
-tool can read, and removing ry changes nothing at run time.
+You write a type after a name, and a function's return type after its parameters:
 
 ```r
-#: fn(price: double, rate: double) -> double
-apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount <- function(price: double, rate: double = 0.2) -> double {
+  price * (1 - rate)
+}
+
+apply_discount("100")
+```
+
+```text
+x expected `double`, found `character`
 ```
 
 An annotation is checked against the body and against every call. Inference already covers the
@@ -97,8 +103,37 @@ files, and anything whose contract you want enforced. A value read from a file h
 give it one, and then every use of it is checked:
 
 ```r
-#: list{name: character, age: integer}
-person <- readRDS("person.rds")
+person: list{name: character, age: integer} <- readRDS("person.rds")
+```
+
+R itself cannot run inline annotations, so the same types can also go in `#:` comments, which keep
+the file valid R that every other tool can read:
+
+```r
+#: fn(price: double, rate: double) -> double
+apply_discount <- function(price, rate) price * (1 - rate)
+```
+
+Both spellings share one type language and mean the same thing. Deleting each inline annotation
+turns a file into the plain R program it means. To keep a project runnable by R, turn inline
+annotations off, and ry then reports each one it finds, and keeps warning while the setting is off:
+
+```toml
+[check]
+inline-annotations = false
+```
+
+A statement may carry both. If they give one parameter, the return, or the value different types,
+ry uses the inline type and says so:
+
+```r
+#: fn(price: double, rate: double) -> double
+apply_discount <- function(price: integer, rate) price * (1 - rate)
+```
+
+```text
+! the inline annotation gives parameter `price` the type `integer`, but the `#:` comment gives it
+  `double`. ry uses the inline type; make the two agree, or delete one
 ```
 
 ## Scalars and vectors
@@ -289,12 +324,22 @@ strict = true
 ```
 
 ```r
-#: fn(df: data.frame) -> double
-total <- function(df) sum(df$amount)
+total <- function(df: data.frame) -> double sum(df$amount)
 ```
 
 ```text
 x strict mode: this expression has an undetermined type (`Unknown`)
+```
+
+Strict mode also reports a parameter that nothing constrains, because it accepts any value
+unchecked. `function(x) x` is generic and fine, but here nothing says what `x` is:
+
+```r
+describe <- function(x) cat("a value\n")
+```
+
+```text
+x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 ```
 
 `Any` is also compatible with everything, but a value declared `Any`, such as the result of a
@@ -304,7 +349,7 @@ reported.) Calls to S3 generics that dispatch through `UseMethod()` return `Any`
 reported either. Strict mode does not yet report R6 objects or bare names from packages ry knows
 only by name, and it wrongly reports a `stop()` guard such as the one in `money()` above.
 
-A plain `#:` annotation gives an `Unknown` value a type, and every later use is checked against it.
+A plain annotation, inline or `#:`, gives an `Unknown` value a type, and every later use is checked against it.
 `#: @if-unknown TYPE` does the same, but becomes an error once ry can infer the value's type, so it
 cannot go stale. `#: @trust TYPE` overrides a type ry did infer, for the cases where you know
 better. Any of them clears the strict finding, since the value now has a type.

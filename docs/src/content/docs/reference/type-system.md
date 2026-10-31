@@ -12,8 +12,10 @@ subtyping between nominal types. The [tour](/type-checking/tour) introduces the 
 
 ## Typing comment syntax
 
-Annotations live in `#:` comments, directly above the binding or expression they describe.
-Consecutive `#:` lines with no blank line between them form one *annotation block*.
+Annotations are written in two ways that share one type grammar: in `#:` comments, described here,
+and [inline](#inline-annotation-syntax), in the code itself. A `#:` comment sits directly above the
+binding or expression it describes. Consecutive `#:` lines with no blank line between them form one
+*annotation block*.
 
 Each annotation takes one of these forms:
 
@@ -76,6 +78,117 @@ findings. Two known exceptions still do: a `[]` vector whose element type is not
 declared (`Rec[]`), and a bare optional positional parameter (`fn(integer, [character])`). A block
 the annotation grammar could not even read is refused silently, because the parse error has already
 said what was wrong.
+
+## Inline annotation syntax
+
+An inline annotation writes a type into the code instead of a comment above it:
+
+```r
+count: integer <- 0L
+
+add <- function(x: integer, y: integer = 1L) -> integer {
+  x + y
+}
+
+first <- function<T>(items: list[T]) -> T items[[1L]]
+```
+
+- `name: TYPE <- value` declares a binding's type. The `=` spelling, `name: TYPE = value`, works too.
+- `name: TYPE` in a parameter list declares a parameter's type, before its default if it has one.
+  `...: TYPE` declares the rest parameter.
+- `-> TYPE` between the parameter list and the body declares a function's return type.
+- `<T, U: numeric>` directly after `function` or `\` declares the function's type parameters, with
+  the same names and constraints as the compact `<...>` binder.
+
+Every `TYPE` is the type grammar of `#:` comments, so anything a `#:` type can say an inline type can
+say, and a type reads the same written either way.
+
+### Meaning
+
+An inline annotation means exactly what the equivalent `#:` block means, because both lower to the
+same annotation:
+
+- A binding's type is a [checked annotation](#checked-annotations): `count: integer <- 0L` is
+  `#: integer` above `count <- 0L`.
+- A function's inline types form a [compact annotation](#compact-function-annotations) naming the
+  annotated parameters, so `function(x: integer, y)` is `#: fn(x: integer)` over `function(x, y)`.
+  [The formal list](#annotations-and-the-formal-list) rules apply unchanged, and an unannotated
+  parameter keeps its inferred type.
+- A parameter with a default is optional, so the inline form never needs `[name]`.
+- A function without `-> TYPE` infers its return type from its body, as an
+  [elided return](#elided-return-types) on a definition does. A function type inside an inline
+  annotation, such as `f: fn(integer)` or `callback: fn(integer)`, follows the `#:` rule for that
+  position: `NULL` when nested, and inferred from the body when it is a binding's whole type over a
+  function literal.
+
+Because the signature sits on the function itself, a function that is not a statement can be
+annotated too. `lapply(ids, function(id: integer) -> character format(id))` checks the lambda's
+body against its signature and the call against its parameter, where a `#:` comment could not reach
+it. When a binding's type and its function's own signature are both written, as in
+`step: fn(x: integer) -> integer <- function(x: integer) -> integer x + 1L`, the signature types the
+function and the binding's type is then checked against it like any other value.
+
+### Where inline annotations parse
+
+A parameter's type and a function's return type and type parameters can be written on any function
+literal. A binding's type is recognized only where a statement starts, at the top level of a file or
+directly inside `{ }`. Elsewhere, such as in a braceless `if` branch, `y: integer <- 1L` is R's
+reading of `y:integer` as an assignment target, which is reported as a syntax error.
+
+A return type is read as far as the type grammar reaches, and the body starts after it. A list or
+function type must hug its bracket, as the formatter writes it: `-> list{name: character}` is a
+record type, while in `-> list {` and `-> fn (` the bracket starts the body.
+
+A mistake in an inline type's grammar is a `syntax-error`, because the statement cannot be read
+until it is fixed. A type that parses but means nothing, such as an unknown type name or a record
+that mixes named and positional items, is an `annotation` error, as it is in a comment.
+
+### Erasure to plain R
+
+R's own parser rejects every inline annotation except a binding's, which R reads as an assignment to
+`name:TYPE` through a `` `:<-` `` replacement function that base R does not define. So no working R
+program contains one, and existing R code parses and behaves exactly as before.
+
+Removing each inline annotation turns an annotated program into the plain R program it means:
+delete a binding's or parameter's `: TYPE`, a function's `<...>`, and its `-> TYPE`. Comments and
+`#:` blocks stay. `count: integer <- 0L` erases to `count <- 0L`, and
+`function<T>(x: T) -> T x` to `function(x) x`.
+
+### Inline and comment annotations together
+
+A statement can carry both a `#:` block and inline annotations. They combine one *slot* at a time,
+where a slot is the binding's value, one parameter, the rest parameter, or the return:
+
+- A slot only one of them types takes that type.
+- A slot both type takes the inline type.
+- A `#:` block in a coercion form (`@trust`, `@if-unknown`, `@new`) says how the value gets its type,
+  so it governs the value, and the inline type is only compared against it.
+
+A slot typed both ways with different types is reported as `annotation-mismatch`, a warning at the
+inline type that points at the comment's type, so the reader always learns which one ry uses.
+Types are compared as types: an alias agrees with its expansion, and `integer | character` agrees
+with `character | integer`. Type parameters pair by position, so `<T>` in the comment and `<U>` in
+the code agree, and a binder whose constraint differs is reported the same way, with the inline
+constraint winning. A positional parameter type in a compact `#:` annotation is compared with
+the formal it pairs with.
+
+```r
+#: fn(price: double, rate: double) -> double
+apply_discount <- function(price: integer, rate) price * (1 - rate)
+```
+
+```text
+! the inline annotation gives parameter `price` the type `integer`, but the `#:` comment gives it
+  `double`. ry uses the inline type; make the two agree, or delete one
+```
+
+### Turning inline annotations off
+
+`[check] inline-annotations = false` in `ry.toml` turns inline annotations off, for code that must
+also run under R. An annotation that is off types nothing, and each one is reported once as an
+`inline-annotation` warning, because R cannot run that code. ry also warns once per run, and the
+language server once per load, for as long as the setting stays off. A `#:` block on the same
+statement then applies alone.
 
 ## Types
 
@@ -2202,7 +2315,8 @@ unannotated `function(x) speak(x)`, that class is not known there.
 Strict mode is an opt-in check, switched on with `[check] strict` and off by default. It changes
 nothing about inference and adds no typing rules. The type checker already computes every type;
 strict mode reads those types and reports the places where the checker genuinely could not determine
-one, and it escalates unresolved references to errors. A value typed `Any` by an annotation or a
+one, together with the [parameters nothing constrains](#untyped-parameters), and it escalates
+unresolved references to errors. A value typed `Any` by an annotation or a
 single declaration is an intentional opt-out and never produces a strict finding. A call that falls
 back to an overload set's `Any` candidate is the exception, because the fallback marks a call the
 declarations could not describe.
@@ -2251,6 +2365,37 @@ in both directions:
   reported as an error rather than silently ignored.
 - The directive changes only which diagnostics are published for the file. Inference and every other
   check are untouched, so hover and the other editor features keep working under `off`.
+
+### Untyped parameters
+
+A parameter without an annotation is reported when nothing constrains it, because it then accepts
+any value unchecked. That is the case when its inferred type is `Unknown`, or is still a fresh type
+variable of its own function that neither another parameter nor the return type mentions:
+
+```r
+describe <- function(x) cat("a value\n")
+```
+
+```text
+x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any
+  value is accepted unchecked. Annotate it, as in `x: TYPE`
+```
+
+A type variable that the signature mentions twice is genuine polymorphism, so `function(x) x`
+(`<T> fn(x: T) -> T`) and `function(flag, a, b) if (flag) a else b` are not reported. Neither is a
+constrained variable such as `<T: numeric>`, a variable tied to an enclosing function, such as the
+inner `x` in `function(f) function(x) f(x)`. A lambda passed as an argument is not judged at all,
+because the call gives its parameters their types only after the lambda is inferred. A `...` formal is
+never reported, and a default does not count as a type, because an unannotated parameter takes its
+type from its uses. Annotate a parameter that really accepts anything as `Any`, which strict mode
+treats as a deliberate choice.
+
+The parameter finding is about the declaration, so it can stand beside an origin in the body that it
+feeds, as in `function(node) node$value`, where annotating `node` would fix both.
+
+Returns and bindings are not reported separately. An undetermined return or binding always traces
+back to one of the origins below, a type error, or a reference to a project binding whose own
+definition is reported, so reporting the declaration too would repeat that finding.
 
 ### Where an undetermined type is reported
 

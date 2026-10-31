@@ -83,3 +83,6 @@ These are known bugs, not design decisions:
   because R CMD check warns about it too.
 - **Strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an undetermined type.
   `# ry: allow(strict)` on the line silences it.
+- **A generic lambda passed as an argument.** `lapply(xs, function<T>(v: T) -> T v)` reports that
+  the lambda's parameter accepts `T`, because type parameters on a function that is not bound to a
+  name are not instantiated. Leave the lambda's types off, or bind it to a name first.

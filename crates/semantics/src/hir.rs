@@ -681,7 +681,7 @@ fn expression_children(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + 
 
 /// Excludes the trailing trivia (including `#:` annotations) rowan attaches
 /// inside expression nodes, so ranges cover code only.
-fn significant_range(node: &SyntaxNode) -> TextRange {
+pub fn significant_range(node: &SyntaxNode) -> TextRange {
     let full = node.text_range();
     let mut end = full.end();
     let mut token = node.last_token();

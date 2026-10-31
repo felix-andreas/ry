@@ -1279,3 +1279,70 @@ fn a_type_name_two_scripts_both_declare_is_not_a_duplicate() {
     );
     assert_eq!(output.code, 0, "{}", output.stderr);
 }
+
+const INLINE_SOURCE: &str = "count: integer <- \"one\"\n";
+
+#[test]
+fn check_types_inline_annotations_by_default() {
+    let directory = project(&[
+        ("ry.toml", "[check]\ntyping = true\n"),
+        ("R/a.R", INLINE_SOURCE),
+    ]);
+    let run = ry(directory.path(), &["check"]);
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("expected `integer`, found `character`"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("inline-annotation"), "{}", run.stderr);
+}
+
+#[test]
+fn check_warns_while_inline_annotations_are_off_and_ignores_them() {
+    let directory = project(&[
+        (
+            "ry.toml",
+            "[check]\ntyping = true\ninline-annotations = false\n",
+        ),
+        ("R/a.R", INLINE_SOURCE),
+    ]);
+    let run = ry(directory.path(), &["check"]);
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(
+        run.stderr.contains(
+            "inline type annotations are turned off (`[check] inline-annotations = false`)"
+        ),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(&heading(
+            "inline-annotation",
+            '!',
+            "inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked"
+        )),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("expected `integer`"),
+        "an annotation that is turned off must not type anything: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn turning_inline_annotations_off_warns_even_without_any() {
+    let directory = project(&[
+        ("ry.toml", "[check]\ninline-annotations = false\n"),
+        ("R/a.R", "x <- 1L\n"),
+    ]);
+    let run = ry(directory.path(), &["check"]);
+    assert!(
+        run.stderr
+            .contains("inline type annotations are turned off"),
+        "{}",
+        run.stderr
+    );
+}

@@ -278,8 +278,9 @@ time. Both the contract and the implementation match by name where names exist.
 
 ## Strict mode
 
-Under strict mode an `Unknown` origin is an error, and an unresolved-name reference is an error
-rather than a plain naming warning. A recursion-induced `Unknown` return is an origin. Explicit
+Under strict mode an `Unknown` origin is an error, an unannotated parameter nothing constrains is an
+error (see the inline-annotations record), and an unresolved-name reference is an error rather than
+a plain naming warning. A recursion-induced `Unknown` return is an origin. Explicit
 `Any` remains the sanctioned escape hatch, so an allowed unknown is expressed by annotating it and
 never silently.
 
@@ -754,13 +755,10 @@ the shifting problem.
 
 ## An annotation is one concept with pluggable spellings
 
-Annotations are one internal concept, and the surface spelling is pluggable. The seam sits at
-annotation recognition during lowering, not in the lexer. `#:` is structured trivia today. R 4.4
-ships `declare()` as an experimental base primitive, which is a runtime no-op, and Posit's quickr
-already annotates with `declare(type(...))`. A valid-R inline form is therefore ordinary call
-syntax recognized at lowering. A true superset dialect, which is the TypeScript road of inline
-syntax plus a strip step, stays a product decision that the pluggable design keeps open. A `#:`
-file must always remain valid ordinary R.
+Annotations are one internal concept, and the surface spelling is pluggable: both spellings lower
+through `annotations.rs` into one `Annotation`. `#:` is structured trivia, and a `#:` file must
+always remain valid ordinary R. The inline spelling is the superset dialect this seam kept open,
+chosen by the mandate in `AGENTS.md` (the next two records).
 
 ## The inline annotation syntax is a superset of R
 
@@ -773,6 +771,68 @@ extension because ry executes them directly, and `declare(type(...))` stays a re
 code that must remain valid R. The cost is that other R tools fail on a typed file, so code that must
 run on GNU R goes through a strip step that moves inline types into `#:` comments. The reasoning is in
 `contributing/design/r-runtime.md`, section 8.
+
+## How inline annotations are built
+
+**Syntax.** `name: TYPE <- value` (or `= value`) for a binding, `name: TYPE` (and `...: TYPE`) in a
+parameter list, `-> TYPE` between the parameter list and the body, and `function<T: numeric>(...)`
+(or `\<T>(...)`) for type parameters. Every `TYPE` is the `#:` type grammar, run on R's token stream
+by the same parser functions, so there is one type grammar. A function header reads like the compact
+annotation it means: `function(x: integer) -> integer` is `fn(x: integer) -> integer` with formals.
+Docs: `reference/type-system.md#inline-annotation-syntax`.
+
+**Why this shape.** The record above gives the product reasons. The binding form is recognized only where a statement starts
+(top level, directly inside `{}`), by a shallow token scan for a `<-` or `=` outside every bracket, where only `(`, `[` and `{` carry
+the scan past a line break (`<` and `>` are also comparisons), so `x:y`, `x:y < -1` and every argument stay ranges. Rejected: `declare(type(...))` calls (valid
+R, but a runtime call per binding and no natural place for parameter or return types), `let x: T`
+(new keyword), `x <- value :: T` (`::` is R's namespace operator), and `function(x): T` (`->`
+mirrors the existing `fn(...) -> T`).
+
+**Erasure.** Deleting `TYPE_ASCRIPTION`, `RETURN_TYPE`, and a `FUNCTION_DEF`'s `TYPE_BINDER_LIST`
+gives the plain R program (`syntax::erase_inline_annotations`). The tree-sitter acceptance oracle
+judges the erased text, and `check_parse_invariants` pins that erasing a clean parse yields a clean,
+annotation-free, idempotent result.
+
+**Trivia.** Inline type grammar defers the trivia it skips and emits it only when the type continues
+(`Parser::deferred_trivia`), so whitespace and comments after a type sit outside its node. Without it
+every range, the erasure, and the formatter had to strip absorbed trailing trivia.
+
+**One meaning.** An inline site lowers to exactly the `Annotation` the equivalent `#:` block would
+(`lower_inline_annotation`). A signature attaches to the statement assigning its function, so it
+merges with that statement's `#:` block and exports a declared scheme at an item root, or else to
+the function expression itself, which is how a lambda passed as an argument is checked. When a
+binding also has a `: TYPE`, the function's own signature types it and the binding type is checked
+against the result (`check_item_with_annotation` skips the declared-function path when the value
+carries its own annotation).
+
+**Both spellings on one statement** merge per slot (value, parameter, rest, return), and type
+parameters pair by position (the comment's are renamed to the inline names first), with the inline
+side winning, except that a `#:` coercion form (`@trust`, `@if-unknown`, `@new`) governs the value
+(`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
+file-absolute ranges, comparing types after alias expansion and union-member sorting, so the warning
+can point at both written types. Positional comment parameter types pair with formals the way
+`check_declared_function` pairs them.
+
+**Turning it off** is a salsa input (`AnalysisSettings`), not host-side filtering, because it changes
+what types mean. It is read only where an inline site exists, which `test_incremental.rs` pins. Off,
+sites type nothing and each warns (`inline-annotation`), and hosts warn once per load.
+
+**Strict mode reports untyped parameters**, by a `noImplicitAny`-style rule: an unannotated parameter
+whose type is `Unknown`, or a fresh unconstrained variable of its own function's level that no other
+parameter and not the return mentions. The level check keeps a closure parameter tied to an
+enclosing function clean, and a lambda passed as an argument is skipped, because the call types its
+parameters only after the lambda is inferred. Unification with `Unknown` never binds a variable, so a rule on `Unknown`
+alone would never fire. Returns and bindings get no finding of their own: every undetermined one
+traces to an origin, a type error, or a project binding reported at its definition, and a separate
+finding would break "one undetermined value, one finding".
+
+**Optionality** comes from the formals alone for a parameter typed only inline
+(`Annotation::inline_parameters` skips the restatement checks in `check_declared_function`), because
+the inline form has no `[name]`: a defaultless formal the body tests with `missing()` stays optional.
+A parameter a `#:` block also names keeps the comment's `[name]`, which is checked as written.
+
+**Known gap.** A generic lambda passed as an argument keeps its binders rigid, so
+`lapply(xs, function<T>(v: T) -> T v)` is reported. `backlog.md` tracks it.
 
 ## Testing doctrine for `syntax`
 

@@ -219,6 +219,31 @@ pub fn check_parse_invariants(input: &str) {
         );
     }
 
+    // Erasure must turn a clean program into plain R: nothing inline survives, the
+    // result is clean too, and erasing again changes nothing. A broken program has
+    // no meaning to erase.
+    if parse.errors().is_empty() {
+        let erased = crate::erase_inline_annotations(&parse);
+        let erased_parse = crate::parse(&erased);
+        assert!(
+            erased_parse.errors().is_empty(),
+            "erasing a clean program introduced {:?} for input {input:?}: {erased:?}",
+            erased_parse.errors()
+        );
+        assert!(
+            !erased_parse
+                .syntax_node()
+                .descendants()
+                .any(|node| crate::is_inline_annotation(&node)),
+            "an inline annotation survived erasure for input {input:?}: {erased:?}"
+        );
+        assert_eq!(
+            crate::erase_inline_annotations(&erased_parse),
+            erased,
+            "erasure is not idempotent for input {input:?}"
+        );
+    }
+
     let again = crate::parse(input);
     assert_eq!(
         parse.green(),

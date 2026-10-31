@@ -8,7 +8,7 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use syntax::testing::{corpus_dir, fixture_case_sources, program_corpus_sources};
-use syntax::{TextRange, TextSize, parse, reparse};
+use syntax::{TextRange, TextSize, erase_inline_annotations, parse, reparse};
 use tree_sitter::{InputEdit, Parser, Point};
 
 #[test]
@@ -143,9 +143,13 @@ fn in_tree_acceptance() {
 
     let mut accepted_only_by_us = Vec::new();
     for (id, text) in &sources {
-        if parse(text).errors().is_empty()
+        // Inline annotations are ry syntax that R rejects by design, so tree-sitter
+        // judges the plain R program they erase to.
+        let parsed = parse(text);
+        let erased = erase_inline_annotations(&parsed);
+        if parsed.errors().is_empty()
             && parser
-                .parse(text.as_str(), None)
+                .parse(erased.as_str(), None)
                 .is_none_or(|tree| tree.root_node().has_error())
         {
             accepted_only_by_us.push(id.clone());

@@ -123,3 +123,14 @@ f <- function() {
 }
 #++++
 clean
+
+#==== inline_annotations
+#---- annotated_binding_name_follows_the_style
+myCount: integer <- 1L
+#++++
+0..7 warning[naming-style] Variable `myCount` should have snake_case name, e.g. my_count
+
+#---- annotated_parameter_name_follows_the_style
+f <- function(myValue: integer) myValue
+#++++
+14..21 warning[naming-style] Parameter `myValue` should have snake_case name, e.g. my_value

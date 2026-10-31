@@ -128,6 +128,10 @@ pub enum SyntaxKind {
     TYPE_LIST,
     TYPE_PAREN,
     TYPE_ARG_LIST,
+    /// An inline `: TYPE` after a binding's name or a parameter's name.
+    TYPE_ASCRIPTION,
+    /// An inline `-> TYPE` between a function's parameter list and its body.
+    RETURN_TYPE,
 
     ERROR,
 }
@@ -291,6 +295,8 @@ impl SyntaxKind {
             TYPE_LIST => "list type",
             TYPE_PAREN => "parenthesized type",
             TYPE_ARG_LIST => "type argument list",
+            TYPE_ASCRIPTION => "type annotation",
+            RETURN_TYPE => "return type annotation",
             ERROR => "error",
         }
     }

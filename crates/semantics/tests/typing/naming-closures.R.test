@@ -128,9 +128,11 @@ f <- function() {
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 f: fn() -> fn() -> integer
 30..31 warning[unused] `g` is assigned but never used.

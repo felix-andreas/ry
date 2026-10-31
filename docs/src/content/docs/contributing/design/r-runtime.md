@@ -682,9 +682,9 @@ that already fail. The rest follows from the mandate:
   command would write plain R with the inline types moved into `#:` comments.
 - **Comment and inline annotations must agree.** When both annotate the same item, ry compares them
   as types, after alias expansion, and reports a warning on the inline annotation when they differ.
-- **Strict mode rejects untyped code.** Today's strict mode reports the sites where a type could not
-  be determined; the mandate extends it to report every function parameter, return and top-level
-  binding without a declared or fully inferred type.
+- **Strict mode rejects untyped code.** The settled rule is in the typing reference
+  ([untyped parameters](/reference/type-system#untyped-parameters)): a parameter nothing constrains
+  is reported, while an undetermined return or binding is reported once, at the origin it traces to.
 
 This settles the question `decisions.md` left open, and the decision is recorded there ("The inline
 annotation syntax is a superset of R").
