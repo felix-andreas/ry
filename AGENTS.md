@@ -31,6 +31,7 @@ AI agents drive development here, with light human steering. They keep two writt
 - Package development loading in the style of `devtools::load_all` is built in, and it lazy-loads only what a session actually needs. [loadfast](https://github.com/finccam/loadfast) prototypes the idea, and ry does it cleanly.
 - A built-in, typed table type replaces data.table and must outperform it. It may be backed by polars.
 - The performance bar is a JIT on the level of Bun.
+- Every R feature keeps working, including S4, R6 and Reference Classes, but ry discourages them: a lint warns on their use, and an option disables them. ry has its own records, tuples and tagged unions, in the style of Roc, as the recommended way to model data.
 
 The tooling goals still hold. Diagnostics follow the style of Rust and Elm: clear, precise, and actionable, in plain user-facing wording rather than internal or theory-heavy language, and with precise source ranges rather than coarse fallback ones. Editor tooling stays complete (hover, completion, goto-definition, references, rename, and inlay hints), so preserve the semantic information those features need whenever practical. Formatting and linting stay first class.
 

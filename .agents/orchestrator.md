@@ -15,6 +15,7 @@ ry becomes a full, backwards-compatible reimplementation of R, extended with ry'
 - Package development loading in the style of `devtools::load_all` is built in, and it lazy-loads only what is needed. This is the idea behind [loadfast](https://github.com/finccam/loadfast), done cleanly.
 - A built-in, typed table type replaces data.table and must outperform it. It may be backed by polars.
 - The performance bar is a JIT on the level of Bun.
+- Every R feature keeps working, including S4, R6 and Reference Classes, but ry discourages them: a lint warns on their use, and an option disables them. ry has its own records, tuples and tagged unions, in the style of Roc, as the recommended way to model data.
 
 Most of the benchmark dependencies ship compiled C, C++ or Rust code written against R's C API (`SEXP`, memory protection, `.Call`). Full compatibility therefore means implementing that C API, not only R's language semantics. That interface shapes the architecture more than the JIT does, so it is designed first.
 
@@ -64,6 +65,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4): all 232 corpus packages pass their tests.
 - Lazy loader on ry's interpreter (session_0111kWqEkieA316rHiKNpGxB).
 - Inline syntax, agreement warnings and strict mode in the runtime (session_0111kWqCdRHRmiRddvo18cnG).
+- Native records, tuples and tagged unions; S4/R6 discouraged (session id to follow).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
