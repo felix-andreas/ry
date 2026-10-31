@@ -4,7 +4,7 @@
 use crate::{
     builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
     coerce::{self, coerce_vector},
-    conditions,
+    conditions, distributions,
     unwind::{R, error},
     values::{
         self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
@@ -165,8 +165,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rep.int", 2, do_rep_int),
     internal("rep_len", 2, do_rep_len),
     internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
-    internal("choose", 2, |call| unsafe { math2(call, choose) }),
-    internal("lchoose", 2, |call| unsafe { math2(call, |n, k| choose(n, k).abs().ln()) }),
+    internal("choose", 2, |call| unsafe { math2(call, distributions::choose) }),
+    internal("lchoose", 2, |call| unsafe { math2(call, distributions::lchoose) }),
     internal("beta", 2, |call| unsafe { math2(call, |a, b| (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()) }),
     internal("lbeta", 2, |call| unsafe { math2(call, |a, b| gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)) }),
     internal("bitwiseAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
@@ -2412,28 +2412,6 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
 }
 
 // Two-argument math.
-
-fn choose(n: f64, k: f64) -> f64 {
-    let k = k.round();
-    if k < 0.0 {
-        return 0.0;
-    }
-    if k == 0.0 {
-        return 1.0;
-    }
-    if n == n.round() && k < 30.0 {
-        let mut result = 1.0;
-        for index in 0..k as i64 {
-            result = result * (n - index as f64) / (index as f64 + 1.0);
-        }
-        return result.round();
-    }
-    let mut result = 1.0;
-    for index in 0..k as i64 {
-        result = result * (n - index as f64) / (index as f64 + 1.0);
-    }
-    result
-}
 
 unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;
