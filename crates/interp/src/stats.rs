@@ -100,6 +100,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("KalmanLike", stats_arima::kalman_like),
     ("KalmanFore", stats_arima::kalman_fore),
     ("KalmanSmooth", stats_arima::kalman_smooth),
+    ("LogLin", loglin),
 ];
 
 /// The arguments of a `.C` or `.Fortran` call, coerced as the routine's declared types, ready
@@ -2168,3 +2169,91 @@ unsafe fn burg(call: &NativeCall<'_>) -> R<Sexp> {
     values::list_vector(&[values::real_vector(&coefficients)?, values::real_vector(&variance1)?, values::real_vector(&variance2)?])
 }
 
+/// `LogLin(dim, config, table, start, nmar, eps, iter)`: iterative proportional fitting of a
+/// log-linear model (Haberman's Applied Statistics algorithm AS 51): each cycle scales the
+/// fit to every margin in `config` in turn, until the largest difference between a fitted
+/// and an observed margin entry falls below `eps`.
+unsafe fn loglin(call: &NativeCall<'_>) -> R<Sexp> {
+    let dims: Vec<usize> = integer_values(call.arg(0))?.iter().map(|&value| value.max(0) as usize).collect();
+    let configuration = integer_values(call.arg(1))?;
+    let table = real_values(call.arg(2))?;
+    let mut fit = real_values(call.arg(3))?;
+    let tolerance = values::as_real_scalar(call.arg(5));
+    let max_iterations = values::as_integer_scalar(call.arg(6)).max(0) as usize;
+    let variables = dims.len();
+    if variables == 0 || configuration.len() % variables != 0 {
+        return Err(call.error("incorrect specification of 'table' or 'start'"));
+    }
+    let margins: Vec<Vec<usize>> = configuration
+        .chunks(variables)
+        .map(|column| column.iter().take_while(|&&variable| variable > 0).map(|&variable| variable as usize - 1).collect())
+        .collect();
+    let cells = table.len();
+    // The marginal cell of each table cell for each margin.
+    let marginal_index: Vec<(Vec<usize>, usize)> = margins
+        .iter()
+        .map(|margin| {
+            let size: usize = margin.iter().map(|&variable| dims[variable]).product();
+            let indices = (0..cells)
+                .map(|cell| {
+                    let mut rest = cell;
+                    let mut coordinates = vec![0usize; variables];
+                    for (variable, coordinate) in coordinates.iter_mut().enumerate() {
+                        *coordinate = rest % dims[variable];
+                        rest /= dims[variable];
+                    }
+                    let mut index = 0;
+                    let mut stride = 1;
+                    for &variable in margin {
+                        index += coordinates[variable] * stride;
+                        stride *= dims[variable];
+                    }
+                    index
+                })
+                .collect();
+            (indices, size)
+        })
+        .collect();
+    let observed: Vec<Vec<f64>> = marginal_index
+        .iter()
+        .map(|(indices, size)| {
+            let mut sums = vec![0.0; *size];
+            for (cell, &index) in indices.iter().enumerate() {
+                sums[index] += table[cell];
+            }
+            sums
+        })
+        .collect();
+    let mut deviations = vec![0.0; max_iterations];
+    let mut last = 0usize;
+    let mut converged = false;
+    for iteration in 0..max_iterations {
+        let mut largest = 0.0_f64;
+        for (margin, (indices, size)) in marginal_index.iter().enumerate() {
+            let mut fitted = vec![0.0; *size];
+            for (cell, &index) in indices.iter().enumerate() {
+                fitted[index] += fit[cell];
+            }
+            for (index, value) in fitted.iter().enumerate() {
+                largest = largest.max((value - observed[margin][index]).abs());
+            }
+            for (cell, &index) in indices.iter().enumerate() {
+                fit[cell] = if fitted[index] > 0.0 { fit[cell] * observed[margin][index] / fitted[index] } else { 0.0 };
+            }
+        }
+        deviations[iteration] = largest;
+        last = iteration + 1;
+        if largest < tolerance {
+            converged = true;
+            break;
+        }
+    }
+    if !converged && max_iterations > 0 {
+        call.warning("algorithm did not converge")?;
+    }
+    values::named_list(&[
+        ("fit", values::real_vector(&fit)?),
+        ("dev", values::real_vector(&deviations)?),
+        ("nlast", values::scalar_integer(last as i32)?),
+    ])
+}
