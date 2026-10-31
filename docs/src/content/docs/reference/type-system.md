@@ -1848,8 +1848,129 @@ strict-mode origin.
 
 The class is a real type. It flows through chains, so `DT[a > 1][, .(m = mean(b)), by = g]` stays a
 `data.table` from end to end, and it satisfies or violates annotations and parameter types like any
-other. Column-level knowledge is out of scope: element types, membership checks, and the evolution of
-columns through `:=` are not tracked.
+other. Column-level knowledge is out of scope for the `data.table` nominal: element types, membership
+checks, and the evolution of columns through `:=` are not tracked. The built-in frame below tracks all
+three.
+
+### Frames
+
+A frame is ry's built-in table. Its type is a record of column vectors, written like a `list{...}`
+record with `frame` in front:
+
+```r
+#: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+price_of <- function(prices) prices$price
+```
+
+A column is always a vector, so a scalar column type broadens: `frame{id: integer}` is
+`frame{id: integer[]}`. A bare `frame` is a frame whose columns are unknown, and every column
+reference on it is a silent `Unknown`. Because a frame's run-time class is `c("frame", "data.frame")`,
+a frame satisfies a `data.frame` parameter. The name is `frame`, not `table`, so that base `table()`
+keeps working.
+
+`frame()` builds one without any import. Each named argument becomes a column of its vector type, and
+an unnamed variable keeps its name:
+
+```r
+sales <- frame(team = c("a", "b"), amount = c(1, 2))   # frame{team: character[], amount: double[]}
+```
+
+An unnamed computed argument, a repeated name, or `...` leaves the columns unknown. With no arguments,
+`frame()` is still graphics' `frame()`, and a project's own `frame` function shadows the builtin.
+
+#### Queries
+
+`f[i, j, by]` evaluates `i`, `j`, and `by` with the frame's columns in scope, as data.table does. A
+bare name that is a column types as that column's vector, ahead of any lexical binding of the same
+name. A name that is no column keeps its lexical type, and a name that is neither is reported:
+
+```text
+unresolved
+
+  ! the frame `sales` has no column `amuont`, and nothing else defines that name. Did you mean `amount`?
+   --[a.R:6:13]
+ 6 | print(sales[amuont > 1])
+   |             ^^^^^^
+```
+
+This is an `unresolved` warning rather than a type error, because R looks a non-column up in the
+enclosing scope, so only a name nothing defines is certainly wrong. `.N` and `.GRP` are `integer`,
+`.I` is `integer[]`, and `.SD` is the source frame without its group columns. A called name, such as
+`sum` in `sum(amount)`, is looked up as a function and never reads a column.
+
+The result of the query follows from its arguments:
+
+| Query | Result |
+| --- | --- |
+| `f[i]`, `f[order(x)]` | the frame type of `f` |
+| `f[, x]`, with `x` a column | the column vector |
+| `f[, sum(x)]` | the value of `j`, for an atomic or `NULL` value; otherwise `Unknown` |
+| `f[, .(a = e1, b = e2)]` or `list(...)` | `frame{a: T1[], b: T2[]}` |
+| any `j` with `by` | the group columns first, then the `j` columns |
+| `f[, y := v]` | `f` with `y` added, or with its type replaced |
+
+In a `.()` or `list()` `j`, an unnamed bare column keeps its name, and any other unnamed item is named
+by its position, as data.table names it: `f[, .(id, price * 2)]` is `frame{id: integer[], V2: double[]}`.
+An unnamed computed `j` under `by` becomes the column `V1`. The groups can be written `by = g`,
+`by = .(g, h)`, `by = c("g", "h")`, or `by = "g"`, and `keyby` works the same way. A group named
+in a string must be a column, so a misspelled one is a type error:
+
+```text
+type-mismatch
+
+  x the frame `sales` has no column `taem`. Did you mean `team`?
+   --[a.R:8:44]
+ 8 | print(sales[, .(total = sum(amount)), by = "taem"])
+   |                                            ^^^^^^
+```
+
+A query's row index `i` must be logical or numeric when its type is known. A frame as `i` is reported
+with a hint to add `on =`, because without it data.table joins on a key that ry cannot see. Queries
+chain, and each step sees the columns the step before it produced:
+
+```r
+sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
+# frame{team: character[], total: double[]}
+```
+
+#### Column updates
+
+`f[, y := v]` is copy-on-write: the statement rebinds `f` in the current scope with `y` added, or with
+`y`'s type replaced. An alias taken earlier keeps the old type, and `y := NULL` removes the column:
+
+```r
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+before <- sales
+sales[, tax := amount * 0.2]    # sales: frame{team: character[], amount: double[], tax: double[]}
+before$tax                      # error: the frame `before` has no column `tax`. Its columns are `team`, `amount`
+```
+
+The left side may also be a string, `c("a", "b")` paired with a `list()` of values, or the functional
+form `` `:=`(a = v, b = w) ``. Any other left side, such as `(columns) := v`, makes the columns
+unknown, silently. Inside a function, `:=` binds a local copy, so the caller's frame keeps its type.
+`f$y <- v` and `f[["y"]] <- v` update a column in the same way.
+
+#### Joins
+
+`x[y, on = keys]` joins two frames. The keys may be written `"id"`, `"a==b"`, `"a,b"`, `c("id")`,
+`c(a = "b")`, `.(id)`, or `.(a = b)`, and each one must be a column of the frame it names. The result
+has `x`'s columns, each key taking `y`'s key type, followed by `y`'s other columns; a column both
+frames have is renamed `i.name`, as data.table names it. `roll =` does not change the type. A join
+whose `i` is not a frame, or whose `on` is some other form, is `Unknown`.
+
+#### Columns
+
+`f$x`, `f[["x"]]`, and `f[[1L]]` type as the column. A missing column is a type error that names the
+frame and suggests the closest column, like a missing record field:
+
+```text
+type-mismatch
+
+  x the frame `sales` has no column `amuont`. Did you mean `amount`?
+   --[a.R:7:13]
+ 7 | print(sales$amuont)
+   |             ^^^^^^
+```
 
 ### Conditional stub namespaces: data.table, dplyr, ggplot2 and testthat
 

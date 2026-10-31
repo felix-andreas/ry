@@ -1565,6 +1565,7 @@ mod tests {
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
+            column_misses: Default::default(),
             top_level_bindings: vec![("value".to_owned(), types::TypeScheme::monomorphic(integer))],
         };
 

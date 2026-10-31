@@ -65,6 +65,9 @@ pub struct ItemNaming {
     pub captured_slots: BTreeSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: BTreeSet<ExprId>,
+    /// `f[, y := v]` statements: R's `:=` updates `f` in place, which ry models as a
+    /// rebinding of the frame's slot, so later reads see the added or removed column.
+    pub column_updates: BTreeMap<ExprId, BindingId>,
     /// Qualified reads outside quiet contexts.
     pub namespace_reads: BTreeMap<ExprId, NamespaceRead>,
     /// `<<-` targets with no enclosing binding: R creates them in the global environment.
@@ -416,6 +419,20 @@ impl Context<'_> {
                     self.quiet_depth -= 1;
                 } else {
                     self.resolve_arguments(arguments);
+                }
+                // A frame's `:=` is copy-on-write, so like `x$a <- v` it binds the name in the
+                // current scope. The target's own read keeps its resolution: it reads the value
+                // before the update, which may live in an enclosing scope.
+                if !*double
+                    && self.quoted_depth == 0
+                    && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
+                    && is_column_update(module, arguments)
+                {
+                    let range = module.expression(*target).range;
+                    let kind = self.assignment_binding_kind();
+                    let slot = self.frame_slot(name, range, kind);
+                    self.record_write_site(id, name, range, slot, false);
+                    self.naming.column_updates.insert(id, slot);
                 }
             }
             ExpressionKind::Field { target, .. } => self.resolve(*target),
@@ -950,6 +967,34 @@ fn data_table_signature(module: &Module, arguments: &[Argument]) -> bool {
                 .value
                 .is_some_and(|value| data_table_marker(module, value))
     })
+}
+
+/// The `j` argument is a `:=` call.
+pub(crate) fn is_column_update(module: &Module, arguments: &[Argument]) -> bool {
+    let (_, j) = query_index_arguments(arguments);
+    j.and_then(|argument| argument.value).is_some_and(|value| {
+        matches!(
+            &module.expression(value).kind,
+            ExpressionKind::Call { callee, .. }
+                if matches!(&module.expression(*callee).kind, ExpressionKind::NameRef(name) if name == ":=")
+        )
+    })
+}
+
+/// A query's `i` and `j`, matched as R matches `[`'s formals: by name first, then the
+/// unnamed arguments fill whichever of the two is still open, in order.
+pub(crate) fn query_index_arguments(
+    arguments: &[Argument],
+) -> (Option<&Argument>, Option<&Argument>) {
+    let named = |formal: &str| {
+        arguments
+            .iter()
+            .find(|argument| argument.name.as_deref() == Some(formal))
+    };
+    let mut positional = arguments.iter().filter(|argument| argument.name.is_none());
+    let i = named("i").or_else(|| positional.next());
+    let j = named("j").or_else(|| positional.next());
+    (i, j)
 }
 
 fn data_table_marker(module: &Module, id: ExprId) -> bool {
