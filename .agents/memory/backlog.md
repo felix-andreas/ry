@@ -1786,6 +1786,14 @@ What step 2 of `contributing/design/r-runtime.md` left for later steps, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
+- **Graphics devices.** The interpreter's session has only the null device, so plotting and opening
+  any device fail with a clear error (`decisions.md`, "the default packages' utils, tools,
+  grDevices and graphics routines"). `stem()` fails too: its layout rules are not derived yet.
+- **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
+  `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
+  `Rprofmem` warn and do nothing.
+- **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
+  context, so it prints `Calls: print -> .Call` where ry prints none.
 
 ## Explicitly out of scope for now
 

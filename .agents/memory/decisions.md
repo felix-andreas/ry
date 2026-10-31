@@ -1884,3 +1884,28 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 - **`dqrdc2` is Rust, written from its description** (R's LINPACK variant, which no system library ships), as are the `dqrsl` family and `dtrco`. They still call BLAS level 1 (`dnrm2`, `ddot`, `daxpy`, `dscal`, `dasum`) because those decide the bits: reference `dnrm2` is a scaled algorithm, not a plain square root of a sum.
 - **One table of base's native routines**, `native::BASE_ROUTINES`. `getRegisteredRoutines` derives from it, and every `.Call`, `.C` and `.Fortran` (the interpreter's and libr's) asks `native::call_base_routine` first, so `qr()` works with or without libR. A routine is base's when its `NativeSymbolInfo`'s `dll` is named `base`, or when it is named by a string with no `PACKAGE` or `PACKAGE = "base"`.
 - **GNU R's quirks are kept on purpose**: `%*%` uses BLAS unless an operand may hold a NaN or an infinity, then a plain loop (which also stands in when BLAS is missing, since reference BLAS sums in the same order); `La_solve`'s condition check norms the already factored copy when `a` was not double; `La_dgecon` estimates with `n` as the leading dimension, which ry refuses for `m < n` instead of reading past the matrix.
+
+# Decision record: the default packages' utils, tools, grDevices and graphics routines
+
+The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by package in
+`builtin_libraries::implementation`. Each behavior was derived from GNU R's documentation and its
+observed output (the oracle cases `io__*`, `colours__*` and `utils__sizes_hashtabs_and_tools`),
+never from its C source.
+
+- **The session has only the null device.** `dev.cur()` is device 1, `.Device` and `.Devices` are
+  bound at startup, and every grDevices or graphics routine without an entry in the tables fails
+  with "graphics devices are not supported in ry yet" (`graphics::no_devices` is the fallback, so a
+  new routine needs no stub). `cairoProps` reports no cairo, so the default device is `pdf` and
+  `bitmapType` is `"Xlib"`, as in a headless build. A real device is a later step.
+- **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
+  low byte), because only the colour routines read it and the interpreter is single-threaded.
+- **`scan` is implemented in `utils.rs`, not `connections.rs`**, because `scan`, `readtablehead`
+  and `countfields` share one tokenizer and only `read.table` drives all three. Connections expose
+  their unread input through `connections::with_input`, and `pushBack` splices into it.
+- **A hash table keeps its entries in R vectors behind the external pointer** (type, keys, values,
+  hashes, count), and a lookup compares a hash that agrees with `identical()` before calling it. The
+  collector then sees every key and value without a Rust-side table it would have to trace.
+- **`contourLines` reproduces GNU R's line order and direction** by rules found from observation,
+  written on `graphics::contour_level`: segment edge order, the saddle rule, the triangle for one
+  missing corner, the nudge of values equal to the level, and closing a loop. A saddle whose
+  bilinear saddle value is within rounding of the level can still pick the other pairing.

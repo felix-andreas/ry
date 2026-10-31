@@ -13,8 +13,8 @@ use crate::{
     format::{format_complex_alone, format_real_alone_scipen},
     unwind::{R, error},
     values::{
-        self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
-        symbols,
+        self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
+        string_vector, symbols,
     },
     write_console,
 };
@@ -35,7 +35,9 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("processevents", |_| Ok(nil())),
     ("tzcode_type", |_| unsafe { scalar_string("internal") }),
     ("nsl", do_nsl),
-    ("menu", |_| Err(error("menu() cannot be used non-interactively"))),
+    ("menu", |_| {
+        Err(error("menu() cannot be used non-interactively"))
+    }),
     ("hashtab_Ext", do_hashtab),
     ("gethash_Ext", do_gethash),
     ("sethash_Ext", do_sethash),
@@ -48,7 +50,11 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("Rprof", do_rprof),
     ("Rprofmem", do_rprofmem),
     ("unzip", do_unzip),
-    ("download", |_| Err(error("the \"internal\" download method is not supported in ry; use method = \"libcurl\""))),
+    ("download", |_| {
+        Err(error(
+            "the \"internal\" download method is not supported in ry; use method = \"libcurl\"",
+        ))
+    }),
     ("sockconnect", no_sockets),
     ("sockread", no_sockets),
     ("sockclose", no_sockets),
@@ -57,13 +63,27 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("sockwrite", no_sockets),
     ("addhistory", |_| Ok(nil())),
     // The `.External2` routines report errors against their own call, as GNU R's do.
-    ("loadhistory", |call| Err(call.error("no history mechanism available"))),
-    ("savehistory", |call| Err(call.error("no history available to save"))),
-    ("dataentry", |call| Err(call.error("data entry cannot be used non-interactively"))),
-    ("dataviewer", |call| Err(call.error("View() cannot be used non-interactively"))),
-    ("edit", |call| Err(call.error("edit() cannot be used non-interactively"))),
-    ("fileedit", |call| Err(call.error("file.edit() cannot be used non-interactively"))),
-    ("selectlist", |call| Err(call.error("select.list() cannot be used non-interactively"))),
+    ("loadhistory", |call| {
+        Err(call.error("no history mechanism available"))
+    }),
+    ("savehistory", |call| {
+        Err(call.error("no history available to save"))
+    }),
+    ("dataentry", |call| {
+        Err(call.error("data entry cannot be used non-interactively"))
+    }),
+    ("dataviewer", |call| {
+        Err(call.error("View() cannot be used non-interactively"))
+    }),
+    ("edit", |call| {
+        Err(call.error("edit() cannot be used non-interactively"))
+    }),
+    ("fileedit", |call| {
+        Err(call.error("file.edit() cannot be used non-interactively"))
+    }),
+    ("selectlist", |call| {
+        Err(call.error("select.list() cannot be used non-interactively"))
+    }),
 ];
 
 unsafe fn no_sockets(_: &NativeCall<'_>) -> R<Sexp> {
@@ -89,13 +109,21 @@ impl Syntax {
             Some(text) if text.len() == 1 => Some(text.as_bytes()[0]),
             Some(_) => return Err(error("invalid 'sep' value: must be one byte")),
         };
-        let quotes = values::first_string(quotes).map(|text| text.as_bytes().to_vec()).unwrap_or_default();
+        let quotes = values::first_string(quotes)
+            .map(|text| text.as_bytes().to_vec())
+            .unwrap_or_default();
         let comment = match values::first_string(comment).as_deref() {
             None | Some("") => None,
             Some(text) if text.len() == 1 => Some(text.as_bytes()[0]),
             Some(_) => return Err(error("invalid 'comment.char' argument")),
         };
-        Ok(Syntax { separator, quotes, comment, strip_white: false, allow_escapes: false })
+        Ok(Syntax {
+            separator,
+            quotes,
+            comment,
+            strip_white: false,
+            allow_escapes: false,
+        })
     }
 }
 
@@ -124,7 +152,14 @@ struct Scanner<'a> {
 
 impl<'a> Scanner<'a> {
     fn new(input: &'a [u8], position: usize, syntax: &'a Syntax) -> Scanner<'a> {
-        Scanner { input, position, syntax, line: 1, eof_in_quote: false, at_line_start: true }
+        Scanner {
+            input,
+            position,
+            syntax,
+            line: 1,
+            eof_in_quote: false,
+            at_line_start: true,
+        }
     }
 
     fn peek(&self) -> Option<u8> {
@@ -279,7 +314,8 @@ impl<'a> Scanner<'a> {
             }
         } else {
             while let Some(byte) = self.peek() {
-                if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') || Some(byte) == self.syntax.comment {
+                if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') || Some(byte) == self.syntax.comment
+                {
                     break;
                 }
                 self.position += 1;
@@ -307,7 +343,12 @@ impl<'a> Scanner<'a> {
             Some(byte) if Some(byte) == self.syntax.comment => self.skip_rest_of_line(),
             Some(_) => End::Separator,
         };
-        (Some(Field { text: String::from_utf8_lossy(&text).into_owned() }), end)
+        (
+            Some(Field {
+                text: String::from_utf8_lossy(&text).into_owned(),
+            }),
+            end,
+        )
     }
 
     fn next_separated_field(&mut self, separator: u8) -> (Option<Field>, End) {
@@ -379,7 +420,12 @@ impl<'a> Scanner<'a> {
         if line_start && text.is_empty() && !quoted && end != End::Separator {
             return (None, end);
         }
-        (Some(Field { text: String::from_utf8_lossy(&text).into_owned() }), end)
+        (
+            Some(Field {
+                text: String::from_utf8_lossy(&text).into_owned(),
+            }),
+            end,
+        )
     }
 }
 
@@ -479,7 +525,10 @@ unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
             } else {
                 Some(Kind::of(element.kind()).ok_or_else(|| error("invalid 'what' specified"))?)
             };
-            columns.push(Column { kind, values: Vec::new() });
+            columns.push(Column {
+                kind,
+                values: Vec::new(),
+            });
         }
         if columns.is_empty() {
             return Err(error("empty 'what' specified"));
@@ -487,15 +536,35 @@ unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
         columns
     } else {
         let kind = Kind::of(what.kind()).ok_or_else(|| error("invalid 'what' specified"))?;
-        vec![Column { kind: Some(kind), values: Vec::new() }]
+        vec![Column {
+            kind: Some(kind),
+            values: Vec::new(),
+        }]
     };
-    let settings = Conversion { decimal, na_strings: &na_strings };
+    let settings = Conversion {
+        decimal,
+        na_strings: &na_strings,
+    };
     let outcome = crate::connections::with_input(file, |input, position| {
         let mut scanner = Scanner::new(input, *position, &syntax);
         scanner.skip_lines(skip);
-        let limits = Limits { max_items, max_lines };
+        let limits = Limits {
+            max_items,
+            max_lines,
+        };
         let result = if is_list {
-            scan_records(&mut scanner, &mut columns, &settings, limits, RecordRules { fill, flush, multi_line, blank_lines_skip })
+            scan_records(
+                &mut scanner,
+                &mut columns,
+                &settings,
+                limits,
+                RecordRules {
+                    fill,
+                    flush,
+                    multi_line,
+                    blank_lines_skip,
+                },
+            )
         } else {
             scan_items(&mut scanner, &mut columns[0], &settings, limits, flush)
         };
@@ -553,7 +622,13 @@ struct Conversion<'a> {
 }
 
 /// Reads fields into one vector; returns the number of items.
-fn scan_items(scanner: &mut Scanner<'_>, column: &mut Column, settings: &Conversion<'_>, limits: Limits, flush: bool) -> Result<usize, crate::unwind::Unwind> {
+fn scan_items(
+    scanner: &mut Scanner<'_>,
+    column: &mut Column,
+    settings: &Conversion<'_>,
+    limits: Limits,
+    flush: bool,
+) -> Result<usize, crate::unwind::Unwind> {
     let kind = column.kind.unwrap_or(Kind::Character);
     let mut lines = 0;
     loop {
@@ -562,7 +637,9 @@ fn scan_items(scanner: &mut Scanner<'_>, column: &mut Column, settings: &Convers
         }
         let (field, mut end) = scanner.next_field();
         if let Some(field) = field {
-            column.values.push(convert_field(&field.text, kind, settings)?);
+            column
+                .values
+                .push(convert_field(&field.text, kind, settings)?);
             if flush && end == End::Separator {
                 end = scanner.skip_rest_of_line();
             }
@@ -600,7 +677,9 @@ fn scan_records(
             fields_on_line += 1;
             let column = &mut columns[filled];
             if let Some(kind) = column.kind {
-                column.values.push(convert_field(&field.text, kind, settings)?);
+                column
+                    .values
+                    .push(convert_field(&field.text, kind, settings)?);
             }
             filled += 1;
             if filled == width {
@@ -674,7 +753,12 @@ fn convert_field(text: &str, kind: Kind, settings: &Conversion<'_>) -> R<Value> 
         return Ok(Value::Text(text.to_owned()));
     }
     let trimmed = text.trim_matches(|character| character == ' ' || character == '\t');
-    if trimmed.is_empty() || settings.na_strings.iter().any(|na| na == trimmed || na == text) {
+    if trimmed.is_empty()
+        || settings
+            .na_strings
+            .iter()
+            .any(|na| na == trimmed || na == text)
+    {
         return Ok(Value::Missing);
     }
     let value = match kind {
@@ -688,11 +772,20 @@ fn convert_field(text: &str, kind: Kind, settings: &Conversion<'_>) -> R<Value> 
         Kind::Complex => parse_complex(trimmed, settings.decimal).map(Value::Complex),
         Kind::Raw => {
             let valid = trimmed.len() <= 2 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit());
-            valid.then(|| u8::from_str_radix(trimmed, 16).ok()).flatten().map(Value::Raw)
+            valid
+                .then(|| u8::from_str_radix(trimmed, 16).ok())
+                .flatten()
+                .map(Value::Raw)
         }
         Kind::Character => None,
     };
-    value.ok_or_else(|| error(format!("scan() expected '{}', got '{}'", kind.expected(), text)))
+    value.ok_or_else(|| {
+        error(format!(
+            "scan() expected '{}', got '{}'",
+            kind.expected(),
+            text
+        ))
+    })
 }
 
 /// A decimal integer that fits an R integer.
@@ -725,9 +818,9 @@ fn parse_complex(text: &str, decimal: u8) -> Option<Rcomplex> {
         return parse_double(text, decimal).map(|r| Rcomplex { r, i: 0.0 });
     };
     let bytes = body.as_bytes();
-    let split = (1..bytes.len())
-        .rev()
-        .find(|&index| matches!(bytes[index], b'+' | b'-') && !matches!(bytes[index - 1], b'e' | b'E'));
+    let split = (1..bytes.len()).rev().find(|&index| {
+        matches!(bytes[index], b'+' | b'-') && !matches!(bytes[index - 1], b'e' | b'E')
+    });
     match split {
         Some(index) => {
             let r = parse_double(&body[..index], decimal)?;
@@ -752,12 +845,30 @@ unsafe fn column_vector(column: &Column) -> R<Sexp> {
                     _ => NA_INTEGER,
                 }
             }
-            Kind::Double => values::reals_mut(vector)[index] = if let Value::Double(value) = value { *value } else { NA_REAL },
-            Kind::Complex => {
-                values::complexes_mut(vector)[index] =
-                    if let Value::Complex(value) = value { *value } else { Rcomplex { r: NA_REAL, i: NA_REAL } }
+            Kind::Double => {
+                values::reals_mut(vector)[index] = if let Value::Double(value) = value {
+                    *value
+                } else {
+                    NA_REAL
+                }
             }
-            Kind::Raw => values::raws_mut(vector)[index] = if let Value::Raw(value) = value { *value } else { 0 },
+            Kind::Complex => {
+                values::complexes_mut(vector)[index] = if let Value::Complex(value) = value {
+                    *value
+                } else {
+                    Rcomplex {
+                        r: NA_REAL,
+                        i: NA_REAL,
+                    }
+                }
+            }
+            Kind::Raw => {
+                values::raws_mut(vector)[index] = if let Value::Raw(value) = value {
+                    *value
+                } else {
+                    0
+                }
+            }
             Kind::Character => {
                 let charsxp = match value {
                     Value::Text(text) => values::mkchar(text)?,
@@ -781,7 +892,10 @@ unsafe fn na_strings(strings: Sexp) -> Vec<String> {
     if strings.kind() != SexpType::String {
         return Vec::new();
     }
-    values::strings(strings).into_iter().map(|text| text.unwrap_or_else(|| "NA".to_owned())).collect()
+    values::strings(strings)
+        .into_iter()
+        .map(|text| text.unwrap_or_else(|| "NA".to_owned()))
+        .collect()
 }
 
 // readtablehead and countfields.
@@ -821,10 +935,14 @@ unsafe fn do_read_table_head(call: &NativeCall<'_>) -> R<Sexp> {
     })?;
     let description = crate::connections::description(file).unwrap_or_default();
     if in_quote {
-        return Err(error(format!("incomplete final line found by readTableHeader on '{description}'")));
+        return Err(error(format!(
+            "incomplete final line found by readTableHeader on '{description}'"
+        )));
     }
     if incomplete {
-        warning(format!("incomplete final line found by readTableHeader on '{description}'"))?;
+        warning(format!(
+            "incomplete final line found by readTableHeader on '{description}'"
+        ))?;
     }
     string_vector(&lines)
 }
@@ -862,7 +980,9 @@ fn head_line(input: &[u8], position: &mut usize, syntax: &Syntax) -> (Vec<u8>, b
             None => {
                 if Some(byte) == syntax.comment {
                     in_comment = true;
-                } else if syntax.quotes.contains(&byte) && (syntax.separator.is_some() || field_start) {
+                } else if syntax.quotes.contains(&byte)
+                    && (syntax.separator.is_some() || field_start)
+                {
                     quote = Some(byte);
                 }
                 field_start = match syntax.separator {
@@ -901,7 +1021,9 @@ unsafe fn do_count_fields(call: &NativeCall<'_>) -> R<Sexp> {
                 break;
             }
             // The lines a quoted field ran over count as unknown.
-            let spanned = scanner.line.saturating_sub(record_line + usize::from(end == End::Line));
+            let spanned = scanner
+                .line
+                .saturating_sub(record_line + usize::from(end == End::Line));
             counts.extend(std::iter::repeat_n(NA_INTEGER, spanned));
             if fields > 0 || !blank_lines_skip {
                 counts.push(fields);
@@ -934,15 +1056,24 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
     let na = na_strings(call.arg(1));
     let as_is = values::as_logical_scalar(call.arg(2)) == 1;
     let decimal = decimal_mark(call.arg(3))?;
-    let numerals = values::first_string(call.arg(4)).map(|text| text.into_owned()).unwrap_or_else(|| "allow.loss".to_owned());
+    let numerals = values::first_string(call.arg(4))
+        .map(|text| text.into_owned())
+        .unwrap_or_else(|| "allow.loss".to_owned());
     let try_logical = values::as_logical_scalar(call.arg(5)) != 0;
     let strings = values::strings(x);
     let missing = |text: &Option<String>| match text {
         None => true,
         Some(text) => na.iter().any(|candidate| candidate == text) || text.trim().is_empty(),
     };
-    let present: Vec<&str> = strings.iter().filter(|text| !missing(text)).filter_map(|text| text.as_deref()).collect();
-    let result = if present.iter().all(|text| try_logical && matches!(*text, "T" | "F" | "TRUE" | "FALSE")) {
+    let present: Vec<&str> = strings
+        .iter()
+        .filter(|text| !missing(text))
+        .filter_map(|text| text.as_deref())
+        .collect();
+    let result = if present
+        .iter()
+        .all(|text| try_logical && matches!(*text, "T" | "F" | "TRUE" | "FALSE"))
+    {
         let result = alloc(SexpType::Logical, strings.len())?;
         for (index, text) in strings.iter().enumerate() {
             values::ints_mut(result)[index] = match text.as_deref() {
@@ -952,28 +1083,53 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
             };
         }
         result
-    } else if present.iter().all(|text| parse_integer(text.trim_start()).is_some() && !text.ends_with([' ', '\t'])) {
+    } else if present
+        .iter()
+        .all(|text| parse_integer(text.trim_start()).is_some() && !text.ends_with([' ', '\t']))
+    {
         let result = alloc(SexpType::Integer, strings.len())?;
         for (index, text) in strings.iter().enumerate() {
-            values::ints_mut(result)[index] =
-                if missing(text) { NA_INTEGER } else { text.as_deref().and_then(|text| parse_integer(text.trim_start())).unwrap_or(NA_INTEGER) };
+            values::ints_mut(result)[index] = if missing(text) {
+                NA_INTEGER
+            } else {
+                text.as_deref()
+                    .and_then(|text| parse_integer(text.trim_start()))
+                    .unwrap_or(NA_INTEGER)
+            };
         }
         result
-    } else if present.iter().all(|text| convertible_double(text, decimal)) && !loses_accuracy(&present, &numerals)? {
+    } else if present.iter().all(|text| convertible_double(text, decimal))
+        && !loses_accuracy(&present, &numerals)?
+    {
         let result = alloc(SexpType::Real, strings.len())?;
         for (index, text) in strings.iter().enumerate() {
-            values::reals_mut(result)[index] =
-                if missing(text) { NA_REAL } else { text.as_deref().and_then(|text| parse_double(text, decimal)).unwrap_or(NA_REAL) };
+            values::reals_mut(result)[index] = if missing(text) {
+                NA_REAL
+            } else {
+                text.as_deref()
+                    .and_then(|text| parse_double(text, decimal))
+                    .unwrap_or(NA_REAL)
+            };
         }
         result
     } else if !present.iter().all(|text| convertible_double(text, decimal))
-        && present.iter().all(|text| text.trim() != "NA" && parse_complex(text.trim(), decimal).is_some())
+        && present
+            .iter()
+            .all(|text| text.trim() != "NA" && parse_complex(text.trim(), decimal).is_some())
     {
         let result = alloc(SexpType::Complex, strings.len())?;
         for (index, text) in strings.iter().enumerate() {
-            let na = Rcomplex { r: NA_REAL, i: NA_REAL };
-            values::complexes_mut(result)[index] =
-                if missing(text) { na } else { text.as_deref().and_then(|text| parse_complex(text.trim(), decimal)).unwrap_or(na) };
+            let na = Rcomplex {
+                r: NA_REAL,
+                i: NA_REAL,
+            };
+            values::complexes_mut(result)[index] = if missing(text) {
+                na
+            } else {
+                text.as_deref()
+                    .and_then(|text| parse_complex(text.trim(), decimal))
+                    .unwrap_or(na)
+            };
         }
         result
     } else {
@@ -992,15 +1148,19 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
             }
             result
         } else {
-            let mut levels: Vec<&str> = strings.iter().filter(|text| !is_na(text)).filter_map(|text| text.as_deref()).collect();
+            let mut levels: Vec<&str> = strings
+                .iter()
+                .filter(|text| !is_na(text))
+                .filter_map(|text| text.as_deref())
+                .collect();
             levels.sort_by(|left, right| crate::sort::collate(left, right));
             levels.dedup();
             let result = alloc(SexpType::Integer, strings.len())?;
             for (index, text) in strings.iter().enumerate() {
                 values::ints_mut(result)[index] = match text.as_deref() {
-                    Some(text) if !is_na(&Some(text.to_owned())) => {
-                        levels.binary_search_by(|level| crate::sort::collate(level, text)).map_or(NA_INTEGER, |position| position as i32 + 1)
-                    }
+                    Some(text) if !is_na(&Some(text.to_owned())) => levels
+                        .binary_search_by(|level| crate::sort::collate(level, text))
+                        .map_or(NA_INTEGER, |position| position as i32 + 1),
                     _ => NA_INTEGER,
                 };
             }
@@ -1044,7 +1204,9 @@ unsafe fn loses_accuracy(texts: &[&str], numerals: &str) -> R<bool> {
             if numerals == "no.loss" {
                 return Ok(true);
             }
-            warning(format!("accuracy loss in conversion from \"{text}\" to numeric"))?;
+            warning(format!(
+                "accuracy loss in conversion from \"{text}\" to numeric"
+            ))?;
         }
     }
     Ok(false)
@@ -1062,10 +1224,18 @@ unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
     let rows = values::as_integer_scalar(call.arg(2)).max(0) as usize;
     let columns = values::as_integer_scalar(call.arg(3)).max(0) as usize;
     let row_names = call.arg(4);
-    let separator = values::first_string(call.arg(5)).map(|text| text.into_owned()).unwrap_or_default();
-    let eol = values::first_string(call.arg(6)).map(|text| text.into_owned()).unwrap_or_default();
-    let na = values::first_string(call.arg(7)).map(|text| text.into_owned()).unwrap_or_else(|| "NA".to_owned());
-    let decimal = values::first_string(call.arg(8)).map(|text| text.into_owned()).unwrap_or_else(|| ".".to_owned());
+    let separator = values::first_string(call.arg(5))
+        .map(|text| text.into_owned())
+        .unwrap_or_default();
+    let eol = values::first_string(call.arg(6))
+        .map(|text| text.into_owned())
+        .unwrap_or_default();
+    let na = values::first_string(call.arg(7))
+        .map(|text| text.into_owned())
+        .unwrap_or_else(|| "NA".to_owned());
+    let decimal = values::first_string(call.arg(8))
+        .map(|text| text.into_owned())
+        .unwrap_or_else(|| ".".to_owned());
     if decimal.chars().count() != 1 {
         return Err(error("'dec' must be a single character"));
     }
@@ -1073,7 +1243,11 @@ unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
     let quoted: Vec<i32> = values::ints(quote).to_vec();
     let escape = values::as_logical_scalar(call.arg(10)) == 1;
     let quote_text = |text: &str| -> String {
-        let inner = if escape { text.replace('"', "\\\"") } else { text.replace('"', "\"\"") };
+        let inner = if escape {
+            text.replace('"', "\\\"")
+        } else {
+            text.replace('"', "\"\"")
+        };
         format!("\"{inner}\"")
     };
     let is_frame = x.kind() == SexpType::List;
@@ -1085,8 +1259,13 @@ unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
     let mut output = String::new();
     for row in 0..rows {
         if row_names != nil() {
-            let name = values::string_at(row_names, row).map_or_else(|| na.clone(), |name| name.into_owned());
-            output.push_str(&if quoted.contains(&0) { quote_text(&name) } else { name });
+            let name = values::string_at(row_names, row)
+                .map_or_else(|| na.clone(), |name| name.into_owned());
+            output.push_str(&if quoted.contains(&0) {
+                quote_text(&name)
+            } else {
+                name
+            });
             output.push_str(&separator);
         }
         for (column, cell) in cells.iter().enumerate() {
@@ -1096,7 +1275,9 @@ unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
             let index = if is_frame { row } else { row + column * rows };
             match cell.text(index, &decimal)? {
                 None => output.push_str(&na),
-                Some((text, true)) if quoted.contains(&(column as i32 + 1)) => output.push_str(&quote_text(&text)),
+                Some((text, true)) if quoted.contains(&(column as i32 + 1)) => {
+                    output.push_str(&quote_text(&text))
+                }
                 Some((text, _)) => output.push_str(&text),
             }
         }
@@ -1118,7 +1299,8 @@ struct Cell {
 
 impl Cell {
     unsafe fn new(vector: Sexp) -> R<Cell> {
-        let levels = values::inherits(vector, "factor").then(|| values::get_attr(vector, symbols().levels));
+        let levels =
+            values::inherits(vector, "factor").then(|| values::get_attr(vector, symbols().levels));
         Ok(Cell { vector, levels })
     }
 
@@ -1129,18 +1311,29 @@ impl Cell {
         if index >= length(vector) {
             return Ok(None);
         }
-        let with_decimal = |text: String| if decimal == "." { text } else { text.replace('.', decimal) };
+        let with_decimal = |text: String| {
+            if decimal == "." {
+                text
+            } else {
+                text.replace('.', decimal)
+            }
+        };
         Ok(match vector.kind() {
             _ if self.levels.is_some() => {
                 let code = values::ints(vector)[index];
                 match self.levels {
-                    Some(levels) if code != NA_INTEGER && code >= 1 && (code as usize) <= length(levels) => {
-                        values::string_at(levels, code as usize - 1).map(|level| (level.into_owned(), true))
+                    Some(levels)
+                        if code != NA_INTEGER && code >= 1 && (code as usize) <= length(levels) =>
+                    {
+                        values::string_at(levels, code as usize - 1)
+                            .map(|level| (level.into_owned(), true))
                     }
                     _ => None,
                 }
             }
-            SexpType::String => values::string_at(vector, index).map(|text| (text.into_owned(), true)),
+            SexpType::String => {
+                values::string_at(vector, index).map(|text| (text.into_owned(), true))
+            }
             SexpType::Logical => match values::ints(vector)[index] {
                 NA_LOGICAL => None,
                 0 => Some(("FALSE".to_owned(), false)),
@@ -1152,7 +1345,11 @@ impl Cell {
             },
             SexpType::Real => {
                 let value = values::reals(vector)[index];
-                if value.is_nan() { None } else { Some((with_decimal(format_real_alone_scipen(value, 15)), false)) }
+                if value.is_nan() {
+                    None
+                } else {
+                    Some((with_decimal(format_real_alone_scipen(value, 15)), false))
+                }
             }
             SexpType::Complex => {
                 let value = values::complexes(vector)[index];
@@ -1180,7 +1377,9 @@ unsafe fn do_crc64(call: &NativeCall<'_>) -> R<Sexp> {
     if text.kind() != SexpType::String {
         return Err(error("input must be a character string"));
     }
-    let bytes = values::first_string(text).map(|text| text.into_owned()).unwrap_or_default();
+    let bytes = values::first_string(text)
+        .map(|text| text.into_owned())
+        .unwrap_or_default();
     scalar_string(&crate::system::crc64_hex(bytes.as_bytes()))
 }
 
@@ -1220,9 +1419,16 @@ unsafe fn object_size(object: Sexp) -> usize {
         | SexpType::Bytecode
         | SexpType::Object => NODE_SIZE,
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
-            NODE_SIZE + object_size(object.tag()) + object_size(object.car()) + object_size(object.cdr())
+            NODE_SIZE
+                + object_size(object.tag())
+                + object_size(object.car())
+                + object_size(object.cdr())
         }
-        SexpType::Closure => NODE_SIZE + object_size(object.car()) + object_size(crate::bytecode::closure_body(object)),
+        SexpType::Closure => {
+            NODE_SIZE
+                + object_size(object.car())
+                + object_size(crate::bytecode::closure_body(object))
+        }
         SexpType::Promise => NODE_SIZE + object_size(object.car()) + object_size(object.cdr()),
         SexpType::Char => VECTOR_HEADER + vector_data_size(object.bytes().len() + 1),
         SexpType::String => {
@@ -1239,7 +1445,9 @@ unsafe fn object_size(object: Sexp) -> usize {
         }
         SexpType::List | SexpType::Expression => {
             let count = length(object);
-            let elements: usize = (0..count).map(|index| object_size(object.element(index))).sum();
+            let elements: usize = (0..count)
+                .map(|index| object_size(object.element(index)))
+                .sum();
             VECTOR_HEADER + vector_data_size(count * 8) + elements
         }
         kind => {
@@ -1269,14 +1477,21 @@ unsafe fn do_octal_size(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn do_char_class(call: &NativeCall<'_>) -> R<Sexp> {
     let x = call.arg(0);
     let characters: Vec<Option<char>> = match x.kind() {
-        SexpType::String if length(x) == 1 => {
-            values::string_at(x, 0).map(|text| text.chars().map(Some).collect()).unwrap_or_default()
-        }
+        SexpType::String if length(x) == 1 => values::string_at(x, 0)
+            .map(|text| text.chars().map(Some).collect())
+            .unwrap_or_default(),
         SexpType::Integer | SexpType::Real => {
             let codes = coerce_vector(x, SexpType::Integer)?;
-            values::ints(codes).iter().map(|code| u32::try_from(*code).ok().and_then(char::from_u32)).collect()
+            values::ints(codes)
+                .iter()
+                .map(|code| u32::try_from(*code).ok().and_then(char::from_u32))
+                .collect()
         }
-        _ => return Err(error("argument 'x' must be a length-1 character vector or an integer vector")),
+        _ => {
+            return Err(error(
+                "argument 'x' must be a length-1 character vector or an integer vector",
+            ));
+        }
     };
     let class = values::require_string(call.arg(1), "class")?;
     let test: fn(char) -> bool = match class.as_str() {
@@ -1288,15 +1503,22 @@ unsafe fn do_char_class(call: &NativeCall<'_>) -> R<Sexp> {
         "graph" => |character| !character.is_control() && !character.is_whitespace(),
         "lower" => char::is_lowercase,
         "print" => |character| !character.is_control(),
-        "punct" => |character| !character.is_control() && !character.is_whitespace() && !character.is_alphanumeric(),
+        "punct" => |character| {
+            !character.is_control() && !character.is_whitespace() && !character.is_alphanumeric()
+        },
         "space" => char::is_whitespace,
         "upper" => char::is_uppercase,
         "xdigit" => |character| character.is_ascii_hexdigit(),
-        _ => return Err(error("character class \"{class}\" is invalid".replace("{class}", &class))),
+        _ => {
+            return Err(error(
+                "character class \"{class}\" is invalid".replace("{class}", &class),
+            ));
+        }
     };
     let result = alloc(SexpType::Logical, characters.len())?;
     for (index, character) in characters.iter().enumerate() {
-        values::ints_mut(result)[index] = character.map_or(NA_LOGICAL, |character| test(character) as i32);
+        values::ints_mut(result)[index] =
+            character.map_or(NA_LOGICAL, |character| test(character) as i32);
     }
     Ok(result)
 }
@@ -1305,7 +1527,9 @@ unsafe fn do_char_class(call: &NativeCall<'_>) -> R<Sexp> {
 
 unsafe fn do_flush_console(_: &NativeCall<'_>) -> R<Sexp> {
     use std::io::Write;
-    std::io::stdout().flush().map_err(|failure| error(format!("cannot flush the console: {failure}")))?;
+    std::io::stdout()
+        .flush()
+        .map_err(|failure| error(format!("cannot flush the console: {failure}")))?;
     Ok(nil())
 }
 
@@ -1389,7 +1613,10 @@ unsafe fn new_state(kind: &str, capacity: usize) -> R<Sexp> {
 }
 
 unsafe fn table_of(object: Sexp) -> Option<Table> {
-    if object.kind() != SexpType::List || length(object) != 1 || !values::inherits(object, "hashtab") {
+    if object.kind() != SexpType::List
+        || length(object) != 1
+        || !values::inherits(object, "hashtab")
+    {
         return None;
     }
     let pointer = object.element(0);
@@ -1400,7 +1627,10 @@ unsafe fn table_of(object: Sexp) -> Option<Table> {
     if tag.kind() != SexpType::Symbol || values::symbol_name(tag) != HASHTAB_MARKER {
         return None;
     }
-    Some(Table { pointer, state: pointer.external_protected() })
+    Some(Table {
+        pointer,
+        state: pointer.external_protected(),
+    })
 }
 
 unsafe fn require_table(object: Sexp) -> R<Table> {
@@ -1433,7 +1663,11 @@ impl Table {
     }
 
     unsafe fn hash(&self, key: Sexp) -> u64 {
-        if self.by_address() { key.as_ptr() as u64 } else { structural_hash(key, 3) }
+        if self.by_address() {
+            key.as_ptr() as u64
+        } else {
+            structural_hash(key, 3)
+        }
     }
 
     unsafe fn find(&self, key: Sexp) -> Option<usize> {
@@ -1442,7 +1676,11 @@ impl Table {
         let flags = crate::sort::IdenticalFlags::default();
         (0..self.count()).find(|&index| {
             self.hash_at(index) == hash
-                && if by_address { self.key(index) == key } else { crate::sort::identical(self.key(index), key, &flags) }
+                && if by_address {
+                    self.key(index) == key
+                } else {
+                    crate::sort::identical(self.key(index), key, &flags)
+                }
         })
     }
 
@@ -1454,15 +1692,21 @@ impl Table {
         let count = self.count();
         let capacity = length(self.state.element(STATE_KEYS));
         if count == capacity {
-            let kind = values::first_string(self.state.element(STATE_TYPE)).map(|text| text.into_owned()).unwrap_or_default();
+            let kind = values::first_string(self.state.element(STATE_TYPE))
+                .map(|text| text.into_owned())
+                .unwrap_or_default();
             let grown = new_state(&kind, (capacity * 2).max(8))?;
             for index in 0..count {
                 values::set_elt(grown.element(STATE_KEYS), index, self.key(index));
                 values::set_elt(grown.element(STATE_VALUES), index, self.value(index));
-                values::reals_mut(grown.element(STATE_HASHES))[index] = values::reals(self.state.element(STATE_HASHES))[index];
+                values::reals_mut(grown.element(STATE_HASHES))[index] =
+                    values::reals(self.state.element(STATE_HASHES))[index];
             }
             crate::heap().set_external_protected(self.pointer, grown);
-            let table = Table { pointer: self.pointer, state: grown };
+            let table = Table {
+                pointer: self.pointer,
+                state: grown,
+            };
             table.set_count(count);
             return table.insert(key, value);
         }
@@ -1528,7 +1772,9 @@ unsafe fn structural_hash(object: Sexp, depth: u32) -> u64 {
 /// `gethash_Ext(h, key, nomatch)`.
 unsafe fn do_gethash(call: &NativeCall<'_>) -> R<Sexp> {
     let table = require_table(call.arg(0))?;
-    Ok(table.find(call.arg(1)).map_or_else(|| call.arg(2), |index| table.value(index)))
+    Ok(table
+        .find(call.arg(1))
+        .map_or_else(|| call.arg(2), |index| table.value(index)))
 }
 
 /// `sethash_Ext(h, key, value)`: the value.
@@ -1565,9 +1811,18 @@ unsafe fn do_maphash(call: &NativeCall<'_>) -> R<Sexp> {
     if !values::is_function(function) {
         return Err(error("FUN must be a function"));
     }
-    let entries: Vec<(Sexp, Sexp)> = (0..table.count()).rev().map(|index| (table.key(index), table.value(index))).collect();
+    let entries: Vec<(Sexp, Sexp)> = (0..table.count())
+        .rev()
+        .map(|index| (table.key(index), table.value(index)))
+        .collect();
     for (key, value) in entries {
-        let args = [Arg { tag: nil(), value: key }, Arg { tag: nil(), value }];
+        let args = [
+            Arg {
+                tag: nil(),
+                value: key,
+            },
+            Arg { tag: nil(), value },
+        ];
         crate::eval::apply(nil(), function, &args, call.env)?;
     }
     Ok(nil())
@@ -1602,26 +1857,45 @@ unsafe fn do_unzip(call: &NativeCall<'_>) -> R<Sexp> {
     let list = values::as_logical_scalar(call.arg(3)) == 1;
     let overwrite = values::as_logical_scalar(call.arg(4)) == 1;
     let junk_paths = values::as_logical_scalar(call.arg(5)) == 1;
-    let archive = std::fs::read(&path).map_err(|_| error(format!("zip file '{path}' cannot be opened")))?;
-    let entries = zip_entries(&archive).ok_or_else(|| error(format!("zip file '{path}' cannot be opened")))?;
+    let archive =
+        std::fs::read(&path).map_err(|_| error(format!("zip file '{path}' cannot be opened")))?;
+    let entries = zip_entries(&archive)
+        .ok_or_else(|| error(format!("zip file '{path}' cannot be opened")))?;
     if list {
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         let sizes: Vec<f64> = entries.iter().map(|entry| entry.size as f64).collect();
         let dates: Vec<String> = entries.iter().map(|entry| entry.date.clone()).collect();
-        return values::list_vector(&[string_vector(&names)?, values::real_vector(&sizes)?, string_vector(&dates)?]);
+        return values::list_vector(&[
+            string_vector(&names)?,
+            values::real_vector(&sizes)?,
+            string_vector(&dates)?,
+        ]);
     }
     let mut extracted = Vec::new();
     for entry in &entries {
-        if wanted.as_ref().is_some_and(|wanted| !wanted.contains(&entry.name)) {
+        if wanted
+            .as_ref()
+            .is_some_and(|wanted| !wanted.contains(&entry.name))
+        {
             continue;
         }
-        let relative = if junk_paths { entry.name.rsplit('/').next().unwrap_or(&entry.name) } else { &entry.name };
+        let relative = if junk_paths {
+            entry.name.rsplit('/').next().unwrap_or(&entry.name)
+        } else {
+            &entry.name
+        };
         if relative.is_empty() {
             continue;
         }
-        let target = std::path::Path::new(&crate::connections::expand_path(&directory)).join(relative);
+        let target =
+            std::path::Path::new(&crate::connections::expand_path(&directory)).join(relative);
         if entry.name.ends_with('/') {
-            std::fs::create_dir_all(&target).map_err(|failure| error(format!("cannot create directory '{}': {failure}", target.display())))?;
+            std::fs::create_dir_all(&target).map_err(|failure| {
+                error(format!(
+                    "cannot create directory '{}': {failure}",
+                    target.display()
+                ))
+            })?;
             continue;
         }
         if target.exists() && !overwrite {
@@ -1629,16 +1903,29 @@ unsafe fn do_unzip(call: &NativeCall<'_>) -> R<Sexp> {
             continue;
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|failure| error(format!("cannot create directory '{}': {failure}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|failure| {
+                error(format!(
+                    "cannot create directory '{}': {failure}",
+                    parent.display()
+                ))
+            })?;
         }
-        let data = zip_member(&archive, entry).ok_or_else(|| error(format!("error {} in extracting from zip file", 1)))?;
-        std::fs::write(&target, data).map_err(|failure| error(format!("cannot open file '{}': {failure}", target.display())))?;
+        let data = zip_member(&archive, entry)
+            .ok_or_else(|| error("error 1 in extracting from zip file"))?;
+        std::fs::write(&target, data).map_err(|failure| {
+            error(format!(
+                "cannot open file '{}': {failure}",
+                target.display()
+            ))
+        })?;
         extracted.push(target.display().to_string());
     }
-    if let Some(wanted) = &wanted {
-        if wanted.iter().any(|name| !entries.iter().any(|entry| &entry.name == name)) {
-            warning("requested file not found in the zip file")?;
-        }
+    if let Some(wanted) = &wanted
+        && wanted
+            .iter()
+            .any(|name| !entries.iter().any(|entry| &entry.name == name))
+    {
+        warning("requested file not found in the zip file")?;
     }
     let result = scalar_integer(0)?;
     let paths = string_vector(&extracted)?;
@@ -1668,7 +1955,9 @@ fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
 fn zip_entries(archive: &[u8]) -> Option<Vec<ZipEntry>> {
     const END_SIGNATURE: u32 = 0x0605_4b50;
     const ENTRY_SIGNATURE: u32 = 0x0201_4b50;
-    let end = (0..archive.len().saturating_sub(21)).rev().find(|&at| read_u32(archive, at) == Some(END_SIGNATURE))?;
+    let end = (0..archive.len().saturating_sub(21))
+        .rev()
+        .find(|&at| read_u32(archive, at) == Some(END_SIGNATURE))?;
     let count = read_u16(archive, end + 10)? as usize;
     let mut at = read_u32(archive, end + 16)? as usize;
     let mut entries = Vec::with_capacity(count);
@@ -1685,7 +1974,8 @@ fn zip_entries(archive: &[u8]) -> Option<Vec<ZipEntry>> {
         let extra_length = read_u16(archive, at + 30)? as usize;
         let comment_length = read_u16(archive, at + 32)? as usize;
         let local_header = read_u32(archive, at + 42)? as usize;
-        let name = String::from_utf8_lossy(archive.get(at + 46..at + 46 + name_length)?).into_owned();
+        let name =
+            String::from_utf8_lossy(archive.get(at + 46..at + 46 + name_length)?).into_owned();
         let date = format!(
             "{:04}-{:02}-{:02} {:02}:{:02}",
             1980 + (day >> 9),
@@ -1694,7 +1984,14 @@ fn zip_entries(archive: &[u8]) -> Option<Vec<ZipEntry>> {
             time >> 11,
             (time >> 5) & 0x3F
         );
-        entries.push(ZipEntry { name, size, compressed_size, method, local_header, date });
+        entries.push(ZipEntry {
+            name,
+            size,
+            compressed_size,
+            method,
+            local_header,
+            date,
+        });
         at += 46 + name_length + extra_length + comment_length;
     }
     Some(entries)
@@ -1715,7 +2012,9 @@ fn zip_member(archive: &[u8], entry: &ZipEntry) -> Option<Vec<u8>> {
         0 => Some(data.to_vec()),
         8 => {
             let mut output = Vec::with_capacity(entry.size as usize);
-            flate2::read::DeflateDecoder::new(data).read_to_end(&mut output).ok()?;
+            flate2::read::DeflateDecoder::new(data)
+                .read_to_end(&mut output)
+                .ok()?;
             Some(output)
         }
         _ => None,

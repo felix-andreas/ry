@@ -28,9 +28,15 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     // The help server cannot start, so `startDynamicHelp` warns and carries on without it.
     ("startHTTPD", |_| unsafe { scalar_integer(-1) }),
     ("stopHTTPD", |_| Ok(nil())),
-    ("parseRd", |_| Err(error("parsing Rd files is not supported in ry yet"))),
-    ("deparseRd", |_| Err(error("deparsing Rd is not supported in ry yet"))),
-    ("parseLatex", |_| Err(error("parsing LaTeX is not supported in ry yet"))),
+    ("parseRd", |_| {
+        Err(error("parsing Rd files is not supported in ry yet"))
+    }),
+    ("deparseRd", |_| {
+        Err(error("deparsing Rd is not supported in ry yet"))
+    }),
+    ("parseLatex", |_| {
+        Err(error("parsing LaTeX is not supported in ry yet"))
+    }),
 ];
 
 /// `Rmd5(files)`: the MD5 digest of each file in hexadecimal, `NA` when it cannot be read.
@@ -44,7 +50,12 @@ unsafe fn do_md5(call: &NativeCall<'_>) -> R<Sexp> {
         .map(|file| {
             let path = crate::connections::expand_path(&file?);
             let bytes = std::fs::read(path).ok()?;
-            Some(md5(&bytes).iter().map(|byte| format!("{byte:02x}")).collect())
+            Some(
+                md5(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            )
         })
         .collect();
     values::string_vector_na(&digests)
@@ -53,11 +64,13 @@ unsafe fn do_md5(call: &NativeCall<'_>) -> R<Sexp> {
 /// MD5 as RFC 1321 specifies it.
 fn md5(message: &[u8]) -> [u8; 16] {
     const SHIFTS: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
-        14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15,
-        21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
-    let constants: Vec<u32> = (0..64).map(|index: i32| (((index + 1) as f64).sin().abs() * 4294967296.0) as u32).collect();
+    let constants: Vec<u32> = (0..64)
+        .map(|index: i32| (((index + 1) as f64).sin().abs() * 4294967296.0) as u32)
+        .collect();
     let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
     let mut padded = message.to_vec();
     padded.push(0x80);
@@ -66,8 +79,10 @@ fn md5(message: &[u8]) -> [u8; 16] {
     }
     padded.extend_from_slice(&((message.len() as u64).wrapping_mul(8)).to_le_bytes());
     for block in padded.chunks_exact(64) {
-        let words: Vec<u32> =
-            block.chunks_exact(4).map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]])).collect();
+        let words: Vec<u32> = block
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
         let [mut a, mut b, mut c, mut d] = state;
         for round in 0..64 {
             let (mixed, word) = match round / 16 {
@@ -76,7 +91,10 @@ fn md5(message: &[u8]) -> [u8; 16] {
                 2 => (b ^ c ^ d, (3 * round + 5) % 16),
                 _ => (c ^ (b | !d), (7 * round) % 16),
             };
-            let rotated = a.wrapping_add(mixed).wrapping_add(constants[round]).wrapping_add(words[word]);
+            let rotated = a
+                .wrapping_add(mixed)
+                .wrapping_add(constants[round])
+                .wrapping_add(words[word]);
             a = d;
             d = c;
             c = b;
@@ -158,7 +176,8 @@ unsafe fn do_non_ascii(call: &NativeCall<'_>) -> R<Sexp> {
     let result = alloc(SexpType::Logical, length(text))?;
     for index in 0..length(text) {
         let charsxp = text.element(index);
-        let non_ascii = charsxp != values::na_string() && charsxp.bytes().iter().any(|byte| *byte > 127);
+        let non_ascii =
+            charsxp != values::na_string() && charsxp.bytes().iter().any(|byte| *byte > 127);
         values::ints_mut(result)[index] = non_ascii as i32;
     }
     Ok(result)
@@ -173,7 +192,11 @@ unsafe fn do_delim_match(call: &NativeCall<'_>) -> R<Sexp> {
     if x.kind() != SexpType::String {
         return Err(error("invalid 'x' argument"));
     }
-    let pair: Vec<char> = values::strings(delims).into_iter().flatten().flat_map(|text| text.chars().collect::<Vec<_>>()).collect();
+    let pair: Vec<char> = values::strings(delims)
+        .into_iter()
+        .flatten()
+        .flat_map(|text| text.chars().collect::<Vec<_>>())
+        .collect();
     if delims.kind() != SexpType::String || length(delims) != 2 || pair.len() != 2 {
         return Err(error("argument 'delim' must specify two characters"));
     }
@@ -234,7 +257,11 @@ unsafe fn do_tab_expand(call: &NativeCall<'_>) -> R<Sexp> {
             expanded.push(None);
             continue;
         };
-        let mut column = starts.get(index % starts.len().max(1)).copied().unwrap_or(0).max(0) as usize;
+        let mut column = starts
+            .get(index % starts.len().max(1))
+            .copied()
+            .unwrap_or(0)
+            .max(0) as usize;
         let mut output = String::with_capacity(text.len());
         for character in text.chars() {
             match character {
@@ -333,10 +360,14 @@ unsafe fn do_getfmts(call: &NativeCall<'_>) -> R<Sexp> {
             _ => {
                 let end = (index + 1).min(bytes.len());
                 let shown = String::from_utf8_lossy(&bytes[start..end]);
-                return Err(error(format!("unrecognised format specification '{shown}'")));
+                return Err(error(format!(
+                    "unrecognised format specification '{shown}'"
+                )));
             }
         }
-        for entry in std::iter::repeat_n("*".to_owned(), stars).chain(std::iter::once(specification)) {
+        for entry in
+            std::iter::repeat_n("*".to_owned(), stars).chain(std::iter::once(specification))
+        {
             if specifications.len() <= argument {
                 specifications.resize(argument + 1, String::new());
             }
@@ -372,7 +403,9 @@ unsafe fn do_code_files_append(call: &NativeCall<'_>) -> R<Sexp> {
                 content.push(b'\n');
             }
             let header = format!("#line 1 \"{source}\"\n");
-            file.write_all(header.as_bytes()).and_then(|()| file.write_all(&content)).is_ok()
+            file.write_all(header.as_bytes())
+                .and_then(|()| file.write_all(&content))
+                .is_ok()
         });
         outcomes.push(appended as i32);
     }
@@ -386,7 +419,9 @@ unsafe fn do_dirchmod(call: &NativeCall<'_>) -> R<Sexp> {
     let directory = values::require_string(call.arg(0), "dir")?;
     let group_writable = values::as_logical_scalar(call.arg(1)) == 1;
     let group = if group_writable { 0o020 } else { 0 };
-    let mut pending = vec![std::path::PathBuf::from(crate::connections::expand_path(&directory))];
+    let mut pending = vec![std::path::PathBuf::from(crate::connections::expand_path(
+        &directory,
+    ))];
     while let Some(path) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&path) else {
             continue;
@@ -405,8 +440,14 @@ unsafe fn do_dirchmod(call: &NativeCall<'_>) -> R<Sexp> {
             } else {
                 continue;
             };
-            std::fs::set_permissions(&entry_path, std::fs::Permissions::from_mode(mode))
-                .map_err(|failure| error(format!("cannot change permissions of '{}': {failure}", entry_path.display())))?;
+            std::fs::set_permissions(&entry_path, std::fs::Permissions::from_mode(mode)).map_err(
+                |failure| {
+                    error(format!(
+                        "cannot change permissions of '{}': {failure}",
+                        entry_path.display()
+                    ))
+                },
+            )?;
         }
     }
     Ok(nil())
@@ -418,7 +459,10 @@ unsafe fn do_ps_kill(call: &NativeCall<'_>) -> R<Sexp> {
     let signal = values::as_integer_scalar(call.arg(1));
     let outcomes: Vec<i32> = values::ints(pids)
         .iter()
-        .map(|&pid| (pid != NA_INTEGER && pid > 0 && signal != NA_INTEGER && libc::kill(pid, signal) == 0) as i32)
+        .map(|&pid| {
+            (pid != NA_INTEGER && pid > 0 && signal != NA_INTEGER && libc::kill(pid, signal) == 0)
+                as i32
+        })
         .collect();
     values::logical_vector(&outcomes)
 }
@@ -491,7 +535,9 @@ unsafe fn do_package_dependencies_scan(call: &NativeCall<'_>) -> R<Sexp> {
                 continue;
             }
             let start = index;
-            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'.') {
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'.')
+            {
                 index += 1;
             }
             let name = &field[start..index];

@@ -12,7 +12,8 @@ use crate::{
     format::c_general,
     unwind::{R, error},
     values::{
-        self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector, symbols,
+        self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
+        symbols,
     },
 };
 use heap::object::{NA_INTEGER, Sexp, SexpType};
@@ -110,8 +111,9 @@ const TRANSPARENT_WHITE: Colour = 0x00FF_FFFF;
 const OPAQUE: u32 = 0xFF;
 const MAX_PALETTE: usize = 1024;
 
-const DEFAULT_PALETTE: [&str; 8] =
-    ["black", "#DF536B", "#61D04F", "#2297E6", "#28E2E5", "#CD0BBC", "#F5C710", "gray62"];
+const DEFAULT_PALETTE: [&str; 8] = [
+    "black", "#DF536B", "#61D04F", "#2297E6", "#28E2E5", "#CD0BBC", "#F5C710", "gray62",
+];
 
 thread_local! {
     static PALETTE: RefCell<Vec<Colour>> = RefCell::new(default_palette());
@@ -119,7 +121,10 @@ thread_local! {
 }
 
 fn default_palette() -> Vec<Colour> {
-    DEFAULT_PALETTE.iter().filter_map(|name| parse_colour_spec(name).ok()).collect()
+    DEFAULT_PALETTE
+        .iter()
+        .filter_map(|name| parse_colour_spec(name).ok())
+        .collect()
 }
 
 fn rgba(red: u32, green: u32, blue: u32, alpha: u32) -> Colour {
@@ -127,7 +132,12 @@ fn rgba(red: u32, green: u32, blue: u32, alpha: u32) -> Colour {
 }
 
 fn channels(colour: Colour) -> [u32; 4] {
-    [colour & 0xFF, (colour >> 8) & 0xFF, (colour >> 16) & 0xFF, colour >> 24]
+    [
+        colour & 0xFF,
+        (colour >> 8) & 0xFF,
+        (colour >> 16) & 0xFF,
+        colour >> 24,
+    ]
 }
 
 /// A colour intensity in `[0, 1]` as a byte, rounding to nearest.
@@ -161,7 +171,8 @@ fn colour_name(colour: Colour) -> String {
 /// A colour given as hex digits or a name, without palette indices.
 fn parse_colour_spec(text: &str) -> Result<Colour, String> {
     if let Some(digits) = text.strip_prefix('#') {
-        let valid = matches!(digits.len(), 6 | 8) && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
+        let valid =
+            matches!(digits.len(), 6 | 8) && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
         if !valid {
             return Err("invalid RGB specification".to_owned());
         }
@@ -173,7 +184,11 @@ fn parse_colour_spec(text: &str) -> Result<Colour, String> {
         return Ok(TRANSPARENT_WHITE);
     }
     // Names match ignoring case and spaces, so "Light Goldenrod 2" is lightgoldenrod2.
-    let wanted: String = text.chars().filter(|character| *character != ' ').collect::<String>().to_ascii_lowercase();
+    let wanted: String = text
+        .chars()
+        .filter(|character| *character != ' ')
+        .collect::<String>()
+        .to_ascii_lowercase();
     COLOUR_NAMES
         .iter()
         .find(|(name, _)| *name == wanted)
@@ -185,7 +200,9 @@ fn parse_colour_spec(text: &str) -> Result<Colour, String> {
 /// index written in digits, where 0 is the background.
 fn parse_colour(text: &str) -> Result<Colour, String> {
     if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
-        let index: usize = text.parse().map_err(|_| format!("invalid color specification \"{text}\""))?;
+        let index: usize = text
+            .parse()
+            .map_err(|_| format!("invalid color specification \"{text}\""))?;
         return Ok(palette_colour(index));
     }
     parse_colour_spec(text)
@@ -197,7 +214,10 @@ fn palette_colour(index: usize) -> Colour {
     }
     PALETTE.with(|palette| {
         let palette = palette.borrow();
-        palette.get((index - 1) % palette.len().max(1)).copied().unwrap_or(TRANSPARENT_WHITE)
+        palette
+            .get((index - 1) % palette.len().max(1))
+            .copied()
+            .unwrap_or(TRANSPARENT_WHITE)
     })
 }
 
@@ -210,21 +230,37 @@ unsafe fn do_rgb(call: &NativeCall<'_>) -> R<Sexp> {
     let integer = max_value == 255.0;
     let mut vectors = Vec::with_capacity(components);
     for index in 0..components {
-        let kind = if integer { SexpType::Integer } else { SexpType::Real };
+        let kind = if integer {
+            SexpType::Integer
+        } else {
+            SexpType::Real
+        };
         vectors.push(coerce_vector(call.arg(index), kind)?);
     }
     let lengths: Vec<usize> = vectors.iter().map(|vector| length(*vector)).collect();
-    let count = if lengths.contains(&0) { 0 } else { lengths.iter().copied().max().unwrap_or(0) };
+    let count = if lengths.contains(&0) {
+        0
+    } else {
+        lengths.iter().copied().max().unwrap_or(0)
+    };
     let mut colours = Vec::with_capacity(count);
     for index in 0..count {
         let mut bytes = [0u32, 0, 0, OPAQUE];
         for (component, vector) in vectors.iter().enumerate() {
-            let what = if component == 3 { "alpha level" } else { "color intensity" };
+            let what = if component == 3 {
+                "alpha level"
+            } else {
+                "color intensity"
+            };
             let position = index % lengths[component];
             bytes[component] = if integer {
                 let value = values::ints(*vector)[position];
                 if !(0..=255).contains(&value) {
-                    let shown = if value == NA_INTEGER { "NA".to_owned() } else { value.to_string() };
+                    let shown = if value == NA_INTEGER {
+                        "NA".to_owned()
+                    } else {
+                        value.to_string()
+                    };
                     return Err(error(format!("{what} {shown}, not in 0:255")));
                 }
                 value as u32
@@ -260,7 +296,11 @@ fn general(value: f64) -> String {
     } else if value.is_nan() {
         "NaN".to_owned()
     } else if value.is_infinite() {
-        if value > 0.0 { "Inf".to_owned() } else { "-Inf".to_owned() }
+        if value > 0.0 {
+            "Inf".to_owned()
+        } else {
+            "-Inf".to_owned()
+        }
     } else {
         c_general(value, 6, false)
     }
@@ -273,7 +313,11 @@ unsafe fn real_arguments(call: &NativeCall<'_>, arguments: &[usize]) -> R<(Vec<S
         vectors.push(coerce_vector(call.arg(index), SexpType::Real)?);
     }
     let lengths: Vec<usize> = vectors.iter().map(|vector| length(*vector)).collect();
-    let count = if lengths.contains(&0) { 0 } else { lengths.iter().copied().max().unwrap_or(0) };
+    let count = if lengths.contains(&0) {
+        0
+    } else {
+        lengths.iter().copied().max().unwrap_or(0)
+    };
     Ok((vectors, count))
 }
 
@@ -289,12 +333,19 @@ unsafe fn do_hsv(call: &NativeCall<'_>) -> R<Sexp> {
     let (vectors, count) = real_arguments(call, arguments)?;
     let mut colours = Vec::with_capacity(count);
     for index in 0..count {
-        let components: Vec<f64> = vectors.iter().map(|vector| recycled(*vector, index)).collect();
+        let components: Vec<f64> = vectors
+            .iter()
+            .map(|vector| recycled(*vector, index))
+            .collect();
         if components.iter().any(|value| !(0.0..=1.0).contains(value)) {
             return Err(error("invalid hsv color"));
         }
         let [red, green, blue] = hsv_to_rgb(components[0], components[1], components[2]);
-        let alpha = if has_alpha { scale_unit(components[3]) } else { OPAQUE };
+        let alpha = if has_alpha {
+            scale_unit(components[3])
+        } else {
+            OPAQUE
+        };
         let colour = rgba(scale_unit(red), scale_unit(green), scale_unit(blue), alpha);
         colours.push(hex(colour, has_alpha));
     }
@@ -329,7 +380,10 @@ unsafe fn do_hcl(call: &NativeCall<'_>) -> R<Sexp> {
     let (vectors, count) = real_arguments(call, arguments)?;
     let mut colours = Vec::with_capacity(count);
     for index in 0..count {
-        let components: Vec<f64> = vectors.iter().map(|vector| recycled(*vector, index)).collect();
+        let components: Vec<f64> = vectors
+            .iter()
+            .map(|vector| recycled(*vector, index))
+            .collect();
         let (hue, chroma, luminance) = (components[0], components[1], components[2]);
         if !hue.is_finite() || !chroma.is_finite() || !luminance.is_finite() {
             colours.push(None);
@@ -350,13 +404,21 @@ unsafe fn do_hcl(call: &NativeCall<'_>) -> R<Sexp> {
         let alpha = if has_alpha {
             let alpha = components[3];
             if !(0.0..=1.0).contains(&alpha) {
-                return Err(error(format!("alpha level {}, not in [0,1]", general(alpha))));
+                return Err(error(format!(
+                    "alpha level {}, not in [0,1]",
+                    general(alpha)
+                )));
             }
             scale_unit(alpha)
         } else {
             OPAQUE
         };
-        let colour = rgba(scale_unit(rgb[0]), scale_unit(rgb[1]), scale_unit(rgb[2]), alpha);
+        let colour = rgba(
+            scale_unit(rgb[0]),
+            scale_unit(rgb[1]),
+            scale_unit(rgb[2]),
+            alpha,
+        );
         colours.push(Some(hex(colour, has_alpha)));
     }
     values::string_vector_na(&colours)
@@ -377,13 +439,22 @@ fn hcl_to_rgb(hue: f64, chroma: f64, luminance: f64) -> [f64; 3] {
     let white_u = 4.0 * WHITE_X / denominator;
     let white_v = 9.0 * WHITE_Y / denominator;
     // CIE's lightness inverse: cubic above the knee at L = 8, linear below it.
-    let y = WHITE_Y * if luminance > 7.999592 { ((luminance + 16.0) / 116.0).powi(3) } else { luminance / 903.3 };
+    let y = WHITE_Y
+        * if luminance > 7.999592 {
+            ((luminance + 16.0) / 116.0).powi(3)
+        } else {
+            luminance / 903.3
+        };
     let u_prime = u / (13.0 * luminance) + white_u;
     let v_prime = v / (13.0 * luminance) + white_v;
     let x = 9.0 * y * u_prime / (4.0 * v_prime);
     let z = -x / 3.0 - 5.0 * y + 3.0 * y / v_prime;
     let gamma = |linear: f64| {
-        if linear > 0.00304 { 1.055 * linear.powf(1.0 / 2.4) - 0.055 } else { 12.92 * linear }
+        if linear > 0.00304 {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        } else {
+            12.92 * linear
+        }
     };
     [
         gamma((3.240479 * x - 1.537150 * y - 0.498535 * z) / WHITE_Y),
@@ -396,7 +467,11 @@ fn hcl_to_rgb(hue: f64, chroma: f64, luminance: f64) -> [f64; 3] {
 unsafe fn do_gray(call: &NativeCall<'_>) -> R<Sexp> {
     let levels = coerce_vector(call.arg(0), SexpType::Real)?;
     let alpha = call.arg(1);
-    let alpha = if alpha == nil() { None } else { Some(coerce_vector(alpha, SexpType::Real)?) };
+    let alpha = if alpha == nil() {
+        None
+    } else {
+        Some(coerce_vector(alpha, SexpType::Real)?)
+    };
     let count = length(levels);
     let mut colours = Vec::with_capacity(count);
     for index in 0..count {
@@ -409,7 +484,10 @@ unsafe fn do_gray(call: &NativeCall<'_>) -> R<Sexp> {
             Some(alpha) if length(alpha) > 0 => {
                 let alpha = recycled(alpha, index);
                 if !(0.0..=1.0).contains(&alpha) {
-                    return Err(error(format!("alpha level {}, not in [0,1]", general(alpha))));
+                    return Err(error(format!(
+                        "alpha level {}, not in [0,1]",
+                        general(alpha)
+                    )));
                 }
                 hex(rgba(grey, grey, grey, scale_unit(alpha)), true)
             }
@@ -460,7 +538,10 @@ unsafe fn colour_element(colours: Sexp, index: usize) -> R<Colour> {
                 return Ok(TRANSPARENT_WHITE);
             }
             if value < 0.0 {
-                return Err(error(format!("numerical color values must be >= 0, found {}", value as i64)));
+                return Err(error(format!(
+                    "numerical color values must be >= 0, found {}",
+                    value as i64
+                )));
             }
             Ok(palette_colour(value as usize))
         }
@@ -476,7 +557,11 @@ unsafe fn do_rgb2hsv(call: &NativeCall<'_>) -> R<Sexp> {
     let input = values::reals(matrix);
     let output = values::reals_mut(result);
     for column in 0..count {
-        let [red, green, blue] = [input[3 * column], input[3 * column + 1], input[3 * column + 2]];
+        let [red, green, blue] = [
+            input[3 * column],
+            input[3 * column + 1],
+            input[3 * column + 2],
+        ];
         let max = red.max(green).max(blue);
         let min = red.min(green).min(blue);
         let delta = max - min;
@@ -523,7 +608,13 @@ unsafe fn do_palette(call: &NativeCall<'_>) -> R<Sexp> {
     if value.kind() != SexpType::String {
         return Err(error("invalid argument type"));
     }
-    let current: Vec<String> = PALETTE.with(|palette| palette.borrow().iter().map(|colour| colour_name(*colour)).collect());
+    let current: Vec<String> = PALETTE.with(|palette| {
+        palette
+            .borrow()
+            .iter()
+            .map(|colour| colour_name(*colour))
+            .collect()
+    });
     let old = string_vector(&current)?;
     let count = length(value);
     if count == 1 {
@@ -537,7 +628,8 @@ unsafe fn do_palette(call: &NativeCall<'_>) -> R<Sexp> {
         }
         let mut colours = Vec::with_capacity(count);
         for index in 0..count {
-            let text = values::string_at(value, index).map_or_else(|| "NA".to_owned(), |text| text.into_owned());
+            let text = values::string_at(value, index)
+                .map_or_else(|| "NA".to_owned(), |text| text.into_owned());
             colours.push(parse_colour_spec(&text).map_err(error)?);
         }
         PALETTE.with(|palette| *palette.borrow_mut() = colours);
@@ -548,7 +640,13 @@ unsafe fn do_palette(call: &NativeCall<'_>) -> R<Sexp> {
 /// `palette2(value)`: the palette as packed integers, after replacing it with `value` unless
 /// that is `NULL`; the display list saves and restores palettes this way.
 unsafe fn do_palette2(call: &NativeCall<'_>) -> R<Sexp> {
-    let current: Vec<i32> = PALETTE.with(|palette| palette.borrow().iter().map(|colour| *colour as i32).collect());
+    let current: Vec<i32> = PALETTE.with(|palette| {
+        palette
+            .borrow()
+            .iter()
+            .map(|colour| *colour as i32)
+            .collect()
+    });
     let old = values::integer_vector(&current)?;
     let value = call.arg(0);
     if value != nil() {
@@ -558,7 +656,10 @@ unsafe fn do_palette2(call: &NativeCall<'_>) -> R<Sexp> {
         if length(value) > MAX_PALETTE {
             return Err(error(format!("maximum number of colors is {MAX_PALETTE}")));
         }
-        let colours: Vec<Colour> = values::ints(value).iter().map(|colour| *colour as u32).collect();
+        let colours: Vec<Colour> = values::ints(value)
+            .iter()
+            .map(|colour| *colour as u32)
+            .collect();
         PALETTE.with(|palette| *palette.borrow_mut() = colours);
     }
     Ok(old)
@@ -621,10 +722,15 @@ unsafe fn do_chull(call: &NativeCall<'_>) -> R<Sexp> {
     let mut hull: Vec<usize> = Vec::with_capacity(2 * order.len());
     for pass in 0..2 {
         let start = hull.len();
-        let sequence: Box<dyn Iterator<Item = &usize>> =
-            if pass == 0 { Box::new(order.iter()) } else { Box::new(order.iter().rev()) };
+        let sequence: Box<dyn Iterator<Item = &usize>> = if pass == 0 {
+            Box::new(order.iter())
+        } else {
+            Box::new(order.iter().rev())
+        };
         for &index in sequence {
-            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], index) <= 0.0 {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], index) <= 0.0
+            {
                 hull.pop();
             }
             hull.push(index);
@@ -652,7 +758,11 @@ unsafe fn do_axis_pars(call: &NativeCall<'_>) -> R<Sexp> {
     if high < low {
         std::mem::swap(&mut low, &mut high);
     }
-    let (first, last, count) = if log { log_axis(10f64.powf(low), 10f64.powf(high), intervals) } else { linear_axis(low, high, intervals) };
+    let (first, last, count) = if log {
+        log_axis(10f64.powf(low), 10f64.powf(high), intervals)
+    } else {
+        linear_axis(low, high, intervals)
+    };
     let axp = values::real_vector(&[first, last])?;
     values::named_list(&[("axp", axp), ("n", scalar_integer(count)?)])
 }
@@ -731,7 +841,11 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
             .map(|index| {
                 let tick = first + index as f64 * step;
                 // A tick that should be zero but is off by rounding is shown as zero.
-                if tick.abs() < 1e-10 * step.abs() { 0.0 } else { tick }
+                if tick.abs() < 1e-10 * step.abs() {
+                    0.0
+                } else {
+                    tick
+                }
             })
             .collect();
     }
@@ -751,7 +865,11 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
         // intervals, which only happens for more than five intervals.
         let stride = (decades / intervals).max(1);
         let excess = decades % intervals;
-        let mut exponent = if decades >= intervals && excess >= 5 { (excess - 2) / 2 + 1 } else { 0 };
+        let mut exponent = if decades >= intervals && excess >= 5 {
+            (excess - 2) / 2 + 1
+        } else {
+            0
+        };
         while exponent <= decades {
             let tick = first * 10f64.powi(exponent);
             if inside(tick) {
@@ -781,14 +899,22 @@ unsafe fn do_contour_lines(call: &NativeCall<'_>) -> R<Sexp> {
     let y = coerce_vector(call.arg(1), SexpType::Real)?;
     let z = coerce_vector(call.arg(2), SexpType::Real)?;
     let levels = coerce_vector(call.arg(3), SexpType::Real)?;
-    let (x, y, z) = (values::reals(x).to_vec(), values::reals(y).to_vec(), values::reals(z).to_vec());
+    let (x, y, z) = (
+        values::reals(x).to_vec(),
+        values::reals(y).to_vec(),
+        values::reals(z).to_vec(),
+    );
     if x.len() < 2 || y.len() < 2 {
         return Err(error("insufficient 'x' or 'y' values"));
     }
     if z.len() != x.len() * y.len() {
         return Err(error("dimension mismatch"));
     }
-    let grid = Grid { x: &x, y: &y, z: &z };
+    let grid = Grid {
+        x: &x,
+        y: &y,
+        z: &z,
+    };
     let mut lines = Vec::new();
     for &level in values::reals(levels) {
         for line in contour_level(&grid, level) {
@@ -853,7 +979,9 @@ fn contour_level(grid: &Grid<'_>, level: f64) -> Vec<Vec<(f64, f64)>> {
         .z
         .iter()
         .filter(|value| value.is_finite())
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| (low.min(*value), high.max(*value)));
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
+            (low.min(*value), high.max(*value))
+        });
     let nudge = 1e-3 * (high - low);
     let value = |column: usize, row: usize| {
         let value = grid.value(column, row);
@@ -883,14 +1011,21 @@ fn contour_level(grid: &Grid<'_>, level: f64) -> Vec<Vec<(f64, f64)>> {
     let mut segments: Vec<Vec<[Edge; 2]>> = vec![Vec::new(); cells_x * cells_y];
     for column in 0..cells_x {
         for row in 0..cells_y {
-            let corners = [value(column, row), value(column + 1, row), value(column, row + 1), value(column + 1, row + 1)];
+            let corners = [
+                value(column, row),
+                value(column + 1, row),
+                value(column, row + 1),
+                value(column + 1, row + 1),
+            ];
             let bottom = (column, row, EdgeKind::AlongX);
             let left = (column, row, EdgeKind::AlongY);
             let right = (column + 1, row, EdgeKind::AlongY);
             let top = (column, row + 1, EdgeKind::AlongX);
             let rising = (column, row, EdgeKind::Rising);
             let falling = (column, row, EdgeKind::Falling);
-            let missing: Vec<usize> = (0..4).filter(|corner| !corners[*corner].is_finite()).collect();
+            let missing: Vec<usize> = (0..4)
+                .filter(|corner| !corners[*corner].is_finite())
+                .collect();
             let candidates: Vec<Edge> = match missing.as_slice() {
                 [] => vec![bottom, left, right, top],
                 [0] => vec![right, top, falling],
@@ -899,17 +1034,25 @@ fn contour_level(grid: &Grid<'_>, level: f64) -> Vec<Vec<(f64, f64)>> {
                 [3] => vec![left, bottom, falling],
                 _ => continue,
             };
-            let crossed: Vec<Edge> = candidates.into_iter().filter(|edge| crossing(*edge).is_some()).collect();
+            let crossed: Vec<Edge> = candidates
+                .into_iter()
+                .filter(|edge| crossing(*edge).is_some())
+                .collect();
             let cell = &mut segments[column * cells_y + row];
             match crossed.len() {
                 2 => cell.push([crossed[0], crossed[1]]),
                 4 => {
                     // The value at the saddle point of the bilinear surface through the corners,
                     // relative to the level.
-                    let [lower_left, lower_right, upper_left, upper_right] = corners.map(|corner| corner - level);
+                    let [lower_left, lower_right, upper_left, upper_right] =
+                        corners.map(|corner| corner - level);
                     let saddle = (lower_left * upper_right - lower_right * upper_left)
                         / (lower_left + upper_right - lower_right - upper_left);
-                    let saddle_with_lower_left = if lower_left > 0.0 { saddle > 0.0 } else { saddle < 0.0 };
+                    let saddle_with_lower_left = if lower_left > 0.0 {
+                        saddle > 0.0
+                    } else {
+                        saddle < 0.0
+                    };
                     if saddle_with_lower_left {
                         cell.push([bottom, right]);
                         cell.push([left, top]);
@@ -938,12 +1081,22 @@ fn contour_level(grid: &Grid<'_>, level: f64) -> Vec<Vec<(f64, f64)>> {
     };
     // Takes the unused segment containing `edge` in the cell on the other side of it from
     // `cell`, returning that cell and the segment's other edge.
-    let take_next = |segments: &mut Vec<Vec<[Edge; 2]>>, cell: (usize, usize), edge: Edge| -> Option<((usize, usize), Edge)> {
-        let next_cell = cells_of(edge).into_iter().flatten().find(|other| *other != cell)?;
+    let take_next = |segments: &mut Vec<Vec<[Edge; 2]>>,
+                     cell: (usize, usize),
+                     edge: Edge|
+     -> Option<((usize, usize), Edge)> {
+        let next_cell = cells_of(edge)
+            .into_iter()
+            .flatten()
+            .find(|other| *other != cell)?;
         let list = &mut segments[next_cell.0 * cells_y + next_cell.1];
         let position = list.iter().position(|segment| segment.contains(&edge))?;
         let segment = list.remove(position);
-        let other = if segment[0] == edge { segment[1] } else { segment[0] };
+        let other = if segment[0] == edge {
+            segment[1]
+        } else {
+            segment[0]
+        };
         Some((next_cell, other))
     };
     let mut lines = Vec::new();
@@ -955,7 +1108,9 @@ fn contour_level(grid: &Grid<'_>, level: f64) -> Vec<Vec<(f64, f64)>> {
                 let mut forward = vec![start, end];
                 let mut current = (cell, end);
                 let mut closed = false;
-                while let Some((next_cell, next_edge)) = take_next(&mut segments, current.0, current.1) {
+                while let Some((next_cell, next_edge)) =
+                    take_next(&mut segments, current.0, current.1)
+                {
                     forward.push(next_edge);
                     if next_edge == start {
                         closed = true;
@@ -966,7 +1121,9 @@ fn contour_level(grid: &Grid<'_>, level: f64) -> Vec<Vec<(f64, f64)>> {
                 let mut edges = Vec::new();
                 if !closed {
                     let mut current = (cell, start);
-                    while let Some((next_cell, next_edge)) = take_next(&mut segments, current.0, current.1) {
+                    while let Some((next_cell, next_edge)) =
+                        take_next(&mut segments, current.0, current.1)
+                    {
                         edges.push(next_edge);
                         current = (next_cell, next_edge);
                     }
