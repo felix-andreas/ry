@@ -179,6 +179,9 @@ pub enum StrictOriginKind {
     /// A recursive definition that checked clean yet exports `Unknown`: the reference
     /// cycle is the only possible source.
     RecursiveUnknown(String),
+    /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
+    /// `expression` is the function and `range` the parameter's name.
+    UntypedParameter(String),
 }
 
 /// No method has a default body: adding a fact must be a compile error at every
@@ -1235,6 +1238,13 @@ impl<'db> Checker<'db, '_> {
                     .pop()
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty);
+                let signature: Vec<(&crate::hir::Parameter, Option<Ty<'db>>)> = parameters
+                    .iter()
+                    .filter(|parameter| parameter.name != "...")
+                    .zip(&named)
+                    .map(|(parameter, typed)| (parameter, Some(typed.ty)))
+                    .collect();
+                self.record_untyped_parameters(id, &signature, return_ty);
                 self.environment.rollback(mark);
                 self.reapply_enclosing_writes(pending_mark);
                 self.frame_level = enclosing_frame_level;
@@ -1370,6 +1380,57 @@ impl<'db> Checker<'db, '_> {
             self.errors.push(error);
         }
         declared.body
+    }
+
+    /// Strict mode's untyped parameters, judged once the body is inferred. A parameter is
+    /// untyped when nothing constrains it: its type is `Unknown`, or still a fresh type
+    /// variable of this function that no other parameter and not the return mentions, so
+    /// any value is accepted unchecked. A variable shared with another part of the
+    /// signature is genuine polymorphism (`function(x) x`). `parameters` pairs each formal
+    /// with its type, or with `None` where an annotation declared it.
+    fn record_untyped_parameters(
+        &mut self,
+        function: ExprId,
+        parameters: &[(&crate::hir::Parameter, Option<Ty<'db>>)],
+        ret: Ty<'db>,
+    ) {
+        let db = self.db;
+        let level = self.table.level;
+        let mut mentioned: FxHashMap<InferenceVar, usize> = FxHashMap::default();
+        for ty in parameters.iter().filter_map(|(_, ty)| *ty).chain([ret]) {
+            let mut found = FxHashSet::default();
+            self.table.collect_unbound_vars(db, ty, &mut found);
+            for var in found {
+                *mentioned.entry(var).or_default() += 1;
+            }
+        }
+        for (parameter, ty) in parameters {
+            let Some(ty) = ty else {
+                continue;
+            };
+            let untyped = match self.table.shallow_resolve(db, *ty).kind(db) {
+                TyKind::Unknown => true,
+                TyKind::Var(var) => {
+                    let representative = self.table.find(*var);
+                    matches!(
+                        self.table.entry(representative),
+                        Entry::Unbound {
+                            level: var_level,
+                            constraint: Constraint::Unconstrained,
+                        } if *var_level >= level
+                    ) && mentioned.get(&representative) == Some(&1)
+                }
+                _ => false,
+            };
+            let origin = StrictOrigin {
+                expression: function,
+                range: parameter.range,
+                kind: StrictOriginKind::UntypedParameter(parameter.name.clone()),
+            };
+            if untyped && !self.strict_origins.contains(&origin) {
+                self.strict_origins.push(origin);
+            }
+        }
     }
 
     /// Annotating is exactly what a strict finding asks for, so it clears the origin.
@@ -3090,6 +3151,12 @@ impl<'db> Checker<'db, '_> {
 
         let pending_mark = self.pending_enclosing_writes.len();
         let mark = self.environment.mark();
+        let untyped_candidates: Vec<(&crate::hir::Parameter, Option<Ty<'db>>)> = parameters
+            .iter()
+            .zip(&formal_types)
+            .filter(|(parameter, _)| parameter.name != "...")
+            .map(|(parameter, &(ty, declared))| (parameter, (!declared).then_some(ty)))
+            .collect();
         for (parameter, (parameter_ty, declared)) in parameters.iter().zip(formal_types) {
             if let Some(slot) = self
                 .naming
@@ -3151,7 +3218,9 @@ impl<'db> Checker<'db, '_> {
         // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
             signature.ret = self.join_early_returns(&early_returns, trailing_ty);
+            self.record_untyped_parameters(function_id, &untyped_candidates, signature.ret);
         } else {
+            self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
             // Each `return` is checked at its own site, not as one union blamed on the tail.
             let mut early_return_failed = false;
             for &(returned, return_range) in &early_returns {

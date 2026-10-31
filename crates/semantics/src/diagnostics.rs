@@ -1560,7 +1560,9 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         for origin in &check.strict_origins {
             // Loop-widened and recursive origins are about the named binding.
             let assignment_target = match &origin.kind {
-                StrictOriginKind::LoopWidened(_) | StrictOriginKind::RecursiveUnknown(_) => None,
+                StrictOriginKind::LoopWidened(_)
+                | StrictOriginKind::RecursiveUnknown(_)
+                | StrictOriginKind::UntypedParameter(_) => None,
                 _ => assignment_targets.get(&origin.expression),
             };
             let message = if let Some(name) = assignment_target {
@@ -1581,6 +1583,11 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     ),
                     StrictOriginKind::RecursiveUnknown(name) => format!(
                         "strict mode: could not determine the full type of `{name}`, because it is defined recursively. Add a type annotation"
+                    ),
+                    StrictOriginKind::UntypedParameter(name) => format!(
+                        "strict mode: parameter `{}` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `{}: TYPE`",
+                        display_name(name),
+                        display_name(name)
                     ),
                 }
             };
