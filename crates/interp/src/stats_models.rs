@@ -12,7 +12,8 @@ use crate::{
     deparse::{deparse_lines, options},
     eval,
     sort::{IdenticalFlags, identical},
-    stats::{QrOutputs, as_reals, dqrsl, matrix_shape},
+    linalg,
+    stats::{as_reals, matrix_shape},
     unwind::R,
     values::{self, length, nil, symbols},
 };
@@ -415,15 +416,25 @@ pub unsafe fn influence(call: &NativeCall<'_>) -> R<Sexp> {
     let rank = values::as_integer_scalar(values::list_get(fit, "rank")).max(0) as usize;
     let (n, _) = matrix_shape(qr);
     let (_, outcomes) = matrix_shape(residuals);
-    let mut decomposition = values::reals(qr).to_vec();
+    // The squared rows of the first `rank` columns of Q, from Q applied to unit vectors.
     let mut hat = vec![0.0; n];
-    for column in 0..rank {
-        let mut unit = vec![0.0; n];
-        unit[column] = 1.0;
-        let mut rotated = vec![0.0; n];
-        dqrsl(&mut decomposition, n, n, rank, &qraux, &unit, QrOutputs { qy: Some(&mut rotated), qty: None, b: None, rsd: None, xb: None });
-        for (total, value) in hat.iter_mut().zip(&rotated) {
-            *total += value * value;
+    if rank > 0 {
+        let units = values::alloc(SexpType::Real, n * rank)?;
+        let data = values::reals_mut(units);
+        data.fill(0.0);
+        for column in 0..rank {
+            data[column + column * n] = 1.0;
+        }
+        let rotated = values::alloc(SexpType::Real, n * rank)?;
+        let integer = |value: usize| values::scalar_integer(value as i32);
+        let qraux = values::real_vector(&qraux)?;
+        let decomposition = values::duplicate(qr)?;
+        linalg::dqrqy(&[decomposition, integer(n)?, integer(rank)?, qraux, units, integer(rank)?, rotated])?;
+        let rotated = values::reals(rotated);
+        for column in 0..rank {
+            for (total, value) in hat.iter_mut().zip(&rotated[column * n..(column + 1) * n]) {
+                *total += value * value;
+            }
         }
     }
     for value in hat.iter_mut() {
