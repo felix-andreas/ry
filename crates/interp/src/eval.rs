@@ -339,10 +339,14 @@ pub unsafe fn call_builtin(
         env,
     };
     let result = scope(|| function(&context));
-    match visibility {
-        Visibility::On => interp().visible = true,
-        Visibility::Off => interp().visible = false,
-        Visibility::Keep => {}
+    // A jump out of the builtin (`return(invisible(x))`) keeps the visibility of the value it
+    // carries.
+    if result.is_ok() {
+        match visibility {
+            Visibility::On => interp().visible = true,
+            Visibility::Off => interp().visible = false,
+            Visibility::Keep => {}
+        }
     }
     match result {
         Err(Unwind::Error(mut failure)) => {

@@ -118,7 +118,11 @@ pub unsafe fn quick_method_check(arguments: Sexp, methods: Sexp, generic: Sexp) 
     };
     let signature_length = if generic.kind() == SexpType::Closure {
         let value = eval::find_var_in_frame(values::install(".SigLength")?, generic.tag())?;
-        if value == unbound() { 1 } else { values::as_integer_scalar(value).max(0) as usize }
+        if value == unbound() {
+            1
+        } else {
+            values::as_integer_scalar(value).max(0) as usize
+        }
     } else {
         1
     };
@@ -126,7 +130,11 @@ pub unsafe fn quick_method_check(arguments: Sexp, methods: Sexp, generic: Sexp) 
     let mut argument = arguments;
     for index in 0..signature_length {
         // Arguments past the ones supplied are missing.
-        let value = if argument.kind() == SexpType::Pairlist { argument.car() } else { missing_arg() };
+        let value = if argument.kind() == SexpType::Pairlist {
+            argument.car()
+        } else {
+            missing_arg()
+        };
         let class = if value == missing_arg() {
             "missing".to_owned()
         } else {
@@ -194,7 +202,9 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
     let generic_symbol = values::install(".Generic")?;
     let generic = eval::find_var(generic_symbol, generic_env)?;
     if generic == unbound() {
-        return Err(error("generic function name not found in the environment of the generic"));
+        return Err(error(
+            "generic function name not found in the environment of the generic",
+        ));
     }
     eval::define(generic_symbol, generic, method_env)?;
     eval::run_closure(call, method, method_env, sys_parent, promargs)
@@ -204,7 +214,9 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
 /// marked as S4 when the prototype is a plain S4 object or the class comes from a package.
 pub unsafe fn new_object(class_def: Sexp) -> R<Sexp> {
     if class_def == nil() {
-        return Err(error("C level NEW macro called with null class definition pointer"));
+        return Err(error(
+            "C level NEW macro called with null class definition pointer",
+        ));
     }
     let virtual_flag = slot_value(class_def, "virtual")?;
     let class_name = slot_value(class_def, "className")?;
@@ -268,7 +280,12 @@ unsafe fn all_methods_table(generic: Sexp, generic_env: Sexp) -> R<Sexp> {
     let get_table = methods_function(".getMethodsTable")?;
     let call = values::call(
         get_table,
-        &[generic, generic_env, values::scalar_bool(true)?, values::scalar_bool(true)?],
+        &[
+            generic,
+            generic_env,
+            values::scalar_bool(true)?,
+            values::scalar_bool(true)?,
+        ],
     )?;
     let table = eval::eval(call, values::base_env())?;
     if table.kind() != SexpType::Environment {
@@ -280,10 +297,18 @@ unsafe fn all_methods_table(generic: Sexp, generic_env: Sexp) -> R<Sexp> {
 /// The generic's signature arguments that take part in dispatch: the first `.SigLength` of
 /// `.SigArgs`.
 unsafe fn signature_symbols(generic_env: Sexp) -> R<Vec<Sexp>> {
-    let arguments = eval::value_of(eval::find_var_in_frame(values::install(".SigArgs")?, generic_env)?)?;
-    let count = eval::value_of(eval::find_var_in_frame(values::install(".SigLength")?, generic_env)?)?;
+    let arguments = eval::value_of(eval::find_var_in_frame(
+        values::install(".SigArgs")?,
+        generic_env,
+    )?)?;
+    let count = eval::value_of(eval::find_var_in_frame(
+        values::install(".SigLength")?,
+        generic_env,
+    )?)?;
     if arguments == unbound() || count == unbound() {
-        return Err(error("the generic function's environment has no signature information"));
+        return Err(error(
+            "the generic function's environment has no signature information",
+        ));
     }
     let count = (values::as_integer_scalar(count).max(0) as usize).min(length(arguments));
     let mut result = Vec::with_capacity(count);
@@ -298,7 +323,11 @@ unsafe fn signature_symbols(generic_env: Sexp) -> R<Vec<Sexp>> {
                     slot_symbol(element)?
                 }
             }
-            _ => return Err(error("invalid signature arguments in the generic function's environment")),
+            _ => {
+                return Err(error(
+                    "invalid signature arguments in the generic function's environment",
+                ));
+            }
         };
         result.push(symbol);
     }
@@ -310,7 +339,10 @@ unsafe fn signature_symbols(generic_env: Sexp) -> R<Vec<Sexp>> {
 /// evaluates it and reports the error.
 unsafe fn bound_missing(symbol: Sexp, env: Sexp) -> R<bool> {
     let cell = crate::heap().frame_cell(env, symbol).ok_or_else(|| {
-        error(format!("could not find symbol '{}' in frame of call", symbol_name(symbol)))
+        error(format!(
+            "could not find symbol '{}' in frame of call",
+            symbol_name(symbol)
+        ))
     })?;
     Ok(cell.has_gp(BINDING_MISSING) || cell.cdr() == missing_arg())
 }
@@ -372,7 +404,10 @@ unsafe fn try_eval(expression: Sexp, env: Sexp) -> R<Result<Sexp, String>> {
     match result {
         Ok(value) => Ok(Ok(value)),
         Err(Unwind::Jump(jump)) => match *jump {
-            Jump::Return { env: returned_to, value } if returned_to == target => {
+            Jump::Return {
+                env: returned_to,
+                value,
+            } if returned_to == target => {
                 let condition = if value.kind() == SexpType::List && length(value) > 0 {
                     value.element(0)
                 } else {
@@ -428,7 +463,13 @@ unsafe fn load_method(method: Sexp, name: Sexp, env: Sexp) -> R<Sexp> {
 // The routines.
 
 unsafe fn set_primitive_methods_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    let (name, op, code, generic, methods) = (call.arg(0), call.arg(1), call.arg(2), call.arg(3), call.arg(4));
+    let (name, op, code, generic, methods) = (
+        call.arg(0),
+        call.arg(1),
+        call.arg(2),
+        call.arg(3),
+        call.arg(4),
+    );
     let code_text = values::first_string(code)
         .ok_or_else(|| call.error("argument 'code' must be a character string"))?
         .into_owned();
@@ -446,8 +487,11 @@ unsafe fn set_primitive_methods_routine(call: &NativeCall<'_>) -> R<Sexp> {
     let op = if matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
         op
     } else {
-        crate::builtins::primitive(&primitive_name)
-            .ok_or_else(|| call.error(format!("object '{primitive_name}' is not a primitive function")))?
+        crate::builtins::primitive(&primitive_name).ok_or_else(|| {
+            call.error(format!(
+                "object '{primitive_name}' is not a primitive function"
+            ))
+        })?
     };
     dispatch::set_primitive_methods(op, &code_text, generic, methods)?;
     Ok(name)
@@ -552,7 +596,9 @@ unsafe fn class_from_cache(call: &NativeCall<'_>) -> R<Sexp> {
             Ok(value)
         }
         _ if class.has_gp(gp::S4_OBJECT) => Ok(class),
-        _ => Err(call.error("class should be either a character-string name or a class definition")),
+        _ => {
+            Err(call.error("class should be either a character-string name or a class definition"))
+        }
     }
 }
 
@@ -561,12 +607,18 @@ unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
     let symbol = match name.kind() {
         SexpType::Symbol => name,
         SexpType::String if length(name) >= 1 => values::install_bytes(name.element(0).bytes())?,
-        _ => return Err(call.error("invalid generic function name: expected a character string or a name")),
+        _ => {
+            return Err(
+                call.error("invalid generic function name: expected a character string or a name")
+            );
+        }
     };
     if env.kind() != SexpType::Environment {
         return Err(call.error("invalid environment for the generic function"));
     }
-    let package = values::first_string(package).unwrap_or_default().into_owned();
+    let package = values::first_string(package)
+        .unwrap_or_default()
+        .into_owned();
     let generic = find_generic(symbol, env, &package)?;
     if generic == nil() && values::as_logical_scalar(must_find) == 1 {
         return Err(call.error(format!(
@@ -610,7 +662,8 @@ unsafe fn find_generic(symbol: Sexp, env: Sexp, package: &str) -> R<Sexp> {
 }
 
 unsafe fn get_slot(call: &NativeCall<'_>) -> R<Sexp> {
-    let symbol = slot_symbol(call.arg(1)).map_err(|_| call.error("invalid type or length for slot name"))?;
+    let symbol =
+        slot_symbol(call.arg(1)).map_err(|_| call.error("invalid type or length for slot name"))?;
     crate::subset::get_slot(call.arg(0), symbol, call.call)
 }
 
@@ -687,7 +740,9 @@ unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
     let (symbol, env) = (call.arg(0), call.arg(1));
     let symbol = match symbol.kind() {
         SexpType::Symbol => symbol,
-        SexpType::String if length(symbol) >= 1 => values::install_bytes(symbol.element(0).bytes())?,
+        SexpType::String if length(symbol) >= 1 => {
+            values::install_bytes(symbol.element(0).bytes())?
+        }
         _ => {
             let class = dispatch::class_of(symbol)?;
             return Err(call.error(format!(
@@ -696,7 +751,11 @@ unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
             )));
         }
     };
-    let env = if env == nil() { values::global_env() } else { env };
+    let env = if env == nil() {
+        values::global_env()
+    } else {
+        env
+    };
     if env.kind() != SexpType::Environment {
         let class = dispatch::class_of(env)?;
         return Err(call.error(format!(
@@ -716,7 +775,8 @@ unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `R_nextMethodCall(matched_call, env)`: evaluates the method call `matched_call` (from
 /// `match.call(expand.dots = FALSE)`) with `.nextMethod` as the function and every supplied
-/// argument passed on as the method frame's own binding of it. A primitive next method is
+/// argument passed on as the method frame's own binding of it (`... = ...` for the dots, which
+/// the call shows in errors). A primitive next method is
 /// called directly, with its S4 dispatch suppressed so that it runs its own code.
 unsafe fn next_method_call(call: &NativeCall<'_>) -> R<Sexp> {
     let (matched_call, env) = (call.arg(0), call.arg(1));
@@ -737,12 +797,9 @@ unsafe fn next_method_call(call: &NativeCall<'_>) -> R<Sexp> {
             .ok_or_else(|| call.error(format!("'{name}' is not a primitive function")))?;
         primitive = true;
     }
-    let dots = symbols().dots;
     let mut items = vec![(nil(), if primitive { op } else { next_symbol })];
     for (tag, value) in values::pairlist_items(matched_call.cdr()) {
-        if tag == dots {
-            items.push((nil(), dots));
-        } else if tag != nil() && value != missing_arg() {
+        if tag != nil() && value != missing_arg() {
             items.push((tag, tag));
         } else {
             items.push((tag, value));
@@ -762,7 +819,9 @@ unsafe fn next_method_call(call: &NativeCall<'_>) -> R<Sexp> {
         entry.state = MethodsState::Suppressed;
     }
     let result = eval::eval(next_call, env);
-    if let (Some(state), Some(entry)) = (previous, interp().globals.primitive_methods.get_mut(&index)) {
+    if let (Some(state), Some(entry)) =
+        (previous, interp().globals.primitive_methods.get_mut(&index))
+    {
         entry.state = state;
     }
     result
@@ -785,7 +844,9 @@ unsafe fn select_method(call: &NativeCall<'_>) -> R<Sexp> {
         }
         let argument = slot_value(methods_list, "argument")?;
         let methods = slot_value(methods_list, "methods")?;
-        let class = if argument.kind() != SexpType::Symbol || bound_missing(argument, env).unwrap_or(true) {
+        let class = if argument.kind() != SexpType::Symbol
+            || bound_missing(argument, env).unwrap_or(true)
+        {
             "missing".to_owned()
         } else {
             let value = if evaluate {
@@ -820,7 +881,9 @@ unsafe fn substitute_direct(call: &NativeCall<'_>) -> R<Sexp> {
                 let names = values::names(frame);
                 (0..length(frame))
                     .map(|index| {
-                        let tag = if names.kind() == SexpType::String && !names.element(index).bytes().is_empty() {
+                        let tag = if names.kind() == SexpType::String
+                            && !names.element(index).bytes().is_empty()
+                        {
                             values::install_bytes(names.element(index).bytes())
                         } else {
                             Ok(nil())
@@ -891,7 +954,9 @@ unsafe fn methods_function(name: &str) -> R<Sexp> {
     let namespace = methods_namespace()?;
     let value = eval::value_of(eval::find_var_in_frame(values::install(name)?, namespace)?)?;
     if !values::is_function(value) {
-        return Err(error(format!("could not find function \"{name}\" in the methods package")));
+        return Err(error(format!(
+            "could not find function \"{name}\" in the methods package"
+        )));
     }
     Ok(value)
 }

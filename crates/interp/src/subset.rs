@@ -403,10 +403,11 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
         SexpType::Pairlist | SexpType::Language => {
             let list = values::pairlist_to_list(object)?;
             let result = subset(list, indices, drop, call)?;
-            if object.kind() == SexpType::Language && length(result) > 0 {
+            // Subsetting a pairlist gives a list, as in GNU R; a call stays a call.
+            if object.kind() == SexpType::Language {
                 return values::list_to_pairlist(result, SexpType::Language);
             }
-            return values::list_to_pairlist(result, SexpType::Pairlist);
+            return Ok(result);
         }
         _ => {}
     }
@@ -1005,7 +1006,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if object.kind() == SexpType::Pairlist || object.kind() == SexpType::Language {
         let list = values::pairlist_to_list(object)?;
         let result = subassign(list, indices, value, call)?;
-        return values::list_to_pairlist(result, object.kind());
+        // A call stays a call, but a pairlist becomes a list, as in GNU R.
+        return if object.kind() == SexpType::Language {
+            values::list_to_pairlist(result, SexpType::Language)
+        } else {
+            Ok(result)
+        };
     }
     if object == nil() && value == nil() {
         return Ok(nil());

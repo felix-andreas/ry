@@ -545,9 +545,23 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             values::string_at(separators, index % separator_count).map_or_else(|| "NA".into(), |text| text.into_owned())
         }
     };
+    // With `fill`, every line starts with the next of `labels` and a space.
+    let labels = call.arg(4);
+    let label_count = if fill_width > 0 && labels.kind() == SexpType::String { length(labels) } else { 0 };
+    let mut line_index = 0usize;
     let mut output = String::new();
-    let mut piece_index = 0usize;
     let mut line_width = 0usize;
+    let mut start_line = |output: &mut String, line_width: &mut usize| {
+        if label_count > 0 {
+            let label = values::string_at(labels, line_index % label_count).map_or_else(|| "NA".into(), |text| text.into_owned());
+            output.push_str(&label);
+            output.push(' ');
+            *line_width = label.len() + 1;
+        }
+        line_index += 1;
+    };
+    start_line(&mut output, &mut line_width);
+    let mut piece_index = 0usize;
     for item_index in 0..length(items) {
         let item = items.element(item_index);
         let texts: Vec<String> = match item.kind() {
@@ -578,14 +592,20 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             }
         };
         for text in texts {
+            // The separator goes before the line break, and a piece only fits on the line if
+            // the separator after it does too.
             if piece_index > 0 {
                 let separator = separator_at(piece_index - 1);
-                if fill_width > 0 && line_width + separator.len() + text.len() > fill_width {
+                output.push_str(&separator);
+                line_width += separator.len();
+                if let Some(position) = separator.rfind('\n') {
+                    line_width = separator.len() - position - 1;
+                }
+                let next_separator = separator_at(piece_index).len();
+                if fill_width > 0 && line_width > 0 && line_width + text.len() + next_separator > fill_width {
                     output.push('\n');
                     line_width = 0;
-                } else {
-                    output.push_str(&separator);
-                    line_width += separator.len();
+                    start_line(&mut output, &mut line_width);
                 }
             }
             line_width += text.len();
