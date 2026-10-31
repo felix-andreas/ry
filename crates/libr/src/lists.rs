@@ -152,9 +152,30 @@ macro_rules! read_path {
     };
 }
 
-read_path!(CAR, car);
-read_path!(CDR, cdr);
-read_path!(TAG, tag);
+/// GNU R lays an external pointer out as a cell, with the address in `CAR`, the protected
+/// value in `CDR` and the tag in `TAG`, and older native code reads it that way.
+macro_rules! read_cell {
+    ($name:ident, $step:ident, $external:expr) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
+            enter(|| {
+                if object.kind() == SexpType::ExternalPtr {
+                    let read: unsafe fn(Sexp) -> Sexp = $external;
+                    return Ok(read(object));
+                }
+                Ok(triple(object, stringify!($name))?.$step())
+            })
+        }
+    };
+}
+
+// The address is handed back to native code as an opaque word and never dereferenced by ry. A
+// null address has no `Sexp` form, so it reads as `R_NilValue`.
+read_cell!(CAR, car, |object| unsafe {
+    Sexp::from_raw(object.external_address().cast()).unwrap_or_else(|| runtime().nil())
+});
+read_cell!(CDR, cdr, |object| unsafe { object.external_protected() });
+read_cell!(TAG, tag, |object| unsafe { object.external_tag() });
 read_path!(CAAR, car, car);
 read_path!(CDAR, car, cdr);
 read_path!(CADR, cdr, car);
