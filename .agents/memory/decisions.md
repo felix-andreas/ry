@@ -2133,3 +2133,12 @@ and gives NA on overflow, where R gives a double.
 - **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
   a known type compile to a slot load after one layout-id comparison, and tag tests are integer
   comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
+- **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
+  the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
+  keeps its slot count in header padding, so the collector never reads the layout table.
+- **The refusal is a builtin flag, not a scan:** `BuiltinDef::accepts_native` is set at startup from
+  `records::ACCEPTS_NATIVE`, and `install_all` asserts every listed name exists, so a renamed
+  builtin cannot silently drop off the list. The check tests only top-level arguments, because
+  looking inside lists would cost time in proportion to the data.
+- **Pattern encoding reuses the value constructors** (`.ry_tag`, `.ry_tuple`, `.ry_record`), so a
+  quoted pattern deparses with the same code as a quoted value, and `_`/`..` stay bare symbols.
