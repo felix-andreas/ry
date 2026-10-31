@@ -101,6 +101,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("KalmanFore", stats_arima::kalman_fore),
     ("KalmanSmooth", stats_arima::kalman_smooth),
     ("LogLin", loglin),
+    ("stl", stl),
 ];
 
 /// The arguments of a `.C` or `.Fortran` call, coerced as the routine's declared types, ready
@@ -2256,4 +2257,230 @@ unsafe fn loglin(call: &NativeCall<'_>) -> R<Sexp> {
         ("dev", values::real_vector(&deviations)?),
         ("nlast", values::scalar_integer(last as i32)?),
     ])
+}
+
+/// `.Fortran(stl, y, n, np, ns, nt, nl, isdeg, itdeg, ildeg, nsjump, ntjump, nljump, ni, no,
+/// rw, season, trend, work)`: Cleveland, Cleveland, McRae and Terpenning's seasonal-trend
+/// decomposition by loess ("STL", Journal of Official Statistics, 1990): inner loops smooth
+/// the cycle subseries and the deseasonalized series alternately, outer loops reweight
+/// against outliers.
+unsafe fn stl(call: &NativeCall<'_>) -> R<Sexp> {
+    let arguments = c_arguments(call)?;
+    let y = values::reals(arguments[0]).to_vec();
+    let n = values::as_integer_scalar(arguments[1]).max(0) as usize;
+    let odd = |value: i32| -> usize {
+        let value = value.max(3) as usize;
+        if value % 2 == 0 { value + 1 } else { value }
+    };
+    let period = (values::as_integer_scalar(arguments[2]).max(2)) as usize;
+    let seasonal_span = odd(values::as_integer_scalar(arguments[3]));
+    let trend_span = odd(values::as_integer_scalar(arguments[4]));
+    let lowpass_span = odd(values::as_integer_scalar(arguments[5]));
+    let degree = |index: usize| values::as_integer_scalar(arguments[index]);
+    let (seasonal_degree, trend_degree, lowpass_degree) = (degree(6), degree(7), degree(8));
+    let jump = |index: usize| values::as_integer_scalar(arguments[index]).max(1) as usize;
+    let (seasonal_jump, trend_jump, lowpass_jump) = (jump(9), jump(10), jump(11));
+    let inner = values::as_integer_scalar(arguments[12]).max(0) as usize;
+    let outer = values::as_integer_scalar(arguments[13]).max(0);
+    let mut weights = vec![0.0; n];
+    let mut season = vec![0.0; n];
+    let mut trend = vec![0.0; n];
+    let mut robust = false;
+    let mut pass = 0;
+    loop {
+        for _ in 0..inner {
+            let detrended: Vec<f64> = (0..n).map(|i| y[i] - trend[i]).collect();
+            let cycles = cycle_subseries_smooth(&detrended, period, seasonal_span, seasonal_degree, seasonal_jump, robust, &weights);
+            let first = moving_average(&cycles, period);
+            let second = moving_average(&first, period);
+            let lowpass_input = moving_average(&second, 3);
+            let lowpass = loess_jumps(&lowpass_input, lowpass_span, lowpass_degree, lowpass_jump, false, &[]);
+            for i in 0..n {
+                season[i] = cycles[period + i] - lowpass[i];
+            }
+            let deseasonalized: Vec<f64> = (0..n).map(|i| y[i] - season[i]).collect();
+            trend = loess_jumps(&deseasonalized, trend_span, trend_degree, trend_jump, robust, &weights);
+        }
+        pass += 1;
+        if pass > outer {
+            break;
+        }
+        let fitted: Vec<f64> = (0..n).map(|i| trend[i] + season[i]).collect();
+        weights = robustness_weights(&y, &fitted);
+        robust = true;
+    }
+    if outer <= 0 {
+        weights.fill(1.0);
+    }
+    values::reals_mut(arguments[14]).copy_from_slice(&weights);
+    values::reals_mut(arguments[15]).copy_from_slice(&season);
+    values::reals_mut(arguments[16]).copy_from_slice(&trend);
+    c_return(call, &arguments)
+}
+
+/// Smooths each cycle subseries by loess and extends it by one value at each end, giving a
+/// series of length `n + 2 period` laid out by cycle position.
+fn cycle_subseries_smooth(y: &[f64], period: usize, span: usize, degree: i32, jump: usize, robust: bool, weights: &[f64]) -> Vec<f64> {
+    let n = y.len();
+    let mut result = vec![0.0; n + 2 * period];
+    for j in 0..period {
+        let count = if j < n { (n - j - 1) / period + 1 } else { 0 };
+        let series: Vec<f64> = (0..count).map(|i| y[i * period + j]).collect();
+        let series_weights: Vec<f64> = if robust { (0..count).map(|i| weights[i * period + j]).collect() } else { Vec::new() };
+        let mut smoothed = vec![0.0; count + 2];
+        let inner = loess_jumps(&series, span, degree, jump, robust, &series_weights);
+        smoothed[1..count + 1].copy_from_slice(&inner);
+        let right = span.min(count);
+        smoothed[0] = loess_estimate(&series, span, degree, 0.0, 1, right, robust, &series_weights).unwrap_or(smoothed[1]);
+        let left = if count >= span { count - span + 1 } else { 1 };
+        smoothed[count + 1] = loess_estimate(&series, span, degree, (count + 1) as f64, left, count, robust, &series_weights).unwrap_or(smoothed[count]);
+        for (m, &value) in smoothed.iter().enumerate() {
+            let index = m * period + j;
+            if index < result.len() {
+                result[index] = value;
+            }
+        }
+    }
+    result
+}
+
+fn moving_average(x: &[f64], length: usize) -> Vec<f64> {
+    let count = x.len() + 1 - length;
+    let mut result = Vec::with_capacity(count);
+    let mut sum: f64 = x[..length].iter().sum();
+    result.push(sum / length as f64);
+    for j in 1..count {
+        sum = sum - x[j - 1] + x[j + length - 1];
+        result.push(sum / length as f64);
+    }
+    result
+}
+
+/// Loess at every point (1-based positions), fitting exactly every `jump` points and
+/// interpolating linearly between them.
+fn loess_jumps(y: &[f64], span: usize, degree: i32, jump: usize, robust: bool, weights: &[f64]) -> Vec<f64> {
+    let n = y.len();
+    if n < 2 {
+        return y.to_vec();
+    }
+    let mut fitted = vec![0.0; n];
+    let step = jump.min(n - 1);
+    let (mut left, mut right) = (1usize, n);
+    let mut fit_at = |i: usize, left: usize, right: usize, fitted: &mut [f64]| {
+        fitted[i - 1] = loess_estimate(y, span, degree, i as f64, left, right, robust, weights).unwrap_or(y[i - 1]);
+    };
+    if span >= n {
+        let mut i = 1;
+        while i <= n {
+            fit_at(i, 1, n, &mut fitted);
+            i += step;
+        }
+    } else if step == 1 {
+        let half = (span + 1) / 2;
+        right = span;
+        for i in 1..=n {
+            if i > half && right != n {
+                left += 1;
+                right += 1;
+            }
+            fit_at(i, left, right, &mut fitted);
+        }
+    } else {
+        let half = (span + 1) / 2;
+        let mut i = 1;
+        while i <= n {
+            if i < half {
+                left = 1;
+                right = span;
+            } else if i >= n - half + 1 {
+                left = n - span + 1;
+                right = n;
+            } else {
+                left = i - half + 1;
+                right = span + i - half;
+            }
+            fit_at(i, left, right, &mut fitted);
+            i += step;
+        }
+    }
+    if step != 1 {
+        let mut i = 1;
+        while i + step <= n {
+            let delta = (fitted[i + step - 1] - fitted[i - 1]) / step as f64;
+            for j in i + 1..i + step {
+                fitted[j - 1] = fitted[i - 1] + delta * (j - i) as f64;
+            }
+            i += step;
+        }
+        let k = ((n - 1) / step) * step + 1;
+        if k != n {
+            fit_at(n, left, right, &mut fitted);
+            if k != n - 1 {
+                let delta = (fitted[n - 1] - fitted[k - 1]) / (n - k) as f64;
+                for j in k + 1..n {
+                    fitted[j - 1] = fitted[k - 1] + delta * (j - k) as f64;
+                }
+            }
+        }
+    }
+    fitted
+}
+
+/// The tricube-weighted local constant (`degree` 0) or line at `xs` from points `left..=right`
+/// (1-based), or `None` when all weights vanish.
+#[allow(clippy::too_many_arguments)]
+fn loess_estimate(y: &[f64], span: usize, degree: i32, xs: f64, left: usize, right: usize, robust: bool, robustness: &[f64]) -> Option<f64> {
+    let n = y.len();
+    let range = n as f64 - 1.0;
+    let mut h = (xs - left as f64).max(right as f64 - xs);
+    if span > n {
+        h += ((span - n) / 2) as f64;
+    }
+    let (h9, h1) = (0.999 * h, 0.001 * h);
+    let mut weights = vec![0.0; right + 1];
+    let mut total = 0.0;
+    for j in left..=right {
+        let r = (j as f64 - xs).abs();
+        if r <= h9 {
+            weights[j] = if r <= h1 { 1.0 } else { (1.0 - (r / h).powi(3)).powi(3) };
+            if robust {
+                weights[j] *= robustness[j - 1];
+            }
+            total += weights[j];
+        }
+    }
+    if total <= 0.0 {
+        return None;
+    }
+    for weight in &mut weights[left..=right] {
+        *weight /= total;
+    }
+    if h > 0.0 && degree > 0 {
+        let mean: f64 = (left..=right).map(|j| weights[j] * j as f64).sum();
+        let mut slope = xs - mean;
+        let spread: f64 = (left..=right).map(|j| weights[j] * (j as f64 - mean).powi(2)).sum();
+        if spread.sqrt() > 0.001 * range {
+            slope /= spread;
+            for j in left..=right {
+                weights[j] *= slope * (j as f64 - mean) + 1.0;
+            }
+        }
+    }
+    Some((left..=right).map(|j| weights[j] * y[j - 1]).sum())
+}
+
+/// Bisquare weights of the residuals, scaled by six times their median absolute value.
+fn robustness_weights(y: &[f64], fitted: &[f64]) -> Vec<f64> {
+    let n = y.len();
+    let residuals: Vec<f64> = (0..n).map(|i| (y[i] - fitted[i]).abs()).collect();
+    let mut sorted = residuals.clone();
+    sorted.sort_by(f64::total_cmp);
+    let middle1 = n / 2 + 1;
+    let middle2 = n - middle1 + 1;
+    let cmad = 3.0 * (sorted[middle1 - 1] + sorted[middle2 - 1]);
+    let (high, low) = (0.999 * cmad, 0.001 * cmad);
+    residuals
+        .iter()
+        .map(|&r| if r <= low { 1.0 } else if r <= high { (1.0 - (r / cmad).powi(2)).powi(2) } else { 0.0 })
+        .collect()
 }
