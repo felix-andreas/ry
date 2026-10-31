@@ -57,4 +57,4 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 - Research session session_0111kWqBCyqwWYwvbAi7TQGr: R runtime and C API architecture, delivering `r-runtime.md`.
 - Typing session session_0111kWqDjwjNJcGFMYNSyybM: inline annotation syntax, the comment/inline disagreement warning, and strict mode. It delivers one large PR.
-- Docs session (session id pending): restructuring the introduction and type-checking sections.
+- Docs session session_0111kWqCgbHESLzg96ct5Rm8: restructuring the introduction and type-checking sections.
