@@ -43,3 +43,16 @@ unions would need the same machinery, so the costing is worth having if those ar
 How `ry repl` loads R at runtime instead of linking against it at build time, which is what keeps
 the rest of the workspace free of any dependency on R. The console has shipped, so most of the page
 is now a design record; the open part is wiring the analysis into it.
+
+### [The R runtime](/contributing/design/r-runtime/)
+
+How ry becomes an R implementation of its own: an ABI-compatible C API (with measured usage across
+the benchmark's 232-package dependency closure), the object model and GC that API forces, a bytecode
+interpreter with a Cranelift JIT fed by ry's static types, lazy package loading from the analysis
+index, a table type on Polars, and the order to build it in. Nothing on it is implemented.
+
+### [Prior art from new language implementations](/contributing/design/prior-art/)
+
+What Roc, Bend, goose and Vx do best in memory management, compilation, typing and C interop, and
+which of their ideas the R runtime adopts or rejects given that R's C API must keep working. It is
+written as an Open Knowledge Format v0.2 concept document, with sources in its frontmatter.

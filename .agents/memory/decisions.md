@@ -762,6 +762,18 @@ syntax recognized at lowering. A true superset dialect, which is the TypeScript 
 syntax plus a strip step, stays a product decision that the pluggable design keeps open. A `#:`
 file must always remain valid ordinary R.
 
+## The inline annotation syntax is a superset of R
+
+The previous position was that a superset dialect "stays a product decision" (the entry above),
+with `declare()` as the valid-R route. The mandate in `AGENTS.md` makes that decision: the inline
+syntax is on by default and ry warns when it is turned off, which only makes sense for a syntax that
+GNU R cannot parse. So the inline form is the superset that `contributing/design/inline-type-syntax.md`
+costed (generic binder, parameter, return and binding positions), typed files keep the `.R`
+extension because ry executes them directly, and `declare(type(...))` stays a recognized spelling for
+code that must remain valid R. The cost is that other R tools fail on a typed file, so code that must
+run on GNU R goes through a strip step that moves inline types into `#:` comments. The reasoning is in
+`contributing/design/r-runtime.md`, section 8.
+
 ## Testing doctrine for `syntax`
 
 The parser is the foundation of everything, so it must be extremely well tested. More is better,
