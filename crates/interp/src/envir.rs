@@ -1435,7 +1435,12 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
     let more = call.arg(2);
     let lists = values::list_items(dots);
     let names = values::names(dots);
-    let lengths: Vec<usize> = lists.iter().map(|&list| length(list)).collect();
+    // A classed argument may define its own `length` and `[[` methods, which mapply honours.
+    let lengths: Vec<usize> = lists
+        .iter()
+        .map(|&list| crate::subset::dispatch_length(list, call.env))
+        .collect::<R<_>>()?;
+    let subset2 = crate::builtins::primitive("[[").ok_or_else(|| call.error("no [[ primitive"))?;
     let longest = if lengths.contains(&0) {
         0
     } else {
@@ -1447,7 +1452,12 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let mut args = Vec::new();
             for (position, &list) in lists.iter().enumerate() {
-                let element = crate::subset::list_or_vector_element(list, index % lengths[position])?;
+                let element = if list.is_object() {
+                    let position_value = values::scalar_integer((index % lengths[position]) as i32 + 1)?;
+                    eval::apply(nil(), subset2, &eval::value_args(&[list, position_value]), call.env)?
+                } else {
+                    crate::subset::list_or_vector_element(list, index % lengths[position])?
+                };
                 let tag = if names != nil() && !names.element(position).bytes().is_empty() {
                     crate::heap().install_char(names.element(position))?
                 } else {
