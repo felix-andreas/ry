@@ -6,14 +6,7 @@ The companion files are `backlog.md` (open work, plus a one-line shipped ledger 
 
 ## Short-term
 
-- **Cleanup program (user-directed, one PR per step, and a step may split):**
-  1. Done: legacy ported and deleted.
-  2. Done: comments cut to short non-obvious "why" comments, and the agent docs trimmed.
-  3. Next: shrink the code in several passes. Simple and data-oriented, and duplication is acceptable.
-  4. Docs passes for density that still introduce one concept after another (style reference: vxlang.org/docs/tour.html).
-  5. At the local maximum, consider a green-field rewrite.
-
-  Keep `roughly.toml` support and the REPL (user directives). Other old-name fallbacks, the perf and debug probes, and the fuzz scaffolding may shrink.
+- **The code-reduction pass in PR #99 finishes first** (simple, data-oriented code, where duplication is acceptable). The rest of the old cleanup program, the docs density passes and the green-field rewrite, is superseded by the R reimplementation in Mid-term. Keep `roughly.toml` support and the REPL (user directives). Other old-name fallbacks, the perf and debug probes, and the fuzz scaffolding may shrink.
 - **Next release: update the install docs.** `installation.md`, `getting-started.md` and the README pin 0.3.1-beta, whose Linux binary (also bundled in the VS Code Linux extension 0.3.1) has a `/nix/store` loader and starts only under Nix. Once a release ships the glibc 2.17 binary, point the examples at it and drop the caveats.
 - **Docs pages follow the writing rules in `AGENTS.md`, and a page that reads like a telegram is as much a regression as dense prose.** Read a page aloud when you edit it, and keep a reason inside its sentence rather than splitting it off. Before rewriting a page, run an adversarial reader subagent with the owner's objections as the rubric (too abstract, information the reader does not need, a term used before it is introduced, copy about the tool instead of what the reader gets). That review found 35 false claims on the user pages and 14 on the contributing pages.
 - **A new em-dash in a diagnostic or a comment is a regression.** Two survive on purpose as test data (`literate.rs`, `test_cli.rs`), and `worklog.md` keeps its original wording.
@@ -22,12 +15,14 @@ The companion files are `backlog.md` (open work, plus a one-line shipped ledger 
 
 ## Mid-term
 
-- **False reports on correct R come first.** `backlog.md` ("Open: false reports and gaps found by the documentation review") lists them worst first, such as inferred numeric parameters refusing mixed `integer`/`double`, `pkg::name` not activating a conditional namespace, and positional append on `list()`. Each is listed on `type-checking/limitations.md`, so a fix also deletes its line there.
+- **Scope (user directive): ry becomes a full, backwards-compatible reimplementation of R, extended with ry's typing.** `AGENTS.md` ("Goals" and "Process") holds the mandate, the benchmark dependency set, and the process rules. The top priority is designing the R C API layer (`SEXP`, memory protection, `.Call`), because most benchmark dependencies ship compiled code against it, so it constrains the architecture more than the JIT does. Then come the runtime, inline annotations with comment-annotation agreement warnings, strict mode, built-in lazy package loading (the idea behind finccam/loadfast), the typed table type that must outperform data.table, and a JIT on the level of Bun. Progress is measured on three synthetic code bases (finance, data science, biostatistics) of about 300,000 lines in about 500 files each.
+- **Process (user direction, see `AGENTS.md` "Process"):** full ownership with no check-in gates, and velocity first, so main may be broken and CI need not be awaited. Small tasks go from the orchestrator to an in-session worker that pushes to main, and large tasks go to cloud sessions that deliver reviewed pull requests. Treat a "landed" claim in an old note with suspicion: the verified state is `backlog.md` plus the fixtures.
+- **Analysis debt that predates the scope.** The next two items still matter as the semantics contract, but they rank behind the reimplementation.
+- **False reports on correct R.** `backlog.md` ("Open: false reports and gaps found by the documentation review") lists them worst first, such as inferred numeric parameters refusing mixed `integer`/`double`, `pkg::name` not activating a conditional namespace, and positional append on `list()`. Each is listed on `type-checking/limitations.md`, so a fix also deletes its line there.
 - **The adoption reviews heading `backlog.md` come next**, each with a minimal repro. Re-run a filed finding before ranking work off it, because two of four claims in one entry were already stale. Add a control in the same file (an obviously undefined name), so "no finding" cannot mean "the check is off".
-- **User direction (standing):** full ownership with no check-in gates, driving toward rust-analyzer quality and an empty `backlog.md` §Open. Work lands through PRs on the session branch. A slice is the docs contract, the implementation, fixtures, the full gate (`just gate`), and the memory and backlog update. Treat a "landed" claim in an old note with suspicion: the verified state is `backlog.md` plus the fixtures.
 - **The language is `ry`** (crate `crates/ry`, published `ry-lang`, config `ry.toml`, suppression `# ry: allow(...)`, env `RY_*`). The former spellings (`roughly.toml`, `# roughly: allow`, `ROUGHLY_*`, extension `roughly.*`) still fall back, and `roughly.toml` must stay.
 - **The type system admits only what is fast to check, which means Hindley-Milner (user directive).** `.Rtypes` overloading is the one sanctioned exception. Traits, typeclasses and general subtyping are declined, not deferred, so evaluate every type-system proposal against `decisions.md` first. Open questions live in `contributing/design/open-questions.md`.
-- **CI gates only `crates/ry`** (`default-members`), so no fixture or fuzz suite runs in CI. The widened workflow is staged in `.github/pending-ci.yml` for a human `git mv`, because the agent token lacks workflow scope. Run `just gate` locally per slice, and never read a green CI badge as "the fixtures pass".
+- **CI gates only `crates/ry`** (`default-members`), so no fixture or fuzz suite runs in CI. The widened workflow is staged in `.github/pending-ci.yml` for a human `git mv`, because the agent token lacks workflow scope. `just gate` runs every suite locally (it does not block landing while main may be broken), and a green CI badge never means "the fixtures pass".
 - **Debt queue:** `backlog.md` §abstraction & duplication review and §test & fuzz architecture review. Both list items deliberately not worth fixing, so respect those.
 
 ## Long-term
