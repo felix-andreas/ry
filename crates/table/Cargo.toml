@@ -1,0 +1,40 @@
+[package]
+name = "table"
+description = "ry's built-in typed table type, an engine over Polars"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/table.rs"
+
+[features]
+# Exposes columns to R and native code as ALTREP vectors. It links the runtime (`libr`), so the
+# engine and its tests build without it, and `libr` never has to compile Polars.
+runtime = ["dep:libr", "dep:heap"]
+
+[dependencies]
+polars = { version = "0.55", default-features = false, features = [
+    "lazy",
+    "asof_join",
+    "semi_anti_join",
+    "cse",
+    "csv",
+    "dtype-categorical",
+    "cov",
+    "round_series",
+    "dtype-date",
+    "fmt",
+    "dtype-i8",
+    "dtype-i16",
+    "dtype-u8",
+    "dtype-u16",
+] }
+polars-arrow = { version = "0.55", default-features = false }
+thiserror.workspace = true
+libr = { package = "libr", path = "../libr", optional = true }
+heap = { path = "../heap", optional = true }
+
+[dev-dependencies]
+syntax = { path = "../syntax" }
