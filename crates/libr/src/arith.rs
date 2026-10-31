@@ -13,188 +13,37 @@ use crate::{
 use heap::object::{NA_INTEGER, SexpType, is_na_real};
 use std::ffi::c_int;
 
-const STATE_WORDS: usize = 624;
-/// `.Random.seed[1]` for the default kinds: Mersenne Twister, inversion for normals, and
-/// rejection sampling.
-const DEFAULT_KIND: i32 = 10403;
-const I2_32M1: f64 = 2.328306437080797e-10;
-
-pub struct Rng {
-    /// `dummy[0]` is the position in the state, `dummy[1..]` the state itself, as R lays out
-    /// the seed vector.
-    dummy: [u32; STATE_WORDS + 1],
-}
-
-impl Default for Rng {
-    fn default() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos() as u32 ^ std::process::id());
-        let mut rng = Rng {
-            dummy: [0; STATE_WORDS + 1],
-        };
-        rng.seed(seed);
-        rng
-    }
-}
-
-impl Rng {
-    /// `set.seed(seed)`: R scrambles the seed with a linear congruential generator before it
-    /// fills the state.
-    pub fn seed(&mut self, seed: u32) {
-        let mut seed = seed;
-        for _ in 0..50 {
-            seed = seed.wrapping_mul(69069).wrapping_add(1);
-        }
-        for word in self.dummy.iter_mut() {
-            seed = seed.wrapping_mul(69069).wrapping_add(1);
-            *word = seed;
-        }
-        self.dummy[0] = STATE_WORDS as u32;
-    }
-
-    pub fn unif_rand(&mut self) -> f64 {
-        let value = self.genrand();
-        if value <= 0.0 {
-            0.5 * I2_32M1
-        } else if 1.0 - value <= 0.0 {
-            1.0 - 0.5 * I2_32M1
-        } else {
-            value
-        }
-    }
-
-    fn genrand(&mut self) -> f64 {
-        const UPPER_MASK: u32 = 0x8000_0000;
-        const LOWER_MASK: u32 = 0x7fff_ffff;
-        const MATRIX_A: u32 = 0x9908_b0df;
-        let magnitude = |y: u32| if y & 1 == 1 { MATRIX_A } else { 0 };
-        let mut position = self.dummy[0] as usize;
-        let state = &mut self.dummy[1..];
-        if position >= STATE_WORDS {
-            if position == STATE_WORDS + 1 {
-                seed_genrand(state, 4357);
-            }
-            for index in 0..STATE_WORDS - 397 {
-                let y = (state[index] & UPPER_MASK) | (state[index + 1] & LOWER_MASK);
-                state[index] = state[index + 397] ^ (y >> 1) ^ magnitude(y);
-            }
-            for index in STATE_WORDS - 397..STATE_WORDS - 1 {
-                let y = (state[index] & UPPER_MASK) | (state[index + 1] & LOWER_MASK);
-                state[index] = state[index + 397 - STATE_WORDS] ^ (y >> 1) ^ magnitude(y);
-            }
-            let y = (state[STATE_WORDS - 1] & UPPER_MASK) | (state[0] & LOWER_MASK);
-            state[STATE_WORDS - 1] = state[396] ^ (y >> 1) ^ magnitude(y);
-            position = 0;
-        }
-        let mut y = state[position];
-        position += 1;
-        y ^= y >> 11;
-        y ^= (y << 7) & 0x9d2c_5680;
-        y ^= (y << 15) & 0xefc6_0000;
-        y ^= y >> 18;
-        self.dummy[0] = position as u32;
-        y as f64 * 2.3283064365386963e-10
-    }
-
-    /// `R_unif_index` under rejection sampling: uniform on `0..n` without the bias of
-    /// `floor(n * unif_rand())`.
-    pub fn unif_index(&mut self, n: f64) -> f64 {
-        if n <= 0.0 {
-            return 0.0;
-        }
-        let bits = n.log2().ceil() as u32;
-        loop {
-            let value = self.random_bits(bits);
-            if n > value {
-                return value;
-            }
-        }
-    }
-
-    fn random_bits(&mut self, bits: u32) -> f64 {
-        let mut value: i64 = 0;
-        let mut drawn = 0;
-        while drawn <= bits {
-            let chunk = (self.unif_rand() * 65536.0).floor() as i64;
-            value = value.wrapping_mul(65536).wrapping_add(chunk);
-            drawn += 16;
-        }
-        let mask = if bits >= 63 {
-            i64::MAX
-        } else {
-            (1i64 << bits) - 1
-        };
-        (value & mask) as f64
-    }
-}
-
-fn seed_genrand(state: &mut [u32], seed: u32) {
-    let mut seed = seed;
-    for word in state.iter_mut() {
-        *word = seed & 0xffff_0000;
-        seed = seed.wrapping_mul(69069).wrapping_add(1);
-        *word |= (seed & 0xffff_0000) >> 16;
-        seed = seed.wrapping_mul(69069).wrapping_add(1);
-    }
-}
-
-unsafe fn read_seed() -> ApiResult<()> {
-    let runtime = runtime();
-    let known = *runtime.heap.known();
-    let seed = frame_value(known.global_env, R_SeedsSymbol.get());
-    if seed == known.unbound {
-        return Ok(());
-    }
-    if seed.kind() != SexpType::Integer || seed.length() != (STATE_WORDS + 2) as isize {
-        return Err(error("'.Random.seed' is not a valid integer vector"));
-    }
-    let values = seed.slice::<i32>();
-    if values[0] != DEFAULT_KIND {
-        return Err(error(
-            "ry supports only the default RNG kinds (Mersenne-Twister, Inversion, Rejection)",
-        ));
-    }
-    for (word, &value) in runtime.rng.dummy.iter_mut().zip(&values[1..]) {
-        *word = value as u32;
-    }
-    Ok(())
-}
-
-unsafe fn write_seed() -> ApiResult<()> {
-    let runtime = runtime();
-    let seed = runtime
-        .heap
-        .alloc_vector(SexpType::Integer, (STATE_WORDS + 2) as isize)?;
-    runtime.heap.root(seed);
-    let values = seed.slice_mut::<i32>();
-    values[0] = DEFAULT_KIND;
-    for (value, &word) in values[1..].iter_mut().zip(runtime.rng.dummy.iter()) {
-        *value = word as i32;
-    }
-    let global = runtime.heap.known().global_env;
-    runtime.heap.define(global, R_SeedsSymbol.get(), seed)?;
-    Ok(())
-}
+// The generator itself is the interpreter's (`interp::random`), so R code and native code share
+// one state through `.Random.seed`.
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetRNGstate() {
-    enter(|| read_seed())
+    enter(|| interp::random::get_rng_state())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PutRNGstate() {
-    enter(|| write_seed())
+    enter(|| interp::random::put_rng_state())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unif_rand() -> f64 {
-    runtime().rng.unif_rand()
+    enter(|| interp::random::unif_rand())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_rand() -> f64 {
+    enter(|| interp::random::norm_rand())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn exp_rand() -> f64 {
+    enter(|| interp::random::exp_rand())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_unif_index(n: f64) -> f64 {
-    runtime().rng.unif_index(n)
+    enter(|| interp::random::unif_index(n))
 }
 
 #[unsafe(no_mangle)]
@@ -313,6 +162,5 @@ pub extern "C" fn R_CheckStack2(_extra: usize) {}
 /// test harness compares sequences against GNU R with it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_set_seed(seed: c_int) {
-    runtime().rng.seed(seed as u32);
-    enter(|| write_seed());
+    enter(|| interp::random::set_seed(seed))
 }

@@ -48,7 +48,20 @@ fn main() -> ExitCode {
                 ..repl::RunOptions::default()
             })
         }
-        Command::Run { file } => Some(repl::RunOptions {
+        Command::Run {
+            file,
+            runtime,
+            arguments,
+        } if runtime.resolve() == Runtime::Ry => {
+            return match repl::run_on_ry_runtime(file, arguments) {
+                Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Command::Run { file, .. } => Some(repl::RunOptions {
             routines: load::call_routines(),
             startup: vec![load::embedded_runtime()],
             file: Some(file.clone()),
@@ -291,10 +304,43 @@ enum Command {
     Run {
         /// The R file to execute
         file: PathBuf,
+        /// The R implementation that runs the file: GNU R (the default), or ry's own runtime
+        /// (also `RY_RUNTIME=ry`)
+        #[clap(long, value_enum)]
+        runtime: Option<Runtime>,
+        /// Arguments the script reads with `commandArgs(trailingOnly = TRUE)`
+        #[clap(trailing_var_arg = true)]
+        arguments: Vec<String>,
     },
     /// Debugging and development commands
     #[command(subcommand)]
     Debug(Debug),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Runtime {
+    /// GNU R, loaded from its installation
+    #[clap(name = "gnu-r")]
+    GnuR,
+    /// ry's own interpreter
+    Ry,
+}
+
+trait ResolveRuntime {
+    fn resolve(&self) -> Runtime;
+}
+
+impl ResolveRuntime for Option<Runtime> {
+    /// The flag wins, then `RY_RUNTIME`, then GNU R.
+    fn resolve(&self) -> Runtime {
+        match self {
+            Some(runtime) => *runtime,
+            None => match env::var("RY_RUNTIME").as_deref() {
+                Ok("ry") => Runtime::Ry,
+                _ => Runtime::GnuR,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

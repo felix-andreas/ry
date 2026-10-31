@@ -921,7 +921,106 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("delayedAssign", 4, do_delayed_assign).invisible(),
     internal("makeLazy", 5, do_make_lazy).invisible(),
     builtin("standardGeneric", -1, dispatch::do_standard_generic).keep_visibility(),
+    builtin("call", -1, do_call),
+    special("expression", -1, do_expression),
+    internal("all.names", 4, do_all_names),
+    internal("returnValue", 1, |call| Ok(call.arg(0))),
+    internal("named", 1, |call| unsafe { values::scalar_integer(call.arg(0).refcount().min(2) as i32) }),
+    internal("refcnt", 1, |call| unsafe { values::scalar_integer(call.arg(0).refcount() as i32) }),
+    internal("address", 1, |call| unsafe { values::scalar_string(&format!("{:p}", call.arg(0).as_ptr())) }),
+    internal("builtins", 1, do_builtins),
 ];
+
+unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
+    let Some(first) = call.args.first() else {
+        return Err(call.error("first argument must be a character string"));
+    };
+    let name = first.value;
+    if name.kind() != SexpType::String || length(name) != 1 {
+        return Err(call.error("first argument must be a character string"));
+    }
+    let function = values::install_bytes(name.element(0).bytes())?;
+    let mut items = vec![(nil(), function)];
+    items.extend(call.args[1..].iter().map(|arg| (arg.tag, arg.value)));
+    values::pairlist(&items, SexpType::Language)
+}
+
+unsafe fn do_expression(call: &Call<'_>) -> R<Sexp> {
+    let result = alloc(SexpType::Expression, call.len())?;
+    let mut any_names = false;
+    for (index, arg) in call.args.iter().enumerate() {
+        values::set_elt(result, index, arg.value);
+        any_names |= arg.tag != nil();
+    }
+    if any_names {
+        let names: Vec<String> = call
+            .args
+            .iter()
+            .map(|arg| if arg.tag == nil() { String::new() } else { symbol_name(arg.tag).into_owned() })
+            .collect();
+        let names = values::string_vector(&names)?;
+        values::set_attr(result, symbols().names, names)?;
+    }
+    Ok(result)
+}
+
+/// `all.names(expr, functions, max.names, unique)`.
+unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
+    let functions = values::as_logical_scalar(call.arg(1)) == 1;
+    let maximum = values::as_integer_scalar(call.arg(2));
+    let unique = values::as_logical_scalar(call.arg(3)) == 1;
+    let mut names: Vec<String> = Vec::new();
+    unsafe fn walk(expression: Sexp, functions: bool, names: &mut Vec<String>) {
+        match expression.kind() {
+            SexpType::Symbol => {
+                let name = symbol_name(expression).into_owned();
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+            SexpType::Language => {
+                if functions {
+                    walk(expression.car(), functions, names);
+                } else if expression.car().kind() == SexpType::Language {
+                    walk(expression.car(), functions, names);
+                }
+                let mut cell = expression.cdr();
+                while cell.kind() == SexpType::Pairlist {
+                    walk(cell.car(), functions, names);
+                    cell = cell.cdr();
+                }
+            }
+            SexpType::Expression => {
+                for index in 0..length(expression) {
+                    walk(expression.element(index), functions, names);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(call.arg(0), functions, &mut names);
+    if unique {
+        let mut seen = std::collections::HashSet::new();
+        names.retain(|name| seen.insert(name.clone()));
+    }
+    if maximum >= 0 && names.len() > maximum as usize {
+        names.truncate(maximum as usize);
+    }
+    values::string_vector(&names)
+}
+
+unsafe fn do_builtins(call: &Call<'_>) -> R<Sexp> {
+    let internal_too = values::as_logical_scalar(call.arg(0)) == 1;
+    let mut names: Vec<&str> = interp()
+        .builtins
+        .iter()
+        .filter(|definition| internal_too || matches!(definition.kind, Kind::Builtin | Kind::Special))
+        .map(|definition| definition.name)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    values::string_vector(&names)
+}
 
 unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     let mut value = nil();

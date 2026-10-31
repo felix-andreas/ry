@@ -649,3 +649,47 @@ unsafe fn do_is_loaded(call: &Call<'_>) -> ApiResult<Sexp> {
 pub unsafe fn quote_error(message: &str) -> Unwind {
     error(message)
 }
+
+/// Runs an R script on ry's runtime the way `Rscript` does: starts the session (base R and the
+/// default packages from the GNU R installation), evaluates the file, and returns the exit
+/// status: 0 on success, 1 after an error, 2 when the session could not start. `arguments` are
+/// what `commandArgs(trailingOnly = TRUE)` returns. This is `ry run --runtime ry`'s entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_run_file(
+    path: *const c_char,
+    count: c_int,
+    arguments: *const *const c_char,
+) -> c_int {
+    let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
+    let mut command_args = vec!["ry".to_owned(), format!("--file={path}"), "--args".to_owned()];
+    for index in 0..count.max(0) as usize {
+        let argument = *arguments.add(index);
+        command_args.push(String::from_utf8_lossy(crate::strings::c_bytes(argument)).into_owned());
+    }
+    runtime();
+    let options = interp::session::StartOptions {
+        command_args,
+        vanilla: true,
+    };
+    if let Err(unwind) = interp::session::start(options) {
+        interp::session::report_toplevel(unwind);
+        crate::boundary::write_console(b"ry: base R did not load\n", true);
+        return 2;
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(failure) => {
+            let message = format!("Fatal error: cannot open file '{path}': {failure}\n");
+            crate::boundary::write_console(message.as_bytes(), true);
+            return 2;
+        }
+    };
+    let outcome = interp::session::run_text(&text, &path);
+    crate::boundary::run_pending_finalizers();
+    use std::io::Write;
+    drop(std::io::stdout().flush());
+    match outcome {
+        interp::session::Outcome::Completed => 0,
+        interp::session::Outcome::Failed => 1,
+    }
+}

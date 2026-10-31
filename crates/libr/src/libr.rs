@@ -62,7 +62,6 @@ pub struct Runtime {
     pub dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
     pub options: Sexp,
-    pub rng: arith::Rng,
     pub console: Console,
     running_finalizers: bool,
 }
@@ -138,7 +137,6 @@ impl Runtime {
             dlls: Vec::new(),
             c_callables: FxHashMap::default(),
             options,
-            rng: arith::Rng::default(),
             console: Box::new(boundary::default_console),
             running_finalizers: false,
         };

@@ -80,6 +80,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("...length", 0, do_dots_length),
     builtin("...elt", 1, do_dots_elt),
     builtin("...names", 0, do_dots_names),
+    crate::builtins::special("::", 2, |call| unsafe { namespace_value(call, true) }),
+    crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
+    internal("getNamespaceValue", 3, |call| unsafe {
+        let name = values::require_string(call.arg(1), "name")?;
+        namespace_lookup(call.arg(0), &name, false, call.env)
+    }),
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
     internal("args", 1, do_args),
@@ -1684,4 +1690,51 @@ pub unsafe fn char_name(charsxp: Sexp) -> String {
 
 pub unsafe fn present_or_nil(value: Option<Sexp>) -> Sexp {
     present(value).unwrap_or(nil())
+}
+
+/// The package or variable name of `pkg::name`: a symbol or a string.
+unsafe fn colon_name(value: Sexp) -> R<String> {
+    match value.kind() {
+        SexpType::Symbol => Ok(symbol_name(value).into_owned()),
+        SexpType::String if length(value) == 1 => Ok(values::string_at(value, 0).unwrap_or_default().into_owned()),
+        _ => Err(error("bad namespace name")),
+    }
+}
+
+/// `pkg::name` (exported only) and `pkg:::name`.
+unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
+    let package = colon_name(call.arg(0))?;
+    let name = colon_name(call.arg(1))?;
+    let package_value = values::scalar_string(&package)?;
+    namespace_lookup(package_value, &name, exported, call.env)
+}
+
+/// Looks `name` up in a package's namespace, loading it if needed. Base is looked up directly;
+/// other packages go through base R's own `getExportedValue` and `asNamespace`.
+unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp) -> R<Sexp> {
+    let package_name = values::first_string(package).map(|text| text.into_owned()).unwrap_or_default();
+    let symbol = values::install(name)?;
+    if package_name == "base" {
+        let value = find_var_in_frame(symbol, base_namespace())?;
+        if value == unbound() {
+            return Err(error(format!("object '{name}' not found")));
+        }
+        return value_of(value);
+    }
+    let function_name = if exported { "getExportedValue" } else { "get" };
+    let function = eval::find_fun(values::install(function_name)?, base_namespace())?;
+    let name_value = values::scalar_string(name)?;
+    if exported {
+        eval::apply(nil(), function, &eval::value_args(&[package, name_value]), env)
+    } else {
+        let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
+        let namespace = eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?;
+        let inherits = scalar_bool(false)?;
+        let args = [
+            Arg { tag: nil(), value: name_value },
+            Arg { tag: values::install("envir")?, value: namespace },
+            Arg { tag: values::install("inherits")?, value: inherits },
+        ];
+        eval::apply(nil(), function, &args, env)
+    }
 }

@@ -98,12 +98,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("lchoose", 2, |call| unsafe { math2(call, |n, k| choose(n, k).abs().ln()) }),
     internal("beta", 2, |call| unsafe { math2(call, |a, b| (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()) }),
     internal("lbeta", 2, |call| unsafe { math2(call, |a, b| gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)) }),
-    internal("bitwAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
-    internal("bitwOr", 2, |call| unsafe { bitwise(call, |a, b| a | b) }),
-    internal("bitwXor", 2, |call| unsafe { bitwise(call, |a, b| a ^ b) }),
-    internal("bitwNot", 1, do_bitw_not),
-    internal("bitwShiftL", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32) }),
-    internal("bitwShiftR", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32) }),
+    internal("bitwiseAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
+    internal("bitwiseOr", 2, |call| unsafe { bitwise(call, |a, b| a | b) }),
+    internal("bitwiseXor", 2, |call| unsafe { bitwise(call, |a, b| a ^ b) }),
+    internal("bitwiseNot", 1, do_bitw_not),
+    internal("bitwiseShiftL", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32) }),
+    internal("bitwiseShiftR", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32) }),
     builtin("xtfrm", 1, |call| unsafe { Ok(call.arg(0)) }).generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
     builtin("Im", 1, |call| unsafe { complex_part(call, 1) }).generic(Generic::Complex),
@@ -124,7 +124,252 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("%*%", 2, |call| unsafe { matrix_product(call, false, false) }),
     internal("trunc", -1, |call| unsafe { math1(call, Math::Trunc) }),
     internal("is.unsorted", 2, do_is_unsorted),
+    internal("compareNumericVersion", 2, do_compare_numeric_version),
+    internal("colSums", 4, |call| unsafe { margin_sums(call, false, false) }),
+    internal("colMeans", 4, |call| unsafe { margin_sums(call, false, true) }),
+    internal("rowSums", 4, |call| unsafe { margin_sums(call, true, false) }),
+    internal("rowMeans", 4, |call| unsafe { margin_sums(call, true, true) }),
+    internal("findInterval", 5, do_find_interval),
+    internal("pretty", 8, do_pretty),
+    internal("sequence", 3, do_sequence),
+    internal("bincode", 4, do_bincode),
 ];
+
+/// `compareNumericVersion(x, y)`: -1, 0 or 1 per pair of versions, `NA` for an empty one.
+unsafe fn do_compare_numeric_version(call: &Call<'_>) -> R<Sexp> {
+    let left = call.arg(0);
+    let right = call.arg(1);
+    let left_count = length(left);
+    let right_count = length(right);
+    let count = if left_count == 0 || right_count == 0 { 0 } else { left_count.max(right_count) };
+    let result = alloc(SexpType::Integer, count)?;
+    for index in 0..count {
+        let a = coerce_vector(left.element(index % left_count), SexpType::Integer)?;
+        let b = coerce_vector(right.element(index % right_count), SexpType::Integer)?;
+        let (a, b) = (values::ints(a), values::ints(b));
+        values::ints_mut(result)[index] = if a.is_empty() || b.is_empty() {
+            NA_INTEGER
+        } else {
+            match a.cmp(b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            }
+        };
+    }
+    Ok(result)
+}
+
+/// `colSums(x, n, p, na.rm)` and friends over an `n` by `p` matrix.
+unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
+    let matrix = values::materialize(call.arg(0))?;
+    let row_count = values::as_integer_scalar(call.arg(1)).max(0) as usize;
+    let col_count = values::as_integer_scalar(call.arg(2)).max(0) as usize;
+    let na_rm = values::as_logical_scalar(call.arg(3)) == 1;
+    if !matches!(matrix.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real) {
+        return Err(call.error("'x' must be numeric"));
+    }
+    let outer = if rows { row_count } else { col_count };
+    let inner = if rows { col_count } else { row_count };
+    let result = alloc(SexpType::Real, outer)?;
+    for position in 0..outer {
+        let mut total = CompensatedSum::default();
+        let mut counted = 0usize;
+        for along in 0..inner {
+            let index = if rows { position + along * row_count } else { along + position * row_count };
+            let value = real_at(matrix, index);
+            if value.is_nan() && na_rm {
+                continue;
+            }
+            total.add(value);
+            counted += 1;
+        }
+        let sum = total.total();
+        values::reals_mut(result)[position] = if mean { sum / counted as f64 } else { sum };
+    }
+    Ok(result)
+}
+
+/// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`.
+unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
+    let breaks = values::reals(call.arg(0)).to_vec();
+    let points = call.arg(1);
+    let rightmost_closed = values::as_logical_scalar(call.arg(2)) == 1;
+    let all_inside = values::as_logical_scalar(call.arg(3)) == 1;
+    let left_open = values::as_logical_scalar(call.arg(4)) == 1;
+    let count = breaks.len();
+    let result = alloc(SexpType::Integer, length(points))?;
+    for index in 0..length(points) {
+        let value = values::reals(points)[index];
+        if value.is_nan() {
+            values::ints_mut(result)[index] = NA_INTEGER;
+            continue;
+        }
+        let mut interval = if left_open {
+            breaks.iter().filter(|&&breakpoint| breakpoint < value).count()
+        } else {
+            breaks.iter().filter(|&&breakpoint| breakpoint <= value).count()
+        } as i32;
+        if rightmost_closed && count > 0 {
+            if !left_open && value == breaks[count - 1] {
+                interval = count as i32 - 1;
+            } else if left_open && value == breaks[0] {
+                interval = 1;
+            }
+        }
+        if all_inside {
+            interval = interval.clamp(1, count as i32 - 1);
+        }
+        values::ints_mut(result)[index] = interval;
+    }
+    Ok(result)
+}
+
+/// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias), eps.correct, bounds)`: GNU R's
+/// rule for round tick values covering `[lo, up]` in about `n` steps.
+unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
+    let mut low = values::as_real_scalar(call.arg(0));
+    let mut high = values::as_real_scalar(call.arg(1));
+    let mut count = values::as_integer_scalar(call.arg(2)).max(0);
+    let min_count = values::as_integer_scalar(call.arg(3)).max(0);
+    let shrink = values::as_real_scalar(call.arg(4));
+    let biases = call.arg(5);
+    let high_bias = crate::subset::numeric_element(biases, 0);
+    let five_bias = if length(biases) > 1 { crate::subset::numeric_element(biases, 1) } else { 0.5 + 1.5 * high_bias };
+    let eps_correction = values::as_integer_scalar(call.arg(6));
+    let bounds = values::as_logical_scalar(call.arg(7)) != 0;
+    let range = high - low;
+    let scale = low.abs().max(high.abs());
+    let small = if range == 0.0 && scale == 0.0 {
+        true
+    } else {
+        let candidate = if (count as f64) < 1.0 { 1.0 } else { count as f64 };
+        range < scale * candidate * f64::EPSILON * 3.0 || range == 0.0
+    };
+    let mut cell;
+    let mut unit_small = false;
+    if small {
+        cell = if scale == 0.0 { 1.0 } else { scale };
+        if scale > 10.0 {
+            cell = 9.0 + cell / 10.0;
+        }
+        cell *= shrink;
+        if min_count > 1 {
+            cell /= min_count as f64;
+        }
+        unit_small = true;
+    } else {
+        cell = range;
+        if count > 1 {
+            cell /= count as f64;
+        }
+    }
+    let _ = unit_small;
+    if cell < 20.0 * f64::MIN_POSITIVE {
+        cell = 20.0 * f64::MIN_POSITIVE;
+    } else if cell * 10.0 > f64::MAX {
+        cell = 0.1 * f64::MAX;
+    }
+    let base = 10f64.powf(cell.log10().floor());
+    let mut unit = base;
+    if 2.0 * base - cell < high_bias * (cell - unit) {
+        unit = 2.0 * base;
+        if 5.0 * base - cell < five_bias * (cell - unit) {
+            unit = 5.0 * base;
+            if 10.0 * base - cell < high_bias * (cell - unit) {
+                unit = 10.0 * base;
+            }
+        }
+    }
+    let mut start = (low / unit + 1e-10).floor();
+    let mut end = (high / unit - 1e-10).ceil();
+    if eps_correction != 0 && (eps_correction > 1 || !small) {
+        if low != 0.0 { low *= 1.0 - f64::EPSILON } else { low = -f64::MIN_POSITIVE }
+        if high != 0.0 { high *= 1.0 + f64::EPSILON } else { high = f64::MIN_POSITIVE }
+    }
+    while start * unit > low + 1e-10 * unit {
+        start -= 1.0;
+    }
+    while end * unit < high - 1e-10 * unit {
+        end += 1.0;
+    }
+    let mut steps = (0.5 + end - start) as i32;
+    if steps < min_count {
+        let missing = min_count - steps;
+        if start >= 0.0 {
+            end += missing as f64 / 2.0;
+            start -= (missing as f64 / 2.0 + missing as f64 % 2.0).floor();
+        } else {
+            start -= missing as f64 / 2.0;
+            end += (missing as f64 / 2.0 + missing as f64 % 2.0).floor();
+        }
+        steps = min_count;
+    }
+    count = steps;
+    if bounds {
+        if start * unit < low {
+            low = start * unit;
+        }
+        if end * unit > high {
+            high = end * unit;
+        }
+    } else {
+        low = start;
+        high = end;
+    }
+    values::named_list(&[
+        ("l", scalar_real(low)?),
+        ("u", scalar_real(high)?),
+        ("n", scalar_integer(count)?),
+        ("unit", scalar_real(unit)?),
+    ])
+}
+
+/// `sequence(nvec, from, by)`.
+unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
+    let lengths = coerce_vector(call.arg(0), SexpType::Integer)?;
+    let from = coerce_vector(call.arg(1), SexpType::Integer)?;
+    let by = coerce_vector(call.arg(2), SexpType::Integer)?;
+    let mut output = Vec::new();
+    for index in 0..length(lengths) {
+        let count = values::ints(lengths)[index];
+        let start = values::ints(from)[index % length(from).max(1)];
+        let step = values::ints(by)[index % length(by).max(1)];
+        for position in 0..count.max(0) {
+            output.push(start + position * step);
+        }
+    }
+    values::integer_vector(&output)
+}
+
+/// `.bincode(x, breaks, right, include.lowest)`.
+unsafe fn do_bincode(call: &Call<'_>) -> R<Sexp> {
+    let points = values::reals(call.arg(0)).to_vec();
+    let breaks = values::reals(call.arg(1)).to_vec();
+    let right = values::as_logical_scalar(call.arg(2)) == 1;
+    let lowest = values::as_logical_scalar(call.arg(3)) == 1;
+    let count = breaks.len();
+    let mut output = Vec::with_capacity(points.len());
+    for value in points {
+        let mut code = NA_INTEGER;
+        if !value.is_nan() && count >= 2 {
+            for bin in 0..count - 1 {
+                let (lower, upper) = (breaks[bin], breaks[bin + 1]);
+                let inside = if right {
+                    (value > lower || (lowest && bin == 0 && value == lower)) && value <= upper
+                } else {
+                    value >= lower && (value < upper || (lowest && bin == count - 2 && value == upper))
+                };
+                if inside {
+                    code = bin as i32 + 1;
+                    break;
+                }
+            }
+        }
+        output.push(code);
+    }
+    values::integer_vector(&output)
+}
 
 // Arithmetic.
 
