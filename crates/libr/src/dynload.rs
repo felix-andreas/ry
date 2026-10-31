@@ -107,8 +107,10 @@ unsafe fn dlerror_text() -> String {
 }
 
 /// `dyn.load`: opens the library, runs its initialization routine, and returns its record. A
-/// library that is already loaded is returned as it is.
-pub unsafe fn load_library(path: &str) -> ApiResult<*mut Dll> {
+/// library that is already loaded is returned as it is. With `local` false, its symbols become
+/// visible to libraries loaded later, as `dyn.load(local = FALSE)` asks (RcppParallel loads
+/// itself that way so packages linking to it resolve its functions).
+pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     let runtime = runtime();
     let canonical = std::fs::canonicalize(path)
         .map(|path| path.to_string_lossy().into_owned())
@@ -117,7 +119,12 @@ pub unsafe fn load_library(path: &str) -> ApiResult<*mut Dll> {
         return Ok(&mut **dll);
     }
     let c_path = CString::new(canonical.clone()).map_err(|_| error("invalid library path"))?;
-    let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+    let visibility = if local {
+        libc::RTLD_LOCAL
+    } else {
+        libc::RTLD_GLOBAL
+    };
+    let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | visibility);
     if handle.is_null() {
         return Err(error(format!(
             "unable to load shared object '{canonical}':\n  {}",

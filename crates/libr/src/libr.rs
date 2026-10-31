@@ -158,6 +158,7 @@ impl Runtime {
             runtime.heap.inhibit_collection();
             globals::install_symbols(&mut runtime.heap);
             eval::install_primitives(&mut runtime.heap);
+            legacy::start_pointer_protection(&mut runtime.heap);
             runtime.heap.allow_collection();
         }
         runtime

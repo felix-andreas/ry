@@ -449,6 +449,7 @@ LibExtern SEXP R_LogicalNAValue;
 LibExtern SEXP R_Srcref;
 LibExtern Rboolean R_InBCInterpreter;
 LibExtern SEXP R_CurrentExpression;
+LibExtern SEXP R_MethodsNamespace;
 
 /* Symbols R provides ready-made. */
 LibExtern SEXP R_AsCharacterSymbol;

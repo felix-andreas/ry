@@ -584,7 +584,14 @@ unsafe fn dyn_load(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiRes
         return Err(error_in(call, "character argument expected"));
     }
     let path = utf8_text(path.element(0))?.into_owned();
-    let dll = crate::dynload::load_library(&path)?;
+    let local_symbol = runtime().heap.install(b"local")?;
+    let mut local = true;
+    for (position, &(tag, value)) in arguments.iter().enumerate().skip(1) {
+        if tag == local_symbol || (position == 1 && tag == runtime().nil()) {
+            local = crate::vectors::as_logical(value)? != 0;
+        }
+    }
+    let dll = crate::dynload::load_library(&path, local)?;
     crate::dynload::dll_info_object(dll)
 }
 

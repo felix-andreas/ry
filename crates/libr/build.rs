@@ -68,5 +68,11 @@ fn main() {
         // dynamic linker satisfies that from ry's already loaded libR instead of searching for
         // GNU R's.
         println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libR.so");
+        // GNU R's libR depends on zlib, bzip2 and xz, and package binaries that call zlib
+        // without linking it themselves (gert, httpuv) find it through that dependency. ry's
+        // libR records the same dependencies, which the linker would otherwise drop as unused.
+        for library in ["z", "bz2", "lzma"] {
+            println!("cargo:rustc-cdylib-link-arg=-Wl,--no-as-needed,-l{library},--as-needed");
+        }
     }
 }

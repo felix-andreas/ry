@@ -485,7 +485,7 @@ impl Sexp {
         unsafe { self.header().refcount.get() }
     }
 
-    pub(crate) unsafe fn increment_refcount(self) {
+    pub unsafe fn increment_refcount(self) {
         unsafe {
             let count = &self.header().refcount;
             if count.get() != REFCOUNT_MAX {
@@ -494,7 +494,7 @@ impl Sexp {
         }
     }
 
-    pub(crate) unsafe fn decrement_refcount(self) {
+    pub unsafe fn decrement_refcount(self) {
         unsafe {
             let count = &self.header().refcount;
             if count.get() != REFCOUNT_MAX && count.get() > 0 {

@@ -770,9 +770,12 @@ unsupported!(
     GEunregisterSystem,
     GEXspline,
     GAxisPars,
+    Rf_GAxisPars,
     CreateAtVector,
+    Rf_CreateAtVector,
     Rf_eval_with_gd,
     desc2GEDesc,
+    Rf_desc2GEDesc,
     fromDeviceHeight,
     fromDeviceWidth,
     fromDeviceX,
@@ -851,18 +854,31 @@ unsupported!(
     GE_LTYpar,
     GEstring_to_pch,
     killDevice,
+    Rf_killDevice,
     nextDevice,
+    Rf_nextDevice,
     prevDevice,
+    Rf_prevDevice,
     selectDevice,
+    Rf_selectDevice,
     ndevNumber,
+    Rf_ndevNumber,
     NewFrameConfirm,
+    Rf_NewFrameConfirm,
     doIdle,
+    Rf_doIdle,
     doKeybd,
+    Rf_doKeybd,
     doMouseEvent,
+    Rf_doMouseEvent,
     doesIdle,
+    Rf_doesIdle,
     AdobeSymbol2utf8,
+    Rf_AdobeSymbol2utf8,
     utf8toAdobeSymbol,
+    Rf_utf8toAdobeSymbol,
     utf8ToLatin1AdobeSymbol2utf8,
+    Rf_utf8ToLatin1AdobeSymbol2utf8,
     Rf_KillAllDevices,
 );
 
@@ -900,6 +916,21 @@ pub extern "C" fn NoDevices() -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn Rf_NoDevices() -> c_int {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_NumDevices() -> c_int {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_curDevice() -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn NumDevices() -> c_int {
     1
 }
@@ -930,7 +961,7 @@ pub unsafe extern "C" fn Rf_ucstoutf8(buffer: *mut c_char, code: c_uint) -> *mut
 /// Removes the private-use code points some fonts map symbols to. Without a symbol font there
 /// is nothing to remap, so the text is copied.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn utf8Toutf8NoPUA(input: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn Rf_utf8Toutf8NoPUA(input: *const c_char) -> *const c_char {
     input
 }
 
