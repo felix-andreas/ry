@@ -24,6 +24,7 @@ polars = { version = "0.55", default-features = false, features = [
     "dtype-categorical",
     "cov",
     "round_series",
+    "propagate_nans",
     "dtype-date",
     "fmt",
     "dtype-i8",

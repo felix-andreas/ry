@@ -6,10 +6,9 @@
 //! conversion. Queries lower from the small IR in [`query`] to a Polars lazy plan, so the planner
 //! sees a whole `tbl[i, j, by]` at once and every aggregation runs as a Polars kernel.
 //!
-//! R code and native code read a column as an R vector. Producing one is a conversion whenever
-//! the Arrow layout and R's layout differ (nulls, booleans, strings), so it happens lazily, per
-//! column, and the result is kept as a [`Mirror`] beside the Arrow data until the column changes.
-//! [`Residency`] names where a column's authoritative data currently lives.
+//! R code and native code read a column as an R vector. The table itself holds only Arrow data:
+//! an R-layout copy, when a reader needs one, belongs to the ALTREP vector that exposes the
+//! column (see `altrep`), so there is one place that records whether a column is resident in R.
 
 pub mod convert;
 pub mod ffi;
@@ -19,8 +18,10 @@ pub mod query;
 pub mod altrep;
 
 use convert::RVector;
-use polars::prelude::{Column, DataFrame, DataType, IntoColumn, NamedFrom, PlSmallStr, Series};
-use std::{fmt, sync::Arc};
+use polars::prelude::{
+    ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr, Series,
+};
+use std::fmt;
 
 pub use polars;
 
@@ -197,48 +198,25 @@ impl fmt::Display for Schema {
     }
 }
 
-/// Where a column's authoritative data lives.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Residency {
-    /// Only in the Arrow buffers Polars owns.
-    Arrow,
-    /// In Arrow, with an R-layout copy kept for readers on the R side. The two agree.
-    Shared,
-    /// In the R-layout copy, because a writable pointer to it was handed out. The Arrow column is
-    /// stale until the next [`Table::sync`].
-    R,
-}
-
-/// The R-layout copy of one column. It is shared between a table and the tables forked from it
-/// until either changes the column, which is why the vector sits behind an `Arc`.
-#[derive(Clone, Debug)]
-pub struct Mirror {
-    name: PlSmallStr,
-    vector: Arc<RVector>,
-    writable: bool,
-}
-
-/// A table: a Polars frame of R-typed columns, its sort key, and the R-layout copies of the
-/// columns R has read.
+/// A table: a Polars frame of R-typed columns and its sort key.
 ///
 /// Updates follow R's copy-on-modify rule, driven by the reference count of the R object that
 /// holds the table: an unshared table is updated in place through `&mut self`, and a shared one
 /// is first [`fork`](Table::fork)ed, which copies only the column list, because the Arrow
 /// buffers themselves are immutable and shared.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Table {
     frame: DataFrame,
     /// The columns the table is sorted by, as `setkey` leaves it. Keyed joins use it.
     key: Vec<PlSmallStr>,
-    /// Sparse: only columns that have been read from the R side have one.
-    mirrors: Vec<Mirror>,
 }
 
 impl Table {
     /// Builds a table from a frame, converting every column to its R dtype: narrower integers
     /// widen to `Int32`, wider ones and unsigned 32-bit ones become `Float64` (as R reads an
     /// `integer64` without the bit64 package), floats widen to `Float64`, and a categorical
-    /// becomes an `Enum` so its level order is fixed.
+    /// becomes an `Enum` so its level order is fixed. A valid `i32::MIN` becomes a null, because
+    /// R reads that bit pattern as `NA_integer_`.
     pub fn new(frame: DataFrame) -> Result<Table> {
         let mut columns = Vec::with_capacity(frame.width());
         for column in frame.into_columns() {
@@ -247,7 +225,6 @@ impl Table {
         Ok(Table {
             frame: DataFrame::new_infer_height(columns)?,
             key: Vec::new(),
-            mirrors: Vec::new(),
         })
     }
 
@@ -269,7 +246,6 @@ impl Table {
         Ok(Table {
             frame: DataFrame::new(height, converted)?,
             key: Vec::new(),
-            mirrors: Vec::new(),
         })
     }
 
@@ -287,10 +263,9 @@ impl Table {
                 .frame
                 .columns()
                 .iter()
-                .map(|column| {
-                    let kind = ColumnType::of(column.dtype())
-                        .unwrap_or_else(|| unreachable!("Table::new normalizes every column"));
-                    (column.name().clone(), kind)
+                .filter_map(|column| {
+                    // `Table::new` and `set_column` normalize every column, so none is skipped.
+                    ColumnType::of(column.dtype()).map(|kind| (column.name().clone(), kind))
                 })
                 .collect(),
         }
@@ -300,81 +275,27 @@ impl Table {
         &self.key
     }
 
-    /// The frame, with every column the R side may have written folded back in first.
-    pub fn frame(&mut self) -> Result<&DataFrame> {
-        self.sync()?;
-        Ok(&self.frame)
-    }
-
-    /// The frame as it stands in Arrow, which is current only when no column is resident in R.
-    pub fn frame_unsynced(&self) -> &DataFrame {
+    pub fn frame(&self) -> &DataFrame {
         &self.frame
     }
 
-    pub fn into_frame(mut self) -> Result<DataFrame> {
-        self.sync()?;
-        Ok(self.frame)
-    }
-
-    pub fn residency(&self, name: &str) -> Result<Residency> {
+    pub fn into_frame(self) -> DataFrame {
         self.frame
-            .column(name)
-            .map_err(|_| Error::NoColumn(name.to_string()))?;
-        Ok(
-            match self.mirrors.iter().find(|mirror| mirror.name == name) {
-                None => Residency::Arrow,
-                Some(mirror) if mirror.writable => Residency::R,
-                Some(_) => Residency::Shared,
-            },
-        )
     }
 
-    /// The column as an R vector, for readers. The conversion runs at most once per version of
-    /// the column, and integer and double columns without nulls could skip it entirely through
-    /// [`Table::column_slice_i32`] and [`Table::column_slice_f64`].
-    pub fn read_r(&mut self, name: &str) -> Result<Arc<RVector>> {
-        if let Some(mirror) = self.mirrors.iter().find(|mirror| mirror.name == name) {
-            return Ok(mirror.vector.clone());
-        }
+    /// The column as an R vector, converted from Arrow.
+    pub fn column_r(&self, name: &str) -> Result<RVector> {
         let column = self
             .frame
             .column(name)
             .map_err(|_| Error::NoColumn(name.to_string()))?;
-        let vector = Arc::new(convert::to_r(column.as_materialized_series())?);
-        self.mirrors.push(Mirror {
-            name: name.into(),
-            vector: vector.clone(),
-            writable: false,
-        });
-        Ok(vector)
-    }
-
-    /// The column as an R vector that the caller may write, as `INTEGER(x)` or `REAL(x)` allow
-    /// native code to. From now on the R copy is authoritative, and the Arrow column is rebuilt
-    /// from it on the next [`Table::sync`].
-    pub fn write_r(&mut self, name: &str) -> Result<&mut RVector> {
-        self.read_r(name)?;
-        let mirror = self
-            .mirrors
-            .iter_mut()
-            .find(|mirror| mirror.name == name)
-            .unwrap_or_else(|| unreachable!("read_r just created the mirror"));
-        mirror.writable = true;
-        Ok(Arc::make_mut(&mut mirror.vector))
+        convert::to_r(column.as_materialized_series())
     }
 
     /// The values of an `Int32` column without nulls stored in one chunk, which R can read in
     /// place because the layouts agree. This is what makes `INTEGER_RO` on a table column free.
     pub fn column_slice_i32(&self, name: &str) -> Option<&[i32]> {
-        let column = self.frame.column(name).ok()?;
-        if self
-            .mirrors
-            .iter()
-            .any(|mirror| mirror.name == name && mirror.writable)
-        {
-            return None;
-        }
-        let chunked = column.as_materialized_series().i32().ok()?;
+        let chunked = self.frame.column(name).ok()?.as_materialized_series().i32().ok()?;
         if chunked.null_count() > 0 {
             return None;
         }
@@ -384,49 +305,21 @@ impl Table {
     /// As [`Table::column_slice_i32`], for `Float64`. A `NaN` is fine, because R's `NaN` is the
     /// same value; only a null needs R's `NA_real_` bit pattern.
     pub fn column_slice_f64(&self, name: &str) -> Option<&[f64]> {
-        let column = self.frame.column(name).ok()?;
-        if self
-            .mirrors
-            .iter()
-            .any(|mirror| mirror.name == name && mirror.writable)
-        {
-            return None;
-        }
-        let chunked = column.as_materialized_series().f64().ok()?;
+        let chunked = self.frame.column(name).ok()?.as_materialized_series().f64().ok()?;
         if chunked.null_count() > 0 {
             return None;
         }
         chunked.cont_slice().ok()
     }
 
-    /// Folds every column the R side may have written back into Arrow. The R copy stays, and
-    /// stays authoritative, because native code may still hold the pointer it was given.
-    pub fn sync(&mut self) -> Result<()> {
-        for mirror in self.mirrors.iter().filter(|mirror| mirror.writable) {
-            let series = convert::to_series(mirror.name.clone(), (*mirror.vector).clone())?;
-            self.frame.replace(&mirror.name, series.into_column())?;
-        }
-        Ok(())
-    }
-
     /// An independent table with the same contents, for a copy-on-modify update of a shared
     /// table. Only the column list is copied; the buffers stay shared.
-    pub fn fork(&mut self) -> Result<Table> {
-        self.sync()?;
-        Ok(Table {
-            frame: self.frame.clone(),
-            key: self.key.clone(),
-            mirrors: self
-                .mirrors
-                .iter()
-                .filter(|mirror| !mirror.writable)
-                .cloned()
-                .collect(),
-        })
+    pub fn fork(&self) -> Table {
+        self.clone()
     }
 
-    /// Adds or replaces a column. Its R copy, if any, is dropped, and a key that includes it is
-    /// dropped too, because the table is no longer known to be sorted by it.
+    /// Adds or replaces a column. A key that includes it is dropped, because the table is no
+    /// longer known to be sorted by it.
     pub fn set_column(&mut self, column: Column) -> Result<()> {
         let column = normalize(column)?;
         if column.len() != self.frame.height() && self.frame.width() > 0 {
@@ -436,7 +329,7 @@ impl Table {
                 found: column.len(),
             });
         }
-        self.forget(column.name().clone().as_str());
+        self.forget_key(column.name().clone().as_str());
         self.frame.with_column(column)?;
         Ok(())
     }
@@ -445,13 +338,12 @@ impl Table {
         self.frame
             .drop_in_place(name)
             .map_err(|_| Error::NoColumn(name.to_string()))?;
-        self.forget(name);
+        self.forget_key(name);
         Ok(())
     }
 
     /// Sorts the table by `columns` and records them as its key, as `setkey` does.
     pub fn set_key(&mut self, columns: &[&str]) -> Result<()> {
-        self.sync()?;
         let frame = std::mem::take(&mut self.frame);
         self.frame = frame.sort(
             columns
@@ -461,13 +353,11 @@ impl Table {
                 .collect::<Vec<_>>(),
             Default::default(),
         )?;
-        self.mirrors.clear();
         self.key = columns.iter().copied().map(PlSmallStr::from).collect();
         Ok(())
     }
 
-    fn forget(&mut self, name: &str) {
-        self.mirrors.retain(|mirror| mirror.name != name);
+    fn forget_key(&mut self, name: &str) {
         if self.key.iter().any(|column| column == name) {
             self.key.clear();
         }
@@ -482,8 +372,20 @@ impl Table {
 /// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for.
 fn normalize(column: Column) -> Result<Column> {
     let target = match column.dtype() {
+        DataType::Int32 => {
+            // R's `NA_integer_` is `i32::MIN`, so a valid `i32::MIN` must become a null, or R would
+            // read it as `NA` while the column claims to have none.
+            let values = column.as_materialized_series().i32()?;
+            if values.min() != Some(i32::MIN) {
+                return Ok(column);
+            }
+            let cleaned: Int32Chunked = values
+                .iter()
+                .map(|value| value.filter(|value| *value != i32::MIN))
+                .collect();
+            return Ok(cleaned.with_name(column.name().clone()).into_column());
+        }
         DataType::Boolean
-        | DataType::Int32
         | DataType::Float64
         | DataType::String
         | DataType::Enum(..) => {

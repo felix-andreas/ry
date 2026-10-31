@@ -24,8 +24,8 @@ pub struct Exported {
 
 /// Exports one column. Several chunks are first concatenated, because the C interface describes
 /// one contiguous array; a column produced by a query is usually a single chunk already.
-pub fn export_column(table: &mut Table, name: &str) -> Result<Exported> {
-    let frame = table.frame()?;
+pub fn export_column(table: &Table, name: &str) -> Result<Exported> {
+    let frame = table.frame();
     let column = frame
         .column(name)
         .map_err(|_| Error::NoColumn(name.to_string()))?;
@@ -38,8 +38,8 @@ pub fn export_column(table: &mut Table, name: &str) -> Result<Exported> {
 }
 
 /// Exports the whole frame as a struct array with one child per column.
-pub fn export_table(table: &mut Table) -> Result<Exported> {
-    let frame = table.frame()?;
+pub fn export_table(table: &Table) -> Result<Exported> {
+    let frame = table.frame();
     let height = frame.height();
     let mut fields = Vec::with_capacity(frame.width());
     let mut arrays = Vec::with_capacity(frame.width());

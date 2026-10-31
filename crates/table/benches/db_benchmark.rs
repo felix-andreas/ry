@@ -223,11 +223,11 @@ fn groupby(dir: &Path) -> Result<()> {
 
 fn joins(dir: &Path) -> Result<()> {
     let mut x = read(dir, "join_x.csv")?;
-    let small = read(dir, "join_small.csv")?.into_frame()?;
+    let small = read(dir, "join_small.csv")?.into_frame();
     let mut medium = read(dir, "join_medium.csv")?;
-    let big = read(dir, "join_big.csv")?.into_frame()?;
-    let medium_frame = medium.frame()?.clone();
-    let x_frame = x.frame()?.clone();
+    let big = read(dir, "join_big.csv")?.into_frame();
+    let medium_frame = medium.frame().clone();
+    let x_frame = x.frame().clone();
     let inner = |other: &DataFrame, on: &str| Query {
         rows: equi_join(other, on, true),
         ..Query::default()
@@ -253,7 +253,7 @@ fn joins(dir: &Path) -> Result<()> {
 
 fn rolling_join(dir: &Path) -> Result<()> {
     let mut prices = read(dir, "rolljoin_prices.csv")?;
-    let trades = read(dir, "rolljoin_trades.csv")?.into_frame()?;
+    let trades = read(dir, "rolljoin_trades.csv")?.into_frame();
     prices.set_key(&["ticker", "time"])?;
     time_question("rolljoin keyed", || {
         let rows = Rows::Join(Join {
@@ -329,9 +329,9 @@ struct Answer {
 
 fn answer(output: Output) -> Result<Answer> {
     match output {
-        Output::Table(mut table) => {
+        Output::Table(table) => {
             let schema = table.schema();
-            let frame = table.frame()?;
+            let frame = table.frame();
             let mut checksum = 0.0;
             for (name, kind) in &schema.columns {
                 if matches!(kind, ColumnType::Integer | ColumnType::Double) {

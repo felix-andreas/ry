@@ -17,8 +17,8 @@
 //!   `int` codes differ from the enum's unsigned zero-based codes, so a copy is unavoidable.
 //!
 //! [`import_column`] is the other direction. An exposed column whose `data2` is still `NULL` comes
-//! back as the very same Arrow array, so `frame(a = f$a)` shares the buffer; any other vector is
-//! converted, which copies only to rewrite NAs into validity.
+//! back as the very same Arrow array, so `frame(a = f$a)` shares the buffer. Any other vector is
+//! copied into a new Arrow buffer, with its NAs rewritten into validity.
 //!
 //! The functions here allocate on the R heap and must run on the thread that owns the runtime.
 //! Their results are rooted in the current handle scope, like any value an API function returns.
@@ -62,9 +62,9 @@ use std::{
 /// # Safety
 ///
 /// The R runtime must be running on this thread.
-pub unsafe fn expose_column(table: &mut Table, name: &str) -> ApiResult<Sexp> {
+pub unsafe fn expose_column(table: &Table, name: &str) -> ApiResult<Sexp> {
     unsafe {
-        let frame = table.frame().map_err(table_error)?;
+        let frame = table.frame();
         let column = frame
             .column(name)
             .map_err(|_| error(format!("the frame has no column `{name}`")))?;
@@ -95,7 +95,7 @@ pub unsafe fn expose_column(table: &mut Table, name: &str) -> ApiResult<Sexp> {
 /// # Safety
 ///
 /// The R runtime must be running on this thread.
-pub unsafe fn expose_table(table: &mut Table) -> ApiResult<Sexp> {
+pub unsafe fn expose_table(table: &Table) -> ApiResult<Sexp> {
     unsafe {
         let schema = table.schema();
         let height = table.height();
@@ -349,7 +349,7 @@ unsafe fn new_altrep(payload: Payload) -> ApiResult<Sexp> {
             .alloc_weak_ref(pointer, nil, nil, finalizer, true)?;
         // `R_new_altrep` roots its result only inside a native call, and this may run outside one.
         let object = R_new_altrep(class, pointer, nil);
-        runtime().heap.root(object);
+        libr::runtime().heap.root(object);
         Ok(object)
     }
 }

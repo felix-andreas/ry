@@ -4,7 +4,7 @@
 
 use syntax::testing::{SplitMix64, fuzz_iterations};
 use table::{
-    ColumnType, Residency, Schema, Table,
+    ColumnType, Schema, Table,
     convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
     ffi,
     polars::prelude::{IntoColumn, PlSmallStr},
@@ -44,10 +44,9 @@ fn strings(values: &[&str]) -> RVector {
 }
 
 fn get(table: &mut Table, name: &str) -> RVector {
-    (*table
-        .read_r(name)
-        .unwrap_or_else(|error| panic!("no column {name}: {error}")))
-    .clone()
+    table
+        .column_r(name)
+        .unwrap_or_else(|error| panic!("no column {name}: {error}"))
 }
 
 /// A column read back from a table, compared bit for bit so that `NA_real_` equals itself and
@@ -150,7 +149,7 @@ fn na_and_nan_stay_distinct_across_the_boundary() {
 fn integer_and_double_data_move_into_arrow_without_a_copy() {
     let values: Vec<f64> = (0..1000).map(f64::from).collect();
     let address = values.as_ptr();
-    let mut table = frame(vec![("x", RVector::Double(values))]);
+    let table = frame(vec![("x", RVector::Double(values))]);
     let slice = table
         .column_slice_f64("x")
         .unwrap_or_else(|| panic!("no zero-copy view"));
@@ -158,12 +157,6 @@ fn integer_and_double_data_move_into_arrow_without_a_copy() {
         slice.as_ptr(),
         address,
         "the R buffer became the Arrow buffer"
-    );
-    assert_eq!(
-        table
-            .residency("x")
-            .unwrap_or_else(|error| panic!("{error}")),
-        Residency::Arrow
     );
 
     // A column with nulls has no zero-copy view, because R needs NA_real_ written into the data.
@@ -173,55 +166,6 @@ fn integer_and_double_data_move_into_arrow_without_a_copy() {
         RVector::Double(values) => values[1],
         _ => panic!("not double"),
     }));
-    drop(table.frame());
-}
-
-#[test]
-fn residency_tracks_reads_and_writes_per_column() {
-    let mut table = frame(vec![("a", ints(&[1, 2, 3])), ("b", ints(&[4, 5, 6]))]);
-    assert_eq!(table.residency("a").ok(), Some(Residency::Arrow));
-    table.read_r("a").unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(table.residency("a").ok(), Some(Residency::Shared));
-    assert_eq!(
-        table.residency("b").ok(),
-        Some(Residency::Arrow),
-        "residency is per column"
-    );
-
-    match table.write_r("b").unwrap_or_else(|error| panic!("{error}")) {
-        RVector::Integer(values) => values[0] = NA_INTEGER,
-        _ => panic!("not integer"),
-    }
-    assert_eq!(table.residency("b").ok(), Some(Residency::R));
-    let total = run(
-        &mut table,
-        Query {
-            select: Select::Value(Expr::Aggregate {
-                function: Aggregate::Sum,
-                arg: Box::new(column("b")),
-                na_rm: true,
-            }),
-            ..Query::default()
-        },
-    );
-    let Output::Vector(total) = total else {
-        panic!("not a vector")
-    };
-    assert_eq!(
-        to_r(&total).ok(),
-        Some(ints(&[11])),
-        "the query saw the write made through the R pointer"
-    );
-
-    // Replacing the column drops its R copy, which is stale now.
-    table
-        .set_column(
-            to_series("a".into(), ints(&[7, 8, 9]))
-                .unwrap_or_else(|error| panic!("{error}"))
-                .into_column(),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(table.residency("a").ok(), Some(Residency::Arrow));
 }
 
 #[test]
@@ -231,7 +175,7 @@ fn copy_on_modify_forks_only_the_column_list() {
         ("y", doubles(&[3.0, 4.0])),
     ]);
     let before = original.column_slice_f64("x").map(<[f64]>::as_ptr);
-    let mut fork = original.fork().unwrap_or_else(|error| panic!("{error}"));
+    let mut fork = original.fork();
     assert_eq!(
         fork.column_slice_f64("x").map(<[f64]>::as_ptr),
         before,
@@ -325,13 +269,13 @@ fn polars_dtypes_without_an_r_type_are_normalized() {
 #[test]
 fn the_arrow_c_interface_round_trips_without_copying() {
     let values: Vec<f64> = vec![1.0, 2.0, 3.0];
-    let mut table = frame(vec![
+    let table = frame(vec![
         ("x", RVector::Double(values)),
         ("name", strings(&["a", "NA", "c"])),
     ]);
     let address = table.column_slice_f64("x").map(<[f64]>::as_ptr);
 
-    let exported = ffi::export_column(&mut table, "x").unwrap_or_else(|error| panic!("{error}"));
+    let exported = ffi::export_column(&table, "x").unwrap_or_else(|error| panic!("{error}"));
     let series = unsafe { ffi::import_column(exported.array, &exported.schema) }
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
@@ -344,7 +288,7 @@ fn the_arrow_c_interface_round_trips_without_copying() {
         "the imported column points at the same buffer"
     );
 
-    let exported = ffi::export_table(&mut table).unwrap_or_else(|error| panic!("{error}"));
+    let exported = ffi::export_table(&table).unwrap_or_else(|error| panic!("{error}"));
     let mut back = unsafe { ffi::import_table(exported.array, &exported.schema) }
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(back.schema(), table.schema());
@@ -432,7 +376,7 @@ fn every_gforce_aggregate_lowers_to_one_grouped_plan() {
         by: vec![named("g", column("g"))],
         ..Query::default()
     };
-    let explained = plan(&mut table, query.clone())
+    let explained = plan(&table, query.clone())
         .and_then(|plan| Ok(plan.explain(true)?))
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
@@ -608,7 +552,7 @@ fn column_references_are_checked_before_the_query_runs() {
         ..Query::default()
     };
     assert_eq!(
-        result_type(&table.schema(), &query).map_err(|error| error.to_string()),
+        result_type(&table.schema(), table.key(), &query).map_err(|error| error.to_string()),
         Err("the frame has no column `pric`".to_string())
     );
     assert!(execute(&mut table, query).is_err());
@@ -618,7 +562,7 @@ fn column_references_are_checked_before_the_query_runs() {
         ..Query::default()
     };
     assert_eq!(
-        result_type(&table.schema(), &query).map_err(|error| error.to_string()),
+        result_type(&table.schema(), table.key(), &query).map_err(|error| error.to_string()),
         Err("invalid query: a row filter must be logical, not double[]".to_string())
     );
 
@@ -628,7 +572,7 @@ fn column_references_are_checked_before_the_query_runs() {
         ..Query::default()
     };
     assert_eq!(
-        result_type(&table.schema(), &query).ok(),
+        result_type(&table.schema(), table.key(), &query).ok(),
         Some(ResultType::Table(Schema::new([
             ("g", ColumnType::Character),
             ("m", ColumnType::Double)
@@ -653,7 +597,7 @@ fn join_i() -> Table {
 
 fn join(i: &mut Table, on: &[(&str, &str)], drop_unmatched: bool, roll: Roll) -> Rows {
     Rows::Join(Join {
-        other: i.frame().unwrap_or_else(|error| panic!("{error}")).clone(),
+        other: i.frame().clone(),
         on: on
             .iter()
             .map(|(x, i)| (PlSmallStr::from(*x), PlSmallStr::from(*i)))
@@ -1080,4 +1024,170 @@ fn factors_with_different_levels_join_by_label() {
         "the join column keeps i's levels"
     );
     assert_eq!(read(&mut result, "v"), ints(&[NA_INTEGER, 2, 2]));
+}
+
+fn query(rows: Rows, select: Select) -> Query {
+    Query {
+        rows,
+        select,
+        ..Query::default()
+    }
+}
+
+#[test]
+fn a_filtered_assignment_aggregates_over_the_selected_rows_only() {
+    let mut x = frame(vec![("g", strings(&["a", "b", "a"])), ("v", ints(&[1, 2, 3]))]);
+    let selected = Rows::Filter(binary(
+        BinaryOp::Equal,
+        column("g"),
+        Expr::Character("a".to_string()),
+    ));
+    run(
+        &mut x,
+        query(
+            selected.clone(),
+            Select::Assign(vec![
+                set("s", aggregate(Aggregate::Sum, column("v"))),
+                set("n", Expr::Count),
+            ]),
+        ),
+    );
+    assert_eq!(read(&mut x, "s"), ints(&[4, NA_INTEGER, 4]));
+    assert_eq!(read(&mut x, "n"), ints(&[2, NA_INTEGER, 2]));
+}
+
+#[test]
+fn a_keyed_join_without_on_matches_the_leading_columns_of_i() {
+    let mut x = frame(vec![("id", ints(&[1, 2, 3])), ("v", doubles(&[10.0, 20.0, 30.0]))]);
+    x.set_key(&["id"]).unwrap_or_else(|error| panic!("{error}"));
+    let mut i = frame(vec![("code", ints(&[3, 1])), ("id", ints(&[1, 2]))]);
+    let rows = join(&mut i, &[], false, Roll::None);
+    let mut result = run_table(&mut x, query(rows, Select::All));
+    assert_eq!(names(&result), ["id", "v", "i.id"]);
+    assert_eq!(read(&mut result, "id"), ints(&[3, 1]));
+    assert_eq!(read(&mut result, "v"), doubles(&[30.0, 10.0]));
+    assert_eq!(read(&mut result, "i.id"), ints(&[1, 2]));
+}
+
+#[test]
+fn na_keys_join_each_other() {
+    let mut x = frame(vec![("k", ints(&[1, NA_INTEGER, 3])), ("v", doubles(&[1.0, 2.0, 3.0]))]);
+    let mut i = frame(vec![("k", ints(&[NA_INTEGER, 3]))]);
+    let rows = join(&mut i, &[("k", "k")], false, Roll::None);
+    let mut result = run_table(&mut x, query(rows, Select::All));
+    assert_eq!(read(&mut result, "k"), ints(&[NA_INTEGER, 3]));
+    assert_eq!(read(&mut result, "v"), doubles(&[2.0, 3.0]));
+}
+
+#[test]
+fn a_rolling_inner_join_keeps_matches_whose_values_are_na() {
+    let mut x = frame(vec![("t", ints(&[1, 5])), ("v", doubles(&[NA_REAL, 2.0]))]);
+    let mut i = frame(vec![("t", ints(&[0, 2, 6]))]);
+    let rows = join(&mut i, &[("t", "t")], true, Roll::Backward(None));
+    let mut result = run_table(&mut x, query(rows, Select::All));
+    assert_eq!(read(&mut result, "t"), ints(&[2, 6]));
+    assert_eq!(read(&mut result, "v"), doubles(&[NA_REAL, 2.0]));
+}
+
+#[test]
+fn a_join_column_takes_the_type_of_i() {
+    let mut x = frame(vec![("id", ints(&[1, 2])), ("v", doubles(&[10.0, 20.0]))]);
+    let mut i = frame(vec![("id", doubles(&[1.5, 2.0])), ("v", doubles(&[1.0, 2.0]))]);
+    let rows = join(&mut i, &[("id", "id")], false, Roll::None);
+    let select = Select::Columns(vec![
+        named("id", column("id")),
+        named("iv", column("i.v")),
+    ]);
+    let joined = query(rows, select);
+    assert_eq!(
+        result_type(&x.schema(), x.key(), &joined).ok(),
+        Some(ResultType::Table(Schema {
+            columns: vec![
+                ("id".into(), ColumnType::Double),
+                ("iv".into(), ColumnType::Double),
+            ]
+        }))
+    );
+    let mut result = run_table(&mut x, joined);
+    assert_eq!(read(&mut result, "id"), doubles(&[1.5, 2.0]));
+    assert_eq!(read(&mut result, "iv"), doubles(&[1.0, 2.0]));
+}
+
+#[test]
+fn reordering_positions_drop_the_key() {
+    let mut x = frame(vec![("id", ints(&[1, 2, 3]))]);
+    x.set_key(&["id"]).unwrap_or_else(|error| panic!("{error}"));
+    let kept = run_table(&mut x, query(Rows::Positions(vec![0, 2]), Select::All));
+    assert_eq!(kept.key(), ["id"]);
+    let reordered = run_table(&mut x, query(Rows::Positions(vec![2, 0]), Select::All));
+    assert!(reordered.key().is_empty());
+}
+
+#[test]
+fn logical_operators_treat_numbers_as_r_does() {
+    let mut x = frame(vec![("a", ints(&[0, 2])), ("b", ints(&[2, 0]))]);
+    let select = Select::Columns(vec![
+        named("n", Expr::Unary(UnaryOp::Not, Box::new(column("a")))),
+        named("both", binary(BinaryOp::And, column("a"), column("b"))),
+        named("either", binary(BinaryOp::Or, column("a"), column("b"))),
+    ]);
+    let mut result = run_table(&mut x, query(Rows::All, select));
+    assert_eq!(read(&mut result, "n"), RVector::Logical(vec![1, 0]));
+    assert_eq!(read(&mut result, "both"), RVector::Logical(vec![0, 0]));
+    assert_eq!(read(&mut result, "either"), RVector::Logical(vec![1, 1]));
+}
+
+#[test]
+fn nan_compares_sorts_and_aggregates_as_in_r() {
+    let mut x = frame(vec![("d", doubles(&[1.0, f64::NAN, -1.0, NA_REAL]))]);
+    let positive = Rows::Filter(binary(BinaryOp::Greater, column("d"), Expr::Double(0.0)));
+    let mut kept = run_table(&mut x, query(positive, Select::All));
+    assert_eq!(read(&mut kept, "d"), doubles(&[1.0]));
+
+    let descending = Rows::Order(vec![SortKey {
+        expr: column("d"),
+        descending: true,
+    }]);
+    let mut sorted = run_table(&mut x, query(descending, Select::All));
+    assert_eq!(read(&mut sorted, "d"), doubles(&[1.0, -1.0, f64::NAN, NA_REAL]));
+
+    let mut without_na = frame(vec![("d", doubles(&[1.0, f64::NAN, -1.0]))]);
+    let select = Select::Columns(vec![
+        named("mx", aggregate(Aggregate::Max, column("d"))),
+        named("mn", aggregate(Aggregate::Min, column("d"))),
+    ]);
+    let mut extremes = run_table(&mut without_na, query(Rows::All, select));
+    assert!(matches!(get(&mut extremes, "mx"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0])));
+    assert!(matches!(get(&mut extremes, "mn"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0])));
+}
+
+#[test]
+fn a_logical_compares_with_a_string_by_its_r_spelling() {
+    let mut x = frame(vec![
+        ("l", RVector::Logical(vec![1, 0])),
+        ("s", strings(&["TRUE", "TRUE"])),
+    ]);
+    let select = Select::Columns(vec![named("eq", binary(BinaryOp::Equal, column("l"), column("s")))]);
+    let mut result = run_table(&mut x, query(Rows::All, select));
+    assert_eq!(read(&mut result, "eq"), RVector::Logical(vec![1, 0]));
+}
+
+#[test]
+fn an_integer_sum_that_overflows_becomes_double() {
+    let mut x = frame(vec![
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
+    ]);
+    let by_group = Query {
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    let mut result = run_table(&mut x, by_group);
+    assert_eq!(read(&mut result, "s"), doubles(&[4e9, 1.0]));
+
+    let small = Rows::Filter(binary(BinaryOp::Equal, column("g"), Expr::Integer(2)));
+    let select = Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]);
+    let mut result = run_table(&mut x, query(small, select));
+    assert_eq!(read(&mut result, "s"), ints(&[1]), "a sum that fits stays integer");
 }

@@ -243,11 +243,11 @@ fn a_plain_r_vector_imports_with_na_as_validity() {
 #[test]
 fn a_whole_frame_is_a_classed_list_of_columns() {
     let _session = session();
-    let mut table = frame(vec![
+    let table = frame(vec![
         ("a", RVector::Integer(vec![1, 2])),
         ("b", RVector::Character(vec![Some("x".into()), None])),
     ]);
-    let list = unsafe { expose_table(&mut table) }.unwrap_or_else(|error| panic!("{error:?}"));
+    let list = unsafe { expose_table(&table) }.unwrap_or_else(|error| panic!("{error:?}"));
     unsafe {
         assert_eq!(list.kind(), SexpType::List);
         assert_eq!(list.length(), 2);
