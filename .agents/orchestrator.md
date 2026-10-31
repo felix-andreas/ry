@@ -58,11 +58,21 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 ## In flight
 
-- Runtime step 1 session session_0111kWqDPNiugVJPvUec1xKs: corpus, differential oracle, benchmark generator.
-- Runtime step 2 session session_0111kWqDWCzM9zgtXPN1prpJ: object model, GC, libR skeleton.
-- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa: item index, lazy bindings and item-level reload, on the GNU R backend first.
+- Runtime step 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): tier-0 bytecode interpreter and base R loaded from the user's GNU R installation.
+- Runtime step 4a (session_0111kWqESzY2bDUMNQAL2or6, Opus): full C API surface, ALTREP, BLAS/LAPACK, connections, package install (owns `crates/libr`).
+- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa (branch `feat/lazy-loader`): item index, lazy bindings and item-level reload, on the GNU R backend first.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
 
-- Step 3 (interpreter and base R) starts when step 2 merges; steps 5-8 follow `r-runtime.md`'s build order.
+1. Finish step 4: all 232 corpus packages pass their own tests.
+2. Inline syntax in the runtime.
+3. The Cranelift JIT.
+4. The polars-backed table type.
+
+Follow-ups:
+
+- Run `ry check` over the generated benchmark code bases and file the findings.
+- Install R 4.6 via rig for data.table's version check.
+- Recheck the Dependabot alerts.
+- Run a docs pass after the feature PRs land.
