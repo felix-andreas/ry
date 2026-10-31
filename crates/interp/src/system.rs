@@ -1124,22 +1124,37 @@ unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
+    use std::io::Write;
     let command = values::require_string(call.arg(0), "command")?;
     let intern = values::as_logical_scalar(call.arg(1)) == 1;
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .output()
-        .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
+    let mut process = std::process::Command::new("sh");
+    process.arg("-c").arg(&command);
     if intern {
+        process.stderr(std::process::Stdio::inherit());
+        let output = process
+            .output()
+            .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
         let text = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = text.lines().collect();
-        return string_vector(&lines);
+        let result = string_vector(&lines)?;
+        let status = output.status.code().unwrap_or(127);
+        if status != 0 {
+            values::set_attr(result, values::install("status")?, scalar_integer(status)?)?;
+            crate::conditions::warning_call(
+                call.call,
+                &format!("running command '{command}' had status {status}"),
+            )?;
+        }
+        return Ok(result);
     }
-    crate::write_console(&output.stdout, false);
-    crate::write_console(&output.stderr, true);
+    // The child writes straight to the terminal, as GNU R's does, so earlier output must be out
+    // first to keep the order.
+    std::io::stdout().flush().map_err(|failure| call.error(format!("cannot flush stdout: {failure}")))?;
+    let status = process
+        .status()
+        .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
     interp().visible = false;
-    scalar_integer(output.status.code().unwrap_or(127))
+    scalar_integer(status.code().unwrap_or(127))
 }
 
 unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {

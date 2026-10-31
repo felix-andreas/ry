@@ -195,6 +195,11 @@ unsafe fn concise_traceback(call: Sexp) -> Option<String> {
         };
         names.push(name);
     }
+    // The functions that signal leave themselves, and whatever they called, out.
+    let signallers = ["stop", "warning", "suppressWarnings", ".signalSimpleWarning"];
+    if let Some(position) = names.iter().rposition(|name| signallers.contains(&name.as_str())) {
+        names.truncate(position);
+    }
     if names.is_empty() {
         return None;
     }

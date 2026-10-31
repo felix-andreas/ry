@@ -36,6 +36,7 @@ pub mod envir;
 pub mod eval;
 pub mod format;
 pub mod linalg;
+pub mod graphics;
 pub mod lower;
 pub mod methods;
 pub mod native;
@@ -47,7 +48,9 @@ pub mod sort;
 pub mod strings;
 pub mod subset;
 pub mod system;
+pub mod tools;
 pub mod unwind;
+pub mod utils;
 pub mod values;
 
 use crate::{

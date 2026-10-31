@@ -296,16 +296,49 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
 /// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias), eps.correct, bounds)`: GNU R's
 /// rule for round tick values covering `[lo, up]` in about `n` steps.
 unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
-    let mut low = values::as_real_scalar(call.arg(0));
-    let mut high = values::as_real_scalar(call.arg(1));
-    let mut count = values::as_integer_scalar(call.arg(2)).max(0);
-    let min_count = values::as_integer_scalar(call.arg(3)).max(0);
-    let shrink = values::as_real_scalar(call.arg(4));
     let biases = call.arg(5);
     let high_bias = crate::subset::numeric_element(biases, 0);
     let five_bias = if length(biases) > 1 { crate::subset::numeric_element(biases, 1) } else { 0.5 + 1.5 * high_bias };
-    let eps_correction = values::as_integer_scalar(call.arg(6));
-    let bounds = values::as_logical_scalar(call.arg(7)) != 0;
+    let result = pretty(
+        values::as_real_scalar(call.arg(0)),
+        values::as_real_scalar(call.arg(1)),
+        values::as_integer_scalar(call.arg(2)).max(0),
+        values::as_integer_scalar(call.arg(3)).max(0),
+        values::as_real_scalar(call.arg(4)),
+        [high_bias, five_bias],
+        values::as_integer_scalar(call.arg(6)),
+        values::as_logical_scalar(call.arg(7)) != 0,
+    );
+    values::named_list(&[
+        ("l", scalar_real(result.low)?),
+        ("u", scalar_real(result.high)?),
+        ("n", scalar_integer(result.count)?),
+        ("unit", scalar_real(result.unit)?),
+    ])
+}
+
+/// The outcome of [`pretty`]: with `bounds`, `low` and `high` are the covering bounds, otherwise
+/// they are the bounds in units of `unit`.
+pub struct Pretty {
+    pub low: f64,
+    pub high: f64,
+    pub count: i32,
+    pub unit: f64,
+}
+
+/// The rounding behind `pretty()` and axis ticks: about `count` intervals of 1, 2 or 5 times a
+/// power of ten that cover `[low, high]`.
+#[allow(clippy::too_many_arguments)]
+pub fn pretty(
+    mut low: f64,
+    mut high: f64,
+    count: i32,
+    min_count: i32,
+    shrink: f64,
+    [high_bias, five_bias]: [f64; 2],
+    eps_correction: i32,
+    bounds: bool,
+) -> Pretty {
     let range = high - low;
     let scale = low.abs().max(high.abs());
     let small = if range == 0.0 && scale == 0.0 {
@@ -315,7 +348,6 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
         range < scale * candidate * f64::EPSILON * 3.0 || range == 0.0
     };
     let mut cell;
-    let mut unit_small = false;
     if small {
         cell = if scale == 0.0 { 1.0 } else { scale };
         if scale > 10.0 {
@@ -325,14 +357,12 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
         if min_count > 1 {
             cell /= min_count as f64;
         }
-        unit_small = true;
     } else {
         cell = range;
         if count > 1 {
             cell /= count as f64;
         }
     }
-    let _ = unit_small;
     if cell < 20.0 * f64::MIN_POSITIVE {
         cell = 20.0 * f64::MIN_POSITIVE;
     } else if cell * 10.0 > f64::MAX {
@@ -373,7 +403,6 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
         }
         steps = min_count;
     }
-    count = steps;
     if bounds {
         if start * unit < low {
             low = start * unit;
@@ -385,12 +414,7 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
         low = start;
         high = end;
     }
-    values::named_list(&[
-        ("l", scalar_real(low)?),
-        ("u", scalar_real(high)?),
-        ("n", scalar_integer(count)?),
-        ("unit", scalar_real(unit)?),
-    ])
+    Pretty { low, high, count: steps, unit }
 }
 
 /// `sequence(nvec, from, by)`.

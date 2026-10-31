@@ -223,9 +223,17 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
     let table: &[(&str, NativeFn)] = match package {
         "methods" => crate::methods::ROUTINES,
         "stats" => crate::distributions::ROUTINES,
+        "utils" => crate::utils::ROUTINES,
+        "tools" => crate::tools::ROUTINES,
+        "grDevices" => crate::graphics::GRDEVICES_ROUTINES,
+        "graphics" => crate::graphics::GRAPHICS_ROUTINES,
         _ => &[],
     };
-    table.iter().find(|(routine, _)| *routine == name).map(|(_, function)| *function)
+    let found = table.iter().find(|(routine, _)| *routine == name).map(|(_, function)| *function);
+    match package {
+        "graphics" | "grDevices" => Some(found.unwrap_or(crate::graphics::no_devices)),
+        _ => found,
+    }
 }
 
 fn find(name: &str, package: Option<&str>) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {

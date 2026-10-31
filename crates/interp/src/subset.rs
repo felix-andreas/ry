@@ -2486,12 +2486,7 @@ unsafe fn do_short_row_names(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_copy_df_attr(call: &Call<'_>) -> R<Sexp> {
     let from = call.arg(0);
     let to = modifiable(call.arg(1))?;
-    let names = get_attr(to, symbols().names);
     crate::heap().set_attrib(to, nil());
     values::copy_attributes(from, to)?;
-    values::remove_attr(to, symbols().names);
-    if names != nil() {
-        values::set_attr(to, symbols().names, names)?;
-    }
     Ok(to)
 }
