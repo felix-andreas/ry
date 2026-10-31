@@ -1,0 +1,82 @@
+packages in closure: 232
+packages whose compiled code touches the R API: 121
+lines of compiled source: {'lines_c': 1210962, 'lines_cpp': 639235, 'lines_headers': 3968433, 'lines_fortran': 24746, 'lines_rust': 11614}
+binding layer: {'C API directly': 91, 'Rcpp': 19, 'Rust': 2, 'cpp11': 9}
+distinct symbols per class: {'header': 397, 'api': 292, 'non-api': 29, 'experimental': 91, 'embedding': 5} total 814
+occurrences per class: {'header': 55293, 'api': 63649, 'non-api': 278, 'experimental': 984, 'embedding': 151}
+coverage curve (top N symbols -> packages fully covered, out of 121 ):
+    25: 1
+    50: 5
+   100: 10
+   150: 19
+   200: 24
+   300: 37
+   400: 43
+   500: 64
+   814: 121
+packages needing the most symbols (own + LinkingTo):
+  Matrix: 259
+  vctrs: 245
+  pak: 224
+  data.table: 206
+  rlang: 203
+  lazyeval: 188
+  vroom: 184
+  purrr: 170
+  ragg: 163
+  rugarch: 161
+  httpuv: 159
+  odbc: 156
+  later: 153
+  textshaping: 151
+  systemfonts: 150
+altrep: 9: cli cpp11 data.table lazyeval pak rlang stringi vctrs vroom
+ccallable: 27: Matrix Rcpp RcppSimdJson Rmpfr VineCopula checkmate cli data.table digest later lazyeval mgcv mvtnorm nloptr pak purrr randtoolbox rlang rngWELL stringi systemfonts textshaping tzdb uuid vctrs xts zoo
+external_ptr: 27: Rblpapi Rcpp cli cpp11 curl data.table digest fastmap ff gert httpuv later lazyeval mgcv multicool openssl pak processx ps purrr rlang sys utf8 vctrs vroom xml2 zip
+unwind: 14: Rcpp cpp11 curl gert later openssl pak polars rlang stringi sys systemfonts xml2 yaml
+non-API users:
+  Matrix: SET_ATTRIB ATTRIB Rf_findVarInFrame SET_OBJECT UNSET_S4_OBJECT
+  Rcpp: Rf_findVarInFrame CLOENV BODY STRING_PTR R_NamespaceRegistry
+  RcppSimdJson: OBJECT
+  Rmpfr: R_Outputfile
+  S7: FORMALS Rf_findVarInFrame
+  backports: Rf_findVar
+  checkmate: ATTRIB Rf_isFrame
+  cli: Rf_findVar Rf_allocSExp SET_ATTRIB Rf_findVarInFrame STRING_PTR
+  cpp11: Rf_findVarInFrame3 R_NamespaceRegistry
+  curl: FORMALS
+  data.table: Rf_findVar SET_ATTRIB ATTRIB BODY STRING_PTR IS_UTF8 IS_ASCII LEVELS DATAPTR
+  fansi: IS_UTF8
+  later: R_GlobalContext
+  lazyeval: Rf_findVar Rf_allocSExp SET_ATTRIB ATTRIB FORMALS CLOENV Rf_findVarInFrame3 SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT R_PromiseExpr PRENV PRVALUE ENCLOS
+  magrittr: Rf_findVar Rf_allocSExp Rf_findVarInFrame3 SET_PRCODE SET_PRENV SET_PRVALUE
+  odbc: Rf_isFrame
+  pak: Rf_findVar Rf_allocSExp SET_ATTRIB FORMALS Rf_findVarInFrame CLOENV BODY STRING_PTR
+  processx: Rf_findVar
+  ps: Rf_findVar Rf_allocSExp SET_ATTRIB
+  purrr: Rf_findVar Rf_allocSExp Rf_findVarInFrame
+  reshape2: OBJECT
+  rlang: Rf_findVar Rf_allocSExp SET_ATTRIB ATTRIB FORMALS CLOENV Rf_findVarInFrame3 SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT R_PromiseExpr PRENV PRVALUE R_NamespaceRegistry ENCLOS
+  slam: SET_ATTRIB ATTRIB SET_OBJECT OBJECT IS_S4_OBJECT
+  stringi: IS_UTF8 IS_ASCII
+  vctrs: Rf_findVar Rf_allocSExp SET_ATTRIB ATTRIB FORMALS CLOENV Rf_findVarInFrame3 SET_OBJECT SET_PRCODE SET_PRENV SET_PRVALUE UNSET_S4_OBJECT R_PromiseExpr PRENV PRVALUE ENCLOS LEVELS
+  vroom: ATTRIB DATAPTR
+  yaml: Rf_allocSExp FORMALS CLOENV BODY
+  zip: Rf_findVar
+subsystems (distinct symbols / packages using any):
+  ALTREP: 14 / 9
+  graphics engine and devices: 112 / 7
+  connections: 6 / 5
+  protection and GC: 19 / 79
+  external pointers, weak references, finalizers: 15 / 27
+  non-local exits and errors: 15 / 88
+  registration and cross-package C calls: 8 / 117
+  environments, closures, promises: 41 / 38
+  evaluation and calls: 39 / 57
+  strings and encodings: 28 / 81
+  vector data access: 51 / 101
+  allocation and coercion: 24 / 86
+  attributes, classes, S4: 31 / 57
+  math, RNG, BLAS/LAPACK: 84 / 82
+  types, constants, and everything else: 327 / 121
+R-level foreign calls (occurrences / packages): {'C': (443, 18), 'Fortran': (127, 5), 'Call': (4255, 104), 'External': (29, 6), 'External2': (29, 4), 'Primitive': (2, 2), 'Internal': (3, 3)}
