@@ -65,7 +65,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4): all 232 corpus packages pass their tests.
 - Lazy loader on ry's interpreter (session_0111kWqEkieA316rHiKNpGxB).
 - Inline syntax, agreement warnings and strict mode in the runtime (session_0111kWqCdRHRmiRddvo18cnG).
-- Native records, tuples and tagged unions; S4/R6 discouraged (session id to follow).
+- Native records, tuples and tagged unions; S4/R6 discouraged (session_0111kWqDq53tu9KBVLAT5WSn, Opus).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
