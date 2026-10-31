@@ -3,7 +3,7 @@ title: Unknown and strict mode
 description: What ry does with code it cannot type, and how to see where that happens
 ---
 
-R has constructs no static checker can follow: data frame columns, S4 and R6 objects, `eval()`.
+R has constructs no static checker can follow, such as data frame columns and S4 and R6 objects.
 Their values are `Unknown`, which is compatible with everything. ry would rather skip a check than
 report something false, so one unmodeled construct never causes a cascade of errors.
 
@@ -25,9 +25,10 @@ total <- function(df) sum(df$amount)
 strict
 
   x strict mode: this expression has an undetermined type (`Unknown`)
-    --[R/a.R:11:27]
- 11 | total <- function(df) sum(df$amount)
-    |                           ^^^^^^^^^
+   --[R/total.R:2:27]
+ 1 | #: fn(df: data.frame) -> double
+ 2 | total <- function(df) sum(df$amount)
+   |                           ^^^^^^^^^
 ```
 
 A `# typing: strict` comment turns strict mode on for one file.
@@ -39,12 +40,12 @@ and the strict finding goes away. [Annotations](/type-checking/annotations) show
 and `@trust` for the cases where a checked annotation does not fit.
 
 `Any` is also compatible with everything, but a value declared `Any` is a deliberate choice, so
-strict mode does not report it. Calls to S3 generics that dispatch through `UseMethod()` return `Any`
-for the same reason.
+strict mode does not report it. File reads such as `readRDS()`, `eval()`, and calls to S3 generics
+that dispatch through `UseMethod()` return `Any`, so strict mode does not report them either.
 
 ## Data frames
 
-Columns are not typed, so `df$amount` is `Unknown`, and `df: data.frame` checks that a data frame
+Columns are not typed, so `df$amount` is `Unknown`. An annotation such as `df: data.frame` checks that a data frame
 arrives but not which columns it has. For analysis code this is the gap that matters most, and
 `data.frame()` is usually the first place strict mode reports. Bare column names inside dplyr verbs
 and the other data-masking functions are recognized, as [checking code](/guides/checking#names)

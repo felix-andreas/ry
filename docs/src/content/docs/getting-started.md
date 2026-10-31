@@ -12,11 +12,9 @@ the code you already have, with nothing to annotate or configure first.
 - **VS Code:** install the
   [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry), which bundles
   the binary for Linux x86_64, macOS on Apple silicon, and Windows x86_64.
-- **Command line:** download
-  [0.3.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.1-beta), or build it with
+- **Command line:** download the binary for your platform from
+  [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta), or build it with
   `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
-- **Linux:** the 0.3.1-beta binary, also the one the extension bundles, starts only under Nix, so
-  build from source and point the extension's `ry.path` setting at it.
 
 [Installation](/installation) covers Zed, RStudio, Nix, and the remaining cases.
 
@@ -57,7 +55,7 @@ Type errors are opt-in. Add a `ry.toml` to the project root:
 typing = true
 ```
 
-Now ry infers a type for every value from how it is used, and reports the mismatches:
+ry already infers a type for every value from how it is used. Now it also reports the mismatches:
 
 ```r
 apply_discount <- function(price, rate) price * (1 - rate)
@@ -72,6 +70,8 @@ type-mismatch
  1 | apply_discount <- function(price, rate) price * (1 - rate)
  2 | apply_discount(100, "0.2")
    |                     ^^^^^
+
+1 problem in 1 file
 ```
 
 ## Next

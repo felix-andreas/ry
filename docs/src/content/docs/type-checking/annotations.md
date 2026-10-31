@@ -18,6 +18,7 @@ type-mismatch
 
   x expected `double`, found `character`
    --[R/annot.R:4:16]
+ 3 | 
  4 | apply_rate(10, "x")
    |                ^^^
 ```
@@ -39,8 +40,9 @@ person$age + "x"   # expected a numeric value (`integer` or `double`), found `ch
 
 Two forms give a type without checking it against the value:
 
-- `#: @if-unknown TYPE` types a value ry cannot infer, and becomes an error once ry can, so it
-  never goes stale:
+- `#: @if-unknown TYPE` types an `Unknown` value, such as a data frame column, and becomes an
+  error once ry can infer the type, so it never goes stale. A value declared `Any`, such as the
+  result of `readRDS()`, takes a plain `#:` annotation instead:
 
   ```text
   x `@if-unknown` applies only where the type is unknown, and this is already `double`. Drop the

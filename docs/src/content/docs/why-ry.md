@@ -7,13 +7,13 @@ description: What ry gives you that other R tools do not, and the trade-offs beh
 
 R reports an undefined name, a call with the wrong arguments, or a `NULL` where a value is needed
 only when that line runs, which can be hours into a job. ry reads the source instead, so it reports
-these as you type. It never runs your code and needs no R installation, and your editor and CI read
+these as you type. It never runs your code and, apart from the console, needs no R installation, and your editor and CI read
 the same `ry.toml`, so they check by the same rules.
 
 ## Types without rewriting your code
 
 Requiring an annotation on every function would rule out the R code that already exists, so ry
-infers types from how values are used, with the Hindley-Milner inference that OCaml and Haskell use:
+infers types from how values are used:
 
 ```r
 discount <- function(price, rate) price * (1 - rate)
@@ -32,12 +32,12 @@ the trade-offs below.
 
 ## What it leaves out
 
-- **Overloading your own functions.** Several signatures per name would turn every call into a
-  search. Use a union such as `integer | character` instead.
-- **Inheritance.** Subtyping makes inference slow and its results hard to predict.
+- **Several signatures for one of your functions.** That would turn every call into a search. A
+  parameter can accept either of two types instead, written `integer | character`.
+- **Inheritance.** One type extending another makes inference slow and its results hard to predict.
   [Custom types](/type-checking/custom-types) keep values apart without it.
-- **What it cannot model.** S4 and R6 objects, data frame columns, and `eval()` become `Unknown`,
-  which is compatible with everything, so they never cause a false error.
+- **What it cannot model.** S4 and R6 objects and data frame columns get a type that is compatible
+  with everything, so they never cause a false error, but they are not checked either.
   [Strict mode](/type-checking/unknown) shows where that happens.
 
 A clean run therefore says less about code built on data frames or R6 than about code built from

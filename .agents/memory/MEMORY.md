@@ -6,7 +6,6 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 
 ## Short-term
 
-- **Next release: update the install docs.** `installation.md`, `getting-started.md` and the README pin 0.3.1-beta, whose Linux binary (also bundled in the VS Code Linux extension 0.3.1) has a `/nix/store` loader and starts only under Nix. Once a release ships the glibc 2.17 binary, point the examples at it and drop the caveats.
 - **Docs pages follow the writing rules in `AGENTS.md`, and a page that reads like a telegram is as much a regression as dense prose.** Read a page aloud when you edit it, and keep a reason inside its sentence rather than splitting it off. Before rewriting a page, run an adversarial reader subagent with the owner's objections as the rubric (too abstract, information the reader does not need, a term used before it is introduced, copy about the tool instead of what the reader gets). That review found 35 false claims on the user pages and 14 on the contributing pages.
 - **A new em-dash in a diagnostic or a comment is a regression.** Two survive on purpose as test data (`literate.rs`, `test_cli.rs`), and `worklog.md` keeps its original wording.
 - **Validate a docs link against the ids in the built HTML** (`docs/dist/**/index.html` after `cd docs && bun run build`), never against a hand-rolled slug, because two headings that differ only in punctuation slug to the same id and the second silently becomes `-1`.

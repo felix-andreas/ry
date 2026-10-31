@@ -5,10 +5,15 @@ description: Function signatures, optional parameters, and generic functions
 
 ## Signatures
 
+A function annotation lists each parameter with its type, then the return type:
+
 ```r
-#: fn(name: character, [greeting]: character, ...: character) -> character
-greet <- function(name, greeting = "hello", ...) paste(greeting, name, ...)
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") paste(greeting, name)
 ```
+
+`[greeting]` marks a parameter callers may omit, and the definition must give it a default, so an
+omitted argument always has a value.
 
 Calls are checked for types, names, and the number of arguments. Parameter names are part of the
 type, because R matches arguments by name as often as by position:
@@ -23,8 +28,9 @@ type-mismatch
   x this function has no parameter `greting`. Did you mean `greeting`?
 ```
 
-`[greeting]` marks a parameter callers may omit, and the definition must give it a default, so an
-omitted argument always has a value. `...: character` checks every extra argument.
+`...: character` types the extra arguments, so `fn(...: character) -> character` checks that every
+argument is a string. A function with `...` accepts any argument name, so a misspelled name is not
+reported there, just as R does not report it.
 
 ## One signature per function
 

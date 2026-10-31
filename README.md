@@ -32,9 +32,8 @@ R reports the same mistake as `Error: unexpected string constant in "planets <- 
 
 - **VS Code:** the [extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry)
   bundles the binary.
-- **Binary:** download [0.3.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.1-beta).
-  GitHub's "latest" release is an old build from when ry was called Roughly. The 0.3.1-beta Linux
-  binary, also bundled in the extension, starts only under Nix, so build from source on Linux.
+- **Binary:** download [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta).
+  GitHub's "latest" release is an old build from when ry was called Roughly.
 - **Cargo:** `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
 
 ```sh

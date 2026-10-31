@@ -19,7 +19,7 @@ unresolved
 ```
 
 Files in a package's `R/` share one namespace, a script is read from top to bottom, and `library()`
-calls and `NAMESPACE` imports bring names into scope. The same analysis reports an assignment that
+calls, `DESCRIPTION` dependencies, and `NAMESPACE` imports bring names into scope. The same analysis reports an assignment that
 nothing reads, a top-level name defined twice in a package (R silently keeps one of them),
 `pkg::name` where the package does not export `name`, and a `NAMESPACE` that imports or exports a
 name that does not exist.
@@ -60,11 +60,12 @@ syntax-error
    |                    ^
 ```
 
-R would say `Error: unexpected symbol in: "  title = "Revenue"  subtitle"`.
+R would stop with `unexpected symbol` and point at `subtitle`.
 
 ## Lints
 
-Three style lints are on by default:
+Three lints are on by default. Here they are in a script, with the `unused` finding for each
+assignment left out:
 
 ```r
 total = 2L

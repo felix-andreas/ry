@@ -46,7 +46,7 @@ These are known bugs, not design decisions:
 - **A vector meeting an unannotated parameter.** In `g <- function(x) x + c(1L, 2L)`, `x` is assumed
   to have length one, so `g(c(1, 2))` is reported. Annotate `x` as `double[]`.
 - **A list filled by position.** `res <- list(); res[[i]] <- x` in a loop infers a dict-like list,
-  and a later `res[[1]]` is reported. Annotate the empty list as `#: list[T]`.
+  and a later `res[[1]]` is reported. Annotate the empty list with its element type, such as `#: list[integer]`.
 - **The loop variable after a loop.** At the top level of a file, reading `i` after
   `for (i in xs) {}` is reported as unresolved, although R keeps its last value.
 - **A variable named like a function.** After `mean <- 3`, the call `mean(x)` is reported as calling

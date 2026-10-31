@@ -50,7 +50,7 @@ exported functions, values read from files, and anything whose contract you want
 
 ## Adopting it one file at a time
 
-A comment at the top of a file overrides the project setting:
+A comment in a file, usually at the top, overrides the project setting for that file:
 
 ```r
 # typing: on

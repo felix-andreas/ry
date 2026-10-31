@@ -37,7 +37,7 @@ A stub turns the check back on. Put it under `stubs/`, named after the package:
 connect : fn(host: character) -> Session
 ```
 
-Now the typo is reported, and so are calls that do not fit the declarations:
+Now the typo is reported, and with type checking on, so are calls that do not fit the declarations:
 
 ```r
 library(dbclient)
