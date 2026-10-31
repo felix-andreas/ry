@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Fill `buffer` (capacity `length`, NUL-terminated, newline included) and
@@ -32,6 +33,16 @@ pub struct RApi {
     parse_eval_string: unsafe extern "C" fn(*const c_char, *mut c_void) -> *mut c_void,
     global_env: *mut *mut c_void,
     interrupts_pending: *mut c_int,
+    /// Registers `.Call` routines that live in this process.
+    embedding_dll_info: unsafe extern "C" fn() -> *mut c_void,
+    register_routines: unsafe extern "C" fn(
+        *mut c_void,
+        *const c_void,
+        *const CallMethodDef,
+        *const c_void,
+        *const c_void,
+    ) -> c_int,
+    call: CallApi,
 
     #[cfg(unix)]
     initialize: unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int,
@@ -184,6 +195,9 @@ pub fn load() -> Result<RApi, ReplError> {
         consolefile: symbol(library, &library_path, "R_Consolefile")?,
         outputfile: symbol(library, &library_path, "R_Outputfile")?,
         interrupts_pending: symbol(library, &library_path, "R_interrupts_pending")?,
+        embedding_dll_info: symbol(library, &library_path, "R_getEmbeddingDllInfo")?,
+        register_routines: symbol(library, &library_path, "R_registerRoutines")?,
+        call: call_api(library, &library_path)?,
         read_console_hook: symbol(library, &library_path, "ptr_R_ReadConsole")?,
         write_console_hook: symbol(library, &library_path, "ptr_R_WriteConsole")?,
         write_console_ex_hook: symbol(library, &library_path, "ptr_R_WriteConsoleEx")?,
@@ -236,6 +250,9 @@ pub fn load() -> Result<RApi, ReplError> {
         parse_eval_string: symbol(library, &library_path, "R_ParseEvalString")?,
         global_env: symbol(library, &library_path, "R_GlobalEnv")?,
         interrupts_pending: symbol(library, &library_path, "R_interrupts_pending")?,
+        embedding_dll_info: symbol(library, &library_path, "R_getEmbeddingDllInfo")?,
+        register_routines: symbol(library, &library_path, "R_registerRoutines")?,
+        call: call_api(library, &library_path)?,
         cmdlineoptions: symbol(library, &library_path, "cmdlineoptions")?,
         def_params_ex: symbol(library, &library_path, "R_DefParamsEx")?,
         set_params: symbol(library, &library_path, "R_SetParams")?,
@@ -282,18 +299,22 @@ impl RApi {
         &self,
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
+        quiet: bool,
     ) -> Result<(), ReplError> {
         // R re-derives R_HOME through its own lookup; export ours so both agree.
         unsafe { env::set_var("R_HOME", &self.r_home) };
         export_wrapper_path_vars(&self.r_home);
 
-        let mut argv = [
+        let mut argv: Vec<*mut c_char> = [
             c"repl",
             c"--interactive",
             c"--no-save",
             c"--no-restore-data",
         ]
-        .map(|argument| argument.as_ptr() as *mut c_char);
+        .iter()
+        .chain(quiet.then_some(&c"--quiet"))
+        .map(|argument| argument.as_ptr() as *mut c_char)
+        .collect();
 
         unsafe {
             *self.running_as_main_program = 1;
@@ -322,6 +343,7 @@ impl RApi {
         &self,
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
+        quiet: bool,
     ) -> Result<(), ReplError> {
         unsafe { env::set_var("R_HOME", &self.r_home) };
         let mut argv = [c"ry".as_ptr() as *mut c_char];
@@ -353,6 +375,7 @@ impl RApi {
                 ));
             }
             start.r_interactive = 1;
+            start.r_quiet = c_int::from(quiet);
             start.restore_action = SA_NORESTORE;
             start.save_action = SA_NOSAVE;
             start.rhome = rhome.as_ptr() as *mut c_char;
@@ -391,6 +414,123 @@ impl RApi {
     pub fn run_main_loop(&self) {
         unsafe { (self.run_mainloop)() }
     }
+
+    /// Makes `routines` callable from R as `.Call("name", ..., PACKAGE = "(embedding)")`,
+    /// and enables the argument helpers below for them. Call once, after
+    /// [`Self::initialize`].
+    pub fn register_call_routines(&self, routines: &[CallRoutine]) {
+        if CALL_API.set(self.call).is_err() || routines.is_empty() {
+            return;
+        }
+        let mut definitions: Vec<CallMethodDef> = routines
+            .iter()
+            .map(|routine| CallMethodDef {
+                name: routine.name.as_ptr(),
+                function: routine.function as *const c_void,
+                arguments: routine.arguments,
+            })
+            .collect();
+        definitions.push(CallMethodDef {
+            name: ptr::null(),
+            function: ptr::null(),
+            arguments: 0,
+        });
+        // R keeps pointers into the table for the life of the process.
+        let definitions: &'static [CallMethodDef] = Box::leak(definitions.into_boxed_slice());
+        unsafe {
+            let info = (self.embedding_dll_info)();
+            (self.register_routines)(
+                info,
+                ptr::null(),
+                definitions.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            );
+        }
+    }
+}
+
+/// An R object pointer, opaque to Rust.
+pub type Sexp = *mut c_void;
+
+/// A routine R calls through `.Call`; every argument and the result is a [`Sexp`]. It runs on
+/// R's thread and must not unwind into R.
+pub struct CallRoutine {
+    pub name: &'static CStr,
+    pub function: *const (),
+    pub arguments: c_int,
+}
+
+#[repr(C)]
+pub struct CallMethodDef {
+    name: *const c_char,
+    function: *const c_void,
+    arguments: c_int,
+}
+
+/// The few object accessors a `.Call` routine needs, resolved with everything else.
+#[derive(Clone, Copy)]
+struct CallApi {
+    is_string: unsafe extern "C" fn(Sexp) -> c_int,
+    length: unsafe extern "C" fn(Sexp) -> c_int,
+    string_elt: unsafe extern "C" fn(Sexp, isize) -> Sexp,
+    r_char: unsafe extern "C" fn(Sexp) -> *const c_char,
+    as_logical: unsafe extern "C" fn(Sexp) -> c_int,
+    mk_string: unsafe extern "C" fn(*const c_char) -> Sexp,
+    nil: *mut Sexp,
+}
+
+// Only R's thread calls routines, and the pointers are into a library loaded for the process.
+unsafe impl Send for CallApi {}
+unsafe impl Sync for CallApi {}
+
+static CALL_API: OnceLock<CallApi> = OnceLock::new();
+
+fn call_api(library: &'static Library, library_path: &Path) -> Result<CallApi, ReplError> {
+    Ok(CallApi {
+        is_string: symbol(library, library_path, "Rf_isString")?,
+        length: symbol(library, library_path, "Rf_length")?,
+        string_elt: symbol(library, library_path, "STRING_ELT")?,
+        r_char: symbol(library, library_path, "R_CHAR")?,
+        as_logical: symbol(library, library_path, "Rf_asLogical")?,
+        mk_string: symbol(library, library_path, "Rf_mkString")?,
+        nil: symbol(library, library_path, "R_NilValue")?,
+    })
+}
+
+/// The first string of a character vector, for a `.Call` routine's argument.
+pub fn string_argument(value: Sexp) -> Option<String> {
+    let api = CALL_API.get()?;
+    unsafe {
+        if (api.is_string)(value) == 0 || (api.length)(value) < 1 {
+            return None;
+        }
+        let text = (api.r_char)((api.string_elt)(value, 0));
+        (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned())
+    }
+}
+
+/// `TRUE` only for a logical (or coercible) `TRUE`.
+pub fn logical_argument(value: Sexp) -> bool {
+    CALL_API
+        .get()
+        .is_some_and(|api| unsafe { (api.as_logical)(value) } == 1)
+}
+
+/// R's `NULL`.
+pub fn null() -> Sexp {
+    CALL_API
+        .get()
+        .map_or(ptr::null_mut(), |api| unsafe { *api.nil })
+}
+
+/// A new character vector of one string. A NUL byte ends the string early.
+pub fn string_value(text: &str) -> Sexp {
+    let Some(api) = CALL_API.get() else {
+        return ptr::null_mut();
+    };
+    let text = CString::new(text.replace('\0', "")).unwrap_or_default();
+    unsafe { (api.mk_string)(text.as_ptr()) }
 }
 
 #[cfg(windows)]

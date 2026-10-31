@@ -36,15 +36,30 @@ pub trait SessionCompleter: Send {
     fn complete(&mut self, line: &str, position: usize) -> Vec<reedline::Suggestion>;
 }
 
+/// Lets a host act between commands without owning the console.
+pub trait ConsoleHooks: Send {
+    /// Called when the user submits a command at R's top-level prompt, before R reads it. R
+    /// code returned here runs first, as its own top-level command.
+    fn before_command(&mut self) -> Option<String>;
+}
+
 #[derive(Default)]
 pub struct RunOptions {
     pub keybindings: Keybindings,
+    /// `.Call` routines registered before anything runs.
+    pub routines: Vec<libr::CallRoutine>,
+    /// Evaluated in the global environment after startup and before the first prompt. They run
+    /// outside R's top-level loop, so each must catch its own errors.
+    pub startup: Vec<String>,
+    /// R input fed before `file`; in batch mode a top-level error in it quits.
+    pub input: String,
     /// Fed to R before the first prompt.
     pub file: Option<PathBuf>,
     /// End the session when the script is consumed; a top-level error quits with
     /// a failing status.
     pub batch: bool,
     pub completer: Option<Box<dyn SessionCompleter>>,
+    pub hooks: Option<Box<dyn ConsoleHooks>>,
 }
 
 /// Returns only when R ends. R assumes it owns the thread it initializes on, so

@@ -4,6 +4,7 @@ pub mod diagnostics;
 pub mod hir;
 pub mod infer;
 pub mod lints;
+pub mod load_index;
 pub mod metadata;
 pub mod naming;
 pub mod stubs;

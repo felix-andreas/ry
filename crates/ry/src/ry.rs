@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod diagnostics;
+pub mod load;
 pub mod namespace;
 pub mod position;
 pub mod repl_completer;

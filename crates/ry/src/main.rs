@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ry::cli::{self, CommandError, Outcome, OutputFormat};
+use ry::load;
 use ry::server;
 use ry::stats::analysis_stats;
 use std::env;
@@ -24,21 +25,64 @@ fn main() -> ExitCode {
 
     // Embedded R assumes it owns the thread it initializes on, so it must stay on `main`.
     let embedded_options = match &cli.command {
-        Command::Repl { keybindings, file } => Some(repl::RunOptions {
-            keybindings: match keybindings {
-                ReplKeybindings::Emacs => repl::Keybindings::Emacs,
-                ReplKeybindings::Vi => repl::Keybindings::Vi,
-            },
-            file: file.clone(),
-            batch: false,
-            completer: Some(Box::new(ry::repl_completer::AnalysisCompleter::new())),
-        }),
+        Command::Repl {
+            keybindings,
+            file,
+            no_load,
+        } => {
+            let mut startup = vec![load::embedded_runtime()];
+            let package = (!no_load).then(load::current_package).flatten();
+            if let Some(root) = &package {
+                startup.push(load::load_statement(root, true));
+            }
+            Some(repl::RunOptions {
+                keybindings: match keybindings {
+                    ReplKeybindings::Emacs => repl::Keybindings::Emacs,
+                    ReplKeybindings::Vi => repl::Keybindings::Vi,
+                },
+                routines: load::call_routines(),
+                startup,
+                file: file.clone(),
+                completer: Some(Box::new(ry::repl_completer::AnalysisCompleter::new())),
+                hooks: Some(Box::new(load::ReloadWatcher)),
+                ..repl::RunOptions::default()
+            })
+        }
         Command::Run { file } => Some(repl::RunOptions {
-            keybindings: repl::Keybindings::Emacs,
             file: Some(file.clone()),
             batch: true,
-            completer: None,
+            ..repl::RunOptions::default()
         }),
+        Command::Load {
+            path,
+            expressions,
+            file,
+            emit_plan: None,
+            r_entry: false,
+            ..
+        } => {
+            let root = match load::package_root(path) {
+                Ok(root) => root,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    return ExitCode::from(2);
+                }
+            };
+            // A new session has nothing loaded, so its first load is always a full one.
+            let mut input = load::load_statement(&root, false);
+            for expression in expressions {
+                input.push('\n');
+                input.push_str(expression);
+            }
+            Some(repl::RunOptions {
+                routines: load::call_routines(),
+                startup: vec![load::embedded_runtime()],
+                input,
+                file: file.clone(),
+                batch: true,
+                ..repl::RunOptions::default()
+            })
+        }
         _ => None,
     };
     if let Some(options) = embedded_options {
@@ -79,7 +123,27 @@ fn main() -> ExitCode {
                 exit_code(analysis_stats(path.as_deref()).map(|()| Outcome::Clean))
             }
         },
-        Command::Repl { .. } | Command::Run { .. } => {
+        Command::Load {
+            path,
+            full,
+            emit_plan: Some(plan_file),
+            state,
+            ..
+        } => {
+            let state = state.unwrap_or_else(|| plan_file.with_extension("state.json"));
+            match load::emit_plan(&path, &plan_file, &state, full) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Command::Load { r_entry: true, .. } => {
+            println!("{}", load::process_runtime());
+            ExitCode::SUCCESS
+        }
+        Command::Repl { .. } | Command::Run { .. } | Command::Load { .. } => {
             unreachable!("handled on the main thread above")
         }
     };
@@ -188,6 +252,37 @@ enum Command {
         /// Execute this R file before the first prompt
         #[clap(long, short)]
         file: Option<PathBuf>,
+        /// Do not load the package the working directory belongs to
+        #[clap(long, default_value_t = false)]
+        no_load: bool,
+    },
+    /// Load an R package from source into the embedded R, lazily, and run code against it
+    ///
+    /// Function definitions are bound lazily, so each is parsed and evaluated on first use,
+    /// and other top-level code runs in collation order. The exit status is 0 when the
+    /// package loaded and the code ran without a top-level error.
+    Load {
+        /// The package, or any path inside it
+        #[clap(default_value = ".")]
+        path: PathBuf,
+        /// With `--emit-plan`, plan a full load whatever the state says
+        #[clap(long, hide = true, default_value_t = false)]
+        full: bool,
+        /// R code to run after loading (repeatable)
+        #[clap(long = "expr", short = 'e')]
+        expressions: Vec<String>,
+        /// An R file to run after loading
+        #[clap(long, short)]
+        file: Option<PathBuf>,
+        /// Write a load plan for a plain R session to this file instead of loading
+        #[clap(long, hide = true)]
+        emit_plan: Option<PathBuf>,
+        /// Where `--emit-plan` keeps what the session has loaded
+        #[clap(long, hide = true, requires = "emit_plan")]
+        state: Option<PathBuf>,
+        /// Print R code that defines `load_all()` for a plain R session, then exit
+        #[clap(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
+        r_entry: bool,
     },
     /// Run an R file through the embedded R and exit (a top-level error
     /// exits with a failing status)

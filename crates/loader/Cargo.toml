@@ -1,0 +1,19 @@
+[package]
+name = "loader"
+edition = "2024"
+version.workspace = true
+publish = false
+
+[lib]
+path = "src/loader.rs"
+
+[dependencies]
+rustc-hash.workspace = true
+salsa.workspace = true
+semantics = { path = "../semantics" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+syntax = { path = "../syntax" }
+tempfile = "3"
