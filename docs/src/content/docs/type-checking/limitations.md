@@ -39,10 +39,10 @@ not analyze them and `ry fmt` skips them.
 
 These are known bugs, not design decisions:
 
-- **Mixed numbers into an unannotated function.** `f <- function(price, rate) price * rate` infers
-  one type for both parameters, so `f(1L, 0.5)` is reported. An unannotated parameter used in
-  arithmetic also rejects a `logical`, so `g <- function(x) x * 2; g(TRUE)` is reported. Annotating
-  the parameters as `double` fixes both.
+- **A logical into an unannotated numeric function.** An unannotated parameter used in arithmetic
+  rejects a `logical`, so `g <- function(x) x * 2; g(TRUE)` is reported. Mixed `integer` and
+  `double` arguments are fine: `f <- function(price, rate) price * rate; f(1L, 0.5)` widens to
+  `double`. Annotating the parameter as `double` accepts the logical too.
 - **A vector meeting an unannotated parameter.** In `g <- function(x) x + c(1L, 2L)`, `x` is assumed
   to have length one, so `g(c(1, 2))` is reported. Annotate `x` as `double[]`.
 - **A list filled by position.** `res <- list(); res[[i]] <- x` in a loop infers a dict-like list,

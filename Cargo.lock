@@ -1617,6 +1617,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
+name = "loader"
+version = "0.3.2-beta"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "salsa",
+ "semantics",
+ "serde",
+ "serde_json",
+ "syntax",
+ "tempfile",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3118,6 +3131,7 @@ dependencies = [
  "ide",
  "ignore",
  "indoc",
+ "loader",
  "miette",
  "portable-pty",
  "repl",

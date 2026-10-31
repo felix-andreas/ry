@@ -1,0 +1,62 @@
+#==== benchmark_idioms
+#---- a_numeric_parameter_widens_from_integer_to_double
+mix <- function(price, rate) price * rate
+a <- mix(1L, 0.5)
+b <- mix(0.5, 1L)
+c <- mix(rbinom(3, 1, 0.5), 1 - rbinom(3, 1, 0.5))
+#++++
+mix: <T: numeric> fn(price: T, rate: T) -> T
+a: double
+b: double
+c: double[]
+
+#---- unchecked_argument_with_disagreeing_numeric_overloads_is_unchecked
+total <- function(x, i) sum(x[[i]])
+check <- function(x, i) vapply(i, function(j) sum(x[[j]]), numeric(1))
+#++++
+total: <T, U> fn(x: T, i: U) -> Unknown
+check: <T, U> fn(x: T, i: list[U] | U[]) -> double[]
+
+#---- a_function_joined_with_an_open_variable_is_callable
+run <- function(source = NULL) {
+  if (is.null(source)) {
+    source <- function(a) a
+  }
+  source(1)
+}
+#++++
+run: <T> fn([source]: T | NULL) -> Unknown
+
+#---- double_and_triple_negation_are_injection_operators
+inject <- function(query = list()) request(!!!query)
+twice <- function(x) !!x
+plain <- !!TRUE
+#++++
+inject: <T> fn([query]: T) -> Unknown
+twice: <T> fn(x: T) -> Unknown
+plain: logical
+35..42 warning[unresolved] I could not resolve `request` in this package, its imports, or builtins.
+
+#---- zeallot_destructuring_binds_the_pattern_names
+span <- function(dates) {
+  c(first, last) %<-% range(dates)
+  list(first = first, last = last)
+}
+swap <- function(values) {
+  range(values) %->% c(low, high)
+  low
+}
+#++++
+span: <T> fn(dates: T) -> list{first: Unknown, last: Unknown}
+swap: <T> fn(values: T) -> Unknown
+
+#---- widening_meets_a_scalar_and_a_vector
+scale <- function(a, b) a * b
+x <- scale(c(1L, 2L), 0.5)
+y <- scale(1L, c(0.5, 1))
+v <- function(flags) !!flags
+#++++
+scale: <T: numeric> fn(a: T, b: T) -> T
+x: double[]
+y: double[]
+v: <T> fn(flags: T) -> Unknown

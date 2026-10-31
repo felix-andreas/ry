@@ -127,6 +127,17 @@ on purpose.
   `shadows-builtin = "warn"`, and `shadows-namespace = "warn"`, all of which are off by default. Each
   case renders every finding as `start..end severity[code] message`, or `clean`. Run both with
   `cargo test -p semantics --test test_lint_fixtures`.
+- **`crates/semantics/tests/load_index`**: the package-load index. A case lists `R/` files, and
+  optionally `NAMESPACE` and `DESCRIPTION`, with `#~~~~` separators, and renders the package's name,
+  the `NAMESPACE` directives a load honors, and, per file, each item's position and whether it is
+  bound lazily or runs eagerly, with what it writes, what it reads while running, and the
+  registrations it makes. Run it with `cargo test -p semantics --test test_load_index_fixtures`.
+- **`crates/loader/tests/reload`**: reload plans. A file headed `#~~~~ before <path>` or
+  `#~~~~ after <path>` exists on that side only, so the same path on both sides is an edit and one
+  side alone is an addition or a deletion, while a plain `#~~~~ <path>` is unchanged. The case loads
+  the `before` side, then renders the plan that takes it to the `after` side: what is bound, run,
+  removed, unregistered, and re-registered. Run it with
+  `cargo test -p loader --test test_reload_fixtures`.
 - **`crates/format/tests/format`**: the formatter's golden suite. Each case's source must format to
   the expected block, and the runner formats that output again to assert idempotence on every case.
   When the expected result is a refusal, the case renders the structured `FormatError`.
@@ -326,6 +337,17 @@ report (it needs the llvm-tools component) with
 Deep runs are manual or scheduled work; the bounded in-tree batteries remain the gate in the default
 suite.
 
+### Reloading
+
+`crates/loader/tests/test_reload_fuzz.rs` generates packages from statements that define, wrap,
+read and rewrite a small pool of names, edits them at random, and checks that applying the reload
+plan to the loaded package gives what a fresh load of the edited package gives. A model executes
+both sides: a lazy binding's value is its definition's text, and a statement stores its text plus
+the values it read, so a statement that should have rerun shows up as a stale value. The same test
+checks that the incrementally derived index equals one built from scratch, and a second test feeds
+the index arbitrary bytes and asserts its positions stay inside the text. Removing either of the
+diff's ordering rules turns it red within a few hundred seeds.
+
 ## End-to-end suites
 
 ### The CLI
@@ -340,6 +362,14 @@ suite.
 - `NAMESPACE` validation, and project stub overrides including their loader-problem reports;
 - data-masked evaluation;
 - the formatter's `--check`, `--diff`, and in-place modes.
+
+### Package loading
+
+`crates/ry/tests/test_load.rs` runs `ry load` and plain `Rscript` against a real GNU R and checks
+the loaded result: `Collate` order, imports, S3 and S4 registration, `Depends`, `sysdata.rda`,
+source references, reloads that rebind, rerun and remove, undoing deleted S4 definitions, the error
+locations, and the `ry load --r-entry` entry point. `test_repl_e2e.rs` checks that `ry repl` loads
+the package it starts in and reloads an edit before the next command. Both skip without R.
 
 ### Native packages
 
@@ -399,6 +429,8 @@ pin these contracts:
 - A body edit that changes the scheme also re-checks the items that read it.
 - A new definition re-checks only the items that read its name.
 - An inserted statement re-checks only the reads it intercepts.
+- A body edit re-derives one item's load facts and its own file's index layer, a `NAMESPACE` edit
+  re-derives no item, and a statement that only moved keeps its load facts.
 
 The same file checks that a chain of re-exports resolves to its base, that a cycle of them pins to
 `Unknown`, and that a chain of 4,096 links resolves without overflowing the analysis thread's stack.

@@ -6,7 +6,8 @@ use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
 use crate::hir::{
     Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
-    Parameter as Formal, UnaryOperator, integer_literal_position, is_whole_number_double,
+    Parameter as Formal, UnaryOperator, destructure_leaves, integer_literal_position,
+    is_whole_number_double,
 };
 use crate::infer::{
     Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
@@ -1762,6 +1763,17 @@ impl<'db> Checker<'db, '_> {
         value: ExprId,
         value_ty: Ty<'db>,
     ) {
+        if spelling == AssignSpelling::Destructure {
+            let unchecked = unknown(self.db);
+            for leaf in destructure_leaves(self.module, target).unwrap_or_default() {
+                if let Some(&slot) = self.naming.resolutions.get(&leaf) {
+                    self.environment.set(slot, EnvEntry::Mono(unchecked));
+                    self.note_captured_write(slot, unchecked);
+                }
+                self.recorded.insert(leaf, unchecked);
+            }
+            return;
+        }
         if let ExpressionKind::NameRef(_) = self.module.expression(target).kind {
             if let Some(&slot) = self.naming.resolutions.get(&target) {
                 if spelling == AssignSpelling::Super {
@@ -2544,6 +2556,45 @@ impl<'db> Checker<'db, '_> {
     fn infer_unary(&mut self, id: ExprId, operator: UnaryOperator, operand: ExprId) -> Ty<'db> {
         match operator {
             UnaryOperator::Minus => self.infer_unary_minus(operand),
+            // `!!x` and `!!!x` are rlang's injection and splice operators as often as double
+            // negation, and the operand of an injection can be any value.
+            UnaryOperator::Not
+                if matches!(
+                    self.module.expression(operand).kind,
+                    ExpressionKind::Unary {
+                        operator: UnaryOperator::Not,
+                        ..
+                    }
+                ) =>
+            {
+                let mut innermost = operand;
+                while let ExpressionKind::Unary {
+                    operator: UnaryOperator::Not,
+                    operand,
+                } = self.module.expression(innermost).kind
+                {
+                    innermost = operand;
+                }
+                let inner = self.infer(innermost);
+                let inner = self.structural(inner);
+                match inner.kind(self.db) {
+                    TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {
+                        scalar(self.db, Atomic::Logical)
+                    }
+                    TyKind::Vector(element)
+                        if matches!(
+                            element.kind(self.db),
+                            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+                        ) =>
+                    {
+                        Ty::new(self.db, TyKind::Vector(scalar(self.db, Atomic::Logical)))
+                    }
+                    _ => {
+                        self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
+                        unknown(self.db)
+                    }
+                }
+            }
             UnaryOperator::Not => self.infer_unary_not(operand),
             UnaryOperator::Plus | UnaryOperator::Tilde | UnaryOperator::Help => {
                 self.infer(operand);
@@ -3982,6 +4033,21 @@ impl<'db> Checker<'db, '_> {
             .collect()
     }
 
+    /// Overload results that differ only in container shape (`lapply` over an unchecked
+    /// vector) stay guessable; a differing `integer` against `double` would mislead.
+    fn is_numeric_result(&self, ty: Ty<'db>) -> bool {
+        match ty.kind(self.db) {
+            TyKind::Scalar(Atomic::Integer | Atomic::Double) => true,
+            TyKind::Vector(element) => {
+                matches!(
+                    element.kind(self.db),
+                    TyKind::Scalar(Atomic::Integer | Atomic::Double)
+                )
+            }
+            _ => false,
+        }
+    }
+
     fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
         entries
             .iter()
@@ -4029,6 +4095,19 @@ impl<'db> Checker<'db, '_> {
         // calls R accepts. Ties go to declaration order.
         let caller_entries = self.caller_open_variables(&call_arguments);
 
+        // An `Unknown` argument fits every candidate, so declaration order alone would
+        // pick one return type (`sum(x[[i]])` as `integer`). The call is only typed when
+        // all fitting candidates agree on the result.
+        let unchecked_argument = caller_entries.is_empty()
+            && call_arguments.iter().any(|argument| {
+                argument.ty.is_some_and(|ty| {
+                    matches!(
+                        self.table.shallow_resolve(self.db, ty).kind(self.db),
+                        TyKind::Unknown | TyKind::Any
+                    )
+                })
+            });
+
         // `1` is a double at runtime, so the integer-literal courtesy round runs only when
         // the strict one matched nothing (`sum(1, 2)` must stay a double).
         let rounds: &[bool] = if call_arguments.iter().any(|argument| argument.whole_double) {
@@ -4048,6 +4127,13 @@ impl<'db> Checker<'db, '_> {
                 let snapshot = self.table.snapshot();
                 match self.probe_overload_candidate(callee, scheme, &call_arguments, courtesy) {
                     Ok((resolved, function)) => {
+                        if unchecked_argument {
+                            let result = self.table.resolve(self.db, function.ret);
+                            self.table.rollback(snapshot);
+                            fits.push((index, true, vec![result]));
+                            fitting_courtesy = courtesy;
+                            continue;
+                        }
                         if caller_entries.is_empty() {
                             self.recorded.insert(callee, resolved);
                             self.selected_overloads.insert(callee, index);
@@ -4082,6 +4168,16 @@ impl<'db> Checker<'db, '_> {
 
         // Without a free fit, a guess is taken only when every guess narrows the caller's
         // types alike; disagreeing narrowings make the variable `Unknown` (unchecked, not wrong).
+        if unchecked_argument
+            && let Some((_, _, first)) = fits.first()
+            && fits.iter().any(|(_, _, results)| results != first)
+            && fits
+                .iter()
+                .any(|(_, _, results)| results.iter().any(|&result| self.is_numeric_result(result)))
+        {
+            self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
+            return Some(unknown(self.db));
+        }
         let winner = fits.iter().find(|(_, free, _)| *free).or_else(|| {
             let (_, _, first) = fits.first()?;
             fits.iter()
@@ -4335,6 +4431,42 @@ impl<'db> Checker<'db, '_> {
                     .collect();
                 let without_null = union_of(self.db, callable);
                 self.dispatch_call(range, callee_range, without_null, arguments)
+            }
+            // A function joined with an unbound variable or a generic parameter (`f <- function(source = NULL) {
+            // if (is.null(source)) source <- function(x) x; source(1) }`): the variable is
+            // whatever callable the caller passes, so only the functions are checked and the
+            // result is unchecked.
+            TyKind::Union(members)
+                if members.iter().any(|&member| {
+                    matches!(
+                        self.table.shallow_resolve(self.db, member).kind(self.db),
+                        TyKind::Function(_)
+                    )
+                }) && members.iter().any(|&member| {
+                    matches!(
+                        self.table.shallow_resolve(self.db, member).kind(self.db),
+                        TyKind::Var(_) | TyKind::Rigid(_)
+                    )
+                }) && members.iter().all(|&member| {
+                    matches!(
+                        self.table.shallow_resolve(self.db, member).kind(self.db),
+                        TyKind::Function(_) | TyKind::Var(_) | TyKind::Rigid(_)
+                    )
+                }) =>
+            {
+                let functions: Vec<Ty<'db>> = members
+                    .iter()
+                    .copied()
+                    .filter(|&member| {
+                        matches!(
+                            self.table.shallow_resolve(self.db, member).kind(self.db),
+                            TyKind::Function(_)
+                        )
+                    })
+                    .collect();
+                let functions = union_of(self.db, functions);
+                self.dispatch_call(range, callee_range, functions, arguments);
+                unknown(self.db)
             }
             // A union of functions (`handlers[[name]](...)`) must accept the call for every
             // member; each probes in an isolated snapshot, so the returns are variable-erased.

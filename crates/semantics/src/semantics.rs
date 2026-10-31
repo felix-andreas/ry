@@ -4,6 +4,7 @@ pub mod diagnostics;
 pub mod hir;
 pub mod infer;
 pub mod lints;
+pub mod load_index;
 pub mod metadata;
 pub mod naming;
 pub mod stubs;
@@ -15,6 +16,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use syntax::ast::{self, BinaryExpr, is_expression_kind};
 use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize};
+
+/// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
+/// run on threads with this stack rather than `ulimit -s`'s.
+pub const ANALYSIS_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 #[salsa::db]
 pub trait Db: salsa::Database {
@@ -140,7 +145,9 @@ pub struct Item<'db> {
     pub disambiguator: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue, serde::Serialize, serde::Deserialize,
+)]
 pub enum ItemKind {
     Function,
     Value,

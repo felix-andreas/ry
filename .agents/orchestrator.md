@@ -61,16 +61,16 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 - Runtime step 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): tier-0 bytecode interpreter and base R loaded from the user's GNU R installation.
 - Runtime step 4a (session_0111kWqESzY2bDUMNQAL2or6, Opus): full C API surface, ALTREP, BLAS/LAPACK, connections, package install (owns `crates/libr`).
-- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa (branch `feat/lazy-loader`): item index, lazy bindings and item-level reload, on the GNU R backend first.
 - Runtime step 8 core (session_0111kWqBmuEsPtQfPJkP31Vx, Opus): the polars-backed table engine crate, query lowering to Polars lazy plans, ALTREP column seam, checker support, and the benchmark harness against data.table.
-- Analysis at benchmark scale (session_0111kWqBbFHVfcMShb4eK3RJ, Sonnet): full-size benchmark code bases, cold and incremental `ry check` measurements, fixes in the analysis crates, and a committed benchmark harness.
+- Analysis performance (session_0111kWqD76vZ2gv5bRe1mtDm, Sonnet): cut cold `ry check` time (6 to 7 s) and peak memory (~1 GiB) on the full-size benchmark code bases, without regressing incremental latency or diagnostics; measured with `just bench`.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
 
 1. Finish step 4: all 232 corpus packages pass their own tests.
-2. Inline syntax in the runtime.
-3. The Cranelift JIT.
+2. Move the lazy loader from the GNU R backend onto ry's own interpreter once step 3 lands.
+3. Inline syntax in the runtime.
+4. The Cranelift JIT.
 
 Follow-ups:
 

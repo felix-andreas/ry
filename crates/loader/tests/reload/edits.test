@@ -1,0 +1,276 @@
+#==== functions
+#---- editing_a_body_rebinds_only_that_function
+#~~~~ before R/a.R
+first <- function() 1
+second <- function() 2
+#~~~~ after R/a.R
+first <- function() 10
+second <- function() 2
+#++++
+source R/a.R
+bind first from R/a.R:1:9
+
+#---- a_function_that_moved_is_rebound_but_nothing_reruns
+#~~~~ before R/a.R
+value <- helper()
+helper <- function() 1
+#~~~~ after R/a.R
+value <- helper()
+
+helper <- function() 1
+#++++
+source R/a.R
+bind helper from R/a.R:3:10
+
+#---- a_deleted_function_is_removed
+#~~~~ before R/a.R
+kept <- function() 1
+gone <- function() 2
+#~~~~ after R/a.R
+kept <- function() 1
+#++++
+source R/a.R
+remove gone
+
+#---- a_function_moved_to_another_file_is_rebound_not_removed
+#~~~~ before R/a.R
+travels <- function() 1
+#~~~~ before R/b.R
+other <- function() 2
+#~~~~ after R/a.R
+#~~~~ after R/b.R
+other <- function() 2
+travels <- function() 1
+#++++
+source R/a.R
+source R/b.R
+bind travels from R/b.R:2:11
+
+#---- a_deleted_file_drops_its_bindings_and_source
+#~~~~ R/a.R
+kept <- function() 1
+#~~~~ before R/b.R
+temporary <- function() 2
+#++++
+drop source R/b.R
+remove temporary
+
+#---- an_unchanged_package_needs_nothing
+#~~~~ R/a.R
+f <- function() 1
+x <- 1
+#++++
+nothing to do
+
+#==== statements
+#---- an_inserted_statement_runs_alone
+#~~~~ before R/a.R
+a <- 1
+b <- 2
+#~~~~ after R/a.R
+a <- 1
+inserted <- 3
+b <- 2
+#++++
+source R/a.R
+run R/a.R:2 inserted <- 3
+
+#---- a_statement_reading_a_changed_function_reruns
+#~~~~ before R/a.R
+helper <- function() 1
+cached <- helper()
+untouched <- 5
+#~~~~ after R/a.R
+helper <- function() 2
+cached <- helper()
+untouched <- 5
+#++++
+source R/a.R
+bind helper from R/a.R:1:10
+run R/a.R:2 cached <- helper()
+
+#---- reruns_cascade_forward_through_statements
+#~~~~ before R/a.R
+base <- function() 1
+level_one <- base()
+level_two <- level_one + 1
+unrelated <- 3
+#~~~~ after R/a.R
+base <- function() 2
+level_one <- base()
+level_two <- level_one + 1
+unrelated <- 3
+#++++
+source R/a.R
+bind base from R/a.R:1:8
+run R/a.R:2 level_one <- base()
+run R/a.R:3 level_two <- level_one + 1
+
+#---- a_read_inside_a_function_body_does_not_rerun
+#~~~~ before R/a.R
+helper <- function() 1
+Class <- list(method = function() helper())
+#~~~~ after R/a.R
+helper <- function() 2
+Class <- list(method = function() helper())
+#++++
+source R/a.R
+bind helper from R/a.R:1:10
+
+#---- a_deleted_statement_removes_what_only_it_bound
+#~~~~ before R/a.R
+shared <- 1
+shared <- shared + 1
+alone <- 2
+#~~~~ after R/a.R
+shared <- 1
+#++++
+source R/a.R
+remove alone
+run R/a.R:1 shared <- 1
+
+#==== laziness_flips
+#---- a_second_writer_turns_a_lazy_function_eager
+#~~~~ R/a.R
+cache <- function(x) x
+#~~~~ after R/b.R
+cache <- memoise::memoise(cache)
+#++++
+source R/b.R
+run R/a.R:1 cache <- function(x) x
+run R/b.R:1 cache <- memoise::memoise(cache)
+
+#---- removing_the_second_writer_turns_it_lazy_again
+#~~~~ R/a.R
+cache <- function(x) x
+#~~~~ before R/b.R
+cache <- memoise::memoise(cache)
+#++++
+drop source R/b.R
+bind cache from R/a.R:1:9
+
+#==== registrations
+#---- a_deleted_s4_method_is_unregistered
+#~~~~ before R/a.R
+setClass("Point", representation(x = "numeric"))
+setMethod("show", "Point", function(object) cat("point"))
+#~~~~ after R/a.R
+setClass("Point", representation(x = "numeric"))
+#++++
+source R/a.R
+unregister S4Method { generic: "show", signature: ["Point"] }
+
+#---- a_changed_s4_method_reruns_without_unregistering
+#~~~~ before R/a.R
+setMethod("show", "Point", function(object) cat("point"))
+#~~~~ after R/a.R
+setMethod("show", "Point", function(object) cat("POINT"))
+#++++
+source R/a.R
+run R/a.R:1 setMethod("show", "Point", function(object) cat("POINT"))
+
+#---- a_rebound_s3_method_is_registered_again
+#~~~~ NAMESPACE
+S3method(print, money)
+#~~~~ before R/a.R
+print.money <- function(x, ...) cat("money")
+#~~~~ after R/a.R
+print.money <- function(x, ...) cat("MONEY")
+#++++
+source R/a.R
+bind print.money from R/a.R:1:15
+register S3 print.money as print.money
+
+#---- a_new_s3method_directive_registers_and_a_dropped_one_unregisters
+#~~~~ before NAMESPACE
+S3method(print, money)
+#~~~~ after NAMESPACE
+S3method(format, money)
+#~~~~ R/a.R
+print.money <- function(x, ...) cat("money")
+format.money <- function(x, ...) "money"
+#++++
+unregister S3 print.money
+register S3 format.money as format.money
+
+#==== namespace
+#---- a_changed_import_rebuilds_the_imports
+#~~~~ before NAMESPACE
+importFrom(stats, median)
+#~~~~ after NAMESPACE
+importFrom(stats, median, sd)
+#~~~~ R/a.R
+f <- function() 1
+#++++
+rebuild imports (1 directives)
+
+#---- an_export_change_needs_no_rebinding
+#~~~~ before NAMESPACE
+export(f)
+#~~~~ after NAMESPACE
+export(f, g)
+#~~~~ R/a.R
+f <- function() 1
+g <- function() 2
+#++++
+sync exports
+
+#==== hooks
+#---- editing_onload_runs_it_again
+#~~~~ before R/zzz.R
+.onLoad <- function(libname, pkgname) options(demo.level = 1)
+#~~~~ after R/zzz.R
+.onLoad <- function(libname, pkgname) options(demo.level = 2)
+#++++
+source R/zzz.R
+bind .onLoad from R/zzz.R:1:11
+run .onLoad
+
+#==== ordering
+#---- rerunning_a_writer_reruns_the_later_writers_of_its_name
+#~~~~ before R/a.R
+level <- 1
+level <- 2
+#~~~~ after R/a.R
+level <- 10
+level <- 2
+#++++
+source R/a.R
+run R/a.R:1 level <- 10
+run R/a.R:2 level <- 2
+
+#---- deleting_the_last_writer_reruns_the_one_before
+#~~~~ before R/a.R
+level <- 1
+level <- 2
+#~~~~ after R/a.R
+level <- 1
+#++++
+source R/a.R
+run R/a.R:1 level <- 1
+
+#---- editing_a_self_wrapping_statement_reruns_the_definition_first
+#~~~~ before R/a.R
+compute <- function(x) x
+compute <- memoise::memoise(compute)
+#~~~~ after R/a.R
+compute <- function(x) x
+compute <- memoise::memoise(compute, cache = cachem::cache_mem())
+#++++
+source R/a.R
+run R/a.R:1 compute <- function(x) x
+run R/a.R:2 compute <- memoise::memoise(compute, cache = cachem::cache_mem())
+
+#---- a_statement_that_called_through_a_changed_function_reruns
+#~~~~ before R/a.R
+deepest <- function() 1
+middle <- function() deepest()
+cached <- middle()
+#~~~~ after R/a.R
+deepest <- function() 2
+middle <- function() deepest()
+cached <- middle()
+#++++
+source R/a.R
+bind deepest from R/a.R:1:11
+run R/a.R:3 cached <- middle()

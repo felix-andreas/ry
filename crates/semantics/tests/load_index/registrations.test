@@ -1,0 +1,48 @@
+#==== s4
+#---- classes_generics_and_methods_are_registrations
+setClass("Point", representation(x = "numeric"))
+Shape <- setClass("Shape", representation("VIRTUAL"))
+setGeneric("area", function(shape) standardGeneric("area"))
+setMethod("area", "Point", function(shape) 0)
+setMethod("show", signature("Point"), function(object) cat("point"))
+setMethod("combine", c("Point", "Shape"), function(x, y) x)
+setReplaceMethod("x", "Point", function(object, value) object)
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager reads [representation setClass] registers S4Class { class: "Point" }
+2:0 eager binds [Shape] reads [representation setClass] registers S4Class { class: "Shape" }
+3:0 eager binds [area] reads [setGeneric] registers S4Generic { generic: "area" }
+4:0 eager reads [setMethod] registers S4Method { generic: "area", signature: ["Point"] }
+5:0 eager reads [setMethod signature] registers S4Method { generic: "show", signature: ["Point"] }
+6:0 eager reads [c setMethod] registers S4Method { generic: "combine", signature: ["Point", "Shape"] }
+7:0 eager reads [setReplaceMethod] registers S4Method { generic: "x<-", signature: ["Point"] }
+
+#---- named_arguments_are_read_by_name
+setMethod(signature = "Point", f = "area", definition = function(shape) 1)
+methods::setClass(Class = "Named")
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager reads [setMethod] registers S4Method { generic: "area", signature: ["Point"] }
+2:0 eager registers S4Class { class: "Named" }
+
+#==== r6
+#---- an_r6_class_registers_its_class_name
+Counter <- R6::R6Class("Counter", public = list(count = 0))
+Anonymous <- R6Class(public = list())
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager binds [Counter] reads [list] registers R6Class { class: "Counter" }
+2:0 eager binds [Anonymous] reads [R6Class list] registers R6Class { class: "Anonymous" }
+
+#==== s3
+#---- explicit_s3_registration_calls_are_recorded
+.S3method("print", "money", function(x, ...) cat("money"))
+registerS3method("format", "money", function(x, ...) "money")
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager reads [.S3method] registers S3Method { generic: "print", class: "money" }
+2:0 eager reads [registerS3method] registers S3Method { generic: "format", class: "money" }
