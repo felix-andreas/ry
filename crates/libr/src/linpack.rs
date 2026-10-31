@@ -8,6 +8,10 @@
 //! pointer, as Fortran passes it, and arrays may alias where the Fortran callers alias them
 //! (`dqrsl` is called with `y` and `qty` in the same storage), so the code works on raw
 //! pointers with the 1-based indexing of the published algorithms.
+//!
+//! R's variants are not part of LINPACK. They are written from R's documentation and from
+//! GNU R's observable behaviour (`tests/test_linpack.rs` holds the comparison), on top of the
+//! LINPACK routines here.
 
 // The routines index several arrays in lockstep exactly as LINPACK does, which keeps them
 // checkable line by line against the published code.
@@ -161,6 +165,7 @@ fn sign(a: f64, b: f64) -> f64 {
 
 /// R's `dqrdc2`: Householder QR with limited pivoting. A column whose norm falls below `tol`
 /// times its original norm moves to the right-hand end, and `rank` counts the columns left.
+/// `work` needs room for `2 * p` values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dqrdc2_(
     x: *mut f64,
@@ -175,46 +180,39 @@ pub unsafe extern "C" fn dqrdc2_(
 ) {
     let x = Matrix::new(x, *ldx);
     let (n, p, tol) = (*n as isize, *p as isize, *tol);
-    // work(p, 2): column 1 holds the norms as recomputed, column 2 the original norms.
-    let work = Matrix::new(work, p.max(1) as c_int);
-    let pivot_at = |index: isize| pivot.offset(index - 1);
-    for j in 1..=p {
-        let norm = dnrm2(n, x.at(1, j));
-        *element(qraux, j) = norm;
-        work.set(j, 1, norm);
-        work.set(j, 2, if norm == 0.0 { 1.0 } else { norm });
+    // `qraux` carries each column's running norm below the current row until that column's
+    // own reflection replaces it. `work` holds two vectors: the norm as last computed in
+    // full, which callers can read back, and the original norm the tolerance is relative to.
+    let refreshed_norm = |column: isize| element(work, column);
+    let original_norm = |column: isize| element(work, p + column);
+    let pivot_entry = |column: isize| pivot.offset(column - 1);
+    for column in 1..=p {
+        let norm = dnrm2(n, x.at(1, column));
+        *element(qraux, column) = norm;
+        *refreshed_norm(column) = norm;
+        // A zero column has no scale to be relative to; measuring it against 1 still marks
+        // it negligible for every positive tolerance.
+        *original_norm(column) = if norm == 0.0 { 1.0 } else { norm };
     }
-    let lup = n.min(p);
-    let mut k = p + 1;
-    for l in 1..=lup {
-        // Cycle negligible columns to the end until a usable one is in position l.
-        while l < k && *element(qraux, l) < work.get(l, 2) * tol {
-            for i in 1..=n {
-                let t = x.get(i, l);
-                for j in l + 1..=p {
-                    x.set(i, j - 1, x.get(i, j));
-                }
-                x.set(i, p, t);
+    // Columns after `kept` are the negligible ones already moved to the right-hand end.
+    let mut kept = p;
+    for l in 1..=n.min(p) {
+        while l <= kept && *element(qraux, l) < *original_norm(l) * tol {
+            // Rotating column `l` past every later one keeps the relative order of the kept
+            // columns and of the columns moved earlier.
+            for column in l..p {
+                dswap(n, x.at(1, column), x.at(1, column + 1));
+                std::ptr::swap(pivot_entry(column), pivot_entry(column + 1));
+                std::ptr::swap(element(qraux, column), element(qraux, column + 1));
+                std::ptr::swap(refreshed_norm(column), refreshed_norm(column + 1));
+                std::ptr::swap(original_norm(column), original_norm(column + 1));
             }
-            let saved_pivot = *pivot_at(l);
-            let saved_qraux = *element(qraux, l);
-            let saved_norm = work.get(l, 1);
-            let saved_original = work.get(l, 2);
-            for j in l + 1..=p {
-                *pivot_at(j - 1) = *pivot_at(j);
-                *element(qraux, j - 1) = *element(qraux, j);
-                work.set(j - 1, 1, work.get(j, 1));
-                work.set(j - 1, 2, work.get(j, 2));
-            }
-            *pivot_at(p) = saved_pivot;
-            *element(qraux, p) = saved_qraux;
-            work.set(p, 1, saved_norm);
-            work.set(p, 2, saved_original);
-            k -= 1;
+            kept -= 1;
         }
         if l == n {
             break;
         }
+        *element(qraux, l) = 0.0;
         let mut norm = dnrm2(n - l + 1, x.at(l, l));
         if norm == 0.0 {
             continue;
@@ -224,27 +222,30 @@ pub unsafe extern "C" fn dqrdc2_(
         }
         dscal(n - l + 1, 1.0 / norm, x.at(l, l));
         x.set(l, l, 1.0 + x.get(l, l));
-        for j in l + 1..=p {
-            let t = -ddot(n - l + 1, x.at(l, l), x.at(l, j)) / x.get(l, l);
-            daxpy(n - l + 1, t, x.at(l, l), x.at(l, j));
-            let column_norm = *element(qraux, j);
-            if column_norm != 0.0 {
-                let ratio = x.get(l, j).abs() / column_norm;
-                let t = (1.0 - ratio * ratio).max(0.0);
-                // Downdating the norm loses accuracy as it shrinks, so recompute it then.
-                if t.abs() < 1e-6 {
-                    let fresh = dnrm2(n - l, x.at(l + 1, j));
-                    *element(qraux, j) = fresh;
-                    work.set(j, 1, fresh);
-                } else {
-                    *element(qraux, j) = column_norm * t.sqrt();
-                }
+        for column in l + 1..=p {
+            let projection = -ddot(n - l + 1, x.at(l, l), x.at(l, column)) / x.get(l, l);
+            daxpy(n - l + 1, projection, x.at(l, l), x.at(l, column));
+            let running = *element(qraux, column);
+            if running == 0.0 {
+                continue;
+            }
+            let ratio = x.get(l, column).abs() / running;
+            let remaining = (1.0 - ratio * ratio).max(0.0);
+            // Once less than a millionth of the squared norm remains, downdating has lost
+            // too many digits to decide negligibility on, so the norm is recomputed. This is
+            // far earlier than LINPACK's `dqrdc` recomputes.
+            if remaining < 1e-6 {
+                let fresh = dnrm2(n - l, x.at(l + 1, column));
+                *element(qraux, column) = fresh;
+                *refreshed_norm(column) = fresh;
+            } else {
+                *element(qraux, column) = running * remaining.sqrt();
             }
         }
         *element(qraux, l) = x.get(l, l);
         x.set(l, l, -norm);
     }
-    *rank = (k - 1).min(n) as c_int;
+    *rank = kept.min(n) as c_int;
 }
 
 /// LINPACK's `dqrdc`: Householder QR with optional column pivoting (`job != 0`), where
@@ -524,76 +525,85 @@ pub unsafe extern "C" fn dqrls_(
     qraux: *mut f64,
     work: *mut f64,
 ) {
-    let (rows, columns, responses) = (*n as isize, *p as isize, *ny as isize);
     dqrdc2_(x, n, n, p, tol, k, qraux, jpvt, work);
-    let rank = *k as isize;
-    let mut info = 0;
-    if rank > 0 {
-        for column in 0..responses {
-            let offset = column * rows;
+    let matrix = Matrix::new(x, *n);
+    let (rows, columns, rank) = (*n as isize, *p as isize, *k as isize);
+    for response in 0..(*ny as isize).max(0) {
+        let observed = y.offset(response * rows);
+        let residuals = rsd.offset(response * rows);
+        let coefficients = b.offset(response * columns);
+        if rank > 0 {
+            let mut info = 0;
             qr_solve(
-                Matrix::new(x, *n),
+                matrix,
                 rows,
                 rank,
                 qraux,
-                y.offset(offset),
-                rsd.offset(offset),
-                qty.offset(offset),
-                b.offset(column * columns),
-                rsd.offset(offset),
-                rsd.offset(offset),
+                observed,
+                std::ptr::null_mut(),
+                qty.offset(response * rows),
+                coefficients,
+                residuals,
+                std::ptr::null_mut(),
                 1110,
                 &mut info,
             );
+        } else {
+            // With nothing kept, the fit is zero and every observation is a residual;
+            // `qty` is left as the caller passed it.
+            dcopy(rows, observed, residuals);
         }
-    } else {
-        for index in 0..rows * responses {
-            *rsd.offset(index) = *y.offset(index);
-        }
-    }
-    for j in rank..columns {
-        for column in 0..responses {
-            *b.offset(j + column * columns) = 0.0;
+        // The coefficients of the columns moved aside are reported as zero.
+        for index in rank + 1..=columns {
+            *element(coefficients, index) = 0.0;
         }
     }
 }
 
-/// Runs `qr_solve` with `job` for each of the `ny` columns, the shape every `dqrutl` helper has.
+/// Applies `qr_solve` with a single-output `job` to each of the `ny` columns of the `n`-row
+/// matrix `y`, writing column by column into `output`, whose columns are `output_rows` long.
+/// Jobs that compute coefficients, residuals or fitted values pass through `Q'y`, which
+/// they store over `y`, as R's helpers do. Returns the last column's `info`.
 #[allow(clippy::too_many_arguments)]
-unsafe fn for_each_column(
+unsafe fn solve_each_column(
     x: *mut f64,
     n: *const c_int,
     k: *const c_int,
     qraux: *mut f64,
+    y: *mut f64,
     ny: *const c_int,
     job: c_int,
-    info: *mut c_int,
-    mut targets: impl FnMut(isize) -> [*mut f64; 6],
-) {
+    output: *mut f64,
+    output_rows: isize,
+) -> c_int {
+    let matrix = Matrix::new(x, *n);
     let rows = *n as isize;
-    let mut status = 0;
-    for column in 0..(*ny as isize) {
-        let [y, qy, qty, b, rsd, xb] = targets(column);
+    let null = std::ptr::null_mut();
+    let mut info = 0;
+    for response in 0..(*ny as isize).max(0) {
+        let observed = y.offset(response * rows);
+        let target = output.offset(response * output_rows);
+        let only = |wanted: c_int| if job == wanted { target } else { null };
+        let transformed = if job == 1000 { target } else { observed };
         qr_solve(
-            Matrix::new(x, *n),
+            matrix,
             rows,
             *k as isize,
             qraux,
-            y,
-            qy,
-            qty,
-            b,
-            rsd,
-            xb,
+            observed,
+            only(10000),
+            transformed,
+            only(100),
+            only(10),
+            only(1),
             job,
-            &mut status,
+            &mut info,
         );
-        if !info.is_null() {
-            *info = status;
-        }
     }
+    info
 }
 
+/// `Q'y` for each column of `y`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dqrqty_(
     x: *mut f64,
@@ -604,22 +614,10 @@ pub unsafe extern "C" fn dqrqty_(
     ny: *const c_int,
     qty: *mut f64,
 ) {
-    let rows = *n as isize;
-    let mut unused = 0.0;
-    let dummy: *mut f64 = &mut unused;
-    for_each_column(x, n, k, qraux, ny, 1000, std::ptr::null_mut(), |column| {
-        let offset = column * rows;
-        [
-            y.offset(offset),
-            dummy,
-            qty.offset(offset),
-            dummy,
-            dummy,
-            dummy,
-        ]
-    });
+    solve_each_column(x, n, k, qraux, y, ny, 1000, qty, *n as isize);
 }
 
+/// `Q y` for each column of `y`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dqrqy_(
     x: *mut f64,
@@ -630,23 +628,11 @@ pub unsafe extern "C" fn dqrqy_(
     ny: *const c_int,
     qy: *mut f64,
 ) {
-    let rows = *n as isize;
-    let mut unused = 0.0;
-    let dummy: *mut f64 = &mut unused;
-    for_each_column(x, n, k, qraux, ny, 10000, std::ptr::null_mut(), |column| {
-        let offset = column * rows;
-        [
-            y.offset(offset),
-            qy.offset(offset),
-            dummy,
-            dummy,
-            dummy,
-            dummy,
-        ]
-    });
+    solve_each_column(x, n, k, qraux, y, ny, 10000, qy, *n as isize);
 }
 
-/// The coefficients for each column of `y`. As in R, `y` is overwritten with `Q'y`.
+/// The coefficients for each column of `y`, into the `k`-row matrix `b`. As in R, `y` is
+/// overwritten with `Q'y`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dqrcf_(
     x: *mut f64,
@@ -658,22 +644,10 @@ pub unsafe extern "C" fn dqrcf_(
     b: *mut f64,
     info: *mut c_int,
 ) {
-    let (rows, rank) = (*n as isize, *k as isize);
-    let mut unused = 0.0;
-    let dummy: *mut f64 = &mut unused;
-    for_each_column(x, n, k, qraux, ny, 100, info, |column| {
-        let offset = column * rows;
-        [
-            y.offset(offset),
-            dummy,
-            y.offset(offset),
-            b.offset(column * rank),
-            dummy,
-            dummy,
-        ]
-    });
+    *info = solve_each_column(x, n, k, qraux, y, ny, 100, b, *k as isize);
 }
 
+/// The residuals for each column of `y`. As in R, `y` is overwritten with `Q'y`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dqrrsd_(
     x: *mut f64,
@@ -684,22 +658,10 @@ pub unsafe extern "C" fn dqrrsd_(
     ny: *const c_int,
     rsd: *mut f64,
 ) {
-    let rows = *n as isize;
-    let mut unused = 0.0;
-    let dummy: *mut f64 = &mut unused;
-    for_each_column(x, n, k, qraux, ny, 10, std::ptr::null_mut(), |column| {
-        let offset = column * rows;
-        [
-            y.offset(offset),
-            dummy,
-            y.offset(offset),
-            dummy,
-            rsd.offset(offset),
-            dummy,
-        ]
-    });
+    solve_each_column(x, n, k, qraux, y, ny, 10, rsd, *n as isize);
 }
 
+/// The fitted values for each column of `y`. As in R, `y` is overwritten with `Q'y`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dqrxb_(
     x: *mut f64,
@@ -710,20 +672,7 @@ pub unsafe extern "C" fn dqrxb_(
     ny: *const c_int,
     xb: *mut f64,
 ) {
-    let rows = *n as isize;
-    let mut unused = 0.0;
-    let dummy: *mut f64 = &mut unused;
-    for_each_column(x, n, k, qraux, ny, 1, std::ptr::null_mut(), |column| {
-        let offset = column * rows;
-        [
-            y.offset(offset),
-            dummy,
-            y.offset(offset),
-            dummy,
-            dummy,
-            xb.offset(offset),
-        ]
-    });
+    solve_each_column(x, n, k, qraux, y, ny, 1, xb, *n as isize);
 }
 
 /// LINPACK's `dtrsl`: solves `T x = b` or `T' x = b` in place for triangular `T`. `job` is

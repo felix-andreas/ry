@@ -91,6 +91,10 @@ name = "test_numerics"
 path = "tests/test_numerics.rs"
 
 [[test]]
+name = "test_linpack"
+path = "tests/test_linpack.rs"
+
+[[test]]
 name = "test_rmath"
 path = "tests/test_rmath.rs"
 
