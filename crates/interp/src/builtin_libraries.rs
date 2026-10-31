@@ -220,16 +220,20 @@ const LIBRARY_MARKER: &str = "ry builtin library";
 const ROUTINE_MARKER: &str = "ry builtin routine";
 
 fn implementation(package: &str, name: &str) -> Option<NativeFn> {
-    let table: &[(&str, NativeFn)] = match package {
-        "methods" => crate::methods::ROUTINES,
-        "stats" => crate::distributions::ROUTINES,
-        "utils" => crate::utils::ROUTINES,
-        "tools" => crate::tools::ROUTINES,
-        "grDevices" => crate::graphics::GRDEVICES_ROUTINES,
-        "graphics" => crate::graphics::GRAPHICS_ROUTINES,
+    let tables: &[&[(&str, NativeFn)]] = match package {
+        "methods" => &[crate::methods::ROUTINES],
+        "stats" => &[crate::stats::ROUTINES, crate::distributions::ROUTINES],
+        "utils" => &[crate::utils::ROUTINES],
+        "tools" => &[crate::tools::ROUTINES],
+        "grDevices" => &[crate::graphics::GRDEVICES_ROUTINES],
+        "graphics" => &[crate::graphics::GRAPHICS_ROUTINES],
         _ => &[],
     };
-    let found = table.iter().find(|(routine, _)| *routine == name).map(|(_, function)| *function);
+    let found = tables
+        .iter()
+        .flat_map(|table| table.iter())
+        .find(|(routine, _)| *routine == name)
+        .map(|(_, function)| *function);
     match package {
         "graphics" | "grDevices" => Some(found.unwrap_or(crate::graphics::no_devices)),
         _ => found,
