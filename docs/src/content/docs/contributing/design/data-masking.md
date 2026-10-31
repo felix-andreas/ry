@@ -91,8 +91,11 @@ which keeps the zero-false-positive property.
    out of the naming walk and into per-package stub metadata. The `@masked` attribute already covers
    the variadic verbs; the bracket is what is still hardcoded.
 2. **Add the column vocabulary and membership checks** ([where column knowledge comes
-   from](#where-column-knowledge-comes-from)), gated on question 3's row-type design, with `:=`
-   evolution under the lower-bound model above.
+   from](#where-column-knowledge-comes-from)), with `:=` evolution under the lower-bound model
+   above. The row-type syntax now exists: ry's built-in `frame{x: integer[], ...}` type has exact
+   column sets, checked column references and query result types (the "Frames" section of the
+   typing reference). Reusing that machinery for a `data.table` annotation is the remaining step,
+   with the lower-bound model replacing exact sets, because a `data.table` updates by reference.
 
 ## dplyr
 

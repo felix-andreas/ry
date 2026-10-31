@@ -1965,3 +1965,68 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   (the new types compare structurally, so backdating still applies), and edit latency fell from
   3 to 5 ms / 95 to 120 ms to 2 ms / 45 to 55 ms (measured, cause not isolated: the allocator and smaller
   memos both touch the incremental path).
+
+# Decision record: the built-in frame
+
+ry's typed table type is spelled `frame`. It is a Polars `DataFrame` held by the `table` crate,
+which links Polars as a Rust crate, and the checker types it as `frame{col: type, ...}`.
+
+- **The name is `frame`, not `table`.** Base R's `table()` and its `"table"` class must keep
+  working, so the type, the constructor `frame(...)` and the runtime class
+  `c("frame", "data.frame")` use a name base R does not give a meaning to in a type position.
+  `graphics::frame()` exists, so the checker treats `frame()` as the built-in only with at least one
+  argument and when the project defines no `frame` of its own.
+- **`:=` has value semantics in the checker.** `f[, y := e]` rebinds `f` to the extended type, and
+  aliases keep the old type. Column sets are exact. At runtime the update is copy-on-write: the
+  interpreter passes an unshared `&mut Table` (reference count one) and the update happens in place,
+  or it calls `Table::fork` first, which copies only the column list, because Arrow buffers are
+  immutable and shared. data.table's own `:=` on a `data.table` keeps its by-reference semantics.
+- **`:=` writes only a slot the current scope already owns** (`naming.rs`, the `Index` arm).
+  Naming runs before types, so it cannot tell a frame from a `data.table`. Minting a local binding
+  for every `NameRef[, y := v]` made a global `data.table` updated inside a function resolve to the
+  `:=` statement, which broke goto-definition, references and rename. So a top-level name, a local
+  or a parameter is rewritten in place, and any other subject binds nothing. For a global frame the
+  checker still records the update as a refinement of the non-local name (`non_local_slots`, the
+  mechanism guard narrowing uses), so later reads in that function see the new columns.
+- **`:=` into an existing column keeps the column's type unless the value replaces it whole**,
+  because data.table coerces the value to the column. The engine (`assigned_type` in `query.rs`)
+  keeps the type under an `i`, under a `by`, and for a value that collapses to one row; a full-length
+  value with neither replaces the type. A string written into a factor keeps the factor and appends
+  the new labels as levels in order of appearance, as data.table does. The checker cannot see that
+  `sum(x)` is one value, so it treats only a literal as one (`is_literal` in `check.rs`), because a
+  scalar-like type such as `as.character(x)`'s is not a length guarantee. A column the statement
+  creates takes the value's type.
+- **Queries go through a small IR** (`crates/table/src/query.rs`), not straight from R syntax to
+  Polars, so the interpreter, the checker's result types (`result_type`) and the tests share one
+  description of `tbl[i, j, by]`. Lowering gives operations R semantics on top of Polars: integer
+  `+ - *` overflow to `NA`, a top-level integer `sum` that does not fit becomes a double (as in
+  R 4.3 and data.table's gsum), a NaN comparison is `NA`, `max`/`min` return NaN when one is
+  present, `!`/`&`/`|` treat a nonzero number as `TRUE`, aggregates propagate `NA` unless
+  `na.rm` (a `null_count` guard that costs nothing when the input has no nulls), `%/%` floors, `%%`
+  takes the divisor's sign, and `cor` is `NA` where Polars gives `NaN`.
+- **data.table's layout is the contract for joins**: rows follow `i`, `x`'s columns come first with
+  the join columns carrying `i`'s values, then `i`'s other columns, a clash prefixed `i.`. Join
+  columns of different types meet through a common type (two factors as strings), and the join
+  column is cast back to `i`'s type.
+- **`by` keeps first-appearance order and `keyby` sorts and keys**, matching data.table, through
+  `group_by_stable` and a sort.
+- **ALTREP lives in the `table` crate behind the `runtime` feature**, which links `libr` and `heap`.
+  The dependency points from the engine to the runtime so that `libr`, which every native package
+  loads, never compiles Polars. An exposed column's `data1` owns the Arrow array and `data2` holds
+  R's layout once something needs it; a column that R never materialized comes back from
+  `import_column` as the same buffer.
+- **NA is Arrow validity, NaN is a value.** A column without nulls has the same bytes in both
+  layouts, which is what makes the zero-copy paths possible.
+
+- **The ALTREP object is the only R-layout copy of a column.** `Table` once tracked its own
+  per-column mirrors next to the ALTREP `data2`, two sources of truth for the same fact. `Table`
+  now holds only the Polars frame and its key; residency is read from the ALTREP object.
+- **Keyed joins without `on` match x's key positionally against i's key, or against i's leading
+  columns when i has no key, and NA keys join each other** (`join_nulls`), all as in data.table.
+  `Join.other` is a `Table` rather than a bare `DataFrame` so that i's key reaches the lowering.
+  An equi join keeps i's order and then x's (`MaintainOrderJoin::LeftRight`), so several matches
+  for one row of i come back in x's order. A rolling join marks x's rows with a
+  hidden column so an inner rolling join keeps matches whose values are NA.
+
+Known gap: an integer `sum` nested in arithmetic or assigned through `:=` still narrows to integer
+and gives NA on overflow, where R gives a double.

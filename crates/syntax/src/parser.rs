@@ -678,7 +678,7 @@ impl Parser<'_, '_> {
                 }
                 // Inline, a body may follow a return type, so `list {` and `fn (` with a
                 // space start the body; only the hugging spelling is the type.
-                "list"
+                "list" | "frame"
                     if self.ann_next_significant(end) == Some(L_BRACE)
                         && (!self.inline_type || self.next_token_is(L_BRACE)) =>
                 {
@@ -823,6 +823,11 @@ impl Parser<'_, '_> {
 
     fn ann_list_braces(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
+        let noun = if self.token_str(self.pos) == "frame" {
+            "frame type"
+        } else {
+            "list type"
+        };
         self.wrap(NAME);
         self.ann_trivia(end);
         debug_assert!(self.at(L_BRACE));
@@ -838,7 +843,7 @@ impl Parser<'_, '_> {
             if self.pos >= end {
                 self.error_unclosed(
                     open_range,
-                    "unclosed `{` in this list type; expected a matching `}`",
+                    format!("unclosed `{{` in this {noun}; expected a matching `}}`"),
                 );
                 break;
             }
@@ -863,7 +868,7 @@ impl Parser<'_, '_> {
                 self.bump();
                 break;
             } else {
-                self.error_here("expected `,` or `}` in this list type");
+                self.error_here(format!("expected `,` or `}}` in this {noun}"));
                 break;
             }
         }
