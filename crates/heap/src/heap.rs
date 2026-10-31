@@ -63,6 +63,10 @@ pub struct Heap {
     inhibit: u32,
     stress_counter: u64,
     known: WellKnown,
+    /// Bumped whenever the set of bindings outside function frames changes (a binding created or
+    /// removed, an enclosure replaced), so a cached lookup that resolved through those
+    /// environments knows it is still valid when the epoch is unchanged.
+    binding_epoch: u64,
 }
 
 /// The objects every R session has, created with the heap.
@@ -286,6 +290,7 @@ impl Heap {
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
             mark_stack: Vec::new(),
+            binding_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
             roots: Roots {
@@ -667,6 +672,7 @@ impl Heap {
     }
 
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
+        self.binding_epoch += 1;
         self.write_barrier(env, value);
         env.set_enclosure_unbarriered(value);
     }
@@ -721,6 +727,9 @@ impl Heap {
         }
         let cell =
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
+        if !env.has_gp(gp::FUNCTION_FRAME) {
+            self.binding_epoch += 1;
+        }
         if self.is_symbol_frame(env) {
             self.store(symbol, symbol.cdr(), cell);
             symbol.set_cdr_unbarriered(cell);
@@ -747,6 +756,7 @@ impl Heap {
         if env.has_gp(gp::FRAME_LOCKED) {
             return Err(HeapError::LockedEnvironmentRemove);
         }
+        self.binding_epoch += 1;
         if self.is_symbol_frame(env) {
             let cell = symbol.cdr();
             if cell.kind() != SexpType::Binding {
@@ -760,6 +770,12 @@ impl Heap {
             return Ok(false);
         }
         Ok((*env.frame_ptr()).remove(symbol).is_some())
+    }
+
+    /// See the field: an unchanged epoch means no binding outside a function frame appeared or
+    /// disappeared, and no enclosure changed.
+    pub fn binding_epoch(&self) -> u64 {
+        self.binding_epoch
     }
 
     /// The symbols bound in `env`'s own frame.

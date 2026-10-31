@@ -265,6 +265,10 @@ pub mod gp {
     pub const BINDING_LOCKED: u16 = 1 << 14;
     pub const ACTIVE_BINDING: u16 = 1 << 15;
     pub const FRAME_LOCKED: u16 = 1 << 14;
+    /// An environment that is a closure call's frame. Bindings appear in such frames all the
+    /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
+    /// through one.
+    pub const FUNCTION_FRAME: u16 = 1 << 8;
 }
 
 pub(crate) mod gc_bits {

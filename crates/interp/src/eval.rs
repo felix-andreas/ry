@@ -544,6 +544,7 @@ pub unsafe fn apply_closure(
     let formals = function.car();
     let actuals = match_args(formals, args, call)?;
     let env = new_env(function.tag())?;
+    env.set_gp_bits(gp::FUNCTION_FRAME, true);
     let missing = missing_arg();
     let heap = crate::heap();
     let mut formal = formals;
@@ -1200,28 +1201,26 @@ unsafe fn do_or2(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn logical_operand(value: Sexp, call: &Call<'_>, side: &str) -> R<i32> {
+    logical_operand_of(value, call.call, call.name(), side)
+}
+
+/// An operand of `&&` or `||` (`operator`) as `TRUE`, `FALSE` or `NA`, with GNU R's errors for
+/// the `side` (`"x"` or `"y"`) that is not a logical scalar.
+pub unsafe fn logical_operand_of(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
     if !matches!(
         value.kind(),
         SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Nil | SexpType::String | SexpType::Raw
     ) {
-        return Err(call.error(format!(
-            "invalid '{side}' type in 'x {} y'",
-            call.name()
-        )));
+        return Err(error_in(call, format!("invalid '{side}' type in 'x {operator} y'")));
     }
     let count = length(value);
     if count > 1 {
-        return Err(call.error(format!(
-            "'length = {count}' in coercion to 'logical(1)'"
-        )));
+        return Err(error_in(call, format!("'length = {count}' in coercion to 'logical(1)'")));
     }
     if value.kind() == SexpType::String {
         let result = values::as_logical_scalar(value);
         if count == 1 && result == heap::object::NA_LOGICAL {
-            return Err(call.error(format!(
-                "invalid '{side}' type in 'x {} y'",
-                call.name()
-            )));
+            return Err(error_in(call, format!("invalid '{side}' type in 'x {operator} y'")));
         }
         return Ok(result);
     }
