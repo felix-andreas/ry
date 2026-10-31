@@ -38,6 +38,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("duplicated", 4, do_duplicated),
     internal("anyDuplicated", 3, do_any_duplicated),
     internal("match", 4, do_match),
+    internal("rowsum_matrix", 5, do_rowsum_matrix),
+    internal("rowsum_df", 5, do_rowsum_data_frame),
     internal("split", 2, do_split),
     internal("identical", 9, do_identical),
     // No vector carries sortedness metadata, so the fast pass never applies and the caller
@@ -531,6 +533,128 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
         })
         .collect();
     values::integer_vector(&result)
+}
+
+/// `rowsum_matrix(x, group, ugroup, na.rm, snames)`: the column sums of `x` within each group,
+/// one row per element of `ugroup`, named by `snames`.
+unsafe fn do_rowsum_matrix(call: &Call<'_>) -> R<Sexp> {
+    let x = values::materialize(call.arg(0))?;
+    let (rows, columns) = match values::dims(x).as_deref() {
+        Some(&[rows, columns]) => (rows, columns),
+        _ => (length(x), 1),
+    };
+    let groups = group_positions(call)?;
+    let result = alloc(x.kind(), groups.count * columns)?;
+    for column in 0..columns {
+        let input = column * rows..(column + 1) * rows;
+        let output = column * groups.count..(column + 1) * groups.count;
+        group_sums(call, x, input, result, output, &groups)?;
+    }
+    values::set_attr(result, symbols().dim, values::integer_vector(&[groups.count as i32, columns as i32])?)?;
+    let column_names = match values::get_attr(x, symbols().dimnames) {
+        dimnames if dimnames.kind() == SexpType::List && length(dimnames) == 2 => dimnames.element(1),
+        _ => nil(),
+    };
+    let dimnames = alloc(SexpType::List, 2)?;
+    values::set_elt(dimnames, 0, call.arg(4));
+    values::set_elt(dimnames, 1, column_names);
+    values::set_attr(result, symbols().dimnames, dimnames)?;
+    Ok(result)
+}
+
+/// `rowsum_df(x, group, ugroup, na.rm, snames)`: as `rowsum_matrix`, for a data frame of
+/// numeric columns, giving a data frame with row names `snames`.
+unsafe fn do_rowsum_data_frame(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.arg(0);
+    let groups = group_positions(call)?;
+    let result = alloc(SexpType::List, length(frame))?;
+    for index in 0..length(frame) {
+        let column = values::materialize(frame.element(index))?;
+        if !matches!(column.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real) || values::inherits(column, "factor") {
+            return Err(call.error("non-numeric data frame in rowsum"));
+        }
+        let kind = if column.kind() == SexpType::Real { SexpType::Real } else { SexpType::Integer };
+        let column = coerce_vector(column, kind)?;
+        let sums = alloc(kind, groups.count)?;
+        values::set_elt(result, index, sums);
+        group_sums(call, column, 0..length(column), sums, 0..groups.count, &groups)?;
+    }
+    values::set_attr(result, symbols().names, values::get_attr(frame, symbols().names))?;
+    values::set_attr(result, symbols().row_names, call.arg(4))?;
+    values::set_attr(result, symbols().class, values::scalar_string("data.frame")?)?;
+    Ok(result)
+}
+
+struct Groups {
+    /// The 0-based group of each row.
+    positions: Vec<usize>,
+    count: usize,
+}
+
+unsafe fn group_positions(call: &Call<'_>) -> R<Groups> {
+    let group = call.arg(1);
+    let unique = call.arg(2);
+    let string_code = SexpType::String.code();
+    let kind = if group.kind().code() >= string_code || unique.kind().code() >= string_code {
+        SexpType::String
+    } else if group.kind().code() >= unique.kind().code() {
+        group.kind()
+    } else {
+        unique.kind()
+    };
+    let group = values::materialize(coerce_vector(group, kind)?)?;
+    let unique = values::materialize(coerce_vector(unique, kind)?)?;
+    let mut table: FxHashMap<Key<'_>, usize> = FxHashMap::default();
+    for (index, key) in element_keys(unique).into_iter().enumerate() {
+        table.entry(key).or_insert(index);
+    }
+    let positions = element_keys(group)
+        .into_iter()
+        .map(|key| table.get(&key).copied().ok_or_else(|| call.error("'ugroup' does not contain every group")))
+        .collect::<R<Vec<usize>>>()?;
+    Ok(Groups { positions, count: length(unique) })
+}
+
+/// Adds `x[input]` into `result[output]` by group. An integer sum that overflows is `NA`, without
+/// a warning, as in GNU R.
+unsafe fn group_sums(
+    call: &Call<'_>,
+    x: Sexp,
+    input: std::ops::Range<usize>,
+    result: Sexp,
+    output: std::ops::Range<usize>,
+    groups: &Groups,
+) -> R<()> {
+    let na_rm = values::as_logical_scalar(call.arg(3)) == 1;
+    if x.kind() == SexpType::Real {
+        let values = &values::reals(x)[input];
+        let sums = &mut values::reals_mut(result)[output];
+        sums.fill(0.0);
+        for (&value, &group) in values.iter().zip(&groups.positions) {
+            if !(na_rm && value.is_nan()) {
+                sums[group] += value;
+            }
+        }
+        return Ok(());
+    }
+    let values = &values::ints(x)[input];
+    let mut sums = vec![Some(0i64); groups.count];
+    for (&value, &group) in values.iter().zip(&groups.positions) {
+        if value == NA_INTEGER {
+            if !na_rm {
+                sums[group] = None;
+            }
+            continue;
+        }
+        sums[group] = sums[group].map(|sum| sum + i64::from(value));
+    }
+    for (slot, sum) in values::ints_mut(result)[output].iter_mut().zip(sums) {
+        *slot = match sum {
+            Some(sum) if sum > i64::from(i32::MIN) && sum <= i64::from(i32::MAX) => sum as i32,
+            _ => NA_INTEGER,
+        };
+    }
+    Ok(())
 }
 
 /// `split(x, f)` for a factor `f`: one piece per level, `f` recycled along `x`, and NA codes

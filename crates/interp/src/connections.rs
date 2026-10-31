@@ -171,19 +171,28 @@ pub unsafe fn connection_index(object: Sexp) -> R<i32> {
     Ok(values::as_integer_scalar(object))
 }
 
-fn read_file_bytes(path: &str, gzip: bool) -> R<Vec<u8>> {
+fn read_file_bytes(path: &str, compressed: bool) -> R<Vec<u8>> {
     let path = expand_path(path);
     let bytes = std::fs::read(&path).map_err(|failure| {
         error(format!("cannot open file '{path}': {}", io_reason(&failure)))
     })?;
-    if gzip && bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut decoded = Vec::new();
-        MultiGzDecoder::new(&bytes[..])
-            .read_to_end(&mut decoded)
-            .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
-        return Ok(decoded);
+    if !compressed {
+        return Ok(bytes);
     }
-    Ok(bytes)
+    // GNU R's `gzfile` reads gzip, bzip2 and xz files, and plain ones, whatever it was asked
+    // to open, and so do `bzfile` and `xzfile`.
+    let mut decoded = Vec::new();
+    let outcome = if bytes.starts_with(&[0x1f, 0x8b]) {
+        MultiGzDecoder::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
+    } else if bytes.starts_with(b"BZh") {
+        bzip2_rs::DecoderReader::new(&bytes[..]).read_to_end(&mut decoded).map(drop)
+    } else if bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]) {
+        lzma_rs::xz_decompress(&mut &bytes[..], &mut decoded).map_err(|failure| std::io::Error::other(failure.to_string()))
+    } else {
+        return Ok(bytes);
+    };
+    outcome.map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
+    Ok(decoded)
 }
 
 fn io_reason(failure: &std::io::Error) -> &'static str {
@@ -364,14 +373,11 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
 
 /// The bytes still to read from a connection, consuming them.
 pub unsafe fn read_all_bytes(file: Sexp) -> R<Vec<u8>> {
-    let index = connection_index(file)?;
-    let connection = interp().connections.get(index)?;
-    if !connection.open {
-        open(connection)?;
-    }
-    let rest = connection.input[connection.position..].to_vec();
-    connection.position = connection.input.len();
-    Ok(rest)
+    with_input(file, |input, position| {
+        let rest = input[*position..].to_vec();
+        *position = input.len();
+        rest
+    })
 }
 
 /// Runs `read` over the unread input of `file`, which advances the position it is given. A
@@ -553,22 +559,30 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// `readChar(con, nchars, useBytes)`: reads only the characters it returns, so that the rest of
+/// an open connection stays readable, as `load()` relies on after checking a file's magic.
 unsafe fn do_read_char(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
     let counts = call.arg(1);
-    let bytes = if source.kind() == SexpType::String {
-        read_file_bytes(&values::require_string(source, "con")?, false)?
-    } else {
-        read_all_bytes(source)?
-    };
-    let mut offset = 0;
-    let mut items = Vec::new();
+    let mut wanted = Vec::with_capacity(length(counts));
     for index in 0..length(counts) {
-        let count = values::as_integer_scalar(crate::subset::vector_element(counts, index)?).max(0) as usize;
-        let end = (offset + count).min(bytes.len());
-        items.push(String::from_utf8_lossy(&bytes[offset..end]).into_owned());
-        offset = end;
+        wanted.push(values::as_integer_scalar(crate::subset::vector_element(counts, index)?).max(0) as usize);
     }
+    let read = |input: &[u8], position: &mut usize| {
+        let mut items = Vec::with_capacity(wanted.len());
+        for &count in &wanted {
+            let end = (*position + count).min(input.len());
+            items.push(String::from_utf8_lossy(&input[*position..end]).into_owned());
+            *position = end;
+        }
+        items
+    };
+    let items = if source.kind() == SexpType::String {
+        let bytes = read_file_bytes(&values::require_string(source, "con")?, false)?;
+        read(&bytes, &mut 0)
+    } else {
+        with_input(source, read)?
+    };
     string_vector(&items)
 }
 
@@ -808,7 +822,7 @@ unsafe fn do_summary_connection(call: &Call<'_>) -> R<Sexp> {
     let description = values::scalar_string(&connection.description)?;
     let class = values::scalar_string(class)?;
     let mode = values::scalar_string(&connection.mode)?;
-    let text = values::scalar_string("text")?;
+    let text = values::scalar_string(if connection.mode.contains('b') { "binary" } else { "text" })?;
     let opened = values::scalar_string(if connection.open { "opened" } else { "closed" })?;
     let can_read = values::scalar_string(if connection.mode.starts_with('r') { "yes" } else { "no" })?;
     let can_write = values::scalar_string(if connection.mode.starts_with('w') || connection.mode.starts_with('a') { "yes" } else { "no" })?;

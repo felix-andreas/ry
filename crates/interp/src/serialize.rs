@@ -21,12 +21,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("unserializeFromConn", 2, do_unserialize_from_conn),
     internal("serializeToConn", 5, do_serialize_to_conn).invisible(),
     internal("unserialize", 2, do_unserialize),
-    internal("serialize", 6, do_serialize),
-    internal("serializeb", 6, do_serialize),
+    internal("serialize", 5, do_serialize),
+    internal("serializeb", 5, do_serialize),
     internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
     internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("loadFromConn2", 3, |call| unsafe { Err(call.error("load() is not supported yet")) }),
-    internal("saveToConn", 8, |call| unsafe { Err(call.error("save() is not supported yet")) }),
+    internal("loadFromConn2", 3, do_load_from_conn),
+    internal("saveToConn", 6, do_save_to_conn).invisible(),
+    internal("getVarsFromFrame", 3, do_get_vars_from_frame),
+    internal("memCompress", 2, do_mem_compress),
+    internal("memDecompress", 2, do_mem_decompress),
 ];
 
 // Special item codes.
@@ -656,7 +659,11 @@ pub unsafe fn unserialize(bytes: &[u8], hook: Sexp) -> R<Sexp> {
         2 => {}
         3 => {
             let encoding_length = reader.integer()? as usize;
-            reader.take(encoding_length)?;
+            if reader.format == Format::Ascii {
+                reader.ascii_word()?;
+            } else {
+                reader.take(encoding_length)?;
+            }
         }
         _ => return Err(error(format!("cannot read workspace version {version}"))),
     }
@@ -1013,6 +1020,151 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
     let bytes = crate::connections::read_all_bytes(call.arg(0))?;
     unserialize(&bytes, call.arg(1))
+}
+
+/// `loadFromConn2(con, envir, verbose)`: reads a `save()` file, whose single object is a
+/// pairlist of the saved bindings, defines each in `envir`, and returns their names.
+unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
+    let env = call.arg(1);
+    if env.kind() != SexpType::Environment {
+        return Err(call.error("invalid 'envir' argument"));
+    }
+    let bytes = crate::connections::read_all_bytes(call.arg(0))?;
+    if !bytes.starts_with(b"RD") {
+        return Err(call.error("the input does not start with a magic number compatible with loading from a connection"));
+    }
+    let mut bindings = unserialize(&bytes, nil())?;
+    crate::heap().root(bindings);
+    let mut names = Vec::new();
+    while bindings.kind() == SexpType::Pairlist {
+        let symbol = bindings.tag();
+        crate::heap().define(env, symbol, bindings.car())?;
+        names.push(values::symbol_name(symbol).into_owned());
+        bindings = bindings.cdr();
+    }
+    values::string_vector(&names)
+}
+
+/// `saveToConn(names, con, ascii, version, envir, eval.promises)`: writes the bindings as a
+/// `save()` file. The data is always XDR, which every reader accepts; `ascii = TRUE` changes
+/// only GNU R's encoding, not what `load()` returns.
+unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    if names.kind() != SexpType::String {
+        return Err(call.error("first argument must be a character vector"));
+    }
+    let env = call.arg(4);
+    if env.kind() != SexpType::Environment {
+        return Err(call.error("invalid 'envir' argument"));
+    }
+    let force = values::as_logical_scalar(call.arg(5)) == 1;
+    let items = saved_bindings(call, names, env, force, false)?;
+    let bindings = values::pairlist(&items, SexpType::Pairlist)?;
+    crate::heap().root(bindings);
+    let mut bytes = b"RDX3\n".to_vec();
+    bytes.extend(serialize(bindings)?);
+    crate::connections::write_bytes(call.arg(1), &bytes)?;
+    Ok(nil())
+}
+
+/// `getVarsFromFrame(vars, env, force)`: the named list of the bindings in `env`'s own frame.
+unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let env = call.arg(1);
+    if names.kind() != SexpType::String || env.kind() != SexpType::Environment {
+        return Err(call.error("bad variable names or environment"));
+    }
+    let force = values::as_logical_scalar(call.arg(2)) == 1;
+    let items = saved_bindings(call, names, env, force, true)?;
+    let result = alloc(SexpType::List, items.len())?;
+    for (index, &(_, value)) in items.iter().enumerate() {
+        values::set_elt(result, index, value);
+    }
+    values::set_attr(result, symbols().names, names)?;
+    Ok(result)
+}
+
+/// The values bound to `names`, as `(symbol, value)` pairs. Each value stays reachable from
+/// `env`, which keeps it alive.
+unsafe fn saved_bindings(call: &Call<'_>, names: Sexp, env: Sexp, force: bool, frame_only: bool) -> R<Vec<(Sexp, Sexp)>> {
+    let mut items = Vec::with_capacity(length(names));
+    for index in 0..length(names) {
+        let name = values::string_at(names, index).unwrap_or_default();
+        let symbol = values::install(&name)?;
+        let mut value = if frame_only {
+            crate::eval::find_var_in_frame(symbol, env)?
+        } else {
+            crate::eval::find_var(symbol, env)?
+        };
+        if value == values::unbound() {
+            return Err(call.error(format!("object '{name}' not found")));
+        }
+        if force && value.kind() == SexpType::Promise {
+            value = crate::eval::force_promise(value)?;
+        }
+        items.push((symbol, value));
+    }
+    Ok(items)
+}
+
+/// `memCompress(from, type)`, with `type` 1 to 4 for none, gzip (a zlib stream, as GNU R
+/// writes), bzip2 and xz.
+unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
+    let from = values::raws(call.arg(0));
+    let compressed = match values::as_integer_scalar(call.arg(1)) {
+        1 => from.to_vec(),
+        2 => {
+            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
+            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+        }
+        3 => return Err(call.error("bzip2 compression is not supported by ry yet")),
+        4 => {
+            let mut output = Vec::new();
+            lzma_rs::xz_compress(&mut &from[..], &mut output).map_err(|failure| call.error(failure.to_string()))?;
+            output
+        }
+        _ => return Err(call.error("invalid 'type' argument")),
+    };
+    raw_vector(&compressed)
+}
+
+/// `memDecompress(from, type)`, with `type` 1 to 5 for none, gzip, bzip2, xz and unknown, which
+/// detects the format from its magic bytes.
+unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
+    let from = values::raws(call.arg(0));
+    let gzip_header = from.starts_with(&[0x1f, 0x8b]);
+    let xz_header = from.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]);
+    let mut kind = values::as_integer_scalar(call.arg(1));
+    if kind == 5 {
+        kind = if gzip_header {
+            2
+        } else if from.starts_with(b"BZh") {
+            3
+        } else if xz_header {
+            4
+        } else {
+            crate::conditions::warning("unknown compression, assuming none")?;
+            1
+        };
+    }
+    let mut output = Vec::new();
+    let outcome = match kind {
+        1 => return raw_vector(from),
+        2 if gzip_header => flate2::read::MultiGzDecoder::new(from).read_to_end(&mut output).map(drop),
+        2 => ZlibDecoder::new(from).read_to_end(&mut output).map(drop),
+        3 => bzip2_rs::DecoderReader::new(from).read_to_end(&mut output).map(drop),
+        4 => lzma_rs::xz_decompress(&mut &from[..], &mut output).map_err(|failure| std::io::Error::other(failure.to_string())),
+        _ => return Err(call.error("invalid 'type' argument")),
+    };
+    outcome.map_err(|_| call.error("internal error in memDecompress"))?;
+    raw_vector(&output)
+}
+
+unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
+    let result = alloc(SexpType::Raw, bytes.len())?;
+    values::raws_mut(result).copy_from_slice(bytes);
+    Ok(result)
 }
 
 unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {

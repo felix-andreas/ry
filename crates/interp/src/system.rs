@@ -34,7 +34,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("debug", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("undebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("debugonce", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("isdebugged", 2, |_| unsafe { scalar_bool(false) }),
+    internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("browserText", 1, |call| unsafe { Err(call.error("no browser context to query")) }),
