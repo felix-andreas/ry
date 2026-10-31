@@ -4,7 +4,7 @@
 use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
 use crate::{Db, SourceFile, parse};
 use std::collections::BTreeSet;
-use syntax::ast::is_expression_kind;
+use crate::hir::is_expression_kind;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.

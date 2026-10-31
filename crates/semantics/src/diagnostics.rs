@@ -314,6 +314,19 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 format!("this is a value, not a name, so nothing can be assigned to it{hint}"),
             ));
         }
+        // The arm body reads every name the pattern binds, so an alternative that leaves one
+        // out would run the body with that name unset or holding a stale value.
+        for mismatch in &naming.or_pattern_mismatches {
+            diagnostics.push(Diagnostic::new(
+                mismatch.range + offset,
+                Severity::Error,
+                "syntax-error",
+                format!(
+                    "this alternative does not bind `{}`, but another alternative of the `|` pattern does. Every alternative must bind the same names",
+                    mismatch.name
+                ),
+            ));
+        }
         // R errors on a read with no prior write. Local slots only: a top-level
         // variable's unwritten path falls through to the enclosing environment.
         for expression in &naming.maybe_undefined {

@@ -2557,7 +2557,7 @@ fn s4_occurrences(
 }
 
 /// Parameters and loop variables are not expressions, so their declaration site is emitted
-/// explicitly.
+/// explicitly. A pattern's names are `NameRef` expressions, so they come with the resolutions.
 fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mut Vec<Occurrence>) {
     let (Some(node), Some(naming), Some(hir)) = (
         item_node(db, item),
@@ -2583,9 +2583,13 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
     let targets: BTreeSet<ExprId> = hir
         .expressions
         .iter()
-        .filter_map(|expression| match &expression.kind {
-            ExpressionKind::Assign { target, .. } => Some(*target),
-            _ => None,
+        .flat_map(|expression| match &expression.kind {
+            ExpressionKind::Assign { target, .. } => vec![*target],
+            ExpressionKind::Match { arms, .. } => arms
+                .iter()
+                .flat_map(|arm| arm.bindings.iter().copied())
+                .collect(),
+            _ => Vec::new(),
         })
         .collect();
     slot.extend(

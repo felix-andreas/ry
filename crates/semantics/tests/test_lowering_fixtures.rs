@@ -2,7 +2,7 @@
 //! happens to type the same.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
+use semantics::hir::{Argument, ExprId, ExpressionKind, Module, PatId, PatternKind};
 use semantics::testing::with_fixture_project;
 use semantics::{DocumentKind, item_hir, item_tree};
 use std::path::PathBuf;
@@ -95,6 +95,13 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         ExpressionKind::Paren(_) => "Paren".to_owned(),
         ExpressionKind::Break => "Break".to_owned(),
         ExpressionKind::Next => "Next".to_owned(),
+        ExpressionKind::Tuple(_) => "Tuple".to_owned(),
+        ExpressionKind::Record(fields) => {
+            let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+            format!("Record({})", names.join(", "))
+        }
+        ExpressionKind::Tag { name, .. } => format!("Tag :{name}"),
+        ExpressionKind::Match { .. } => "Match".to_owned(),
     };
     output.push_str(&format!("{}{label}\n", "  ".repeat(depth)));
     match kind {
@@ -114,9 +121,68 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         ExpressionKind::Function { body, .. } => {
             render_expression(output, module, *body, depth + 1);
         }
+        ExpressionKind::Match { scrutinee, arms } => {
+            render_expression(output, module, *scrutinee, depth + 1);
+            let indent = "  ".repeat(depth + 1);
+            for arm in arms {
+                output.push_str(&format!("{indent}arm\n"));
+                render_pattern(output, module, arm.pattern, depth + 2);
+                if let Some(guard) = arm.guard {
+                    output.push_str(&format!("{indent}  if\n"));
+                    render_expression(output, module, guard, depth + 3);
+                }
+                render_expression(output, module, arm.body, depth + 2);
+            }
+        }
         _ => {
             for child in kind.child_ids() {
                 render_expression(output, module, child, depth + 1);
+            }
+        }
+    }
+}
+
+fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match &module.pattern(id).kind {
+        PatternKind::Missing => output.push_str(&format!("{indent}pattern Missing\n")),
+        PatternKind::Wildcard => output.push_str(&format!("{indent}pattern _\n")),
+        PatternKind::Bind(name) => {
+            let ExpressionKind::NameRef(name) = &module.expression(*name).kind else {
+                panic!("a binding leaf is a name");
+            };
+            output.push_str(&format!("{indent}pattern bind {name}\n"));
+        }
+        PatternKind::Literal { literal, negative } => output.push_str(&format!(
+            "{indent}pattern literal {}{literal:?}\n",
+            if *negative { "-" } else { "" }
+        )),
+        PatternKind::Tag { name, payload, .. } => {
+            output.push_str(&format!("{indent}pattern tag :{name}\n"));
+            if let Some(payload) = payload {
+                render_pattern(output, module, *payload, depth + 1);
+            }
+        }
+        PatternKind::Tuple(items) => {
+            output.push_str(&format!("{indent}pattern tuple\n"));
+            for item in items {
+                render_pattern(output, module, *item, depth + 1);
+            }
+        }
+        PatternKind::Record { fields, rest } => {
+            output.push_str(&format!(
+                "{indent}pattern record{}\n",
+                if *rest { " .." } else { "" }
+            ));
+            for field in fields {
+                output.push_str(&format!("{indent}  field {} =\n", field.name));
+                render_pattern(output, module, field.pattern, depth + 2);
+            }
+        }
+        PatternKind::Or(alternatives) => {
+            output.push_str(&format!("{indent}pattern or\n"));
+            for alternative in alternatives {
+                render_pattern(output, module, *alternative, depth + 1);
             }
         }
     }

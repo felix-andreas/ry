@@ -11,11 +11,11 @@ pub mod stubs;
 pub mod testing;
 pub mod types;
 
-use crate::hir::Symbol;
+use crate::hir::{Symbol, binary_operands, is_expression_kind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
-use syntax::ast::{self, BinaryExpr, is_expression_kind};
+use syntax::ast::{self, BinaryExpr};
 use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
@@ -1459,12 +1459,11 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     }
     let binary = BinaryExpr::cast(node.clone())?;
     let operator = binary.operator()?;
+    let (lhs, rhs) = binary_operands(node);
     // `:=` binds nothing: R calls a function of that name (data.table, rlang).
     let (target, value) = match operator.kind() {
-        SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => {
-            (binary.lhs(), binary.rhs())
-        }
-        SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (binary.rhs(), binary.lhs()),
+        SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => (lhs, rhs),
+        SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (rhs, lhs),
         _ => return None,
     };
     let target = target?;

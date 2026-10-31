@@ -1393,6 +1393,15 @@ impl<'db> Checker<'db, '_> {
             }
             ExpressionKind::Paren(inner) => self.infer(*inner),
             ExpressionKind::Break | ExpressionKind::Next => unknown(self.db),
+            ExpressionKind::Tuple(_)
+            | ExpressionKind::Record(_)
+            | ExpressionKind::Tag { .. }
+            | ExpressionKind::Match { .. } => {
+                for child in expression.kind.child_ids() {
+                    self.infer(child);
+                }
+                unknown(self.db)
+            }
         };
         // Assignments applied their annotation before the slot write above.
         let ty = if matches!(expression.kind, ExpressionKind::Assign { .. }) {
@@ -2403,6 +2412,9 @@ impl<'db> Checker<'db, '_> {
                 ..
             } => self.diverges(*then_branch) && self.diverges(*else_branch),
             ExpressionKind::Paren(inner) => self.diverges(*inner),
+            ExpressionKind::Match { arms, .. } => {
+                !arms.is_empty() && arms.iter().all(|arm| self.diverges(arm.body))
+            }
             _ => false,
         }
     }
@@ -6616,7 +6628,7 @@ mod tests {
     use crate::hir::lower_item;
     use crate::naming::resolve_item;
     use syntax::SyntaxKind;
-    use syntax::ast::is_expression_kind;
+    use crate::hir::is_expression_kind;
 
     fn check_source<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
         let parse = syntax::parse(source);
