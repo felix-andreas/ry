@@ -27,10 +27,9 @@ behavior below truthfully, most of it under "Where correct code is reported" in
 
 False reports on correct R, worst first:
 
-- **Inferred numeric parameters share one type.** `function(price, rate) price * rate` infers
-  `<T: numeric> fn(price: T, rate: T) -> T`, so `f(1L, 0.5)` reports `expected integer, found
-  double` and `f(TRUE, 0.5)` rejects the logical. Annotated `double` parameters widen correctly.
-  Widening has to apply where a type variable meets two numeric arguments.
+- **An inferred numeric parameter rejects a `logical`.** `f(TRUE, 0.5)` for `function(price, rate)
+  price * rate` is refused, while mixed `integer` and `double` widen (`InferenceTable::widen_numeric_binding`).
+  Promotion has to live in the type, not the binding (see "Promotion needs to live in the type").
 - **`pkg::name` does not activate a conditional namespace.** `dplyr::mutate()` or
   `jsonlite::fromJSON()` in a script without `library()` or `DESCRIPTION` reports an unknown
   namespace. The read names its package, so it should activate the namespace (or at least validate
@@ -2345,3 +2344,21 @@ What step 2 of `contributing/design/r-runtime.md` left for later steps, most pre
 - **The engine and its scheduling.** A red-green core with per-symbol interface firewalls, an SCC fixed point, tombstones, eviction and a stacker-grown validation spine. Durability tiers, with open documents LOW and the corpus HIGH, and a sound downgrade that re-mins through cutoff nodes. Memoized completion.
 - **The docs site.** Getting started leads with a real bug, installation is its own page, the typing guide and reference are contracts, and the architecture, structure and testing contributor pages are current.
 - **`legacy/` is deleted after a full port.** Every case of the previous implementation's suites was rendered on the shipping stack, bucketed by agreement and adjudicated against the typing reference, which fixed 18 real bugs and ported the distinct cases into the fixture suites. Its incrementality contracts became `crates/semantics/tests/test_incremental.rs`, which surfaced and fixed the missing per-name firewalls, its performance instruments became the one `test_perf.rs` witness, and its 1,967 programs stay as inputs in `crates/syntax/tests/programs/`.
+
+## Benchmark code bases (measured)
+
+`just bench` generates the three 300K-line code bases (about 413K lines with tests) and prints this
+table; `tools/bench/lsp_latency.py` drives `ry server` over stdio. Release build, 4-core container,
+typing on:
+
+| code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
+|---|---:|---:|---|---:|---:|
+| finance | 6.1 s | 997 MiB | 1005 `unused` (genuine) | 3 / 118 ms | 3 / 112 ms |
+| data science | 6.7 s | 1006 MiB | none | 5 / 116 ms | 3 / 122 ms |
+| biostatistics | 6.2 s | 1020 MiB | none | 3 / 94 ms | 3 / 105 ms |
+
+Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
+- Peak memory is about 2.4 KiB per line with tests, above the 2 KiB budget in `test_perf.rs`.
+- "Settled" includes the server's idle delay, so it is an upper bound on the semantic wave.
+- An `Unknown` argument to an overloaded call now yields `Unknown` when numeric results disagree
+  (`sum(x[[i]])`); other disagreements still take the first candidate.
