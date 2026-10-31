@@ -16,4 +16,5 @@ clap.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 similar.workspace = true
+syntax = { path = "../syntax" }
 thiserror.workspace = true

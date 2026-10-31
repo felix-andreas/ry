@@ -987,6 +987,7 @@ unsafe fn step(
             let target = operand(0);
             if target < at {
                 crate::heap().release_handles(mark);
+                crate::unwind::poll_interrupt()?;
             }
             *pc = target;
             return Ok(None);

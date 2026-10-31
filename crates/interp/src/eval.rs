@@ -242,6 +242,9 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     let result = eval(promise.cdr(), promise.tag());
     promise.set_gp_bits(PROMISE_SEEN, false);
     let value = result?;
+    if promise.has_gp(gp::CHECKED_PROMISE) {
+        crate::annotations::check_forced(promise, value)?;
+    }
     let heap = crate::heap();
     heap.set_car(promise, value);
     heap.set_tag(promise, nil());
@@ -258,6 +261,7 @@ pub unsafe fn value_of(object: Sexp) -> R<Sexp> {
 }
 
 unsafe fn eval_call(call: Sexp, env: Sexp) -> R<Sexp> {
+    crate::unwind::poll_interrupt()?;
     let head = call.car();
     let function = if head.kind() == SexpType::Symbol {
         find_fun(head, env)?
@@ -621,12 +625,20 @@ pub unsafe fn run_closure(
         restarts: restarts.clone(),
     });
     let depth = state.frames.len();
-    let result = scope(|| {
-        stacker::maybe_grow(128 * 1024, 4 * 1024 * 1024, || {
-            let body = function.cdr();
-            bytecode::run_body(function, body, env)
-        })
+    let signature = crate::annotations::enter(call, function, env, depth);
+    let result = signature.and_then(|signature| {
+        let result = scope(|| {
+            stacker::maybe_grow(128 * 1024, 4 * 1024 * 1024, || {
+                let body = function.cdr();
+                bytecode::run_body(function, body, env)
+            })
+        });
+        Ok((signature, result))
     });
+    let (signature, result) = match result {
+        Ok(pair) => pair,
+        Err(unwind) => (None, Err(unwind)),
+    };
     let result = match result {
         Err(unwind) if unwind.returns_to(env) => {
             let Unwind::Jump(jump) = unwind else {
@@ -642,6 +654,13 @@ pub unsafe fn run_closure(
         }
         other => other,
     };
+    let result = match (signature, result) {
+        (Some(signature), Ok(value)) => {
+            crate::annotations::check_return(call, signature, value).map(|()| value)
+        }
+        (_, result) => result,
+    };
+    crate::annotations::leave(depth);
     let result = run_on_exit(depth, result);
     let state = interp();
     state.frames.truncate(depth - 1);
