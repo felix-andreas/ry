@@ -2,7 +2,7 @@
 //! `unlist`, lengths, names, dims, and attributes.
 
 use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present, special},
     coerce::{self, coerce_vector},
     conditions,
     eval::{self, value_of},
@@ -18,12 +18,12 @@ use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("[", -1, do_subset).generic(Generic::Internal).keep_missing(),
     builtin("[[", -1, do_subset2).generic(Generic::Internal).keep_missing(),
-    builtin("$", 2, do_dollar).generic(Generic::Internal),
-    builtin("@", 2, do_at),
+    special("$", 2, do_dollar),
+    special("@", 2, do_at),
     builtin("[<-", -1, do_subassign).generic(Generic::Internal).keep_missing(),
     builtin("[[<-", -1, do_subassign2).generic(Generic::Internal).keep_missing(),
-    builtin("$<-", 3, do_dollar_assign).generic(Generic::Internal),
-    builtin("@<-", 3, do_at_assign),
+    special("$<-", 3, do_dollar_assign),
+    special("@<-", 3, do_at_assign),
     builtin(".subset", -1, do_subset).keep_missing(),
     builtin(".subset2", -1, do_subset2).keep_missing(),
     builtin("c", -1, do_c).generic(Generic::Internal),
@@ -720,6 +720,13 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         return Err(crate::unwind::error_in(call, "attempt to select less than one element in get1index"));
     }
     let names = values::names(object);
+    if index.kind() == SexpType::String
+        && matches!(object.kind(), SexpType::List | SexpType::Expression)
+        && match_name(names, index.element(0).bytes(), exact)?.is_none()
+    {
+        // A list has no element of that name: `[[` gives `NULL`, unlike for atomic vectors.
+        return Ok(nil());
+    }
     let position = single_position(index, length(object), names, exact, call)?;
     element_or_value(object, position)
 }
@@ -784,37 +791,32 @@ unsafe fn single_position(index: Sexp, extent: usize, names: Sexp, exact: Option
 
 // `$` and `@`.
 
-unsafe fn dollar_name(value: Sexp) -> R<Sexp> {
+/// The name argument of `$` and `@`: a symbol or string, never evaluated.
+unsafe fn name_argument(value: Sexp) -> R<Sexp> {
+    let value = if value.kind() == SexpType::Promise { value.cdr() } else { value };
     match value.kind() {
         SexpType::Symbol => Ok(value.car()),
         SexpType::String if length(value) >= 1 => Ok(value.element(0)),
-        SexpType::Language => {
-            // A promise from dispatch: `x$name` passes the name unevaluated.
-            Ok(values::mkchar(&crate::deparse::deparse_one_line(value))?)
-        }
+        SexpType::Language if value.car() == symbols().quote => name_argument(value.cdr().car()),
         _ => Err(error("invalid subscript type '".to_string() + value.kind().name() + "'")),
     }
 }
 
-/// `$` is special in GNU R: its second argument is a name, never evaluated. Here it is a builtin
-/// whose call arguments are read back from the call.
+/// `x$name`: `$` is special, so the name is never evaluated; an object dispatches with the
+/// name as a string.
 unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let name_argument = if call.call.kind() == SexpType::Language && length(call.call) >= 3 {
-        call.call.cdr().cdr().car()
-    } else {
-        call.arg(1)
-    };
-    let name_argument = if name_argument.kind() == SexpType::Promise {
-        name_argument.cdr()
-    } else {
-        name_argument
-    };
-    let name = if matches!(name_argument.kind(), SexpType::Symbol | SexpType::String) {
-        dollar_name(name_argument)?
-    } else {
-        dollar_name(call.arg(1))?
-    };
+    if call.len() != 2 {
+        return Err(call.error(format!("{} arguments passed to '$' which requires 2", call.len())));
+    }
+    let object = eval::eval(call.arg(0), call.env)?;
+    let name = name_argument(call.arg(1))?;
+    if object.is_object() {
+        let name_string = values::scalar_string_charsxp(name)?;
+        let args = [Arg { tag: nil(), value: object }, Arg { tag: nil(), value: name_string }];
+        if let Some(value) = crate::dispatch::dispatch_builtin("$", call.call, &args, call.env)? {
+            return Ok(value);
+        }
+    }
     dollar(object, name, call.call)
 }
 
@@ -862,13 +864,8 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
 }
 
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let name_argument = if call.call.kind() == SexpType::Language && length(call.call) >= 3 {
-        call.call.cdr().cdr().car()
-    } else {
-        call.arg(1)
-    };
-    let symbol = slot_symbol(name_argument)?;
+    let object = eval::eval(call.arg(0), call.env)?;
+    let symbol = slot_symbol(call.arg(1))?;
     get_slot(object, symbol, call.call)
 }
 
@@ -933,14 +930,10 @@ unsafe fn interp_methods_function(name: &str) -> R<Option<Sexp>> {
 }
 
 unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let name_argument = if call.call.kind() == SexpType::Language && length(call.call) >= 3 {
-        call.call.cdr().cdr().car()
-    } else {
-        call.arg(1)
-    };
-    let symbol = slot_symbol(name_argument)?;
-    let value = call.arg(2);
+    let object = eval::eval(call.arg(0), call.env)?;
+    let symbol = slot_symbol(call.arg(1))?;
+    let value = eval::eval(call.arg(2), call.env)?;
+
     // The methods package checks the assignment against the class definition.
     if let Some(check) = interp_methods_function("checkAtAssignment")? {
         let class = values::class_attr(object);
@@ -1305,19 +1298,21 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
 }
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let name_argument = if call.call.kind() == SexpType::Language && length(call.call) >= 3 {
-        let raw = call.call.cdr().cdr().car();
-        if raw.kind() == SexpType::Promise { raw.cdr() } else { raw }
-    } else {
-        call.arg(1)
-    };
-    let name = if matches!(name_argument.kind(), SexpType::Symbol | SexpType::String) {
-        dollar_name(name_argument)?
-    } else {
-        dollar_name(call.arg(1))?
-    };
-    dollar_assign(object, name, call.arg(2), call.call)
+    let object = eval::eval(call.arg(0), call.env)?;
+    let name = name_argument(call.arg(1))?;
+    let value = eval::eval(call.arg(2), call.env)?;
+    if object.is_object() {
+        let name_string = values::scalar_string_charsxp(name)?;
+        let args = [
+            Arg { tag: nil(), value: object },
+            Arg { tag: nil(), value: name_string },
+            Arg { tag: symbols().value, value },
+        ];
+        if let Some(result) = crate::dispatch::dispatch_builtin("$<-", call.call, &args, call.env)? {
+            return Ok(result);
+        }
+    }
+    dollar_assign(object, name, value, call.call)
 }
 
 pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -> R<Sexp> {

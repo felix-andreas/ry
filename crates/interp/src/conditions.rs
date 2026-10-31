@@ -153,6 +153,12 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     let show = state.show_error_messages && (show == nil() || values::as_logical_scalar(show) != 0);
     if show {
         write_console(text.as_bytes(), true);
+        let calls_option = crate::envir::get_option("showErrorCalls");
+        if values::as_logical_scalar(calls_option) == 1 || std::env::var_os("RY_TRACEBACK").is_some() {
+            if let Some(traceback) = concise_traceback(call) {
+                write_console(format!("Calls: {traceback}\n").as_bytes(), true);
+            }
+        }
         if !interp().warnings.is_empty() {
             write_console(b"In addition: ", true);
             print_warnings();
@@ -174,6 +180,32 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     }
     interp().in_error -= 1;
     outcome
+}
+
+/// GNU R's concise traceback: the functions on the stack, outermost first, or `None` when the
+/// only one is the call the message already names.
+unsafe fn concise_traceback(call: Sexp) -> Option<String> {
+    let mut names = Vec::new();
+    for frame in &interp().frames {
+        let head = frame.call.car();
+        let name = if frame.call.kind() == SexpType::Language && head.kind() == SexpType::Symbol {
+            values::symbol_name(head).into_owned()
+        } else {
+            "<Anonymous>".to_owned()
+        };
+        names.push(name);
+    }
+    if names.is_empty() {
+        return None;
+    }
+    if names.len() == 1 && interp().frames.last().is_some_and(|frame| frame.call == call) {
+        return None;
+    }
+    let mut text = names.join(" -> ");
+    if text.chars().count() > 300 {
+        text = format!("... -> {}", names[names.len().saturating_sub(5)..].join(" -> "));
+    }
+    Some(text)
 }
 
 /// `Error in <call> : <message>`, with the message on its own line when the two would not fit

@@ -49,7 +49,7 @@ pub unsafe fn deparse_one_line(object: Sexp) -> String {
     // GNU R's `deparse1s` joins the lines of a call it reports in a message.
     lines
         .iter()
-        .map(|line| line.trim_start())
+        .map(|line| line.trim())
         .collect::<Vec<_>>()
         .join(" ")
 }

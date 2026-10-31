@@ -40,6 +40,8 @@ pub struct Routine {
 pub enum RoutineKind {
     Call,
     External,
+    C,
+    Fortran,
 }
 
 /// `R_CallMethodDef` and `R_ExternalMethodDef`.
@@ -74,11 +76,21 @@ impl Dll {
         }
     }
 
-    fn registered(&self, kind: RoutineKind) -> &[Routine] {
+    pub fn registered(&self, kind: RoutineKind) -> &[Routine] {
         match kind {
             RoutineKind::Call => &self.call_routines,
             RoutineKind::External => &self.external_routines,
+            RoutineKind::C => &self.c_routines,
+            RoutineKind::Fortran => &self.fortran_routines,
         }
+    }
+
+    pub fn handle(&self) -> *mut c_void {
+        self.handle
+    }
+
+    pub fn dynamic_lookup(&self) -> bool {
+        self.use_dynamic_symbols
     }
 }
 
@@ -186,6 +198,8 @@ pub unsafe fn find_routine(
     let interface = match kind {
         RoutineKind::Call => ".Call",
         RoutineKind::External => ".External",
+        RoutineKind::C => ".C",
+        RoutineKind::Fortran => ".Fortran",
     };
     Err(match package {
         Some(package) => error(format!(

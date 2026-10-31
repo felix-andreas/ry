@@ -951,6 +951,7 @@ version = "0.3.2-beta"
 dependencies = [
  "cc",
  "heap",
+ "interp",
  "libc",
  "libloading",
  "rustc-hash 2.1.3",

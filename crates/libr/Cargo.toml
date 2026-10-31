@@ -18,6 +18,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 heap = { path = "../heap" }
+interp = { path = "../interp" }
 libc = "0.2"
 rustc-hash.workspace = true
 

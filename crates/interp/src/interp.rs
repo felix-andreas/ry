@@ -34,6 +34,7 @@ pub mod envir;
 pub mod eval;
 pub mod format;
 pub mod lower;
+pub mod native;
 pub mod print;
 pub mod random;
 pub mod serialize;
@@ -299,6 +300,7 @@ impl RootSource for InterpRoots {
                 }
             }
             interp.bytecode.trace(marker);
+            interp.connections.trace(marker);
         }
     }
 }

@@ -698,6 +698,11 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
     Ok(result)
 }
 
+/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`).
+pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    internal_dispatch(name, call, args, env)
+}
+
 unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     let object = args[0].value;
     let Some(found) = find_s3_method(name, object, env, values::base_namespace(), None)? else {

@@ -32,7 +32,9 @@ extern void ry_unwind_save(SEXP cont);
 extern void ry_unwind_restore(SEXP cont);
 extern void ry_toplevel_report(void);
 extern void ry_discard_pending(void);
-extern SEXP ry_pending_condition(SEXP classes);
+extern SEXP ry_pending_condition(SEXP classes, SEXP target);
+extern SEXP ry_handlers_enter(SEXP classes);
+extern void ry_handlers_leave(SEXP target);
 extern void ry_fatal_without_context(void) __attribute__((noreturn));
 
 typedef struct RyContext {
@@ -522,14 +524,20 @@ RY_EXPORT SEXP R_ExecWithCleanup(SEXP (*fun)(void *), void *data, void (*cleanfu
 RY_EXPORT Rboolean R_ToplevelExec(void (*fun)(void *), void *data)
 {
     RyContext context;
+    /* A top-level context hides the condition handlers outside it, as in GNU R. */
+    SEXP saved = PROTECT(ry_handlers_enter(R_NilValue));
     ry_context_push(&context);
     if (setjmp(context.buffer)) {
         ry_context_land(&context);
+        ry_handlers_leave(saved);
+        UNPROTECT(1);
         ry_toplevel_report();
         return FALSE;
     }
     fun(data);
     ry_context_pop(&context);
+    ry_handlers_leave(saved);
+    UNPROTECT(1);
     return TRUE;
 }
 
@@ -544,10 +552,14 @@ RY_EXPORT SEXP R_tryCatch(SEXP (*body)(void *), void *bdata, SEXP conds,
 {
     RyContext context;
     PROTECT(conds);
+    /* The interpreter's handler stack gets an exiting handler for `conds`, so R code evaluated
+       inside sees it, ordered among the R-level handlers. */
+    SEXP target = PROTECT(ry_handlers_enter(conds));
     ry_context_push(&context);
     if (setjmp(context.buffer)) {
         ry_context_land(&context);
-        SEXP condition = ry_pending_condition(conds);
+        ry_handlers_leave(target);
+        SEXP condition = ry_pending_condition(conds, target);
         if (condition == NULL) {
             if (finally != NULL)
                 finally(fdata);
@@ -566,14 +578,15 @@ RY_EXPORT SEXP R_tryCatch(SEXP (*body)(void *), void *bdata, SEXP conds,
         }
         SEXP result = handler(condition, hdata);
         ry_context_pop(&handling);
-        UNPROTECT(2);
+        UNPROTECT(3);
         if (finally != NULL)
             finally(fdata);
         return result;
     }
     SEXP result = body(bdata);
     ry_context_pop(&context);
-    UNPROTECT(1);
+    ry_handlers_leave(target);
+    UNPROTECT(2);
     if (finally != NULL)
         finally(fdata);
     return result;

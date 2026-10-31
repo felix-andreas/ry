@@ -423,7 +423,7 @@ pub unsafe fn format_vector(
                     }
                 })
                 .collect();
-            justify(items, quote)
+            items
         }
         SexpType::Raw => values::raws(vector)
             .iter()
