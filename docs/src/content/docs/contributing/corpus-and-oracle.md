@@ -28,7 +28,22 @@ The run writes `.corpus/status.csv` (one row per package with its version, or th
 missing) and `.corpus/logs/install.log`. Packages that need system libraries fail until you
 install them, and the log names the missing header or library.
 
-@@STATUS@@
+### Install status
+
+A run on Ubuntu 24.04 with R 4.3.3 installed 65 of the 67 closure packages and every `Suggests`
+(the recommended packages `MASS`, `lattice` and `rpart` come from the system R). Two do not
+install:
+
+- `polars` is not available for R 4.3.3. Its CRAN release needs a newer R (the runtime design
+  targets 4.6), so it needs a newer GNU R than the container's, for example one installed with
+  [rig](https://github.com/r-lib/rig).
+- `Rblpapi` links against the proprietary Bloomberg `blpapi` SDK (`-lblpapi3_64`), which is not
+  redistributable, so it cannot be installed anywhere without a Bloomberg licence.
+
+`FLSSS` is missing from the pinned snapshot, so the script installs it from the newest one. The
+packages that load system libraries (`git2r`, `odbc`, `pdftools`, `Rglpk` and the compile
+dependencies) need the Ubuntu packages in `tools/corpus/system-packages.txt` first; without them
+they install but fail to load.
 
 ## The differential oracle
 
@@ -72,5 +87,7 @@ count (by default one file per 600 lines).
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
 infrastructure plus domain code, instantiated with random parameters until the line target is
 reached. Services that cannot run in a test (Azure, Bloomberg, ODBC) take an injectable client,
-so the tests never touch a network. The tests run only against the corpus library, so run
-`just corpus` first.
+so the tests never touch a network. `just bench-test` runs a package's tests against the corpus library, so run `just corpus` first.
+Because `polars` and `Rblpapi` cannot be installed, it tests a copy whose `Imports` omit the
+missing packages; the code reaches them only inside guarded or injectable branches. The three
+10,000-line packages pass all of their roughly 340 tests each under GNU R 4.3.3.
