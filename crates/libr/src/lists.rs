@@ -158,6 +158,7 @@ read_path!(CDDDR, cdr, cdr, cdr);
 read_path!(CADDR, cdr, cdr, car);
 read_path!(CADDDR, cdr, cdr, cdr, car);
 read_path!(CAD4R, cdr, cdr, cdr, cdr, car);
+read_path!(CAD5R, cdr, cdr, cdr, cdr, cdr, car);
 
 macro_rules! write_path {
     ($name:ident, $($step:ident),*) => {
@@ -373,4 +374,33 @@ pub unsafe extern "C" fn R_mkClosure(formals: Sexp, body: Sexp, env: Sexp) -> Se
             .heap
             .alloc_triple(SexpType::Closure, formals, body, env)?)
     })
+}
+
+/// The expression a compiled body stands for: GNU R keeps it as the first constant of the
+/// bytecode's constant pool (code in the first slot, constants in the second).
+unsafe fn bytecode_expression(body: Sexp) -> Sexp {
+    if body.kind() != SexpType::Bytecode {
+        return body;
+    }
+    let constants = body.cdr();
+    if constants.kind() == SexpType::List && constants.length() > 0 {
+        constants.element(0)
+    } else {
+        body
+    }
+}
+
+/// `R_ClosureExpr(f)`: the body of a closure as an expression, even when it is compiled.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ClosureExpr(closure: Sexp) -> Sexp {
+    enter(|| {
+        Ok(bytecode_expression(
+            checked_kind(closure, SexpType::Closure, "R_ClosureExpr")?.cdr(),
+        ))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_BytecodeExpr(body: Sexp) -> Sexp {
+    bytecode_expression(body)
 }

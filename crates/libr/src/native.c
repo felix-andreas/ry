@@ -990,3 +990,48 @@ RY_EXPORT void ry_run_task_callbacks(SEXP expr, SEXP value, Rboolean succeeded, 
         }
     }
 }
+
+/* R_maphashC's callback is native code; the status is unused because an error jumps instead. */
+SEXP ry_maphash_call(SEXP (*function)(SEXP, SEXP, void *), SEXP key, SEXP value, void *data,
+                     int *status)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        *status = 1;
+        return NULL;
+    }
+    SEXP result = function(key, value, data);
+    ry_context_pop(&context);
+    *status = 0;
+    return result;
+}
+
+/*
+ * R_withCallingErrorHandler: the handler sees an error raised in the body and the error then
+ * continues outward. GNU R runs a calling handler before the stack unwinds; here the native
+ * frames between the error and this context are already gone when the handler runs, which only
+ * matters to a handler that inspects them.
+ */
+RY_EXPORT SEXP R_withCallingErrorHandler(SEXP (*body)(void *), void *bdata,
+                                         SEXP (*handler)(SEXP, void *), void *hdata)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        SEXP classes = PROTECT(Rf_mkString("error"));
+        SEXP condition = ry_pending_condition(classes);
+        if (condition != NULL) {
+            PROTECT(condition);
+            handler(condition, hdata);
+            UNPROTECT(1);
+        }
+        UNPROTECT(1);
+        ry_jump();
+    }
+    SEXP result = body(bdata);
+    ry_context_pop(&context);
+    return result;
+}

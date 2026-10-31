@@ -36,6 +36,7 @@ handle_globals!(
     R_Srcref,
     R_CurrentExpression,
     R_AsCharacterSymbol,
+    R_AtsignSymbol,
     R_BaseSymbol,
     R_baseSymbol,
     R_BraceSymbol,
@@ -100,6 +101,7 @@ pub static R_InBCInterpreter: Global<c_int> = Global::new(0);
 /// The names behind the ready-made symbols.
 const SYMBOLS: &[(&Global<Sexp>, &str)] = &[
     (&R_AsCharacterSymbol, "as.character"),
+    (&R_AtsignSymbol, "@"),
     (&R_BaseSymbol, "base"),
     (&R_baseSymbol, "base"),
     (&R_BraceSymbol, "{"),

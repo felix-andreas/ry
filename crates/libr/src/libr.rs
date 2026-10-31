@@ -27,6 +27,7 @@ pub mod eval;
 pub mod extptr;
 pub mod globals;
 pub mod graphics;
+pub mod hashtab;
 pub mod legacy;
 pub mod lists;
 pub mod memory;

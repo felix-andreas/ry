@@ -80,6 +80,18 @@ pub trait Evaluator: Sync {
 
     /// Prints `value` as auto-printing at top level would, as `Rf_PrintValue` does.
     unsafe fn print_value(&self, value: Sexp, env: Sexp) -> ApiResult<()>;
+
+    /// The environment of the innermost closure call on the stack, or the global environment
+    /// at top level, as `R_GetCurrentEnv` reports it.
+    unsafe fn current_env(&self) -> Sexp;
+
+    /// The source reference of a call on the stack, as `R_GetCurrentSrcref(skip)` reports it:
+    /// with `skip >= 0`, `skip` frames above the innermost; with `skip < 0`, the `-skip`th frame
+    /// from the top level. `R_NilValue` when there is none.
+    unsafe fn current_srcref(&self, skip: c_int) -> ApiResult<Sexp>;
+
+    /// Runs `.Last()` and `.Last.sys()` as R's shutdown does, as `R_dot_Last` does.
+    unsafe fn dot_last(&self) -> ApiResult<()>;
 }
 
 /// `ParseStatus` from `R_ext/Parse.h`, with GNU R's numbering.
@@ -784,4 +796,56 @@ pub unsafe fn call_namespaced(package: &str, function: &str, arguments: &[Sexp])
     let global = runtime.heap.known().global_env;
     installed_evaluator(&format!("{}::{}", utf8_text(package.car())?, utf8_text(function.car())?))?;
     eval(call, global)
+}
+
+/// `R_GetCurrentEnv()`: the environment code calling it runs in. Native code is called from a
+/// closure's frame, which only the interpreter knows; without one it is the global environment.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetCurrentEnv() -> Sexp {
+    enter(|| {
+        Ok(match evaluator() {
+            Some(evaluator) => evaluator.current_env(),
+            None => runtime().heap.known().global_env,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetCurrentSrcref(skip: c_int) -> Sexp {
+    enter(|| match evaluator() {
+        Some(evaluator) => evaluator.current_srcref(skip),
+        None => Ok(runtime().nil()),
+    })
+}
+
+/// `R_GetSrcFilename(srcref)`: the file name recorded in a source reference's `srcfile`
+/// environment, or `""`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetSrcFilename(srcref: Sexp) -> Sexp {
+    enter(|| {
+        let srcfile =
+            crate::attributes::raw_attribute(srcref, crate::globals::R_SrcfileSymbol.get());
+        let empty = || -> ApiResult<Sexp> {
+            let blank = runtime().heap.known().blank_string;
+            crate::memory::scalar_string(blank)
+        };
+        if srcfile.kind() != SexpType::Environment {
+            return empty();
+        }
+        let filename = runtime().heap.install(b"filename")?;
+        let value = crate::environments::frame_lookup(srcfile, filename)?;
+        if value.kind() == SexpType::String {
+            Ok(value)
+        } else {
+            empty()
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_dot_Last() {
+    enter(|| match evaluator() {
+        Some(evaluator) => evaluator.dot_last(),
+        None => Ok(()),
+    })
 }

@@ -112,7 +112,7 @@ void SHALLOW_DUPLICATE_ATTRIB(SEXP to, SEXP from);
 #define NO_REFERENCES(x) (NAMED(x) == 0)
 #define MAYBE_REFERENCED(x) (!NO_REFERENCES(x))
 #define NOT_SHARED(x) (!MAYBE_SHARED(x))
-#define IS_SCALAR(x, type) (TYPEOF(x) == (type) && XLENGTH(x) == 1)
+int (IS_SCALAR)(SEXP x, int type);
 
 /* Vectors. */
 int (LENGTH)(SEXP x);
@@ -496,6 +496,165 @@ LibExtern SEXP R_dot_Method;
 LibExtern SEXP R_dot_packageName;
 LibExtern SEXP R_dot_target;
 LibExtern SEXP R_dot_Generic;
+
+/* Bindings, dots and namespaces. */
+typedef enum {
+    R_BindingTypeUnbound = 0,
+    R_BindingTypeValue = 1,
+    R_BindingTypeMissing = 2,
+    R_BindingTypeDelayed = 3,
+    R_BindingTypeForced = 4,
+    R_BindingTypeActive = 5
+} R_BindingType_t;
+R_BindingType_t R_GetBindingType(SEXP sym, SEXP env);
+void R_MakeActiveBinding(SEXP sym, SEXP fun, SEXP env);
+void R_MakeDelayedBinding(SEXP sym, SEXP expr, SEXP eval_env, SEXP env);
+void R_MakeForcedBinding(SEXP sym, SEXP expr, SEXP value, SEXP env);
+void R_MakeMissingBinding(SEXP sym, SEXP env);
+SEXP R_ActiveBindingFunction(SEXP sym, SEXP env);
+SEXP R_DelayedBindingExpression(SEXP sym, SEXP env);
+SEXP R_DelayedBindingEnvironment(SEXP sym, SEXP env);
+SEXP R_ForcedBindingExpression(SEXP sym, SEXP env);
+typedef enum {
+    R_DotTypeValue = 0,
+    R_DotTypeMissing = 1,
+    R_DotTypeDelayed = 2,
+    R_DotTypeForced = 3
+} R_DotType_t;
+SEXP R_findDotsEnv(SEXP env);
+Rboolean R_DotsExist(SEXP env);
+int R_DotsLength(SEXP env);
+SEXP R_DotsNames(SEXP env);
+SEXP R_DotsElt(int i, SEXP env);
+R_DotType_t R_GetDotType(int i, SEXP env);
+SEXP R_DotDelayedExpression(int i, SEXP env);
+SEXP R_DotDelayedEnvironment(int i, SEXP env);
+SEXP R_DotForcedExpression(int i, SEXP env);
+SEXP R_envSymbols(SEXP env);
+SEXP Rf_topenv(SEXP target, SEXP env);
+SEXP R_NamespaceEnvSpec(SEXP rho);
+SEXP R_PackageEnvName(SEXP rho);
+SEXP R_getRegisteredNamespace(const char *name);
+SEXP Rf_GetOption(SEXP tag, SEXP rho);
+int Rf_GetOptionWidth(void);
+int Rf_GetOptionDigits(void);
+SEXP R_GetCurrentEnv(void);
+SEXP R_GetCurrentSrcref(int skip);
+SEXP R_GetSrcFilename(SEXP srcref);
+SEXP R_ClosureExpr(SEXP f);
+SEXP R_BytecodeExpr(SEXP e);
+#define BODY_EXPR(e) R_ClosureExpr(e)
+SEXP (CAD5R)(SEXP e);
+LibExtern SEXP R_AtsignSymbol;
+
+/* Evaluation entry points beyond Rf_eval. */
+SEXP R_ParseString(const char *text);
+SEXP R_ParseEvalString(const char *text, SEXP env);
+void Rf_PrintValue(SEXP x);
+SEXP R_forceAndCall(SEXP call, int n, SEXP rho);
+SEXP R_withCallingErrorHandler(SEXP (*body)(void *), void *bdata,
+                               SEXP (*handler)(SEXP, void *), void *hdata);
+void R_dot_Last(void);
+void R_RunExitFinalizers(void);
+
+/* Classes and S4. */
+SEXP R_data_class(SEXP x, Rboolean single);
+SEXP R_class(SEXP x);
+SEXP R_do_slot(SEXP obj, SEXP name);
+SEXP R_do_slot_assign(SEXP obj, SEXP name, SEXP value);
+int R_has_slot(SEXP obj, SEXP name);
+SEXP R_do_MAKE_CLASS(const char *what);
+SEXP R_getClassDef(const char *what);
+SEXP R_do_new_object(SEXP class_def);
+int R_check_class_etc(SEXP x, const char **valid);
+SEXP Rf_asS4(SEXP x, Rboolean flag, int complete);
+
+/* Attribute queries. */
+R_xlen_t R_getAttribCount(SEXP x);
+SEXP R_getAttribNames(SEXP x);
+SEXP R_getAttributes(SEXP x);
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
+bool R_hasAttrib(SEXP x, SEXP name);
+R_xlen_t R_nrow(SEXP x);
+R_xlen_t R_ncol(SEXP x);
+int Rf_nlevels(SEXP f);
+SEXP Rf_GetColNames(SEXP dimnames);
+SEXP Rf_GetArrayDimnames(SEXP x);
+void Rf_GetMatrixDimnames(SEXP x, SEXP *rl, SEXP *cl, const char **rn, const char **cn);
+
+/* Vector utilities. */
+SEXP Rf_duplicated(SEXP x, Rboolean from_last);
+R_xlen_t Rf_any_duplicated(SEXP x, Rboolean from_last);
+R_xlen_t Rf_any_duplicated3(SEXP x, SEXP incomp, Rboolean from_last);
+Rcomplex Rf_asComplex(SEXP x);
+Rboolean Rf_asRboolean(SEXP x);
+bool Rf_asBool(SEXP x);
+Rboolean R_isTRUE(SEXP x);
+void Rf_copyVector(SEXP s, SEXP t);
+void Rf_copyMatrix(SEXP s, SEXP t, Rboolean byrow);
+void Rf_copyListMatrix(SEXP s, SEXP t, Rboolean byrow);
+Rboolean Rf_isVectorizable(SEXP s);
+Rboolean Rf_isScalarString(SEXP s);
+Rboolean Rf_isUnsorted(SEXP x, Rboolean strictly);
+Rboolean Rf_pmatch(SEXP formal, SEXP tag, Rboolean exact);
+Rboolean Rf_psmatch(const char *formal, const char *tag, Rboolean exact);
+Rboolean Rf_NonNullStringMatch(SEXP s, SEXP t);
+char *Rf_acopy_string(const char *s);
+void R_orderVector(int *indx, int n, SEXP arglist, Rboolean nalast, Rboolean decreasing);
+void R_orderVector1(int *indx, int n, SEXP x, Rboolean nalast, Rboolean decreasing);
+SEXP R_duplicateAsResizable(SEXP x);
+typedef enum { Bytes, Chars, Width } nchar_type;
+int R_nchar(SEXP string, nchar_type type, Rboolean allowNA, Rboolean keepNA, const char *msg_name);
+
+/* Hash tables. */
+typedef struct { SEXP cell; } R_hashtab_type;
+R_hashtab_type R_mkhashtab(int type, int size);
+R_hashtab_type R_asHashtable(SEXP h);
+SEXP R_HashtabSEXP(R_hashtab_type h);
+int R_isHashtable(SEXP h);
+SEXP R_gethash(R_hashtab_type h, SEXP key, SEXP nomatch);
+SEXP R_sethash(R_hashtab_type h, SEXP key, SEXP value);
+int R_remhash(R_hashtab_type h, SEXP key);
+int R_numhash(R_hashtab_type h);
+int R_typhash(R_hashtab_type h);
+SEXP R_maphash(R_hashtab_type h, SEXP FUN);
+SEXP R_maphashC(R_hashtab_type h, SEXP (*FUN)(SEXP, SEXP, void *), void *data);
+void R_clrhash(R_hashtab_type h);
+
+/* Environment flags, which GNU R exposes as functions. */
+int (ENVFLAGS)(SEXP x);
+void (SET_ENVFLAGS)(SEXP x, int v);
+
+#ifndef R_NO_REMAP
+#define acopy_string Rf_acopy_string
+#define any_duplicated Rf_any_duplicated
+#define any_duplicated3 Rf_any_duplicated3
+#define asBool Rf_asBool
+#define asComplex Rf_asComplex
+#define asRboolean Rf_asRboolean
+#define asS4 Rf_asS4
+#define copyListMatrix Rf_copyListMatrix
+#define copyMatrix Rf_copyMatrix
+#define copyVector Rf_copyVector
+#define duplicated Rf_duplicated
+#define GetArrayDimnames Rf_GetArrayDimnames
+#define GetColNames Rf_GetColNames
+#define GetMatrixDimnames Rf_GetMatrixDimnames
+#define GetOption Rf_GetOption
+#define GetOptionDigits Rf_GetOptionDigits
+#define GetOptionWidth Rf_GetOptionWidth
+#define isScalarString Rf_isScalarString
+#define isUnsorted Rf_isUnsorted
+#define isVectorizable Rf_isVectorizable
+#define nlevels Rf_nlevels
+#define NonNullStringMatch Rf_NonNullStringMatch
+#define pmatch Rf_pmatch
+#define psmatch Rf_psmatch
+#define PrintValue Rf_PrintValue
+#define topenv Rf_topenv
+#endif
 
 #ifndef R_NO_REMAP
 #define alloc3DArray Rf_alloc3DArray
