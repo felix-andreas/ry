@@ -5,16 +5,15 @@ use semantics::diagnostics::Severity;
 use semantics::lints::{LintConfig, LintLevel, NameStyle, lint_file};
 use semantics::testing::with_fixture_project;
 use std::path::Path;
+use syntax::testing::run_fixture_suite;
 
 fn render_with(source: &str, config: &LintConfig) -> String {
     with_fixture_project(
         vec![(source.to_owned(), DocumentKind::Package)],
         |db, files| {
-            let [file] = files else {
+            let &[file] = files else {
                 panic!("a fixture case is one file");
             };
-            let file = *file;
-
             let mut output = String::new();
             for diagnostic in lint_file(db, file, config) {
                 let severity = match diagnostic.severity {
@@ -40,7 +39,7 @@ fn render_with(source: &str, config: &LintConfig) -> String {
 #[test]
 fn lint_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lints");
-    syntax::testing::run_fixture_suite(&suite, &|source| {
+    run_fixture_suite(&suite, &|source| {
         render_with(source, &LintConfig::default())
     });
 }
@@ -55,5 +54,5 @@ fn lint_style_fixtures() {
         ..LintConfig::default()
     };
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lints-style");
-    syntax::testing::run_fixture_suite(&suite, &|source| render_with(source, &config));
+    run_fixture_suite(&suite, &|source| render_with(source, &config));
 }

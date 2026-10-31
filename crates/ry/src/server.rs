@@ -1,11 +1,14 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
-use crate::config::{CONFIG_FILE_NAME, Config, ConfigError, ExperimentalFeatures};
+use crate::cli::{project_order, project_stub_paths, shares_a_namespace};
+use crate::config::{
+    CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures, suggested_table,
+};
 use crate::diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics};
+use crate::namespace::namespace_import_problems;
 use crate::position::{LineColumn, LineIndex};
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
-use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{self, request};
 use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
@@ -13,41 +16,51 @@ use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
 use async_lsp::{ClientSocket, ErrorCode, LanguageClient, LanguageServer, ResponseError};
 use futures::future::BoxFuture;
+use ide::{
+    CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
+    HoverDefinition, NavigationTarget, SignatureData, StubTarget,
+};
+use salsa::Setter;
 use semantics::diagnostics::{Diagnostic, Severity};
+use semantics::metadata::{
+    PackageMetadata, file_attached_namespaces, normalized_imports, parse_description_collate,
+    parse_description_dependencies, parse_description_package, parse_namespace_imports,
+};
+use semantics::stubs::{
+    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+    shipped_stub_sources, stub_source_problems,
+};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::ops::ControlFlow;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::{ControlFlow, Range};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use syntax::{SyntaxKind, TextRange, TextSize};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
+use std::{env, fs, panic, process, thread};
+use syntax::{SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_syntactic_name};
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
 
-pub fn run(experimental_features: ExperimentalFeatures, debug: bool) {
-    run_async(experimental_features, debug);
-}
-
 #[tokio::main(flavor = "current_thread")]
-async fn run_async(experimental_features: ExperimentalFeatures, debug: bool) {
+pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
     install_panic_hook();
-    let runtime = tokio::runtime::Handle::current();
+    let runtime = Handle::current();
 
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
         let (sender, receiver) = mpsc::channel::<Job>();
         let cancel = CancelHandle::default();
-        let idle_interrupt = Arc::new(AtomicBool::new(false));
 
         let seed = WorkerSeed {
             client: client.clone(),
             experimental_features,
             debug,
             cancel: cancel.clone(),
-            idle_interrupt: idle_interrupt.clone(),
             runtime: runtime.clone(),
         };
-        std::thread::Builder::new()
+        thread::Builder::new()
             .name("ry-analysis".to_owned())
             .stack_size(crate::ANALYSIS_STACK_SIZE)
             .spawn(move || run_worker(seed, receiver))
@@ -55,17 +68,12 @@ async fn run_async(experimental_features: ExperimentalFeatures, debug: bool) {
 
         // No ConcurrencyLayer: its backpressure deadlocks pending request futures against
         // the mainloop's dispatch, and the serial worker is the concurrency bound anyway.
-        let _ = ConcurrencyLayer::default();
         ServiceBuilder::new()
             .layer(TracingLayer::default())
             .layer(LifecycleLayer::default())
             .layer(CatchUnwindLayer::default())
             .layer(ClientProcessMonitorLayer::new(client.clone()))
-            .service(Router::from_language_server(ServerState {
-                sender,
-                cancel,
-                idle_interrupt,
-            }))
+            .service(Router::from_language_server(ServerState { sender, cancel }))
     });
 
     #[cfg(unix)]
@@ -89,7 +97,7 @@ async fn run_async(experimental_features: ExperimentalFeatures, debug: bool) {
 /// through the shared slot.
 #[derive(Clone, Default)]
 struct CancelHandle {
-    token: Arc<std::sync::Mutex<Option<salsa::CancellationToken>>>,
+    token: Arc<Mutex<Option<salsa::CancellationToken>>>,
 }
 
 impl CancelHandle {
@@ -105,8 +113,8 @@ impl CancelHandle {
 }
 
 fn install_panic_hook() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
         // Cancellation is not a fault; process death is the worker loop's decision, not the hook's.
         if info.payload().is::<salsa::Cancelled>() {
             return;
@@ -120,8 +128,7 @@ enum Job {
         Box<lsp_types::InitializeParams>,
         oneshot::Sender<Result<lsp_types::InitializeResult, ResponseError>>,
     ),
-    Read(Box<dyn FnOnce(&mut Worker) + Send>),
-    Write(Box<dyn FnOnce(&mut Worker) + Send>),
+    Run(Box<dyn FnOnce(&mut Worker) + Send>),
 }
 
 struct WorkerSeed {
@@ -131,8 +138,7 @@ struct WorkerSeed {
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
-    idle_interrupt: Arc<AtomicBool>,
-    runtime: tokio::runtime::Handle,
+    runtime: Handle,
 }
 
 fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
@@ -140,9 +146,6 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
     let mut worker: Option<Worker> = None;
     loop {
         let job = if worker.as_ref().is_some_and(Worker::has_idle_work) {
-            // Reset before the poll: a job enqueued after it flags the token after this
-            // reset, so the idle unit sees it at its next cancellation check.
-            seed_idle_interrupt(&worker).store(false, Ordering::SeqCst);
             match receiver.try_recv() {
                 Ok(job) => Some(job),
                 Err(mpsc::TryRecvError::Empty) => None,
@@ -154,54 +157,38 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
                 Err(_) => return,
             }
         };
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match job {
             Some(Job::Initialize(params, reply)) => {
                 let seed = seed.take().expect("initialize arrives exactly once");
                 let (initialized, result) = Worker::initialize(seed, *params);
                 worker = Some(initialized);
-                let _ = reply.send(Ok(result));
+                // The receiver is gone only when the client cancelled the request.
+                reply.send(Ok(result)).ok();
             }
-            Some(Job::Read(work)) => {
-                if let Some(worker) = worker.as_mut() {
-                    worker.refresh_cancellation();
-                    work(worker);
-                }
-            }
-            Some(Job::Write(work)) => match worker.as_mut() {
+            job => match worker.as_mut() {
                 Some(worker) => {
                     worker.refresh_cancellation();
-                    work(worker);
+                    match job {
+                        Some(Job::Run(work)) => work(worker),
+                        _ => worker.run_idle_unit(),
+                    }
                 }
                 // LSP allows dropping notifications before initialize.
-                None => tracing::warn!("dropping a notification before initialize"),
+                None => tracing::warn!("dropping a job that arrived before initialize"),
             },
-            None => {
-                if let Some(worker) = worker.as_mut() {
-                    worker.refresh_cancellation();
-                    worker.run_idle_unit();
-                }
-            }
         }));
         if outcome.is_err() {
             // A read catches its own cancellation, so this is a coherence panic; serving a
             // corrupted analysis state is worse than dying.
             tracing::error!("analysis worker panicked; exiting");
-            std::process::exit(1);
+            process::exit(1);
         }
     }
-}
-
-fn seed_idle_interrupt(worker: &Option<Worker>) -> &AtomicBool {
-    &worker
-        .as_ref()
-        .expect("idle work implies an initialized worker")
-        .idle_interrupt
 }
 
 struct ServerState {
     sender: mpsc::Sender<Job>,
     cancel: CancelHandle,
-    idle_interrupt: Arc<AtomicBool>,
 }
 
 impl ServerState {
@@ -211,38 +198,34 @@ impl ServerState {
         F: FnOnce(&mut Worker) -> Result<T, ResponseError> + Send + 'static,
     {
         let (reply, receive) = oneshot::channel();
-        let job = Job::Read(Box::new(move |worker| {
-            let _ = reply.send(build(worker));
+        let job = Job::Run(Box::new(move |worker| {
+            // The receiver is gone only when the client cancelled the request.
+            reply.send(build(worker)).ok();
         }));
+        self.submit(job, receive)
+    }
+
+    fn submit<T: Send + 'static>(
+        &self,
+        job: Job,
+        receive: oneshot::Receiver<Result<T, ResponseError>>,
+    ) -> BoxFuture<'static, Result<T, ResponseError>> {
         if self.sender.send(job).is_err() {
             return Box::pin(async { Err(worker_gone_error()) });
         }
-        self.idle_interrupt.store(true, Ordering::SeqCst);
         Box::pin(async move { receive.await.unwrap_or_else(|_| Err(worker_gone_error())) })
     }
 
     /// Flips the cancellation token before enqueueing so an in-flight read abandons.
     /// A send failure is unrecoverable.
-    fn notify_edit<F>(&self, build: F) -> ControlFlow<async_lsp::Result<()>>
-    where
-        F: FnOnce(&mut Worker) + Send + 'static,
-    {
-        self.cancel.cancel();
-        if self.sender.send(Job::Write(Box::new(build))).is_err() {
-            panic!("analysis worker is gone; cannot apply a document-sync edit");
-        }
-        self.idle_interrupt.store(true, Ordering::SeqCst);
-        ControlFlow::Continue(())
-    }
-
     fn notify<F>(&self, build: F) -> ControlFlow<async_lsp::Result<()>>
     where
         F: FnOnce(&mut Worker) + Send + 'static,
     {
-        if self.sender.send(Job::Write(Box::new(build))).is_err() {
+        self.cancel.cancel();
+        if self.sender.send(Job::Run(Box::new(build))).is_err() {
             panic!("analysis worker is gone; cannot apply a notification");
         }
-        self.idle_interrupt.store(true, Ordering::SeqCst);
         ControlFlow::Continue(())
     }
 }
@@ -257,29 +240,11 @@ enum PositionEncoding {
     Utf16,
 }
 
-impl PositionEncoding {
-    fn negotiate(offered: Option<&[lsp_types::PositionEncodingKind]>) -> PositionEncoding {
-        if offered.is_some_and(|kinds| kinds.contains(&lsp_types::PositionEncodingKind::UTF8)) {
-            PositionEncoding::Utf8
-        } else {
-            PositionEncoding::Utf16
-        }
-    }
-
-    fn kind(self) -> lsp_types::PositionEncodingKind {
-        match self {
-            PositionEncoding::Utf8 => lsp_types::PositionEncodingKind::UTF8,
-            PositionEncoding::Utf16 => lsp_types::PositionEncodingKind::UTF16,
-        }
-    }
-}
-
 struct Worker {
     client: ClientSocket,
-    runtime: tokio::runtime::Handle,
+    runtime: Handle,
     cancel: CancelHandle,
     current_token: salsa::CancellationToken,
-    idle_interrupt: Arc<AtomicBool>,
     experimental_features: ExperimentalFeatures,
     debug: bool,
     encoding: PositionEncoding,
@@ -306,12 +271,12 @@ struct Worker {
     prime_queue: VecDeque<PathBuf>,
     /// Non-empty sets only. Kept current per synced or primed file, never by a
     /// whole-project sweep, so keystroke work stays O(open documents).
-    attached_by_file: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    attached_by_file: HashMap<PathBuf, BTreeSet<String>>,
 }
 
 struct WorkspaceMetadata {
     imports: Vec<(String, Option<String>)>,
-    dependencies: std::collections::BTreeSet<String>,
+    dependencies: BTreeSet<String>,
     collate: Vec<String>,
     package: Option<String>,
 }
@@ -321,13 +286,17 @@ impl Worker {
         seed: WorkerSeed,
         params: lsp_types::InitializeParams,
     ) -> (Worker, lsp_types::InitializeResult) {
-        let encoding = PositionEncoding::negotiate(
-            params
-                .capabilities
-                .general
-                .as_ref()
-                .and_then(|general| general.position_encodings.as_deref()),
-        );
+        let offers_utf8 = params
+            .capabilities
+            .general
+            .as_ref()
+            .and_then(|general| general.position_encodings.as_ref())
+            .is_some_and(|kinds| kinds.contains(&lsp_types::PositionEncodingKind::UTF8));
+        let encoding = if offers_utf8 {
+            PositionEncoding::Utf8
+        } else {
+            PositionEncoding::Utf16
+        };
         let supports_pull_diagnostics = params
             .capabilities
             .text_document
@@ -387,7 +356,6 @@ impl Worker {
             runtime: seed.runtime,
             cancel: seed.cancel,
             current_token,
-            idle_interrupt: seed.idle_interrupt,
             experimental_features: seed.experimental_features,
             debug: seed.debug,
             encoding,
@@ -411,7 +379,16 @@ impl Worker {
             attached_by_file: HashMap::new(),
         };
         worker.install_stubs();
-        worker.install_metadata();
+        let metadata = worker.current_metadata();
+        worker.collate_order = metadata.collate;
+        // No file has been scanned yet, so nothing is attached.
+        PackageMetadata::new(
+            &worker.db,
+            metadata.imports,
+            metadata.dependencies,
+            Default::default(),
+            metadata.package,
+        );
         worker.load_workspace_sources();
 
         let result = initialize_result(encoding, worker.experimental_features);
@@ -419,43 +396,23 @@ impl Worker {
     }
 
     fn install_stubs(&mut self) {
-        let mut sources = semantics::stubs::shipped_stub_sources();
+        let mut sources = shipped_stub_sources();
         self.stub_source_paths = materialize_shipped_stubs(&sources);
-        let stubs_dir = self.workspace_root.join("stubs");
-        if let Ok(entries) = std::fs::read_dir(&stubs_dir) {
-            let mut paths: Vec<PathBuf> = entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.extension()
-                        .is_some_and(|extension| extension == "Rtypes")
-                })
-                .collect();
-            paths.sort();
-            for path in paths {
-                match std::fs::read_to_string(&path) {
-                    Ok(text) => {
-                        let stem = path
-                            .file_stem()
-                            .map(|stem| stem.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        sources.push((stem, text));
-                        self.stub_source_paths.push(Some(path));
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            "skipping unreadable override stub {}: {error}",
-                            path.display()
-                        );
-                    }
+        for (path, stem) in project_stub_paths(&self.workspace_root) {
+            match fs::read_to_string(&path) {
+                Ok(text) => {
+                    sources.push((stem, text));
+                    self.stub_source_paths.push(Some(path));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable override stub {}: {error}",
+                        path.display()
+                    )
                 }
             }
         }
-        semantics::stubs::StubSources::new(
-            &self.db,
-            sources,
-            semantics::stubs::shipped_export_manifests(),
-        );
+        StubSources::new(&self.db, sources, shipped_export_manifests());
     }
 
     /// The open NAMESPACE buffer wins over disk; DESCRIPTION is not a tracked
@@ -466,28 +423,24 @@ impl Worker {
             .namespace_documents
             .get(&namespace_path)
             .cloned()
-            .or_else(|| std::fs::read_to_string(&namespace_path).ok());
+            .or_else(|| fs::read_to_string(&namespace_path).ok());
         let imports = namespace_text
             .as_deref()
-            .map(|text| {
-                semantics::metadata::normalized_imports(
-                    &semantics::metadata::parse_namespace_imports(text),
-                )
-            })
+            .map(|text| normalized_imports(&parse_namespace_imports(text)))
             .unwrap_or_default();
-        let description_text = std::fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
+        let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
         let dependencies = description_text
             .as_deref()
-            .map(semantics::metadata::parse_description_dependencies)
+            .map(parse_description_dependencies)
             .unwrap_or_default();
         let collate = description_text
             .as_deref()
-            .map(semantics::metadata::parse_description_collate)
+            .map(parse_description_collate)
             .unwrap_or_default();
         let package = description_text
             .as_deref()
             .ok()
-            .and_then(semantics::metadata::parse_description_package);
+            .and_then(parse_description_package);
         WorkspaceMetadata {
             imports,
             dependencies,
@@ -496,19 +449,7 @@ impl Worker {
         }
     }
 
-    fn install_metadata(&mut self) {
-        let metadata = self.current_metadata();
-        self.collate_order = metadata.collate;
-        semantics::metadata::PackageMetadata::new(
-            &self.db,
-            metadata.imports,
-            metadata.dependencies,
-            self.attached_union(),
-            metadata.package,
-        );
-    }
-
-    fn attached_union(&self) -> std::collections::BTreeSet<String> {
+    fn attached_union(&self) -> BTreeSet<String> {
         self.attached_by_file
             .values()
             .flat_map(|namespaces| namespaces.iter().cloned())
@@ -520,9 +461,7 @@ impl Worker {
     fn refresh_attached(&mut self, path: &Path) {
         let scanned = match self.files.get(path) {
             Some(&file) => {
-                let scan = self.cancellable(|worker| {
-                    semantics::metadata::file_attached_namespaces(&worker.db, file)
-                });
+                let scan = self.cancellable(|worker| file_attached_namespaces(&worker.db, file));
                 match scan {
                     Ok(scanned) => scanned,
                     // A newer edit is already queued; its own sync re-scans.
@@ -543,25 +482,11 @@ impl Worker {
             return;
         }
         let union = self.attached_union();
-        match semantics::metadata::PackageMetadata::try_get(&self.db) {
-            Some(metadata) => {
-                if metadata.attached(&self.db) == &union {
-                    return;
-                }
-                use salsa::Setter;
-                metadata.set_attached(&mut self.db).to(union);
-            }
-            None => {
-                let current = self.current_metadata();
-                semantics::metadata::PackageMetadata::new(
-                    &self.db,
-                    current.imports,
-                    current.dependencies,
-                    union,
-                    current.package,
-                );
-            }
+        let metadata = PackageMetadata::get(&self.db);
+        if metadata.attached(&self.db) == &union {
+            return;
         }
+        metadata.set_attached(&mut self.db).to(union);
         self.refresh_all_diagnostics();
     }
 
@@ -573,22 +498,11 @@ impl Worker {
             self.collate_order = current.collate;
             self.rebuild_project_files();
         }
-        let Some(metadata) = semantics::metadata::PackageMetadata::try_get(&self.db) else {
-            semantics::metadata::PackageMetadata::new(
-                &self.db,
-                current.imports,
-                current.dependencies,
-                self.attached_union(),
-                current.package,
-            );
-            self.refresh_all_diagnostics();
-            return;
-        };
+        let metadata = PackageMetadata::get(&self.db);
         let facts_changed = metadata.imports(&self.db) != &current.imports
             || metadata.dependencies(&self.db) != &current.dependencies
             || metadata.package(&self.db) != &current.package;
         if facts_changed {
-            use salsa::Setter;
             metadata.set_imports(&mut self.db).to(current.imports);
             metadata
                 .set_dependencies(&mut self.db)
@@ -604,7 +518,7 @@ impl Worker {
         let r_path = self.workspace_root.join("R");
         if r_path.is_dir() {
             let entries =
-                std::fs::read_dir(&r_path).expect("listing the workspace R directory must succeed");
+                fs::read_dir(&r_path).expect("listing the workspace R directory must succeed");
             let mut paths: Vec<PathBuf> = entries
                 .flatten()
                 .map(|entry| entry.path())
@@ -617,7 +531,7 @@ impl Worker {
                 .collect();
             paths.sort();
             for path in paths {
-                let text = std::fs::read_to_string(&path)
+                let text = fs::read_to_string(&path)
                     .expect("reading a workspace source file must succeed");
                 let file = SourceFile::new(&self.db, text, DocumentKind::Package);
                 self.files.insert(path.clone(), file);
@@ -627,33 +541,11 @@ impl Worker {
         self.rebuild_project_files();
     }
 
-    /// Package documents first (in `Collate` order when declared, then by path), then
-    /// scripts: the order the last-writer-wins symbol index and the CLI agree on.
+    /// In the order the last-writer-wins symbol index and the CLI agree on.
     fn rebuild_project_files(&mut self) {
-        use salsa::Setter;
-        let r_path = self.workspace_root.join("R");
-        let collate_rank: HashMap<&str, usize> = self
-            .collate_order
-            .iter()
-            .enumerate()
-            .map(|(rank, name)| (name.as_str(), rank))
-            .collect();
+        let order = project_order(&self.workspace_root, &self.collate_order);
         let mut ordered: Vec<(&PathBuf, &SourceFile)> = self.files.iter().collect();
-        ordered.sort_by_key(|(path, _)| {
-            let rank = path
-                .file_name()
-                .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
-                .copied()
-                .unwrap_or(usize::MAX);
-            (
-                !path.starts_with(&r_path),
-                rank,
-                path.strip_prefix(&self.workspace_root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            )
-        });
+        ordered.sort_by_cached_key(|(path, _)| order(path));
         let files: Vec<SourceFile> = ordered.into_iter().map(|(_, file)| *file).collect();
         match ProjectFiles::try_get(&self.db) {
             Some(project) => {
@@ -716,12 +608,7 @@ impl Worker {
         &mut self,
         body: impl FnOnce(&mut Worker) -> T,
     ) -> Result<T, salsa::Cancelled> {
-        let this: *mut Worker = self;
-        salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
-            // The closure runs synchronously on this thread; the raw pointer
-            // only bridges catch_unwind's UnwindSafe bound.
-            body(unsafe { &mut *this })
-        }))
+        salsa::Cancelled::catch(AssertUnwindSafe(|| body(self)))
     }
 
     fn document_path(&mut self, uri: &lsp_types::Url) -> Option<PathBuf> {
@@ -750,17 +637,25 @@ impl Worker {
         lsp_types::Url::from_file_path(path).expect("tracked paths convert to URIs")
     }
 
+    /// The analyzed file a request names, with its current text.
+    fn document(&mut self, uri: &lsp_types::Url) -> Option<(SourceFile, String)> {
+        let path = self.document_path(uri)?;
+        let &file = self.files.get(&path)?;
+        Some((file, self.text(file)))
+    }
+
+    /// Also resolves the request's cursor to an offset in that text.
+    fn document_at(
+        &mut self,
+        position: &lsp_types::TextDocumentPositionParams,
+    ) -> Option<(SourceFile, String, TextSize)> {
+        let (file, text) = self.document(&position.text_document.uri)?;
+        let offset = self.to_offset(&text, position.position);
+        Some((file, text, offset))
+    }
+
     fn is_package_path(&self, path: &Path) -> bool {
-        crate::cli::shares_a_namespace(path, &self.workspace_root)
-    }
-
-    fn is_stub_document(path: &Path) -> bool {
-        path.extension()
-            .is_some_and(|extension| extension == "Rtypes")
-    }
-
-    fn is_namespace_document(path: &Path) -> bool {
-        path.file_name().is_some_and(|name| name == "NAMESPACE")
+        shares_a_namespace(path, &self.workspace_root)
     }
 
     fn text(&self, file: SourceFile) -> String {
@@ -788,6 +683,13 @@ impl Worker {
         lsp_types::Position::new(column.line, column.column)
     }
 
+    fn to_text_range(&self, text: &str, range: lsp_types::Range) -> TextRange {
+        TextRange::new(
+            self.to_offset(text, range.start),
+            self.to_offset(text, range.end),
+        )
+    }
+
     fn to_range(&self, text: &str, range: TextRange) -> lsp_types::Range {
         lsp_types::Range {
             start: self.to_position(text, range.start()),
@@ -807,9 +709,9 @@ impl Worker {
             .map(|(path, _)| path)
     }
 
-    fn render_hover_definition(&self, definition: &ide::HoverDefinition) -> Option<String> {
+    fn render_hover_definition(&self, definition: &HoverDefinition) -> Option<String> {
         match definition {
-            ide::HoverDefinition::Local {
+            HoverDefinition::Local {
                 target,
                 maybe_undefined,
             } => {
@@ -820,11 +722,11 @@ impl Worker {
                 }
                 Some(summary)
             }
-            ide::HoverDefinition::Global { target } => {
+            HoverDefinition::Global { target } => {
                 let location = self.render_source_location(target)?;
                 Some(format!("Package global, defined at `{location}`"))
             }
-            ide::HoverDefinition::Stub {
+            HoverDefinition::Stub {
                 namespace,
                 overloads,
                 declaration,
@@ -848,9 +750,9 @@ impl Worker {
     }
 
     /// Just the file name: goto-definition does the jumping.
-    fn render_stub_source_location(&self, target: ide::StubTarget) -> Option<String> {
+    fn render_stub_source_location(&self, target: StubTarget) -> Option<String> {
         let path = self.stub_source_paths.get(target.source_index)?.as_ref()?;
-        let sources = semantics::stubs::StubSources::try_get(&self.db)?;
+        let sources = StubSources::get(&self.db);
         let (_, text) = sources.sources(&self.db).get(target.source_index)?;
         let index = LineIndex::new(text);
         let position = index.line_column_chars(target.range.start(), text);
@@ -862,22 +764,22 @@ impl Worker {
         ))
     }
 
-    fn definition_location(&self, target: ide::DefinitionTarget) -> Option<lsp_types::Location> {
+    fn definition_location(&self, target: DefinitionTarget) -> Option<lsp_types::Location> {
         match target {
-            ide::DefinitionTarget::Project(target) => {
+            DefinitionTarget::Project(target) => {
                 let path = self.path_of(target.file)?;
                 Some(lsp_types::Location {
                     uri: self.document_uri(path),
                     range: self.to_range_in(target.file, target.range),
                 })
             }
-            ide::DefinitionTarget::Stub(target) => self.stub_location(target),
+            DefinitionTarget::Stub(target) => self.stub_location(target),
         }
     }
 
-    fn stub_location(&self, target: ide::StubTarget) -> Option<lsp_types::Location> {
+    fn stub_location(&self, target: StubTarget) -> Option<lsp_types::Location> {
         let path = self.stub_source_paths.get(target.source_index)?.as_ref()?;
-        let sources = semantics::stubs::StubSources::try_get(&self.db)?;
+        let sources = StubSources::get(&self.db);
         let (_, text) = sources.sources(&self.db).get(target.source_index)?;
         Some(lsp_types::Location {
             uri: lsp_types::Url::from_file_path(path).ok()?,
@@ -885,7 +787,7 @@ impl Worker {
         })
     }
 
-    fn render_source_location(&self, target: &ide::NavigationTarget) -> Option<String> {
+    fn render_source_location(&self, target: &NavigationTarget) -> Option<String> {
         let path = self.path_of(target.file)?;
         let display = path
             .strip_prefix(&self.workspace_root)
@@ -907,25 +809,15 @@ impl Worker {
             return;
         };
         let version = params.text_document.version;
-        if Worker::is_stub_document(&path) {
-            self.stub_documents
-                .insert(path.clone(), params.text_document.text.clone());
-            if !self.supports_pull_diagnostics {
-                let diagnostics = self.stub_diagnostics(&params.text_document.text);
-                let uri = self.document_uri(&path);
-                self.publish(uri, diagnostics, Some(version));
-            }
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "Rtypes")
+        {
+            self.sync_stub_document(path, params.text_document.text, version);
             return;
         }
-        if Worker::is_namespace_document(&path) {
-            self.namespace_documents
-                .insert(path.clone(), params.text_document.text.clone());
-            self.refresh_metadata();
-            if !self.supports_pull_diagnostics {
-                let diagnostics = self.namespace_diagnostics(&params.text_document.text);
-                let uri = self.document_uri(&path);
-                self.publish(uri, diagnostics, Some(version));
-            }
+        if path.file_name().is_some_and(|name| name == "NAMESPACE") {
+            self.sync_namespace_document(path, params.text_document.text, version);
             return;
         }
 
@@ -935,7 +827,6 @@ impl Worker {
         } else {
             DocumentKind::Script
         };
-        use salsa::Setter;
         match self.files.get(&path) {
             Some(&file) => {
                 file.set_text(&mut self.db).to(params.text_document.text);
@@ -960,26 +851,14 @@ impl Worker {
         };
         let version = params.text_document.version;
 
-        if let Some(text) = self.stub_documents.get(&path).cloned() {
+        if let Some(text) = self.stub_documents.remove(&path) {
             let updated = self.apply_content_changes(text, &params.content_changes);
-            self.stub_documents.insert(path.clone(), updated.clone());
-            if !self.supports_pull_diagnostics {
-                let diagnostics = self.stub_diagnostics(&updated);
-                let uri = self.document_uri(&path);
-                self.publish(uri, diagnostics, Some(version));
-            }
+            self.sync_stub_document(path, updated, version);
             return;
         }
-        if let Some(text) = self.namespace_documents.get(&path).cloned() {
+        if let Some(text) = self.namespace_documents.remove(&path) {
             let updated = self.apply_content_changes(text, &params.content_changes);
-            self.namespace_documents
-                .insert(path.clone(), updated.clone());
-            self.refresh_metadata();
-            if !self.supports_pull_diagnostics {
-                let diagnostics = self.namespace_diagnostics(&updated);
-                let uri = self.document_uri(&path);
-                self.publish(uri, diagnostics, Some(version));
-            }
+            self.sync_namespace_document(path, updated, version);
             return;
         }
 
@@ -996,11 +875,30 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let updated = self.apply_content_changes(text, &params.content_changes);
-        use salsa::Setter;
         file.set_text(&mut self.db).to(updated);
         self.refresh_attached(&path);
         if !self.supports_pull_diagnostics {
             self.publish_first_wave(&path, version);
+        }
+    }
+
+    /// Stubs and NAMESPACE are tracked as text, outside the analyzed project.
+    fn sync_stub_document(&mut self, path: PathBuf, text: String, version: i32) {
+        if !self.supports_pull_diagnostics {
+            let diagnostics = self.stub_diagnostics(&text);
+            let uri = self.document_uri(&path);
+            self.publish(uri, diagnostics, Some(version));
+        }
+        self.stub_documents.insert(path, text);
+    }
+
+    fn sync_namespace_document(&mut self, path: PathBuf, text: String, version: i32) {
+        self.namespace_documents.insert(path.clone(), text.clone());
+        self.refresh_metadata();
+        if !self.supports_pull_diagnostics {
+            let diagnostics = self.namespace_diagnostics(&text);
+            let uri = self.document_uri(&path);
+            self.publish(uri, diagnostics, Some(version));
         }
     }
 
@@ -1015,42 +913,8 @@ impl Worker {
             match change.range {
                 None => text = change.text.clone(),
                 Some(range) => {
-                    let index = LineIndex::new(&text);
-                    let (start, end) = match self.encoding {
-                        PositionEncoding::Utf8 => (
-                            index.offset(
-                                LineColumn {
-                                    line: range.start.line,
-                                    column: range.start.character,
-                                },
-                                &text,
-                            ),
-                            index.offset(
-                                LineColumn {
-                                    line: range.end.line,
-                                    column: range.end.character,
-                                },
-                                &text,
-                            ),
-                        ),
-                        PositionEncoding::Utf16 => (
-                            index.offset_utf16(
-                                LineColumn {
-                                    line: range.start.line,
-                                    column: range.start.character,
-                                },
-                                &text,
-                            ),
-                            index.offset_utf16(
-                                LineColumn {
-                                    line: range.end.line,
-                                    column: range.end.character,
-                                },
-                                &text,
-                            ),
-                        ),
-                    };
-                    text.replace_range(usize::from(start)..usize::from(end), &change.text);
+                    let range = self.to_text_range(&text, range);
+                    text.replace_range(Range::<usize>::from(range), &change.text);
                 }
             }
         }
@@ -1090,10 +954,9 @@ impl Worker {
 
         if self.is_package_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.
-            match std::fs::read_to_string(&path) {
+            match fs::read_to_string(&path) {
                 Ok(text) => {
                     if let Some(&file) = self.files.get(&path) {
-                        use salsa::Setter;
                         file.set_text(&mut self.db).to(text);
                     }
                     self.refresh_attached(&path);
@@ -1153,8 +1016,7 @@ impl Worker {
                     .is_some_and(|extension| extension == "R" || extension == "r")
                 && !self.open_documents.contains(&path)
             {
-                use salsa::Setter;
-                match std::fs::read_to_string(&path) {
+                match fs::read_to_string(&path) {
                     Ok(text) => match self.files.get(&path) {
                         Some(&file) => {
                             file.set_text(&mut self.db).to(text);
@@ -1356,33 +1218,29 @@ impl Worker {
 
     fn stub_diagnostics(&self, text: &str) -> Vec<lsp_types::Diagnostic> {
         let index = LineIndex::new(text);
-        semantics::stubs::stub_source_problems(&self.db, text)
+        stub_source_problems(&self.db, text)
             .into_iter()
             .map(|problem| {
                 let start = index.line_start(problem.line as u32);
                 let end = start + index.line_length(problem.line as u32, text);
                 self.convert_diagnostic(
                     text,
-                    Diagnostic {
-                        range: TextRange::new(start.into(), end.into()),
-                        severity: Severity::Error,
-                        code: "stub",
-                        message: problem.message,
-                        related: Vec::new(),
-                    },
+                    Diagnostic::new(
+                        TextRange::new(start.into(), end.into()),
+                        Severity::Error,
+                        "stub",
+                        problem.message,
+                    ),
                 )
             })
             .collect()
     }
 
     fn namespace_diagnostics(&self, text: &str) -> Vec<lsp_types::Diagnostic> {
-        let imports = crate::namespace::parse_namespace_imports(text);
-        let knows =
-            |package: &str| semantics::stubs::namespace_known(&self.db, package).unwrap_or(false);
-        let exports = |package: &str, name: &str| {
-            semantics::stubs::namespace_exports(&self.db, package, name)
-        };
-        crate::namespace::namespace_import_problems(&imports, &knows, &exports)
+        let imports = parse_namespace_imports(text);
+        let knows = |package: &str| namespace_known(&self.db, package).unwrap_or(false);
+        let exports = |package: &str, name: &str| namespace_exports(&self.db, package, name);
+        namespace_import_problems(&imports, &knows, &exports)
             .into_iter()
             .map(|diagnostic| self.convert_diagnostic(text, diagnostic))
             .collect()
@@ -1426,7 +1284,9 @@ impl Worker {
             if self.supports_diagnostic_refresh {
                 let mut client = self.client.clone();
                 self.runtime.spawn(async move {
-                    let _ = client.workspace_diagnostic_refresh(()).await;
+                    if let Err(error) = client.workspace_diagnostic_refresh(()).await {
+                        tracing::warn!("diagnostic refresh request failed: {error}");
+                    }
                 });
             }
             return;
@@ -1443,11 +1303,14 @@ impl Worker {
     }
 
     fn report_error(&self, message: &str) {
+        self.show_message(lsp_types::MessageType::ERROR, message.to_owned());
+    }
+
+    fn show_message(&self, typ: lsp_types::MessageType, message: String) {
         let mut client = self.client.clone();
-        let _ = client.show_message(lsp_types::ShowMessageParams {
-            typ: lsp_types::MessageType::ERROR,
-            message: message.to_owned(),
-        });
+        if let Err(error) = client.show_message(lsp_types::ShowMessageParams { typ, message }) {
+            tracing::error!("showing a message failed: {error}");
+        }
     }
 
     fn report_unknown_config_keys(&self) {
@@ -1458,7 +1321,7 @@ impl Worker {
             .config
             .unknown_keys
             .iter()
-            .map(|key| match crate::config::suggested_table(key) {
+            .map(|key| match suggested_table(key) {
                 Some(table) => format!("`{key}` (it belongs under `[{table}]`)"),
                 None => format!("`{key}`"),
             })
@@ -1470,25 +1333,24 @@ impl Worker {
             .source_directory
             .as_deref()
             .map(|directory| {
-                crate::config::CONFIG_FILE_NAMES
+                CONFIG_FILE_NAMES
                     .into_iter()
                     .find(|name| directory.join(name).is_file())
-                    .unwrap_or(crate::config::CONFIG_FILE_NAME)
+                    .unwrap_or(CONFIG_FILE_NAME)
             })
-            .unwrap_or(crate::config::CONFIG_FILE_NAME);
-        let mut client = self.client.clone();
-        let _ = client.show_message(lsp_types::ShowMessageParams {
-            typ: lsp_types::MessageType::WARNING,
-            message: format!(
+            .unwrap_or(CONFIG_FILE_NAME);
+        let pronoun = if self.config.unknown_keys.len() == 1 {
+            "it"
+        } else {
+            "them"
+        };
+        self.show_message(
+            lsp_types::MessageType::WARNING,
+            format!(
                 "{file} sets {keys}, which this version of ry does not know, so it is \
-                 ignoring {}. Check the spelling, or update ry.",
-                if self.config.unknown_keys.len() == 1 {
-                    "it"
-                } else {
-                    "them"
-                }
+                 ignoring {pronoun}. Check the spelling, or update ry."
             ),
-        });
+        );
     }
 }
 
@@ -1507,7 +1369,10 @@ fn initialize_result(
 ) -> lsp_types::InitializeResult {
     lsp_types::InitializeResult {
         capabilities: lsp_types::ServerCapabilities {
-            position_encoding: Some(encoding.kind()),
+            position_encoding: Some(match encoding {
+                PositionEncoding::Utf8 => lsp_types::PositionEncodingKind::UTF8,
+                PositionEncoding::Utf16 => lsp_types::PositionEncodingKind::UTF16,
+            }),
             code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
                 lsp_types::CodeActionOptions {
                     code_action_kinds: Some(vec![lsp_types::CodeActionKind::QUICKFIX]),
@@ -1550,7 +1415,15 @@ fn initialize_result(
                 lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                     lsp_types::SemanticTokensOptions {
                         legend: lsp_types::SemanticTokensLegend {
-                            token_types: semantic_token_legend(),
+                            // In index order. Only `#:` annotation bodies are colored:
+                            // R grammars cannot see type syntax.
+                            token_types: vec![
+                                lsp_types::SemanticTokenType::TYPE,
+                                lsp_types::SemanticTokenType::TYPE_PARAMETER,
+                                lsp_types::SemanticTokenType::PARAMETER,
+                                lsp_types::SemanticTokenType::OPERATOR,
+                                lsp_types::SemanticTokenType::DECORATOR,
+                            ],
                             token_modifiers: Vec::new(),
                         },
                         full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
@@ -1582,18 +1455,6 @@ fn initialize_result(
     }
 }
 
-/// In index order. Only `#:` annotation bodies are colored: R grammars cannot see
-/// type syntax.
-fn semantic_token_legend() -> Vec<lsp_types::SemanticTokenType> {
-    vec![
-        lsp_types::SemanticTokenType::TYPE,
-        lsp_types::SemanticTokenType::TYPE_PARAMETER,
-        lsp_types::SemanticTokenType::PARAMETER,
-        lsp_types::SemanticTokenType::OPERATOR,
-        lsp_types::SemanticTokenType::DECORATOR,
-    ]
-}
-
 impl LanguageServer for ServerState {
     type Error = ResponseError;
     type NotifyResult = ControlFlow<async_lsp::Result<()>>;
@@ -1603,15 +1464,7 @@ impl LanguageServer for ServerState {
         params: lsp_types::InitializeParams,
     ) -> BoxFuture<'static, Result<lsp_types::InitializeResult, Self::Error>> {
         let (reply, receive) = oneshot::channel();
-        if self
-            .sender
-            .send(Job::Initialize(Box::new(params), reply))
-            .is_err()
-        {
-            return Box::pin(async { Err(worker_gone_error()) });
-        }
-        self.idle_interrupt.store(true, Ordering::SeqCst);
-        Box::pin(async move { receive.await.unwrap_or_else(|_| Err(worker_gone_error())) })
+        self.submit(Job::Initialize(Box::new(params), reply), receive)
     }
 
     fn initialized(&mut self, _: lsp_types::InitializedParams) -> Self::NotifyResult {
@@ -1619,26 +1472,26 @@ impl LanguageServer for ServerState {
     }
 
     fn did_open(&mut self, params: lsp_types::DidOpenTextDocumentParams) -> Self::NotifyResult {
-        self.notify_edit(move |worker| worker.did_open(params))
+        self.notify(move |worker| worker.did_open(params))
     }
 
     fn did_change(&mut self, params: lsp_types::DidChangeTextDocumentParams) -> Self::NotifyResult {
-        self.notify_edit(move |worker| worker.did_change(params))
+        self.notify(move |worker| worker.did_change(params))
     }
 
     fn did_save(&mut self, params: lsp_types::DidSaveTextDocumentParams) -> Self::NotifyResult {
-        self.notify_edit(move |worker| worker.did_save(params))
+        self.notify(move |worker| worker.did_save(params))
     }
 
     fn did_close(&mut self, params: lsp_types::DidCloseTextDocumentParams) -> Self::NotifyResult {
-        self.notify_edit(move |worker| worker.did_close(params))
+        self.notify(move |worker| worker.did_close(params))
     }
 
     fn did_change_watched_files(
         &mut self,
         params: lsp_types::DidChangeWatchedFilesParams,
     ) -> Self::NotifyResult {
-        self.notify_edit(move |worker| worker.did_change_watched_files(params))
+        self.notify(move |worker| worker.did_change_watched_files(params))
     }
 
     fn did_change_configuration(
@@ -1653,18 +1506,12 @@ impl LanguageServer for ServerState {
         params: lsp_types::HoverParams,
     ) -> BoxFuture<'static, Result<Option<lsp_types::Hover>, Self::Error>> {
         self.read(move |worker| {
-            let position = params.text_document_position_params;
-            let Some(path) = worker.document_path(&position.text_document.uri) else {
+            let Some((file, text, offset)) =
+                worker.document_at(&params.text_document_position_params)
+            else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
+            let files = ProjectFiles::get(&worker.db);
             let hover = worker
                 .cancellable(|worker| ide::hover(&worker.db, files, file, offset))
                 .unwrap_or_default();
@@ -1723,14 +1570,10 @@ impl LanguageServer for ServerState {
                     })
                 }));
             }
-            let Some(&file) = worker.files.get(&path) else {
+            let Some((file, _, offset)) = worker.document_at(&position) else {
                 return Ok(None);
             };
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
+            let files = ProjectFiles::get(&worker.db);
             let target = worker
                 .cancellable(|worker| ide::definition(&worker.db, files, file, offset))
                 .unwrap_or_default();
@@ -1747,18 +1590,11 @@ impl LanguageServer for ServerState {
         params: request::GotoTypeDefinitionParams,
     ) -> BoxFuture<'static, Result<Option<request::GotoTypeDefinitionResponse>, Self::Error>> {
         self.read(move |worker| {
-            let position = params.text_document_position_params;
-            let Some(path) = worker.document_path(&position.text_document.uri) else {
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position_params)
+            else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
+            let files = ProjectFiles::get(&worker.db);
             let target = worker
                 .cancellable(|worker| ide::type_definition(&worker.db, files, file, offset))
                 .unwrap_or_default();
@@ -1775,19 +1611,11 @@ impl LanguageServer for ServerState {
         params: lsp_types::ReferenceParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::Location>>, Self::Error>> {
         self.read(move |worker| {
-            let position = params.text_document_position;
             let include_declaration = params.context.include_declaration;
-            let Some(path) = worker.document_path(&position.text_document.uri) else {
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
+            let files = ProjectFiles::get(&worker.db);
             let occurrences = worker
                 .cancellable(|worker| {
                     ide::references(&worker.db, files, file, offset, include_declaration)
@@ -1812,18 +1640,12 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentHighlightParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::DocumentHighlight>>, Self::Error>> {
         self.read(move |worker| {
-            let position = params.text_document_position_params;
-            let Some(path) = worker.document_path(&position.text_document.uri) else {
+            let Some((file, text, offset)) =
+                worker.document_at(&params.text_document_position_params)
+            else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
+            let files = ProjectFiles::get(&worker.db);
             let occurrences = worker
                 .cancellable(|worker| ide::references(&worker.db, files, file, offset, true))
                 .unwrap_or_default();
@@ -1845,24 +1667,26 @@ impl LanguageServer for ServerState {
     ) -> BoxFuture<'static, Result<Option<lsp_types::WorkspaceEdit>, Self::Error>> {
         self.read(move |worker| {
             let new_name = params.new_name;
-            if !is_valid_r_identifier(&new_name) {
+            if !is_syntactic_name(&new_name) {
                 return Err(ResponseError::new(
                     ErrorCode::INVALID_PARAMS,
                     format!("`{new_name}` is not a valid R identifier"),
                 ));
             }
-            let position = params.text_document_position;
-            let Some(path) = worker.document_path(&position.text_document.uri) else {
+            // `..1` is syntactic, but it names an element of `...`, so a binding of it could
+            // never be read back.
+            if new_name.strip_prefix("..").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+            }) {
+                return Err(ResponseError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("`{new_name}` refers to an element of `...` and cannot name a binding"),
+                ));
+            }
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
+            let files = ProjectFiles::get(&worker.db);
             let occurrences =
                 match worker.cancellable(|worker| ide::rename(&worker.db, files, file, offset)) {
                     Ok(occurrences) => occurrences,
@@ -1900,18 +1724,10 @@ impl LanguageServer for ServerState {
         params: lsp_types::CompletionParams,
     ) -> BoxFuture<'static, Result<Option<lsp_types::CompletionResponse>, Self::Error>> {
         self.read(move |worker| {
-            let position = params.text_document_position;
-            let Some(path) = worker.document_path(&position.text_document.uri) else {
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
+            let files = ProjectFiles::get(&worker.db);
             let result = worker
                 .cancellable(|worker| ide::completion(&worker.db, files, file, offset))
                 .unwrap_or_default();
@@ -1934,18 +1750,10 @@ impl LanguageServer for ServerState {
         params: lsp_types::InlayHintParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::InlayHint>>, Self::Error>> {
         self.read(move |worker| {
-            let Some(path) = worker.document_path(&params.text_document.uri) else {
+            let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let viewport = {
-                let start = worker.to_offset(&text, params.range.start);
-                let end = worker.to_offset(&text, params.range.end);
-                TextRange::new(start, end)
-            };
+            let viewport = worker.to_text_range(&text, params.range);
             let hints = worker
                 .cancellable(|worker| ide::inlay_hints(&worker.db, file, Some(viewport)))
                 .unwrap_or_default();
@@ -1972,15 +1780,10 @@ impl LanguageServer for ServerState {
         params: lsp_types::SignatureHelpParams,
     ) -> BoxFuture<'static, Result<Option<lsp_types::SignatureHelp>, Self::Error>> {
         self.read(move |worker| {
-            let position = params.text_document_position_params;
-            let Some(path) = worker.document_path(&position.text_document.uri) else {
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position_params)
+            else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let offset = worker.to_offset(&text, position.position);
             let help = worker
                 .cancellable(|worker| ide::signature_help(&worker.db, file, offset))
                 .unwrap_or_default();
@@ -2015,10 +1818,7 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let text = worker.text(file);
-            let range = TextRange::new(
-                worker.to_offset(&text, params.range.start),
-                worker.to_offset(&text, params.range.end),
-            );
+            let range = worker.to_text_range(&text, params.range);
             let actions = worker
                 .cancellable(|worker| ide::code_actions(&worker.db, file, range))
                 .unwrap_or_default();
@@ -2058,13 +1858,9 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some(path) = worker.document_path(&params.text_document.uri) else {
+            let Some((_, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
             match format::format(&text, worker.config.format) {
                 Ok(formatted) => {
                     let index = LineIndex::new(&text);
@@ -2096,17 +1892,10 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentRangeFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some(path) = worker.document_path(&params.text_document.uri) else {
+            let Some((_, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
-            let selection = TextRange::new(
-                worker.to_offset(&text, params.range.start),
-                worker.to_offset(&text, params.range.end),
-            );
+            let selection = worker.to_text_range(&text, params.range);
 
             let root = syntax::parse(&text).syntax_node();
             let mut covered: Option<TextRange> = None;
@@ -2170,13 +1959,9 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentSymbolParams,
     ) -> BoxFuture<'static, Result<Option<lsp_types::DocumentSymbolResponse>, Self::Error>> {
         self.read(move |worker| {
-            let Some(path) = worker.document_path(&params.text_document.uri) else {
+            let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
             let symbols = worker
                 .cancellable(|worker| ide::document_symbols(&worker.db, file))
                 .unwrap_or_default();
@@ -2193,9 +1978,7 @@ impl LanguageServer for ServerState {
         params: lsp_types::WorkspaceSymbolParams,
     ) -> BoxFuture<'static, Result<Option<lsp_types::WorkspaceSymbolResponse>, Self::Error>> {
         self.read(move |worker| {
-            let Some(files) = ProjectFiles::try_get(&worker.db) else {
-                return Ok(None);
-            };
+            let files = ProjectFiles::get(&worker.db);
             let query = params.query;
             let symbols = worker
                 .cancellable(|worker| ide::workspace_symbols(&worker.db, files, &query))
@@ -2227,13 +2010,9 @@ impl LanguageServer for ServerState {
         params: lsp_types::FoldingRangeParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::FoldingRange>>, Self::Error>> {
         self.read(move |worker| {
-            let Some(path) = worker.document_path(&params.text_document.uri) else {
+            let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
-            let Some(&file) = worker.files.get(&path) else {
-                return Ok(None);
-            };
-            let text = worker.text(file);
             Ok(Some(folding_ranges(&worker.db, file, &text)))
         })
     }
@@ -2292,17 +2071,17 @@ impl LanguageServer for ServerState {
             // Fault injection for the cancelled-pull test: the marker file lets the test
             // order its edit strictly after this pull started, so the cancellation flip
             // targets this pull's token rather than one a queued job would refresh away.
-            if let Some(delay) = std::env::var("RY_TEST_DELAY_PULL_MS")
+            if let Some(delay) = env::var("RY_TEST_DELAY_PULL_MS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
             {
-                if let Ok(marker) = std::env::var("RY_TEST_PULL_MARKER") {
-                    std::fs::write(&marker, b"pulling")
+                if let Ok(marker) = env::var("RY_TEST_PULL_MARKER") {
+                    fs::write(&marker, b"pulling")
                         .expect("the cancelled-pull test marker must be writable");
                 }
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(delay);
-                while !worker.current_token.is_cancelled() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                let deadline = Instant::now() + Duration::from_millis(delay);
+                while !worker.current_token.is_cancelled() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(5));
                 }
             }
             match worker.cancellable(|worker| worker.settled_diagnostics(&path)) {
@@ -2323,7 +2102,7 @@ impl LanguageServer for ServerState {
 fn to_lsp_document_symbol(
     worker: &Worker,
     text: &str,
-    symbol: ide::DocumentSymbol,
+    symbol: DocumentSymbol,
 ) -> Option<lsp_types::DocumentSymbol> {
     if symbol.name.is_empty() {
         return None;
@@ -2345,30 +2124,28 @@ fn to_lsp_document_symbol(
     })
 }
 
-fn lsp_document_symbol_kind(kind: ide::DocumentSymbolKind) -> lsp_types::SymbolKind {
+fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
     match kind {
-        ide::DocumentSymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
-        ide::DocumentSymbolKind::Value => lsp_types::SymbolKind::VARIABLE,
-        ide::DocumentSymbolKind::TypeDefinition => lsp_types::SymbolKind::STRUCT,
-        ide::DocumentSymbolKind::AliasDefinition | ide::DocumentSymbolKind::S4Generic => {
+        DocumentSymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
+        DocumentSymbolKind::Value => lsp_types::SymbolKind::VARIABLE,
+        DocumentSymbolKind::TypeDefinition => lsp_types::SymbolKind::STRUCT,
+        DocumentSymbolKind::AliasDefinition | DocumentSymbolKind::S4Generic => {
             lsp_types::SymbolKind::INTERFACE
         }
-        ide::DocumentSymbolKind::S4Class | ide::DocumentSymbolKind::R6Class => {
-            lsp_types::SymbolKind::CLASS
-        }
-        ide::DocumentSymbolKind::S4Method | ide::DocumentSymbolKind::R6Method => {
+        DocumentSymbolKind::S4Class | DocumentSymbolKind::R6Class => lsp_types::SymbolKind::CLASS,
+        DocumentSymbolKind::S4Method | DocumentSymbolKind::R6Method => {
             lsp_types::SymbolKind::METHOD
         }
-        ide::DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
+        DocumentSymbolKind::R6Field => lsp_types::SymbolKind::FIELD,
     }
 }
 
-fn convert_completion_item(item: ide::CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
+fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
     let kind = match item.kind {
-        ide::CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
-        ide::CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
-        ide::CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
-        ide::CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
+        CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
+        CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
+        CompletionKind::Function => lsp_types::CompletionItemKind::FUNCTION,
+        CompletionKind::Field => lsp_types::CompletionItemKind::FIELD,
     };
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),
@@ -2382,7 +2159,7 @@ fn convert_completion_item(item: ide::CompletionItem, snippets: bool) -> lsp_typ
         }),
         ..Default::default()
     };
-    if snippets && item.kind == ide::CompletionKind::Function {
+    if snippets && item.kind == CompletionKind::Function {
         // A known zero-argument signature drops the cursor past the parens;
         // everything else (arguments or unknown) drops it between them.
         converted.insert_text = Some(if item.takes_arguments == Some(false) {
@@ -2403,7 +2180,7 @@ fn convert_completion_item(item: ide::CompletionItem, snippets: bool) -> lsp_typ
 /// Label offsets are always UTF-16 code units per the LSP spec, independent
 /// of the negotiated document encoding.
 fn convert_signature(
-    signature: ide::SignatureData,
+    signature: SignatureData,
     label_offsets: bool,
 ) -> lsp_types::SignatureInformation {
     let parameters: Vec<lsp_types::ParameterInformation> = signature
@@ -2445,22 +2222,17 @@ fn empty_full_diagnostic_report() -> lsp_types::DocumentDiagnosticReportResult {
     ))
 }
 
-/// A content hash, not the document version: inter-file dependencies move
-/// diagnostics without moving the version.
-fn diagnostics_result_id(diagnostics: &[lsp_types::Diagnostic]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::hash::DefaultHasher::new();
-    serde_json::to_string(diagnostics)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
+/// The result id is a content hash, not the document version: inter-file
+/// dependencies move diagnostics without moving the version.
 fn diagnostic_report(
     items: Vec<lsp_types::Diagnostic>,
     previous_result_id: Option<String>,
 ) -> lsp_types::DocumentDiagnosticReportResult {
-    let result_id = diagnostics_result_id(&items);
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_string(&items)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    let result_id = format!("{:016x}", hasher.finish());
     if previous_result_id.as_deref() == Some(result_id.as_str()) {
         return lsp_types::DocumentDiagnosticReportResult::Report(
             lsp_types::DocumentDiagnosticReport::Unchanged(
@@ -2496,52 +2268,6 @@ fn diagnostics_cancelled_error() -> ResponseError {
     )
 }
 
-/// Valid R identifier: a letter or `.` (not followed by a digit) first, then
-/// alphanumerics, `.`, `_`; reserved words excluded.
-fn is_valid_r_identifier(name: &str) -> bool {
-    const RESERVED: &[&str] = &[
-        "if",
-        "else",
-        "repeat",
-        "while",
-        "function",
-        "for",
-        "in",
-        "next",
-        "break",
-        "TRUE",
-        "FALSE",
-        "NULL",
-        "Inf",
-        "NaN",
-        "NA",
-        "NA_integer_",
-        "NA_real_",
-        "NA_character_",
-        "NA_complex_",
-    ];
-    if RESERVED.contains(&name) {
-        return false;
-    }
-    let mut characters = name.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    if !(first.is_alphabetic() || first == '.') {
-        return false;
-    }
-    if first == '.'
-        && name
-            .chars()
-            .nth(1)
-            .is_some_and(|second| second.is_ascii_digit())
-    {
-        return false;
-    }
-    name.chars()
-        .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
-}
-
 /// Brace/paren/argument-list folds keep the closing delimiter visible;
 /// consecutive comments (including `#:` blocks) fold as one region.
 fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_types::FoldingRange> {
@@ -2567,55 +2293,36 @@ fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_ty
             }
         }
     }
-    let mut run_start: Option<u32> = None;
-    let mut previous_line: Option<u32> = None;
-    let mut comment_lines: Vec<u32> = Vec::new();
-    for element in parse.syntax_node().descendants_with_tokens() {
-        if let syntax::SyntaxElement::Token(token) = element
-            && matches!(token.kind(), SyntaxKind::COMMENT)
-        {
-            comment_lines.push(index.line_column(token.text_range().start()).line);
-        }
-    }
+    let mut comment_lines: Vec<u32> = parse
+        .syntax_node()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| token.kind() == SyntaxKind::COMMENT)
+        .map(|token| index.line_column(token.text_range().start()).line)
+        .collect();
     comment_lines.sort_unstable();
     comment_lines.dedup();
+    let mut runs: Vec<(u32, u32)> = Vec::new();
     for line in comment_lines {
-        match (run_start, previous_line) {
-            (Some(start), Some(previous)) if line == previous + 1 => {
-                previous_line = Some(line);
-                let _ = start;
-            }
-            (Some(start), Some(previous)) => {
-                if previous > start {
-                    ranges.push(comment_fold(start, previous));
-                }
-                run_start = Some(line);
-                previous_line = Some(line);
-            }
-            _ => {
-                run_start = Some(line);
-                previous_line = Some(line);
-            }
+        match runs.last_mut() {
+            Some((_, end)) if line == *end + 1 => *end = line,
+            _ => runs.push((line, line)),
         }
     }
-    if let (Some(start), Some(previous)) = (run_start, previous_line)
-        && previous > start
-    {
-        ranges.push(comment_fold(start, previous));
-    }
+    ranges.extend(
+        runs.into_iter()
+            .filter(|(start, end)| end > start)
+            .map(|(start, end)| lsp_types::FoldingRange {
+                start_line: start,
+                start_character: None,
+                end_line: end,
+                end_character: None,
+                kind: Some(lsp_types::FoldingRangeKind::Comment),
+                collapsed_text: None,
+            }),
+    );
     ranges.sort_by_key(|range| (range.start_line, range.end_line));
     ranges
-}
-
-fn comment_fold(start: u32, end: u32) -> lsp_types::FoldingRange {
-    lsp_types::FoldingRange {
-        start_line: start,
-        start_character: None,
-        end_line: end,
-        end_character: None,
-        kind: Some(lsp_types::FoldingRangeKind::Comment),
-        collapsed_text: None,
-    }
 }
 
 fn annotation_semantic_tokens(
@@ -2632,7 +2339,7 @@ fn annotation_semantic_tokens(
         .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
         for element in annotation.descendants_with_tokens() {
-            let syntax::SyntaxElement::Token(token) = element else {
+            let SyntaxElement::Token(token) = element else {
                 continue;
             };
             if let Some(token_type) = classify_annotation_token(&token)
@@ -2647,7 +2354,7 @@ fn annotation_semantic_tokens(
 
 /// Indices into the advertised legend: type names 0, `<T>` binders 1,
 /// field/parameter names 2, punctuation 3, `@` directives 4.
-fn classify_annotation_token(token: &syntax::SyntaxToken) -> Option<u32> {
+fn classify_annotation_token(token: &SyntaxToken) -> Option<u32> {
     let parent_kind = token.parent().map(|parent| parent.kind());
     match token.kind() {
         SyntaxKind::IDENT => match parent_kind {
@@ -2727,7 +2434,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
         // The wrapped parse prefixes "#: " (3 bytes) before the type text.
         let parse = syntax::parse(&format!("#: {type_text}\n"));
         for element in parse.syntax_node().descendants_with_tokens() {
-            let syntax::SyntaxElement::Token(token) = element else {
+            let SyntaxElement::Token(token) = element else {
                 continue;
             };
             let range = token.text_range();
@@ -2797,7 +2504,7 @@ fn materialize_shipped_stubs(shipped: &[(String, String)]) -> Vec<Option<PathBuf
         .join("ry")
         .join("stubs")
         .join(env!("CARGO_PKG_VERSION"));
-    if let Err(error) = std::fs::create_dir_all(&directory) {
+    if let Err(error) = fs::create_dir_all(&directory) {
         tracing::warn!(
             "stub locations unavailable: cannot create {}: {error}",
             directory.display()
@@ -2808,9 +2515,9 @@ fn materialize_shipped_stubs(shipped: &[(String, String)]) -> Vec<Option<PathBuf
         .iter()
         .map(|(namespace, text)| {
             let path = directory.join(format!("{namespace}.Rtypes"));
-            let current = std::fs::read_to_string(&path).ok();
+            let current = fs::read_to_string(&path).ok();
             if current.as_deref() != Some(text.as_str())
-                && let Err(error) = std::fs::write(&path, text)
+                && let Err(error) = fs::write(&path, text)
             {
                 tracing::warn!("stub location unavailable: {}: {error}", path.display());
                 return None;

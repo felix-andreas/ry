@@ -2,9 +2,23 @@
 //! panic, and must answer byte-equal to a single thread.
 
 use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::stubs::install_shipped_stubs;
+use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree};
+use std::time::{Duration, Instant};
+use std::{slice, thread};
 
-fn cyclic_project(db: &RootDatabase, files: usize, functions_per_file: usize) -> Vec<SourceFile> {
+fn project(sources: &[String]) -> (RootDatabase, Vec<SourceFile>) {
+    let db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let files: Vec<SourceFile> = sources
+        .iter()
+        .map(|source| SourceFile::new(&db, source.clone(), DocumentKind::Package))
+        .collect();
+    ProjectFiles::new(&db, files.clone());
+    (db, files)
+}
+
+fn cyclic_sources(files: usize, functions_per_file: usize) -> Vec<String> {
     let mut sources = Vec::new();
     for file_index in 0..files {
         let mut source = String::new();
@@ -21,12 +35,7 @@ fn cyclic_project(db: &RootDatabase, files: usize, functions_per_file: usize) ->
         ));
         sources.push(source);
     }
-    let handles: Vec<SourceFile> = sources
-        .into_iter()
-        .map(|source| SourceFile::new(db, source, DocumentKind::Package))
-        .collect();
-    ProjectFiles::new(db, handles.clone());
-    handles
+    sources
 }
 
 fn all_diagnostics(db: &RootDatabase, files: &[SourceFile]) -> Vec<String> {
@@ -55,17 +64,13 @@ fn all_diagnostics(db: &RootDatabase, files: &[SourceFile]) -> Vec<String> {
 /// The wall-time bound is generous: a hang here is a parallel-fixpoint bug, never load.
 #[test]
 fn concurrent_cycle_queries_agree_with_the_baseline() {
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let files = cyclic_project(&db, 6, 4);
-
-    let baseline_db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&baseline_db);
-    let baseline_files = cyclic_project(&baseline_db, 6, 4);
+    let sources = cyclic_sources(6, 4);
+    let (db, files) = project(&sources);
+    let (baseline_db, baseline_files) = project(&sources);
     let baseline = all_diagnostics(&baseline_db, &baseline_files);
 
-    let started = std::time::Instant::now();
-    std::thread::scope(|scope| {
+    let started = Instant::now();
+    thread::scope(|scope| {
         let mut workers = Vec::new();
         for worker in 0..8 {
             let db = db.clone();
@@ -81,22 +86,15 @@ fn concurrent_cycle_queries_agree_with_the_baseline() {
             let rendered = handle.join().expect("worker thread must not panic");
             let mut ordered = files.clone();
             ordered.rotate_left(worker % files.len());
-            let expected = {
-                let mut expected = Vec::new();
-                let by_file: std::collections::HashMap<SourceFile, Vec<String>> = files
-                    .iter()
-                    .map(|&file| (file, all_diagnostics(&db, std::slice::from_ref(&file))))
-                    .collect();
-                for file in &ordered {
-                    expected.extend(by_file[file].iter().cloned());
-                }
-                expected
-            };
-            assert_eq!(rendered, expected, "worker {worker} diverged");
+            assert_eq!(
+                rendered,
+                all_diagnostics(&db, &ordered),
+                "worker {worker} diverged"
+            );
         }
     });
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(60),
+        started.elapsed() < Duration::from_secs(60),
         "parallel fixpoint took implausibly long, so treat it as a hang"
     );
 
@@ -120,38 +118,25 @@ fn parallel_cold_prime_matches_sequential() {
     }
     sources.push("shared_helper <- function() 1L\n".to_owned());
 
-    let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let files: Vec<SourceFile> = sources
-        .iter()
-        .map(|source| SourceFile::new(&db, source.clone(), DocumentKind::Package))
-        .collect();
-    ProjectFiles::new(&db, files.clone());
-
-    std::thread::scope(|scope| {
+    let (db, files) = project(&sources);
+    thread::scope(|scope| {
         for chunk in files.chunks(4) {
             let db = db.clone();
             let chunk = chunk.to_vec();
             scope.spawn(move || {
                 for &file in &chunk {
-                    let _ = file_diagnostics(&db, file);
+                    file_diagnostics(&db, file);
                 }
             });
         }
     });
 
-    let sequential_db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&sequential_db);
-    let sequential_files: Vec<SourceFile> = sources
-        .iter()
-        .map(|source| SourceFile::new(&sequential_db, source.clone(), DocumentKind::Package))
-        .collect();
-    ProjectFiles::new(&sequential_db, sequential_files.clone());
+    let (sequential_db, sequential_files) = project(&sources);
 
     for (&file, &sequential_file) in files.iter().zip(&sequential_files) {
         assert_eq!(
-            all_diagnostics(&db, std::slice::from_ref(&file)),
-            all_diagnostics(&sequential_db, std::slice::from_ref(&sequential_file)),
+            all_diagnostics(&db, slice::from_ref(&file)),
+            all_diagnostics(&sequential_db, slice::from_ref(&sequential_file)),
         );
     }
 }
@@ -178,27 +163,21 @@ fn cyclic_group_answers_are_forcing_order_independent() {
     ];
     for sources in cases {
         let build = |forcing: &dyn Fn(&RootDatabase, &[SourceFile])| -> Vec<String> {
-            let db = RootDatabase::default();
-            semantics::stubs::install_shipped_stubs(&db);
-            let files: Vec<SourceFile> = sources
-                .iter()
-                .map(|source| SourceFile::new(&db, source.clone(), DocumentKind::Package))
-                .collect();
-            ProjectFiles::new(&db, files.clone());
+            let (db, files) = project(&sources);
             forcing(&db, &files);
             all_diagnostics(&db, &files)
         };
         let forward = build(&|_, _| {});
         let reverse = build(&|db, files| {
             for &file in files.iter().rev() {
-                let _ = file_diagnostics(db, file);
-                let _ = strict_diagnostics(db, file);
+                file_diagnostics(db, file);
+                strict_diagnostics(db, file);
             }
         });
         let phased = build(&|db, files| {
             for &file in files {
-                for &item in semantics::item_tree(db, file) {
-                    let _ = semantics::item_check(db, item);
+                for &item in item_tree(db, file) {
+                    item_check(db, item);
                 }
             }
         });

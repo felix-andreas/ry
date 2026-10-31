@@ -9,11 +9,25 @@ use miette::{
     Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
 };
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
+use semantics::metadata::{
+    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+    parse_description_dependencies, parse_description_package, parse_namespace_exports,
+    parse_namespace_imports,
+};
+use semantics::stubs::{
+    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+    shipped_stub_sources, stub_source_problems, stubs,
+};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+use std::{env, fmt, fs, iter, thread};
 use syntax::TextRange;
+use syntax::literate::{is_literate_extension, r_source_of_literate};
 
 /// A run summary: not a finding, so a plain line rather than a report.
 pub fn info(message: &str) {
@@ -88,7 +102,7 @@ pub fn check(
             }
         };
         warn_unknown_config_keys(&config);
-        let target = std::fs::canonicalize(file).map_err(|err| {
+        let target = fs::canonicalize(file).map_err(|err| {
             error_because(&format!("failed to resolve: {}", file.display()), &err);
             CommandError
         })?;
@@ -114,94 +128,85 @@ pub fn check(
 
         // Override stubs fold on top of the shipped corpus (later sources win); an
         // unreadable one is an I/O failure.
-        let mut stub_sources = semantics::stubs::shipped_stub_sources();
-        let mut project_stub_files: Vec<(PathBuf, String)> = Vec::new();
-        match discover_project_stubs(&root) {
-            Ok(project_stubs) => {
-                for stub in project_stubs {
-                    stub_sources.push((stub.stem, stub.text.clone()));
-                    project_stub_files.push((stub.path, stub.text));
-                }
-            }
+        let project_stubs = match read_project_stubs(&root) {
+            Ok(project_stubs) => project_stubs,
             Err((path, err)) => {
                 n_failures += 1;
                 error_because(
                     &format!("failed to read override stub: {}", path.display()),
                     &err,
                 );
+                Vec::new()
             }
-        }
+        };
+        let mut stub_sources = shipped_stub_sources();
+        stub_sources.extend(
+            project_stubs
+                .iter()
+                .map(|stub| (stub.stem.clone(), stub.text.clone())),
+        );
 
         let mut db = RootDatabase::default();
-        semantics::stubs::StubSources::new(
-            &db,
-            stub_sources,
-            semantics::stubs::shipped_export_manifests(),
-        );
+        StubSources::new(&db, stub_sources, shipped_export_manifests());
 
         // A broken override stub silently changes what every file checks against, so
         // its dropped declarations are reported as findings.
-        for (stub_path, stub_text) in &project_stub_files {
+        for stub in &project_stubs {
+            let stub_text = &stub.text;
             let stub_index = LineIndex::new(stub_text);
-            let stub_lines = LineStarts::new(stub_text);
-            for problem in semantics::stubs::stub_source_problems(&db, stub_text) {
-                n_diagnostics += 1;
-                let start = stub_index.line_start(problem.line as u32);
-                let end = start + stub_index.line_length(problem.line as u32, stub_text);
-                let diagnostic = Diagnostic {
-                    range: TextRange::new(start.into(), end.into()),
-                    severity: Severity::Error,
-                    code: "stub",
-                    message: problem.message,
-                    related: Vec::new(),
-                };
-                match output {
-                    OutputFormat::Human => {
-                        render_human_diagnostic(stub_path, stub_text, &stub_lines, &diagnostic, &[])
-                    }
-                    OutputFormat::Json => {
-                        render_json_diagnostic(stub_path, stub_text, &stub_index, &diagnostic, &[])
-                    }
-                }
-            }
+            let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
+                .into_iter()
+                .map(|problem| {
+                    let start = stub_index.line_start(problem.line as u32);
+                    let end = start + stub_index.line_length(problem.line as u32, stub_text);
+                    Diagnostic::new(
+                        TextRange::new(start.into(), end.into()),
+                        Severity::Error,
+                        "stub",
+                        problem.message,
+                    )
+                })
+                .collect();
+            n_diagnostics += render_findings(
+                output,
+                min_severity,
+                &stub.path,
+                stub_text,
+                &problems,
+                &|_| None,
+            );
         }
 
         let namespace_path = root.join("NAMESPACE");
-        let namespace_source = std::fs::read_to_string(&namespace_path).ok();
+        let namespace_source = fs::read_to_string(&namespace_path).ok();
         let namespace_imports = namespace_source
             .as_deref()
-            .map(namespace::parse_namespace_imports)
+            .map(parse_namespace_imports)
             .unwrap_or_default();
-        let description_source = std::fs::read_to_string(root.join("DESCRIPTION")).ok();
+        let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
         let dependencies = description_source
             .as_deref()
-            .map(semantics::metadata::parse_description_dependencies)
+            .map(parse_description_dependencies)
             .unwrap_or_default();
         let collate = description_source
             .as_deref()
-            .map(semantics::metadata::parse_description_collate)
+            .map(parse_description_collate)
             .unwrap_or_default();
-        let collate_rank: HashMap<&str, usize> = collate
-            .iter()
-            .enumerate()
-            .map(|(rank, name)| (name.as_str(), rank))
-            .collect();
-        let metadata = semantics::metadata::PackageMetadata::new(
+        let metadata = PackageMetadata::new(
             &db,
-            semantics::metadata::normalized_imports(&namespace_imports),
+            normalized_imports(&namespace_imports),
             dependencies,
             BTreeSet::new(),
             description_source
                 .as_deref()
-                .and_then(semantics::metadata::parse_description_package),
+                .and_then(parse_description_package),
         );
 
-        let r_path = root.join("R");
         let mut used_tokens = BTreeSet::new();
         let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
         let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
         for path in paths {
-            let source = match std::fs::read_to_string(&path) {
+            let source = match fs::read_to_string(&path) {
                 Ok(source) => analysable_source(&path, source),
                 Err(err) => {
                     n_failures += 1;
@@ -220,25 +225,10 @@ pub fn check(
             checked.push((path, source));
         }
 
-        // The server's order, so the last-writer-wins symbol index selects the same
-        // winners; diagnostics still print in discovery order.
+        // Analysis follows the project order; diagnostics still print in discovery order.
+        let order = project_order(&root, &collate);
         let mut ordered: Vec<usize> = (0..checked.len()).collect();
-        ordered.sort_by_key(|index| {
-            let path = &checked[*index].0;
-            let rank = path
-                .file_name()
-                .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
-                .copied()
-                .unwrap_or(usize::MAX);
-            (
-                !path.starts_with(&r_path),
-                rank,
-                path.strip_prefix(&root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            )
-        });
+        ordered.sort_by_cached_key(|&index| order(&checked[index].0));
         let mut files: Vec<Option<SourceFile>> = vec![None; checked.len()];
         let mut project = Vec::with_capacity(checked.len());
         for index in ordered {
@@ -252,38 +242,39 @@ pub fn check(
             files[index] = Some(file);
             project.push(file);
         }
+        let files: Vec<SourceFile> = files.into_iter().flatten().collect();
         ProjectFiles::new(&db, project.clone());
-        let attached = semantics::metadata::attached_union(&db, project);
+        let attached = attached_union(&db, project);
         if !attached.is_empty() {
             use salsa::Setter;
             metadata.set_attached(&mut db).to(attached);
         }
 
-        let path_by_file: std::collections::HashMap<SourceFile, &PathBuf> = checked
+        let path_by_file: HashMap<SourceFile, &PathBuf> = files
             .iter()
-            .enumerate()
-            .filter_map(|(index, (path, _))| files[index].map(|file| (file, path)))
+            .zip(&checked)
+            .map(|(&file, (path, _))| (file, path))
             .collect();
         // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
-        let workers = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
+        let workers = thread::available_parallelism()
+            .map(NonZero::get)
             .unwrap_or(1)
             .min(checked.len().max(1));
         // Warm per-item naming across cores first: inside the project-wide interface walk
         // it would serialize on one thread. Largest files first so one cannot skew a chunk.
         // Workers need the analysis stack: interface resolution recurses per dependency edge.
-        std::thread::scope(|scope| {
+        thread::scope(|scope| {
             {
                 let db = db.clone();
-                std::thread::Builder::new()
+                thread::Builder::new()
                     .stack_size(crate::ANALYSIS_STACK_SIZE)
                     .spawn_scoped(scope, move || {
-                        let _ = semantics::stubs::stubs(&db);
+                        let _ = stubs(&db);
                     })
                     .expect("check worker thread should spawn");
             }
             let mut by_size: Vec<usize> = (0..checked.len()).collect();
-            by_size.sort_by_key(|&index| std::cmp::Reverse(checked[index].1.len()));
+            by_size.sort_by_key(|&index| Reverse(checked[index].1.len()));
             for worker in 0..workers {
                 let db = db.clone();
                 let files = &files;
@@ -293,14 +284,11 @@ pub fn check(
                     .skip(worker)
                     .step_by(workers)
                     .collect();
-                std::thread::Builder::new()
+                thread::Builder::new()
                     .stack_size(crate::ANALYSIS_STACK_SIZE)
                     .spawn_scoped(scope, move || {
                         for index in deal {
-                            let Some(file) = files[index] else {
-                                continue;
-                            };
-                            for &item in semantics::item_tree(&db, file) {
+                            for &item in semantics::item_tree(&db, files[index]) {
                                 let _ = semantics::item_naming(&db, item);
                             }
                         }
@@ -309,7 +297,7 @@ pub fn check(
             }
         });
         let mut per_file: Vec<Vec<Diagnostic>> = (0..checked.len()).map(|_| Vec::new()).collect();
-        std::thread::scope(|scope| {
+        thread::scope(|scope| {
             let mut pending: Vec<(usize, &mut Vec<Diagnostic>)> =
                 per_file.iter_mut().enumerate().collect();
             let chunk_size = pending.len().div_ceil(workers.max(1)).max(1);
@@ -323,15 +311,12 @@ pub fn check(
                 let checked = &checked;
                 let files = &files;
                 let config = &config;
-                let worker = std::thread::Builder::new()
+                let worker = thread::Builder::new()
                     .stack_size(crate::ANALYSIS_STACK_SIZE)
                     .spawn_scoped(scope, move || {
                         for (index, slot) in chunk {
-                            let (_, source) = &checked[index];
-                            let file =
-                                files[index].expect("every checked file was fed to the project");
-                            let rendered = document_diagnostics(&db, file, config);
-                            *slot = apply_suppressions(rendered, source);
+                            let rendered = document_diagnostics(&db, files[index], config);
+                            *slot = apply_suppressions(rendered, &checked[index].1);
                         }
                     });
                 worker.expect("check worker thread should spawn");
@@ -347,44 +332,31 @@ pub fn check(
             })
         };
         for (index, (path, source)) in checked.iter().enumerate() {
-            if !reported.get(index).copied().unwrap_or(false) {
-                continue;
-            }
-            let line_index = LineIndex::new(source);
-            let snippet_lines = LineStarts::new(source);
-            for diagnostic in &per_file[index] {
-                if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
-                    continue;
-                }
-                n_diagnostics += 1;
-                let related: Vec<RelatedNote> =
-                    diagnostic.related.iter().filter_map(resolve_note).collect();
-                match output {
-                    OutputFormat::Human => {
-                        render_human_diagnostic(path, source, &snippet_lines, diagnostic, &related)
-                    }
-                    OutputFormat::Json => {
-                        render_json_diagnostic(path, source, &line_index, diagnostic, &related)
-                    }
-                }
+            if reported[index] {
+                n_diagnostics += render_findings(
+                    output,
+                    min_severity,
+                    path,
+                    source,
+                    &per_file[index],
+                    &resolve_note,
+                );
             }
         }
 
         // Emitted last so the `unused-import` lint sees the whole package.
         if let Some(namespace_source) = &namespace_source {
-            let knows =
-                |package: &str| semantics::stubs::namespace_known(&db, package).unwrap_or(false);
-            let exports =
-                |package: &str, name: &str| semantics::stubs::namespace_exports(&db, package, name);
+            let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
+            let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
             let mut problems =
                 namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
             let defines = |name: &str| {
-                semantics::ProjectFiles::try_get(&db).is_some_and(|files| {
+                ProjectFiles::try_get(&db).is_some_and(|files| {
                     semantics::package_definitions(&db, files).contains_key(name)
                 })
             };
             problems.extend(namespace::namespace_export_problems(
-                &semantics::metadata::parse_namespace_exports(namespace_source),
+                &parse_namespace_exports(namespace_source),
                 &defines,
             ));
             problems.extend(namespace::unused_import_diagnostics(
@@ -392,29 +364,14 @@ pub fn check(
                 &used_tokens,
                 config.lint.unused_import,
             ));
-            let index = LineIndex::new(namespace_source);
-            for diagnostic in problems {
-                if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
-                    continue;
-                }
-                n_diagnostics += 1;
-                match output {
-                    OutputFormat::Human => render_human_diagnostic(
-                        &namespace_path,
-                        namespace_source,
-                        &LineStarts::new(namespace_source),
-                        &diagnostic,
-                        &[],
-                    ),
-                    OutputFormat::Json => render_json_diagnostic(
-                        &namespace_path,
-                        namespace_source,
-                        &index,
-                        &diagnostic,
-                        &[],
-                    ),
-                }
-            }
+            n_diagnostics += render_findings(
+                output,
+                min_severity,
+                &namespace_path,
+                namespace_source,
+                &problems,
+                &|_| None,
+            );
         }
     }
 
@@ -453,9 +410,9 @@ pub(crate) fn analysable_source(path: &Path, text: String) -> String {
     let literate = path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(syntax::literate::is_literate_extension);
+        .is_some_and(is_literate_extension);
     if literate {
-        syntax::literate::r_source_of_literate(&text)
+        r_source_of_literate(&text)
     } else {
         text
     }
@@ -491,7 +448,7 @@ pub(crate) fn exclude_matcher(
             target.parent().unwrap_or(target).to_path_buf()
         }
     });
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let root = fs::canonicalize(&root).unwrap_or(root);
     let mut builder = GitignoreBuilder::new(&root);
     for pattern in &config.check.exclude {
         if let Err(err) = builder.add_line(None, pattern) {
@@ -564,9 +521,7 @@ pub(crate) fn collect_r_files(
                 path.extension()
                     .and_then(|extension| extension.to_str())
                     .is_some_and(|extension| {
-                        extension == "R"
-                            || extension == "r"
-                            || syntax::literate::is_literate_extension(extension)
+                        extension == "R" || extension == "r" || is_literate_extension(extension)
                     })
                     .then_some(Ok(path))
             }
@@ -578,44 +533,109 @@ pub(crate) fn collect_r_files(
         .collect()
 }
 
-/// The file stem is the namespace label.
-pub(crate) struct ProjectStub {
-    pub(crate) path: PathBuf,
-    pub(crate) stem: String,
-    pub(crate) text: String,
-}
-
-/// `<root>/stubs/*.Rtypes`, in path order.
-pub(crate) fn discover_project_stubs(
-    root: &Path,
-) -> Result<Vec<ProjectStub>, (PathBuf, std::io::Error)> {
-    let stubs_dir = root.join("stubs");
-    let Ok(entries) = std::fs::read_dir(&stubs_dir) else {
-        return Ok(Vec::new());
+/// `<root>/stubs/*.Rtypes` in path order, each with its file stem (the namespace label).
+pub(crate) fn project_stub_paths(root: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = fs::read_dir(root.join("stubs")) else {
+        return Vec::new();
     };
-    let mut paths: Vec<PathBuf> = entries
+    let mut stubs: Vec<(PathBuf, String)> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "Rtypes")
         })
+        .map(|path| {
+            let stem = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (path, stem)
+        })
         .collect();
-    paths.sort();
-    let mut sources = Vec::new();
-    for path in paths {
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let stem = path
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                sources.push(ProjectStub { path, stem, text });
+    stubs.sort();
+    stubs
+}
+
+pub(crate) struct ProjectStub {
+    pub(crate) path: PathBuf,
+    /// The namespace label.
+    pub(crate) stem: String,
+    pub(crate) text: String,
+}
+
+/// Every project stub, or the first one that cannot be read.
+pub(crate) fn read_project_stubs(
+    root: &Path,
+) -> Result<Vec<ProjectStub>, (PathBuf, std::io::Error)> {
+    project_stub_paths(root)
+        .into_iter()
+        .map(|(path, stem)| match fs::read_to_string(&path) {
+            Ok(text) => Ok(ProjectStub { path, stem, text }),
+            Err(err) => Err((path, err)),
+        })
+        .collect()
+}
+
+/// Package documents first (in `Collate` order when declared, then by path), then
+/// scripts. The server, `check`, and the stats agree on it, so the last-writer-wins
+/// symbol index selects the same winners everywhere.
+pub(crate) fn project_order<'a>(
+    root: &'a Path,
+    collate: &'a [String],
+) -> impl Fn(&Path) -> (bool, usize, String) + 'a {
+    let r_path = root.join("R");
+    let collate_rank: HashMap<&str, usize> = collate
+        .iter()
+        .enumerate()
+        .map(|(rank, name)| (name.as_str(), rank))
+        .collect();
+    move |path| {
+        let rank = path
+            .file_name()
+            .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
+            .copied()
+            .unwrap_or(usize::MAX);
+        (
+            !path.starts_with(&r_path),
+            rank,
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    }
+}
+
+/// Renders the findings at or above the floor and returns how many it rendered.
+fn render_findings<'a>(
+    output: OutputFormat,
+    min_severity: MinSeverity,
+    path: &Path,
+    source: &str,
+    diagnostics: &[Diagnostic],
+    resolve_note: &dyn Fn(&RelatedLocation) -> Option<RelatedNote<'a>>,
+) -> usize {
+    let line_index = LineIndex::new(source);
+    let snippet_lines = LineStarts::new(source);
+    let mut rendered = 0;
+    for diagnostic in diagnostics {
+        if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
+            continue;
+        }
+        rendered += 1;
+        let related: Vec<RelatedNote> =
+            diagnostic.related.iter().filter_map(resolve_note).collect();
+        match output {
+            OutputFormat::Human => {
+                render_human_diagnostic(path, source, &snippet_lines, diagnostic, &related)
             }
-            Err(err) => return Err((path, err)),
+            OutputFormat::Json => {
+                render_json_diagnostic(path, source, &line_index, diagnostic, &related)
+            }
         }
     }
-    Ok(sources)
+    rendered
 }
 
 /// A related range often sits in another document, so each note carries its own text.
@@ -774,8 +794,8 @@ impl<'a> Default for Report<'a> {
     }
 }
 
-impl std::fmt::Display for Report<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Report<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.message)
     }
 }
@@ -787,9 +807,9 @@ impl std::error::Error for Report<'_> {
 }
 
 impl miette::Diagnostic for Report<'_> {
-    fn code(&self) -> Option<Box<dyn std::fmt::Display + '_>> {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
         self.code
-            .map(|code| Box::new(code) as Box<dyn std::fmt::Display>)
+            .map(|code| Box::new(code) as Box<dyn fmt::Display>)
     }
 
     fn severity(&self) -> Option<ReportSeverity> {
@@ -804,7 +824,7 @@ impl miette::Diagnostic for Report<'_> {
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
         let snippet = self.snippet.as_ref()?;
-        Some(Box::new(std::iter::once(snippet.label.clone())))
+        Some(Box::new(iter::once(snippet.label.clone())))
     }
 
     fn related(&self) -> Option<Box<dyn Iterator<Item = &dyn miette::Diagnostic> + '_>> {
@@ -946,7 +966,7 @@ struct NamedText<'a> {
 impl<'a> NamedText<'a> {
     fn new(path: &Path, text: &'a str, lines: &'a LineStarts) -> NamedText<'a> {
         static WORKING_DIRECTORY: LazyLock<Option<PathBuf>> =
-            LazyLock::new(|| std::env::current_dir().ok());
+            LazyLock::new(|| env::current_dir().ok());
         let name = WORKING_DIRECTORY
             .as_deref()
             .and_then(|directory| path.strip_prefix(directory).ok())
@@ -1025,7 +1045,7 @@ fn project_root_for_target(target: &Path) -> PathBuf {
         target.parent()
     };
     while let Some(directory) = current {
-        if crate::config::CONFIG_FILE_NAMES
+        if config::CONFIG_FILE_NAMES
             .iter()
             .any(|name| directory.join(name).is_file())
             || directory.join("DESCRIPTION").is_file()
@@ -1076,15 +1096,15 @@ pub fn fmt(
                     !path
                         .extension()
                         .and_then(|extension| extension.to_str())
-                        .is_some_and(syntax::literate::is_literate_extension)
+                        .is_some_and(is_literate_extension)
                 })
                 .collect();
             Ok((paths, config))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let start_global = std::time::Instant::now();
-    let mut elapsed_total = std::time::Duration::ZERO;
+    let start_global = Instant::now();
+    let mut elapsed_total = Duration::ZERO;
     let mut bytes_total = 0usize;
 
     let mut n_files = 0;
@@ -1093,7 +1113,7 @@ pub fn fmt(
     for (paths, config) in paths_with_config {
         for path in paths {
             n_files += 1;
-            let initial = match std::fs::read_to_string(&path) {
+            let initial = match fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(err) => {
                     n_errors += 1;
@@ -1102,7 +1122,7 @@ pub fn fmt(
                 }
             };
 
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             let new = match format::format(&initial, config.format) {
                 Ok(new) => new,
                 Err(err) => {
@@ -1121,7 +1141,7 @@ pub fn fmt(
                     print_diff(&initial, &new);
                 } else if check {
                     eprintln!("Would reformat: {}", style(path.display()).bold());
-                } else if let Err(err) = std::fs::write(&path, &new) {
+                } else if let Err(err) = fs::write(&path, &new) {
                     n_errors += 1;
                     error_because(
                         &format!("failed to write to file: {}", path.display()),
@@ -1188,12 +1208,8 @@ pub fn fmt(
     })
 }
 
-pub fn server(experimental_features: ExperimentalFeatures, debug: bool) {
-    crate::server::run(experimental_features, debug);
-}
-
 pub fn ast(path: &Path) -> Result<(), CommandError> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
             error(&err.to_string());
@@ -1246,8 +1262,8 @@ fn print_diff(old: &str, new: &str) {
     use similar::{ChangeTag, TextDiff};
 
     struct Line(Option<usize>);
-    impl std::fmt::Display for Line {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    impl fmt::Display for Line {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             match self.0 {
                 None => write!(f, "    "),
                 Some(index) => write!(f, "{:<4}", index + 1),

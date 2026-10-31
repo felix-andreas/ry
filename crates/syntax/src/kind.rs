@@ -134,61 +134,44 @@ pub enum SyntaxKind {
 
 use SyntaxKind::*;
 
+/// R's reserved words, in the order the grammar declares them.
+pub const KEYWORDS: [(&str, SyntaxKind); 19] = [
+    ("function", FUNCTION_KW),
+    ("if", IF_KW),
+    ("else", ELSE_KW),
+    ("repeat", REPEAT_KW),
+    ("while", WHILE_KW),
+    ("for", FOR_KW),
+    ("in", IN_KW),
+    ("next", NEXT_KW),
+    ("break", BREAK_KW),
+    ("TRUE", TRUE_KW),
+    ("FALSE", FALSE_KW),
+    ("NULL", NULL_KW),
+    ("Inf", INF_KW),
+    ("NaN", NAN_KW),
+    ("NA", NA_KW),
+    ("NA_integer_", NA_INTEGER_KW),
+    ("NA_real_", NA_REAL_KW),
+    ("NA_complex_", NA_COMPLEX_KW),
+    ("NA_character_", NA_CHARACTER_KW),
+];
+
 impl SyntaxKind {
     pub fn is_trivia(self) -> bool {
         matches!(self, WHITESPACE | NEWLINE | COMMENT)
     }
 
     pub fn is_keyword(self) -> bool {
-        matches!(
-            self,
-            FUNCTION_KW
-                | IF_KW
-                | ELSE_KW
-                | REPEAT_KW
-                | WHILE_KW
-                | FOR_KW
-                | IN_KW
-                | NEXT_KW
-                | BREAK_KW
-                | TRUE_KW
-                | FALSE_KW
-                | NULL_KW
-                | INF_KW
-                | NAN_KW
-                | NA_KW
-                | NA_INTEGER_KW
-                | NA_REAL_KW
-                | NA_COMPLEX_KW
-                | NA_CHARACTER_KW
-        )
+        (FUNCTION_KW..=NA_CHARACTER_KW).contains(&self)
     }
 
     /// A backticked spelling is never a keyword.
     pub fn from_keyword(word: &str) -> Option<SyntaxKind> {
-        let kind = match word {
-            "function" => FUNCTION_KW,
-            "if" => IF_KW,
-            "else" => ELSE_KW,
-            "repeat" => REPEAT_KW,
-            "while" => WHILE_KW,
-            "for" => FOR_KW,
-            "in" => IN_KW,
-            "next" => NEXT_KW,
-            "break" => BREAK_KW,
-            "TRUE" => TRUE_KW,
-            "FALSE" => FALSE_KW,
-            "NULL" => NULL_KW,
-            "Inf" => INF_KW,
-            "NaN" => NAN_KW,
-            "NA" => NA_KW,
-            "NA_integer_" => NA_INTEGER_KW,
-            "NA_real_" => NA_REAL_KW,
-            "NA_complex_" => NA_COMPLEX_KW,
-            "NA_character_" => NA_CHARACTER_KW,
-            _ => return None,
-        };
-        Some(kind)
+        KEYWORDS
+            .iter()
+            .find(|(spelling, _)| *spelling == word)
+            .map(|(_, kind)| *kind)
     }
 
     pub fn display(self) -> &'static str {

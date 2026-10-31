@@ -2,6 +2,7 @@
 //! `cargo test -p semantics --release --test test_perf -- --ignored --nocapture`.
 //! One test, so the resident-set reading is not polluted by a sibling test thread.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 use salsa::Setter;
 use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
 use semantics::infer::RESOLVE_CALLS;
+use semantics::stubs::install_shipped_stubs;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 
 #[test]
@@ -29,9 +31,7 @@ fn corpus_budgets() {
     let start = Instant::now();
     let mut retained = Vec::new();
     for sources in &packages {
-        let db = RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
-        let files = package_files(&db, sources);
+        let (db, files) = package(sources);
         for &file in &files {
             file_diagnostics(&db, file);
             strict_diagnostics(&db, file);
@@ -66,9 +66,7 @@ fn corpus_budgets() {
         .iter()
         .max_by_key(|sources| sources.iter().map(String::len).sum::<usize>())
         .expect("the corpus is not empty");
-    let mut db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let files = package_files(&db, sources);
+    let (mut db, files) = package(sources);
     for &file in &files {
         file_diagnostics(&db, file);
     }
@@ -110,17 +108,19 @@ fn corpus_budgets() {
     );
 }
 
-fn package_files(db: &RootDatabase, sources: &[String]) -> Vec<SourceFile> {
+fn package(sources: &[String]) -> (RootDatabase, Vec<SourceFile>) {
+    let db = RootDatabase::default();
+    install_shipped_stubs(&db);
     let files: Vec<SourceFile> = sources
         .iter()
-        .map(|source| SourceFile::new(db, source.clone(), DocumentKind::Package))
+        .map(|source| SourceFile::new(&db, source.clone(), DocumentKind::Package))
         .collect();
-    ProjectFiles::new(db, files.clone());
-    files
+    ProjectFiles::new(&db, files.clone());
+    (db, files)
 }
 
 fn proc_status_kb(key: &str) -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let status = fs::read_to_string("/proc/self/status").ok()?;
     status
         .lines()
         .find(|line| line.starts_with(key))?
@@ -134,7 +134,7 @@ fn corpus_packages() -> Vec<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus");
     let mut packages = Vec::new();
     for top in ["r-base", "cran"] {
-        let Ok(entries) = std::fs::read_dir(root.join(top)) else {
+        let Ok(entries) = fs::read_dir(root.join(top)) else {
             continue;
         };
         let mut directories: Vec<PathBuf> = entries
@@ -149,7 +149,7 @@ fn corpus_packages() -> Vec<Vec<String>> {
             paths.sort();
             let sources: Vec<String> = paths
                 .iter()
-                .filter_map(|path| std::fs::read(path).ok())
+                .filter_map(|path| fs::read(path).ok())
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .collect();
             if !sources.is_empty() {
@@ -161,7 +161,7 @@ fn corpus_packages() -> Vec<Vec<String>> {
 }
 
 fn collect_r_files(directory: &Path, paths: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
+    let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {

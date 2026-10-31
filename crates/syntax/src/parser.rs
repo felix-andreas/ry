@@ -2,12 +2,12 @@
 //! groups and end a complete statement at top level and directly inside `{}`;
 //! `else` may follow a newline only when a group or brace encloses the `if`.
 
-use crate::kind::SyntaxKind;
+use crate::kind::SyntaxKind::{self, *};
 use crate::lexer::{Token, lex};
 use crate::{Parse, SyntaxError};
 use rowan::{Checkpoint, GreenNodeBuilder, TextRange, TextSize};
 
-pub(crate) fn parse(text: &str) -> Parse {
+pub fn parse(text: &str) -> Parse {
     let (tokens, lexer_errors) = lex(text);
     let mut offsets = Vec::with_capacity(tokens.len() + 1);
     let mut offset = 0usize;
@@ -97,44 +97,31 @@ impl Parser<'_> {
         loop {
             let token = self.tokens.get(pos)?;
             match token.kind {
-                SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => pos += 1,
-                SyntaxKind::NEWLINE if across_newlines => pos += 1,
-                SyntaxKind::ANNOTATION_MARKER => pos = self.annotation_region_end(pos),
+                WHITESPACE | COMMENT => pos += 1,
+                NEWLINE if across_newlines => pos += 1,
+                ANNOTATION_MARKER => pos = self.annotation_region_end(pos),
                 kind => return Some((kind, pos)),
             }
         }
     }
 
     fn annotation_region_end(&self, mut pos: usize) -> usize {
-        debug_assert_eq!(self.tokens[pos].kind, SyntaxKind::ANNOTATION_MARKER);
+        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
         loop {
-            while let Some(token) = self.tokens.get(pos) {
-                if token.kind == SyntaxKind::NEWLINE {
-                    break;
-                }
+            while kind_at(pos).is_some_and(|kind| kind != NEWLINE) {
                 pos += 1;
             }
-            let Some(token) = self.tokens.get(pos) else {
+            if kind_at(pos).is_none() {
                 return pos;
-            };
-            debug_assert_eq!(token.kind, SyntaxKind::NEWLINE);
+            }
             let mut lookahead = pos + 1;
-            while self
-                .tokens
-                .get(lookahead)
-                .is_some_and(|t| t.kind == SyntaxKind::WHITESPACE)
-            {
+            while kind_at(lookahead) == Some(WHITESPACE) {
                 lookahead += 1;
             }
-            if self
-                .tokens
-                .get(lookahead)
-                .is_some_and(|t| t.kind == SyntaxKind::ANNOTATION_MARKER)
-            {
-                pos = lookahead + 1;
-            } else {
+            if kind_at(lookahead) != Some(ANNOTATION_MARKER) {
                 return pos;
             }
+            pos = lookahead + 1;
         }
     }
 
@@ -169,16 +156,16 @@ impl Parser<'_> {
         self.builder.checkpoint()
     }
 
-    fn wrap_name(&mut self) {
-        self.start(SyntaxKind::NAME);
+    /// Wraps the current token alone in a `kind` node.
+    fn wrap(&mut self, kind: SyntaxKind) {
+        self.start(kind);
         self.bump();
         self.finish();
     }
 
-    fn wrap_literal(&mut self) {
-        self.start(SyntaxKind::LITERAL);
-        self.bump();
-        self.finish();
+    /// Annotation parsing must not run past the `#:` region ending at `end`.
+    fn ann_at(&self, kind: SyntaxKind, end: usize) -> bool {
+        self.pos < end && self.at(kind)
     }
 
     fn error_here(&mut self, message: impl Into<String>) {
@@ -197,16 +184,18 @@ impl Parser<'_> {
     }
 
     fn error_unclosed(&mut self, range: TextRange, message: impl Into<String>) {
-        if self.in_annotation {
-            if self.annotation_unclosed_reported {
-                return;
-            }
+        if !self.in_annotation {
+            self.error_at(range, message);
+        } else if !self.annotation_unclosed_reported {
             self.annotation_unclosed_reported = true;
             self.annotation_reported = true;
             self.push_error(range, message);
-            return;
         }
-        self.error_at(range, message);
+    }
+
+    fn error_expected(&mut self, what: &str) {
+        let found = self.describe_current();
+        self.error_here(format!("expected {what}, found {found}"));
     }
 
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
@@ -237,12 +226,7 @@ impl Parser<'_> {
     fn separator_gap(&self) -> TextRange {
         let end = (0..self.pos)
             .rev()
-            .find(|&index| {
-                !matches!(
-                    self.tokens[index].kind,
-                    SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::NEWLINE
-                )
-            })
+            .find(|&index| !matches!(self.tokens[index].kind, WHITESPACE | COMMENT | NEWLINE))
             .map(|index| self.token_range(index).end())
             .unwrap_or_else(|| self.token_range(self.pos).start());
         TextRange::empty(end)
@@ -251,7 +235,7 @@ impl Parser<'_> {
     fn describe_current(&self) -> String {
         match self.current() {
             None => "end of file".to_owned(),
-            Some(SyntaxKind::NEWLINE) => "end of line".to_owned(),
+            Some(NEWLINE) => "end of line".to_owned(),
             Some(kind) => kind.display().to_owned(),
         }
     }
@@ -261,16 +245,11 @@ impl Parser<'_> {
     /// named argument missing its comma, which is also R's reading.
     fn starts_new_statement(&self) -> bool {
         match self.current() {
-            Some(
-                SyntaxKind::IF_KW
-                | SyntaxKind::FOR_KW
-                | SyntaxKind::WHILE_KW
-                | SyntaxKind::REPEAT_KW,
-            ) => true,
-            Some(SyntaxKind::IDENT | SyntaxKind::STRING) => matches!(
+            Some(IF_KW | FOR_KW | WHILE_KW | REPEAT_KW) => true,
+            Some(IDENT | STRING) => matches!(
                 self.peek_significant(self.pos + 1, false)
                     .map(|(kind, _)| kind),
-                Some(SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS)
+                Some(LESS_MINUS | LESS2_MINUS)
             ),
             _ => false,
         }
@@ -278,31 +257,26 @@ impl Parser<'_> {
 
     /// Scans backwards: the newline was already consumed by the preceding element.
     fn crossed_line(&self) -> bool {
-        for index in (0..self.pos).rev() {
-            match self.tokens[index].kind {
-                SyntaxKind::NEWLINE => return true,
-                SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => continue,
-                _ => return false,
-            }
-        }
-        false
+        self.tokens[..self.pos]
+            .iter()
+            .rev()
+            .find(|token| !matches!(token.kind, WHITESPACE | COMMENT))
+            .is_some_and(|token| token.kind == NEWLINE)
     }
 
     fn eat_trivia(&mut self, across_newlines: bool) {
         loop {
             match self.current() {
-                Some(SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) => self.bump(),
-                Some(SyntaxKind::NEWLINE) if across_newlines || !self.newlines_significant() => {
-                    self.bump()
-                }
-                Some(SyntaxKind::ANNOTATION_MARKER) => self.annotation(),
+                Some(WHITESPACE | COMMENT) => self.bump(),
+                Some(NEWLINE) if across_newlines || !self.newlines_significant() => self.bump(),
+                Some(ANNOTATION_MARKER) => self.annotation(),
                 _ => return,
             }
         }
     }
 
     fn annotation(&mut self) {
-        self.start(SyntaxKind::ANNOTATION);
+        self.start(ANNOTATION);
         self.in_annotation = true;
         self.annotation_reported = false;
         self.annotation_unclosed_reported = false;
@@ -313,7 +287,7 @@ impl Parser<'_> {
                 break;
             }
             let before = self.pos;
-            if self.at(SyntaxKind::AT) {
+            if self.at(AT) {
                 self.ann_directive(end);
             } else {
                 self.ann_type(end, true);
@@ -327,16 +301,13 @@ impl Parser<'_> {
     }
 
     fn ann_trivia(&mut self, end: usize) {
-        while self.pos < end {
-            match self.current() {
-                Some(
-                    SyntaxKind::WHITESPACE
-                    | SyntaxKind::NEWLINE
-                    | SyntaxKind::ANNOTATION_MARKER
-                    | SyntaxKind::COMMENT,
-                ) => self.bump(),
-                _ => return,
-            }
+        while self.pos < end
+            && matches!(
+                self.current(),
+                Some(WHITESPACE | NEWLINE | ANNOTATION_MARKER | COMMENT)
+            )
+        {
+            self.bump();
         }
     }
 
@@ -347,15 +318,15 @@ impl Parser<'_> {
     }
 
     fn ann_directive(&mut self, end: usize) {
-        self.start(SyntaxKind::ANNOTATION_DIRECTIVE);
-        debug_assert!(self.at(SyntaxKind::AT));
+        self.start(ANNOTATION_DIRECTIVE);
+        debug_assert!(self.at(AT));
         self.bump();
         // `@if-unknown` lexes as `if` `-` `unknown`; adjacent tokens join.
         let name_start = self.pos;
         let mut name = String::new();
         while self.pos < end {
             let joinable = match self.current() {
-                Some(SyntaxKind::IDENT | SyntaxKind::MINUS) => true,
+                Some(IDENT | MINUS) => true,
                 Some(kind) => kind.is_keyword(),
                 None => false,
             };
@@ -373,30 +344,25 @@ impl Parser<'_> {
         match name.as_str() {
             "type" | "alias" => {
                 self.ann_trivia(end);
-                if matches!(self.current(), Some(SyntaxKind::IDENT)) && self.pos < end {
-                    self.wrap_name();
+                if self.ann_at(IDENT, end) {
+                    self.wrap(NAME);
                 } else {
                     self.error_here(format!("expected a type name after `@{name}`"));
                 }
                 self.ann_trivia(end);
-                if self.at(SyntaxKind::LESS) && self.pos < end {
+                if self.ann_at(LESS, end) {
                     self.ann_binder_list(end);
                 }
                 self.ann_trivia(end);
                 self.ann_braced_type(end, &name);
                 // Trailing text would otherwise parse as a second annotation and
                 // silently refuse the block.
-                while self.at(SyntaxKind::WHITESPACE) && self.pos < end {
+                while self.ann_at(WHITESPACE, end) {
                     self.bump();
                 }
-                if self.pos < end
-                    && !matches!(
-                        self.current(),
-                        Some(SyntaxKind::NEWLINE | SyntaxKind::COMMENT) | None
-                    )
-                {
+                if self.pos < end && !matches!(self.current(), Some(NEWLINE | COMMENT) | None) {
                     self.error_here(format!("unexpected text after the `@{name}` definition"));
-                    while self.pos < end && !self.at(SyntaxKind::NEWLINE) {
+                    while self.pos < end && !self.at(NEWLINE) {
                         self.bump();
                     }
                 }
@@ -404,19 +370,19 @@ impl Parser<'_> {
             "param" => {
                 self.ann_trivia(end);
                 match self.current() {
-                    Some(SyntaxKind::IDENT | SyntaxKind::DOTS) if self.pos < end => {
-                        self.wrap_name()
+                    Some(IDENT | DOTS) if self.pos < end => {
+                        self.wrap(NAME)
                     }
-                    Some(SyntaxKind::L_BRACKET) if self.pos < end => {
+                    Some(L_BRACKET) if self.pos < end => {
                         self.bump();
                         self.ann_trivia(end);
-                        if matches!(self.current(), Some(SyntaxKind::IDENT)) && self.pos < end {
-                            self.wrap_name();
+                        if self.ann_at(IDENT, end) {
+                            self.wrap(NAME);
                         } else {
                             self.error_here("expected a parameter name inside `[...]`");
                         }
                         self.ann_trivia(end);
-                        if self.at(SyntaxKind::R_BRACKET) && self.pos < end {
+                        if self.ann_at(R_BRACKET, end) {
                             self.bump();
                         } else {
                             self.error_here("expected `]` after the optional parameter name");
@@ -425,7 +391,7 @@ impl Parser<'_> {
                     // JSDoc writes the type first. This directive writes the
                     // name first, so say which form to use instead of only
                     // reporting the missing name.
-                    Some(SyntaxKind::L_BRACE) if self.pos < end => self.error_here(
+                    Some(L_BRACE) if self.pos < end => self.error_here(
                         "expected a parameter name after `@param`. The name comes before the type, as `@param name {TYPE}`",
                     ),
                     _ => self.error_here("expected a parameter name after `@param`"),
@@ -439,13 +405,13 @@ impl Parser<'_> {
             }
             "forall" => loop {
                 self.ann_trivia(end);
-                if !matches!(self.current(), Some(SyntaxKind::IDENT)) || self.pos >= end {
+                if !self.ann_at(IDENT, end) {
                     self.error_here("expected a type parameter name after `@forall`");
                     break;
                 }
                 self.ann_binder(end);
                 self.ann_trivia(end);
-                if self.at(SyntaxKind::COMMA) && self.pos < end {
+                if self.ann_at(COMMA, end) {
                     self.bump();
                 } else {
                     break;
@@ -461,10 +427,7 @@ impl Parser<'_> {
             }
             "strict" => {
                 self.ann_trivia(end);
-                if matches!(self.current(), Some(SyntaxKind::IDENT))
-                    && self.pos < end
-                    && self.token_str(self.pos) == "off"
-                {
+                if self.ann_at(IDENT, end) && self.token_str(self.pos) == "off" {
                     self.bump();
                 }
             }
@@ -483,11 +446,11 @@ impl Parser<'_> {
     }
 
     fn ann_braced_type(&mut self, end: usize, directive: &str) {
-        if self.at(SyntaxKind::L_BRACE) && self.pos < end {
+        if self.ann_at(L_BRACE, end) {
             let open_range = self.token_range(self.pos);
             self.bump();
             self.ann_trivia(end);
-            if self.at(SyntaxKind::R_BRACE) || self.pos >= end {
+            if self.at(R_BRACE) || self.pos >= end {
                 self.error_here(format!(
                     "expected a type inside `{{...}}` of `@{directive}`"
                 ));
@@ -497,7 +460,7 @@ impl Parser<'_> {
                 self.ann_type(end, false);
             }
             self.ann_trivia(end);
-            if self.at(SyntaxKind::R_BRACE) && self.pos < end {
+            if self.ann_at(R_BRACE, end) {
                 self.bump();
             } else {
                 self.error_unclosed(
@@ -511,7 +474,7 @@ impl Parser<'_> {
     }
 
     fn ann_type(&mut self, end: usize, allow_binders: bool) {
-        if allow_binders && self.at(SyntaxKind::LESS) && self.pos < end {
+        if allow_binders && self.ann_at(LESS, end) {
             self.ann_binder_list(end);
             self.ann_trivia(end);
         }
@@ -519,24 +482,24 @@ impl Parser<'_> {
     }
 
     fn ann_binder_list(&mut self, end: usize) {
-        self.start(SyntaxKind::TYPE_BINDER_LIST);
-        debug_assert!(self.at(SyntaxKind::LESS));
+        self.start(TYPE_BINDER_LIST);
+        debug_assert!(self.at(LESS));
         self.bump();
         loop {
             self.ann_trivia(end);
             match self.current() {
                 // Only an empty list or a trailing comma reaches `>` here.
-                Some(SyntaxKind::GREATER) if self.pos < end => {
+                Some(GREATER) if self.pos < end => {
                     self.error_here("expected a type parameter name in `<...>`");
                     self.bump();
                     break;
                 }
-                Some(SyntaxKind::IDENT) if self.pos < end => {
+                Some(IDENT) if self.pos < end => {
                     self.ann_binder(end);
                     self.ann_trivia(end);
-                    if self.at(SyntaxKind::COMMA) && self.pos < end {
+                    if self.ann_at(COMMA, end) {
                         self.bump();
-                    } else if self.at(SyntaxKind::GREATER) && self.pos < end {
+                    } else if self.ann_at(GREATER, end) {
                         self.bump();
                         break;
                     } else {
@@ -554,21 +517,21 @@ impl Parser<'_> {
     }
 
     fn ann_binder(&mut self, end: usize) {
-        self.start(SyntaxKind::TYPE_BINDER);
-        self.wrap_name();
+        self.start(TYPE_BINDER);
+        self.wrap(NAME);
         self.ann_trivia(end);
-        if self.at(SyntaxKind::COLON) && self.pos < end {
+        if self.ann_at(COLON, end) {
             self.bump();
             self.ann_trivia(end);
-            if matches!(self.current(), Some(SyntaxKind::IDENT)) && self.pos < end {
+            if self.ann_at(IDENT, end) {
                 // A constraint may span words (`scalar numeric`). Trivia is taken
                 // only between words: after the last it would pull the next `#:`
                 // marker into the binder.
-                while self.ann_next_significant(end) == Some(SyntaxKind::IDENT) {
-                    self.wrap_name();
+                while self.ann_next_significant(end) == Some(IDENT) {
+                    self.wrap(NAME);
                     self.ann_trivia(end);
                 }
-                self.wrap_name();
+                self.wrap(NAME);
             } else {
                 self.error_here("expected a constraint name after `:`");
             }
@@ -582,9 +545,9 @@ impl Parser<'_> {
         let mut members = 1usize;
         loop {
             self.ann_trivia(end);
-            if self.at(SyntaxKind::PIPE) && self.pos < end {
+            if self.ann_at(PIPE, end) {
                 if members == 1 {
-                    self.start_at(checkpoint, SyntaxKind::TYPE_UNION);
+                    self.start_at(checkpoint, TYPE_UNION);
                 }
                 members += 1;
                 self.bump();
@@ -616,26 +579,26 @@ impl Parser<'_> {
     fn ann_primary_inner(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
         match self.current() {
-            Some(SyntaxKind::LESS) => {
+            Some(LESS) => {
                 self.error_here("higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level");
                 // Read the type past the binder so the one finding is not
                 // buried under consequences. The `ERROR` wrapper tells lowering
                 // the binder's names bind nothing, so they are not reported again.
-                self.start(SyntaxKind::ERROR);
+                self.start(ERROR);
                 self.ann_binder_list(end);
                 self.finish();
                 self.ann_trivia(end);
                 self.ann_union(end);
                 return;
             }
-            Some(SyntaxKind::L_PAREN) => {
-                self.start(SyntaxKind::TYPE_PAREN);
+            Some(L_PAREN) => {
+                self.start(TYPE_PAREN);
                 let open_range = self.token_range(self.pos);
                 self.bump();
                 self.ann_trivia(end);
                 self.ann_type(end, false);
                 self.ann_trivia(end);
-                if self.at(SyntaxKind::R_PAREN) && self.pos < end {
+                if self.ann_at(R_PAREN, end) {
                     self.bump();
                 } else {
                     self.error_unclosed(
@@ -645,49 +608,46 @@ impl Parser<'_> {
                 }
                 self.finish();
             }
-            Some(SyntaxKind::IDENT | SyntaxKind::NULL_KW) => match self.token_str(self.pos) {
-                "list" if self.ann_next_significant(end) == Some(SyntaxKind::L_BRACKET) => {
+            Some(IDENT | NULL_KW) => match self.token_str(self.pos) {
+                "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
                     self.ann_list_brackets(end);
                 }
-                "list" if self.ann_next_significant(end) == Some(SyntaxKind::L_BRACE) => {
+                "list" if self.ann_next_significant(end) == Some(L_BRACE) => {
                     self.ann_list_braces(end);
                 }
-                "fn" if self.ann_next_significant(end) == Some(SyntaxKind::L_PAREN) => {
+                "fn" if self.ann_next_significant(end) == Some(L_PAREN) => {
                     self.ann_function_type(end);
                 }
                 _ => {
-                    if self.ann_next_significant(end) == Some(SyntaxKind::LESS) {
-                        self.start(SyntaxKind::TYPE_APPLY);
-                        self.wrap_name();
+                    if self.ann_next_significant(end) == Some(LESS) {
+                        self.start(TYPE_APPLY);
+                        self.wrap(NAME);
                         self.ann_trivia(end);
                         self.ann_type_arg_list(end);
                         self.finish();
                     } else {
-                        self.start(SyntaxKind::TYPE_REF);
-                        self.bump();
-                        self.finish();
+                        self.wrap(TYPE_REF);
                     }
                 }
             },
             _ => {
-                let description = self.describe_current();
-                self.error_here(format!("expected a type, found {description}"));
+                self.error_expected("a type");
                 return;
             }
         }
         loop {
             self.ann_trivia(end);
-            if !self.at(SyntaxKind::L_BRACKET) || self.pos >= end {
+            if !self.ann_at(L_BRACKET, end) {
                 break;
             }
             let after = self.peek_significant(self.pos + 1, true);
             let is_suffix = match after {
-                Some((SyntaxKind::R_BRACKET, _)) => true,
-                Some((SyntaxKind::IDENT, ident_pos)) => {
+                Some((R_BRACKET, _)) => true,
+                Some((IDENT, ident_pos)) => {
                     self.token_str(ident_pos) == "named"
                         && matches!(
                             self.peek_significant(ident_pos + 1, true),
-                            Some((SyntaxKind::R_BRACKET, _))
+                            Some((R_BRACKET, _))
                         )
                 }
                 _ => false,
@@ -695,14 +655,14 @@ impl Parser<'_> {
             if !is_suffix {
                 break;
             }
-            self.start_at(checkpoint, SyntaxKind::TYPE_VECTOR);
+            self.start_at(checkpoint, TYPE_VECTOR);
             self.bump();
             self.ann_trivia(end);
-            if matches!(self.current(), Some(SyntaxKind::IDENT)) {
+            if matches!(self.current(), Some(IDENT)) {
                 self.bump();
                 self.ann_trivia(end);
             }
-            if self.at(SyntaxKind::R_BRACKET) && self.pos < end {
+            if self.ann_at(R_BRACKET, end) {
                 self.bump();
             }
             self.finish();
@@ -715,8 +675,8 @@ impl Parser<'_> {
     }
 
     fn ann_type_arg_list(&mut self, end: usize) {
-        self.start(SyntaxKind::TYPE_ARG_LIST);
-        debug_assert!(self.at(SyntaxKind::LESS));
+        self.start(TYPE_ARG_LIST);
+        debug_assert!(self.at(LESS));
         self.bump();
         let mut arguments = 0;
         loop {
@@ -724,7 +684,7 @@ impl Parser<'_> {
             match self.current() {
                 // An empty list is left to the arity check, which names the
                 // expected count.
-                Some(SyntaxKind::GREATER) if self.pos < end => {
+                Some(GREATER) if self.pos < end => {
                     if arguments > 0 {
                         self.error_here("expected a type in the type argument list");
                     }
@@ -739,9 +699,9 @@ impl Parser<'_> {
                     self.ann_type(end, false);
                     arguments += 1;
                     self.ann_trivia(end);
-                    if self.at(SyntaxKind::COMMA) && self.pos < end {
+                    if self.ann_at(COMMA, end) {
                         self.bump();
-                    } else if self.at(SyntaxKind::GREATER) && self.pos < end {
+                    } else if self.ann_at(GREATER, end) {
                         self.bump();
                         break;
                     } else {
@@ -755,17 +715,16 @@ impl Parser<'_> {
     }
 
     fn ann_list_brackets(&mut self, end: usize) {
-        self.start(SyntaxKind::TYPE_LIST);
-        self.wrap_name();
+        self.start(TYPE_LIST);
+        self.wrap(NAME);
         self.ann_trivia(end);
-        debug_assert!(self.at(SyntaxKind::L_BRACKET));
+        debug_assert!(self.at(L_BRACKET));
         let open_range = self.token_range(self.pos);
         self.bump();
         self.ann_trivia(end);
-        if matches!(self.current(), Some(SyntaxKind::IDENT))
-            && self.pos < end
+        if self.ann_at(IDENT, end)
             && self.token_str(self.pos) == "named"
-            && self.ann_next_significant(end) == Some(SyntaxKind::COLON)
+            && self.ann_next_significant(end) == Some(COLON)
         {
             self.bump();
             self.ann_trivia(end);
@@ -774,7 +733,7 @@ impl Parser<'_> {
         }
         self.ann_type(end, false);
         self.ann_trivia(end);
-        if self.at(SyntaxKind::R_BRACKET) && self.pos < end {
+        if self.ann_at(R_BRACKET, end) {
             self.bump();
         } else {
             self.error_unclosed(
@@ -787,16 +746,15 @@ impl Parser<'_> {
 
     fn ann_list_braces(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
-        self.wrap_name();
+        self.wrap(NAME);
         self.ann_trivia(end);
-        debug_assert!(self.at(SyntaxKind::L_BRACE));
+        debug_assert!(self.at(L_BRACE));
         let open_range = self.token_range(self.pos);
         self.bump();
-        let mut is_record = false;
-        let mut first = true;
+        let mut is_record = None;
         loop {
             self.ann_trivia(end);
-            if self.at(SyntaxKind::R_BRACE) && self.pos < end {
+            if self.ann_at(R_BRACE, end) {
                 self.bump();
                 break;
             }
@@ -807,15 +765,12 @@ impl Parser<'_> {
                 );
                 break;
             }
-            let named_field = matches!(self.current(), Some(SyntaxKind::IDENT))
-                && self.ann_next_significant(end) == Some(SyntaxKind::COLON);
-            if first {
-                is_record = named_field;
-                first = false;
-            }
+            let named_field = matches!(self.current(), Some(IDENT))
+                && self.ann_next_significant(end) == Some(COLON);
+            is_record.get_or_insert(named_field);
             if named_field {
-                self.start(SyntaxKind::TYPE_FIELD);
-                self.wrap_name();
+                self.start(TYPE_FIELD);
+                self.wrap(NAME);
                 self.ann_trivia(end);
                 self.bump();
                 self.ann_trivia(end);
@@ -825,9 +780,9 @@ impl Parser<'_> {
                 self.ann_type(end, false);
             }
             self.ann_trivia(end);
-            if self.at(SyntaxKind::COMMA) && self.pos < end {
+            if self.ann_at(COMMA, end) {
                 self.bump();
-            } else if self.at(SyntaxKind::R_BRACE) && self.pos < end {
+            } else if self.ann_at(R_BRACE, end) {
                 self.bump();
                 break;
             } else {
@@ -837,26 +792,26 @@ impl Parser<'_> {
         }
         self.start_at(
             checkpoint,
-            if is_record {
-                SyntaxKind::TYPE_RECORD
+            if is_record == Some(true) {
+                TYPE_RECORD
             } else {
-                SyntaxKind::TYPE_TUPLE
+                TYPE_TUPLE
             },
         );
         self.finish();
     }
 
     fn ann_function_type(&mut self, end: usize) {
-        self.start(SyntaxKind::TYPE_FUNCTION);
-        self.wrap_name();
+        self.start(TYPE_FUNCTION);
+        self.wrap(NAME);
         self.ann_trivia(end);
-        debug_assert!(self.at(SyntaxKind::L_PAREN));
-        self.start(SyntaxKind::TYPE_PARAMETER_LIST);
+        debug_assert!(self.at(L_PAREN));
+        self.start(TYPE_PARAMETER_LIST);
         let open_range = self.token_range(self.pos);
         self.bump();
         loop {
             self.ann_trivia(end);
-            if self.at(SyntaxKind::R_PAREN) && self.pos < end {
+            if self.ann_at(R_PAREN, end) {
                 self.bump();
                 break;
             }
@@ -869,9 +824,9 @@ impl Parser<'_> {
             }
             self.ann_function_parameter(end);
             self.ann_trivia(end);
-            if self.at(SyntaxKind::COMMA) && self.pos < end {
+            if self.ann_at(COMMA, end) {
                 self.bump();
-            } else if self.at(SyntaxKind::R_PAREN) && self.pos < end {
+            } else if self.ann_at(R_PAREN, end) {
                 self.bump();
                 break;
             } else {
@@ -881,7 +836,7 @@ impl Parser<'_> {
         }
         self.finish();
         self.ann_trivia(end);
-        if self.at(SyntaxKind::MINUS_GREATER) && self.pos < end {
+        if self.ann_at(MINUS_GREATER, end) {
             self.bump();
             self.ann_trivia(end);
             if self.pos < end {
@@ -894,39 +849,36 @@ impl Parser<'_> {
     }
 
     fn ann_function_parameter(&mut self, end: usize) {
-        self.start(SyntaxKind::TYPE_PARAMETER);
+        self.start(TYPE_PARAMETER);
         match self.current() {
-            Some(SyntaxKind::DOTS) => {
+            Some(DOTS) => {
                 self.bump();
-                if matches!(self.current(), Some(SyntaxKind::IDENT))
-                    && self.adjacent(self.pos)
-                    && self.pos < end
-                {
-                    self.wrap_name();
+                if self.ann_at(IDENT, end) && self.adjacent(self.pos) {
+                    self.wrap(NAME);
                 }
                 self.ann_trivia(end);
-                if self.at(SyntaxKind::COLON) && self.pos < end {
+                if self.ann_at(COLON, end) {
                     self.bump();
                     self.ann_trivia(end);
                     self.ann_type(end, false);
                 }
             }
-            Some(SyntaxKind::L_BRACKET) => {
+            Some(L_BRACKET) => {
                 self.bump();
                 self.ann_trivia(end);
-                if matches!(self.current(), Some(SyntaxKind::IDENT)) && self.pos < end {
-                    self.wrap_name();
+                if self.ann_at(IDENT, end) {
+                    self.wrap(NAME);
                 } else {
                     self.error_here("expected `[name]: TYPE` for an optional parameter");
                 }
                 self.ann_trivia(end);
-                if self.at(SyntaxKind::R_BRACKET) && self.pos < end {
+                if self.ann_at(R_BRACKET, end) {
                     self.bump();
                 } else {
                     self.error_here("expected `]` after the optional parameter name");
                 }
                 self.ann_trivia(end);
-                if self.at(SyntaxKind::COLON) && self.pos < end {
+                if self.ann_at(COLON, end) {
                     self.bump();
                     self.ann_trivia(end);
                     self.ann_type(end, false);
@@ -934,10 +886,8 @@ impl Parser<'_> {
                     self.error_here("expected `:` after `[name]` in an optional parameter");
                 }
             }
-            Some(SyntaxKind::IDENT)
-                if self.ann_next_significant(end) == Some(SyntaxKind::COLON) =>
-            {
-                self.wrap_name();
+            Some(IDENT) if self.ann_next_significant(end) == Some(COLON) => {
+                self.wrap(NAME);
                 self.ann_trivia(end);
                 self.bump();
                 self.ann_trivia(end);
@@ -949,10 +899,10 @@ impl Parser<'_> {
     }
 
     fn source_file(&mut self) {
-        self.start(SyntaxKind::SOURCE_FILE);
+        self.start(SOURCE_FILE);
         self.statements(None);
         if self.pos < self.tokens.len() {
-            self.start(SyntaxKind::ERROR);
+            self.start(ERROR);
             while self.pos < self.tokens.len() {
                 self.bump();
             }
@@ -967,7 +917,7 @@ impl Parser<'_> {
             self.statement_had_lexer_error = false;
             self.statement_left_group_open = false;
             match self.current() {
-                Some(SyntaxKind::SEMICOLON) => {
+                Some(SEMICOLON) => {
                     self.bump();
                     continue;
                 }
@@ -979,18 +929,17 @@ impl Parser<'_> {
             let statement_start = self.pos;
             if !self.expression(0) {
                 match self.current() {
-                    Some(SyntaxKind::ELSE_KW) => self.error_here(
+                    Some(ELSE_KW) => self.error_here(
                         "unexpected `else`: it must stay on the same line as the `if` branch it belongs to (or the `if` must be inside braces)",
                     ),
-                    Some(SyntaxKind::R_BRACE) if terminator.is_none() => {
+                    Some(R_BRACE) if terminator.is_none() => {
                         self.error_here("unmatched `}`: no `{` is open here")
                     }
                     _ => {
-                        let description = self.describe_current();
-                        self.error_here(format!("expected a statement, found {description}"));
+                        self.error_expected("a statement");
                     }
                 }
-                self.start(SyntaxKind::ERROR);
+                self.start(ERROR);
                 self.recover_to_statement_boundary(terminator);
                 self.finish();
                 continue;
@@ -998,13 +947,13 @@ impl Parser<'_> {
 
             self.eat_trivia(false);
             match self.current() {
-                None | Some(SyntaxKind::NEWLINE | SyntaxKind::SEMICOLON) => {}
+                None | Some(NEWLINE | SEMICOLON) => {}
                 Some(kind) if Some(kind) == terminator => {}
                 Some(_) if self.statement_left_group_open => continue,
                 Some(kind) => {
-                    if kind != SyntaxKind::ERROR_TOKEN && !self.statement_had_lexer_error {
+                    if kind != ERROR_TOKEN && !self.statement_had_lexer_error {
                         if self.statement_ends_with_bare_return(statement_start)
-                            && Self::starts_expression(kind)
+                            && starts_expression(kind)
                         {
                             self.error_here("`return` needs parentheses: `return(x)`");
                         } else {
@@ -1014,7 +963,7 @@ impl Parser<'_> {
                             ));
                         }
                     }
-                    self.start(SyntaxKind::ERROR);
+                    self.start(ERROR);
                     self.recover_to_statement_boundary(terminator);
                     self.finish();
                 }
@@ -1025,41 +974,27 @@ impl Parser<'_> {
     /// `return x`: `return` reads like a keyword but is a function in R. Reached
     /// through an access operator (`x$return`) it is an ordinary name.
     fn statement_ends_with_bare_return(&self, start: usize) -> bool {
-        let mut last: Option<(usize, SyntaxKind)> = None;
-        let mut before: Option<SyntaxKind> = None;
-        for (offset, token) in self
-            .tokens
-            .get(start..self.pos)
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-        {
-            if matches!(
-                token.kind,
-                SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::NEWLINE
-            ) {
-                continue;
-            }
-            before = last.map(|(_, kind)| kind);
-            last = Some((offset, token.kind));
-        }
-        let Some((last_offset, last_kind)) = last else {
+        let mut significant = (start..self.pos)
+            .filter(|&index| {
+                self.tokens
+                    .get(index)
+                    .is_some_and(|token| !matches!(token.kind, WHITESPACE | COMMENT | NEWLINE))
+            })
+            .rev();
+        let Some(last) = significant.next() else {
             return false;
         };
-        last_kind == SyntaxKind::IDENT
-            && self.token_str(start + last_offset) == "return"
-            && !matches!(
-                before,
-                Some(SyntaxKind::DOLLAR | SyntaxKind::AT | SyntaxKind::COLON2 | SyntaxKind::COLON3)
-            )
+        let before = significant.next().and_then(|index| self.tokens.get(index));
+        self.tokens
+            .get(last)
+            .is_some_and(|token| token.kind == IDENT)
+            && self.token_str(last) == "return"
+            && !before.is_some_and(|token| matches!(token.kind, DOLLAR | AT | COLON2 | COLON3))
     }
 
     fn recover_to_statement_boundary(&mut self, terminator: Option<SyntaxKind>) {
         while let Some(kind) = self.current() {
-            if kind == SyntaxKind::NEWLINE
-                || kind == SyntaxKind::SEMICOLON
-                || Some(kind) == terminator
-            {
+            if matches!(kind, NEWLINE | SEMICOLON) || Some(kind) == terminator {
                 return;
             }
             self.bump();
@@ -1089,35 +1024,31 @@ impl Parser<'_> {
             self.eat_trivia(false);
             let Some(kind) = self.current() else { break };
             match kind {
-                SyntaxKind::L_PAREN if CALL_BP >= min_bp => {
-                    self.start_at(checkpoint, SyntaxKind::CALL_EXPR);
-                    self.argument_list(SyntaxKind::L_PAREN);
+                L_PAREN if CALL_BP >= min_bp => {
+                    self.start_at(checkpoint, CALL_EXPR);
+                    self.argument_list(L_PAREN);
                     self.finish();
                 }
-                SyntaxKind::L_BRACKET if CALL_BP >= min_bp => {
-                    self.start_at(checkpoint, SyntaxKind::SUBSET_EXPR);
-                    self.argument_list(SyntaxKind::L_BRACKET);
+                L_BRACKET if CALL_BP >= min_bp => {
+                    self.start_at(checkpoint, SUBSET_EXPR);
+                    self.argument_list(L_BRACKET);
                     self.finish();
                 }
-                SyntaxKind::L_BRACKET2 if CALL_BP >= min_bp => {
-                    self.start_at(checkpoint, SyntaxKind::SUBSET2_EXPR);
-                    self.argument_list(SyntaxKind::L_BRACKET2);
+                L_BRACKET2 if CALL_BP >= min_bp => {
+                    self.start_at(checkpoint, SUBSET2_EXPR);
+                    self.argument_list(L_BRACKET2);
                     self.finish();
                 }
-                SyntaxKind::DOLLAR | SyntaxKind::AT if FIELD_BP >= min_bp => {
-                    let node = if kind == SyntaxKind::DOLLAR {
-                        SyntaxKind::DOLLAR_EXPR
-                    } else {
-                        SyntaxKind::AT_EXPR
-                    };
+                DOLLAR | AT if FIELD_BP >= min_bp => {
+                    let node = if kind == DOLLAR { DOLLAR_EXPR } else { AT_EXPR };
                     self.start_at(checkpoint, node);
                     self.bump();
                     self.eat_trivia(true);
                     self.field_name(kind);
                     self.finish();
                 }
-                SyntaxKind::COLON2 | SyntaxKind::COLON3 if NAMESPACE_BP >= min_bp => {
-                    self.start_at(checkpoint, SyntaxKind::NAMESPACE_EXPR);
+                COLON2 | COLON3 if NAMESPACE_BP >= min_bp => {
+                    self.start_at(checkpoint, NAMESPACE_EXPR);
                     self.bump();
                     self.eat_trivia(true);
                     self.field_name(kind);
@@ -1130,7 +1061,7 @@ impl Parser<'_> {
                     if left_bp < min_bp {
                         break;
                     }
-                    self.start_at(checkpoint, SyntaxKind::BINARY_EXPR);
+                    self.start_at(checkpoint, BINARY_EXPR);
                     let operator_range = self.token_range(self.pos);
                     let operator = self.describe_current();
                     self.bump();
@@ -1150,57 +1081,12 @@ impl Parser<'_> {
 
     fn field_name(&mut self, operator: SyntaxKind) {
         match self.current() {
-            Some(SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI) => self.wrap_name(),
-            Some(SyntaxKind::STRING) => self.wrap_literal(),
+            Some(IDENT | DOTS | DOTDOTI) => self.wrap(NAME),
+            Some(STRING) => self.wrap(LITERAL),
             _ => {
-                let description = self.describe_current();
-                self.error_here(format!(
-                    "expected a name after {}, found {description}",
-                    operator.display()
-                ));
+                self.error_expected(&format!("a name after {}", operator.display()));
             }
         }
-    }
-
-    /// Must stay in lockstep with the tokens `primary` accepts.
-    fn starts_expression(kind: SyntaxKind) -> bool {
-        matches!(
-            kind,
-            SyntaxKind::IDENT
-                | SyntaxKind::DOTS
-                | SyntaxKind::DOTDOTI
-                | SyntaxKind::UNDERSCORE
-                | SyntaxKind::INTEGER
-                | SyntaxKind::DOUBLE
-                | SyntaxKind::COMPLEX
-                | SyntaxKind::STRING
-                | SyntaxKind::RAW_STRING
-                | SyntaxKind::TRUE_KW
-                | SyntaxKind::FALSE_KW
-                | SyntaxKind::NULL_KW
-                | SyntaxKind::INF_KW
-                | SyntaxKind::NAN_KW
-                | SyntaxKind::NA_KW
-                | SyntaxKind::NA_INTEGER_KW
-                | SyntaxKind::NA_REAL_KW
-                | SyntaxKind::NA_COMPLEX_KW
-                | SyntaxKind::NA_CHARACTER_KW
-                | SyntaxKind::MINUS
-                | SyntaxKind::PLUS
-                | SyntaxKind::BANG
-                | SyntaxKind::TILDE
-                | SyntaxKind::QUESTION
-                | SyntaxKind::L_PAREN
-                | SyntaxKind::L_BRACE
-                | SyntaxKind::IF_KW
-                | SyntaxKind::FOR_KW
-                | SyntaxKind::WHILE_KW
-                | SyntaxKind::REPEAT_KW
-                | SyntaxKind::FUNCTION_KW
-                | SyntaxKind::BACKSLASH
-                | SyntaxKind::BREAK_KW
-                | SyntaxKind::NEXT_KW
-        )
     }
 
     fn primary(&mut self) -> bool {
@@ -1208,74 +1094,53 @@ impl Parser<'_> {
             return false;
         };
         match kind {
-            SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI | SyntaxKind::UNDERSCORE => {
-                self.wrap_name()
-            }
-            SyntaxKind::ERROR_TOKEN => {
+            IDENT | DOTS | DOTDOTI | UNDERSCORE => self.wrap(NAME),
+            ERROR_TOKEN => {
                 self.statement_had_lexer_error = true;
-                self.start(SyntaxKind::ERROR);
-                self.bump();
-                self.finish();
+                self.wrap(ERROR);
             }
-            SyntaxKind::INTEGER
-            | SyntaxKind::DOUBLE
-            | SyntaxKind::COMPLEX
-            | SyntaxKind::STRING
-            | SyntaxKind::RAW_STRING
-            | SyntaxKind::TRUE_KW
-            | SyntaxKind::FALSE_KW
-            | SyntaxKind::NULL_KW
-            | SyntaxKind::INF_KW
-            | SyntaxKind::NAN_KW
-            | SyntaxKind::NA_KW
-            | SyntaxKind::NA_INTEGER_KW
-            | SyntaxKind::NA_REAL_KW
-            | SyntaxKind::NA_COMPLEX_KW
-            | SyntaxKind::NA_CHARACTER_KW => self.wrap_literal(),
-            SyntaxKind::MINUS | SyntaxKind::PLUS => self.unary(UNARY_SIGN_BP),
-            SyntaxKind::BANG => self.unary(UNARY_NOT_BP),
-            SyntaxKind::TILDE => self.unary(TILDE_BP + 1),
-            SyntaxKind::QUESTION => self.unary(HELP_BP + 1),
-            SyntaxKind::L_PAREN => {
-                self.start(SyntaxKind::PAREN_EXPR);
+            INTEGER | DOUBLE | COMPLEX | STRING | RAW_STRING => self.wrap(LITERAL),
+            MINUS | PLUS => self.unary(UNARY_SIGN_BP),
+            BANG => self.unary(UNARY_NOT_BP),
+            TILDE => self.unary(TILDE_BP + 1),
+            QUESTION => self.unary(HELP_BP + 1),
+            L_PAREN => {
+                self.start(PAREN_EXPR);
                 let open_range = self.token_range(self.pos);
                 self.open_group();
                 self.bump();
                 self.eat_trivia(true);
                 if !self.expression(0) {
-                    let description = self.describe_current();
-                    self.error_here(format!(
-                        "expected an expression inside `(`, found {description}"
-                    ));
+                    self.error_expected("an expression inside `(`");
                 }
                 self.eat_trivia(true);
                 self.end_group();
-                if self.at(SyntaxKind::R_PAREN) {
+                if self.at(R_PAREN) {
                     self.bump();
                 } else {
                     self.error_at(open_range, "unclosed `(`; expected a matching `)`");
                 }
                 self.finish();
             }
-            SyntaxKind::L_BRACE => {
-                self.start(SyntaxKind::BRACE_EXPR);
+            L_BRACE => {
+                self.start(BRACE_EXPR);
                 let open_range = self.token_range(self.pos);
                 self.groups.push(0);
                 self.bump();
-                self.statements(Some(SyntaxKind::R_BRACE));
+                self.statements(Some(R_BRACE));
                 self.groups.pop();
-                if self.at(SyntaxKind::R_BRACE) {
+                if self.at(R_BRACE) {
                     self.bump();
                 } else {
                     self.error_at(open_range, "unclosed `{`; expected a matching `}`");
                 }
                 self.finish();
             }
-            SyntaxKind::IF_KW => self.if_expr(),
-            SyntaxKind::FOR_KW => self.for_expr(),
-            SyntaxKind::WHILE_KW => self.while_expr(),
-            SyntaxKind::REPEAT_KW => {
-                self.start(SyntaxKind::REPEAT_EXPR);
+            IF_KW => self.if_expr(),
+            FOR_KW => self.for_expr(),
+            WHILE_KW => self.while_expr(),
+            REPEAT_KW => {
+                self.start(REPEAT_EXPR);
                 self.bump();
                 self.eat_trivia(true);
                 if !self.expression(0) {
@@ -1283,24 +1148,17 @@ impl Parser<'_> {
                 }
                 self.finish();
             }
-            SyntaxKind::FUNCTION_KW | SyntaxKind::BACKSLASH => self.function_def(),
-            SyntaxKind::BREAK_KW => {
-                self.start(SyntaxKind::BREAK_EXPR);
-                self.bump();
-                self.finish();
-            }
-            SyntaxKind::NEXT_KW => {
-                self.start(SyntaxKind::NEXT_EXPR);
-                self.bump();
-                self.finish();
-            }
+            FUNCTION_KW | BACKSLASH => self.function_def(),
+            BREAK_KW => self.wrap(BREAK_EXPR),
+            NEXT_KW => self.wrap(NEXT_EXPR),
+            _ if (TRUE_KW..=NA_CHARACTER_KW).contains(&kind) => self.wrap(LITERAL),
             _ => return false,
         }
         true
     }
 
     fn unary(&mut self, right_bp: u8) {
-        self.start(SyntaxKind::UNARY_EXPR);
+        self.start(UNARY_EXPR);
         let operator = self.describe_current();
         let operator_range = self.token_range(self.pos);
         self.bump();
@@ -1315,69 +1173,54 @@ impl Parser<'_> {
     }
 
     fn if_expr(&mut self) {
-        self.start(SyntaxKind::IF_EXPR);
+        self.start(IF_EXPR);
         self.bump();
         self.eat_trivia(true);
         self.condition_parens("if");
         self.eat_trivia(true);
         if !self.expression(0) {
-            let description = self.describe_current();
-            self.error_here(format!(
-                "expected a branch after the `if` condition, found {description}"
-            ));
+            self.error_expected("a branch after the `if` condition");
         }
         let across = self.else_allowed_across_newline();
-        if let Some((SyntaxKind::ELSE_KW, _)) = self.peek_significant(self.pos, across) {
+        if let Some((ELSE_KW, _)) = self.peek_significant(self.pos, across) {
             self.eat_trivia(across);
-            debug_assert!(self.at(SyntaxKind::ELSE_KW));
+            debug_assert!(self.at(ELSE_KW));
             self.bump();
             self.eat_trivia(true);
             if !self.expression(0) {
-                let description = self.describe_current();
-                self.error_here(format!(
-                    "expected an expression after `else`, found {description}"
-                ));
+                self.error_expected("an expression after `else`");
             }
         }
         self.finish();
     }
 
     fn for_expr(&mut self) {
-        self.start(SyntaxKind::FOR_EXPR);
+        self.start(FOR_EXPR);
         self.bump();
         self.eat_trivia(true);
-        if self.at(SyntaxKind::L_PAREN) {
+        if self.at(L_PAREN) {
             let open_range = self.token_range(self.pos);
             self.open_group();
             self.bump();
             self.eat_trivia(true);
-            if self.at(SyntaxKind::IDENT) {
-                self.wrap_name();
+            if self.at(IDENT) {
+                self.wrap(NAME);
             } else {
-                let description = self.describe_current();
-                self.error_here(format!(
-                    "expected a loop variable after `for (`, found {description}"
-                ));
+                self.error_expected("a loop variable after `for (`");
             }
             self.eat_trivia(true);
-            if self.at(SyntaxKind::IN_KW) {
+            if self.at(IN_KW) {
                 self.bump();
             } else {
-                let description = self.describe_current();
-                self.error_here(format!(
-                    "expected `in` in the `for` head, found {description}"
-                ));
+                self.error_expected("`in` in the `for` head");
             }
             self.eat_trivia(true);
             if !self.expression(0) {
-                let description = self.describe_current();
-                self.error_here(format!(
-                    "expected a sequence expression in the `for` head, found {description}"
-                ));
+                self.error_expected("a sequence expression in the `for` head");
             }
             self.eat_trivia(true);
             self.end_group();
-            if self.at(SyntaxKind::R_PAREN) {
+            if self.at(R_PAREN) {
                 self.bump();
             } else {
                 self.error_at(
@@ -1386,8 +1229,7 @@ impl Parser<'_> {
                 );
             }
         } else {
-            let description = self.describe_current();
-            self.error_here(format!("expected `(` after `for`, found {description}"));
+            self.error_expected("`(` after `for`");
         }
         self.eat_trivia(true);
         if !self.expression(0) {
@@ -1397,7 +1239,7 @@ impl Parser<'_> {
     }
 
     fn while_expr(&mut self) {
-        self.start(SyntaxKind::WHILE_EXPR);
+        self.start(WHILE_EXPR);
         self.bump();
         self.eat_trivia(true);
         self.condition_parens("while");
@@ -1409,11 +1251,8 @@ impl Parser<'_> {
     }
 
     fn condition_parens(&mut self, construct: &str) {
-        if !self.at(SyntaxKind::L_PAREN) {
-            let description = self.describe_current();
-            self.error_here(format!(
-                "expected `(` after `{construct}`, found {description}"
-            ));
+        if !self.at(L_PAREN) {
+            self.error_expected(&format!("`(` after `{construct}`"));
             return;
         }
         let open_range = self.token_range(self.pos);
@@ -1421,14 +1260,11 @@ impl Parser<'_> {
         self.bump();
         self.eat_trivia(true);
         if !self.expression(0) {
-            let description = self.describe_current();
-            self.error_here(format!(
-                "expected a condition inside `{construct} (…)`, found {description}"
-            ));
+            self.error_expected(&format!("a condition inside `{construct} (…)`"));
         }
         self.eat_trivia(true);
         self.end_group();
-        if self.at(SyntaxKind::R_PAREN) {
+        if self.at(R_PAREN) {
             self.bump();
         } else {
             self.error_at(
@@ -1439,17 +1275,14 @@ impl Parser<'_> {
     }
 
     fn function_def(&mut self) {
-        self.start(SyntaxKind::FUNCTION_DEF);
+        self.start(FUNCTION_DEF);
         let keyword_range = self.token_range(self.pos);
         self.bump();
         self.eat_trivia(true);
-        if self.at(SyntaxKind::L_PAREN) {
+        if self.at(L_PAREN) {
             self.parameter_list();
         } else {
-            let description = self.describe_current();
-            self.error_here(format!(
-                "expected `(` to open the parameter list, found {description}"
-            ));
+            self.error_expected("`(` to open the parameter list");
         }
         self.eat_trivia(true);
         if !self.expression(0) && !self.statement_left_group_open {
@@ -1461,23 +1294,23 @@ impl Parser<'_> {
     }
 
     fn parameter_list(&mut self) {
-        self.start(SyntaxKind::PARAMETER_LIST);
+        self.start(PARAMETER_LIST);
         let open_range = self.token_range(self.pos);
         self.open_group();
         self.bump();
         loop {
             self.eat_trivia(true);
             match self.current() {
-                None | Some(SyntaxKind::R_PAREN) => break,
-                Some(SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI) => {
-                    self.start(SyntaxKind::PARAMETER);
+                None | Some(R_PAREN) => break,
+                Some(IDENT | DOTS | DOTDOTI) => {
+                    self.start(PARAMETER);
                     self.bump();
                     self.eat_trivia(true);
-                    if self.at(SyntaxKind::EQ) {
+                    if self.at(EQ) {
                         self.bump();
                         self.eat_trivia(true);
                         match self.current() {
-                            Some(SyntaxKind::COMMA | SyntaxKind::R_PAREN) | None => {
+                            Some(COMMA | R_PAREN) | None => {
                                 self.error_here("expected a default value after `=`");
                             }
                             _ => {
@@ -1489,38 +1322,31 @@ impl Parser<'_> {
                     }
                     self.finish();
                     self.eat_trivia(true);
-                    if self.at(SyntaxKind::COMMA) {
+                    if self.at(COMMA) {
                         self.bump();
                     } else if self.crossed_line() && self.starts_new_statement() {
                         break;
-                    } else if matches!(
-                        self.current(),
-                        Some(SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI)
-                    ) {
+                    } else if matches!(self.current(), Some(IDENT | DOTS | DOTDOTI)) {
                         self.error_at(self.separator_gap(), "missing `,` between these parameters");
-                    } else if !matches!(self.current(), None | Some(SyntaxKind::R_PAREN)) {
-                        let description = self.describe_current();
-                        self.error_here(format!(
-                            "expected `,` or `)` in the parameter list, found {description}"
-                        ));
-                        self.recover_argument(SyntaxKind::R_PAREN);
-                        if self.at(SyntaxKind::COMMA) {
+                    } else if !matches!(self.current(), None | Some(R_PAREN)) {
+                        self.error_expected("`,` or `)` in the parameter list");
+                        self.recover_argument(R_PAREN);
+                        if self.at(COMMA) {
                             self.bump();
                         }
                     }
                 }
                 _ => {
-                    let description = self.describe_current();
-                    self.error_here(format!("expected a parameter name, found {description}"));
-                    self.recover_argument(SyntaxKind::R_PAREN);
-                    if self.at(SyntaxKind::COMMA) {
+                    self.error_expected("a parameter name");
+                    self.recover_argument(R_PAREN);
+                    if self.at(COMMA) {
                         self.bump();
                     }
                 }
             }
         }
         self.end_group();
-        if self.at(SyntaxKind::R_PAREN) {
+        if self.at(R_PAREN) {
             self.bump();
         } else {
             self.error_at(
@@ -1533,13 +1359,13 @@ impl Parser<'_> {
     }
 
     fn argument_list(&mut self, open: SyntaxKind) {
-        self.start(SyntaxKind::ARGUMENT_LIST);
+        self.start(ARGUMENT_LIST);
         let open_range = self.token_range(self.pos);
         self.open_group();
         self.bump();
         let closer = match open {
-            SyntaxKind::L_PAREN => SyntaxKind::R_PAREN,
-            _ => SyntaxKind::R_BRACKET,
+            L_PAREN => R_PAREN,
+            _ => R_BRACKET,
         };
         let mut expect_argument = true;
         loop {
@@ -1547,9 +1373,9 @@ impl Parser<'_> {
             match self.current() {
                 None => break,
                 Some(kind) if kind == closer => break,
-                Some(SyntaxKind::COMMA) => {
+                Some(COMMA) => {
                     if expect_argument {
-                        self.start(SyntaxKind::ARGUMENT);
+                        self.start(ARGUMENT);
                         self.finish();
                     }
                     self.bump();
@@ -1557,7 +1383,7 @@ impl Parser<'_> {
                 }
                 Some(kind) => {
                     if !expect_argument {
-                        if Self::starts_expression(kind) {
+                        if starts_expression(kind) {
                             // The opener was never closed; reading on would
                             // adopt every later statement as an argument.
                             if self.crossed_line() && self.starts_new_statement() {
@@ -1570,9 +1396,8 @@ impl Parser<'_> {
                             self.argument(closer);
                             continue;
                         }
-                        let description = self.describe_current();
-                        self.error_here(format!(
-                            "expected `,` or {} in this argument list, found {description}",
+                        self.error_expected(&format!(
+                            "`,` or {} in this argument list",
                             closer.display()
                         ));
                         self.recover_argument(closer);
@@ -1586,9 +1411,9 @@ impl Parser<'_> {
         self.end_group();
         if self.at(closer) {
             self.bump();
-            if open == SyntaxKind::L_BRACKET2 {
+            if open == L_BRACKET2 {
                 self.eat_trivia(true);
-                if self.at(SyntaxKind::R_BRACKET) {
+                if self.at(R_BRACKET) {
                     self.bump();
                 } else {
                     self.error_at(open_range, "expected `]]` to close `[[`");
@@ -1609,43 +1434,35 @@ impl Parser<'_> {
     }
 
     fn argument(&mut self, closer: SyntaxKind) {
-        self.start(SyntaxKind::ARGUMENT);
+        self.start(ARGUMENT);
         // R's grammar admits `NULL` as a tag (the `switch(x, NULL = , …)` idiom).
         let tagged = matches!(
             self.current(),
-            Some(
-                SyntaxKind::IDENT
-                    | SyntaxKind::STRING
-                    | SyntaxKind::DOTS
-                    | SyntaxKind::DOTDOTI
-                    | SyntaxKind::NULL_KW
-            )
+            Some(IDENT | STRING | DOTS | DOTDOTI | NULL_KW)
         ) && self
             .peek_significant(self.pos + 1, true)
-            .is_some_and(|(kind, _)| kind == SyntaxKind::EQ);
+            .is_some_and(|(kind, _)| kind == EQ);
         if tagged {
             match self.current() {
-                Some(SyntaxKind::STRING | SyntaxKind::NULL_KW) => self.wrap_literal(),
-                _ => self.wrap_name(),
+                Some(STRING | NULL_KW) => self.wrap(LITERAL),
+                _ => self.wrap(NAME),
             }
             self.eat_trivia(true);
-            debug_assert!(self.at(SyntaxKind::EQ));
+            debug_assert!(self.at(EQ));
             self.bump();
             self.eat_trivia(true);
             match self.current() {
-                Some(SyntaxKind::COMMA) | None => {}
+                Some(COMMA) | None => {}
                 Some(kind) if kind == closer => {}
                 _ => {
                     if !self.expression(0) {
-                        let description = self.describe_current();
-                        self.error_here(format!("expected an argument value, found {description}"));
+                        self.error_expected("an argument value");
                         self.recover_argument(closer);
                     }
                 }
             }
         } else if !self.expression(0) {
-            let description = self.describe_current();
-            self.error_here(format!("expected an argument, found {description}"));
+            self.error_expected("an argument");
             self.recover_argument(closer);
         }
         self.finish();
@@ -1655,10 +1472,10 @@ impl Parser<'_> {
     /// to nothing here and is consumed, so the list loop cannot spin.
     fn recover_argument(&mut self, closer: SyntaxKind) {
         let start = self.pos;
-        self.start(SyntaxKind::ERROR);
+        self.start(ERROR);
         self.recover_in_list(closer);
         if self.pos == start
-            && !matches!(self.current(), None | Some(SyntaxKind::COMMA))
+            && !matches!(self.current(), None | Some(COMMA))
             && self.current() != Some(closer)
         {
             self.bump();
@@ -1671,16 +1488,13 @@ impl Parser<'_> {
         let mut depth = 0u32;
         while let Some(kind) = self.current() {
             match kind {
-                SyntaxKind::COMMA if depth == 0 => return,
+                COMMA if depth == 0 => return,
                 kind if kind == closer && depth == 0 => return,
-                SyntaxKind::L_PAREN
-                | SyntaxKind::L_BRACKET
-                | SyntaxKind::L_BRACKET2
-                | SyntaxKind::L_BRACE => {
+                L_PAREN | L_BRACKET | L_BRACKET2 | L_BRACE => {
                     depth += 1;
                     self.bump();
                 }
-                SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET | SyntaxKind::R_BRACE => {
+                R_PAREN | R_BRACKET | R_BRACE => {
                     if depth == 0 {
                         return;
                     }
@@ -1725,7 +1539,6 @@ const LEFT_ASSIGN_BP: u8 = 8;
 const HELP_BP: u8 = 2;
 
 fn infix_binding_power(kind: SyntaxKind) -> Option<(u8, u8)> {
-    use SyntaxKind::*;
     let (left, right) = match kind {
         QUESTION => (HELP_BP, HELP_BP + 1),
         LESS_MINUS | LESS2_MINUS | COLON_EQ => (LEFT_ASSIGN_BP, LEFT_ASSIGN_BP),
@@ -1743,4 +1556,29 @@ fn infix_binding_power(kind: SyntaxKind) -> Option<(u8, u8)> {
         _ => return None,
     };
     Some((left, right))
+}
+
+/// Must stay in lockstep with the tokens `primary` accepts.
+fn starts_expression(kind: SyntaxKind) -> bool {
+    kind.is_keyword() && !matches!(kind, ELSE_KW | IN_KW)
+        || matches!(
+            kind,
+            IDENT
+                | DOTS
+                | DOTDOTI
+                | UNDERSCORE
+                | INTEGER
+                | DOUBLE
+                | COMPLEX
+                | STRING
+                | RAW_STRING
+                | MINUS
+                | PLUS
+                | BANG
+                | TILDE
+                | QUESTION
+                | L_PAREN
+                | L_BRACE
+                | BACKSLASH
+        )
 }

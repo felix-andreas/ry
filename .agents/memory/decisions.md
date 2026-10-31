@@ -1237,8 +1237,9 @@ diffing the parsed facts so a formatting edit does not invalidate anything. The 
 moved from the host crate into `semantics::metadata`, which makes it the single source of truth,
 and the host keeps problem rendering.
 
-Consumption is two predicates at the diagnostic edges. `imported_bare` joins the unresolved-check
-skip set, and `declared_dependency` quiets the unknown-namespace warning. Typing is untouched, so
+Consumption is a few predicates at the diagnostic edges. `imported_by_name` and
+`imports_every_name` join the unresolved-check skip set, and `declared_dependency` quiets the
+unknown-namespace warning. Typing is untouched, so
 an imported but undescribed read stays `Unknown` with the usual strict origin.
 
 One tolerance call matters. An `import(pkg)` of a namespace without stubs makes every otherwise
@@ -1484,8 +1485,8 @@ fell back to the whole statement. Where naming mints no top-level binding (`x <<
 the name. The classification also read `:=` as an assignment spelling, publishing a definition that
 neither R nor the HIR (a call to `:=`) makes.
 
-**Shape.** `classify_top_level` now delegates to `top_level_definition`, which returns the item's
-kind, its name, and the range of the syntax that spells the name: the assignment target, or the
+**Shape.** `item_spans` classifies each top-level node through `top_level_definition`, which
+returns the item's kind, its name, and the range of the syntax that spells the name: the assignment target, or the
 `setGeneric` name inside its quotes. `:=` is no longer a binding spelling. In the IDE, a
 project-defined generic is one global symbol, so its `setGeneric`, `setMethod`, and `standardGeneric`
 strings and its calls navigate, reference, and rename together. `semantics::item_name_range(db, item)`

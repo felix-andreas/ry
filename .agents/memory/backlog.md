@@ -343,14 +343,24 @@ ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycl
 reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
 any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
 
+### A read waits for the idle job in flight
+
+Only a notification (an open, edit, save or watched-file change) cancels in-flight work; a request
+never does (`ServerState::notify` against `ServerState::read` in `crates/ry/src/server.rs`). A hover
+or completion that arrives while the worker warms a file therefore waits for that one file's
+analysis to finish, because idle work runs one file per job. Measure the
+worst single-file warm-up on a large package before adding read preemption; if it is well under the
+keystroke budget, delete this entry.
+
 ### Judged fast enough, so do not invent work here
 
 Single-package cold analysis is 1.9 s and 88 MiB peak for ggplot2's 68k lines, 1.3 s and 72 MiB for
 mgcv's 37k lines after the chain fix, and 1.4 s for the 64k lines of `targets` as the instrument
 classifies it. Parse is only 2% to 7% of the pass, at about 0.9 microseconds per line.
 
-`item_spans` identity is clean. `item_span_positions` is a memoized index, so `item_span_range` is a
-constant-time probe, and `item_spans` itself is consumed per file. Incrementality genuinely holds:
+`item_spans` identity is clean. `item_span_positions` is a memoized index, so `item_node` finds an
+item's span in constant time, and `item_spans` itself is consumed per file. Incrementality genuinely
+holds:
 every project reported zero item rechecks per keystroke and zero resolve steps, with edited-file
 diagnostics at a 2.5 ms median on ggplot2 and a 21.3 ms median at 277,586 lines, which is inside the
 stated bar. rowan re-anchoring is not a quadratic either, because `child_or_token_at_range` is a
@@ -367,49 +377,6 @@ comparison.
 that position barely matters, from two 20,501-line projects with 500 findings each costing 6.9 s and
 8.0 s. Those projects are analysis-bound, at 4.6 s for JSON against 41 ms for the reporter, so they
 were never evidence about the reporter at all.
-
-## Open: abstraction and duplication
-
-An independent review looked for duplicated sources of truth and for abstractions that earn nothing.
-These are the findings that are still open.
-
-### Rename accepts `..1` as a new name, and the identifier rule is written twice
-
-The server's `is_valid_r_identifier` restates a rule that `syntax::is_syntactic_name` already owns.
-Same reserved-word list, same start and continue classes, same `.5` exclusion. Call the lexer's rule
-instead of keeping a second copy, which removes about 60 lines.
-
-The dot-dot part of the finding as originally filed was wrong, and it was checked against R. Both
-`... <- 1` and `..1 <- 1` run, and `... <- 5` genuinely binds, because `get("...")` returns 5. They
-are not invalid assignment targets.
-
-The real defect is narrower and is only about a `..1`-style name. The assignment succeeds but the
-read cannot, because `..1` resolves as a positional slot of an enclosing `...` rather than as a
-variable. `..1 <- 7; ..1` fails with "..1 used in an incorrect context, no ... to look in". Renaming
-a variable to `..1` therefore turns every one of its reads into a run-time error silently, and
-rename must refuse it. `...` is a legal name, so refusing that one needs a different justification,
-such as shadowing the forwarding mechanism, or none at all.
-
-Moving to `is_syntactic_name` does not fix this on its own, because the lexer's rule accepts both
-spellings too.
-
-### A dead-code batch, all of it hidden behind `let _ =`
-
-Seven items, compile-verified as unreachable, across 44 lines. They survive because a `let _ = ...`
-keeps the binding alive, which is also why the compiler never flagged them. That is the pattern to
-grep for.
-
-### One rule table, written twice
-
-The lint rule metadata is restated rather than derived, so a rule can be added to one table and not
-the other. Make one the single source of truth and generate the second view from it.
-
-### A `use`-qualification sweep
-
-About 80 sites fully qualify a function whose module is not imported at all, which is against the
-house style. A type is imported directly, and a function gets at least one module-level import
-unless ambiguity forces qualification. The change is mechanical, so do it as its own pass to keep
-the diff readable.
 
 ## Open: oracles, or what the fuzzers never ask
 
@@ -556,8 +523,8 @@ ones.
 
 ### The semantics incremental invariant never performs a small edit
 
-`check_pipeline_reporting` derives its edit by generating an unrelated program, so the computed
-splice covers 97.3% of the old text on average and only one pair in 250 touches 10% or less.
+The fuzz harness's `run_single_file` derives its edit by generating an unrelated program, so the
+computed splice covers 97.3% of the old text on average and only one pair in 250 touches 10% or less.
 `syntax::reparse` therefore takes the full-parse fallback essentially always, and the engine sees
 whole-file invalidation every time. The splice-reuse path and per-item early cutoff, which are the
 architecture's core claim, are never exercised. Derive the edit from the source instead, by
@@ -711,8 +678,8 @@ input, and a stack overflow aborts printing nothing. A stack overflow is a live 
 itself acknowledges, through `deep_nesting_is_refused_not_fatal`.
 
 This is recoverable today only because the seed is fixed, and that property disappears the moment
-`FUZZ_SEED` lands, so this has to land with it. `semantics::check_pipeline_reporting` is the correct
-pattern and is already in the tree.
+`FUZZ_SEED` lands, so this has to land with it. The semantics fuzz harness's `run_single_file` is
+the correct pattern and is already in the tree.
 
 ### Two arms are silently dead and one is 99% wasted
 
@@ -794,21 +761,9 @@ feature returns lies inside the file. `definition`, `references`, `rename`, `typ
 in-bounds ranges and determinism for every range-returning feature, and pay for it with the offset
 sampling the economics review costs out. That is the same wall clock for several times the oracle.
 
-### About 280 lines of fuzz harness are copy-pasted across four crates
-
-`SplitMix64` exists four times, three of them byte-identical and the fourth adding `chance()`.
-`iterations()` exists four times identically. `corpus_sample()` exists twice, byte-identical apart
-from one comment. The byte-mutation loop exists three times.
-
-All four test crates already depend on `syntax::testing` for `env_var`, so the shared home exists.
-Put `rng`, `iterations`, `corpus_sample` and `mutate_bytes` there. That replaces four copies with
-one, and it is not a new abstraction.
-
 ### Seeds are hand-maintained while 1,183 fixture sources sit unused
 
-`syntax::testing::parse_fixture_files` is public with no callers outside its module.
-
-Meanwhile the batteries seed from 81 hand-written strings and never see the 1,183 fixture cases,
+The batteries seed from 81 hand-written strings and never see the 1,183 fixture cases,
 which are the richest R corpus in the repo and the one that grows with every change. Seed the
 `syntax` and `format` batteries from it, delete the three `SEEDS` lists, which is about 110 lines,
 and keep a hand seed only where it encodes something the fixtures do not. For `semantics`, use
@@ -2321,7 +2276,7 @@ The end-to-end guard rests on the corpus suites.
 - **Every real R export resolves, through a vendored manifest.** `decisions.md` has the record.
 
 - **The diagnostics phase stopped scanning every project file per non-local read.**
-  `declared_global_variable` was work proportional to reads times files, at about 375 million memo
+  The `globalVariables` check was work proportional to reads times files, at about 375 million memo
   lookups on a script-heavy workspace, and a script-local cross-statement read paid the
   project-wide guard chain before its own frame-slot resolution. One memoized project-level
   `globalVariables` union set, `project_global_variable_declarations`, replaced it, with the guards

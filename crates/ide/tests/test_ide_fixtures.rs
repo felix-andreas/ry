@@ -1,13 +1,19 @@
 //! A case carries at most one `$0` cursor marker; the output renders each feature at it, then
 //! the inlay hints of the file holding it.
 
+use ide::{
+    DefinitionTarget, HoverDefinition, code_actions, completion, definition, document_symbols,
+    hover, inlay_hints, references, rename, signature_help, type_definition, workspace_symbols,
+};
+use semantics::stubs::{StubSources, install_shipped_stubs};
 use semantics::testing::{ProbeDatabase, with_fixture_project};
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::path::Path;
+use syntax::testing::{run_fixture_suite, split_files};
 use syntax::{TextRange, TextSize};
 
 fn render(source: &str) -> String {
-    let files: Vec<(Option<String>, String)> = match syntax::testing::split_files(source) {
+    let files: Vec<(Option<String>, String)> = match split_files(source) {
         None => vec![(None, source.to_owned())],
         Some(files) => files
             .into_iter()
@@ -51,7 +57,7 @@ fn render(source: &str) -> String {
         if cursor.is_some() {
             render_at(db, project, file, offset, &place, &mut output);
         }
-        for hint in ide::inlay_hints(db, file, None) {
+        for hint in inlay_hints(db, file, None) {
             output.push_str(&format!("hint @{}{}\n", u32::from(hint.offset), hint.label));
         }
         output
@@ -61,7 +67,7 @@ fn render(source: &str) -> String {
 /// Renders the covered stub text instead of byte offsets, which shift whenever an unrelated stub
 /// is added.
 fn stub_text(db: &RootDatabase, source_index: usize, range: TextRange) -> String {
-    let Some(sources) = semantics::stubs::StubSources::try_get(db) else {
+    let Some(sources) = StubSources::try_get(db) else {
         return "<no stub sources>".to_owned();
     };
     let Some((_, text)) = sources.sources(db).get(source_index) else {
@@ -83,7 +89,7 @@ fn render_at(
     place: &dyn Fn(SourceFile, TextRange) -> String,
     output: &mut String,
 ) {
-    match ide::hover(db, files, file, offset) {
+    match hover(db, files, file, offset) {
         Some(hover) => {
             for line in &hover.lines {
                 output.push_str(&format!(
@@ -93,7 +99,7 @@ fn render_at(
                 ));
             }
             match hover.definition {
-                Some(ide::HoverDefinition::Local {
+                Some(HoverDefinition::Local {
                     target,
                     maybe_undefined,
                 }) => output.push_str(&format!(
@@ -105,11 +111,11 @@ fn render_at(
                         ""
                     },
                 )),
-                Some(ide::HoverDefinition::Global { target }) => output.push_str(&format!(
+                Some(HoverDefinition::Global { target }) => output.push_str(&format!(
                     "hover-definition: global {}\n",
                     place(target.file, target.range),
                 )),
-                Some(ide::HoverDefinition::Stub {
+                Some(HoverDefinition::Stub {
                     namespace,
                     overloads,
                     declaration,
@@ -132,19 +138,22 @@ fn render_at(
         }
         None => output.push_str("hover: none\n"),
     }
-    match ide::definition(db, files, file, offset) {
-        Some(ide::DefinitionTarget::Project(target)) => output.push_str(&format!(
-            "definition {}\n",
-            place(target.file, target.range),
-        )),
-        Some(ide::DefinitionTarget::Stub(target)) => output.push_str(&format!(
-            "definition: stub source {} at {}\n",
+    let render_target = |label: &str, target: Option<DefinitionTarget>| match target {
+        Some(DefinitionTarget::Project(target)) => {
+            format!("{label} {}\n", place(target.file, target.range))
+        }
+        Some(DefinitionTarget::Stub(target)) => format!(
+            "{label}: stub source {} at {}\n",
             target.source_index,
             stub_text(db, target.source_index, target.range),
-        )),
-        None => output.push_str("definition: none\n"),
-    }
-    let references = ide::references(db, files, file, offset, true);
+        ),
+        None => format!("{label}: none\n"),
+    };
+    output.push_str(&render_target(
+        "definition",
+        definition(db, files, file, offset),
+    ));
+    let references = references(db, files, file, offset, true);
     if references.is_empty() {
         output.push_str("references: none\n");
     } else {
@@ -160,23 +169,14 @@ fn render_at(
             .collect();
         output.push_str(&format!("references: {}\n", ranges.join(", ")));
     }
-    match ide::rename(db, files, file, offset) {
+    match rename(db, files, file, offset) {
         Some(edits) => output.push_str(&format!("rename: {} edit(s)\n", edits.len())),
         None => output.push_str("rename: none\n"),
     }
-    match ide::type_definition(db, files, file, offset) {
-        Some(ide::DefinitionTarget::Project(target)) => output.push_str(&format!(
-            "type-definition {}\n",
-            place(target.file, target.range),
-        )),
-        Some(ide::DefinitionTarget::Stub(target)) => output.push_str(&format!(
-            "type-definition: stub source {} at {}\n",
-            target.source_index,
-            stub_text(db, target.source_index, target.range),
-        )),
-        None => {}
+    if let Some(type_target) = type_definition(db, files, file, offset) {
+        output.push_str(&render_target("type-definition", Some(type_target)));
     }
-    match ide::signature_help(db, file, offset) {
+    match signature_help(db, file, offset) {
         Some(help) => {
             for (signature_index, signature) in help.signatures.iter().enumerate() {
                 let marker =
@@ -205,7 +205,7 @@ fn render_at(
         }
         None => output.push_str("signature: none\n"),
     }
-    for action in ide::code_actions(db, file, syntax::TextRange::new(offset, offset)) {
+    for action in code_actions(db, file, TextRange::new(offset, offset)) {
         output.push_str(&format!("action: {}\n", action.title));
         for edit in &action.edits {
             output.push_str(&format!(
@@ -216,7 +216,7 @@ fn render_at(
             ));
         }
     }
-    match ide::completion(db, files, file, offset) {
+    match completion(db, files, file, offset) {
         Some(result) => {
             let labels: Vec<String> = result
                 .items
@@ -238,7 +238,7 @@ fn render_at(
 #[test]
 fn workspace_symbols_ranked() {
     let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let first = SourceFile::new(
         &db,
         "alpha_one <- function() 1\nbeta <- 2\n".to_owned(),
@@ -251,23 +251,17 @@ fn workspace_symbols_ranked() {
     );
     let files = ProjectFiles::new(&db, vec![first, second]);
 
-    let names: Vec<String> = ide::workspace_symbols(&db, files, "alpha")
-        .into_iter()
-        .map(|symbol| symbol.name)
-        .collect();
-    assert_eq!(names, vec!["alpha_one".to_owned(), "alpha_two".to_owned()]);
-
-    let subsequence: Vec<String> = ide::workspace_symbols(&db, files, "aone")
-        .into_iter()
-        .map(|symbol| symbol.name)
-        .collect();
-    assert_eq!(subsequence, vec!["alpha_one".to_owned()]);
+    assert_eq!(
+        symbol_names(&db, files, "alpha"),
+        ["alpha_one", "alpha_two"]
+    );
+    assert_eq!(symbol_names(&db, files, "aone"), ["alpha_one"]);
 }
 
 #[test]
 fn document_symbols_expose_s4_and_r6_hierarchy() {
     let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let source = "\
 setClass(\"Person\", representation(name = \"character\"))
 setGeneric(\"greet\", function(object) standardGeneric(\"greet\"))
@@ -287,9 +281,9 @@ setMethod(f = \"foo\", signature = list(x = \"Person\", y = \"Other\"), definiti
 setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
 ";
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&db, vec![file]);
+    let files = ProjectFiles::new(&db, vec![file]);
 
-    let symbols = ide::document_symbols(&db, file);
+    let symbols = document_symbols(&db, file);
     let rendered: Vec<String> = symbols
         .iter()
         .map(|symbol| {
@@ -338,12 +332,14 @@ setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
         "{account:#?}"
     );
 
-    let files = semantics::ProjectFiles::try_get(&db).expect("project files installed");
-    let deposit: Vec<String> = ide::workspace_symbols(&db, files, "deposit")
+    assert_eq!(symbol_names(&db, files, "deposit"), ["deposit"]);
+}
+
+fn symbol_names(db: &RootDatabase, files: ProjectFiles, query: &str) -> Vec<String> {
+    workspace_symbols(db, files, query)
         .into_iter()
         .map(|symbol| symbol.name)
-        .collect();
-    assert_eq!(deposit, vec!["deposit".to_owned()]);
+        .collect()
 }
 
 // Completion renders every global candidate's type, so unlike the point queries it re-checks the
@@ -357,13 +353,13 @@ fn point_queries_recheck_only_what_an_edit_changed() {
     let at = |needle: &str| TextSize::from(source.find(needle).expect("needle") as u32);
     let point_queries = |db: &ProbeDatabase| {
         let file = files[0];
-        ide::hover(db, project, file, at("helper(2L)"));
-        ide::signature_help(db, file, at("2L)"));
-        ide::inlay_hints(db, file, None);
-        ide::definition(db, project, file, at("helper(2L)"));
+        hover(db, project, file, at("helper(2L)"));
+        signature_help(db, file, at("2L)"));
+        inlay_hints(db, file, None);
+        definition(db, project, file, at("helper(2L)"));
     };
     let complete = |db: &ProbeDatabase| {
-        ide::completion(db, project, files[0], at("helper(2L)"));
+        completion(db, project, files[0], at("helper(2L)"));
     };
     point_queries(&db);
     complete(&db);
@@ -387,7 +383,7 @@ fn point_queries_recheck_only_what_an_edit_changed() {
 
 #[test]
 fn ide_fixtures() {
-    syntax::testing::run_fixture_suite(
+    run_fixture_suite(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ide"),
         &render,
     );

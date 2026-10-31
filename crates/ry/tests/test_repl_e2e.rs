@@ -6,7 +6,9 @@
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 fn r_available() -> bool {
     let available = std::process::Command::new("R")
@@ -26,7 +28,7 @@ struct ReplSession {
     _lock: std::sync::MutexGuard<'static, ()>,
     _pair: portable_pty::PtyPair,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    chunks: std::sync::mpsc::Receiver<Vec<u8>>,
+    chunks: mpsc::Receiver<Vec<u8>>,
     writer: Box<dyn Write + Send>,
     seen: String,
     /// So a terminal query split over a read boundary is still recognized.
@@ -53,8 +55,8 @@ impl ReplSession {
         let writer = pair.master.take_writer().expect("pty writer");
         // The pty read blocks with no timeout, so it gets its own thread and a silent
         // session fails instead of hanging.
-        let (sender, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
-        std::thread::spawn(move || {
+        let (sender, chunks) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             loop {
                 match reader.read(&mut buffer) {
@@ -183,13 +185,38 @@ fn strip_ansi(text: &str) -> String {
     stripped
 }
 
-#[test]
-fn evaluates_and_autoprints() {
+/// Starts a session at its banner, or skips the test when no R is installed.
+fn start_session() -> Option<ReplSession> {
     if !r_available() {
-        return;
+        return None;
     }
     let mut session = ReplSession::start();
     session.expect("ry R console");
+    Some(session)
+}
+
+/// Runs `body` as a script through `ry run`, or skips the test when no R is installed.
+fn run_script(body: &str) -> Option<(std::process::Output, String)> {
+    if !r_available() {
+        return None;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let script = directory.path().join("script.R");
+    fs::write(&script, body).expect("write script");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("run the binary");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    Some((output, stdout))
+}
+
+#[test]
+fn evaluates_and_autoprints() {
+    let Some(mut session) = start_session() else {
+        return;
+    };
     session.send("1 + 1\r");
     session.expect("[1] 2");
     session.quit();
@@ -197,11 +224,9 @@ fn evaluates_and_autoprints() {
 
 #[test]
 fn multiline_input_continues_and_defines() {
-    if !r_available() {
+    let Some(mut session) = start_session() else {
         return;
-    }
-    let mut session = ReplSession::start();
-    session.expect("ry R console");
+    };
     session.send("f <- function(x) {\r");
     session.send("x * 2\r");
     session.send("}\r");
@@ -212,11 +237,9 @@ fn multiline_input_continues_and_defines() {
 
 #[test]
 fn errors_come_back_on_the_error_stream() {
-    if !r_available() {
+    let Some(mut session) = start_session() else {
         return;
-    }
-    let mut session = ReplSession::start();
-    session.expect("ry R console");
+    };
     session.send("stop(\"boom\")\r");
     session.expect("boom");
     session.send("1 + 1\r");
@@ -226,11 +249,9 @@ fn errors_come_back_on_the_error_stream() {
 
 #[test]
 fn tab_completes_with_analysis_signatures() {
-    if !r_available() {
+    let Some(mut session) = start_session() else {
         return;
-    }
-    let mut session = ReplSession::start();
-    session.expect("ry R console");
+    };
     session.send("seq_l\t");
     // Session-binding completion is pinned by the completer's unit tests; menu
     // interaction over a pty is too stateful to assert reliably.
@@ -245,11 +266,9 @@ fn tab_completes_with_analysis_signatures() {
 
 #[test]
 fn ctrl_c_interrupts_evaluation() {
-    if !r_available() {
+    let Some(mut session) = start_session() else {
         return;
-    }
-    let mut session = ReplSession::start();
-    session.expect("ry R console");
+    };
     session.send("Sys.sleep(60)\r");
     // Let evaluation start (terminal back in cooked mode) so Ctrl-C arrives as
     // SIGINT, not as an editor keystroke.
@@ -263,13 +282,11 @@ fn ctrl_c_interrupts_evaluation() {
 
 #[test]
 fn the_terminal_width_reaches_r() {
-    if !r_available() {
-        return;
-    }
     // R defaults to 80 columns regardless of the terminal and exports no setter, so
     // the console must feed `options(width = …)` in.
-    let mut session = ReplSession::start();
-    session.expect("ry R console");
+    let Some(mut session) = start_session() else {
+        return;
+    };
     session.send("cat(\"WIDTH:\", getOption(\"width\"), \"\\n\")\r");
     session.expect("WIDTH: 120");
     session.quit();
@@ -277,12 +294,10 @@ fn the_terminal_width_reaches_r() {
 
 #[test]
 fn a_table_that_fits_is_printed_on_one_line() {
-    if !r_available() {
-        return;
-    }
     // A 92-character header: over R's default width, under the session terminal's 120.
-    let mut session = ReplSession::start();
-    session.expect("ry R console");
+    let Some(mut session) = start_session() else {
+        return;
+    };
     session.send(
         "print(data.frame(a_reasonably_long_column=1L, another_long_column_name=2L, third_column_name_here=3L))\r",
     );
@@ -292,18 +307,9 @@ fn a_table_that_fits_is_printed_on_one_line() {
 
 #[test]
 fn run_executes_a_file_and_exits_zero() {
-    if !r_available() {
+    let Some((output, stdout)) = run_script("x <- 40 + 2\nprint(x)\n") else {
         return;
-    }
-    let directory = tempfile::tempdir().expect("temp dir");
-    let script = directory.path().join("ok.R");
-    std::fs::write(&script, "x <- 40 + 2\nprint(x)\n").expect("write script");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-        .arg("run")
-        .arg(&script)
-        .output()
-        .expect("run the binary");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    };
     assert!(
         output.status.success(),
         "expected exit 0, got {:?}\nstdout: {stdout}\nstderr: {}",
@@ -315,18 +321,9 @@ fn run_executes_a_file_and_exits_zero() {
 
 #[test]
 fn run_error_exits_nonzero() {
-    if !r_available() {
+    let Some((output, stdout)) = run_script("stop(\"boom\")\nprint(\"unreached\")\n") else {
         return;
-    }
-    let directory = tempfile::tempdir().expect("temp dir");
-    let script = directory.path().join("bad.R");
-    std::fs::write(&script, "stop(\"boom\")\nprint(\"unreached\")\n").expect("write script");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-        .arg("run")
-        .arg(&script)
-        .output()
-        .expect("run the binary");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    };
     assert_eq!(
         output.status.code(),
         Some(1),

@@ -3,11 +3,15 @@
 //! Usage: `cargo run --release -p ry-lang --example keystroke_probe <package-dir>...`
 
 use salsa::Setter as _;
-use semantics::{DocumentKind, ProjectFiles, SourceFile};
+use semantics::diagnostics::file_diagnostics;
+use semantics::stubs::install_shipped_stubs;
+use semantics::{Db, DocumentKind, ProjectFiles, SourceFile, SpliceCache};
+use std::cmp::Reverse;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::{env, fs, mem};
 
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static WALK_EXECUTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -22,7 +26,7 @@ const WALKS: &[&str] = &[
 #[derive(Clone)]
 struct ProbeDatabase {
     storage: salsa::Storage<Self>,
-    splice_cache: std::sync::Arc<semantics::SpliceCache>,
+    splice_cache: Arc<SpliceCache>,
 }
 
 impl Default for ProbeDatabase {
@@ -40,7 +44,7 @@ impl Default for ProbeDatabase {
                     }
                 }
             }))),
-            splice_cache: std::sync::Arc::default(),
+            splice_cache: Arc::default(),
         }
     }
 }
@@ -49,9 +53,89 @@ impl Default for ProbeDatabase {
 impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
-impl semantics::Db for ProbeDatabase {
-    fn splice_cache(&self) -> &semantics::SpliceCache {
+impl Db for ProbeDatabase {
+    fn splice_cache(&self) -> &SpliceCache {
         &self.splice_cache
+    }
+}
+
+fn main() {
+    let roots: Vec<PathBuf> = env::args().skip(1).map(PathBuf::from).collect();
+    assert!(!roots.is_empty(), "pass package directories");
+    let sources = collect_sources(&roots);
+    let lines: usize = sources
+        .iter()
+        .map(|(_, source)| source.lines().count())
+        .sum();
+    println!("{} files, {} lines", sources.len(), lines);
+
+    let mut db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let files: Vec<SourceFile> = sources
+        .iter()
+        .map(|(_, source)| SourceFile::new(&db, source.clone(), DocumentKind::Package))
+        .collect();
+    ProjectFiles::new(&db, files.clone());
+
+    let start = Instant::now();
+    let findings: usize = files
+        .iter()
+        .map(|&file| file_diagnostics(&db, file).len())
+        .sum();
+    println!("cold prime: {:?} ({findings} findings)", start.elapsed());
+
+    let mut by_size: Vec<usize> = (0..sources.len()).collect();
+    by_size.sort_by_key(|&index| Reverse(sources[index].1.len()));
+    let editable: Vec<usize> = by_size
+        .into_iter()
+        .filter(|&index| body_literal_offset(&sources[index].1).is_some())
+        .collect();
+    let picks: Vec<usize> = [0, editable.len() / 2]
+        .iter()
+        .filter_map(|&rank| editable.get(rank).copied())
+        .collect();
+
+    const EDITS: usize = 8;
+    for &index in &picks {
+        let (path, original) = &sources[index];
+        let file = files[index];
+        let offset = body_literal_offset(original).expect("picked for a literal");
+        let edits = [
+            (
+                "body edit",
+                format!("{}11{}", &original[..offset], &original[offset + 1..]),
+            ),
+            ("new item ", format!("{original}\nprobe_binding <- 0L\n")),
+        ];
+        for (label, edited) in edits {
+            let mut times = Vec::new();
+            let mut executes = Vec::new();
+            let mut walks: Vec<String> = Vec::new();
+            for edit in 0..EDITS {
+                let text = if edit % 2 == 0 { &edited } else { original };
+                file.set_text(&mut db).to(text.clone());
+                EXECUTES.store(0, Ordering::Relaxed);
+                drain_walks();
+                let start = Instant::now();
+                file_diagnostics(&db, file);
+                times.push(start.elapsed());
+                executes.push(EXECUTES.load(Ordering::Relaxed));
+                walks.extend(drain_walks());
+            }
+            times.sort();
+            executes.sort();
+            println!(
+                "{label} {:>50}: median {:?} / worst {:?}, {}..{} queries, walks: {:?}",
+                path.display(),
+                times[times.len() / 2],
+                times[times.len() - 1],
+                executes[0],
+                executes[executes.len() - 1],
+                walks
+            );
+        }
+        file.set_text(&mut db).to(original.clone());
+        file_diagnostics(&db, file);
     }
 }
 
@@ -59,7 +143,7 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
     let mut sources = Vec::new();
     let mut stack: Vec<PathBuf> = roots.to_vec();
     while let Some(directory) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
+        let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -68,9 +152,8 @@ fn collect_sources(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
                 stack.push(path);
             } else if path
                 .extension()
-                .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("r"))
-                && let Ok(bytes) = std::fs::read(&path)
+                && let Ok(bytes) = fs::read(&path)
             {
                 sources.push((path, String::from_utf8_lossy(&bytes).into_owned()));
             }
@@ -88,118 +171,5 @@ fn body_literal_offset(source: &str) -> Option<usize> {
 }
 
 fn drain_walks() -> Vec<String> {
-    std::mem::take(&mut *WALK_EXECUTES.lock().expect("probe lock"))
-}
-
-fn timed_demand(db: &ProbeDatabase, file: SourceFile) -> (std::time::Duration, usize, Vec<String>) {
-    EXECUTES.store(0, Ordering::Relaxed);
-    drain_walks();
-    let start = Instant::now();
-    let _ = semantics::diagnostics::file_diagnostics(db, file);
-    (
-        start.elapsed(),
-        EXECUTES.load(Ordering::Relaxed),
-        drain_walks(),
-    )
-}
-
-fn main() {
-    let roots: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
-    assert!(!roots.is_empty(), "pass package directories");
-    let sources = collect_sources(&roots);
-    let lines: usize = sources
-        .iter()
-        .map(|(_, source)| source.lines().count())
-        .sum();
-    println!("{} files, {} lines", sources.len(), lines);
-
-    let mut db = ProbeDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
-    let files: Vec<SourceFile> = sources
-        .iter()
-        .map(|(_, source)| SourceFile::new(&db, source.clone(), DocumentKind::Package))
-        .collect();
-    ProjectFiles::new(&db, files.clone());
-
-    let start = Instant::now();
-    let mut findings = 0usize;
-    for &file in &files {
-        findings += semantics::diagnostics::file_diagnostics(&db, file).len();
-    }
-    println!("cold prime: {:?} ({findings} findings)", start.elapsed());
-
-    let mut by_size: Vec<usize> = (0..sources.len()).collect();
-    by_size.sort_by_key(|&index| std::cmp::Reverse(sources[index].1.len()));
-    let editable: Vec<usize> = by_size
-        .iter()
-        .copied()
-        .filter(|&index| body_literal_offset(&sources[index].1).is_some())
-        .collect();
-    let picks: Vec<usize> = [0, editable.len() / 2]
-        .iter()
-        .filter_map(|&rank| editable.get(rank).copied())
-        .collect();
-
-    const EDITS: usize = 8;
-    for &index in &picks {
-        let (path, original) = &sources[index];
-        let file = files[index];
-        let offset = body_literal_offset(original).expect("picked for a literal");
-
-        let mut times = Vec::new();
-        let mut executes = Vec::new();
-        let mut walks: Vec<String> = Vec::new();
-        for edit in 0..EDITS {
-            let text = if edit % 2 == 0 {
-                format!("{}11{}", &original[..offset], &original[offset + 1..])
-            } else {
-                original.clone()
-            };
-            file.set_text(&mut db).to(text);
-            let (elapsed, count, walk) = timed_demand(&db, file);
-            times.push(elapsed);
-            executes.push(count);
-            walks.extend(walk);
-        }
-        times.sort();
-        executes.sort();
-        println!(
-            "body edit {:>50}: median {:?} / worst {:?}, {}..{} queries, walks: {:?}",
-            path.display(),
-            times[times.len() / 2],
-            times[times.len() - 1],
-            executes[0],
-            executes[executes.len() - 1],
-            walks
-        );
-
-        let mut times = Vec::new();
-        let mut executes = Vec::new();
-        let mut walks: Vec<String> = Vec::new();
-        for edit in 0..EDITS {
-            let text = if edit % 2 == 0 {
-                format!("{original}\nprobe_binding <- 0L\n")
-            } else {
-                original.clone()
-            };
-            file.set_text(&mut db).to(text);
-            let (elapsed, count, walk) = timed_demand(&db, file);
-            times.push(elapsed);
-            executes.push(count);
-            walks.extend(walk);
-        }
-        times.sort();
-        executes.sort();
-        println!(
-            "new item  {:>50}: median {:?} / worst {:?}, {}..{} queries, walks: {:?}",
-            path.display(),
-            times[times.len() / 2],
-            times[times.len() - 1],
-            executes[0],
-            executes[executes.len() - 1],
-            walks
-        );
-        file.set_text(&mut db).to(original.clone());
-        let _ = semantics::diagnostics::file_diagnostics(&db, file);
-    }
+    mem::take(&mut *WALK_EXECUTES.lock().expect("probe lock"))
 }

@@ -1,24 +1,12 @@
 //! Every feature runs at sampled offsets and must not panic or produce a range outside the text
 //! it indexes. `FUZZ_ITERS` scales the mutation budget.
 
+use ide::{DefinitionTarget, DocumentSymbol};
+use semantics::stubs::install_shipped_stubs;
 use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use syntax::TextSize;
-
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        (self.next() % bound.max(1) as u64) as usize
-    }
-}
+use std::collections::{BTreeSet, HashSet};
+use syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed};
+use syntax::{SyntaxKind, TextRange, TextSize, lex};
 
 const SEEDS: &[&str] = &[
     "x <- 1L\ny <- x + 1\n",
@@ -33,16 +21,9 @@ const SEEDS: &[&str] = &[
     "s <- \"unterminated\n",
 ];
 
-fn iterations() -> usize {
-    std::env::var("FUZZ_ITERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(300)
-}
-
 fn sweep(source: &str) {
     let db = RootDatabase::default();
-    semantics::stubs::install_shipped_stubs(&db);
+    install_shipped_stubs(&db);
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     let files = ProjectFiles::new(&db, vec![file]);
     let completion_offsets = one_offset_per_context(source);
@@ -61,7 +42,7 @@ fn sweep(source: &str) {
             check_range(&db, file, hover.range, &at("hover"));
         }
 
-        let _ = ide::hover_debug(&db, file, offset);
+        ide::hover_debug(&db, file, offset);
 
         let cursor_name = name_at(source, offset);
 
@@ -151,7 +132,7 @@ fn sweep(source: &str) {
         let type_definition = ide::type_definition(&db, files, file, offset);
         check_target(&db, type_definition.as_ref(), &at("type definition"));
 
-        let selection = syntax::TextRange::new(offset, offset);
+        let selection = TextRange::new(offset, offset);
         let actions = ide::code_actions(&db, file, selection);
         for action in &actions {
             for edit in &action.edits {
@@ -171,7 +152,14 @@ fn sweep(source: &str) {
     for symbol in ide::document_symbols(&db, file) {
         check_symbol(&db, file, &symbol);
     }
-    let _ = ide::workspace_symbols(&db, files, "a");
+    for symbol in ide::workspace_symbols(&db, files, "a") {
+        check_range(
+            &db,
+            symbol.target.file,
+            symbol.target.range,
+            "workspace symbol",
+        );
+    }
 }
 
 /// Token boundaries are where position decisions happen; the stride keeps off-boundary and
@@ -190,10 +178,10 @@ fn sample_offsets(source: &str) -> Vec<usize> {
     offsets
 }
 
-fn token_boundaries(source: &str) -> std::collections::BTreeSet<TextSize> {
-    let mut offsets = std::collections::BTreeSet::from([TextSize::from(0)]);
+fn token_boundaries(source: &str) -> BTreeSet<TextSize> {
+    let mut offsets = BTreeSet::from([TextSize::from(0)]);
     let mut at = 0usize;
-    for token in syntax::lex(source).0 {
+    for token in lex(source).0 {
         at += usize::from(token.len);
         offsets.insert(TextSize::from(at.min(source.len()) as u32));
     }
@@ -201,12 +189,11 @@ fn token_boundaries(source: &str) -> std::collections::BTreeSet<TextSize> {
 }
 
 /// The kind of token the cursor sits after decides what completion may offer.
-fn one_offset_per_context(source: &str) -> std::collections::BTreeSet<TextSize> {
-    let mut seen = std::collections::HashSet::new();
-    let mut offsets =
-        std::collections::BTreeSet::from([TextSize::from(0), TextSize::from(source.len() as u32)]);
+fn one_offset_per_context(source: &str) -> BTreeSet<TextSize> {
+    let mut seen = HashSet::new();
+    let mut offsets = BTreeSet::from([TextSize::from(0), TextSize::from(source.len() as u32)]);
     let mut at = 0usize;
-    for token in syntax::lex(source).0 {
+    for token in lex(source).0 {
         at += usize::from(token.len);
         if seen.insert(token.kind) {
             offsets.insert(TextSize::from(at.min(source.len()) as u32));
@@ -218,10 +205,10 @@ fn one_offset_per_context(source: &str) -> std::collections::BTreeSet<TextSize> 
 fn name_at(source: &str, offset: TextSize) -> Option<&str> {
     let offset = usize::from(offset);
     let mut start = 0usize;
-    for token in syntax::lex(source).0 {
+    for token in lex(source).0 {
         let end = start + usize::from(token.len);
         // A backtick-quoted name lexes as IDENT, backticks included.
-        if (start..end).contains(&offset) && token.kind == syntax::SyntaxKind::IDENT {
+        if (start..end).contains(&offset) && token.kind == SyntaxKind::IDENT {
             return source.get(start..end);
         }
         start = end;
@@ -233,7 +220,7 @@ fn name_at(source: &str, offset: TextSize) -> Option<&str> {
 /// must spell the cursor's name. Backticks are normalized: `` `x` `` and `x` name one binding.
 fn check_names(
     db: &RootDatabase,
-    ranges: impl IntoIterator<Item = (SourceFile, syntax::TextRange)>,
+    ranges: impl IntoIterator<Item = (SourceFile, TextRange)>,
     cursor_name: Option<&str>,
     what: &str,
 ) {
@@ -259,18 +246,14 @@ fn unquote(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-fn definition_range(
-    target: Option<&ide::DefinitionTarget>,
-) -> Option<(SourceFile, syntax::TextRange)> {
+fn definition_range(target: Option<&DefinitionTarget>) -> Option<(SourceFile, TextRange)> {
     match target {
-        Some(ide::DefinitionTarget::Project(navigation)) => {
-            Some((navigation.file, navigation.range))
-        }
+        Some(DefinitionTarget::Project(navigation)) => Some((navigation.file, navigation.range)),
         _ => None,
     }
 }
 
-fn check_range(db: &RootDatabase, file: SourceFile, range: syntax::TextRange, what: &str) {
+fn check_range(db: &RootDatabase, file: SourceFile, range: TextRange, what: &str) {
     let length = file.text(db).len();
     assert!(
         usize::from(range.end()) <= length,
@@ -278,14 +261,14 @@ fn check_range(db: &RootDatabase, file: SourceFile, range: syntax::TextRange, wh
     );
 }
 
-fn check_target(db: &RootDatabase, target: Option<&ide::DefinitionTarget>, what: &str) {
+fn check_target(db: &RootDatabase, target: Option<&DefinitionTarget>, what: &str) {
     // A stub target's range indexes a stub source, not a project file.
-    if let Some(ide::DefinitionTarget::Project(navigation)) = target {
+    if let Some(DefinitionTarget::Project(navigation)) = target {
         check_range(db, navigation.file, navigation.range, what);
     }
 }
 
-fn check_symbol(db: &RootDatabase, file: SourceFile, symbol: &ide::DocumentSymbol) {
+fn check_symbol(db: &RootDatabase, file: SourceFile, symbol: &DocumentSymbol) {
     check_range(db, file, symbol.range, "document symbol");
     check_range(db, file, symbol.selection, "document symbol selection");
     for child in &symbol.children {
@@ -303,36 +286,8 @@ fn seeds_never_panic() {
 #[test]
 fn fuzz_seed_mutations() {
     let mut rng = SplitMix64(0x01DE_F022);
-    for _ in 0..iterations() {
-        let seed = SEEDS[rng.below(SEEDS.len())];
-        let mut text = seed.as_bytes().to_vec();
-        for _ in 0..(1 + rng.below(4)) {
-            match rng.below(4) {
-                0 if !text.is_empty() => {
-                    let at = rng.below(text.len());
-                    text.remove(at);
-                }
-                1 => {
-                    let at = rng.below(text.len() + 1);
-                    text.insert(at, (rng.next() & 0x7F) as u8);
-                }
-                2 if !text.is_empty() => {
-                    let at = rng.below(text.len());
-                    text[at] = (rng.next() & 0x7F) as u8;
-                }
-                _ => {
-                    let donor = SEEDS[rng.below(SEEDS.len())].as_bytes();
-                    let from = rng.below(donor.len());
-                    let to = (from + rng.below(24)).min(donor.len());
-                    let at = rng.below(text.len() + 1);
-                    for (index, &byte) in donor[from..to].iter().enumerate() {
-                        text.insert(at + index, byte);
-                    }
-                }
-            }
-        }
-        let text = String::from_utf8_lossy(&text).into_owned();
-        sweep(&text);
+    for _ in 0..fuzz_iterations(300) {
+        sweep(&mutate_seed(&mut rng, SEEDS, 24));
     }
 }
 
@@ -341,7 +296,7 @@ fn fuzz_seed_mutations() {
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]
 fn fuzz_deep() {
     let mut rng = SplitMix64(0x01DE_F023);
-    for _ in 0..iterations().max(5000) {
+    for _ in 0..fuzz_iterations(300).max(5000) {
         let pieces = 1 + rng.below(12);
         let mut text = String::new();
         for _ in 0..pieces {

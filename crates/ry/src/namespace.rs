@@ -1,10 +1,10 @@
 //! NAMESPACE problem diagnostics; parsing lives in `semantics::metadata`.
 
 use semantics::diagnostics::{Diagnostic, Severity};
-use semantics::lints::LintLevel;
-pub use semantics::metadata::{NamespaceImport, parse_namespace_imports};
+use semantics::lints::{LintLevel, lint_severity};
+use semantics::metadata::NamespaceImport;
 use std::collections::BTreeSet;
-use syntax::{SyntaxKind, TextRange};
+use syntax::{SyntaxElement, SyntaxKind, TextRange};
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
 /// error, not a warning, because R refuses to load the package.
@@ -20,16 +20,15 @@ pub fn namespace_import_problems(
             if !knows_namespace(&import.namespace) || exports(&import.namespace, name) {
                 return None;
             }
-            Some(Diagnostic {
-                range: import.range,
-                severity: Severity::Error,
-                code: "unresolved",
-                message: format!(
+            Some(Diagnostic::new(
+                import.range,
+                Severity::Error,
+                "unresolved",
+                format!(
                     "`{name}` is not exported by `{}`, so this package will not load.",
                     import.namespace
                 ),
-                related: Vec::new(),
-            })
+            ))
         })
         .collect()
 }
@@ -43,14 +42,13 @@ pub fn namespace_export_problems(
     exports
         .iter()
         .filter(|(name, _)| !defines(name))
-        .map(|(name, range)| Diagnostic {
-            range: *range,
-            severity: Severity::Error,
-            code: "unresolved",
-            message: format!(
-                "`{name}` is exported but this package defines no such top-level object."
-            ),
-            related: Vec::new(),
+        .map(|(name, range)| {
+            Diagnostic::new(
+                *range,
+                Severity::Error,
+                "unresolved",
+                format!("`{name}` is exported but this package defines no such top-level object."),
+            )
         })
         .collect()
 }
@@ -63,10 +61,8 @@ pub fn unused_import_diagnostics(
     used_tokens: &BTreeSet<String>,
     level: LintLevel,
 ) -> Vec<Diagnostic> {
-    let severity = match level {
-        LintLevel::Default | LintLevel::Off => return Vec::new(),
-        LintLevel::Warn => Severity::Warning,
-        LintLevel::Error => Severity::Error,
+    let Some(severity) = lint_severity(level, None) else {
+        return Vec::new();
     };
     imports
         .iter()
@@ -75,16 +71,15 @@ pub fn unused_import_diagnostics(
             if used_tokens.contains(name) {
                 return None;
             }
-            Some(Diagnostic {
-                range: import.range,
-                severity: severity.clone(),
-                code: "unused-import",
-                message: format!(
+            Some(Diagnostic::new(
+                import.range,
+                severity,
+                "unused-import",
+                format!(
                     "imported name `{name}` from `{}` is never used.",
                     import.namespace
                 ),
-                related: Vec::new(),
-            })
+            ))
         })
         .collect()
 }
@@ -94,7 +89,7 @@ pub fn unused_import_diagnostics(
 pub fn collect_used_tokens(source: &str, out: &mut BTreeSet<String>) {
     let parse = syntax::parse(source);
     for element in parse.syntax_node().descendants_with_tokens() {
-        if let syntax::SyntaxElement::Token(token) = element {
+        if let SyntaxElement::Token(token) = element {
             if token.kind().is_trivia() {
                 continue;
             }
@@ -115,26 +110,25 @@ pub fn collect_used_tokens(source: &str, out: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use semantics::RootDatabase;
+    use semantics::metadata::parse_namespace_imports;
+    use semantics::stubs::{install_shipped_stubs, namespace_exports, namespace_known};
 
     fn stub_backed<'db>(
-        db: &'db semantics::RootDatabase,
+        db: &'db RootDatabase,
     ) -> (
         impl Fn(&str) -> bool + 'db,
         impl Fn(&str, &str) -> bool + 'db,
     ) {
         (
-            move |namespace: &str| {
-                semantics::stubs::namespace_known(db, namespace).unwrap_or(false)
-            },
-            move |namespace: &str, name: &str| {
-                semantics::stubs::namespace_exports(db, namespace, name)
-            },
+            move |namespace: &str| namespace_known(db, namespace).unwrap_or(false),
+            move |namespace: &str, name: &str| namespace_exports(db, namespace, name),
         )
     }
 
     fn problems_for(source: &str) -> Vec<String> {
-        let db = semantics::RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
+        let db = RootDatabase::default();
+        install_shipped_stubs(&db);
         let (knows, exports) = stub_backed(&db);
         namespace_import_problems(&parse_namespace_imports(source), &knows, &exports)
             .into_iter()
@@ -150,8 +144,8 @@ mod tests {
 
     #[test]
     fn known_namespace_with_a_typo_is_an_error() {
-        let db = semantics::RootDatabase::default();
-        semantics::stubs::install_shipped_stubs(&db);
+        let db = RootDatabase::default();
+        install_shipped_stubs(&db);
         let (knows, exports) = stub_backed(&db);
         let problems = namespace_import_problems(
             &parse_namespace_imports("importFrom(stats, sd, medain)\n"),

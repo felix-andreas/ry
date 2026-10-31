@@ -10,10 +10,11 @@ pub mod stubs;
 pub mod testing;
 pub mod types;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
-use syntax::Parse;
-use syntax::ast::AstNode as _;
+use std::sync::{Arc, Mutex};
+use syntax::ast::{self, BinaryExpr, is_expression_kind};
+use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 #[salsa::db]
 pub trait Db: salsa::Database {
@@ -26,7 +27,7 @@ pub trait Db: salsa::Database {
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     /// Shared across storage-handle clones so fresh handles keep the warm entries.
-    splice_cache: std::sync::Arc<SpliceCache>,
+    splice_cache: Arc<SpliceCache>,
 }
 
 #[salsa::db]
@@ -53,8 +54,8 @@ pub struct SourceFile {
 }
 
 #[salsa::tracked(returns(clone))]
-pub fn parse(db: &dyn Db, file: SourceFile) -> ParseResult {
-    ParseResult(db.splice_cache().parse(file, file.text(db)))
+pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
+    db.splice_cache().parse(file, file.text(db))
 }
 
 /// The previous `(text, parse)` per file. At capacity, inserting an unknown file
@@ -62,7 +63,7 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> ParseResult {
 /// session's open set stays resident.
 #[derive(Default)]
 pub struct SpliceCache {
-    entries: std::sync::Mutex<rustc_hash::FxHashMap<SourceFile, (std::sync::Arc<str>, Parse)>>,
+    entries: Mutex<FxHashMap<SourceFile, (Arc<str>, Parse)>>,
 }
 
 const SPLICE_CACHE_CAPACITY: usize = 64;
@@ -89,14 +90,14 @@ impl SpliceCache {
         if entries.len() >= SPLICE_CACHE_CAPACITY && !entries.contains_key(&file) {
             entries.clear();
         }
-        entries.insert(file, (std::sync::Arc::from(new_text), parse.clone()));
+        entries.insert(file, (Arc::from(new_text), parse.clone()));
         parse
     }
 }
 
 /// The one edit turning `old` into `new` (replaced range in `old`, replacement
 /// length); several accumulated edits collapse into one region.
-fn derived_edit(old: &str, new: &str) -> (syntax::TextRange, syntax::TextSize) {
+fn derived_edit(old: &str, new: &str) -> (TextRange, TextSize) {
     let mut prefix = old
         .as_bytes()
         .iter()
@@ -119,23 +120,12 @@ fn derived_edit(old: &str, new: &str) -> (syntax::TextRange, syntax::TextSize) {
         suffix -= 1;
     }
     (
-        syntax::TextRange::new(
-            syntax::TextSize::from(prefix as u32),
-            syntax::TextSize::from((old.len() - suffix) as u32),
+        TextRange::new(
+            TextSize::from(prefix as u32),
+            TextSize::from((old.len() - suffix) as u32),
         ),
-        syntax::TextSize::from((new.len() - suffix - prefix) as u32),
+        TextSize::from((new.len() - suffix - prefix) as u32),
     )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseResult(pub Parse);
-
-impl std::ops::Deref for ParseResult {
-    type Target = Parse;
-
-    fn deref(&self) -> &Parse {
-        &self.0
-    }
 }
 
 /// Identity is insertion-stable (kind, name, parent, disambiguator), never a
@@ -161,26 +151,7 @@ pub enum ItemKind {
 /// leaves it equal and cuts off. Borrowed: per-item work reads it once per item.
 #[salsa::tracked(returns(ref))]
 pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
-    let parse = parse(db, file);
-    let root = parse.syntax_node();
-    let mut counts: rustc_hash::FxHashMap<(ItemKind, Option<String>), u32> =
-        rustc_hash::FxHashMap::default();
-    let mut items = Vec::new();
-    for node in root.children() {
-        if !syntax::ast::is_expression_kind(node.kind()) && node.kind() != syntax::SyntaxKind::ERROR
-        {
-            continue;
-        }
-        let (kind, name) = classify_top_level(&node);
-        let disambiguator = {
-            let counter = counts.entry((kind, name.clone())).or_insert(0);
-            let current = *counter;
-            *counter += 1;
-            current
-        };
-        items.push(Item::new(db, file, kind, name, None, disambiguator));
-    }
-    items
+    item_spans(db, file).iter().map(|span| span.item).collect()
 }
 
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
@@ -188,13 +159,13 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 /// from it stay item-relative until the rendering edge.
 #[salsa::tracked(returns(clone))]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    resolve_item_node(db, item).map(|node| ItemSyntax(node.green().into()))
+    item_node(db, item).map(|node| ItemSyntax(node.green().into()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemSpan<'db> {
     pub item: Item<'db>,
-    pub range: syntax::TextRange,
+    pub range: TextRange,
 }
 
 /// One memoized walk; a per-item lookup would re-classify the file per item.
@@ -202,15 +173,16 @@ pub struct ItemSpan<'db> {
 pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> {
     let parse = parse(db, file);
     let root = parse.syntax_node();
-    let mut counts: rustc_hash::FxHashMap<(ItemKind, Option<String>), u32> =
-        rustc_hash::FxHashMap::default();
+    let mut counts: FxHashMap<(ItemKind, Option<String>), u32> = FxHashMap::default();
     let mut spans = Vec::new();
     for node in root.children() {
-        if !syntax::ast::is_expression_kind(node.kind()) && node.kind() != syntax::SyntaxKind::ERROR
-        {
+        if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
             continue;
         }
-        let (kind, name) = classify_top_level(&node);
+        let (kind, name) = match top_level_definition(&node) {
+            Some(definition) => (definition.kind, Some(definition.name)),
+            None => (ItemKind::Statement, None),
+        };
         let disambiguator = {
             let counter = counts.entry((kind, name.clone())).or_insert(0);
             let current = *counter;
@@ -227,16 +199,11 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
 
 /// Absolute offsets, for the rendering edge and position-addressed IDE features
 /// only; derived per-item values must use `item_syntax` to keep cutting off.
-pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::SyntaxNode> {
-    resolve_item_node(db, item)
-}
-
-pub(crate) fn resolve_item_node<'db>(
-    db: &'db dyn Db,
-    item: Item<'db>,
-) -> Option<syntax::SyntaxNode> {
-    let range = item_span_range(db, item)?;
-    let parse = parse(db, *item.file(db));
+pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<SyntaxNode> {
+    let file = *item.file(db);
+    let index = *item_span_positions(db, file).get(&item)?;
+    let range = item_spans(db, file).get(index)?.range;
+    let parse = parse(db, file);
     // Descend by range: a linear child walk per item is quadratic in statements.
     parse
         .syntax_node()
@@ -245,17 +212,8 @@ pub(crate) fn resolve_item_node<'db>(
         .filter(|node| node.text_range() == range)
 }
 
-pub(crate) fn item_span_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::TextRange> {
-    let file = *item.file(db);
-    let index = *item_span_positions(db, file).get(&item)?;
-    item_spans(db, file).get(index).map(|span| span.range)
-}
-
 #[salsa::tracked(returns(ref))]
-fn item_tree_positions<'db>(
-    db: &'db dyn Db,
-    file: SourceFile,
-) -> rustc_hash::FxHashMap<Item<'db>, usize> {
+fn item_tree_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item<'db>, usize> {
     item_tree(db, file)
         .iter()
         .enumerate()
@@ -264,10 +222,7 @@ fn item_tree_positions<'db>(
 }
 
 #[salsa::tracked(returns(ref))]
-fn item_span_positions<'db>(
-    db: &'db dyn Db,
-    file: SourceFile,
-) -> rustc_hash::FxHashMap<Item<'db>, usize> {
+fn item_span_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item<'db>, usize> {
     item_spans(db, file)
         .iter()
         .enumerate()
@@ -280,8 +235,8 @@ pub struct ItemSyntax(pub rowan::GreenNode);
 
 impl ItemSyntax {
     /// Offsets start at 0 (item-relative).
-    pub fn syntax_node(&self) -> syntax::SyntaxNode {
-        syntax::SyntaxNode::new_root(self.0.clone())
+    pub fn syntax_node(&self) -> SyntaxNode {
+        SyntaxNode::new_root(self.0.clone())
     }
 }
 
@@ -296,13 +251,9 @@ pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
 #[salsa::tracked(returns(ref))]
 pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::ItemNaming> {
     let module = item_hir(db, item).as_ref()?;
-    let masked_verbs = stubs::stubs(db)
-        .map(|library| library.masked.clone())
-        .unwrap_or_default();
-    Some(naming::resolve_item_with_masked_verbs(
-        module,
-        &masked_verbs,
-    ))
+    let no_masked_verbs = FxHashMap::default();
+    let masked_verbs = stubs::stubs(db).map_or(&no_masked_verbs, |library| &library.masked);
+    Some(naming::resolve_item(module, masked_verbs))
 }
 
 /// Recognized structurally by the checker rather than through the stub corpus.
@@ -329,67 +280,44 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
 /// An annotation applies only to the expression starting on the very next line;
 /// a blank line, a plain comment, or the end of the sequence breaks the association.
 pub enum AnnotationTarget {
-    Attached(syntax::SyntaxNode),
+    Attached(SyntaxNode),
     BlankLineSeparated,
     Dangling,
 }
 
 /// The single source of the annotation association rule for a statement sequence.
-pub fn statement_annotations(
-    parent: &syntax::SyntaxNode,
-) -> Vec<(syntax::SyntaxNode, AnnotationTarget)> {
-    let mut associations: Vec<(syntax::SyntaxNode, AnnotationTarget)> = Vec::new();
-    let mut pending: Option<(syntax::SyntaxNode, usize)> = None;
+pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, AnnotationTarget)> {
+    let mut associations = Vec::new();
+    let mut pending: Option<(SyntaxNode, usize)> = None;
     for child in parent.children_with_tokens() {
-        match child {
-            rowan::NodeOrToken::Node(node) if node.kind() == syntax::SyntaxKind::ANNOTATION => {
-                if let Some((previous, newlines)) = pending.take() {
-                    let target = if newlines >= 2 {
-                        AnnotationTarget::BlankLineSeparated
-                    } else {
-                        AnnotationTarget::Dangling
-                    };
-                    associations.push((previous, target));
-                }
-                pending = Some((node, 0));
+        let kind = child.kind();
+        if kind == SyntaxKind::WHITESPACE {
+            continue;
+        }
+        if kind == SyntaxKind::NEWLINE {
+            if let Some((_, newlines)) = pending.as_mut() {
+                *newlines += 1;
             }
-            rowan::NodeOrToken::Node(node) => {
-                if let Some((annotation, newlines)) = pending.take() {
-                    let attachable = syntax::ast::is_expression_kind(node.kind())
-                        || node.kind() == syntax::SyntaxKind::ERROR;
-                    let target = if newlines >= 2 {
-                        AnnotationTarget::BlankLineSeparated
-                    } else if attachable {
-                        AnnotationTarget::Attached(node)
-                    } else {
-                        AnnotationTarget::Dangling
-                    };
-                    associations.push((annotation, target));
-                }
-            }
-            rowan::NodeOrToken::Token(token) => match token.kind() {
-                syntax::SyntaxKind::WHITESPACE => {}
-                syntax::SyntaxKind::NEWLINE => {
-                    if let Some((_, newlines)) = pending.as_mut() {
-                        *newlines += 1;
-                    }
-                }
-                syntax::SyntaxKind::COMMENT => {
-                    if let Some((annotation, newlines)) = pending.take() {
-                        let target = if newlines >= 2 {
-                            AnnotationTarget::BlankLineSeparated
-                        } else {
-                            AnnotationTarget::Dangling
-                        };
-                        associations.push((annotation, target));
-                    }
-                }
-                _ => {
-                    if let Some((annotation, _)) = pending.take() {
-                        associations.push((annotation, AnnotationTarget::Dangling));
-                    }
-                }
-            },
+            continue;
+        }
+        if let Some((annotation, newlines)) = pending.take() {
+            let target = if child.as_token().is_some() && kind != SyntaxKind::COMMENT {
+                AnnotationTarget::Dangling
+            } else if newlines >= 2 {
+                AnnotationTarget::BlankLineSeparated
+            } else if let Some(node) = child.as_node()
+                && (is_expression_kind(kind) || kind == SyntaxKind::ERROR)
+            {
+                AnnotationTarget::Attached(node.clone())
+            } else {
+                AnnotationTarget::Dangling
+            };
+            associations.push((annotation, target));
+        }
+        if let rowan::NodeOrToken::Node(node) = child
+            && kind == SyntaxKind::ANNOTATION
+        {
+            pending = Some((node, 0));
         }
     }
     if let Some((annotation, _)) = pending {
@@ -413,8 +341,8 @@ pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<I
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
-) -> rustc_hash::FxHashMap<Item<'db>, ItemSyntax> {
-    let item_by_range: rustc_hash::FxHashMap<syntax::TextRange, Item<'db>> = item_spans(db, file)
+) -> FxHashMap<Item<'db>, ItemSyntax> {
+    let item_by_range: FxHashMap<TextRange, Item<'db>> = item_spans(db, file)
         .iter()
         .map(|span| (span.range, span.item))
         .collect();
@@ -443,10 +371,10 @@ pub fn item_expression_annotations<'db>(
         return Vec::new();
     };
     let root = syntax.syntax_node();
-    let mut parents: Vec<syntax::SyntaxNode> = Vec::new();
+    let mut parents: Vec<SyntaxNode> = Vec::new();
     for node in root
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
@@ -503,14 +431,14 @@ pub fn file_typing_mode(db: &dyn Db, file: SourceFile) -> Option<TypingMode> {
 pub fn file_typing_directives(
     db: &dyn Db,
     file: SourceFile,
-) -> (Option<TypingMode>, Vec<(syntax::TextRange, String)>) {
+) -> (Option<TypingMode>, Vec<(TextRange, String)>) {
     let parse = parse(db, file);
     let root = parse.syntax_node();
     let mut mode = None;
     let mut invalid = Vec::new();
     for element in root.children_with_tokens() {
         match element {
-            rowan::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::COMMENT => {
+            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMENT => {
                 let Some(rest) = token
                     .text()
                     .trim_start_matches('#')
@@ -527,7 +455,7 @@ pub fn file_typing_directives(
                     other => invalid.push((token.text_range(), other.to_owned())),
                 }
             }
-            rowan::NodeOrToken::Node(node) if node.kind() == syntax::SyntaxKind::ANNOTATION => {
+            rowan::NodeOrToken::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
                 if let Some(strict) = annotations::lower_annotation(db, &node).strict {
                     mode = Some(if strict {
                         TypingMode::Strict
@@ -552,7 +480,7 @@ pub fn file_type_definitions<'db>(
     let mut definitions = Vec::new();
     for node in root
         .children()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
     {
         definitions.extend(annotations::lower_annotation(db, &node).definitions);
     }
@@ -563,8 +491,8 @@ pub fn file_type_definitions<'db>(
 pub fn project_type_definitions<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> rustc_hash::FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
-    let mut definitions = rustc_hash::FxHashMap::default();
+) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
+    let mut definitions = FxHashMap::default();
     for &file in files.files(db) {
         if *file.kind(db) != DocumentKind::Package {
             continue;
@@ -582,9 +510,8 @@ pub fn project_type_definitions<'db>(
 pub fn conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> rustc_hash::FxHashMap<String, Vec<Item<'db>>> {
-    let mut writers: rustc_hash::FxHashMap<String, Vec<Item<'db>>> =
-        rustc_hash::FxHashMap::default();
+) -> FxHashMap<String, Vec<Item<'db>>> {
+    let mut writers: FxHashMap<String, Vec<Item<'db>>> = FxHashMap::default();
     for &file in files.files(db) {
         if *file.kind(db) != DocumentKind::Package {
             continue;
@@ -676,8 +603,8 @@ fn statement_binding_recover<'db>(
 pub fn package_definitions<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> rustc_hash::FxHashMap<String, Item<'db>> {
-    let mut winners = rustc_hash::FxHashMap::default();
+) -> FxHashMap<String, Item<'db>> {
+    let mut winners = FxHashMap::default();
     for &file in files.files(db) {
         if *file.kind(db) != DocumentKind::Package {
             continue;
@@ -775,7 +702,7 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
 /// round-cap pins depend on query order.
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct InterfaceSccs<'db> {
-    pub membership: rustc_hash::FxHashMap<Item<'db>, u32>,
+    pub membership: FxHashMap<Item<'db>, u32>,
     /// Members in canonical order: project file order, then item order.
     pub groups: Vec<Vec<Item<'db>>>,
 }
@@ -784,7 +711,7 @@ pub struct InterfaceSccs<'db> {
 pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceSccs<'db> {
     let winners = package_definitions(db, files);
     let mut nodes: Vec<Item<'db>> = Vec::new();
-    let mut position: rustc_hash::FxHashMap<Item<'db>, usize> = rustc_hash::FxHashMap::default();
+    let mut position: FxHashMap<Item<'db>, usize> = FxHashMap::default();
     for &file in files.files(db) {
         if *file.kind(db) != DocumentKind::Package {
             continue;
@@ -891,10 +818,10 @@ pub fn scc_schemes<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     group: u32,
-) -> rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
     let sccs = interface_sccs(db, files);
     let Some(members) = sccs.groups.get(group as usize) else {
-        return rustc_hash::FxHashMap::default();
+        return FxHashMap::default();
     };
     let winners = package_definitions(db, files);
     // Only a name's winner is reachable through reads.
@@ -907,22 +834,22 @@ pub fn scc_schemes<'db>(
         .collect();
 
     let unknown_scheme = types::TypeScheme::monomorphic(types::unknown(db));
-    let mut table: rustc_hash::FxHashMap<String, types::TypeScheme<'db>> = member_names
+    let mut table: FxHashMap<String, types::TypeScheme<'db>> = member_names
         .iter()
         .map(|(name, _)| (name.clone(), unknown_scheme.clone()))
         .collect();
-    let mut schemes: rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>> = members
+    let mut schemes: FxHashMap<Item<'db>, types::TypeScheme<'db>> = members
         .iter()
         .map(|&item| (item, unknown_scheme.clone()))
         .collect();
     for _round in 0..SCHEME_ROUND_CAP {
-        let mut next_schemes = rustc_hash::FxHashMap::default();
+        let mut next_schemes = FxHashMap::default();
         for &item in members {
             let scheme =
                 check_member_scheme(db, item, &table).unwrap_or_else(|| unknown_scheme.clone());
             next_schemes.insert(item, scheme);
         }
-        let next_table: rustc_hash::FxHashMap<String, types::TypeScheme<'db>> = member_names
+        let next_table: FxHashMap<String, types::TypeScheme<'db>> = member_names
             .iter()
             .map(|(name, item)| (name.clone(), next_schemes[item].clone()))
             .collect();
@@ -944,7 +871,7 @@ fn unknown_group_schemes<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     group: u32,
-) -> rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
     let unknown = types::TypeScheme::monomorphic(types::unknown(db));
     interface_sccs(db, files)
         .groups
@@ -963,7 +890,7 @@ fn scc_schemes_initial<'db>(
     _id: salsa::Id,
     files: ProjectFiles,
     group: u32,
-) -> rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
     unknown_group_schemes(db, files, group)
 }
 
@@ -971,44 +898,50 @@ fn scc_schemes_initial<'db>(
 /// as an S3 method), which re-enter this group through `global_scheme`.
 fn scc_schemes_recover<'db>(
     db: &'db dyn Db,
-    cycle: &salsa::Cycle,
-    last_provisional: &rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>>,
-    value: rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>>,
+    _cycle: &salsa::Cycle,
+    last_provisional: &FxHashMap<Item<'db>, types::TypeScheme<'db>>,
+    value: FxHashMap<Item<'db>, types::TypeScheme<'db>>,
     files: ProjectFiles,
     group: u32,
-) -> rustc_hash::FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
     // Refuse on the first disagreement: salsa iterating this query would multiply the
     // group's own bounded rounds and can exhaust memory.
     if &value == last_provisional {
         return value;
     }
-    let _ = cycle;
     unknown_group_schemes(db, files, group)
 }
 
 fn check_member_scheme<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
-    table: &rustc_hash::FxHashMap<String, types::TypeScheme<'db>>,
+    table: &FxHashMap<String, types::TypeScheme<'db>>,
 ) -> Option<types::TypeScheme<'db>> {
-    let module = item_hir(db, item).as_ref()?;
-    let naming = item_naming(db, item).as_ref()?;
-    let annotation = item_annotation_syntax(db, item)
-        .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
     let base = SalsaGlobals::for_item(db, item);
     let globals = SccGlobals {
         base: &base,
         members: table,
     };
-    check::check_item_with_annotation(
+    check_item_against(db, item, &globals)?.scheme
+}
+
+fn check_item_against<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    globals: &dyn check::GlobalEnv<'db>,
+) -> Option<check::ItemCheck<'db>> {
+    let module = item_hir(db, item).as_ref()?;
+    let naming = item_naming(db, item).as_ref()?;
+    let annotation = item_annotation_syntax(db, item)
+        .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
+    Some(check::check_item_with_annotation(
         db,
         module,
         naming,
         annotation.as_ref(),
         &item_expression_annotations(db, item),
-        Some(&globals),
-    )
-    .scheme
+        Some(globals),
+    ))
 }
 
 /// Always `item_check`'s scheme, so export and hover share one source of truth.
@@ -1062,19 +995,7 @@ pub fn item_check<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCh
 }
 
 fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<'db>> {
-    let module = item_hir(db, item).as_ref()?;
-    let naming = item_naming(db, item).as_ref()?;
-    let annotation = item_annotation_syntax(db, item)
-        .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
-    let globals = SalsaGlobals::for_item(db, item);
-    let mut check = check::check_item_with_annotation(
-        db,
-        module,
-        naming,
-        annotation.as_ref(),
-        &item_expression_annotations(db, item),
-        Some(&globals),
-    );
+    let mut check = check_item_against(db, item, &SalsaGlobals::for_item(db, item))?;
     // A cyclic-group member exports the group's fixpoint value, not this one-step
     // re-derivation, which runs one propagation hop ahead of what readers see.
     if check.scheme.is_some()
@@ -1088,6 +1009,7 @@ fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<
             && check.strict_origins.is_empty()
             && let Some(scheme) = &check.scheme
             && types::contains_unknown(db, scheme.body)
+            && let Some(module) = item_hir(db, item)
             && let Some(root) = module.root
             && let Some(name) = item.name(db).clone()
         {
@@ -1151,7 +1073,6 @@ struct SalsaGlobals<'db> {
     db: &'db dyn Db,
     item: Item<'db>,
     files: Option<ProjectFiles>,
-    is_script: bool,
     file: SourceFile,
 }
 
@@ -1161,7 +1082,7 @@ struct SalsaGlobals<'db> {
 fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
-) -> rustc_hash::FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
+) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
     let mut definitions = ProjectFiles::try_get(db)
         .map(|files| project_type_definitions(db, files).clone())
         .unwrap_or_default();
@@ -1174,7 +1095,7 @@ fn visible_type_definitions<'db>(
 }
 
 #[salsa::tracked(returns(ref))]
-fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashSet<String> {
+fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut classes = stub_arithmetic_classes(db);
     if let Some(files) = ProjectFiles::try_get(db) {
         classes.extend(project_arithmetic_classes(db, files).iter().cloned());
@@ -1192,9 +1113,8 @@ const CONDITIONAL_SLOT_JOIN_CAP: usize = 8;
 fn file_binders<'db>(
     db: &'db dyn Db,
     file: SourceFile,
-) -> rustc_hash::FxHashMap<String, Vec<(usize, Item<'db>)>> {
-    let mut binders: rustc_hash::FxHashMap<String, Vec<(usize, Item<'db>)>> =
-        rustc_hash::FxHashMap::default();
+) -> FxHashMap<String, Vec<(usize, Item<'db>)>> {
+    let mut binders: FxHashMap<String, Vec<(usize, Item<'db>)>> = FxHashMap::default();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
         let own_name = item.name(db).clone();
         if let Some(name) = &own_name {
@@ -1236,18 +1156,16 @@ fn frame_binder<'db>(
 
 impl<'db> SalsaGlobals<'db> {
     fn for_item(db: &'db dyn Db, item: Item<'db>) -> SalsaGlobals<'db> {
-        let file = *item.file(db);
         SalsaGlobals {
             db,
             item,
             files: ProjectFiles::try_get(db),
-            is_script: *file.kind(db) == DocumentKind::Script,
-            file,
+            file: *item.file(db),
         }
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
-        if deferred && !self.is_script {
+        if deferred && *self.file.kind(self.db) != DocumentKind::Script {
             return None;
         }
         frame_binder(self.db, self.item, name, deferred)
@@ -1343,30 +1261,30 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
 
     fn type_definitions(
         &self,
-    ) -> &'db rustc_hash::FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
+    ) -> &'db FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
         visible_type_definitions(self.db, self.file)
     }
 
-    fn arithmetic_classes(&self) -> &'db rustc_hash::FxHashSet<String> {
+    fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         visible_arithmetic_classes(self.db, self.file)
     }
 }
 
 #[salsa::tracked(returns(clone))]
-fn stub_arithmetic_classes(db: &dyn Db) -> rustc_hash::FxHashSet<String> {
+fn stub_arithmetic_classes(db: &dyn Db) -> FxHashSet<String> {
     let Some(library) = stubs::stubs(db) else {
-        return rustc_hash::FxHashSet::default();
+        return FxHashSet::default();
     };
     arithmetic_classes_among(library.schemes.keys().map(String::as_str))
 }
 
 #[salsa::tracked(returns(clone))]
-fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> rustc_hash::FxHashSet<String> {
+fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<String> {
     arithmetic_classes_among(package_definitions(db, files).keys().map(String::as_str))
 }
 
 #[salsa::tracked(returns(ref))]
-fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashSet<String> {
+fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     arithmetic_classes_among(
         item_tree(db, file)
             .iter()
@@ -1374,11 +1292,9 @@ fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> rustc_hash::FxHashS
     )
 }
 
-fn arithmetic_classes_among<'a>(
-    names: impl Iterator<Item = &'a str>,
-) -> rustc_hash::FxHashSet<String> {
+fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashSet<String> {
     let prefixes: Vec<String> = check::arithmetic_method_prefixes().collect();
-    let mut classes = rustc_hash::FxHashSet::default();
+    let mut classes = FxHashSet::default();
     for name in names {
         for prefix in &prefixes {
             if let Some(class) = name.strip_prefix(prefix.as_str())
@@ -1395,7 +1311,7 @@ fn arithmetic_classes_among<'a>(
 /// re-enter the group.
 struct SccGlobals<'db, 'a> {
     base: &'a SalsaGlobals<'db>,
-    members: &'a rustc_hash::FxHashMap<String, types::TypeScheme<'db>>,
+    members: &'a FxHashMap<String, types::TypeScheme<'db>>,
 }
 
 impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
@@ -1426,27 +1342,20 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
 
     fn type_definitions(
         &self,
-    ) -> &'db rustc_hash::FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
+    ) -> &'db FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
         self.base.type_definitions()
     }
 
     /// Must delegate, not default: an empty set makes `Date + 1` in any recursive function
     /// collapse the whole scheme to `Unknown`.
-    fn arithmetic_classes(&self) -> &'db rustc_hash::FxHashSet<String> {
+    fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         self.base.arithmetic_classes()
-    }
-}
-
-fn classify_top_level(node: &syntax::SyntaxNode) -> (ItemKind, Option<String>) {
-    match top_level_definition(node) {
-        Some(definition) => (definition.kind, Some(definition.name)),
-        None => (ItemKind::Statement, None),
     }
 }
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
 /// `setGeneric` name string.
-pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::TextRange> {
+pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let node = item_node(db, item)?;
     top_level_definition(&node).map(|definition| definition.name_range)
 }
@@ -1455,10 +1364,10 @@ pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<syntax::
 struct TopLevelDefinition {
     kind: ItemKind,
     name: String,
-    name_range: syntax::TextRange,
+    name_range: TextRange,
 }
 
-fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition> {
+fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     use syntax::SyntaxKind;
     if let Some((name, name_range)) = set_generic_target(node) {
         return Some(TopLevelDefinition {
@@ -1470,7 +1379,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
     if node.kind() != SyntaxKind::BINARY_EXPR {
         return None;
     }
-    let binary = syntax::ast::BinaryExpr::cast(node.clone())?;
+    let binary = BinaryExpr::cast(node.clone())?;
     let operator = binary.operator()?;
     // `:=` binds nothing: R calls a function of that name (data.table, rlang).
     let (target, value) = match operator.kind() {
@@ -1481,7 +1390,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
         _ => return None,
     };
     let target = target?;
-    let name = syntax::ast::Name::cast(target.clone())
+    let name = ast::Name::cast(target.clone())
         .and_then(|name| name.text())
         .or_else(|| {
             (target.kind() == SyntaxKind::LITERAL
@@ -1506,7 +1415,7 @@ fn top_level_definition(node: &syntax::SyntaxNode) -> Option<TopLevelDefinition>
 
 /// The name a top-level `setGeneric` binds, with its range inside the string: the only S4
 /// registration that creates a bare-name binding (`setClass`/`setMethod` bind nothing).
-fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::TextRange)> {
+fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
     use syntax::SyntaxKind;
     if node.kind() != SyntaxKind::CALL_EXPR {
         return None;
@@ -1528,7 +1437,7 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
     let arguments = node
         .children()
         .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
-    let is_named_argument = |argument: &syntax::SyntaxNode| {
+    let is_named_argument = |argument: &SyntaxNode| {
         argument.children_with_tokens().any(|element| {
             element
                 .as_token()
@@ -1562,9 +1471,9 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
     let name = text[1..text.len() - 1].to_owned();
     // Without the quotes: the span a rename rewrites.
     let range = string.text_range();
-    let content = syntax::TextRange::new(
-        range.start() + syntax::TextSize::from(1),
-        range.end() - syntax::TextSize::from(1),
+    let content = TextRange::new(
+        range.start() + TextSize::from(1),
+        range.end() - TextSize::from(1),
     );
     (!name.is_empty()).then_some((name, content))
 }
@@ -1573,6 +1482,10 @@ fn set_generic_target(node: &syntax::SyntaxNode) -> Option<(String, syntax::Text
 mod tests {
     use super::*;
     use salsa::Setter as _;
+
+    fn function_item<'db>(db: &'db RootDatabase, file: SourceFile, name: &str) -> Item<'db> {
+        Item::new(db, file, ItemKind::Function, Some(name.to_owned()), None, 0)
+    }
 
     #[test]
     fn refusal_is_idempotent() {
@@ -1631,14 +1544,14 @@ mod tests {
         {
             let items = item_tree(&db, file);
             assert_eq!(items.len(), 2);
-            let g = Item::new(&db, file, ItemKind::Function, Some("g".to_owned()), None, 0);
+            let g = function_item(&db, file, "g");
             assert_eq!(items[1], g);
             let g_after = item_syntax(&db, g).expect("g still exists");
             assert_eq!(g_before, g_after);
         }
 
         file.set_text(&mut db).to("f <- function(x) x\n".to_owned());
-        let g = Item::new(&db, file, ItemKind::Function, Some("g".to_owned()), None, 0);
+        let g = function_item(&db, file, "g");
         assert_eq!(item_syntax(&db, g), None);
     }
 
@@ -1650,14 +1563,7 @@ mod tests {
             "pad <- 1\nadd <- function(x, y = 2) x + y\n".to_owned(),
             DocumentKind::Package,
         );
-        let add = Item::new(
-            &db,
-            file,
-            ItemKind::Function,
-            Some("add".to_owned()),
-            None,
-            0,
-        );
+        let add = function_item(&db, file, "add");
         let before = item_hir(&db, add).clone().expect("add lowers");
         let root = before.expression(before.root.expect("has root"));
         let hir::ExpressionKind::Assign { value, .. } = &root.kind else {
@@ -1678,14 +1584,7 @@ mod tests {
 
         file.set_text(&mut db)
             .to("pad <- 100000\nadd <- function(x, y = 2) x + y\n".to_owned());
-        let add = Item::new(
-            &db,
-            file,
-            ItemKind::Function,
-            Some("add".to_owned()),
-            None,
-            0,
-        );
+        let add = function_item(&db, file, "add");
         let after = item_hir(&db, add).clone().expect("add still lowers");
         assert_eq!(before, after);
     }
@@ -1705,25 +1604,11 @@ mod tests {
         );
         ProjectFiles::new(&db, vec![util, main]);
 
-        let use_item = Item::new(
-            &db,
-            main,
-            ItemKind::Function,
-            Some("use".to_owned()),
-            None,
-            0,
-        );
+        let use_item = function_item(&db, main, "use");
         let use_check = item_check(&db, use_item).expect("use checks");
         assert!(use_check.errors.is_empty(), "{:?}", use_check.errors);
 
-        let bad_item = Item::new(
-            &db,
-            main,
-            ItemKind::Function,
-            Some("bad".to_owned()),
-            None,
-            0,
-        );
+        let bad_item = function_item(&db, main, "bad");
         let bad_check = item_check(&db, bad_item).expect("bad checks");
         assert!(
             !bad_check.errors.is_empty(),
@@ -1732,14 +1617,7 @@ mod tests {
 
         util.set_text(&mut db)
             .to("add <- function(x, y) y + x\n".to_owned());
-        let use_item = Item::new(
-            &db,
-            main,
-            ItemKind::Function,
-            Some("use".to_owned()),
-            None,
-            0,
-        );
+        let use_item = function_item(&db, main, "use");
         let again = item_check(&db, use_item).expect("use still checks");
         assert!(again.errors.is_empty());
     }
@@ -1753,14 +1631,7 @@ mod tests {
             DocumentKind::Package,
         );
         ProjectFiles::new(&db, vec![file]);
-        let even = Item::new(
-            &db,
-            file,
-            ItemKind::Function,
-            Some("is_even".to_owned()),
-            None,
-            0,
-        );
+        let even = function_item(&db, file, "is_even");
         let check = item_check(&db, even).expect("checks");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = global_scheme(&db, even);
@@ -1780,14 +1651,7 @@ mod tests {
             DocumentKind::Package,
         );
         ProjectFiles::new(&db, vec![file]);
-        let item = Item::new(
-            &db,
-            file,
-            ItemKind::Function,
-            Some("count".to_owned()),
-            None,
-            0,
-        );
+        let item = function_item(&db, file, "count");
         let check = item_check(&db, item).expect("checks");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
     }

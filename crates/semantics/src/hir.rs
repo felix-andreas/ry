@@ -1,8 +1,9 @@
 //! Spans are item-relative, so an edit elsewhere in the file reproduces an
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
-use syntax::ast::AstNode as _;
-use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use std::iter;
+use syntax::ast::{BinaryExpr, Name, is_expression_kind};
+use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
 pub struct ExprId(pub u32);
@@ -173,8 +174,8 @@ pub enum ExpressionKind {
     Repeat {
         body: ExprId,
     },
-    /// Recognized by the bare callee name; rebinding `local` is not modeled.
-    /// is not modeled), like `return` and `stop`.
+    /// Recognized by the bare callee name, like `return` and `stop`; rebinding
+    /// `local` is not modeled.
     Local {
         body: ExprId,
     },
@@ -239,32 +240,21 @@ impl ExpressionKind {
 }
 
 pub fn lower_item(root: &SyntaxNode) -> Module {
-    let mut lowering = Lowering {
-        module: Module::default(),
-    };
-    let root_id = lowering.lower_expression(root);
-    lowering.module.root = Some(root_id);
-    lowering.module
+    let mut module = Module::default();
+    let root_id = module.lower_expression(root);
+    module.root = Some(root_id);
+    module
 }
 
-struct Lowering {
-    module: Module,
-}
-
-impl Lowering {
+impl Module {
     fn allocate(&mut self, kind: ExpressionKind, range: TextRange) -> ExprId {
-        let id = ExprId(self.module.expressions.len() as u32);
-        self.module.expressions.push(Expression { kind, range });
+        let id = ExprId(self.expressions.len() as u32);
+        self.expressions.push(Expression { kind, range });
         id
     }
 
     fn missing(&mut self, range: TextRange) -> ExprId {
         self.allocate(ExpressionKind::Missing, range)
-    }
-
-    fn child_expressions(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
-        node.children()
-            .filter(|child| syntax::ast::is_expression_kind(child.kind()))
     }
 
     fn lower_optional(&mut self, node: Option<SyntaxNode>, fallback: TextRange) -> ExprId {
@@ -278,7 +268,7 @@ impl Lowering {
         let range = significant_range(node);
         match node.kind() {
             SyntaxKind::NAME => {
-                let text = syntax::ast::Name::cast(node.clone())
+                let text = Name::cast(node.clone())
                     .and_then(|name| name.text())
                     .unwrap_or_default();
                 self.allocate(ExpressionKind::NameRef(text), range)
@@ -288,15 +278,13 @@ impl Lowering {
                 self.allocate(ExpressionKind::Literal(kind), range)
             }
             SyntaxKind::PAREN_EXPR => {
-                let inner = Self::child_expressions(node).next();
+                let inner = expression_children(node).next();
                 let inner = self.lower_optional(inner, range);
                 self.allocate(ExpressionKind::Paren(inner), range)
             }
             SyntaxKind::BRACE_EXPR => {
-                let statements: Vec<ExprId> = Self::child_expressions(node)
-                    .collect::<Vec<_>>()
-                    .iter()
-                    .map(|child| self.lower_expression(child))
+                let statements = expression_children(node)
+                    .map(|child| self.lower_expression(&child))
                     .collect();
                 // A trailing `;` adds no expression in R's grammar, so
                 // `{ 1L; }` is `1L` and needs no flag here.
@@ -306,8 +294,15 @@ impl Lowering {
                 let operator = node
                     .children_with_tokens()
                     .filter_map(|element| element.into_token())
-                    .find_map(|token| unary_operator(token.kind()));
-                let operand = Self::child_expressions(node).next();
+                    .find_map(|token| match token.kind() {
+                        SyntaxKind::MINUS => Some(UnaryOperator::Minus),
+                        SyntaxKind::PLUS => Some(UnaryOperator::Plus),
+                        SyntaxKind::BANG => Some(UnaryOperator::Not),
+                        SyntaxKind::TILDE => Some(UnaryOperator::Tilde),
+                        SyntaxKind::QUESTION => Some(UnaryOperator::Help),
+                        _ => None,
+                    });
+                let operand = expression_children(node).next();
                 let operand = self.lower_optional(operand, range);
                 match operator {
                     Some(operator) => {
@@ -318,14 +313,14 @@ impl Lowering {
             }
             SyntaxKind::BINARY_EXPR => self.lower_binary(node, range),
             SyntaxKind::CALL_EXPR => {
-                let callee_node = Self::child_expressions(node).next();
+                let callee_node = expression_children(node).next();
                 let is_local = callee_node.as_ref().is_some_and(|callee| {
                     callee.kind() == SyntaxKind::NAME
-                        && syntax::ast::Name::cast(callee.clone())
+                        && Name::cast(callee.clone())
                             .and_then(|name| name.text())
                             .is_some_and(|text| text == "local")
                 });
-                let arguments = self.lower_arguments(node);
+                let arguments = self.lower_arguments(node, None);
                 if is_local
                     && let [
                         Argument {
@@ -342,9 +337,9 @@ impl Lowering {
             }
             SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR => {
                 let double = node.kind() == SyntaxKind::SUBSET2_EXPR;
-                let target = Self::child_expressions(node).next();
+                let target = expression_children(node).next();
                 let target = self.lower_optional(target, range);
-                let arguments = self.lower_arguments(node);
+                let arguments = self.lower_arguments(node, None);
                 self.allocate(
                     ExpressionKind::Index {
                         double,
@@ -356,7 +351,7 @@ impl Lowering {
             }
             SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR => {
                 let at = node.kind() == SyntaxKind::AT_EXPR;
-                let mut children = Self::child_expressions(node);
+                let mut children = expression_children(node);
                 let target = children.next();
                 let target = self.lower_optional(target, range);
                 let name_node = children.next();
@@ -378,7 +373,7 @@ impl Lowering {
                     .children_with_tokens()
                     .filter_map(|element| element.into_token())
                     .any(|token| token.kind() == SyntaxKind::COLON3);
-                let mut children = Self::child_expressions(node);
+                let mut children = expression_children(node);
                 let package = children.next().and_then(|child| field_name_text(&child));
                 let name = children.next().and_then(|child| field_name_text(&child));
                 self.allocate(
@@ -396,12 +391,12 @@ impl Lowering {
                     .find(|child| child.kind() == SyntaxKind::PARAMETER_LIST)
                     .map(|list| self.lower_parameters(&list))
                     .unwrap_or_default();
-                let body = Self::child_expressions(node).next();
+                let body = expression_children(node).next();
                 let body = self.lower_optional(body, range);
                 self.allocate(ExpressionKind::Function { parameters, body }, range)
             }
             SyntaxKind::IF_EXPR => {
-                let mut children = Self::child_expressions(node);
+                let mut children = expression_children(node);
                 let condition = children.next();
                 let then_branch = children.next();
                 let else_branch = children.next();
@@ -418,11 +413,11 @@ impl Lowering {
                 )
             }
             SyntaxKind::FOR_EXPR => {
-                let mut children = Self::child_expressions(node);
+                let mut children = expression_children(node);
                 let variable_node = children.next();
                 let (variable, variable_range) = match &variable_node {
                     Some(node) if node.kind() == SyntaxKind::NAME => (
-                        syntax::ast::Name::cast(node.clone()).and_then(|name| name.text()),
+                        Name::cast(node.clone()).and_then(|name| name.text()),
                         Some(node.text_range()),
                     ),
                     _ => (None, None),
@@ -442,7 +437,7 @@ impl Lowering {
                 )
             }
             SyntaxKind::WHILE_EXPR => {
-                let mut children = Self::child_expressions(node);
+                let mut children = expression_children(node);
                 let condition = children.next();
                 let body = children.next();
                 let condition = self.lower_optional(condition, range);
@@ -450,7 +445,7 @@ impl Lowering {
                 self.allocate(ExpressionKind::While { condition, body }, range)
             }
             SyntaxKind::REPEAT_EXPR => {
-                let body = Self::child_expressions(node).next();
+                let body = expression_children(node).next();
                 let body = self.lower_optional(body, range);
                 self.allocate(ExpressionKind::Repeat { body }, range)
             }
@@ -461,39 +456,40 @@ impl Lowering {
     }
 
     fn lower_binary(&mut self, node: &SyntaxNode, range: TextRange) -> ExprId {
-        let Some(binary) = syntax::ast::BinaryExpr::cast(node.clone()) else {
+        let Some(binary) = BinaryExpr::cast(node.clone()) else {
             return self.missing(range);
         };
-        let operator_token = binary.operator();
-        let lhs = binary.lhs();
-        let rhs = binary.rhs();
-        let Some(operator_token) = operator_token else {
+        let Some(operator_token) = binary.operator() else {
             return self.missing(range);
         };
-
-        if operator_token.kind() == SyntaxKind::PIPE_GREATER
-            && let Some(call) = self.lower_pipe(lhs.clone(), rhs.clone(), range)
-        {
-            return call;
-        }
-
-        match operator_token.kind() {
-            SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => {
-                let spelling = match operator_token.kind() {
-                    SyntaxKind::LESS_MINUS => AssignSpelling::Local,
+        let (lhs, rhs) = (binary.lhs(), binary.rhs());
+        let operator = match operator_token.kind() {
+            kind @ (SyntaxKind::LESS_MINUS
+            | SyntaxKind::EQ
+            | SyntaxKind::LESS2_MINUS
+            | SyntaxKind::MINUS_GREATER
+            | SyntaxKind::MINUS_GREATER2) => {
+                let spelling = match kind {
+                    SyntaxKind::LESS_MINUS | SyntaxKind::MINUS_GREATER => AssignSpelling::Local,
                     SyntaxKind::EQ => AssignSpelling::Equals,
                     _ => AssignSpelling::Super,
                 };
-                let target = self.lower_optional(lhs, range);
-                let value = self.lower_optional(rhs, range);
-                self.allocate(
+                let lhs = self.lower_optional(lhs, range);
+                let rhs = self.lower_optional(rhs, range);
+                let (target, value) =
+                    if matches!(kind, SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2) {
+                        (rhs, lhs)
+                    } else {
+                        (lhs, rhs)
+                    };
+                return self.allocate(
                     ExpressionKind::Assign {
                         spelling,
                         target,
                         value,
                     },
                     range,
-                )
+                );
             }
             // `:=` binds nothing in R: it is a call to a function named `:=` (data.table,
             // rlang). The callee sits on the operator token so an unresolved `:=` reports there.
@@ -502,72 +498,60 @@ impl Lowering {
                     ExpressionKind::NameRef(":=".to_owned()),
                     operator_token.text_range(),
                 );
-                let left = self.lower_optional(lhs, range);
-                let right = self.lower_optional(rhs, range);
-                self.allocate(
-                    ExpressionKind::Call {
-                        callee,
-                        arguments: vec![
-                            Argument {
-                                name: None,
-                                name_range: None,
-                                value: Some(left),
-                            },
-                            Argument {
-                                name: None,
-                                name_range: None,
-                                value: Some(right),
-                            },
-                        ],
-                    },
-                    range,
-                )
+                let arguments = [lhs, rhs]
+                    .into_iter()
+                    .map(|operand| Argument {
+                        name: None,
+                        name_range: None,
+                        value: Some(self.lower_optional(operand, range)),
+                    })
+                    .collect();
+                return self.allocate(ExpressionKind::Call { callee, arguments }, range);
             }
-            SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => {
-                let spelling = if operator_token.kind() == SyntaxKind::MINUS_GREATER {
-                    AssignSpelling::Local
-                } else {
-                    AssignSpelling::Super
-                };
-                let value = self.lower_optional(lhs, range);
-                let target = self.lower_optional(rhs, range);
-                self.allocate(
-                    ExpressionKind::Assign {
-                        spelling,
-                        target,
-                        value,
-                    },
-                    range,
-                )
+            SyntaxKind::PIPE_GREATER => {
+                if let Some(call) = self.lower_pipe(lhs.clone(), rhs.clone(), range) {
+                    return call;
+                }
+                BinaryOperator::Pipe
             }
-            kind => {
-                let operator = if kind == SyntaxKind::SPECIAL {
-                    match operator_token.text() {
-                        "%%" => Some(BinaryOperator::Modulo),
-                        "%/%" => Some(BinaryOperator::IntegerDivide),
-                        _ => Some(BinaryOperator::Special),
-                    }
-                } else {
-                    binary_operator(kind)
-                };
-                let Some(operator) = operator else {
-                    return self.missing(range);
-                };
-                let lhs = self.lower_optional(lhs, range);
-                let rhs = self.lower_optional(rhs, range);
-                let special_name =
-                    (operator == BinaryOperator::Special).then(|| operator_token.text().to_owned());
-                self.allocate(
-                    ExpressionKind::Binary {
-                        operator,
-                        special_name,
-                        lhs,
-                        rhs,
-                    },
-                    range,
-                )
-            }
-        }
+            SyntaxKind::SPECIAL => match operator_token.text() {
+                "%%" => BinaryOperator::Modulo,
+                "%/%" => BinaryOperator::IntegerDivide,
+                _ => BinaryOperator::Special,
+            },
+            SyntaxKind::PLUS => BinaryOperator::Add,
+            SyntaxKind::MINUS => BinaryOperator::Subtract,
+            SyntaxKind::STAR => BinaryOperator::Multiply,
+            SyntaxKind::SLASH => BinaryOperator::Divide,
+            SyntaxKind::CARET => BinaryOperator::Power,
+            SyntaxKind::COLON => BinaryOperator::Sequence,
+            SyntaxKind::LESS => BinaryOperator::Less,
+            SyntaxKind::GREATER => BinaryOperator::Greater,
+            SyntaxKind::LESS_EQ => BinaryOperator::LessEq,
+            SyntaxKind::GREATER_EQ => BinaryOperator::GreaterEq,
+            SyntaxKind::EQ2 => BinaryOperator::Equal,
+            SyntaxKind::BANG_EQ => BinaryOperator::NotEqual,
+            SyntaxKind::AMP => BinaryOperator::And,
+            SyntaxKind::AMP2 => BinaryOperator::And2,
+            SyntaxKind::PIPE => BinaryOperator::Or,
+            SyntaxKind::PIPE2 => BinaryOperator::Or2,
+            SyntaxKind::TILDE => BinaryOperator::Tilde,
+            SyntaxKind::QUESTION => BinaryOperator::Help,
+            _ => return self.missing(range),
+        };
+        let lhs = self.lower_optional(lhs, range);
+        let rhs = self.lower_optional(rhs, range);
+        let special_name =
+            (operator == BinaryOperator::Special).then(|| operator_token.text().to_owned());
+        self.allocate(
+            ExpressionKind::Binary {
+                operator,
+                special_name,
+                lhs,
+                rhs,
+            },
+            range,
+        )
     }
 
     /// R's parser rewrites `x |> f(y)` to `f(x, y)`, so the pipe lowers as that call.
@@ -589,7 +573,7 @@ impl Lowering {
             PipeShape::FirstArgument => None,
             PipeShape::NamedPlaceholder(index) => Some((index, piped)),
         };
-        let mut arguments = self.lower_arguments_substituting(&call, substitute);
+        let mut arguments = self.lower_arguments(&call, substitute);
         if matches!(shape, PipeShape::FirstArgument) {
             arguments.insert(
                 0,
@@ -603,12 +587,8 @@ impl Lowering {
         Some(self.allocate(ExpressionKind::Call { callee, arguments }, range))
     }
 
-    fn lower_arguments(&mut self, node: &SyntaxNode) -> Vec<Argument> {
-        self.lower_arguments_substituting(node, None)
-    }
-
     /// The `_` placeholder never becomes an expression, so nothing dangles in the arena.
-    fn lower_arguments_substituting(
+    fn lower_arguments(
         &mut self,
         node: &SyntaxNode,
         substitute: Option<(usize, ExprId)>,
@@ -621,8 +601,6 @@ impl Lowering {
         };
         list.children()
             .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
-            .collect::<Vec<_>>()
-            .iter()
             .enumerate()
             .map(|(index, argument)| {
                 let tag = argument
@@ -648,7 +626,7 @@ impl Lowering {
                     };
                 }
                 let value_node = {
-                    let mut expressions = Self::child_expressions(argument);
+                    let mut expressions = expression_children(&argument);
                     if name.is_some() {
                         // The tag itself is the first expression child.
                         expressions.next();
@@ -668,8 +646,6 @@ impl Lowering {
     fn lower_parameters(&mut self, list: &SyntaxNode) -> Vec<Parameter> {
         list.children()
             .filter(|child| child.kind() == SyntaxKind::PARAMETER)
-            .collect::<Vec<_>>()
-            .iter()
             .map(|parameter| {
                 let name = parameter
                     .first_token()
@@ -681,7 +657,7 @@ impl Lowering {
                             .to_owned()
                     })
                     .unwrap_or_default();
-                let default = Self::child_expressions(parameter)
+                let default = expression_children(&parameter)
                     .next()
                     .map(|node| self.lower_expression(&node));
                 let range = parameter
@@ -696,6 +672,11 @@ impl Lowering {
             })
             .collect()
     }
+}
+
+fn expression_children(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+    node.children()
+        .filter(|child| is_expression_kind(child.kind()))
 }
 
 /// Excludes the trailing trivia (including `#:` annotations) rowan attaches
@@ -787,7 +768,7 @@ fn string_value(text: &str) -> String {
                 Some('[') => ']',
                 _ => '}',
             });
-            closer.extend(std::iter::repeat_n('-', dashes));
+            closer.extend(iter::repeat_n('-', dashes));
             closer.push(quote);
             let body = &inner[body_start..];
             return body
@@ -802,25 +783,13 @@ fn string_value(text: &str) -> String {
 
 fn field_name_text(node: &SyntaxNode) -> Option<String> {
     match node.kind() {
-        SyntaxKind::NAME => syntax::ast::Name::cast(node.clone()).and_then(|name| name.text()),
+        SyntaxKind::NAME => Name::cast(node.clone()).and_then(|name| name.text()),
         SyntaxKind::LITERAL => {
             let token = node.first_token()?;
             (token.kind() == SyntaxKind::STRING).then(|| string_value(token.text()))
         }
         _ => None,
     }
-}
-
-fn unary_operator(kind: SyntaxKind) -> Option<UnaryOperator> {
-    let operator = match kind {
-        SyntaxKind::MINUS => UnaryOperator::Minus,
-        SyntaxKind::PLUS => UnaryOperator::Plus,
-        SyntaxKind::BANG => UnaryOperator::Not,
-        SyntaxKind::TILDE => UnaryOperator::Tilde,
-        SyntaxKind::QUESTION => UnaryOperator::Help,
-        _ => return None,
-    };
-    Some(operator)
 }
 
 enum PipeShape {
@@ -831,7 +800,7 @@ enum PipeShape {
 /// R's placeholder rules: `_` may appear exactly once, as the whole value of a
 /// named argument of this call. Any other use is an R error (`None`).
 fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
-    let underscores: Vec<syntax::SyntaxToken> = call
+    let underscores: Vec<SyntaxToken> = call
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
         .filter(|token| token.kind() == SyntaxKind::UNDERSCORE)
@@ -856,12 +825,7 @@ fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
         .filter_map(|element| element.into_token())
         .any(|token| token.kind() == SyntaxKind::EQ);
     // With a tag present, the value is the second expression child.
-    let is_value = argument
-        .children()
-        .filter(|child| syntax::ast::is_expression_kind(child.kind()))
-        .nth(1)
-        .as_ref()
-        == Some(&name);
+    let is_value = expression_children(&argument).nth(1).as_ref() == Some(&name);
     if !named || !is_value {
         return None;
     }
@@ -870,31 +834,4 @@ fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
         .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
         .position(|candidate| candidate == argument)?;
     Some(PipeShape::NamedPlaceholder(index))
-}
-
-fn binary_operator(kind: SyntaxKind) -> Option<BinaryOperator> {
-    let operator = match kind {
-        SyntaxKind::PLUS => BinaryOperator::Add,
-        SyntaxKind::MINUS => BinaryOperator::Subtract,
-        SyntaxKind::STAR => BinaryOperator::Multiply,
-        SyntaxKind::SLASH => BinaryOperator::Divide,
-        SyntaxKind::CARET => BinaryOperator::Power,
-        SyntaxKind::SPECIAL => BinaryOperator::Special,
-        SyntaxKind::PIPE_GREATER => BinaryOperator::Pipe,
-        SyntaxKind::COLON => BinaryOperator::Sequence,
-        SyntaxKind::LESS => BinaryOperator::Less,
-        SyntaxKind::GREATER => BinaryOperator::Greater,
-        SyntaxKind::LESS_EQ => BinaryOperator::LessEq,
-        SyntaxKind::GREATER_EQ => BinaryOperator::GreaterEq,
-        SyntaxKind::EQ2 => BinaryOperator::Equal,
-        SyntaxKind::BANG_EQ => BinaryOperator::NotEqual,
-        SyntaxKind::AMP => BinaryOperator::And,
-        SyntaxKind::AMP2 => BinaryOperator::And2,
-        SyntaxKind::PIPE => BinaryOperator::Or,
-        SyntaxKind::PIPE2 => BinaryOperator::Or2,
-        SyntaxKind::TILDE => BinaryOperator::Tilde,
-        SyntaxKind::QUESTION => BinaryOperator::Help,
-        _ => return None,
-    };
-    Some(operator)
 }

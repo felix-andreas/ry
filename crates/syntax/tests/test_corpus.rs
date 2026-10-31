@@ -2,7 +2,14 @@
 //! `scripts/fetch-corpus.rs`) and skip when it is absent.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::fs;
+use std::hint::black_box;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+use syntax::testing::{corpus_dir, fixture_case_sources, program_corpus_sources};
+use syntax::{TextRange, TextSize, parse, reparse};
+use tree_sitter::{InputEdit, Parser, Point};
 
 #[test]
 fn corpus_round_trip() {
@@ -22,7 +29,7 @@ fn corpus_round_trip() {
         if was_lossy {
             lossy += 1;
         }
-        if syntax::parse(&text).text() != text {
+        if parse(&text).text() != text {
             failures.push(path.clone());
         }
     }
@@ -51,10 +58,7 @@ fn corpus_acceptance() {
     };
 
     let files = corpus_r_files(&root);
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_r::LANGUAGE.into())
-        .expect("load tree-sitter-r grammar");
+    let mut parser = tree_sitter_parser();
 
     let mut both_clean = 0usize;
     let mut both_error = 0usize;
@@ -67,8 +71,8 @@ fn corpus_acceptance() {
         if was_lossy {
             lossy += 1;
         }
-        let parse = syntax::parse(&text);
-        let ours_error = !parse.errors().is_empty();
+        let parsed = parse(&text);
+        let ours_error = !parsed.errors().is_empty();
         let ts_error = parser
             .parse(text.as_str(), None)
             .is_none_or(|tree| tree.root_node().has_error());
@@ -77,7 +81,7 @@ fn corpus_acceptance() {
             (false, false) => both_clean += 1,
             (true, true) => both_error += 1,
             (true, false) => {
-                let message = parse.errors().first().map(|error| error.message.clone());
+                let message = parsed.errors().first().map(|error| error.message.clone());
                 ours_only.push((path.clone(), message.unwrap_or_default()));
             }
             (false, true) => ts_only.push(path.clone()),
@@ -112,7 +116,7 @@ fn corpus_acceptance() {
         !files.is_empty(),
         "corpus present but no .R files found under r-base/ or cran/"
     );
-    let allowlist = allowlisted_paths();
+    let allowlist = read_allowlist("tests/acceptance-allowlist.txt");
     let unexplained: Vec<_> = ours_only
         .iter()
         .filter(|(path, _)| {
@@ -133,17 +137,13 @@ fn corpus_acceptance() {
 /// carry `#:` annotations and deliberately broken sources.
 #[test]
 fn in_tree_acceptance() {
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_r::LANGUAGE.into())
-        .expect("load tree-sitter-r grammar");
-
-    let mut sources = syntax::testing::program_corpus_sources();
-    sources.extend(syntax::testing::fixture_case_sources());
+    let mut parser = tree_sitter_parser();
+    let mut sources = program_corpus_sources();
+    sources.extend(fixture_case_sources());
 
     let mut accepted_only_by_us = Vec::new();
     for (id, text) in &sources {
-        if syntax::parse(text).errors().is_empty()
+        if parse(text).errors().is_empty()
             && parser
                 .parse(text.as_str(), None)
                 .is_none_or(|tree| tree.root_node().has_error())
@@ -166,7 +166,9 @@ fn in_tree_acceptance() {
         "expected the in-tree corpus, found {} sources",
         sources.len()
     );
-    let allowlist = allowlisted_in_tree_ids();
+    let allowlist: HashSet<String> = read_allowlist("tests/in-tree-acceptance-allowlist.txt")
+        .into_iter()
+        .collect();
     let unexplained: Vec<&String> = accepted_only_by_us
         .iter()
         .filter(|id| !allowlist.contains(*id))
@@ -188,36 +190,27 @@ fn corpus_parse_speed() {
         eprintln!("corpus_parse_speed: corpus not fetched; skipping");
         return;
     };
-    let mut files = Vec::new();
-    for base in ["r-base", "cran"] {
-        collect_r_files(&root.join(base), &mut files);
-    }
-    let sources: Vec<String> = files
+    let sources: Vec<String> = corpus_r_files(&root)
         .iter()
-        .filter_map(|path| std::fs::read(path).ok())
+        .filter_map(|path| fs::read(path).ok())
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .collect();
     let total_bytes: usize = sources.iter().map(String::len).sum();
-    let total_lines: usize = sources.iter().map(|s| s.lines().count()).sum();
+    let total_lines: usize = sources.iter().map(|source| source.lines().count()).sum();
 
     for source in sources.iter().take(50) {
-        let _ = syntax::parse(source);
+        black_box(parse(source));
     }
-    let ours_start = std::time::Instant::now();
+    let ours_start = Instant::now();
     for source in &sources {
-        let parse = syntax::parse(source);
-        std::hint::black_box(parse.green());
+        black_box(parse(source).green());
     }
     let ours = ours_start.elapsed();
 
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_r::LANGUAGE.into())
-        .expect("grammar loads");
-    let ts_start = std::time::Instant::now();
+    let mut parser = tree_sitter_parser();
+    let ts_start = Instant::now();
     for source in &sources {
-        let tree = parser.parse(source, None);
-        std::hint::black_box(&tree);
+        black_box(parser.parse(source, None));
     }
     let ts = ts_start.elapsed();
 
@@ -235,7 +228,7 @@ fn corpus_parse_speed() {
     eprintln!("  ratio:       {ratio:.2}x");
     assert!(
         ratio >= 5.0,
-        "Phase 1 gate: expected ≥5× tree-sitter batch parse speed, measured {ratio:.2}x"
+        "expected ≥5× tree-sitter batch parse speed, measured {ratio:.2}x"
     );
 }
 
@@ -246,14 +239,11 @@ fn corpus_incremental_speed() {
         eprintln!("corpus_incremental_speed: corpus not fetched; skipping");
         return;
     };
-    let mut files = Vec::new();
-    for base in ["r-base", "cran"] {
-        collect_r_files(&root.join(base), &mut files);
-    }
+    let files = corpus_r_files(&root);
     let mut sources: Vec<(String, String)> = Vec::new();
     let mut largest = String::new();
     for path in &files {
-        if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(bytes) = fs::read(path) {
             let text = String::from_utf8_lossy(&bytes).into_owned();
             if text.len() > largest.len() {
                 largest = text;
@@ -269,7 +259,7 @@ fn corpus_incremental_speed() {
         if synthetic.lines().count() > 20_000 {
             break;
         }
-        if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(bytes) = fs::read(path) {
             synthetic.push_str(&String::from_utf8_lossy(&bytes));
             synthetic.push('\n');
         }
@@ -281,59 +271,40 @@ fn corpus_incremental_speed() {
 
     const EDITS: usize = 100;
     for (label, source) in &sources {
-        let middle = {
-            let mut at = source.len() / 2;
-            while at > 0 && !source.is_char_boundary(at) {
-                at -= 1;
-            }
-            at
-        };
+        let middle = source.floor_char_boundary(source.len() / 2);
 
         let mut text = source.clone();
-        let ours_start = std::time::Instant::now();
+        let ours_start = Instant::now();
         for step in 0..EDITS {
             text.insert(middle + step, 'x');
-            let parse = syntax::parse(&text);
-            std::hint::black_box(parse.green());
+            black_box(parse(&text).green());
         }
         let ours = ours_start.elapsed() / EDITS as u32;
 
         let mut text = source.clone();
-        let mut previous = syntax::parse(&text);
-        let splice_start = std::time::Instant::now();
+        let mut previous = parse(&text);
+        let splice_start = Instant::now();
         for step in 0..EDITS {
-            let at = middle + step;
-            text.insert(at, 'x');
-            let parse = syntax::reparse(
-                &previous,
-                &text,
-                rowan::TextRange::new(
-                    rowan::TextSize::from(at as u32),
-                    rowan::TextSize::from(at as u32),
-                ),
-                rowan::TextSize::from(1),
-            );
-            std::hint::black_box(parse.green());
-            previous = parse;
+            let at = TextSize::from((middle + step) as u32);
+            text.insert(middle + step, 'x');
+            previous = reparse(&previous, &text, TextRange::empty(at), TextSize::from(1));
+            black_box(previous.green());
         }
         let splice = splice_start.elapsed() / EDITS as u32;
 
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_r::LANGUAGE.into())
-            .expect("grammar loads");
+        let mut parser = tree_sitter_parser();
         let mut text = source.clone();
         let mut tree = parser.parse(&text, None).expect("initial parse");
         let point = |text: &str, offset: usize| {
             let row = text[..offset].matches('\n').count();
             let line_start = text[..offset].rfind('\n').map(|at| at + 1).unwrap_or(0);
-            tree_sitter::Point::new(row, offset - line_start)
+            Point::new(row, offset - line_start)
         };
-        let ts_start = std::time::Instant::now();
+        let ts_start = Instant::now();
         for step in 0..EDITS {
             let at = middle + step;
             text.insert(at, 'x');
-            tree.edit(&tree_sitter::InputEdit {
+            tree.edit(&InputEdit {
                 start_byte: at,
                 old_end_byte: at,
                 new_end_byte: at + 1,
@@ -342,7 +313,7 @@ fn corpus_incremental_speed() {
                 new_end_position: point(&text, at + 1),
             });
             tree = parser.parse(&text, Some(&tree)).expect("incremental parse");
-            std::hint::black_box(&tree);
+            black_box(&tree);
         }
         let ts = ts_start.elapsed() / EDITS as u32;
 
@@ -356,35 +327,23 @@ fn corpus_incremental_speed() {
     }
 }
 
-fn allowlisted_paths() -> Vec<String> {
-    read_allowlist("tests/acceptance-allowlist.txt").collect()
+fn tree_sitter_parser() -> Parser {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_r::LANGUAGE.into())
+        .expect("load tree-sitter-r grammar");
+    parser
 }
 
-fn allowlisted_in_tree_ids() -> std::collections::HashSet<String> {
-    read_allowlist("tests/in-tree-acceptance-allowlist.txt").collect()
-}
-
-fn read_allowlist(relative: &str) -> impl Iterator<Item = String> {
+fn read_allowlist(relative: &str) -> Vec<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-    std::fs::read_to_string(path)
+    fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_owned)
-        .collect::<Vec<_>>()
-        .into_iter()
-}
-
-fn corpus_dir() -> Option<PathBuf> {
-    if let Some(dir) = syntax::testing::env_var("CORPUS_DIR") {
-        let path = PathBuf::from(dir);
-        return path.is_dir().then_some(path);
-    }
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("corpus");
-    path.is_dir().then_some(path)
+        .collect()
 }
 
 fn corpus_r_files(root: &Path) -> Vec<PathBuf> {
@@ -397,7 +356,7 @@ fn corpus_r_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_r_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -416,8 +375,7 @@ fn collect_r_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Some R sources are latin1; the flag reports whether decoding was lossy.
 fn read_lossy(path: &Path) -> (String, bool) {
-    let bytes =
-        std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     match String::from_utf8_lossy(&bytes) {
         Cow::Borrowed(text) => (text.to_owned(), false),
         Cow::Owned(text) => (text, true),

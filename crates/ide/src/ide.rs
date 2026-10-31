@@ -2,16 +2,23 @@
 //! live in the server. Per-item query results carry item-relative ranges, while this API speaks
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
+use semantics::annotations::{block_refusal, lower_annotation};
 use semantics::check::ItemCheck;
 use semantics::diagnostics::TypeRenderer;
-use semantics::hir::{Argument, ExprId, ExpressionKind};
+use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
 use semantics::naming::{BindingId, BindingKind};
+use semantics::stubs::{declaring_namespace, stub_declaration, stubs};
 use semantics::types::{FunctionType, Ty, TyKind, TypeScheme, contains_inference_var};
 use semantics::{
-    Db, Item, ItemKind, ProjectFiles, SourceFile, global_scheme, item_annotation_syntax,
-    item_check, item_hir, item_name_range, item_naming, item_node, item_tree, package_definitions,
+    Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
+    item_annotation_syntax, item_check, item_expression_annotations, item_hir, item_name_range,
+    item_naming, item_node, item_tree, package_definitions, project_type_definitions,
 };
-use syntax::{TextRange, TextSize};
+use std::collections::BTreeSet;
+use std::iter::once;
+use syntax::SyntaxKind::{self, *};
+use syntax::kind::KEYWORDS;
+use syntax::{SyntaxElement, SyntaxNode, SyntaxToken, TextRange, TextSize, is_syntactic_name};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hover {
@@ -61,13 +68,6 @@ pub struct StubTarget {
     pub range: TextRange,
 }
 
-fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
-    semantics::stubs::stub_declaration(db, name).map(|declaration| StubTarget {
-        source_index: declaration.source_index,
-        range: declaration.range,
-    })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Occurrence {
     pub file: SourceFile,
@@ -82,7 +82,7 @@ pub fn hover(
     offset: TextSize,
 ) -> Option<Hover> {
     if let Some(cursor) = annotation_type_at(db, file, offset) {
-        return annotation_type_hover(db, file, &cursor);
+        return Some(annotation_type_hover(db, file, &cursor));
     }
     if let Some(hover) = annotation_definition_hover(db, file, offset) {
         return Some(hover);
@@ -98,7 +98,6 @@ pub fn hover(
         .into_iter()
         .find_map(|id| check.expression_types.get(&id).map(|ty| (id, *ty)))?;
 
-    let mut renderer = TypeRenderer::default();
     let (lines, definition) = match &hir.expression(expression).kind {
         ExpressionKind::NameRef(name) => {
             // The item's own top-level name renders the exported scheme, not the initializer's
@@ -125,15 +124,14 @@ pub fn hover(
                 hover_definition(db, files, position.item, expression, name),
             )
         }
-        _ => (vec![renderer.render(db, ty)], None),
+        _ => (vec![TypeRenderer::default().render(db, ty)], None),
     };
 
-    let range = trim_trailing_trivia(
-        file.text(db),
-        hir.expression(expression).range + position.item_offset,
-    );
     Some(Hover {
-        range,
+        range: trim_trailing_trivia(
+            file.text(db),
+            hir.expression(expression).range + position.item_offset,
+        ),
         lines,
         definition,
     })
@@ -192,22 +190,16 @@ fn hover_definition<'db>(
             maybe_undefined: naming.maybe_undefined.contains(&expression),
         });
     }
-    if naming.non_locals.contains_key(&expression) {
-        if let Some(definition) = global_hover_definition(db, files, name, None) {
-            return Some(definition);
-        }
-        let namespace = semantics::stubs::declaring_namespace(db, name)?;
-        let overloads = semantics::stubs::stubs(db)?
-            .schemes
-            .get(name)
-            .map_or(0, Vec::len);
-        return Some(HoverDefinition::Stub {
-            namespace: namespace.to_owned(),
-            overloads,
-            declaration: stub_target(db, name),
-        });
+    if !naming.non_locals.contains_key(&expression) {
+        return None;
     }
-    None
+    global_hover_definition(db, files, name, None).or_else(|| {
+        Some(HoverDefinition::Stub {
+            namespace: declaring_namespace(db, name)?.to_owned(),
+            overloads: stubs(db)?.schemes.get(name).map_or(0, Vec::len),
+            declaration: stub_target(db, name),
+        })
+    })
 }
 
 fn global_hover_definition(
@@ -217,13 +209,21 @@ fn global_hover_definition(
     own_item: Option<Item<'_>>,
 ) -> Option<HoverDefinition> {
     let declaring = declaring_item(db, files, name).or(own_item)?;
-    let node = item_node(db, declaring)?;
-    let range = item_name_range(db, declaring).unwrap_or_else(|| node.text_range());
-    Some(HoverDefinition::Global {
-        target: NavigationTarget {
-            file: *declaring.file(db),
-            range,
-        },
+    item_target(db, declaring).map(|target| HoverDefinition::Global { target })
+}
+
+fn item_target(db: &dyn Db, item: Item<'_>) -> Option<NavigationTarget> {
+    let node = item_node(db, item)?;
+    Some(NavigationTarget {
+        file: *item.file(db),
+        range: item_name_range(db, item).unwrap_or_else(|| node.text_range()),
+    })
+}
+
+fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
+    stub_declaration(db, name).map(|declaration| StubTarget {
+        source_index: declaration.source_index,
+        range: declaration.range,
     })
 }
 
@@ -252,7 +252,7 @@ fn referenced_scheme<'db>(
     if let Some(item) = declaring_item(db, files, name) {
         return Some(global_scheme(db, item));
     }
-    let candidates = semantics::stubs::stubs(db)?.schemes.get(name)?;
+    let candidates = stubs(db)?.schemes.get(name)?;
     let index = check
         .selected_overloads
         .get(&reference)
@@ -265,56 +265,45 @@ pub fn hover_debug(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Debug
     let mut sections = Vec::new();
     if let Some(position) = position_in_item(db, file, offset)
         && let Some(hir) = item_hir(db, position.item)
-        && let Some(expression) = position.expressions_at().into_iter().next()
+        && let Some(expression) = position.expression_at()
     {
         sections.push(DebugSection {
             title: "Lowering",
             body: format!("{:#?}", hir.expression(expression)),
         });
         if let Some(naming) = item_naming(db, position.item) {
-            let resolution = if let Some(binding) = naming.resolutions.get(&expression) {
-                match naming.bindings.get(binding) {
+            let body = match naming.resolutions.get(&expression) {
+                Some(binding) => match naming.bindings.get(binding) {
                     Some(info) => format!(
-                        "slot `{}` ({:?}, declared at {}..{})",
-                        info.name,
-                        info.kind,
-                        u32::from(info.range.start()),
-                        u32::from(info.range.end()),
+                        "slot `{}` ({:?}, declared at {:?})",
+                        info.name, info.kind, info.range
                     ),
                     None => "slot (missing binding info)".to_owned(),
-                }
-            } else if let Some(name) = naming.non_locals.get(&expression) {
-                format!("non-local `{name}`")
-            } else {
-                "no resolution recorded".to_owned()
+                },
+                None => match naming.non_locals.get(&expression) {
+                    Some(name) => format!("non-local `{name}`"),
+                    None => "no resolution recorded".to_owned(),
+                },
             };
             sections.push(DebugSection {
                 title: "Naming",
-                body: resolution,
+                body,
             });
         }
     }
-    let parse = semantics::parse(db, file);
-    let root = parse.syntax_node();
-    if let Some(token) = root
+    if let Some(token) = semantics::parse(db, file)
+        .syntax_node()
         .token_at_offset(offset)
         .right_biased()
-        .or_else(|| root.token_at_offset(offset).left_biased())
     {
-        let mut chain = vec![format!(
-            "{:?}@{}..{}",
-            token.kind(),
-            u32::from(token.text_range().start()),
-            u32::from(token.text_range().end()),
-        )];
-        for ancestor in std::iter::successors(token.parent(), syntax::SyntaxNode::parent) {
-            chain.push(format!(
-                "{:?}@{}..{}",
-                ancestor.kind(),
-                u32::from(ancestor.text_range().start()),
-                u32::from(ancestor.text_range().end()),
-            ));
-        }
+        let chain: Vec<String> = once((token.kind(), token.text_range()))
+            .chain(
+                token
+                    .parent_ancestors()
+                    .map(|node| (node.kind(), node.text_range())),
+            )
+            .map(|(kind, range)| format!("{kind:?}@{range:?}"))
+            .collect();
         sections.push(DebugSection {
             title: "Parsing",
             body: chain.join("\n"),
@@ -338,55 +327,43 @@ pub fn definition(
 ) -> Option<DefinitionTarget> {
     match target_at(db, files, file, offset)? {
         Target::Slot { item, binding } => {
-            let naming = item_naming(db, item).as_ref()?;
-            let info = naming.bindings.get(&binding)?;
+            let info = item_naming(db, item).as_ref()?.bindings.get(&binding)?;
             let item_offset = item_node(db, item)?.text_range().start();
             Some(DefinitionTarget::Project(NavigationTarget {
                 file,
                 range: info.range + item_offset,
             }))
         }
-        // The last declaration wins, matching the project definition table's fold order.
-        Target::TypeName(name) => type_name_occurrences(db, files, &name)
-            .into_iter()
-            .rfind(|occurrence| occurrence.is_declaration)
-            .map(|occurrence| {
-                DefinitionTarget::Project(NavigationTarget {
-                    file: occurrence.file,
-                    range: occurrence.range,
-                })
-            })
-            .or_else(|| stub_target(db, &name).map(DefinitionTarget::Stub)),
-        ref target @ Target::S4 { .. } => occurrences(db, files, target)
-            .into_iter()
-            .find(|occurrence| occurrence.is_declaration)
-            .map(|occurrence| {
-                DefinitionTarget::Project(NavigationTarget {
-                    file: occurrence.file,
-                    range: occurrence.range,
-                })
-            }),
+        Target::TypeName(name) => type_name_definition(db, files, &name),
         Target::StubGlobal(name) => stub_target(db, &name).map(DefinitionTarget::Stub),
-        Target::Global(name) => {
-            if let Some(winner) = package_definitions(db, files).get(&name) {
-                let node = item_node(db, *winner)?;
-                let range = item_name_range(db, *winner).unwrap_or_else(|| node.text_range());
-                return Some(DefinitionTarget::Project(NavigationTarget {
-                    file: *winner.file(db),
-                    range,
-                }));
+        target @ (Target::Global(_) | Target::S4 { .. }) => {
+            if let Target::Global(name) = &target
+                && let Some(winner) = package_definitions(db, files).get(name)
+            {
+                return item_target(db, *winner).map(DefinitionTarget::Project);
             }
-            occurrences(db, files, &Target::Global(name.clone()))
+            occurrences(db, files, &target)
                 .into_iter()
                 .find(|occurrence| occurrence.is_declaration)
-                .map(|occurrence| {
-                    DefinitionTarget::Project(NavigationTarget {
-                        file: occurrence.file,
-                        range: occurrence.range,
-                    })
-                })
+                .map(declaration_target)
         }
     }
+}
+
+/// The last declaration wins, matching the project definition table's fold order.
+fn type_name_definition(db: &dyn Db, files: ProjectFiles, name: &str) -> Option<DefinitionTarget> {
+    type_name_occurrences(db, files, name)
+        .into_iter()
+        .rfind(|occurrence| occurrence.is_declaration)
+        .map(declaration_target)
+        .or_else(|| stub_target(db, name).map(DefinitionTarget::Stub))
+}
+
+fn declaration_target(occurrence: Occurrence) -> DefinitionTarget {
+    DefinitionTarget::Project(NavigationTarget {
+        file: occurrence.file,
+        range: occurrence.range,
+    })
 }
 
 pub fn references(
@@ -430,12 +407,8 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
         let Some(node) = item_node(db, item) else {
             continue;
         };
-        let item_offset = node.text_range().start();
-        if let Some(viewport) = viewport {
-            let range = node.text_range();
-            if range.end() < viewport.start() || viewport.end() < range.start() {
-                continue;
-            }
+        if viewport.is_some_and(|viewport| !ranges_overlap(node.text_range(), viewport)) {
+            continue;
         }
         let Some(hir) = item_hir(db, item) else {
             continue;
@@ -446,15 +419,14 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
         // Only a surviving payload types the binding: refused, definitions-only, and toggle-only
         // blocks leave it hintable.
         let annotated = item_annotation_syntax(db, item).is_some_and(|annotation| {
-            let lowered = semantics::annotations::lower_annotation(db, &annotation.syntax_node());
+            let lowered = lower_annotation(db, &annotation.syntax_node());
             lowered.declared.is_some() || lowered.new_nominal.is_some() || lowered.trusted
         });
         // A hint on an annotated nested statement would restate the line above.
-        let annotated_expressions: std::collections::BTreeSet<ExprId> =
-            semantics::item_expression_annotations(db, item)
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
+        let annotated_expressions: BTreeSet<ExprId> = item_expression_annotations(db, item)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
 
         for (index, expression) in hir.expressions.iter().enumerate() {
             let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
@@ -469,31 +441,11 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             if (is_root && annotated) || annotated_expressions.contains(&id) {
                 continue;
             }
-
-            let mut renderer = TypeRenderer::default();
-            let label = if is_root {
-                let Some(scheme) = &check.scheme else {
-                    continue;
-                };
-                if !scheme_is_hintable(db, scheme) {
-                    continue;
-                }
-                renderer.render_scheme(db, scheme)
-            } else {
-                let Some(ty) = check
-                    .expression_types
-                    .get(&id)
-                    .or_else(|| check.expression_types.get(value))
-                else {
-                    continue;
-                };
-                if !is_hintable(db, *ty, matches!(ty.kind(db), TyKind::Function(_))) {
-                    continue;
-                }
-                renderer.render(db, *ty)
+            let Some(label) = assignment_label(db, &check, id, *value, is_root) else {
+                continue;
             };
             hints.push(InlayHint {
-                offset: target_expression.range.end() + item_offset,
+                offset: target_expression.range.end() + node.text_range().start(),
                 label: format!(": {label}"),
             });
         }
@@ -529,16 +481,12 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
         .expressions
         .iter()
         .enumerate()
-        .filter_map(|(index, expression)| match &expression.kind {
-            ExpressionKind::Call { .. }
-                if !expression.range.is_empty()
-                    && expression.range.start() <= position.relative
-                    && position.relative <= expression.range.end() =>
-            {
-                Some((expression.range, ExprId(index as u32)))
-            }
-            _ => None,
+        .filter(|(_, expression)| {
+            matches!(expression.kind, ExpressionKind::Call { .. })
+                && !expression.range.is_empty()
+                && expression.range.contains_inclusive(position.relative)
         })
+        .map(|(index, expression)| (expression.range, ExprId(index as u32)))
         .collect();
     calls.sort_by_key(|(range, id)| (range.len(), range.start(), id.0));
 
@@ -546,16 +494,13 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
         let ExpressionKind::Call { callee, arguments } = &hir.expression(*id).kind else {
             return None;
         };
-        let function =
-            check
-                .expression_types
-                .get(callee)
-                .and_then(|callee_ty| match callee_ty.kind(db) {
-                    TyKind::Function(function) => Some(function.clone()),
-                    _ => None,
-                });
+        let function = check
+            .expression_types
+            .get(callee)
+            .copied()
+            .filter(|ty| matches!(ty.kind(db), TyKind::Function(_)));
         let overloads = callee_name(hir, *callee)
-            .and_then(|name| semantics::stubs::stubs(db)?.schemes.get(&name).cloned())
+            .and_then(|name| stubs(db)?.schemes.get(&name))
             .filter(|schemes| schemes.len() > 1);
         (function.is_some() || overloads.is_some())
             .then_some((*callee, function, overloads, arguments))
@@ -566,25 +511,20 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     if let Some(schemes) = overloads {
         let mut signatures: Vec<SignatureData> = schemes
             .iter()
-            .map(|scheme| overload_signature(db, scheme, arguments, hir, position.relative))
+            .map(|scheme| scheme_signature(db, scheme, arguments, hir, position.relative))
             .collect();
         let selected = check.selected_overloads.get(&callee).copied().unwrap_or(0);
         // The committed candidate renders instantiated with this call site's types.
-        if let Some(function) = &function
+        if let Some(function) = function
             && let Some(entry) = signatures.get_mut(selected)
         {
-            let mut renderer = TypeRenderer::default();
-            let (label, parameters) = render_signature(db, &mut renderer, String::new(), function);
-            entry.active_parameter = active_parameter(
+            *entry = scheme_signature(
                 db,
-                function,
-                parameters.len(),
+                &TypeScheme::monomorphic(function),
                 arguments,
                 hir,
                 position.relative,
             );
-            entry.label = label;
-            entry.parameters = parameters;
         }
         return Some(SignatureHelp {
             active_signature: selected.min(signatures.len().saturating_sub(1)),
@@ -592,47 +532,32 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
         });
     }
 
-    let function = &function?;
+    let function = function?;
     // An open callee renders the scheme it instantiates rather than variables nothing binds.
     let naming = item_naming(db, position.item).as_ref();
-    if let Some(name) = callee_name(hir, callee)
+    let scheme = if let Some(name) = callee_name(hir, callee)
         && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
-        && contains_inference_var(db, Ty::new(db, TyKind::Function(function.clone())))
+        && contains_inference_var(db, function)
         && let Some(files) = ProjectFiles::try_get(db)
         && let Some(scheme) = referenced_scheme(db, files, &name, &check, callee)
     {
-        return Some(SignatureHelp {
-            signatures: vec![overload_signature(
-                db,
-                &scheme,
-                arguments,
-                hir,
-                position.relative,
-            )],
-            active_signature: 0,
-        });
-    }
-    let mut renderer = TypeRenderer::default();
-    let (label, parameters) = render_signature(db, &mut renderer, String::new(), function);
-    let active_parameter = active_parameter(
-        db,
-        function,
-        parameters.len(),
-        arguments,
-        hir,
-        position.relative,
-    );
+        scheme
+    } else {
+        TypeScheme::monomorphic(function)
+    };
     Some(SignatureHelp {
-        signatures: vec![SignatureData {
-            label,
-            parameters,
-            active_parameter,
-        }],
+        signatures: vec![scheme_signature(
+            db,
+            &scheme,
+            arguments,
+            hir,
+            position.relative,
+        )],
         active_signature: 0,
     })
 }
 
-fn callee_name(hir: &semantics::hir::Module, callee: ExprId) -> Option<String> {
+fn callee_name(hir: &Module, callee: ExprId) -> Option<String> {
     match &hir.expression(callee).kind {
         ExpressionKind::NameRef(name) => Some(name.clone()),
         ExpressionKind::Namespace { name, .. } => name.clone(),
@@ -642,36 +567,32 @@ fn callee_name(hir: &semantics::hir::Module, callee: ExprId) -> Option<String> {
 
 /// A non-function declaration still occupies its slot, so the committed index stays aligned
 /// with the declared set.
-fn overload_signature(
+fn scheme_signature(
     db: &dyn Db,
     scheme: &TypeScheme<'_>,
     arguments: &[Argument],
-    hir: &semantics::hir::Module,
+    hir: &Module,
     position: TextSize,
 ) -> SignatureData {
     let mut renderer = TypeRenderer::default();
-    match scheme.body.kind(db) {
-        TyKind::Function(function) => {
-            let mut prefix = renderer
-                .render_binder_prefix(&scheme.binders)
-                .unwrap_or_default();
-            if !prefix.is_empty() {
-                prefix.push(' ');
-            }
-            let (label, parameters) = render_signature(db, &mut renderer, prefix, function);
-            let active_parameter =
-                active_parameter(db, function, parameters.len(), arguments, hir, position);
-            SignatureData {
-                label,
-                parameters,
-                active_parameter,
-            }
-        }
-        _ => SignatureData {
+    let TyKind::Function(function) = scheme.body.kind(db) else {
+        return SignatureData {
             label: renderer.render_scheme(db, scheme),
             parameters: Vec::new(),
             active_parameter: None,
-        },
+        };
+    };
+    let prefix = renderer
+        .render_binder_prefix(&scheme.binders)
+        .map(|prefix| format!("{prefix} "))
+        .unwrap_or_default();
+    let (label, parameters) = render_signature(db, &mut renderer, prefix, function);
+    let active_parameter =
+        active_parameter(db, function, parameters.len(), arguments, hir, position);
+    SignatureData {
+        label,
+        parameters,
+        active_parameter,
     }
 }
 
@@ -707,14 +628,16 @@ pub struct CompletionItem {
     pub takes_arguments: Option<bool>,
 }
 
-fn scheme_takes_arguments(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<bool> {
-    match scheme.body.kind(db) {
-        TyKind::Function(function) => Some(
-            !function.positional.is_empty()
-                || !function.named.is_empty()
-                || function.variadic.is_some(),
-        ),
-        _ => None,
+impl CompletionItem {
+    fn new(label: String, kind: CompletionKind, source: CompletionSource) -> Self {
+        Self {
+            label,
+            kind,
+            source,
+            detail: None,
+            documentation: None,
+            takes_arguments: None,
+        }
     }
 }
 
@@ -724,113 +647,80 @@ pub struct CompletionResult {
     pub is_incomplete: bool,
 }
 
-const RESERVED_WORDS: &[&str] = &[
-    "if",
-    "else",
-    "repeat",
-    "while",
-    "function",
-    "for",
-    "in",
-    "next",
-    "break",
-    "TRUE",
-    "FALSE",
-    "NULL",
-    "Inf",
-    "NaN",
-    "NA",
-    "NA_integer_",
-    "NA_real_",
-    "NA_complex_",
-    "NA_character_",
-];
-
 pub fn completion(
     db: &dyn Db,
     files: ProjectFiles,
     file: SourceFile,
     offset: TextSize,
 ) -> Option<CompletionResult> {
-    let text = file.text(db);
-    let (context, query) = completion_context(text, offset)?;
-
+    let (context, query) = completion_context(file.text(db), offset)?;
+    let root = semantics::parse(db, file).syntax_node();
+    if annotation_at(&root, offset).is_some() {
+        return annotation_completion(db, files, file, &query);
+    }
+    // R value names never resolve inside string content; only record-field subscripts complete
+    // there.
+    if let Some(string_token) = root
+        .descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find(|token| {
+            token.kind() == STRING
+                && token.text_range().start() < offset
+                && offset < token.text_range().end()
+        })
     {
-        let parse = semantics::parse(db, file);
-        if parse.syntax_node().descendants().any(|node| {
-            node.kind() == syntax::SyntaxKind::ANNOTATION
-                && node.text_range().start() <= offset
-                && offset <= node.text_range().end()
-        }) {
-            return annotation_completion(db, files, file, &query);
-        }
-        // R value names never resolve inside string content; only record-field subscripts
-        // complete there.
-        if let Some(string_token) = parse
-            .syntax_node()
-            .descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-            .find(|token| {
-                token.kind() == syntax::SyntaxKind::STRING
-                    && token.text_range().start() < offset
-                    && offset < token.text_range().end()
-            })
-        {
-            return string_subscript_completion(db, file, offset, &string_token);
-        }
+        return string_subscript_completion(db, file, offset, &string_token);
     }
 
     let items = match context {
-        CompletionContext::Field => spelled_completions(
-            db,
-            files,
-            &query,
-            syntax::SyntaxKind::AT_EXPR,
-            CompletionSource::Field,
-        ),
+        CompletionContext::Field => {
+            spelled_completions(db, files, &query, AT_EXPR, CompletionSource::Field)
+        }
         CompletionContext::Item => dollar_completions(db, files, file, offset, &query),
         CompletionContext::Namespace { package } => {
             namespace_completions(db, files, &package, &query)
         }
         CompletionContext::MaybeNamespace => return None,
         CompletionContext::Default => {
-            let mut items = Vec::new();
+            let case_sensitive = query_is_case_sensitive(&query);
             // Keywords are prefix-completed only: no one searches for `function` by typing `con`.
-            for keyword in RESERVED_WORDS {
-                if prefix_under_case(keyword, &query, query_is_case_sensitive(&query)) {
-                    items.push(CompletionItem {
-                        label: (*keyword).to_owned(),
-                        kind: CompletionKind::Keyword,
-                        source: CompletionSource::Keyword,
-                        detail: None,
-                        documentation: None,
-                        takes_arguments: None,
-                    });
-                }
-            }
+            let mut items: Vec<CompletionItem> = KEYWORDS
+                .iter()
+                .filter(|(keyword, _)| prefix_under_case(keyword, &query, case_sensitive))
+                .map(|(keyword, _)| {
+                    CompletionItem::new(
+                        (*keyword).to_owned(),
+                        CompletionKind::Keyword,
+                        CompletionSource::Keyword,
+                    )
+                })
+                .collect();
             if let Some(position) = position_in_item(db, file, offset)
                 && let Some(naming) = item_naming(db, position.item)
-                && let Some(item_node) = item_node(db, position.item)
+                && let Some(node) = item_node(db, position.item)
             {
-                let item_offset = item_node.text_range().start();
-                for info in naming.bindings.values() {
-                    if info.kind == BindingKind::TopLevel {
-                        continue;
-                    }
-                    if !binding_visible_at(&item_node, info.range.start() + item_offset, offset) {
-                        continue;
-                    }
-                    if search_match(&info.name, &query).is_some() {
-                        items.push(CompletionItem {
-                            label: info.name.clone(),
-                            kind: CompletionKind::Variable,
-                            source: CompletionSource::Local,
-                            detail: None,
-                            documentation: None,
-                            takes_arguments: None,
-                        });
-                    }
-                }
+                let item_offset = node.text_range().start();
+                items.extend(
+                    naming
+                        .bindings
+                        .values()
+                        .filter(|info| {
+                            info.kind != BindingKind::TopLevel
+                                && binding_visible_at(
+                                    &node,
+                                    info.range.start() + item_offset,
+                                    offset,
+                                )
+                                && search_match(&info.name, &query).is_some()
+                        })
+                        .map(|info| {
+                            CompletionItem::new(
+                                info.name.clone(),
+                                CompletionKind::Variable,
+                                CompletionSource::Local,
+                            )
+                        }),
+                );
             }
             for &project_file in files.files(db) {
                 for &item in item_tree(db, project_file) {
@@ -841,93 +731,77 @@ pub fn completion(
                         // inside a top-level `if`).
                         ItemKind::Statement => {
                             if let Some(naming) = item_naming(db, item) {
-                                for info in naming.bindings.values() {
-                                    if info.kind == BindingKind::TopLevel
-                                        && search_match(&info.name, &query).is_some()
-                                    {
-                                        items.push(CompletionItem {
-                                            label: info.name.clone(),
-                                            kind: CompletionKind::Variable,
-                                            source: CompletionSource::Global,
-                                            detail: None,
-                                            documentation: None,
-                                            takes_arguments: None,
-                                        });
-                                    }
-                                }
+                                items.extend(
+                                    naming
+                                        .bindings
+                                        .values()
+                                        .filter(|info| {
+                                            info.kind == BindingKind::TopLevel
+                                                && search_match(&info.name, &query).is_some()
+                                        })
+                                        .map(|info| {
+                                            CompletionItem::new(
+                                                info.name.clone(),
+                                                CompletionKind::Variable,
+                                                CompletionSource::Global,
+                                            )
+                                        }),
+                                );
                             }
                             continue;
                         }
                     };
-                    let Some(name) = item.name(db).clone() else {
-                        continue;
-                    };
-                    if search_match(&name, &query).is_some() {
-                        let takes_arguments =
-                            scheme_takes_arguments(db, &semantics::global_scheme(db, item));
+                    if let Some(name) = item.name(db)
+                        && search_match(name, &query).is_some()
+                    {
                         items.push(CompletionItem {
-                            label: name,
-                            kind,
-                            source: CompletionSource::Global,
-                            detail: None,
-                            documentation: None,
-                            takes_arguments,
+                            takes_arguments: scheme_takes_arguments(db, &global_scheme(db, item)),
+                            ..CompletionItem::new(name.clone(), kind, CompletionSource::Global)
                         });
                     }
                 }
             }
             // A project global outranks a same-named stub at deduplication, mirroring resolution.
-            if let Some(library) = semantics::stubs::stubs(db) {
-                for (name, schemes) in &library.schemes {
-                    if search_match(name, &query).is_none() {
-                        continue;
-                    }
-                    let Some(scheme) = schemes.first() else {
-                        continue;
-                    };
-                    let mut renderer = TypeRenderer::default();
-                    let namespace = library
+            if let Some(library) = stubs(db) {
+                let documentation = |name: &String| {
+                    library
                         .exports_by_namespace
                         .iter()
                         .find(|(_, names)| names.contains(name))
-                        .map(|(namespace, _)| namespace.clone());
-                    items.push(CompletionItem {
-                        label: name.clone(),
-                        kind: match scheme.body.kind(db) {
-                            TyKind::Function(_) => CompletionKind::Function,
-                            _ => CompletionKind::Variable,
-                        },
-                        source: CompletionSource::Stdlib,
-                        detail: Some(renderer.render_scheme(db, scheme)),
-                        documentation: namespace
-                            .map(|namespace| format!("From the `{namespace}` package.")),
-                        takes_arguments: scheme_takes_arguments(db, scheme),
-                    });
-                }
+                        .map(|(namespace, _)| format!("From the `{namespace}` package."))
+                };
+                items.extend(
+                    library
+                        .schemes
+                        .iter()
+                        .filter(|(name, _)| search_match(name, &query).is_some())
+                        .filter_map(|(name, schemes)| {
+                            Some(CompletionItem {
+                                documentation: documentation(name),
+                                ..scheme_completion(db, name.clone(), schemes.first()?)
+                            })
+                        }),
+                );
                 // Manifest-only exports complete untyped. Non-syntactic names are skipped: a bare
                 // reference needs backticks, so inserting the raw name changes the syntax.
-                for name in &library.known_exports {
-                    if library.schemes.contains_key(name)
-                        || !syntax::is_syntactic_name(name)
-                        || search_match(name, &query).is_none()
-                    {
-                        continue;
-                    }
-                    let namespace = library
-                        .exports_by_namespace
+                items.extend(
+                    library
+                        .known_exports
                         .iter()
-                        .find(|(_, names)| names.contains(name))
-                        .map(|(namespace, _)| namespace.clone());
-                    items.push(CompletionItem {
-                        label: name.clone(),
-                        kind: CompletionKind::Variable,
-                        source: CompletionSource::Stdlib,
-                        detail: None,
-                        documentation: namespace
-                            .map(|namespace| format!("From the `{namespace}` package.")),
-                        takes_arguments: None,
-                    });
-                }
+                        .filter(|name| {
+                            !library.schemes.contains_key(*name)
+                                && is_syntactic_name(name)
+                                && search_match(name, &query).is_some()
+                        })
+                        .map(|name| CompletionItem {
+                            documentation: documentation(name),
+                            ..CompletionItem::new(
+                                name.clone(),
+                                CompletionKind::Variable,
+                                CompletionSource::Stdlib,
+                            )
+                        }),
+                );
             }
             items
         }
@@ -965,27 +839,23 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
     let text = file.text(db);
     let mut actions = Vec::new();
 
-    let parse = semantics::parse(db, file);
-    for annotation in parse
-        .syntax_node()
+    let root = semantics::parse(db, file).syntax_node();
+    for annotation in root
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == ANNOTATION && ranges_overlap(node.text_range(), viewport))
     {
-        if !ranges_overlap(annotation.text_range(), viewport) {
-            continue;
-        }
         for directive in annotation
             .descendants()
-            .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION_DIRECTIVE)
+            .filter(|node| node.kind() == ANNOTATION_DIRECTIVE)
         {
-            if let Some((name, range)) = directive_name_range(&directive)
-                && name == "if-unknown"
+            if directive_name(&directive).as_deref() == Some("if-unknown")
+                && let Some(at) = child_token(&directive, AT)
             {
                 actions.push(CodeAction {
                     title: "Replace `@if-unknown` with `@trust`".to_owned(),
                     kind: CodeActionKind::IfUnknownToTrust,
                     edits: vec![TextEdit {
-                        range,
+                        range: TextRange::at(at.text_range().start(), TextSize::of("@if-unknown")),
                         replacement: "@trust".to_owned(),
                     }],
                 });
@@ -1041,15 +911,13 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         let Some(check) = item_check(db, item) else {
             continue;
         };
-        let annotated = item_annotation_syntax(db, item).is_some_and(|annotation| {
-            semantics::annotations::block_refusal(&annotation.syntax_node()).is_none()
-        });
+        let annotated = item_annotation_syntax(db, item)
+            .is_some_and(|annotation| block_refusal(&annotation.syntax_node()).is_none());
         for (index, expression) in hir.expressions.iter().enumerate() {
             let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
                 continue;
             };
-            let target_expression = hir.expression(*target);
-            let ExpressionKind::NameRef(name) = &target_expression.kind else {
+            let ExpressionKind::NameRef(name) = &hir.expression(*target).kind else {
                 continue;
             };
             let id = ExprId(index as u32);
@@ -1061,36 +929,18 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             let line_start = text[..start.min(text.len())]
                 .rfind('\n')
                 .map_or(0, |at| at + 1);
-            if !text[line_start..start].trim().is_empty() {
+            let Some(indentation) = text
+                .get(line_start..start)
+                .filter(|indentation| indentation.trim().is_empty())
+            else {
                 continue;
-            }
-
-            let mut renderer = TypeRenderer::default();
-            let rendered = if is_root {
-                let Some(scheme) = &check.scheme else {
-                    continue;
-                };
-                if !scheme_is_hintable(db, scheme) {
-                    continue;
-                }
-                renderer.render_scheme(db, scheme)
-            } else {
-                let Some(ty) = check
-                    .expression_types
-                    .get(&id)
-                    .or_else(|| check.expression_types.get(value))
-                else {
-                    continue;
-                };
-                if !is_hintable(db, *ty, matches!(ty.kind(db), TyKind::Function(_))) {
-                    continue;
-                }
-                renderer.render(db, *ty)
             };
-            let indentation = &text[line_start..start];
+            let Some(label) = assignment_label(db, &check, id, *value, is_root) else {
+                continue;
+            };
             let edit = TextEdit {
                 range: TextRange::empty(TextSize::from(line_start as u32)),
-                replacement: format!("{indentation}#: {rendered}\n"),
+                replacement: format!("{indentation}#: {label}\n"),
             };
             all_annotation_edits.push(edit.clone());
             if ranges_overlap(expression.range + item_offset, viewport) {
@@ -1138,17 +988,6 @@ fn removal_range(text: &str, range: TextRange) -> TextRange {
     )
 }
 
-fn directive_name_range(directive: &syntax::SyntaxNode) -> Option<(String, TextRange)> {
-    let name = directive_name(directive)?;
-    let at = directive
-        .children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .find(|token| token.kind() == syntax::SyntaxKind::AT)?;
-    let start = at.text_range().start();
-    let end = start + TextSize::from(1 + name.len() as u32);
-    Some((name, TextRange::new(start, end)))
-}
-
 pub fn type_definition(
     db: &dyn Db,
     files: ProjectFiles,
@@ -1157,24 +996,14 @@ pub fn type_definition(
 ) -> Option<DefinitionTarget> {
     let position = position_in_item(db, file, offset)?;
     let check = item_check(db, position.item)?;
-    let (_, ty) = position
+    let ty = position
         .expressions_at()
         .into_iter()
-        .find_map(|id| check.expression_types.get(&id).map(|ty| (id, *ty)))?;
+        .find_map(|id| check.expression_types.get(&id).copied())?;
     let TyKind::Named(name, _) = ty.kind(db) else {
         return None;
     };
-    let name = name.text(db).to_owned();
-    type_name_occurrences(db, files, &name)
-        .into_iter()
-        .rfind(|occurrence| occurrence.is_declaration)
-        .map(|occurrence| {
-            DefinitionTarget::Project(NavigationTarget {
-                file: occurrence.file,
-                range: occurrence.range,
-            })
-        })
-        .or_else(|| stub_target(db, &name).map(DefinitionTarget::Stub))
+    type_name_definition(db, files, name.text(db))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1211,47 +1040,25 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
             continue;
         };
         let range = node.text_range();
-        match *item.kind(db) {
+        let name = match *item.kind(db) {
             ItemKind::Function | ItemKind::Value => {
-                let Some(name) = item.name(db).clone() else {
+                let Some(name) = item.name(db) else {
                     continue;
                 };
-                // A registration call (`setGeneric("name", ...)`) is a named item without an
-                // assignment; it selects the string name.
-                if node.kind() == syntax::SyntaxKind::CALL_EXPR {
-                    let Some(construct) = classify_symbol_call(&node) else {
-                        continue;
-                    };
-                    let Some((name, selection)) = construct.name else {
-                        continue;
-                    };
-                    symbols.push(DocumentSymbol {
-                        name,
-                        kind: construct.kind,
-                        detail: construct.detail,
-                        range,
-                        selection,
-                        children: construct.children,
-                    });
-                    continue;
-                }
-                let selection = item_name_range(db, item).unwrap_or(range);
-                // An assigned S4/R6 construction keeps the assigned name but takes the
-                // construct's kind, detail, and members.
-                let construct = node
-                    .children()
-                    .find(|child| child.kind() == syntax::SyntaxKind::CALL_EXPR)
-                    .and_then(|call| classify_symbol_call(&call));
-                let (kind, detail, children) = match construct {
-                    Some(construct) => (construct.kind, construct.detail, construct.children),
-                    None => {
-                        let kind = match *item.kind(db) {
-                            ItemKind::Function => DocumentSymbolKind::Function,
-                            _ => DocumentSymbolKind::Value,
-                        };
-                        (kind, function_detail(&node), Vec::new())
-                    }
-                };
+                Some(name)
+            }
+            ItemKind::Statement => None,
+        };
+        // A registration call (`setGeneric("name", ...)`) is a named item without an assignment;
+        // it selects the string name.
+        if node.kind() == CALL_EXPR {
+            if let Some(SymbolCall {
+                kind,
+                name: Some((name, selection)),
+                detail,
+                children,
+            }) = classify_symbol_call(&node)
+            {
                 symbols.push(DocumentSymbol {
                     name,
                     kind,
@@ -1261,62 +1068,58 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                     children,
                 });
             }
-            ItemKind::Statement => {
-                if node.kind() != syntax::SyntaxKind::CALL_EXPR {
-                    continue;
+            continue;
+        }
+        let Some(name) = name else {
+            continue;
+        };
+        let selection = item_name_range(db, item).unwrap_or(range);
+        // An assigned S4/R6 construction keeps the assigned name but takes the construct's kind,
+        // detail, and members.
+        let (kind, detail, children) =
+            match child_node(&node, CALL_EXPR).and_then(|call| classify_symbol_call(&call)) {
+                Some(construct) => (construct.kind, construct.detail, construct.children),
+                None => {
+                    let kind = if matches!(*item.kind(db), ItemKind::Function) {
+                        DocumentSymbolKind::Function
+                    } else {
+                        DocumentSymbolKind::Value
+                    };
+                    (kind, function_detail(&node), Vec::new())
                 }
-                let Some(construct) = classify_symbol_call(&node) else {
-                    continue;
-                };
-                let Some((name, selection)) = construct.name else {
-                    continue;
-                };
-                symbols.push(DocumentSymbol {
-                    name,
-                    kind: construct.kind,
-                    detail: construct.detail,
-                    range,
-                    selection,
-                    children: construct.children,
-                });
-            }
-        }
+            };
+        symbols.push(DocumentSymbol {
+            name: name.clone(),
+            kind,
+            detail,
+            range,
+            selection,
+            children,
+        });
     }
-    let parse = semantics::parse(db, file);
-    for annotation in parse
-        .syntax_node()
+    let root = semantics::parse(db, file).syntax_node();
+    for directive in root
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == ANNOTATION_DIRECTIVE)
     {
-        for directive in annotation
-            .descendants()
-            .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION_DIRECTIVE)
-        {
-            let (kind, detail) = match directive_name(&directive).as_deref() {
-                Some("type") => (DocumentSymbolKind::TypeDefinition, "@type"),
-                Some("alias") => (DocumentSymbolKind::AliasDefinition, "@alias"),
-                _ => continue,
-            };
-            let Some(name_token) = directive
-                .children()
-                .find(|child| child.kind() == syntax::SyntaxKind::NAME)
-                .and_then(|name| {
-                    name.children_with_tokens()
-                        .filter_map(|element| element.into_token())
-                        .find(|token| token.kind() == syntax::SyntaxKind::IDENT)
-                })
-            else {
-                continue;
-            };
-            symbols.push(DocumentSymbol {
-                name: name_token.text().to_owned(),
-                kind,
-                detail: Some(detail.to_owned()),
-                range: directive.text_range(),
-                selection: name_token.text_range(),
-                children: Vec::new(),
-            });
-        }
+        let (kind, detail) = match directive_name(&directive).as_deref() {
+            Some("type") => (DocumentSymbolKind::TypeDefinition, "@type"),
+            Some("alias") => (DocumentSymbolKind::AliasDefinition, "@alias"),
+            _ => continue,
+        };
+        let Some(name_token) =
+            child_node(&directive, NAME).and_then(|name| child_token(&name, IDENT))
+        else {
+            continue;
+        };
+        symbols.push(DocumentSymbol {
+            name: name_token.text().to_owned(),
+            kind,
+            detail: Some(detail.to_owned()),
+            range: directive.text_range(),
+            selection: name_token.text_range(),
+            children: Vec::new(),
+        });
     }
     symbols.sort_by_key(|symbol| (symbol.range.start(), symbol.range.end()));
     symbols
@@ -1330,87 +1133,67 @@ struct SymbolCall {
     children: Vec<DocumentSymbol>,
 }
 
-fn classify_symbol_call(call: &syntax::SyntaxNode) -> Option<SymbolCall> {
+fn classify_symbol_call(call: &SyntaxNode) -> Option<SymbolCall> {
     let callee = s4_callee_name(call)?;
-    let arguments = call
-        .children()
-        .find(|child| child.kind() == syntax::SyntaxKind::ARGUMENT_LIST)?;
-    match callee.as_str() {
-        "setClass" => Some(SymbolCall {
-            kind: DocumentSymbolKind::S4Class,
-            name: string_argument_content(s4_argument(&arguments, "Class", 0)),
-            detail: None,
-            children: Vec::new(),
-        }),
-        "setGeneric" => Some(SymbolCall {
-            kind: DocumentSymbolKind::S4Generic,
-            name: string_argument_content(s4_argument(&arguments, "name", 0)),
-            detail: None,
-            children: Vec::new(),
-        }),
+    let arguments = child_node(call, ARGUMENT_LIST)?;
+    let (kind, name_parameter, detail, children) = match callee.as_str() {
+        "setClass" => (DocumentSymbolKind::S4Class, "Class", None, Vec::new()),
+        "setGeneric" => (DocumentSymbolKind::S4Generic, "name", None, Vec::new()),
         "setMethod" => {
-            let signature = s4_argument(&arguments, "signature", 1)
-                .map(|signature| {
-                    let classes: Vec<String> = s4_signature_strings(&signature)
-                        .into_iter()
-                        .filter_map(|class| string_argument_content(Some(class)))
-                        .map(|(name, _)| name)
-                        .collect();
-                    if classes.is_empty() {
-                        "Unknown".to_owned()
-                    } else {
-                        classes.join(", ")
-                    }
-                })
-                .unwrap_or_else(|| "Unknown".to_owned());
-            Some(SymbolCall {
-                kind: DocumentSymbolKind::S4Method,
-                name: string_argument_content(s4_argument(&arguments, "f", 0)),
-                detail: Some(signature),
-                children: Vec::new(),
-            })
+            let classes: Vec<String> = s4_argument(&arguments, "signature", 1)
+                .iter()
+                .flat_map(s4_signature_strings)
+                .filter_map(|class| string_argument_content(Some(class)))
+                .map(|(name, _)| name)
+                .collect();
+            let signature = if classes.is_empty() {
+                "Unknown".to_owned()
+            } else {
+                classes.join(", ")
+            };
+            (
+                DocumentSymbolKind::S4Method,
+                "f",
+                Some(signature),
+                Vec::new(),
+            )
         }
-        "R6Class" => Some(SymbolCall {
-            kind: DocumentSymbolKind::R6Class,
-            name: string_argument_content(s4_argument(&arguments, "classname", 0)),
-            detail: None,
-            children: r6_members(&arguments),
-        }),
-        _ => None,
-    }
+        "R6Class" => (
+            DocumentSymbolKind::R6Class,
+            "classname",
+            None,
+            r6_members(&arguments),
+        ),
+        _ => return None,
+    };
+    Some(SymbolCall {
+        kind,
+        name: string_argument_content(s4_argument(&arguments, name_parameter, 0)),
+        detail,
+        children,
+    })
 }
 
-fn r6_members(arguments: &syntax::SyntaxNode) -> Vec<DocumentSymbol> {
+fn r6_members(arguments: &SyntaxNode) -> Vec<DocumentSymbol> {
     let mut members = Vec::new();
     for (field, position) in [("public", 1), ("private", 2), ("active", 3)] {
-        let Some(list) = s4_argument(arguments, field, position) else {
-            continue;
-        };
-        if list.kind() != syntax::SyntaxKind::CALL_EXPR {
-            continue;
-        }
-        let Some(list_arguments) = list
-            .children()
-            .find(|child| child.kind() == syntax::SyntaxKind::ARGUMENT_LIST)
+        let Some(list_arguments) = s4_argument(arguments, field, position)
+            .filter(|list| list.kind() == CALL_EXPR)
+            .and_then(|list| child_node(&list, ARGUMENT_LIST))
         else {
             continue;
         };
         for member in list_arguments
             .children()
-            .filter(|child| child.kind() == syntax::SyntaxKind::ARGUMENT)
+            .filter(|child| child.kind() == ARGUMENT)
         {
-            let Some(name) = member
-                .children()
-                .find(|child| child.kind() == syntax::SyntaxKind::NAME)
-            else {
+            let Some(name) = child_node(&member, NAME) else {
                 continue;
             };
-            let value = member
-                .children()
-                .find(|child| child.kind() != syntax::SyntaxKind::NAME);
+            let value = member.children().find(|child| child.kind() != NAME);
             let is_function = value
                 .as_ref()
-                .is_some_and(|value| value.kind() == syntax::SyntaxKind::FUNCTION_DEF);
+                .is_some_and(|value| value.kind() == FUNCTION_DEF);
             let kind = if is_function && field != "active" {
                 DocumentSymbolKind::R6Method
             } else {
@@ -1433,29 +1216,19 @@ fn r6_members(arguments: &syntax::SyntaxNode) -> Vec<DocumentSymbol> {
     members
 }
 
-fn function_detail(node: &syntax::SyntaxNode) -> Option<String> {
-    let function = if node.kind() == syntax::SyntaxKind::FUNCTION_DEF {
-        node.clone()
-    } else {
-        node.descendants()
-            .find(|child| child.kind() == syntax::SyntaxKind::FUNCTION_DEF)?
-    };
-    let parameters = function
-        .children()
-        .find(|child| child.kind() == syntax::SyntaxKind::PARAMETER_LIST)?;
+fn function_detail(node: &SyntaxNode) -> Option<String> {
+    let function = node
+        .descendants()
+        .find(|child| child.kind() == FUNCTION_DEF)?;
+    let parameters = child_node(&function, PARAMETER_LIST)?;
     let names: Vec<String> = parameters
         .children()
-        .filter(|child| child.kind() == syntax::SyntaxKind::PARAMETER)
+        .filter(|child| child.kind() == PARAMETER)
         .filter_map(|parameter| {
             parameter
                 .children_with_tokens()
-                .filter_map(|element| element.into_token())
-                .find(|token| {
-                    matches!(
-                        token.kind(),
-                        syntax::SyntaxKind::IDENT | syntax::SyntaxKind::DOTS
-                    )
-                })
+                .filter_map(SyntaxElement::into_token)
+                .find(|token| matches!(token.kind(), IDENT | DOTS))
                 .map(|token| token.text().to_owned())
         })
         .collect();
@@ -1463,25 +1236,20 @@ fn function_detail(node: &syntax::SyntaxNode) -> Option<String> {
 }
 
 /// The content and range inside the quotes of a string-literal node.
-fn string_argument_content(node: Option<syntax::SyntaxNode>) -> Option<(String, TextRange)> {
-    let token = node?
-        .children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .find(|token| token.kind() == syntax::SyntaxKind::STRING)?;
+fn string_argument_content(node: Option<SyntaxNode>) -> Option<(String, TextRange)> {
+    let token = child_token(&node?, STRING)?;
     let text = token.text();
-    if text.len() < 2 || !(text.starts_with('"') || text.starts_with('\'')) {
+    if !text.starts_with(['"', '\'']) {
         return None;
     }
-    let name = text[1..text.len() - 1].to_string();
-    if name.is_empty() {
-        return None;
-    }
-    let range = token.text_range();
+    let name = text
+        .get(1..text.len() - 1)
+        .filter(|name| !name.is_empty())?;
     Some((
-        name,
-        TextRange::new(
-            range.start() + TextSize::from(1),
-            range.end() - TextSize::from(1),
+        name.to_owned(),
+        TextRange::at(
+            token.text_range().start() + TextSize::from(1),
+            TextSize::of(name),
         ),
     ))
 }
@@ -1497,29 +1265,23 @@ pub fn workspace_symbols(db: &dyn Db, files: ProjectFiles, query: &str) -> Vec<W
     let mut symbols: Vec<(MatchScore, WorkspaceSymbol)> = Vec::new();
     for &file in files.files(db) {
         for symbol in document_symbols(db, file) {
-            for entry in std::iter::once(&symbol).chain(&symbol.children) {
-                if let Some(score) = search_match(&entry.name, query) {
-                    symbols.push((
-                        score,
-                        WorkspaceSymbol {
-                            name: entry.name.clone(),
-                            kind: entry.kind,
-                            target: NavigationTarget {
-                                file,
-                                range: entry.selection,
-                            },
+            symbols.extend(once(&symbol).chain(&symbol.children).filter_map(|entry| {
+                Some((
+                    search_match(&entry.name, query)?,
+                    WorkspaceSymbol {
+                        name: entry.name.clone(),
+                        kind: entry.kind,
+                        target: NavigationTarget {
+                            file,
+                            range: entry.selection,
                         },
-                    ));
-                }
-            }
+                    },
+                ))
+            }));
         }
     }
-    symbols.sort_by(|(left_score, left), (right_score, right)| {
-        (left_score, left.name.to_lowercase(), &left.name).cmp(&(
-            right_score,
-            right.name.to_lowercase(),
-            &right.name,
-        ))
+    symbols.sort_by_cached_key(|(score, symbol)| {
+        (*score, symbol.name.to_lowercase(), symbol.name.clone())
     });
     symbols.truncate(COMPLETION_LIMIT);
     symbols.into_iter().map(|(_, symbol)| symbol).collect()
@@ -1537,54 +1299,33 @@ fn annotation_type_at(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<AnnotationTypeCursor> {
-    let parse = semantics::parse(db, file);
-    let root = parse.syntax_node();
-    let annotation = root.descendants().find(|node| {
-        node.kind() == syntax::SyntaxKind::ANNOTATION
-            && node.text_range().start() <= offset
-            && offset <= node.text_range().end()
-    })?;
-
+    let annotation = annotation_at(&semantics::parse(db, file).syntax_node(), offset)?;
     let token = annotation
         .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
+        .filter_map(SyntaxElement::into_token)
         .find(|token| {
-            matches!(
-                token.kind(),
-                syntax::SyntaxKind::IDENT | syntax::SyntaxKind::NULL_KW
-            ) && token.text_range().start() <= offset
-                && offset <= token.text_range().end()
+            matches!(token.kind(), IDENT | NULL_KW) && token.text_range().contains_inclusive(offset)
         })?;
-    let name = token.text().to_string();
-    let range = token.text_range();
-
     let parent = token.parent()?;
-    let (is_type_position, resolvable) = match parent.kind() {
-        syntax::SyntaxKind::TYPE_REF => (true, token.kind() == syntax::SyntaxKind::IDENT),
-        syntax::SyntaxKind::NAME => match parent.parent().map(|grandparent| grandparent.kind()) {
-            Some(syntax::SyntaxKind::TYPE_APPLY) => (true, true),
-            Some(syntax::SyntaxKind::ANNOTATION_DIRECTIVE) => (
-                parent.parent().is_some_and(|grandparent| {
-                    matches!(
-                        directive_name(&grandparent).as_deref(),
-                        Some("type" | "alias")
-                    )
-                }),
-                true,
-            ),
-            Some(other) if type_kind(other) => (true, false),
-            _ => (false, false),
-        },
-        other if type_kind(other) => (true, false),
-        _ => (false, false),
+    let resolvable = match parent.kind() {
+        TYPE_REF => token.kind() == IDENT,
+        NAME => {
+            let grandparent = parent.parent()?;
+            match grandparent.kind() {
+                TYPE_APPLY => true,
+                ANNOTATION_DIRECTIVE if is_type_directive(&grandparent) => true,
+                other if type_kind(other) => false,
+                _ => return None,
+            }
+        }
+        other if type_kind(other) => false,
+        _ => return None,
     };
-    if !is_type_position {
-        return None;
-    }
+    let name = token.text().to_owned();
     let navigable = resolvable && !binder_names(&annotation).contains(&name);
     Some(AnnotationTypeCursor {
         name,
-        range,
+        range: token.text_range(),
         navigable,
     })
 }
@@ -1607,74 +1348,55 @@ struct S4Occurrence {
 }
 
 fn s4_occurrences_in(db: &dyn Db, file: SourceFile) -> Vec<S4Occurrence> {
-    let parse = semantics::parse(db, file);
+    let root = semantics::parse(db, file).syntax_node();
     let mut occurrences = Vec::new();
-    for call in parse
-        .syntax_node()
-        .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::CALL_EXPR)
-    {
-        let Some(callee) = s4_callee_name(&call) else {
-            continue;
-        };
-        let Some(arguments) = call
-            .children()
-            .find(|child| child.kind() == syntax::SyntaxKind::ARGUMENT_LIST)
+    for call in root.descendants().filter(|node| node.kind() == CALL_EXPR) {
+        let (Some(callee), Some(arguments)) =
+            (s4_callee_name(&call), child_node(&call, ARGUMENT_LIST))
         else {
             continue;
         };
-        match callee.as_str() {
-            "setClass" => push_s4_string(
-                s4_argument(&arguments, "Class", 0),
-                S4Kind::Class,
-                true,
-                &mut occurrences,
-            ),
-            "setGeneric" => push_s4_string(
-                s4_argument(&arguments, "name", 0),
-                S4Kind::Generic,
-                true,
-                &mut occurrences,
-            ),
+        let strings: Vec<(Option<SyntaxNode>, S4Kind, bool)> = match callee.as_str() {
+            "setClass" => vec![(s4_argument(&arguments, "Class", 0), S4Kind::Class, true)],
+            "setGeneric" => vec![(s4_argument(&arguments, "name", 0), S4Kind::Generic, true)],
             // The generic's body dispatches by name, so a rename must cover it.
-            "standardGeneric" => push_s4_string(
-                s4_argument(&arguments, "f", 0),
-                S4Kind::Generic,
-                false,
-                &mut occurrences,
-            ),
-            "setMethod" => {
-                push_s4_string(
-                    s4_argument(&arguments, "f", 0),
-                    S4Kind::Generic,
-                    false,
-                    &mut occurrences,
-                );
-                if let Some(signature) = s4_argument(&arguments, "signature", 1) {
-                    for class_string in s4_signature_strings(&signature) {
-                        push_s4_string(Some(class_string), S4Kind::Class, false, &mut occurrences);
-                    }
-                }
-            }
-            "new" => push_s4_string(
-                s4_argument(&arguments, "Class", 0),
-                S4Kind::Class,
-                false,
-                &mut occurrences,
-            ),
-            _ => {}
-        }
+            "standardGeneric" => vec![(s4_argument(&arguments, "f", 0), S4Kind::Generic, false)],
+            "setMethod" => once((s4_argument(&arguments, "f", 0), S4Kind::Generic, false))
+                .chain(
+                    s4_argument(&arguments, "signature", 1)
+                        .iter()
+                        .flat_map(s4_signature_strings)
+                        .map(|class| (Some(class), S4Kind::Class, false)),
+                )
+                .collect(),
+            "new" => vec![(s4_argument(&arguments, "Class", 0), S4Kind::Class, false)],
+            _ => continue,
+        };
+        // Raw strings never carry S4 names.
+        occurrences.extend(
+            strings
+                .into_iter()
+                .filter_map(|(node, kind, is_declaration)| {
+                    let (name, range) = string_argument_content(node)?;
+                    Some(S4Occurrence {
+                        name,
+                        kind,
+                        range,
+                        is_declaration,
+                    })
+                }),
+        );
     }
     occurrences
 }
 
-fn s4_callee_name(call: &syntax::SyntaxNode) -> Option<String> {
+fn s4_callee_name(call: &SyntaxNode) -> Option<String> {
     let callee = call.children().next()?;
     match callee.kind() {
-        syntax::SyntaxKind::NAME => Some(callee.text().to_string()),
-        syntax::SyntaxKind::NAMESPACE_EXPR => callee
+        NAME => Some(callee.text().to_string()),
+        NAMESPACE_EXPR => callee
             .children()
-            .filter(|child| child.kind() == syntax::SyntaxKind::NAME)
+            .filter(|child| child.kind() == NAME)
             .last()
             .map(|name| name.text().to_string()),
         _ => None,
@@ -1682,100 +1404,71 @@ fn s4_callee_name(call: &syntax::SyntaxNode) -> Option<String> {
 }
 
 /// By name, else the unnamed argument at `index`.
-fn s4_argument(
-    arguments: &syntax::SyntaxNode,
-    name: &str,
-    index: usize,
-) -> Option<syntax::SyntaxNode> {
-    let all: Vec<syntax::SyntaxNode> = arguments
-        .children()
-        .filter(|child| child.kind() == syntax::SyntaxKind::ARGUMENT)
-        .collect();
-    for argument in &all {
-        if let Some(argument_name) = argument
+fn s4_argument(arguments: &SyntaxNode, name: &str, index: usize) -> Option<SyntaxNode> {
+    let argument_nodes = || {
+        arguments
             .children()
-            .find(|child| child.kind() == syntax::SyntaxKind::NAME)
-            && argument_name.text() == name
-        {
-            return argument
-                .children()
-                .find(|child| child.kind() != syntax::SyntaxKind::NAME);
-        }
+            .filter(|child| child.kind() == ARGUMENT)
+    };
+    if let Some(named) = argument_nodes().find(|argument| {
+        child_node(argument, NAME).is_some_and(|argument_name| argument_name.text() == name)
+    }) {
+        return named.children().find(|child| child.kind() != NAME);
     }
-    all.get(index)
+    argument_nodes()
+        .nth(index)
         .filter(|argument| {
             // A NAME child followed by EQ is a `name =` tag; a bare NAME child is the value.
             !argument
                 .children_with_tokens()
-                .any(|element| element.kind() == syntax::SyntaxKind::EQ)
+                .any(|element| element.kind() == EQ)
         })
         .and_then(|argument| argument.children().next())
 }
 
-fn s4_signature_strings(signature: &syntax::SyntaxNode) -> Vec<syntax::SyntaxNode> {
+fn s4_signature_strings(signature: &SyntaxNode) -> Vec<SyntaxNode> {
     if is_string_literal(signature) {
         return vec![signature.clone()];
     }
-    if signature.kind() == syntax::SyntaxKind::CALL_EXPR
-        && let Some(arguments) = signature
-            .children()
-            .find(|child| child.kind() == syntax::SyntaxKind::ARGUMENT_LIST)
-    {
-        return arguments
-            .children()
-            .filter(|child| child.kind() == syntax::SyntaxKind::ARGUMENT)
-            .filter_map(|argument| argument.children().last())
-            .filter(is_string_literal)
-            .collect();
+    if signature.kind() != CALL_EXPR {
+        return Vec::new();
     }
-    Vec::new()
+    child_node(signature, ARGUMENT_LIST)
+        .into_iter()
+        .flat_map(|arguments| arguments.children())
+        .filter(|child| child.kind() == ARGUMENT)
+        .filter_map(|argument| argument.children().last())
+        .filter(is_string_literal)
+        .collect()
 }
 
-fn is_string_literal(node: &syntax::SyntaxNode) -> bool {
-    node.kind() == syntax::SyntaxKind::LITERAL
+fn is_string_literal(node: &SyntaxNode) -> bool {
+    node.kind() == LITERAL
         && node
             .children_with_tokens()
-            .any(|element| element.kind() == syntax::SyntaxKind::STRING)
+            .any(|element| element.kind() == STRING)
 }
 
-fn push_s4_string(
-    node: Option<syntax::SyntaxNode>,
-    kind: S4Kind,
-    is_declaration: bool,
-    out: &mut Vec<S4Occurrence>,
-) {
-    // Raw strings never carry S4 names.
-    let Some((name, range)) = string_argument_content(node) else {
-        return;
-    };
-    out.push(S4Occurrence {
-        name,
-        kind,
-        range,
-        is_declaration,
-    });
-}
-
-fn type_kind(kind: syntax::SyntaxKind) -> bool {
+fn type_kind(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        syntax::SyntaxKind::TYPE_REF
-            | syntax::SyntaxKind::TYPE_APPLY
-            | syntax::SyntaxKind::TYPE_VECTOR
-            | syntax::SyntaxKind::TYPE_UNION
-            | syntax::SyntaxKind::TYPE_FUNCTION
-            | syntax::SyntaxKind::TYPE_RECORD
-            | syntax::SyntaxKind::TYPE_TUPLE
-            | syntax::SyntaxKind::TYPE_LIST
-            | syntax::SyntaxKind::TYPE_PAREN
-            | syntax::SyntaxKind::TYPE_BINDER_LIST
-            | syntax::SyntaxKind::TYPE_BINDER
-            | syntax::SyntaxKind::TYPE_PARAMETER_LIST
-            | syntax::SyntaxKind::TYPE_ARG_LIST
+        TYPE_REF
+            | TYPE_APPLY
+            | TYPE_VECTOR
+            | TYPE_UNION
+            | TYPE_FUNCTION
+            | TYPE_RECORD
+            | TYPE_TUPLE
+            | TYPE_LIST
+            | TYPE_PAREN
+            | TYPE_BINDER_LIST
+            | TYPE_BINDER
+            | TYPE_PARAMETER_LIST
+            | TYPE_ARG_LIST
     )
 }
 
-fn directive_name(directive: &syntax::SyntaxNode) -> Option<String> {
+fn directive_name(directive: &SyntaxNode) -> Option<String> {
     let mut name = String::new();
     let mut end: Option<TextSize> = None;
     for element in directive.children_with_tokens() {
@@ -1783,10 +1476,10 @@ fn directive_name(directive: &syntax::SyntaxNode) -> Option<String> {
             break;
         };
         match token.kind() {
-            syntax::SyntaxKind::AT => {
+            AT => {
                 end = Some(token.text_range().end());
             }
-            syntax::SyntaxKind::WHITESPACE | syntax::SyntaxKind::NEWLINE => break,
+            WHITESPACE | NEWLINE => break,
             // Only touching tokens join: `@if-unknown` lexes as `if` `-` `unknown`.
             _ if end.is_some() && Some(token.text_range().start()) == end => {
                 name.push_str(token.text());
@@ -1798,46 +1491,58 @@ fn directive_name(directive: &syntax::SyntaxNode) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-fn binder_names(annotation: &syntax::SyntaxNode) -> Vec<String> {
+fn is_type_directive(directive: &SyntaxNode) -> bool {
+    matches!(directive_name(directive).as_deref(), Some("type" | "alias"))
+}
+
+fn binder_names(annotation: &SyntaxNode) -> Vec<String> {
     annotation
         .descendants()
-        .filter(|node| node.kind() == syntax::SyntaxKind::TYPE_BINDER)
+        .filter(|node| node.kind() == TYPE_BINDER)
         .filter_map(|binder| {
             binder
                 .descendants_with_tokens()
-                .filter_map(|element| element.into_token())
-                .find(|token| token.kind() == syntax::SyntaxKind::IDENT)
+                .filter_map(SyntaxElement::into_token)
+                .find(|token| token.kind() == IDENT)
                 .map(|token| token.text().to_string())
         })
         .collect()
 }
 
-fn annotation_type_hover(
-    db: &dyn Db,
-    file: SourceFile,
-    cursor: &AnnotationTypeCursor,
-) -> Option<Hover> {
+fn annotation_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxNode> {
+    root.descendants()
+        .find(|node| node.kind() == ANNOTATION && node.text_range().contains_inclusive(offset))
+}
+
+fn child_node(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
+    node.children().find(|child| child.kind() == kind)
+}
+
+fn child_token(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find(|token| token.kind() == kind)
+}
+
+fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeCursor) -> Hover {
     // Resolves against the file's own declarations, matching how the checker's winner table
     // folds files.
-    let definition = cursor
-        .navigable
-        .then(|| {
-            semantics::file_type_definitions(db, file)
-                .into_iter()
-                .find(|definition| definition.name.text(db) == cursor.name)
-        })
-        .flatten();
-    let project_declared = definition.is_some();
-    let line = match definition {
+    let declared = if cursor.navigable {
+        file_type_definitions(db, file)
+            .into_iter()
+            .find(|definition| definition.name.text(db) == cursor.name)
+    } else {
+        None
+    };
+    let line = match &declared {
         Some(definition) => {
-            let mut renderer = TypeRenderer::default();
             let parameters = if definition.parameters.is_empty() {
                 String::new()
             } else {
-                let names: Vec<String> = definition
+                let names: Vec<&str> = definition
                     .parameters
                     .iter()
-                    .map(|parameter| parameter.text(db).to_owned())
+                    .map(|parameter| parameter.text(db))
                     .collect();
                 format!("<{}>", names.join(", "))
             };
@@ -1845,129 +1550,90 @@ fn annotation_type_hover(
             format!(
                 "{keyword} {}{parameters} {{{}}}",
                 cursor.name,
-                renderer.render(db, definition.body)
+                TypeRenderer::default().render(db, definition.body)
             )
         }
         None => cursor.name.clone(),
     };
-    let stub_definition = if !project_declared && cursor.navigable {
-        semantics::stubs::stubs(db)
-            .is_some_and(|library| library.nominals.contains(&cursor.name))
-            .then(|| {
-                semantics::stubs::declaring_namespace(db, &cursor.name).map(|namespace| {
-                    HoverDefinition::Stub {
-                        namespace: namespace.to_owned(),
-                        overloads: 0,
-                        declaration: stub_target(db, &cursor.name),
-                    }
-                })
-            })
-            .flatten()
+    let definition = if declared.is_none()
+        && cursor.navigable
+        && stubs(db).is_some_and(|library| library.nominals.contains(&cursor.name))
+        && let Some(namespace) = declaring_namespace(db, &cursor.name)
+    {
+        Some(HoverDefinition::Stub {
+            namespace: namespace.to_owned(),
+            overloads: 0,
+            declaration: stub_target(db, &cursor.name),
+        })
     } else {
         None
     };
-    Some(Hover {
+    Hover {
         range: cursor.range,
         lines: vec![line],
-        definition: stub_definition,
-    })
+        definition,
+    }
 }
 
 /// The hover range spans only the declaration's own lines: a stitched block may hold several.
 fn annotation_definition_hover(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<Hover> {
-    let parse = semantics::parse(db, file);
-    let root = parse.syntax_node();
-    let annotation = root.descendants().find(|node| {
-        node.kind() == syntax::SyntaxKind::ANNOTATION
-            && node.text_range().start() <= offset
-            && offset <= node.text_range().end()
-    })?;
-    for directive in annotation.descendants().filter(|node| {
-        node.kind() == syntax::SyntaxKind::ANNOTATION_DIRECTIVE
-            && matches!(directive_name(node).as_deref(), Some("type" | "alias"))
-    }) {
-        let start = annotation
-            .descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-            .filter(|token| {
-                token.kind() == syntax::SyntaxKind::ANNOTATION_MARKER
-                    && token.text_range().start() <= directive.text_range().start()
-            })
-            .map(|token| token.text_range().start())
-            .last()
-            .unwrap_or_else(|| directive.text_range().start());
-        let range = TextRange::new(start, directive.text_range().end());
-        if !(range.start() <= offset && offset <= range.end()) {
-            continue;
-        }
-        let Some(name) = directive
-            .children()
-            .find(|child| child.kind() == syntax::SyntaxKind::NAME)
-            .map(|name| name.text().to_string())
-        else {
-            continue;
-        };
-        let cursor = AnnotationTypeCursor {
-            name,
-            range,
-            navigable: true,
-        };
-        return annotation_type_hover(db, file, &cursor);
-    }
-    None
+    let annotation = annotation_at(&semantics::parse(db, file).syntax_node(), offset)?;
+    annotation
+        .descendants()
+        .filter(|node| node.kind() == ANNOTATION_DIRECTIVE && is_type_directive(node))
+        .find_map(|directive| {
+            let start = annotation
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .filter(|token| {
+                    token.kind() == ANNOTATION_MARKER
+                        && token.text_range().start() <= directive.text_range().start()
+                })
+                .map(|token| token.text_range().start())
+                .last()
+                .unwrap_or_else(|| directive.text_range().start());
+            let range = TextRange::new(start, directive.text_range().end());
+            if !range.contains_inclusive(offset) {
+                return None;
+            }
+            let name = child_node(&directive, NAME)?.text().to_string();
+            Some(annotation_type_hover(
+                db,
+                file,
+                &AnnotationTypeCursor {
+                    name,
+                    range,
+                    navigable: true,
+                },
+            ))
+        })
 }
 
 fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Occurrence> {
     let mut result = Vec::new();
     for &file in files.files(db) {
-        let parse = semantics::parse(db, file);
-        for annotation in parse
-            .syntax_node()
-            .descendants()
-            .filter(|node| node.kind() == syntax::SyntaxKind::ANNOTATION)
-        {
+        let root = semantics::parse(db, file).syntax_node();
+        for annotation in root.descendants().filter(|node| node.kind() == ANNOTATION) {
             let shadowed = binder_names(&annotation)
                 .iter()
                 .any(|binder| binder == name);
             for node in annotation.descendants() {
-                let (token, is_declaration) = match node.kind() {
-                    syntax::SyntaxKind::TYPE_REF => {
-                        let Some(token) = node
-                            .children_with_tokens()
-                            .filter_map(|element| element.into_token())
-                            .find(|token| token.kind() == syntax::SyntaxKind::IDENT)
-                        else {
-                            continue;
-                        };
-                        (token, false)
-                    }
-                    syntax::SyntaxKind::NAME => {
-                        let Some(parent) = node.parent() else {
-                            continue;
-                        };
-                        let is_declaration = match parent.kind() {
-                            syntax::SyntaxKind::TYPE_APPLY => false,
-                            syntax::SyntaxKind::ANNOTATION_DIRECTIVE => {
-                                if !matches!(
-                                    directive_name(&parent).as_deref(),
-                                    Some("type" | "alias")
-                                ) {
-                                    continue;
-                                }
-                                true
-                            }
-                            _ => continue,
-                        };
-                        let Some(token) = node
-                            .children_with_tokens()
-                            .filter_map(|element| element.into_token())
-                            .find(|token| token.kind() == syntax::SyntaxKind::IDENT)
-                        else {
-                            continue;
-                        };
-                        (token, is_declaration)
-                    }
+                let is_declaration = match node.kind() {
+                    TYPE_REF => false,
+                    NAME => match node.parent() {
+                        Some(parent) if parent.kind() == TYPE_APPLY => false,
+                        Some(parent)
+                            if parent.kind() == ANNOTATION_DIRECTIVE
+                                && is_type_directive(&parent) =>
+                        {
+                            true
+                        }
+                        _ => continue,
+                    },
                     _ => continue,
+                };
+                let Some(token) = child_token(&node, IDENT) else {
+                    continue;
                 };
                 if token.text() != name || (shadowed && !is_declaration) {
                     continue;
@@ -1987,7 +1653,7 @@ fn string_subscript_completion(
     db: &dyn Db,
     file: SourceFile,
     offset: TextSize,
-    string_token: &syntax::SyntaxToken,
+    string_token: &SyntaxToken,
 ) -> Option<CompletionResult> {
     let position = position_in_item(db, file, offset)?;
     let hir = item_hir(db, position.item).as_ref()?;
@@ -1997,7 +1663,7 @@ fn string_subscript_completion(
     let target = hir
         .expressions
         .iter()
-        .filter_map(|expression| match &expression.kind {
+        .find_map(|expression| match &expression.kind {
             ExpressionKind::Index {
                 double: true,
                 target,
@@ -2011,28 +1677,25 @@ fn string_subscript_completion(
                 Some(*target)
             }
             _ => None,
-        })
-        .next()?;
-    let ty = *check.expression_types.get(&target)?;
-    let TyKind::Record(fields) = ty.kind(db) else {
+        })?;
+    let TyKind::Record(fields) = check.expression_types.get(&target)?.kind(db) else {
         return None;
     };
 
-    let text = string_token.text();
     let typed = usize::from(offset - string_token.text_range().start());
-    let query = text.get(1..typed).unwrap_or_default();
+    let query = string_token.text().get(1..typed).unwrap_or_default();
 
     let mut renderer = TypeRenderer::default();
-    let items: Vec<CompletionItem> = fields
+    let items = fields
         .iter()
         .filter(|field| search_match(field.name.text(db), query).is_some())
         .map(|field| CompletionItem {
-            label: field.name.text(db).to_owned(),
-            kind: CompletionKind::Field,
-            source: CompletionSource::Field,
             detail: Some(renderer.render(db, field.ty)),
-            documentation: None,
-            takes_arguments: None,
+            ..CompletionItem::new(
+                field.name.text(db).to_owned(),
+                CompletionKind::Field,
+                CompletionSource::Field,
+            )
         })
         .collect();
     finish_completions(items, query)
@@ -2057,45 +1720,37 @@ fn annotation_completion(
         "Unknown",
         "NULL",
     ];
-    let mut items = Vec::new();
-    for primitive in PRIMITIVES {
-        if search_match(primitive, query).is_some() {
-            items.push(CompletionItem {
-                label: (*primitive).to_owned(),
-                kind: CompletionKind::Keyword,
-                source: CompletionSource::Keyword,
-                detail: None,
-                documentation: None,
-                takes_arguments: None,
-            });
-        }
-    }
+    let mut items: Vec<CompletionItem> = PRIMITIVES
+        .iter()
+        .filter(|primitive| search_match(primitive, query).is_some())
+        .map(|primitive| {
+            CompletionItem::new(
+                (*primitive).to_owned(),
+                CompletionKind::Keyword,
+                CompletionSource::Keyword,
+            )
+        })
+        .collect();
     // The project table covers package files only, so a script's own declarations are added.
-    let mut definitions: Vec<(String, semantics::annotations::NamedDefinition<'_>)> =
-        semantics::project_type_definitions(db, files)
-            .iter()
-            .map(|(name, definition)| (name.text(db).to_owned(), definition.clone()))
-            .collect();
-    for definition in semantics::file_type_definitions(db, file) {
+    let mut definitions: Vec<(String, Ty<'_>)> = project_type_definitions(db, files)
+        .iter()
+        .map(|(name, definition)| (name.text(db).to_owned(), definition.body))
+        .collect();
+    for definition in file_type_definitions(db, file) {
         let label = definition.name.text(db).to_owned();
         if !definitions.iter().any(|(name, _)| *name == label) {
-            definitions.push((label, definition));
+            definitions.push((label, definition.body));
         }
     }
-    for (label, definition) in definitions {
-        if search_match(&label, query).is_none() {
-            continue;
-        }
-        let mut renderer = TypeRenderer::default();
-        items.push(CompletionItem {
-            label,
-            kind: CompletionKind::Variable,
-            source: CompletionSource::Global,
-            detail: Some(renderer.render(db, definition.body)),
-            documentation: None,
-            takes_arguments: None,
-        });
-    }
+    items.extend(
+        definitions
+            .into_iter()
+            .filter(|(label, _)| search_match(label, query).is_some())
+            .map(|(label, body)| CompletionItem {
+                detail: Some(TypeRenderer::default().render(db, body)),
+                ..CompletionItem::new(label, CompletionKind::Variable, CompletionSource::Global)
+            }),
+    );
     finish_completions(items, query)
 }
 
@@ -2116,29 +1771,18 @@ enum CompletionContext {
 
 /// R scoping is function-granular: a binding is visible only where its innermost enclosing
 /// `FUNCTION_DEF` contains the cursor, so sibling closures' locals do not leak.
-fn binding_visible_at(
-    item_node: &syntax::SyntaxNode,
-    binding_start: TextSize,
-    cursor: TextSize,
-) -> bool {
-    if !item_node
-        .text_range()
-        .contains_range(TextRange::empty(binding_start))
-    {
+fn binding_visible_at(item_node: &SyntaxNode, binding_start: TextSize, cursor: TextSize) -> bool {
+    if !item_node.text_range().contains_inclusive(binding_start) {
         return true;
     }
-    let covering = item_node.covering_element(TextRange::empty(binding_start));
-    let covering_node = match covering {
-        syntax::SyntaxElement::Node(node) => node,
-        syntax::SyntaxElement::Token(token) => token.parent().unwrap_or_else(|| item_node.clone()),
+    let covering = match item_node.covering_element(TextRange::empty(binding_start)) {
+        SyntaxElement::Node(node) => node,
+        SyntaxElement::Token(token) => token.parent().unwrap_or_else(|| item_node.clone()),
     };
-    let owning_function = covering_node
+    covering
         .ancestors()
-        .find(|ancestor| ancestor.kind() == syntax::SyntaxKind::FUNCTION_DEF);
-    match owning_function {
-        Some(function) => function.text_range().contains(cursor),
-        None => true,
-    }
+        .find(|ancestor| ancestor.kind() == FUNCTION_DEF)
+        .is_none_or(|function| function.text_range().contains(cursor))
 }
 
 /// Works on raw text so completion still fires mid-edit inside broken code.
@@ -2179,7 +1823,9 @@ fn completion_context(text: &str, offset: TextSize) -> Option<(CompletionContext
                             .map(|start| {
                                 prefix[start..]
                                     .chars()
-                                    .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '_')
+                                    .take_while(|next| {
+                                        next.is_alphanumeric() || *next == '.' || *next == '_'
+                                    })
                                     .collect::<String>()
                             })
                             .unwrap_or_default();
@@ -2202,37 +1848,24 @@ fn spelled_completions(
     db: &dyn Db,
     files: ProjectFiles,
     query: &str,
-    kind: syntax::SyntaxKind,
+    kind: SyntaxKind,
     source: CompletionSource,
 ) -> Vec<CompletionItem> {
-    let mut labels = std::collections::BTreeSet::new();
+    let mut labels = BTreeSet::new();
     for &project_file in files.files(db) {
-        let parse = semantics::parse(db, project_file);
-        for node in parse.syntax_node().descendants() {
-            if node.kind() != kind {
-                continue;
-            }
-            // The lhs is an expression node, so the last bare NAME child is the field.
-            if let Some(name) = node
-                .children()
-                .filter(|child| child.kind() == syntax::SyntaxKind::NAME)
-                .last()
-            {
-                labels.insert(name.text().to_string());
-            }
-        }
+        let root = semantics::parse(db, project_file).syntax_node();
+        // The lhs is an expression node, so the last bare NAME child is the field.
+        labels.extend(
+            root.descendants()
+                .filter(|node| node.kind() == kind)
+                .filter_map(|node| node.children().filter(|child| child.kind() == NAME).last())
+                .map(|name| name.text().to_string()),
+        );
     }
     labels
         .into_iter()
         .filter(|label| search_match(label, query).is_some())
-        .map(|label| CompletionItem {
-            label,
-            kind: CompletionKind::Field,
-            source,
-            detail: None,
-            documentation: None,
-            takes_arguments: None,
-        })
+        .map(|label| CompletionItem::new(label, CompletionKind::Field, source))
         .collect()
 }
 
@@ -2247,45 +1880,33 @@ fn dollar_completions(
         let position = position_in_item(db, file, offset)?;
         let hir = item_hir(db, position.item).as_ref()?;
         let check = item_check(db, position.item)?;
-        let target = hir
+        let (_, target) = hir
             .expressions
             .iter()
             .filter_map(|expression| match &expression.kind {
                 ExpressionKind::Field { target, .. }
                     if !expression.range.is_empty()
-                        && expression.range.start() <= position.relative
-                        && position.relative <= expression.range.end() =>
+                        && expression.range.contains_inclusive(position.relative) =>
                 {
                     Some((expression.range, *target))
                 }
                 _ => None,
             })
-            .min_by_key(|(range, _)| range.len())
-            .map(|(_, target)| target)?;
-        let ty = *check.expression_types.get(&target)?;
-        let TyKind::Record(fields) = ty.kind(db) else {
+            .min_by_key(|(range, _)| range.len())?;
+        let TyKind::Record(fields) = check.expression_types.get(&target)?.kind(db) else {
             return None;
         };
         let mut renderer = TypeRenderer::default();
         Some(
             fields
                 .iter()
-                .map(|field| {
-                    // A non-syntactic field name is insertable after `$` only backtick-quoted.
-                    let name = field.name.text(db);
-                    let label = if syntax::is_syntactic_name(name) {
-                        name.to_owned()
-                    } else {
-                        format!("`{name}`")
-                    };
-                    CompletionItem {
-                        label,
-                        kind: CompletionKind::Field,
-                        source: CompletionSource::Field,
-                        detail: Some(renderer.render(db, field.ty)),
-                        documentation: None,
-                        takes_arguments: None,
-                    }
+                .map(|field| CompletionItem {
+                    detail: Some(renderer.render(db, field.ty)),
+                    ..CompletionItem::new(
+                        insertable_name(field.name.text(db)),
+                        CompletionKind::Field,
+                        CompletionSource::Field,
+                    )
                 })
                 .filter(|item| search_match(&item.label, query).is_some())
                 .collect::<Vec<_>>(),
@@ -2293,13 +1914,7 @@ fn dollar_completions(
     })();
     match typed {
         Some(items) if !items.is_empty() => items,
-        _ => spelled_completions(
-            db,
-            files,
-            query,
-            syntax::SyntaxKind::DOLLAR_EXPR,
-            CompletionSource::Field,
-        ),
+        _ => spelled_completions(db, files, query, DOLLAR_EXPR, CompletionSource::Field),
     }
 }
 
@@ -2309,96 +1924,96 @@ fn namespace_completions(
     package: &str,
     query: &str,
 ) -> Vec<CompletionItem> {
-    if let Some(library) = semantics::stubs::stubs(db)
+    if let Some(library) = stubs(db)
         && let Some(exports) = library.exports_by_namespace.get(package)
     {
-        let mut items: Vec<CompletionItem> = exports
+        return exports
             .iter()
             .filter(|name| search_match(name, query).is_some())
             .map(|name| {
-                let mut renderer = TypeRenderer::default();
-                let (kind, detail, takes_arguments) =
-                    match library.schemes.get(name).and_then(|s| s.first()) {
-                        Some(scheme) => (
-                            match scheme.body.kind(db) {
-                                TyKind::Function(_) => CompletionKind::Function,
-                                _ => CompletionKind::Variable,
-                            },
-                            Some(renderer.render_scheme(db, scheme)),
-                            scheme_takes_arguments(db, scheme),
-                        ),
-                        None => (CompletionKind::Variable, None, None),
-                    };
-                // A non-syntactic export is referable after `::` only backtick-quoted.
-                let label = if syntax::is_syntactic_name(name) {
-                    name.clone()
-                } else {
-                    format!("`{name}`")
-                };
-                CompletionItem {
-                    label,
-                    kind,
-                    source: CompletionSource::Stdlib,
-                    detail,
-                    documentation: None,
-                    takes_arguments,
+                let label = insertable_name(name);
+                match library
+                    .schemes
+                    .get(name)
+                    .and_then(|schemes| schemes.first())
+                {
+                    Some(scheme) => scheme_completion(db, label, scheme),
+                    None => CompletionItem::new(
+                        label,
+                        CompletionKind::Variable,
+                        CompletionSource::Stdlib,
+                    ),
                 }
             })
             .collect();
-        items.sort_by(|left, right| left.label.cmp(&right.label));
-        return items;
     }
-    spelled_completions(
-        db,
-        files,
-        query,
-        syntax::SyntaxKind::NAMESPACE_EXPR,
-        CompletionSource::Global,
-    )
+    spelled_completions(db, files, query, NAMESPACE_EXPR, CompletionSource::Global)
 }
 
-fn finish_completions(items: Vec<CompletionItem>, query: &str) -> Option<CompletionResult> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut deduplicated = Vec::new();
-    for item in items {
-        if seen.insert(item.label.clone()) {
-            deduplicated.push(item);
-        }
-    }
-    deduplicated.sort_by(|left, right| {
+fn finish_completions(mut items: Vec<CompletionItem>, query: &str) -> Option<CompletionResult> {
+    let mut seen = BTreeSet::new();
+    items.retain(|item| seen.insert(item.label.clone()));
+    items.sort_by_cached_key(|item| {
         (
-            search_match(&left.label, query),
-            left.source,
-            left.label.to_lowercase(),
-            left.label.clone(),
-            left.kind,
+            search_match(&item.label, query),
+            item.source,
+            item.label.to_lowercase(),
+            item.label.clone(),
         )
-            .cmp(&(
-                search_match(&right.label, query),
-                right.source,
-                right.label.to_lowercase(),
-                right.label.clone(),
-                right.kind,
-            ))
     });
-    let is_incomplete = deduplicated.len() > COMPLETION_LIMIT;
-    deduplicated.truncate(COMPLETION_LIMIT);
-    (!deduplicated.is_empty()).then_some(CompletionResult {
-        items: deduplicated,
+    let is_incomplete = items.len() > COMPLETION_LIMIT;
+    items.truncate(COMPLETION_LIMIT);
+    (!items.is_empty()).then_some(CompletionResult {
+        items,
         is_incomplete,
     })
 }
 
+fn scheme_completion(db: &dyn Db, label: String, scheme: &TypeScheme<'_>) -> CompletionItem {
+    let kind = match scheme.body.kind(db) {
+        TyKind::Function(_) => CompletionKind::Function,
+        _ => CompletionKind::Variable,
+    };
+    CompletionItem {
+        detail: Some(TypeRenderer::default().render_scheme(db, scheme)),
+        takes_arguments: scheme_takes_arguments(db, scheme),
+        ..CompletionItem::new(label, kind, CompletionSource::Stdlib)
+    }
+}
+
+fn scheme_takes_arguments(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<bool> {
+    match scheme.body.kind(db) {
+        TyKind::Function(function) => Some(
+            !function.positional.is_empty()
+                || !function.named.is_empty()
+                || function.variadic.is_some(),
+        ),
+        _ => None,
+    }
+}
+
+/// A non-syntactic name is insertable after `$` or `::` only backtick-quoted.
+fn insertable_name(name: &str) -> String {
+    if is_syntactic_name(name) {
+        name.to_owned()
+    } else {
+        format!("`{name}`")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MatchScore {
-    tier: u8,
+    tier: MatchTier,
     first_match_index: u32,
 }
 
-const TIER_EXACT: u8 = 0;
-const TIER_PREFIX: u8 = 1;
-const TIER_SUBSTRING: u8 = 2;
-const TIER_SUBSEQUENCE: u8 = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchTier {
+    Exact,
+    Prefix,
+    Substring,
+    Subsequence,
+}
 
 /// Shorter queries match by prefix only, so one- or two-character inputs do not surface
 /// scattered matches.
@@ -2409,7 +2024,7 @@ const MIN_SUBSEQUENCE_QUERY_LEN: usize = 3;
 pub fn search_match(candidate: &str, query: &str) -> Option<MatchScore> {
     if query.is_empty() {
         return Some(MatchScore {
-            tier: TIER_PREFIX,
+            tier: MatchTier::Prefix,
             first_match_index: 0,
         });
     }
@@ -2441,15 +2056,15 @@ pub fn search_match(candidate: &str, query: &str) -> Option<MatchScore> {
     }
 
     let tier = if equal_under_case(candidate, query, case_sensitive) {
-        TIER_EXACT
+        MatchTier::Exact
     } else if prefix_under_case(candidate, query, case_sensitive) {
-        TIER_PREFIX
+        MatchTier::Prefix
     } else if substring_under_case(candidate, query, case_sensitive) {
-        TIER_SUBSTRING
+        MatchTier::Substring
     } else {
-        TIER_SUBSEQUENCE
+        MatchTier::Subsequence
     };
-    if query.chars().count() < MIN_SUBSEQUENCE_QUERY_LEN && tier > TIER_PREFIX {
+    if query.chars().count() < MIN_SUBSEQUENCE_QUERY_LEN && tier > MatchTier::Prefix {
         return None;
     }
     Some(MatchScore {
@@ -2534,7 +2149,7 @@ fn active_parameter(
     function: &FunctionType<'_>,
     rendered_count: usize,
     arguments: &[Argument],
-    hir: &semantics::hir::Module,
+    hir: &Module,
     cursor: TextSize,
 ) -> Option<usize> {
     if rendered_count == 0 {
@@ -2621,12 +2236,30 @@ fn active_parameter(
 
 /// Variables are presentable only under a top-level function type, whose label generalizes them
 /// into binders; anywhere else they would render as unanchored type parameters.
-fn scheme_is_hintable(db: &dyn Db, scheme: &TypeScheme<'_>) -> bool {
+fn assignment_label(
+    db: &dyn Db,
+    check: &ItemCheck<'_>,
+    id: ExprId,
+    value: ExprId,
+    is_root: bool,
+) -> Option<String> {
+    let monomorphic;
+    let scheme = if is_root {
+        check.scheme.as_ref()?
+    } else {
+        let ty = check
+            .expression_types
+            .get(&id)
+            .or_else(|| check.expression_types.get(&value))?;
+        monomorphic = TypeScheme::monomorphic(*ty);
+        &monomorphic
+    };
     is_hintable(
         db,
         scheme.body,
         matches!(scheme.body.kind(db), TyKind::Function(_)),
     )
+    .then(|| TypeRenderer::default().render_scheme(db, scheme))
 }
 
 fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
@@ -2689,8 +2322,7 @@ fn target_at<'db>(
             && (type_name_occurrences(db, files, &cursor.name)
                 .iter()
                 .any(|occurrence| occurrence.is_declaration)
-                || semantics::stubs::stubs(db)
-                    .is_some_and(|library| library.nominals.contains(&cursor.name)));
+                || stubs(db).is_some_and(|library| library.nominals.contains(&cursor.name)));
         return declared.then_some(Target::TypeName(cursor.name));
     }
 
@@ -2720,7 +2352,7 @@ fn target_at<'db>(
             if global_declaration_exists(db, files, name) {
                 return Some(Target::Global(name.clone()));
             }
-            if semantics::stubs::stub_declaration(db, name).is_some() {
+            if stub_declaration(db, name).is_some() {
                 return Some(Target::StubGlobal(name.clone()));
             }
         }
@@ -2730,7 +2362,7 @@ fn target_at<'db>(
     // name), so its strings and its calls are one symbol.
     if let Some(occurrence) = s4_occurrences_in(db, file)
         .into_iter()
-        .find(|occurrence| occurrence.range.start() <= offset && offset <= occurrence.range.end())
+        .find(|occurrence| occurrence.range.contains_inclusive(offset))
     {
         if occurrence.kind == S4Kind::Generic
             && global_declaration_exists(db, files, &occurrence.name)
@@ -2749,9 +2381,7 @@ fn target_at<'db>(
     let (binding, info) = naming
         .bindings
         .iter()
-        .filter(|(_, info)| {
-            info.range.start() <= position.relative && position.relative <= info.range.end()
-        })
+        .filter(|(_, info)| info.range.contains_inclusive(position.relative))
         .min_by_key(|(binding, info)| (info.range.len(), binding.0))?;
     if info.kind == BindingKind::TopLevel {
         return Some(Target::Global(info.name.clone()));
@@ -2785,86 +2415,40 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
     let mut result = Vec::new();
     match target {
         Target::StubGlobal(_) => {}
-        Target::Slot { item, binding } => {
-            if let Some(node) = item_node(db, *item) {
-                slot_occurrences(
-                    db,
-                    *item,
-                    node.text_range().start(),
-                    *binding,
-                    &mut |range, is_declaration| {
-                        result.push(Occurrence {
-                            file: *item.file(db),
-                            range,
-                            is_declaration,
-                        });
-                    },
-                );
-            }
-        }
-        Target::TypeName(name) => {
-            result = type_name_occurrences(db, files, name);
-        }
+        Target::Slot { item, binding } => slot_occurrences(db, *item, *binding, &mut result),
+        Target::TypeName(name) => result = type_name_occurrences(db, files, name),
         Target::S4 { name, kind } => {
             for &file in files.files(db) {
-                for occurrence in s4_occurrences_in(db, file) {
-                    if occurrence.name == *name && occurrence.kind == *kind {
-                        result.push(Occurrence {
-                            file,
-                            range: occurrence.range,
-                            is_declaration: occurrence.is_declaration,
-                        });
-                    }
-                }
+                result.extend(s4_occurrences(db, file, name, *kind));
             }
         }
         Target::Global(name) => {
             for &file in files.files(db) {
-                for occurrence in s4_occurrences_in(db, file) {
-                    if occurrence.kind == S4Kind::Generic && occurrence.name == *name {
-                        result.push(Occurrence {
-                            file,
-                            range: occurrence.range,
-                            is_declaration: occurrence.is_declaration,
-                        });
-                    }
-                }
+                result.extend(s4_occurrences(db, file, name, S4Kind::Generic));
                 for &item in item_tree(db, file) {
-                    let Some(node) = item_node(db, item) else {
+                    let (Some(node), Some(naming)) = (item_node(db, item), item_naming(db, item))
+                    else {
                         continue;
                     };
-                    let item_offset = node.text_range().start();
-                    if let Some(naming) = item_naming(db, item) {
-                        for (id, info) in &naming.bindings {
-                            if info.kind == BindingKind::TopLevel && info.name == *name {
-                                slot_occurrences(
-                                    db,
-                                    item,
-                                    item_offset,
-                                    *id,
-                                    &mut |range, is_declaration| {
-                                        result.push(Occurrence {
-                                            file,
-                                            range,
-                                            is_declaration,
-                                        });
-                                    },
-                                );
-                            }
+                    for (binding, info) in &naming.bindings {
+                        if info.kind == BindingKind::TopLevel && info.name == *name {
+                            slot_occurrences(db, item, *binding, &mut result);
                         }
-                        if let Some(hir) = item_hir(db, item) {
-                            for (expression, non_local) in
-                                naming.non_locals.iter().chain(&naming.quiet_reads)
-                            {
-                                if non_local == name {
-                                    result.push(Occurrence {
-                                        file,
-                                        range: hir.expression(*expression).range + item_offset,
-                                        is_declaration: false,
-                                    });
-                                }
-                            }
-                        }
+                    }
+                    if let Some(hir) = item_hir(db, item) {
+                        let item_offset = node.text_range().start();
+                        result.extend(
+                            naming
+                                .non_locals
+                                .iter()
+                                .chain(&naming.quiet_reads)
+                                .filter(|(_, non_local)| *non_local == name)
+                                .map(|(expression, _)| Occurrence {
+                                    file,
+                                    range: hir.expression(*expression).range + item_offset,
+                                    is_declaration: false,
+                                }),
+                        );
                     }
                 }
             }
@@ -2881,55 +2465,68 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
     result
 }
 
+fn s4_occurrences(
+    db: &dyn Db,
+    file: SourceFile,
+    name: &str,
+    kind: S4Kind,
+) -> impl Iterator<Item = Occurrence> {
+    s4_occurrences_in(db, file)
+        .into_iter()
+        .filter(move |occurrence| occurrence.name == name && occurrence.kind == kind)
+        .map(move |occurrence| Occurrence {
+            file,
+            range: occurrence.range,
+            is_declaration: occurrence.is_declaration,
+        })
+}
+
 /// Parameters and loop variables are not expressions, so their declaration site is emitted
 /// explicitly.
-fn slot_occurrences(
-    db: &dyn Db,
-    item: Item<'_>,
-    item_offset: TextSize,
-    binding: BindingId,
-    emit: &mut dyn FnMut(TextRange, bool),
-) {
-    let Some(naming) = item_naming(db, item) else {
-        return;
-    };
-    let Some(hir) = item_hir(db, item) else {
+fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mut Vec<Occurrence>) {
+    let (Some(node), Some(naming), Some(hir)) = (
+        item_node(db, item),
+        item_naming(db, item),
+        item_hir(db, item),
+    ) else {
         return;
     };
     let Some(info) = naming.bindings.get(&binding) else {
         return;
     };
+    let file = *item.file(db);
+    let item_offset = node.text_range().start();
 
-    let mut ranges: Vec<(TextRange, bool)> = Vec::new();
+    let mut slot = Vec::new();
     if matches!(info.kind, BindingKind::Parameter | BindingKind::ForVariable) {
-        ranges.push((info.range + item_offset, true));
+        slot.push(Occurrence {
+            file,
+            range: info.range + item_offset,
+            is_declaration: true,
+        });
     }
-
-    let targets = assignment_targets(hir);
-    for (expression, resolved) in &naming.resolutions {
-        if resolved == &binding {
-            ranges.push((
-                hir.expression(*expression).range + item_offset,
-                targets.contains(expression),
-            ));
-        }
-    }
-
-    ranges.sort_by_key(|(range, _)| range.start());
-    ranges.dedup_by_key(|(range, _)| *range);
-    for (range, is_declaration) in ranges {
-        emit(range, is_declaration);
-    }
-}
-
-fn assignment_targets(hir: &semantics::hir::Module) -> std::collections::BTreeSet<ExprId> {
-    let mut targets = std::collections::BTreeSet::new();
-    for expression in &hir.expressions {
-        if let ExpressionKind::Assign { target, .. } = &expression.kind {
-            targets.insert(*target);
-        }
-    }
-    targets
+    let targets: BTreeSet<ExprId> = hir
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            ExpressionKind::Assign { target, .. } => Some(*target),
+            _ => None,
+        })
+        .collect();
+    slot.extend(
+        naming
+            .resolutions
+            .iter()
+            .filter(|(_, resolved)| **resolved == binding)
+            .map(|(expression, _)| Occurrence {
+                file,
+                range: hir.expression(*expression).range + item_offset,
+                is_declaration: targets.contains(expression),
+            }),
+    );
+    slot.sort_by_key(|occurrence| occurrence.range.start());
+    slot.dedup_by_key(|occurrence| occurrence.range);
+    result.extend(slot);
 }
 
 struct PositionedItem<'db> {
@@ -2946,20 +2543,22 @@ impl PositionedItem<'_> {
         let Some(hir) = item_hir(self.db, self.item) else {
             return Vec::new();
         };
-        let mut containing: Vec<(TextSize, bool, ExprId)> = Vec::new();
-        for (index, expression) in hir.expressions.iter().enumerate() {
-            let range = expression.range;
-            if range.is_empty() || !(range.start() <= self.relative && self.relative <= range.end())
-            {
-                continue;
-            }
-            containing.push((
-                range.len(),
-                !matches!(expression.kind, ExpressionKind::NameRef(_)),
-                ExprId(index as u32),
-            ));
-        }
-        containing.sort_by_key(|(width, not_name, id)| (*width, *not_name, id.0));
+        let mut containing: Vec<(TextSize, bool, ExprId)> = hir
+            .expressions
+            .iter()
+            .enumerate()
+            .filter(|(_, expression)| {
+                !expression.range.is_empty() && expression.range.contains_inclusive(self.relative)
+            })
+            .map(|(index, expression)| {
+                (
+                    expression.range.len(),
+                    !matches!(expression.kind, ExpressionKind::NameRef(_)),
+                    ExprId(index as u32),
+                )
+            })
+            .collect();
+        containing.sort_unstable();
         containing.into_iter().map(|(_, _, id)| id).collect()
     }
 
@@ -2969,29 +2568,25 @@ impl PositionedItem<'_> {
 }
 
 fn position_in_item(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<PositionedItem<'_>> {
+    let positioned = |item, range: TextRange| PositionedItem {
+        db,
+        item,
+        item_offset: range.start(),
+        relative: offset - range.start(),
+    };
     // A cursor exactly at an item's end (typing after its last token) belongs to it unless the
     // next item starts there.
-    let mut touching: Option<PositionedItem<'_>> = None;
+    let mut touching = None;
     for &item in item_tree(db, file) {
         let Some(node) = item_node(db, item) else {
             continue;
         };
         let range = node.text_range();
-        if range.start() <= offset && offset < range.end() {
-            return Some(PositionedItem {
-                db,
-                item,
-                item_offset: range.start(),
-                relative: offset - range.start(),
-            });
+        if range.contains(offset) {
+            return Some(positioned(item, range));
         }
         if offset == range.end() && touching.is_none() {
-            touching = Some(PositionedItem {
-                db,
-                item,
-                item_offset: range.start(),
-                relative: offset - range.start(),
-            });
+            touching = Some(positioned(item, range));
         }
     }
     touching

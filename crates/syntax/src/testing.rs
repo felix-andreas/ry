@@ -1,36 +1,91 @@
 //! Fixture format: `#==== <group>` opens a group, `#---- <case>` a case whose
 //! source runs to `#++++`, then the expectation runs to the next directive.
+//!
+//! The fuzz helpers live here too, so every crate's harness draws from one
+//! generator and one set of mutation operators.
 
+use rowan::NodeOrToken;
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
-pub struct FixtureCase {
-    pub id: String,
-    pub source: String,
-    pub expected: String,
-    expected_span: Range<usize>,
-}
+use crate::SyntaxNode;
 
-pub struct FixtureFile {
-    pub path: PathBuf,
-    pub text: String,
-    pub cases: Vec<FixtureCase>,
-}
+pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
+    let files = parse_fixture_files(suite_dir);
+    assert!(
+        !files.is_empty(),
+        "no fixture files found under {}",
+        suite_dir.display()
+    );
 
-pub fn parse_fixture_files(suite_dir: &Path) -> Vec<FixtureFile> {
-    let mut paths = Vec::new();
-    collect_fixture_files(suite_dir, &mut paths);
-    paths.sort();
-    paths
-        .into_iter()
-        .map(|path| {
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("read fixture {}: {error}", path.display()));
-            parse_fixture_file(&path, text)
-        })
-        .collect()
+    let filter = env::var("FIXTURE_FILTER").ok();
+    let bless = env_var("BLESS").is_some_and(|value| value == "1");
+    let mut seen_ids = HashSet::new();
+    let mut failures = Vec::new();
+    let mut matched = 0usize;
+
+    for file in files {
+        for case in &file.cases {
+            assert!(
+                seen_ids.insert(case.id.clone()),
+                "duplicate fixture id `{}` (fixture ids must be unique across the suite)",
+                case.id
+            );
+        }
+
+        let mut blessed_edits: Vec<(Range<usize>, String)> = Vec::new();
+        for case in &file.cases {
+            if filter.as_deref().is_some_and(|filter| filter != case.id) {
+                continue;
+            }
+            matched += 1;
+            let rendered = normalize(&render(&case.source));
+            let expected = normalize(&case.expected);
+            if rendered == expected {
+                continue;
+            }
+            if bless {
+                blessed_edits.push((case.expected_span.clone(), rendered));
+            } else {
+                failures.push(format!(
+                    "fixture `{}` ({})\n---- expected ----\n{expected}\n---- actual ----\n{rendered}\n",
+                    case.id,
+                    file.path.display()
+                ));
+            }
+        }
+
+        if !blessed_edits.is_empty() {
+            let mut new_text = file.text;
+            for (span, rendered) in blessed_edits.into_iter().rev() {
+                let separator = if span.end == new_text.len() {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+                new_text.replace_range(span, &format!("{rendered}{separator}"));
+            }
+            fs::write(&file.path, new_text)
+                .unwrap_or_else(|error| panic!("cannot bless {}: {error}", file.path.display()));
+        }
+    }
+
+    if let Some(filter) = &filter {
+        assert!(
+            matched > 0 || sibling_suite_holds(suite_dir, filter),
+            "FIXTURE_FILTER=`{filter}` names no fixture case in any suite. Check the id.\n\
+             A filter that matches nothing would otherwise run zero cases and report a pass."
+        );
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} fixture failure(s):\n\n{}\n(set RY_BLESS=1 to accept the new output)",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 pub fn fixture_case_sources() -> Vec<(String, String)> {
@@ -68,7 +123,7 @@ const FIXTURE_SUITES: [&str; 13] = [
 /// Inputs without expectations, for the invariant batteries.
 pub fn program_corpus_sources() -> Vec<(String, String)> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs");
-    let Ok(entries) = std::fs::read_dir(&directory) else {
+    let Ok(entries) = fs::read_dir(&directory) else {
         return Vec::new();
     };
     let mut files: Vec<PathBuf> = entries
@@ -82,120 +137,28 @@ pub fn program_corpus_sources() -> Vec<(String, String)> {
     files.sort();
     let mut sources = Vec::new();
     for path in files {
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        let mut id = String::new();
-        let mut body = String::new();
+        let mut current: Option<(String, String)> = None;
         for line in text.lines() {
-            match line.strip_prefix("#---- ") {
-                Some(next) => {
-                    if !id.is_empty() {
-                        sources.push((std::mem::take(&mut id), std::mem::take(&mut body)));
-                    }
-                    id = next.to_owned();
-                    body.clear();
-                }
-                None => {
-                    body.push_str(line);
-                    body.push('\n');
-                }
+            if let Some(id) = line.strip_prefix("#---- ") {
+                sources.extend(current.replace((id.to_owned(), String::new())));
+            } else if let Some((_, body)) = &mut current {
+                body.push_str(line);
+                body.push('\n');
             }
         }
-        if !id.is_empty() {
-            sources.push((id, body));
-        }
+        sources.extend(current);
     }
     sources
 }
 
 /// Falls back to the `ROUGHLY_` prefix, which existing scripts still set.
 pub fn env_var(suffix: &str) -> Option<String> {
-    std::env::var(format!("RY_{suffix}"))
-        .or_else(|_| std::env::var(format!("ROUGHLY_{suffix}")))
+    env::var(format!("RY_{suffix}"))
+        .or_else(|_| env::var(format!("ROUGHLY_{suffix}")))
         .ok()
-}
-
-pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
-    let mut files = Vec::new();
-    collect_fixture_files(suite_dir, &mut files);
-    files.sort();
-    assert!(
-        !files.is_empty(),
-        "no fixture files found under {}",
-        suite_dir.display()
-    );
-
-    let filter = std::env::var("FIXTURE_FILTER").ok();
-    let bless = env_var("BLESS").is_some_and(|value| value == "1");
-    let mut seen_ids = HashSet::new();
-    let mut failures = Vec::new();
-    let mut matched = 0usize;
-
-    for path in files {
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-        let file = parse_fixture_file(&path, text);
-        for case in &file.cases {
-            assert!(
-                seen_ids.insert(case.id.clone()),
-                "duplicate fixture id `{}` (fixture ids must be unique across the suite)",
-                case.id
-            );
-        }
-
-        let mut blessed_edits: Vec<(Range<usize>, String)> = Vec::new();
-        for case in &file.cases {
-            if filter.as_deref().is_some_and(|filter| filter != case.id) {
-                continue;
-            }
-            matched += 1;
-            let rendered = normalize(&render(&case.source));
-            let expected = normalize(&case.expected);
-            if rendered == expected {
-                continue;
-            }
-            if bless {
-                blessed_edits.push((case.expected_span.clone(), rendered));
-            } else {
-                let mut report = String::new();
-                let _ = writeln!(report, "fixture `{}` ({})", case.id, file.path.display());
-                let _ = writeln!(report, "---- expected ----\n{expected}");
-                let _ = writeln!(report, "---- actual ----\n{rendered}");
-                failures.push(report);
-            }
-        }
-
-        if !blessed_edits.is_empty() {
-            let mut new_text = file.text.clone();
-            for (span, rendered) in blessed_edits.into_iter().rev() {
-                let at_eof = span.end == new_text.len();
-                let replacement = if at_eof {
-                    format!("{rendered}\n")
-                } else {
-                    format!("{rendered}\n\n")
-                };
-                new_text.replace_range(span, &replacement);
-            }
-            std::fs::write(&file.path, new_text)
-                .unwrap_or_else(|error| panic!("cannot bless {}: {error}", file.path.display()));
-        }
-    }
-
-    if let Some(filter) = &filter {
-        assert!(
-            matched > 0 || sibling_suite_holds(suite_dir, filter),
-            "FIXTURE_FILTER=`{filter}` names no fixture case in any suite. Check the id.\n\
-             A filter that matches nothing would otherwise run zero cases and report a pass."
-        );
-    }
-
-    assert!(
-        failures.is_empty(),
-        "{} fixture failure(s):\n\n{}\n(set RY_BLESS=1 to accept the new output)",
-        failures.len(),
-        failures.join("\n")
-    );
 }
 
 /// `None` for a single-file case (no `#~~~~ <path>` lines).
@@ -212,142 +175,6 @@ pub fn split_files(source: &str) -> Option<Vec<(String, String)>> {
         }
     }
     Some(files)
-}
-
-/// One test binary drives several suites, so a focused filter legitimately
-/// matches nothing here when the case lives in a sibling suite.
-fn sibling_suite_holds(suite_dir: &Path, id: &str) -> bool {
-    let Some(parent) = suite_dir.parent() else {
-        return false;
-    };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
-        path.is_dir()
-            && path != suite_dir
-            && parse_fixture_files(&path)
-                .iter()
-                .any(|file| file.cases.iter().any(|case| case.id == id))
-    })
-}
-
-fn collect_fixture_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("cannot read fixture dir {}: {error}", dir.display()));
-    for entry in entries {
-        let entry = entry.expect("readable directory entry");
-        let path = entry.path();
-        if path.is_dir() {
-            collect_fixture_files(&path, out);
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension == "test")
-        {
-            out.push(path);
-        }
-    }
-}
-
-pub fn parse_fixture_file(path: &Path, text: String) -> FixtureFile {
-    let mut cases = Vec::new();
-    let mut group: Option<String> = None;
-    let mut case: Option<String> = None;
-    let mut source_lines: Vec<&str> = Vec::new();
-    let mut expected_start: Option<usize> = None;
-    let mut expected_end = 0usize;
-
-    let mut offset = 0usize;
-    let mut flush = |group: &Option<String>,
-                     case: &mut Option<String>,
-                     source_lines: &mut Vec<&str>,
-                     expected_start: &mut Option<usize>,
-                     expected_end: usize,
-                     text: &str| {
-        if let Some(case_name) = case.take() {
-            let group_name = group.clone().unwrap_or_else(|| {
-                panic!(
-                    "{}: case `{case_name}` appears before any `#====` group",
-                    path.display()
-                )
-            });
-            let start = expected_start.take().unwrap_or_else(|| {
-                panic!(
-                    "{}: case `{case_name}` has no `#++++` expectation",
-                    path.display()
-                )
-            });
-            let source = source_lines.join("\n").trim_end().to_owned();
-            source_lines.clear();
-            cases.push(FixtureCase {
-                id: format!("{group_name}__{case_name}"),
-                source,
-                expected: text[start..expected_end].to_owned(),
-                expected_span: start..expected_end,
-            });
-        }
-        source_lines.clear();
-    };
-
-    for line in text.split_inclusive('\n') {
-        offset += line.len();
-        let trimmed = line.trim_end_matches(['\n', '\r']);
-        if let Some(name) = trimmed.strip_prefix("#====") {
-            flush(
-                &group,
-                &mut case,
-                &mut source_lines,
-                &mut expected_start,
-                expected_end,
-                &text,
-            );
-            group = Some(name.trim().to_owned());
-        } else if let Some(name) = trimmed.strip_prefix("#----") {
-            flush(
-                &group,
-                &mut case,
-                &mut source_lines,
-                &mut expected_start,
-                expected_end,
-                &text,
-            );
-            case = Some(name.trim().to_owned());
-        } else if trimmed.starts_with("#++++") {
-            expected_start = Some(offset);
-            expected_end = offset;
-        } else if expected_start.is_some() && case.is_some() {
-            expected_end = offset;
-        } else if case.is_some() {
-            source_lines.push(trimmed);
-        }
-    }
-    flush(
-        &group,
-        &mut case,
-        &mut source_lines,
-        &mut expected_start,
-        expected_end,
-        &text,
-    );
-
-    FixtureFile {
-        path: path.to_owned(),
-        text,
-        cases,
-    }
-}
-
-fn normalize(text: &str) -> String {
-    let mut normalized = text
-        .lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n");
-    while normalized.ends_with('\n') {
-        normalized.pop();
-    }
-    normalized.trim_end().to_owned()
 }
 
 pub fn check_parse_invariants(input: &str) {
@@ -405,7 +232,277 @@ pub fn check_parse_invariants(input: &str) {
     );
 }
 
-fn check_geometry(node: &crate::SyntaxNode, input: &str) {
+/// A deterministic generator, so a fuzz failure reproduces from its seed.
+pub struct SplitMix64(pub u64);
+
+impl SplitMix64 {
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut mixed = self.0;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        mixed ^ (mixed >> 31)
+    }
+
+    pub fn below(&mut self, bound: usize) -> usize {
+        (self.next_u64() % bound.max(1) as u64) as usize
+    }
+
+    pub fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
+        self.next_u64() % denominator < numerator
+    }
+}
+
+/// `FUZZ_ITERS` overrides each harness's default budget.
+pub fn fuzz_iterations(default: usize) -> usize {
+    env::var("FUZZ_ITERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+pub fn random_bytes(rng: &mut SplitMix64) -> String {
+    let length = rng.below(160);
+    let bytes: Vec<u8> = (0..length).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+pub fn token_soup(rng: &mut SplitMix64, alphabet: &[&str]) -> String {
+    let mut text = String::new();
+    for _ in 0..rng.below(48) {
+        text.push_str(alphabet[rng.below(alphabet.len())]);
+        if rng.below(3) == 0 {
+            text.push(' ');
+        }
+    }
+    text
+}
+
+/// Byte edits on one seed, plus splices of up to `max_donor` bytes from another.
+pub fn mutate_seed(rng: &mut SplitMix64, seeds: &[&str], max_donor: usize) -> String {
+    let mut text = seeds[rng.below(seeds.len())].as_bytes().to_vec();
+    for _ in 0..(1 + rng.below(4)) {
+        match rng.below(4) {
+            0 if !text.is_empty() => {
+                let at = rng.below(text.len());
+                text.remove(at);
+            }
+            1 => {
+                let at = rng.below(text.len() + 1);
+                text.insert(at, (rng.next_u64() & 0x7F) as u8);
+            }
+            2 if !text.is_empty() => {
+                let at = rng.below(text.len());
+                text[at] = (rng.next_u64() & 0x7F) as u8;
+            }
+            _ => {
+                let donor = seeds[rng.below(seeds.len())].as_bytes();
+                let from = rng.below(donor.len());
+                let to = (from + rng.below(max_donor)).min(donor.len());
+                let at = rng.below(text.len() + 1);
+                text.splice(at..at, donor[from..to].iter().copied());
+            }
+        }
+    }
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+pub fn mutate_bytes(rng: &mut SplitMix64, source: &str) -> Vec<u8> {
+    let mut bytes = source.as_bytes().to_vec();
+    for _ in 0..(1 + rng.below(6)) {
+        if bytes.is_empty() {
+            break;
+        }
+        match rng.below(3) {
+            0 => {
+                let at = rng.below(bytes.len());
+                bytes.remove(at);
+            }
+            1 => {
+                let at = rng.below(bytes.len() + 1);
+                bytes.insert(at, (rng.next_u64() & 0x7F) as u8);
+            }
+            _ => {
+                let at = rng.below(bytes.len());
+                bytes[at] = (rng.next_u64() & 0x7F) as u8;
+            }
+        }
+    }
+    bytes
+}
+
+/// An evenly spread sample of the corpus's `.R` files.
+pub fn corpus_sample(count: usize) -> Option<Vec<String>> {
+    let root = corpus_dir()?;
+    let mut files = Vec::new();
+    let mut stack = vec![root.join("r-base"), root.join("cran")];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "R") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let step = (files.len() / count.max(1)).max(1);
+    let sample: Vec<String> = files
+        .iter()
+        .step_by(step)
+        .take(count)
+        .filter_map(|path| fs::read(path).ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .collect();
+    (!sample.is_empty()).then_some(sample)
+}
+
+/// The gitignored corpus of real R sources that `scripts/fetch-corpus.rs`
+/// fetches, or `None` when it is absent.
+pub fn corpus_dir() -> Option<PathBuf> {
+    let root = env_var("CORPUS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"));
+    root.is_dir().then_some(root)
+}
+
+struct FixtureFile {
+    path: PathBuf,
+    text: String,
+    cases: Vec<FixtureCase>,
+}
+
+struct FixtureCase {
+    id: String,
+    source: String,
+    expected: String,
+    expected_span: Range<usize>,
+}
+
+fn parse_fixture_files(suite_dir: &Path) -> Vec<FixtureFile> {
+    let mut paths = Vec::new();
+    collect_fixture_files(suite_dir, &mut paths);
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read fixture {}: {error}", path.display()));
+            parse_fixture_file(path, text)
+        })
+        .collect()
+}
+
+fn collect_fixture_files(directory: &Path, out: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read fixture dir {}: {error}", directory.display()));
+    for entry in entries {
+        let path = entry.expect("readable directory entry").path();
+        if path.is_dir() {
+            collect_fixture_files(&path, out);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "test")
+        {
+            out.push(path);
+        }
+    }
+}
+
+fn parse_fixture_file(path: PathBuf, text: String) -> FixtureFile {
+    struct OpenCase<'a> {
+        name: String,
+        source: Vec<&'a str>,
+        expected: Option<Range<usize>>,
+    }
+    let close = |case: OpenCase, group: Option<&str>| {
+        let group = group.unwrap_or_else(|| {
+            panic!(
+                "{}: case `{}` appears before any `#====` group",
+                path.display(),
+                case.name
+            )
+        });
+        let expected_span = case.expected.unwrap_or_else(|| {
+            panic!(
+                "{}: case `{}` has no `#++++` expectation",
+                path.display(),
+                case.name
+            )
+        });
+        FixtureCase {
+            id: format!("{group}__{}", case.name),
+            source: case.source.join("\n").trim_end().to_owned(),
+            expected: text[expected_span.clone()].to_owned(),
+            expected_span,
+        }
+    };
+
+    let mut cases = Vec::new();
+    let mut group: Option<String> = None;
+    let mut open: Option<OpenCase> = None;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if let Some(name) = trimmed.strip_prefix("#====") {
+            cases.extend(open.take().map(|case| close(case, group.as_deref())));
+            group = Some(name.trim().to_owned());
+        } else if let Some(name) = trimmed.strip_prefix("#----") {
+            cases.extend(open.take().map(|case| close(case, group.as_deref())));
+            open = Some(OpenCase {
+                name: name.trim().to_owned(),
+                source: Vec::new(),
+                expected: None,
+            });
+        } else if let Some(case) = &mut open {
+            if trimmed.starts_with("#++++") {
+                case.expected = Some(offset..offset);
+            } else if let Some(expected) = &mut case.expected {
+                expected.end = offset;
+            } else {
+                case.source.push(trimmed);
+            }
+        }
+    }
+    cases.extend(open.take().map(|case| close(case, group.as_deref())));
+
+    FixtureFile { path, text, cases }
+}
+
+/// One test binary drives several suites, so a focused filter legitimately
+/// matches nothing here when the case lives in a sibling suite.
+fn sibling_suite_holds(suite_dir: &Path, id: &str) -> bool {
+    let Some(parent) = suite_dir.parent() else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.is_dir()
+            && path != suite_dir
+            && parse_fixture_files(&path)
+                .iter()
+                .any(|file| file.cases.iter().any(|case| case.id == id))
+    })
+}
+
+fn normalize(text: &str) -> String {
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_owned()
+}
+
+fn check_geometry(node: &SyntaxNode, input: &str) {
     let range = node.text_range();
     let mut cursor = range.start();
     for child in node.children_with_tokens() {
@@ -417,7 +514,7 @@ fn check_geometry(node: &crate::SyntaxNode, input: &str) {
             node.kind()
         );
         cursor = child_range.end();
-        if let rowan::NodeOrToken::Node(child) = child {
+        if let NodeOrToken::Node(child) = child {
             check_geometry(&child, input);
         }
     }

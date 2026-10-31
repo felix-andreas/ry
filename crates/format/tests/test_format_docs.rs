@@ -4,6 +4,7 @@
 use format::{Config, format};
 use regex::{Captures, Regex};
 use std::fs;
+use syntax::testing::env_var;
 
 #[test]
 fn documentation_examples() {
@@ -49,7 +50,7 @@ MAKE CHANGES TO crates/format/tests/formatter.template.md INSTEAD";
         .replace(BEFORE, AFTER);
 
     let path = "../../docs/src/content/docs/reference/formatting-rules.md";
-    if syntax::testing::env_var("BLESS").as_deref() == Some("1") {
+    if env_var("BLESS").as_deref() == Some("1") {
         // The docs tree is absent in a sandboxed build.
         if fs::metadata(path).is_ok() {
             fs::write(path, &formatted).expect("write the generated docs page");
