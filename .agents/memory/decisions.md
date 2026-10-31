@@ -1883,8 +1883,14 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   or a parameter is rewritten in place, and any other subject binds nothing. For a global frame the
   checker still records the update as a refinement of the non-local name (`non_local_slots`, the
   mechanism guard narrowing uses), so later reads in that function see the new columns.
-- **A subset `:=` (`f[i, y := v]`) keeps an existing column's type**, because data.table coerces
-  the value to the column. A column it creates takes the value's type.
+- **`:=` into an existing column keeps the column's type unless the value replaces it whole**,
+  because data.table coerces the value to the column. The engine (`assigned_type` in `query.rs`)
+  keeps the type under an `i`, under a `by`, and for a value that collapses to one row; a full-length
+  value with neither replaces the type. A string written into a factor keeps the factor and appends
+  the new labels as levels in order of appearance, as data.table does. The checker cannot see that
+  `sum(x)` is one value, so it treats only a literal as one (`is_literal` in `check.rs`), because a
+  scalar-like type such as `as.character(x)`'s is not a length guarantee. A column the statement
+  creates takes the value's type.
 - **Queries go through a small IR** (`crates/table/src/query.rs`), not straight from R syntax to
   Polars, so the interpreter, the checker's result types (`result_type`) and the tests share one
   description of `tbl[i, j, by]`. Lowering gives operations R semantics on top of Polars: integer
@@ -1910,8 +1916,11 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **The ALTREP object is the only R-layout copy of a column.** `Table` once tracked its own
   per-column mirrors next to the ALTREP `data2`, two sources of truth for the same fact. `Table`
   now holds only the Polars frame and its key; residency is read from the ALTREP object.
-- **Keyed joins without `on` match x's key positionally against i's leading columns, and NA keys
-  join each other** (`join_nulls`), both as in data.table. A rolling join marks x's rows with a
+- **Keyed joins without `on` match x's key positionally against i's key, or against i's leading
+  columns when i has no key, and NA keys join each other** (`join_nulls`), all as in data.table.
+  `Join.other` is a `Table` rather than a bare `DataFrame` so that i's key reaches the lowering.
+  An equi join keeps i's order and then x's (`MaintainOrderJoin::LeftRight`), so several matches
+  for one row of i come back in x's order. A rolling join marks x's rows with a
   hidden column so an inner rolling join keeps matches whose values are NA.
 
 Known gap: an integer `sum` nested in arithmetic or assigned through `:=` still narrows to integer

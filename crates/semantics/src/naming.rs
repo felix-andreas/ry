@@ -288,7 +288,7 @@ impl Context<'_> {
                 use crate::hir::BinaryOperator;
                 // `a %op% b` calls `%op%`: a quiet read that keeps a project definition alive.
                 if let Some(name) = special_name {
-                    self.naming.quiet_operator_reads.insert(name.clone());
+                    self.naming.quiet_operator_reads.insert(*name);
                     // A local `%op%` needs its slot marked too, or it reads as a dead store.
                     self.mark_slot_read(name);
                 }
@@ -474,8 +474,8 @@ impl Context<'_> {
                         id,
                         NamespaceRead {
                             internal: *internal,
-                            package: package.clone(),
-                            name: name.clone(),
+                            package: *package,
+                            name: *name,
                         },
                     );
                 }
@@ -493,7 +493,7 @@ impl Context<'_> {
                         self.mint_binding(&parameter.name, parameter.range, BindingKind::Parameter);
                     self.current_scope()
                         .slots
-                        .insert(parameter.name.clone(), slot);
+                        .insert(parameter.name, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.premint_frame_assignments(*body);
@@ -529,7 +529,7 @@ impl Context<'_> {
                 self.resolve(*sequence);
                 if let (Some(variable), Some(range)) = (variable, variable_range) {
                     let slot = self.mint_binding(variable, *range, BindingKind::ForVariable);
-                    self.current_scope().slots.insert(variable.clone(), slot);
+                    self.current_scope().slots.insert(*variable, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.loop_body(*body, true);
@@ -848,8 +848,8 @@ impl Context<'_> {
                             }
                             None => {
                                 if self.emit {
-                                    self.naming.non_locals.insert(target, name.clone());
-                                    self.naming.super_globals.insert(name.clone());
+                                    self.naming.non_locals.insert(target, *name);
+                                    self.naming.super_globals.insert(*name);
                                 }
                             }
                         }
@@ -973,7 +973,7 @@ impl Context<'_> {
         for write in &self.writes {
             if write.reportable && !write.used && !throwaway(&write.name) {
                 self.naming.unused_assignments.push(UnusedAssignment {
-                    name: write.name.clone(),
+                    name: write.name,
                     range: write.range,
                 });
             }
@@ -985,7 +985,7 @@ impl Context<'_> {
                 && !self.read_parameter_slots.contains(id)
             {
                 self.naming.unused_parameters.push(UnusedAssignment {
-                    name: binding.name.clone(),
+                    name: binding.name,
                     range: binding.range,
                 });
             }

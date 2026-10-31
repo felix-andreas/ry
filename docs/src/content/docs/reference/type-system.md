@@ -1952,8 +1952,12 @@ The left side may also be a string, `c("a", "b")` paired with a `list()` of valu
 form `` `:=`(a = v, b = w) ``. Any other left side, such as `(columns) := v`, makes the columns
 unknown, silently. `f$y <- v` and `f[["y"]] <- v` update a column in the same way.
 
-With a row index, as in `f[id > 1, price := 0L]`, only some rows change, so the value is coerced to
-the existing column and `price` keeps its type. A column the statement creates takes the value's type.
+data.table coerces a value written into an existing column to that column's type, so the column
+keeps its type whenever the value does not replace it whole. That is the case with a row index, as in
+`f[id > 1, price := 0L]`, with `by`, and with a literal value, as in `f[, price := 0L]`. A value that
+replaces the whole column, as in `f[, price := 1:3]`, replaces its type, and a column the statement
+creates takes the value's type. Only a literal counts as a single value: a call such as `sum(x)` also
+returns one value at runtime, but the checker types `f[, price := sum(id)]` as a replacement.
 
 The rebinding applies only to a name the current scope already binds: any top-level name, or a
 function's own local or parameter. A `:=` on any other name, such as a global updated inside a

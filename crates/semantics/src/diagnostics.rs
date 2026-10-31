@@ -234,7 +234,7 @@ fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> FxHashMap<Symbol, usiz
             if binding.kind != BindingKind::TopLevel {
                 continue;
             }
-            positions.entry(binding.name.clone()).or_insert(index);
+            positions.entry(binding.name).or_insert(index);
         }
     }
     positions
@@ -1661,7 +1661,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if let ExpressionKind::Assign { target, value, .. } = &expression.kind
                 && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
             {
-                assignment_targets.insert(*value, name.clone());
+                assignment_targets.insert(*value, *name);
             }
         }
         for origin in &check.strict_origins {

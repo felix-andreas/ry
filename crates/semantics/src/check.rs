@@ -1201,7 +1201,7 @@ impl<'db> Checker<'db, '_> {
                 rhs,
             } => {
                 let (operator, lhs, rhs) = (*operator, *lhs, *rhs);
-                let special_name = special_name.clone();
+                let special_name = *special_name;
                 self.infer_binary(id, range, operator, special_name.as_deref(), lhs, rhs)
             }
             ExpressionKind::Call { callee, arguments } => {
@@ -1226,7 +1226,7 @@ impl<'db> Checker<'db, '_> {
             } => {
                 let at = *at;
                 let target = *target;
-                let name = name.clone();
+                let name = *name;
                 let name_range = name_range.unwrap_or(range);
                 self.infer_field(id, range, name_range, at, target, name)
             }
@@ -1238,7 +1238,7 @@ impl<'db> Checker<'db, '_> {
                 name,
             } => {
                 let validated = validated_namespace_name(self.db, *internal, package, name);
-                let name = name.clone();
+                let name = *name;
                 match validated
                     .as_ref()
                     .and_then(|name| self.globals.and_then(|globals| globals.scheme(name, false)))
@@ -1766,7 +1766,7 @@ impl<'db> Checker<'db, '_> {
         }
         let scope = self.column_scopes.last()?;
         let miss = ColumnMiss {
-            frame: scope.frame.clone(),
+            frame: scope.frame,
             columns: scope
                 .columns
                 .iter()
@@ -2327,7 +2327,7 @@ impl<'db> Checker<'db, '_> {
                         .naming
                         .bindings
                         .get(&slot)
-                        .map(|info| info.name.clone())
+                        .map(|info| info.name)
                     {
                         self.record_strict_origin(
                             loop_expression,
@@ -3772,7 +3772,6 @@ impl<'db> Checker<'db, '_> {
             let forwards_dots = matches!(&module.expression(value).kind, ExpressionKind::NameRef(name) if name == "...");
             let name = argument
                 .name
-                .clone()
                 .or_else(|| variable_name(module, value).filter(|_| !forwards_dots));
             let field = name.map(|name| self.column_field(&name, ty));
             match (field, columns.as_mut()) {
@@ -5265,7 +5264,7 @@ impl<'db> Checker<'db, '_> {
                     match join_keys(module, on_value) {
                         Some(keys) => self.join_columns(
                             &keys,
-                            (frame.clone(), subject_columns.as_deref()),
+                            (frame, subject_columns.as_deref()),
                             (joined_name, joined_columns.as_deref()),
                         ),
                         None => {
@@ -5343,7 +5342,11 @@ impl<'db> Checker<'db, '_> {
         let result = match j_value {
             Some(_) if let Some(update) = update => Ty::new(
                 db,
-                TyKind::Frame(self.column_update(update, subject_columns, i_value.is_some())),
+                TyKind::Frame(self.column_update(
+                    update,
+                    subject_columns,
+                    i_value.is_some() || by.is_some(),
+                )),
             ),
             // `with = FALSE` and a `..name` `j` read `j` as column names or positions, which ry
             // does not model.
@@ -5401,7 +5404,7 @@ impl<'db> Checker<'db, '_> {
                     complete = false;
                     self.errors.push(TypeError {
                         range,
-                        kind: column_does_not_exist(db, column, frame.clone(), columns),
+                        kind: column_does_not_exist(db, column, *frame, columns),
                     });
                 }
             }
@@ -5484,7 +5487,6 @@ impl<'db> Checker<'db, '_> {
                             let ty = self.infer(item);
                             let name = argument
                                 .name
-                                .clone()
                                 .or_else(|| variable_name(module, item));
                             match name {
                                 Some(name) => {
@@ -5516,7 +5518,7 @@ impl<'db> Checker<'db, '_> {
         let db = self.db;
         let scope = self.column_scopes.last()?;
         let columns = scope.columns.clone()?;
-        let frame = scope.frame.clone();
+        let frame = scope.frame;
         let mut groups = Some(Vec::new());
         for &(text, range) in literals {
             for name in text.split(',').map(str::trim) {
@@ -5530,7 +5532,7 @@ impl<'db> Checker<'db, '_> {
                         groups = None;
                         self.errors.push(TypeError {
                             range,
-                            kind: column_does_not_exist(db, name, frame.clone(), &columns),
+                            kind: column_does_not_exist(db, name, frame, &columns),
                         });
                     }
                 }
@@ -5565,7 +5567,6 @@ impl<'db> Checker<'db, '_> {
                 // data.table names an unnamed computed item by its position.
                 let name = argument
                     .name
-                    .clone()
                     .or_else(|| variable_name(module, value))
                     .unwrap_or_else(|| Symbol::from(format!("V{}", position + 1)));
                 let field = self.column_field(&name, ty);
@@ -5584,7 +5585,7 @@ impl<'db> Checker<'db, '_> {
                         columns.iter().any(|column| column.name.text(db) == name)
                     }) =>
             {
-                Some(name.clone())
+                Some(*name)
             }
             _ => None,
         };
@@ -5626,17 +5627,19 @@ impl<'db> Checker<'db, '_> {
     /// `j` as `y := v`, `c("a", "b") := list(v, w)`, or `` `:=`(a = v, b = w) ``: the
     /// queried frame with each named column set to its value's vector type, or removed
     /// by `NULL`. A left side naming columns some other way widens to unknown columns.
-    /// With `subset` (an `i` is present), only some rows change, so data.table coerces the
-    /// value to an existing column and the column keeps its type.
+    /// data.table coerces a value written into an existing column to the column's type, so the
+    /// column keeps its type unless the value replaces it whole: with `partial` (an `i` or a
+    /// `by` is present) or a literal value, the type stays. Only a literal is certainly one value;
+    /// a scalar-like type is not, because `as.character(x)` is scalar-like too.
     fn column_update(
         &mut self,
         arguments: &[Argument],
         base: Option<Vec<RecordField<'db>>>,
-        subset: bool,
+        partial: bool,
     ) -> Option<Vec<RecordField<'db>>> {
         let module = self.module;
         let db = self.db;
-        let mut updates: Option<Vec<(String, Ty<'db>)>> = Some(Vec::new());
+        let mut updates: Option<Vec<(String, Ty<'db>, bool)>> = Some(Vec::new());
         match arguments {
             [left, right] if left.name.is_none() && right.name.is_none() => {
                 // The left side names columns; it is never read.
@@ -5683,12 +5686,13 @@ impl<'db> Checker<'db, '_> {
                             Some(value) => self.infer(value),
                             None => unknown(db),
                         };
-                        Some(names.into_iter().map(|name| (name, ty)).collect())
+                        let single = right.value.is_some_and(|value| is_literal(module, value));
+                        Some(names.into_iter().map(|name| (name, ty, single)).collect())
                     }
                     (Some(names), Some(items)) if names.len() == items.len() => {
                         let mut paired = Vec::with_capacity(names.len());
                         for (name, item) in names.into_iter().zip(items) {
-                            paired.push((name, self.infer(item)));
+                            paired.push((name, self.infer(item), is_literal(module, item)));
                         }
                         Some(paired)
                     }
@@ -5706,15 +5710,17 @@ impl<'db> Checker<'db, '_> {
                         continue;
                     };
                     let ty = self.infer(value);
-                    match (argument.name.clone(), updates.as_mut()) {
-                        (Some(name), Some(updates)) => updates.push((name.to_string(), ty)),
+                    match (argument.name, updates.as_mut()) {
+                        (Some(name), Some(updates)) => {
+                            updates.push((name.to_string(), ty, is_literal(module, value)));
+                        }
                         _ => updates = None,
                     }
                 }
             }
         }
         let mut columns = base?;
-        for (name, ty) in updates? {
+        for (name, ty, single) in updates? {
             let resolved = self.table.resolve(db, ty);
             let position = columns
                 .iter()
@@ -5724,7 +5730,7 @@ impl<'db> Checker<'db, '_> {
                     columns.remove(position);
                 }
                 (TyKind::Null, None) => {}
-                (_, Some(_)) if subset => {}
+                (_, Some(_)) if partial || single => {}
                 (_, Some(position)) => {
                     if let Some(column) = columns.get_mut(position) {
                         column.ty = column_type(db, resolved);
@@ -6364,6 +6370,18 @@ fn variable_name(module: &Module, id: ExprId) -> Option<Symbol> {
     match &module.expression(id).kind {
         ExpressionKind::NameRef(name) => Some(*name),
         _ => None,
+    }
+}
+
+/// Whether an expression is a literal, possibly negated: certainly one value.
+fn is_literal(module: &Module, id: ExprId) -> bool {
+    match &module.expression(id).kind {
+        ExpressionKind::Literal(_) => true,
+        ExpressionKind::Unary {
+            operator: UnaryOperator::Minus,
+            operand,
+        } => is_literal(module, *operand),
+        _ => false,
     }
 }
 

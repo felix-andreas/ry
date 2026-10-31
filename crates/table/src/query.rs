@@ -8,9 +8,11 @@
 //! planner then sees the whole query, so every aggregation, data.table's GForce set included,
 //! runs as a grouped Polars kernel rather than as R code once per group.
 
+use crate::convert::{enum_dtype, factor_levels};
 use crate::{ColumnType, Error, Result, Schema, Table};
+use std::collections::HashSet;
 use polars::prelude::{
-    AsOfOptions, ChunkAgg, AsofStrategy, DataFrame, DataType, ExplodeOptions, Expr as PolarsExpr, IntoLazy,
+    AsOfOptions, ChunkAgg, AsofStrategy, Column, DataFrame, DataType, ExplodeOptions, Expr as PolarsExpr, IntoLazy,
     JoinType, LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
     SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
 };
@@ -54,9 +56,11 @@ pub struct SortKey {
 /// and then `i`'s other columns, a clashing name taking an `i.` prefix.
 #[derive(Clone, Debug)]
 pub struct Join {
-    pub other: DataFrame,
-    /// Pairs of `(x column, i column)`. Empty means `x`'s key, matched in order against `i`'s
-    /// leading columns, as data.table matches a keyed join without `on`.
+    /// `i`, the table whose rows are looked up in `x`.
+    pub other: Table,
+    /// Pairs of `(x column, i column)`. Empty means `x`'s key, matched in order against `i`'s key
+    /// when `i` is keyed and against its leading columns otherwise, as data.table matches a join
+    /// without `on`.
     pub on: Vec<(PlSmallStr, PlSmallStr)>,
     /// `nomatch = NULL`: drop the rows of `i` that match nothing, which makes the join inner.
     pub drop_unmatched: bool,
@@ -315,7 +319,7 @@ pub fn result_type(schema: &Schema, key: &[PlSmallStr], query: &Query) -> Result
     let typer = Typer { schema };
     let rows_schema = match &query.rows {
         Rows::Join(join) => {
-            let i_schema = Table::new(join.other.clone())?.schema();
+            let i_schema = join.other.schema();
             join_schema(schema, &i_schema, &join_columns(join, key)?)?
         }
         Rows::Filter(filter) => {
@@ -356,9 +360,14 @@ pub fn result_type(schema: &Schema, key: &[PlSmallStr], query: &Query) -> Result
                 match expr {
                     None => columns.retain(|(column, _)| column != name),
                     Some(expr) => {
+                        let replaces = matches!(query.rows, Rows::All)
+                            && query.by.is_empty()
+                            && !collapses(expr);
                         let kind = typer.expr(expr)?;
                         match columns.iter_mut().find(|(column, _)| column == name) {
-                            Some((_, existing)) => *existing = supertype(*existing, kind),
+                            Some((_, existing)) => {
+                                *existing = assigned_type(Some(*existing), kind, replaces)?;
+                            }
                             None => columns.push((name.clone(), kind)),
                         }
                     }
@@ -419,16 +428,17 @@ fn rows(
         }
         Rows::Join(join) => {
             let on = join_columns(join, key)?;
-            let i_table = Table::new(join.other.clone())?;
-            let i_schema = i_table.schema();
-            let joined = join_plan(plan, schema, i_table.into_frame().lazy(), &i_schema, join, &on)?;
+            let i_schema = join.other.schema();
+            let i_plan = join.other.frame().clone().lazy();
+            let joined = join_plan(plan, schema, i_plan, &i_schema, join, &on)?;
             (joined, join_schema(schema, &i_schema, &on)?)
         }
     })
 }
 
 /// The `(x column, i column)` pairs a join matches on. Without `on`, `x`'s key columns pair in
-/// order with `i`'s leading columns, and a shorter `i` joins on a prefix of the key.
+/// order with `i`'s key columns, or with its leading columns when `i` has no key, and a shorter
+/// `i` joins on a prefix of `x`'s key.
 fn join_columns(join: &Join, key: &[PlSmallStr]) -> Result<Vec<(PlSmallStr, PlSmallStr)>> {
     if !join.on.is_empty() {
         return Ok(join.on.clone());
@@ -438,9 +448,14 @@ fn join_columns(join: &Join, key: &[PlSmallStr]) -> Result<Vec<(PlSmallStr, PlSm
             "a join needs `on =` or a keyed table".to_string(),
         ));
     }
+    let i_columns: Vec<&PlSmallStr> = if join.other.key().is_empty() {
+        join.other.frame().get_column_names()
+    } else {
+        join.other.key().iter().collect()
+    };
     Ok(key
         .iter()
-        .zip(join.other.get_column_names())
+        .zip(i_columns)
         .map(|(x_column, i_column)| (x_column.clone(), i_column.clone()))
         .collect())
 }
@@ -512,7 +527,7 @@ fn join_plan(
                 JoinType::Left
             })
             .join_nulls(true)
-            .maintain_order(MaintainOrderJoin::Left)
+            .maintain_order(MaintainOrderJoin::LeftRight)
             .suffix(CLASH_SUFFIX)
             .finish(),
         Some((strategy, tolerance)) => {
@@ -695,7 +710,8 @@ fn collapses(expr: &Expr) -> bool {
 }
 
 /// Lowers `:=`. Each new column is computed by one projection of the plan, and then replaces or
-/// joins the table's column list in place, so the columns not assigned are never touched.
+/// joins the table's column list in place, so the columns not assigned are never touched. The
+/// whole update is computed before the table changes, so an update that fails leaves it intact.
 fn assign(
     table: &mut Table,
     schema: &Schema,
@@ -726,46 +742,78 @@ fn assign(
     for (name, expr) in by {
         groups.push(lower.expr(expr)?.alias(name.clone()));
     }
+    let whole = filter.is_none() && groups.is_empty();
     let mut targets = Vec::with_capacity(assignments.len());
     for (name, expr) in assignments {
-        let Some(expr) = expr else { continue };
-        let kind = typer.expr(expr)?;
-        let target = match schema.column(name) {
-            Some(existing) => supertype(existing, kind),
-            None => kind,
+        let existing = schema.column(name);
+        let Some(expr) = expr else {
+            if existing.is_none() {
+                return Err(Error::Query(format!(
+                    "cannot remove `{name}`: the table has no such column"
+                )));
+            }
+            continue;
         };
-        targets.push((name.clone(), expr, target));
+        let replaces = whole && !collapses(expr);
+        let kind = assigned_type(existing, typer.expr(expr)?, replaces)?;
+        let levels = match existing {
+            Some(ColumnType::Factor) if !replaces => {
+                factor_levels(frame.column(name)?.dtype())
+            }
+            _ => None,
+        };
+        targets.push(Target {
+            name: name.clone(),
+            expr,
+            kind,
+            levels,
+        });
     }
-    if let Some(filter) = &filter {
+    let result = match &filter {
+        _ if targets.is_empty() => None,
         // An aggregate, or a group, must see only the selected rows, which an expression over the
         // whole frame would not, so such an update computes on the filtered rows and scatters the
         // results back. A row-wise update keeps the cheaper `when(filter)` form below.
-        if !groups.is_empty() || targets.iter().any(|(_, expr, _)| !row_wise(expr)) {
-            return assign_filtered(table, &lower, filter.clone(), &groups, &targets, assignments);
+        Some(filter)
+            if !groups.is_empty() || targets.iter().any(|target| !row_wise(target.expr)) =>
+        {
+            Some(assign_filtered(&frame, &lower, filter.clone(), &groups, &targets)?)
+        }
+        _ => {
+            let mut computed = Vec::with_capacity(targets.len());
+            for target in &targets {
+                let mut value = lower.expr(target.expr)?;
+                if !groups.is_empty() {
+                    value = value.over(groups.clone())?;
+                }
+                value = target.store(value);
+                if let Some(filter) = &filter {
+                    let otherwise = if schema.column(&target.name).is_some() {
+                        target.store(col(target.name.clone()))
+                    } else {
+                        target.store(lit(NULL))
+                    };
+                    value = when(filter.clone()).then(value).otherwise(otherwise);
+                }
+                computed.push(value.alias(target.name.clone()));
+            }
+            // `with_columns` broadcasts a value that collapses to one row, where `select` would not.
+            let names: Vec<PolarsExpr> =
+                targets.iter().map(|target| col(target.name.clone())).collect();
+            Some(frame.lazy().with_columns(computed).select(names).collect()?)
+        }
+    };
+    let mut columns = Vec::with_capacity(targets.len());
+    if let Some(result) = result {
+        for (column, target) in result.into_columns().into_iter().zip(&targets) {
+            columns.push(match &target.levels {
+                Some(levels) => relevel(column, levels)?,
+                None => column,
+            });
         }
     }
-    let mut computed = Vec::new();
-    for (name, expr, target) in targets {
-        let mut value = lower.expr(expr)?;
-        if !groups.is_empty() {
-            value = value.over(groups.clone())?;
-        }
-        value = value.cast(dtype(target));
-        if let Some(filter) = &filter {
-            let otherwise = if schema.column(&name).is_some() {
-                col(name.clone()).cast(dtype(target))
-            } else {
-                lit(polars::prelude::Null {}).cast(dtype(target))
-            };
-            value = when(filter.clone()).then(value).otherwise(otherwise);
-        }
-        computed.push(value.alias(name.clone()));
-    }
-    if !computed.is_empty() {
-        let result = frame.lazy().select(computed).collect()?;
-        for column in result.into_columns() {
-            table.set_column(column)?;
-        }
+    for column in columns {
+        table.set_column(column)?;
     }
     for (name, expr) in assignments {
         if expr.is_none() {
@@ -773,6 +821,63 @@ fn assign(
         }
     }
     Ok(())
+}
+
+/// One column that `:=` writes.
+struct Target<'a> {
+    name: PlSmallStr,
+    expr: &'a Expr,
+    kind: ColumnType,
+    /// The levels of an existing factor column that the value is written into by label. A label
+    /// the factor lacks becomes a new level, as data.table adds it.
+    levels: Option<Vec<String>>,
+}
+
+impl Target<'_> {
+    /// The value as the column stores it. A factor written into an existing factor goes through
+    /// its labels, and a factor that becomes the whole column keeps its own levels.
+    fn store(&self, value: PolarsExpr) -> PolarsExpr {
+        match (&self.levels, self.kind) {
+            (Some(_), _) => value.cast(DataType::String),
+            (None, ColumnType::Factor) => value,
+            (None, kind) => value.cast(dtype(kind)),
+        }
+    }
+}
+
+/// The type of a column after `:=` writes a value of type `kind` into it. A value written into an
+/// existing column takes that column's type, as data.table coerces it, unless the value replaces
+/// the whole column (no `i`, no `by`, one value per row), which replaces its type as well.
+fn assigned_type(
+    existing: Option<ColumnType>,
+    kind: ColumnType,
+    replaces: bool,
+) -> Result<ColumnType> {
+    match existing {
+        None => Ok(kind),
+        Some(_) if replaces => Ok(kind),
+        Some(ColumnType::Factor) => match kind {
+            ColumnType::Character | ColumnType::Factor => Ok(ColumnType::Factor),
+            other => Err(Error::Query(format!(
+                "writing {other} values into a factor column is not supported"
+            ))),
+        },
+        Some(existing) => Ok(existing),
+    }
+}
+
+/// A string column as a factor whose levels are `levels` followed by the labels they lack, in
+/// order of first appearance.
+fn relevel(column: Column, levels: &[String]) -> Result<Column> {
+    let mut levels = levels.to_vec();
+    let mut known: HashSet<String> = levels.iter().cloned().collect();
+    for label in column.as_materialized_series().str()?.iter().flatten() {
+        if !known.contains(label) {
+            known.insert(label.to_string());
+            levels.push(label.to_string());
+        }
+    }
+    Ok(column.cast(&enum_dtype(&levels)?)?)
 }
 
 /// Whether an expression computes each row from that row alone, so that evaluating it over the
@@ -792,26 +897,26 @@ fn row_wise(expr: &Expr) -> bool {
     }
 }
 
+/// The assigned columns of a filtered update that must be computed on the selected rows alone,
+/// in the order of `targets`.
 fn assign_filtered(
-    table: &mut Table,
+    frame: &DataFrame,
     lower: &Lowering,
     filter: PolarsExpr,
     groups: &[PolarsExpr],
-    targets: &[(PlSmallStr, &Expr, ColumnType)],
-    assignments: &[(PlSmallStr, Option<Expr>)],
-) -> Result<()> {
+    targets: &[Target],
+) -> Result<DataFrame> {
     const ROW: &str = "\u{1}row";
     // Marks the rows the filter selected, so that an `NA` computed for one of them still replaces
     // the old value, while unselected rows keep theirs.
     const ROW_MATCHED: &str = "\u{1}matched";
-    let frame = table.frame().clone();
     let mut values = vec![col(ROW), lit(true).alias(ROW_MATCHED)];
-    for (name, expr, target) in targets {
-        let mut value = lower.expr(expr)?;
+    for target in targets {
+        let mut value = lower.expr(target.expr)?;
         if !groups.is_empty() {
             value = value.over(groups)?;
         }
-        values.push(value.cast(dtype(*target)).alias(name.clone()));
+        values.push(target.store(value).alias(target.name.clone()));
     }
     let selected = frame
         .clone()
@@ -819,20 +924,23 @@ fn assign_filtered(
         .with_row_index(ROW, None)
         .filter(filter)
         .select(values);
-    let mut keep = Vec::new();
-    for (name, _, target) in targets {
+    let mut keep = Vec::with_capacity(targets.len());
+    for target in targets {
+        let name = &target.name;
         let value = if lower.schema.column(name).is_some() {
             let computed = col(format!("{name}{CLASH_SUFFIX}"));
             when(col(ROW_MATCHED).is_not_null())
                 .then(computed)
-                .otherwise(col(name.clone()).cast(dtype(*target)))
+                .otherwise(target.store(col(name.clone())))
         } else {
             col(name.clone())
         };
         keep.push(value.alias(name.clone()));
     }
-    let original = frame.lazy().with_row_index(ROW, None);
-    let result = original
+    Ok(frame
+        .clone()
+        .lazy()
+        .with_row_index(ROW, None)
         .join_builder()
         .with(selected)
         .left_on([col(ROW)])
@@ -842,16 +950,7 @@ fn assign_filtered(
         .suffix(CLASH_SUFFIX)
         .finish()
         .select(keep)
-        .collect()?;
-    for column in result.into_columns() {
-        table.set_column(column)?;
-    }
-    for (name, expr) in assignments {
-        if expr.is_none() {
-            table.drop_column(name)?;
-        }
-    }
-    Ok(())
+        .collect()?)
 }
 
 /// The null count of each input column, read once per query from the chunks' metadata. A column
@@ -956,6 +1055,10 @@ impl Typer<'_> {
                     Aggregate::Mean | Aggregate::Median | Aggregate::Sd | Aggregate::Var => {
                         arithmetic(kind, ColumnType::Integer)?;
                         ColumnType::Double
+                    }
+                    // R's `min` and `max` of logicals are integers.
+                    Aggregate::Min | Aggregate::Max if kind == ColumnType::Logical => {
+                        ColumnType::Integer
                     }
                     Aggregate::Min | Aggregate::Max | Aggregate::First | Aggregate::Last => kind,
                     Aggregate::Length => ColumnType::Integer,
@@ -1100,13 +1203,28 @@ impl Lowering<'_> {
                 na_rm,
             } => {
                 let kind = typer.expr(arg)?;
-                let value = self.expr(arg)?;
+                let mut value = self.expr(arg)?;
+                if kind == ColumnType::Logical
+                    && matches!(function, Aggregate::Min | Aggregate::Max)
+                {
+                    value = value.cast(DataType::Int32);
+                }
+                // `na.rm = TRUE` drops `NaN` as well as `NA`. Polars skips nulls on its own.
+                if *na_rm && kind == ColumnType::Double {
+                    value = value.clone().filter(value.is_not_nan());
+                }
                 let aggregated = match function {
                     // R's integer sum is exact: an integer when it fits and a double when it does
                     // not. It is summed in 64 bits here and narrowed once the result is known
                     // (see `narrow_sums`).
                     Aggregate::Sum if kind != ColumnType::Double => value.cast(DataType::Int64).sum(),
                     Aggregate::Sum => value.sum(),
+                    // With `na.rm = TRUE` a group with no values left has the mean `0 / 0`, which
+                    // is `NaN` in R, where Polars gives null.
+                    Aggregate::Mean if *na_rm => {
+                        let value = value.cast(DataType::Float64);
+                        value.clone().sum() / value.count().cast(DataType::Float64)
+                    }
                     Aggregate::Mean => value.cast(DataType::Float64).mean(),
                     // R's `min` and `max` are `NaN` when an input is, where Polars skips it.
                     Aggregate::Min if kind == ColumnType::Double => value.nan_min(),
@@ -1153,9 +1271,20 @@ impl Lowering<'_> {
             }
             Expr::IfElse(test, yes, no) => {
                 let kind = typer.expr(expr)?;
-                when(self.expr(test)?)
-                    .then(self.expr(yes)?.cast(dtype(kind)))
-                    .otherwise(self.expr(no)?.cast(dtype(kind)))
+                // Two factor branches stay factors; Polars refuses them if their levels differ,
+                // as `fifelse` does.
+                let branch = |value: PolarsExpr| match kind {
+                    ColumnType::Factor => value,
+                    kind => value.cast(dtype(kind)),
+                };
+                let (yes, no) = (branch(self.expr(yes)?), branch(self.expr(no)?));
+                let test = self.expr(test)?;
+                // An `NA` test gives `NA`, where Polars would take the `no` branch.
+                when(test.clone().is_null())
+                    .then(branch(lit(NULL)))
+                    .when(test)
+                    .then(yes)
+                    .otherwise(no)
             }
         })
     }

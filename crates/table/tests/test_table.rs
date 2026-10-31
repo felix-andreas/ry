@@ -597,7 +597,7 @@ fn join_i() -> Table {
 
 fn join(i: &mut Table, on: &[(&str, &str)], drop_unmatched: bool, roll: Roll) -> Rows {
     Rows::Join(Join {
-        other: i.frame().clone(),
+        other: i.clone(),
         on: on
             .iter()
             .map(|(x, i)| (PlSmallStr::from(*x), PlSmallStr::from(*i)))
@@ -1190,4 +1190,138 @@ fn an_integer_sum_that_overflows_becomes_double() {
     let select = Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]);
     let mut result = run_table(&mut x, query(small, select));
     assert_eq!(read(&mut result, "s"), ints(&[1]), "a sum that fits stays integer");
+}
+
+fn factor(codes: &[i32], levels: &[&str]) -> RVector {
+    RVector::Factor {
+        codes: codes.to_vec(),
+        levels: levels.iter().map(|level| level.to_string()).collect(),
+    }
+}
+
+#[test]
+fn a_keyed_join_without_on_matches_the_key_of_a_keyed_i() {
+    let mut x = frame(vec![("a", ints(&[1, 2, 3])), ("v", doubles(&[10.0, 20.0, 30.0]))]);
+    x.set_key(&["a"]).unwrap_or_else(|error| panic!("{error}"));
+    let mut i = frame(vec![("z", ints(&[3, 1])), ("a", ints(&[1, 2]))]);
+    i.set_key(&["a"]).unwrap_or_else(|error| panic!("{error}"));
+    let rows = join(&mut i, &[], false, Roll::None);
+    let mut result = run_table(&mut x, query(rows, Select::All));
+    assert_eq!(names(&result), ["a", "v", "z"]);
+    assert_eq!(read(&mut result, "a"), ints(&[1, 2]));
+    assert_eq!(read(&mut result, "v"), doubles(&[10.0, 20.0]));
+    assert_eq!(read(&mut result, "z"), ints(&[3, 1]));
+}
+
+#[test]
+fn na_rm_drops_nan_and_an_emptied_mean_is_nan() {
+    let mut x = frame(vec![
+        ("x", doubles(&[1.0, f64::NAN, 3.0, NA_REAL])),
+        ("g", ints(&[1, 1, 2, 2])),
+    ]);
+    let removed = |function| Expr::Aggregate {
+        function,
+        arg: Box::new(column("x")),
+        na_rm: true,
+    };
+    let grouped = Query {
+        select: Select::Columns(vec![
+            named("s", removed(Aggregate::Sum)),
+            named("m", removed(Aggregate::Mean)),
+            named("mx", removed(Aggregate::Max)),
+            named("md", removed(Aggregate::Median)),
+        ]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    let mut result = run_table(&mut x, grouped);
+    for name in ["s", "m", "mx", "md"] {
+        assert_eq!(read(&mut result, name), doubles(&[1.0, 3.0]), "{name}");
+    }
+
+    let mut empty = frame(vec![("x", doubles(&[NA_REAL, f64::NAN]))]);
+    let select = Select::Columns(vec![named("m", removed(Aggregate::Mean))]);
+    let mut result = run_table(&mut empty, query(Rows::All, select));
+    assert!(
+        matches!(get(&mut result, "m"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0])),
+        "data.table gives NaN, not NA"
+    );
+}
+
+#[test]
+fn an_na_ifelse_test_gives_na() {
+    let mut x = frame(vec![("t", RVector::Logical(vec![1, NA_INTEGER]))]);
+    let choice = Expr::IfElse(
+        Box::new(column("t")),
+        Box::new(Expr::Double(1.0)),
+        Box::new(Expr::Double(2.0)),
+    );
+    let mut result = run_table(&mut x, query(Rows::All, Select::Columns(vec![named("r", choice)])));
+    assert_eq!(read(&mut result, "r"), doubles(&[1.0, NA_REAL]));
+}
+
+#[test]
+fn max_and_min_of_logicals_are_integers() {
+    let mut x = frame(vec![
+        ("b", RVector::Logical(vec![1, 0, NA_INTEGER])),
+        ("g", ints(&[1, 1, 2])),
+    ]);
+    let grouped = Query {
+        select: Select::Columns(vec![
+            named("mx", aggregate(Aggregate::Max, column("b"))),
+            named("mn", aggregate(Aggregate::Min, column("b"))),
+        ]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    assert_eq!(
+        result_type(&x.schema(), x.key(), &grouped).ok(),
+        Some(ResultType::Table(Schema::new([
+            ("g", ColumnType::Integer),
+            ("mx", ColumnType::Integer),
+            ("mn", ColumnType::Integer),
+        ])))
+    );
+    let mut result = run_table(&mut x, grouped);
+    assert_eq!(read(&mut result, "mx"), ints(&[1, NA_INTEGER]));
+    assert_eq!(read(&mut result, "mn"), ints(&[0, NA_INTEGER]));
+}
+
+#[test]
+fn assigning_into_an_existing_column_keeps_its_type_unless_the_value_replaces_it() {
+    let mut x = frame(vec![
+        ("i", ints(&[1, 2])),
+        ("d", doubles(&[1.5, 2.5])),
+        ("f", factor(&[1, 2], &["a", "b"])),
+        ("h", factor(&[2, 1], &["q", "r"])),
+        ("g", ints(&[1, 2])),
+    ]);
+    let second = || Rows::Filter(binary(BinaryOp::Greater, column("g"), Expr::Integer(1)));
+    run(&mut x, query(second(), Select::Assign(vec![set("i", Expr::Double(1.5))])));
+    assert_eq!(read(&mut x, "i"), ints(&[1, 1]), "a subset truncates into the integer column");
+    run(
+        &mut x,
+        query(second(), Select::Assign(vec![set("f", Expr::Character("z".into()))])),
+    );
+    assert_eq!(read(&mut x, "f"), factor(&[1, 3], &["a", "b", "z"]), "a new label adds a level");
+    run(&mut x, query(Rows::All, Select::Assign(vec![set("d", Expr::Integer(1))])));
+    assert_eq!(read(&mut x, "d"), doubles(&[1.0, 1.0]), "one value coerces to the column");
+    run(
+        &mut x,
+        query(Rows::All, Select::Assign(vec![set("g", column("d"))])),
+    );
+    assert_eq!(read(&mut x, "g"), doubles(&[1.0, 1.0]), "a whole column replaces the type");
+    run(&mut x, query(Rows::All, Select::Assign(vec![set("k", column("h"))])));
+    assert_eq!(read(&mut x, "k"), factor(&[2, 1], &["q", "r"]), "a factor stays a factor");
+}
+
+#[test]
+fn a_failing_update_leaves_the_table_unchanged() {
+    let mut x = frame(vec![("a", ints(&[1, 2]))]);
+    let update = Select::Assign(vec![
+        set("a", Expr::Integer(9)),
+        (PlSmallStr::from("missing"), None),
+    ]);
+    assert!(execute(&mut x, query(Rows::All, update)).is_err());
+    assert_eq!(read(&mut x, "a"), ints(&[1, 2]));
 }

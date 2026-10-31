@@ -223,12 +223,12 @@ fn groupby(dir: &Path) -> Result<()> {
 
 fn joins(dir: &Path) -> Result<()> {
     let mut x = read(dir, "join_x.csv")?;
-    let small = read(dir, "join_small.csv")?.into_frame();
+    let small = read(dir, "join_small.csv")?;
     let mut medium = read(dir, "join_medium.csv")?;
-    let big = read(dir, "join_big.csv")?.into_frame();
-    let medium_frame = medium.frame().clone();
-    let x_frame = x.frame().clone();
-    let inner = |other: &DataFrame, on: &str| Query {
+    let big = read(dir, "join_big.csv")?;
+    let medium_frame = medium.clone();
+    let x_frame = x.clone();
+    let inner = |other: &Table, on: &str| Query {
         rows: equi_join(other, on, true),
         ..Query::default()
     };
@@ -253,7 +253,7 @@ fn joins(dir: &Path) -> Result<()> {
 
 fn rolling_join(dir: &Path) -> Result<()> {
     let mut prices = read(dir, "rolljoin_prices.csv")?;
-    let trades = read(dir, "rolljoin_trades.csv")?.into_frame();
+    let trades = read(dir, "rolljoin_trades.csv")?;
     prices.set_key(&["ticker", "time"])?;
     time_question("rolljoin keyed", || {
         let rows = Rows::Join(Join {
@@ -391,7 +391,7 @@ fn assign(name: &str, expr: Expr) -> Query {
     }
 }
 
-fn equi_join(other: &DataFrame, on: &str, drop_unmatched: bool) -> Rows {
+fn equi_join(other: &Table, on: &str, drop_unmatched: bool) -> Rows {
     Rows::Join(Join {
         other: other.clone(),
         on: vec![(on.into(), on.into())],

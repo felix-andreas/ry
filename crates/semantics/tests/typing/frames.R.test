@@ -404,6 +404,24 @@ prices: frame{id: integer[], price: double[]}
 frame{id: integer[], price: double[]}
 kept: double[]
 
+#---- a_single_value_walrus_keeps_the_existing_column_type
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[, price := 0L]
+kept <- prices$price
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: double[]}
+kept: double[]
+
+#---- a_grouped_walrus_keeps_the_existing_column_type
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[, id := 1.5, by = price]
+kept <- prices$id
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: double[]}
+kept: integer[]
+
 #---- a_subset_walrus_adds_a_new_column_with_the_value_type
 prices <- frame(id = 1:3, price = c(1, 2, 3))
 prices[id > 1L, flag := TRUE]

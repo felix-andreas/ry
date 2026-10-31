@@ -153,12 +153,8 @@ pub fn to_r(series: &Series) -> Result<RVector> {
                 .map(|value| value.map(str::to_string))
                 .collect(),
         ),
-        DataType::Enum(categories, _) => {
-            let levels = categories
-                .categories()
-                .values_iter()
-                .map(str::to_string)
-                .collect();
+        dtype @ DataType::Enum(..) => {
+            let levels = factor_levels(dtype).unwrap_or_default();
             let physical = series.to_physical_repr().cast(&DataType::Int32)?;
             let codes = physical
                 .i32()?
@@ -174,6 +170,20 @@ pub fn to_r(series: &Series) -> Result<RVector> {
             });
         }
     })
+}
+
+/// A factor column's levels in order, read from its `Enum` dtype.
+pub fn factor_levels(dtype: &DataType) -> Option<Vec<String>> {
+    match dtype {
+        DataType::Enum(categories, _) => Some(
+            categories
+                .categories()
+                .values_iter()
+                .map(str::to_string)
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 /// The `Enum` dtype whose categories are `levels`, in order, which is how a factor's level order
