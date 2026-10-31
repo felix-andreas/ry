@@ -40,7 +40,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{env, fs, panic, process, thread};
-use syntax::{SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_syntactic_name};
+use syntax::{
+    SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_inline_annotation,
+    is_syntactic_name,
+};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
@@ -2347,11 +2350,9 @@ fn annotation_semantic_tokens(
 ) -> Vec<lsp_types::SemanticToken> {
     let parse = semantics::parse(db, file);
     let mut spans: Vec<(TextRange, u32)> = Vec::new();
-    for annotation in parse
-        .syntax_node()
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for annotation in parse.syntax_node().descendants().filter(|node| {
+        node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(node)
+    }) {
         for element in annotation.descendants_with_tokens() {
             let SyntaxElement::Token(token) = element else {
                 continue;

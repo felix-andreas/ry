@@ -1,0 +1,114 @@
+#==== inline_annotations
+#---- hover_on_an_annotated_binding
+cou$0nt: integer <- 1L
+#++++
+hover 0..5: count: integer
+hover-definition: global 0..5
+definition 0..5
+references: 0..5*
+rename: 1 edit(s)
+signature: none
+completion (45): count, count.fields, c.noquote, capture.output, chol.default, chooseOpsMethod.default, colours, colSums
+
+#---- hover_on_a_parameter_read_uses_its_inline_type
+f <- function(count: integer) cou$0nt
+#++++
+hover 30..35: count: integer
+hover-definition: local 14..19
+definition 14..19
+references: 14..19*, 30..35
+rename: 2 edit(s)
+signature: none
+completion (45): count, count.fields, c.noquote, capture.output, chol.default, chooseOpsMethod.default, colours, colSums
+
+#---- hover_on_a_builtin_type_name
+count: inte$0ger <- 1L
+#++++
+hover 7..14: integer
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): integer
+
+#---- declared_type_name_navigates_and_renames_across_both_forms
+#: @type Money {double}
+
+#: Money
+price <- 1
+
+total: Mon$0ey <- price
+#++++
+hover 53..58: @type Money {double}
+definition 9..14
+references: 9..14*, 28..33, 53..58
+rename: 3 edit(s)
+type-definition 9..14
+signature: none
+completion (1): Money
+
+#---- type_parameter_is_not_a_navigable_type
+pick <- function<T>(x: $0T) -> T x
+#++++
+hover 23..24: T
+definition: none
+references: none
+rename: none
+signature: none
+completion (11): Any, character, complex, double, fn, integer, list, logical
+
+#---- completion_after_a_parameter_colon
+#: @type Money {double}
+
+f <- function(x: $0) x
+#++++
+hover 25..45: fn(x: Unknown) -> Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (12): Any, character, complex, double, fn, integer, list, logical
+
+#---- completion_after_a_binding_colon_before_the_type_exists
+#: @type Money {double}
+
+price: Mo$0
+#++++
+hover 25..34: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): Money
+
+#---- completion_after_the_return_arrow
+#: @type Money {double}
+
+f <- function(x) -> Mo$0 x
+#++++
+hover 45..47: Mo
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): Money
+
+#---- only_the_unannotated_binding_gets_a_hint_and_an_action
+f <- function(x: integer) -> integer {
+  total: integer <- x
+  ot$0her <- total
+  other
+}
+#++++
+hover 63..68: other: integer
+hover-definition: local 63..68
+definition 63..68
+references: 63..68*, 80..85
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `other`
+  edit 61..61 -> "  #: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 61..61 -> "  #: integer\n"
+completion (1): other
+hint @68: integer

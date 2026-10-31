@@ -552,7 +552,6 @@ signature: none
 action: Add inferred type annotation for `g`
   edit 73..73 -> "#: fn(id: UserId) -> UserId\n"
 action: Add inferred type annotations for the whole file
-  edit 105..105 -> "  #: UserId\n"
   edit 73..73 -> "#: fn(id: UserId) -> UserId\n"
 completion (1): UserId
 hint @74: fn(id: UserId) -> UserId
@@ -608,8 +607,6 @@ references: 9..14*, 50..55
 rename: 2 edit(s)
 type-definition 9..14
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 56..56 -> "  #: Score\n"
 completion (1): Score
 
 #---- declaration_name_is_target
@@ -625,8 +622,6 @@ definition 9..14
 references: 9..14*, 49..54
 rename: 2 edit(s)
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 55..55 -> "  #: Score\n"
 completion (1): Score
 
 #---- annotation_completion_types

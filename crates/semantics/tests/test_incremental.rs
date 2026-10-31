@@ -1,7 +1,10 @@
+use salsa::Setter;
 use semantics::diagnostics::file_diagnostics;
 use semantics::testing::ProbeDatabase;
 use semantics::types::{Atomic, scalar, unknown};
-use semantics::{DocumentKind, Item, ProjectFiles, SourceFile, global_scheme, package_definitions};
+use semantics::{
+    AnalysisSettings, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme, package_definitions,
+};
 use std::thread;
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
@@ -179,4 +182,37 @@ fn a_deep_reexport_chain_resolves_fully() {
         .expect("spawn the analysis thread")
         .join()
         .expect("the chain resolves");
+}
+
+#[test]
+fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
+    let mut db = ProbeDatabase::default();
+    let settings = AnalysisSettings::new(&db, true);
+    let files = db.project(&[
+        "typed <- function(x: integer) -> integer x\n",
+        "untyped <- function(x) x + 1L\n",
+        "#: integer\ncommented <- 1L\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    settings.set_inline_annotations(&mut db).to(false);
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["typed"]);
+}
+
+#[test]
+fn editing_an_inline_annotation_rechecks_the_item_and_its_readers_only() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "count: integer <- 1L\n",
+        "use_count <- function() count\n",
+        "other <- function() 3L\n",
+    ]);
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(files[0], "count: double <- 1L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["count", "use_count"]);
 }
