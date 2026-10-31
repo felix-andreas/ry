@@ -2362,3 +2362,8 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - "Settled" includes the server's idle delay, so it is an upper bound on the semantic wave.
 - An `Unknown` argument to an overloaded call now yields `Unknown` when numeric results disagree
   (`sum(x[[i]])`); other disagreements still take the first candidate.
+- A top-level zeallot pattern (`c(a, b) %<-% x` outside a function) defines no package global,
+  because `top_level_definition` yields one name per item. Other files then report `a` as
+  unresolved and the defining file reports it unused. Destructured names also lack declaration
+  occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
+- `Function | Null | Var` callee unions fall through to the not-callable finding.

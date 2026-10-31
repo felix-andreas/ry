@@ -53,7 +53,9 @@ def cold_check(binary, root):
     before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     with tempfile.TemporaryFile() as findings:
         started = time.perf_counter()
-        subprocess.run([binary, "check", root, "--output", "json"], stdout=findings, stderr=subprocess.DEVNULL)
+        status = subprocess.run([binary, "check", root, "--output", "json"], stdout=findings, stderr=subprocess.DEVNULL)
+        if status.returncode not in (0, 1):
+            sys.exit(f"ry check failed on {root} with status {status.returncode}")
         elapsed = time.perf_counter() - started
         findings.seek(0)
         codes = collections.Counter(json.loads(line)["code"] for line in findings if line.strip())
@@ -70,7 +72,7 @@ def lsp_latency(binary, root, runs):
         text=True,
     )
     if result.returncode != 0:
-        return None
+        sys.exit(f"lsp_latency.py failed on {root}: {result.stderr or result.stdout}")
     return json.loads(result.stdout)
 
 

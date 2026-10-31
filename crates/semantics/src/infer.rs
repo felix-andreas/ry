@@ -8,7 +8,7 @@ use crate::diagnostics::nearest_name;
 use crate::stubs::stubs;
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, for_each_child_type,
-    map_child_types, substitute_rigid, union_of, unknown,
+    map_child_types, scalar, substitute_rigid, union_of, unknown,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{Cell, RefCell};
@@ -17,10 +17,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
-    Unbound { level: u32, constraint: Constraint },
+    Unbound {
+        level: u32,
+        constraint: Constraint,
+    },
     /// `numeric` records that the variable was numeric-constrained when it bound, which
     /// lets a later, wider numeric argument rebind it (`f(1L, 0.5)`).
-    Bound { ty: Ty<'db>, numeric: bool },
+    Bound {
+        ty: Ty<'db>,
+        numeric: bool,
+    },
     Redirect(InferenceVar),
 }
 
@@ -511,7 +517,12 @@ impl<'db> InferenceTable<'db> {
     /// the variable widens to the wider type. Earlier arguments still fit, because
     /// `integer` is compatible with `double`. Logicals never widen a binding, since a
     /// body like `stopifnot(x + 1L > 0L); x` returns the argument's own type.
-    fn widen_numeric_binding(&mut self, db: &'db dyn Db, actual: Ty<'db>, expected: Ty<'db>) -> bool {
+    fn widen_numeric_binding(
+        &mut self,
+        db: &'db dyn Db,
+        actual: Ty<'db>,
+        expected: Ty<'db>,
+    ) -> bool {
         let TyKind::Var(var) = expected.kind(db) else {
             return false;
         };
@@ -536,12 +547,27 @@ impl<'db> InferenceTable<'db> {
         };
         match (rank(bound), rank(actual)) {
             (Some((bound_vector, bound_rank)), Some((actual_vector, actual_rank)))
-                if bound_vector == actual_vector && actual_rank > bound_rank =>
+                if actual_rank > bound_rank
+                    || (actual_rank == bound_rank && !bound_vector && actual_vector) =>
             {
+                // A scalar meeting a vector widens to the vector: R recycles it.
+                let element = scalar(
+                    db,
+                    if actual_rank.max(bound_rank) == 2 {
+                        Atomic::Double
+                    } else {
+                        Atomic::Integer
+                    },
+                );
+                let widened = if bound_vector || actual_vector {
+                    Ty::new(db, TyKind::Vector(element))
+                } else {
+                    element
+                };
                 self.set(
                     representative,
                     Entry::Bound {
-                        ty: actual,
+                        ty: widened,
                         numeric: true,
                     },
                 );

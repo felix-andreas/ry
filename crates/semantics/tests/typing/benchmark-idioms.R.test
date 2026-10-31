@@ -49,3 +49,14 @@ swap <- function(values) {
 #++++
 span: <T> fn(dates: T) -> list{first: Unknown, last: Unknown}
 swap: <T> fn(values: T) -> Unknown
+
+#---- widening_meets_a_scalar_and_a_vector
+scale <- function(a, b) a * b
+x <- scale(c(1L, 2L), 0.5)
+y <- scale(1L, c(0.5, 1))
+v <- function(flags) !!flags
+#++++
+scale: <T: numeric> fn(a: T, b: T) -> T
+x: double[]
+y: double[]
+v: <T> fn(flags: T) -> Unknown

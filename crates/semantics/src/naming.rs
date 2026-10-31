@@ -635,7 +635,11 @@ impl Context<'_> {
                 if *spelling == AssignSpelling::Destructure {
                     for leaf in destructure_leaves(module, *target).unwrap_or_default() {
                         if let ExpressionKind::NameRef(name) = &module.expression(leaf).kind {
-                            self.frame_slot(name, module.expression(leaf).range, BindingKind::Local);
+                            self.frame_slot(
+                                name,
+                                module.expression(leaf).range,
+                                BindingKind::Local,
+                            );
                         }
                     }
                 }

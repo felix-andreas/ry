@@ -5,8 +5,9 @@ use crate::Db;
 use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
 use crate::hir::{
-    Argument, AssignSpelling, BinaryOperator, destructure_leaves, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
-    Parameter as Formal, UnaryOperator, integer_literal_position, is_whole_number_double,
+    Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
+    Parameter as Formal, UnaryOperator, destructure_leaves, integer_literal_position,
+    is_whole_number_double,
 };
 use crate::infer::{
     Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
@@ -2393,6 +2394,14 @@ impl<'db> Checker<'db, '_> {
                     TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {
                         scalar(self.db, Atomic::Logical)
                     }
+                    TyKind::Vector(element)
+                        if matches!(
+                            element.kind(self.db),
+                            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+                        ) =>
+                    {
+                        Ty::new(self.db, TyKind::Vector(scalar(self.db, Atomic::Logical)))
+                    }
                     _ => {
                         self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                         unknown(self.db)
@@ -3796,7 +3805,10 @@ impl<'db> Checker<'db, '_> {
         match ty.kind(self.db) {
             TyKind::Scalar(Atomic::Integer | Atomic::Double) => true,
             TyKind::Vector(element) => {
-                matches!(element.kind(self.db), TyKind::Scalar(Atomic::Integer | Atomic::Double))
+                matches!(
+                    element.kind(self.db),
+                    TyKind::Scalar(Atomic::Integer | Atomic::Double)
+                )
             }
             _ => false,
         }
@@ -3925,9 +3937,9 @@ impl<'db> Checker<'db, '_> {
         if unchecked_argument
             && let Some((_, _, first)) = fits.first()
             && fits.iter().any(|(_, _, results)| results != first)
-            && fits.iter().any(|(_, _, results)| {
-                results.iter().any(|&result| self.is_numeric_result(result))
-            })
+            && fits
+                .iter()
+                .any(|(_, _, results)| results.iter().any(|&result| self.is_numeric_result(result)))
         {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return Some(unknown(self.db));
@@ -4186,7 +4198,7 @@ impl<'db> Checker<'db, '_> {
                 let without_null = union_of(self.db, callable);
                 self.dispatch_call(range, callee_range, without_null, arguments)
             }
-            // A function joined with an unbound variable (`f <- function(source = NULL) {
+            // A function joined with an unbound variable or a generic parameter (`f <- function(source = NULL) {
             // if (is.null(source)) source <- function(x) x; source(1) }`): the variable is
             // whatever callable the caller passes, so only the functions are checked and the
             // result is unchecked.
@@ -4199,12 +4211,12 @@ impl<'db> Checker<'db, '_> {
                 }) && members.iter().any(|&member| {
                     matches!(
                         self.table.shallow_resolve(self.db, member).kind(self.db),
-                        TyKind::Var(_)
+                        TyKind::Var(_) | TyKind::Rigid(_)
                     )
                 }) && members.iter().all(|&member| {
                     matches!(
                         self.table.shallow_resolve(self.db, member).kind(self.db),
-                        TyKind::Function(_) | TyKind::Var(_)
+                        TyKind::Function(_) | TyKind::Var(_) | TyKind::Rigid(_)
                     )
                 }) =>
             {

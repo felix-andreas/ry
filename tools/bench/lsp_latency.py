@@ -121,7 +121,7 @@ def pick_edits(text):
             if match and match.group(2):
                 signature = (index, line.rindex(")"))
         if body is None and signature is not None and index > signature[0]:
-            match = re.search(r"\b(\d)\b", line)
+            match = re.search(r"(?<![\w.\[(])(\d)(?![\w.\])])", line)
             if match and line.startswith("  ") and "#" not in line and '"' not in line:
                 body = (index, match.start(1), match.group(1))
         if body and signature:
