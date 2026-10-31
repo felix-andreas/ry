@@ -1786,6 +1786,50 @@ there was no previous source of truth; the choices that settle architecture are 
 - **The corpus is pinned with renv** on a dated P3M snapshot in build step 1, because renv is in the
   benchmark set and R's own installer cannot backtrack to older compatible versions.
 
+# Decision record: the interpreter and base R
+
+This settles step 3 of `contributing/design/r-runtime.md`. The code is `crates/interp`; before it
+there was no evaluator, so there was no previous source of truth.
+
+- **`interp` sits between `heap` and `libr`.** `libr` depends on `interp` and installs it on the
+  runtime's heap (`interp::install`), passing host hooks (console output, ALTREP materialization,
+  finalizers) and replacing the foreign-function builtins (`.Call`, `dyn.load`, ...) with
+  `interp::register_builtins`. `interp` never sees C, so it builds and tests without libR, and the C
+  API's `Rf_eval`, `R_tryEval` and `R_ToplevelExec` are thin calls into it.
+- **Every non-local exit is a Rust `Err(Unwind)`.** `return`, `break`, `next`, exiting handlers and
+  restarts are `Jump`s to a frame's environment; an error raised by a builtin stays unsignalled
+  (`Unwind::Error`) until the nearest `eval` or builtin boundary signals it, so calling handlers run
+  before any frame unwinds. Only the libR boundary converts to and from `longjmp`. This keeps Rust
+  destructors sound and needs no context stack beyond `Interp::frames`.
+- **Frames mirror GNU R's function contexts exactly** (closure calls, `eval()` and internal
+  dispatch push one), because `sys.call`, `sys.function`, `parent.frame` and the oracle driver's own
+  `sys.nframe()` arithmetic observe them.
+- **Base R's R code loads from the user's GNU R installation** (the base lazy-load database,
+  `R_HOME/library`), per the licensing record; GNU R's byte code reads back as its source
+  expression, which ry compiles itself.
+- **The default packages' native code is reimplemented in Rust** (`builtin_libraries.rs`). GNU R
+  builds the shared libraries of methods, utils, stats, grDevices, graphics and tools against its
+  internal headers, so they inline its object layout (`LENGTH`, `PROTECT` through `R_PPStack`) and
+  cannot run on ry's heap. `dyn.load` of one returns a library record backed by a table with GNU R's
+  routine names and arities, so `useDynLib` binds every `C_` symbol and an unimplemented routine fails
+  naming itself. CRAN packages are unaffected: since R 4.2 they see an opaque `SEXP`.
+- **Tier-0 code is a register machine stored in the closure** as a `BCODESXP` (instructions,
+  constants with the source first, inline caches), compiled on a body's second call. Keeping it in
+  the closure means it is collected with it and needs no side table; `closure_body` is the one
+  reader that must know. Inlined constructs run behind a cached guard that the symbol still names
+  the base primitive, falling back to the AST evaluator for the whole expression, so redefining
+  `if` or `+` keeps GNU R's semantics instead of GNU R's compiler's assumption that base is not
+  shadowed.
+- **Inline caches are validated by one heap counter, the binding epoch,** which moves when a
+  binding is created or removed outside a function frame, or an enclosure changes. Function frames
+  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a cached
+  lookup never resolves through one and the frame itself is probed directly. A function lookup that
+  skipped a non-function binding is not cached, because that binding could later hold a function
+  without moving the epoch.
+- **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
+  GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
+  quadratic.
+
 # Decision record: the package-development loader
 
 Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and the user page
