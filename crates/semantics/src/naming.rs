@@ -3,7 +3,7 @@
 //! falls outward exactly like R's runtime.
 
 use crate::hir::{
-    Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, UnaryOperator,
+    Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, Symbol, UnaryOperator,
     destructure_leaves,
 };
 use rustc_hash::FxHashMap;
@@ -17,7 +17,7 @@ pub struct BindingId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingInfo {
-    pub name: String,
+    pub name: Symbol,
     /// The first write's site.
     pub range: TextRange,
     pub kind: BindingKind,
@@ -33,15 +33,15 @@ pub enum BindingKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnusedAssignment {
-    pub name: String,
+    pub name: Symbol,
     pub range: TextRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceRead {
     pub internal: bool,
-    pub package: String,
-    pub name: Option<String>,
+    pub package: Symbol,
+    pub name: Option<Symbol>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -49,19 +49,19 @@ pub struct ItemNaming {
     pub bindings: BTreeMap<BindingId, BindingInfo>,
     pub resolutions: BTreeMap<ExprId, BindingId>,
     pub maybe_undefined: BTreeSet<ExprId>,
-    pub non_locals: BTreeMap<ExprId, String>,
+    pub non_locals: BTreeMap<ExprId, Symbol>,
     /// The subset of `non_locals` read inside a nested function, which runs when called.
     pub deferred_non_locals: BTreeSet<ExprId>,
     /// Unresolved reads in a quiet context (data masking, opaque operators): never reported,
     /// but they keep cross-item bindings alive, since masked code falls back to enclosing ones.
-    pub quiet_reads: BTreeMap<ExprId, String>,
+    pub quiet_reads: BTreeMap<ExprId, Symbol>,
     pub deferred_quiet_reads: BTreeSet<ExprId>,
     /// `%op%` names read as operators; by name because the operator is a token, not a `NameRef`.
-    pub quiet_operator_reads: BTreeSet<String>,
+    pub quiet_operator_reads: BTreeSet<Symbol>,
     pub unused_assignments: Vec<UnusedAssignment>,
     pub unused_parameters: Vec<UnusedAssignment>,
     /// Own top-level slots read within the item; the cross-item unused check seeds them as used.
-    pub used_top_level_names: BTreeSet<String>,
+    pub used_top_level_names: BTreeSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
     pub captured_slots: BTreeSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
@@ -69,7 +69,7 @@ pub struct ItemNaming {
     /// Qualified reads outside quiet contexts.
     pub namespace_reads: BTreeMap<ExprId, NamespaceRead>,
     /// `<<-` targets with no enclosing binding: R creates them in the global environment.
-    pub super_globals: BTreeSet<String>,
+    pub super_globals: BTreeSet<Symbol>,
     /// Targets R parses but refuses at run time (a computed value or a number); reads inside
     /// them are suppressed as consequences of the mistake.
     pub invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
@@ -130,7 +130,7 @@ struct Scope {
     /// since a shadowed outer binding is not what the closure reads.
     id: u32,
     kind: ScopeKind,
-    slots: BTreeMap<String, BindingId>,
+    slots: BTreeMap<Symbol, BindingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -145,7 +145,7 @@ enum Reach {
 type FlowState = BTreeMap<BindingId, BTreeSet<Reach>>;
 
 struct AssignmentWrite {
-    name: String,
+    name: Symbol,
     range: TextRange,
     scope: u32,
     used: bool,
@@ -158,7 +158,7 @@ struct Context<'a> {
     next_binding: u32,
     scopes: Vec<Scope>,
     /// Loop re-walks must mint no new ids: one binding per (site, name).
-    bindings_by_site: FxHashMap<(u32, u32, String), BindingId>,
+    bindings_by_site: FxHashMap<(u32, u32, Symbol), BindingId>,
     scope_ids: FxHashMap<ExprId, u32>,
     flow: FlowState,
     writes: Vec<AssignmentWrite>,
@@ -189,7 +189,7 @@ impl Context<'_> {
         let key = (
             u32::from(range.start()),
             u32::from(range.end()),
-            name.to_owned(),
+            Symbol::new(name),
         );
         if let Some(&existing) = self.bindings_by_site.get(&key) {
             return existing;
@@ -200,7 +200,7 @@ impl Context<'_> {
         self.naming.bindings.insert(
             id,
             BindingInfo {
-                name: name.to_owned(),
+                name: Symbol::new(name),
                 range,
                 kind,
             },
@@ -231,7 +231,7 @@ impl Context<'_> {
             return slot;
         }
         let slot = self.mint_binding(name, range, kind);
-        self.current_scope().slots.insert(name.to_owned(), slot);
+        self.current_scope().slots.insert(Symbol::new(name), slot);
         slot
     }
 
@@ -690,7 +690,7 @@ impl Context<'_> {
                 self.read_parameter_slots.insert(slot);
             }
             Some(BindingKind::TopLevel) => {
-                self.naming.used_top_level_names.insert(name.to_owned());
+                self.naming.used_top_level_names.insert(Symbol::new(name));
             }
             _ => {}
         }
@@ -731,12 +731,12 @@ impl Context<'_> {
             None => {
                 if self.emit {
                     if self.quiet_depth == 0 {
-                        self.naming.non_locals.insert(id, name.to_owned());
+                        self.naming.non_locals.insert(id, Symbol::new(name));
                         if self.current_function_depth() > 0 {
                             self.naming.deferred_non_locals.insert(id);
                         }
                     } else {
-                        self.naming.quiet_reads.insert(id, name.to_owned());
+                        self.naming.quiet_reads.insert(id, Symbol::new(name));
                         if self.current_function_depth() > 0 {
                             self.naming.deferred_quiet_reads.insert(id);
                         }
@@ -773,7 +773,12 @@ impl Context<'_> {
         let target_expression = module.expression(target);
         match &target_expression.kind {
             // `"x" <- 1` is `x <- 1` in R.
-            ExpressionKind::NameRef(name) | ExpressionKind::Literal(LiteralKind::String(name)) => {
+            ExpressionKind::NameRef(_) | ExpressionKind::Literal(LiteralKind::String(_)) => {
+                let name = &match &target_expression.kind {
+                    ExpressionKind::NameRef(name) => *name,
+                    ExpressionKind::Literal(LiteralKind::String(text)) => Symbol::new(text),
+                    _ => return,
+                };
                 let range = target_expression.range;
                 match spelling {
                     AssignSpelling::Super => {
@@ -903,7 +908,7 @@ impl Context<'_> {
                     .map(|scope| scope.id)
                     .unwrap_or_else(|| self.current_scope().id);
                 self.writes.push(AssignmentWrite {
-                    name: name.to_owned(),
+                    name: Symbol::new(name),
                     range,
                     scope,
                     used: false,

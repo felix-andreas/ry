@@ -4,7 +4,7 @@ use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::{LintLevel, lint_severity};
 use semantics::metadata::NamespaceImport;
 use std::collections::BTreeSet;
-use syntax::{SyntaxElement, SyntaxKind, TextRange};
+use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, TextRange};
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
 /// error, not a warning, because R refuses to load the package.
@@ -86,9 +86,8 @@ pub fn unused_import_diagnostics(
 
 /// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
 /// string tokens contribute their unquoted content.
-pub fn collect_used_tokens(source: &str, out: &mut BTreeSet<String>) {
-    let parse = syntax::parse(source);
-    for element in parse.syntax_node().descendants_with_tokens() {
+pub fn collect_used_tokens(root: &SyntaxNode, out: &mut BTreeSet<String>) {
+    for element in root.descendants_with_tokens() {
         if let SyntaxElement::Token(token) = element {
             if token.kind().is_trivia() {
                 continue;
@@ -188,7 +187,7 @@ mod tests {
         let imports = parse_namespace_imports(namespace);
         let mut used = BTreeSet::new();
         for source in sources {
-            collect_used_tokens(source, &mut used);
+            collect_used_tokens(&syntax::parse(source).syntax_node(), &mut used);
         }
         unused_import_diagnostics(&imports, &used, level)
             .into_iter()

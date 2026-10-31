@@ -1832,3 +1832,31 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 - **Deferred:** updating other development packages' import copies of a changed binding, loading a
   rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and
   evaluating `if` in `NAMESPACE` (ignored with a warning). `backlog.md` lists them.
+
+## Cold-pass memory and time: interned names, compact HIR, parallel setup
+
+- **Previous shape.** Every HIR expression, naming binding and resolution owned its own `String`
+  for each identifier, `Vec`s with spare capacity held block and argument lists, the HIR arena kept
+  its growth slack, per-item memos used hash maps keyed by `ExprId`, and each parse allocated a
+  private rowan node cache. `ry check` then re-parsed every file serially twice (attached
+  namespaces, used tokens) before analysis, and dropped the whole database at exit.
+- **Weakness.** The same spelling was stored once per mention (a name like `x` appears hundreds of
+  thousands of times), the setup phase was single-threaded, and the drop walked every
+  allocation only to exit. Peak memory was about 1 GiB and the cold pass 6 s.
+- **Target shape.**
+  - `hir::Symbol` is a process-wide interned name: `Copy`, two words, leaked `&'static str`. HIR,
+    naming and the check output carry `Symbol`. Project-level maps stay keyed by `String` so their
+    lookups keep borrowing `str`, converting at the boundary.
+  - HIR lists are boxed slices and `lower_item` shrinks the arena, so a memoized item holds no
+    slack. `ItemCheck.expression_types` is a dense table indexed by `ExprId` (ids are dense within
+    an item).
+  - Parsing shares one rowan `NodeCache` per thread, replaced every 256 parses so a long-running
+    server does not pin the garbage of replaced trees.
+  - `check` parses each file once on all cores while collecting attached namespaces and used
+    tokens, forgets the database instead of dropping it, and the binary uses mimalloc (a default
+    feature; massif only sees the system allocator, so profile with `--no-default-features`).
+- **Impact.** Cold check 6.1, 6.7, 6.2 s to 3.4, 3.6, 2.8 s and peak 1 GiB to about 770 MiB on the
+  three benchmark code bases, with byte-identical diagnostics. Item-level firewalls are unchanged
+  (the new types compare structurally, so backdating still applies), and edit latency fell from
+  3 to 5 ms / 95 to 120 ms to 2 ms / 45 to 55 ms (measured, cause not isolated: the allocator and smaller
+  memos both touch the incremental path).

@@ -1,12 +1,160 @@
 //! Spans are item-relative, so an edit elsewhere in the file reproduces an
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
-use std::iter;
+use rustc_hash::{FxHashSet, FxHasher};
+use std::hash::{Hash, Hasher};
+use std::sync::{LazyLock, Mutex};
+use std::{fmt, iter, ops};
 use syntax::ast::{BinaryExpr, Name, is_expression_kind};
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
 pub struct ExprId(pub u32);
+
+/// An identifier, interned process-wide: the same spelling is one allocation shared by every
+/// item that mentions it, and copying one costs two words. The table only grows, which is
+/// bounded by the distinct spellings a session has seen.
+#[derive(Clone, Copy, salsa::SalsaValue)]
+pub struct Symbol(&'static str);
+
+const SYMBOL_SHARDS: usize = 16;
+
+static SYMBOLS: LazyLock<[Mutex<FxHashSet<&'static str>>; SYMBOL_SHARDS]> =
+    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(FxHashSet::default())));
+
+impl Symbol {
+    pub fn new(text: &str) -> Symbol {
+        let mut hasher = FxHasher::default();
+        text.hash(&mut hasher);
+        let shard = &SYMBOLS[hasher.finish() as usize % SYMBOL_SHARDS];
+        // A poisoned shard means another thread died mid-insert; the set is still a valid
+        // set of leaked strings, so keep serving it.
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(&interned) = shard.get(text) {
+            return Symbol(interned);
+        }
+        let interned: &'static str = Box::leak(text.into());
+        shard.insert(interned);
+        Symbol(interned)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl ops::Deref for Symbol {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0
+    }
+}
+
+impl PartialEq for Symbol {
+    fn eq(&self, other: &Symbol) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for Symbol {}
+
+impl PartialEq<str> for Symbol {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for Symbol {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<Symbol> for String {
+    fn eq(&self, other: &Symbol) -> bool {
+        self.as_str() == other.0
+    }
+}
+
+impl PartialEq<Symbol> for &str {
+    fn eq(&self, other: &Symbol) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<Symbol> for str {
+    fn eq(&self, other: &Symbol) -> bool {
+        self == other.0
+    }
+}
+
+impl Default for Symbol {
+    fn default() -> Symbol {
+        Symbol::new("")
+    }
+}
+
+impl PartialEq<String> for Symbol {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == other
+    }
+}
+
+impl Hash for Symbol {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl PartialOrd for Symbol {
+    fn partial_cmp(&self, other: &Symbol) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Symbol {
+    fn cmp(&self, other: &Symbol) -> std::cmp::Ordering {
+        self.0.cmp(other.0)
+    }
+}
+
+impl std::borrow::Borrow<str> for Symbol {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
+impl AsRef<str> for Symbol {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
+impl From<&str> for Symbol {
+    fn from(text: &str) -> Symbol {
+        Symbol::new(text)
+    }
+}
+
+impl From<String> for Symbol {
+    fn from(text: String) -> Symbol {
+        Symbol::new(&text)
+    }
+}
+
+impl fmt::Display for Symbol {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl fmt::Debug for Symbol {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.0, formatter)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module {
@@ -104,10 +252,10 @@ pub enum BinaryOperator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiteralKind {
     /// Source text is kept for literal index positions and the literal-as-integer courtesy.
-    Integer(String),
-    Double(String),
+    Integer(Box<str>),
+    Double(Box<str>),
     Complex,
-    String(String),
+    String(Box<str>),
     Logical(bool),
     Null,
     Na(NaAtom),
@@ -126,7 +274,7 @@ pub enum NaAtom {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Argument {
-    pub name: Option<String>,
+    pub name: Option<Symbol>,
     pub name_range: Option<TextRange>,
     /// `None` is a positional hole (`f(, x)`) or an empty tagged value.
     pub value: Option<ExprId>,
@@ -134,7 +282,7 @@ pub struct Argument {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
-    pub name: String,
+    pub name: Symbol,
     pub default: Option<ExprId>,
     /// The name's range, excluding the default.
     pub range: TextRange,
@@ -145,7 +293,7 @@ pub enum ExpressionKind {
     /// A broken region: types as Unknown and reports nothing of its own.
     Missing,
     Literal(LiteralKind),
-    NameRef(String),
+    NameRef(Symbol),
     Assign {
         spelling: AssignSpelling,
         target: ExprId,
@@ -159,32 +307,32 @@ pub enum ExpressionKind {
         operator: BinaryOperator,
         /// Set only for `Special`: R evaluates `a %op% b` as a call to `%op%`,
         /// so naming needs the name to keep a user-defined operator alive.
-        special_name: Option<String>,
+        special_name: Option<Symbol>,
         lhs: ExprId,
         rhs: ExprId,
     },
     Call {
         callee: ExprId,
-        arguments: Vec<Argument>,
+        arguments: Box<[Argument]>,
     },
     Index {
         double: bool,
         target: ExprId,
-        arguments: Vec<Argument>,
+        arguments: Box<[Argument]>,
     },
     Field {
         at: bool,
         target: ExprId,
-        name: Option<String>,
+        name: Option<Symbol>,
         name_range: Option<TextRange>,
     },
     Namespace {
         internal: bool,
-        package: Option<String>,
-        name: Option<String>,
+        package: Option<Symbol>,
+        name: Option<Symbol>,
     },
     Function {
-        parameters: Vec<Parameter>,
+        parameters: Box<[Parameter]>,
         body: ExprId,
     },
     If {
@@ -193,7 +341,7 @@ pub enum ExpressionKind {
         else_branch: Option<ExprId>,
     },
     For {
-        variable: Option<String>,
+        variable: Option<Symbol>,
         variable_range: Option<TextRange>,
         sequence: ExprId,
         body: ExprId,
@@ -211,7 +359,7 @@ pub enum ExpressionKind {
         body: ExprId,
     },
     Block {
-        statements: Vec<ExprId>,
+        statements: Box<[ExprId]>,
     },
     Paren(ExprId),
     Break,
@@ -264,7 +412,7 @@ impl ExpressionKind {
             ExpressionKind::For { sequence, body, .. } => vec![*sequence, *body],
             ExpressionKind::While { condition, body } => vec![*condition, *body],
             ExpressionKind::Repeat { body } | ExpressionKind::Local { body } => vec![*body],
-            ExpressionKind::Block { statements, .. } => statements.clone(),
+            ExpressionKind::Block { statements, .. } => statements.to_vec(),
             ExpressionKind::Paren(inner) => vec![*inner],
         }
     }
@@ -274,6 +422,8 @@ pub fn lower_item(root: &SyntaxNode) -> Module {
     let mut module = Module::default();
     let root_id = module.lower_expression(root);
     module.root = Some(root_id);
+    // The arena is kept for the life of the project, so the doubling slack is not free.
+    module.expressions.shrink_to_fit();
     module
 }
 
@@ -302,7 +452,7 @@ impl Module {
                 let text = Name::cast(node.clone())
                     .and_then(|name| name.text())
                     .unwrap_or_default();
-                self.allocate(ExpressionKind::NameRef(text), range)
+                self.allocate(ExpressionKind::NameRef(Symbol::new(&text)), range)
             }
             SyntaxKind::LITERAL => {
                 let kind = literal_kind(node);
@@ -316,7 +466,7 @@ impl Module {
             SyntaxKind::BRACE_EXPR => {
                 let statements = expression_children(node)
                     .map(|child| self.lower_expression(&child))
-                    .collect();
+                    .collect::<Box<[ExprId]>>();
                 // A trailing `;` adds no expression in R's grammar, so
                 // `{ 1L; }` is `1L` and needs no flag here.
                 self.allocate(ExpressionKind::Block { statements }, range)
@@ -359,12 +509,18 @@ impl Module {
                             value: Some(body),
                             ..
                         },
-                    ] = arguments.as_slice()
+                    ] = &*arguments
                 {
                     return self.allocate(ExpressionKind::Local { body: *body }, range);
                 }
                 let callee = self.lower_optional(callee_node, range);
-                self.allocate(ExpressionKind::Call { callee, arguments }, range)
+                self.allocate(
+                    ExpressionKind::Call {
+                        callee,
+                        arguments: arguments.into(),
+                    },
+                    range,
+                )
             }
             SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR => {
                 let double = node.kind() == SyntaxKind::SUBSET2_EXPR;
@@ -375,7 +531,7 @@ impl Module {
                     ExpressionKind::Index {
                         double,
                         target,
-                        arguments,
+                        arguments: arguments.into(),
                     },
                     range,
                 )
@@ -448,7 +604,9 @@ impl Module {
                 let variable_node = children.next();
                 let (variable, variable_range) = match &variable_node {
                     Some(node) if node.kind() == SyntaxKind::NAME => (
-                        Name::cast(node.clone()).and_then(|name| name.text()),
+                        Name::cast(node.clone())
+                            .and_then(|name| name.text())
+                            .map(Symbol::from),
                         Some(node.text_range()),
                     ),
                     _ => (None, None),
@@ -526,7 +684,7 @@ impl Module {
             // rlang). The callee sits on the operator token so an unresolved `:=` reports there.
             SyntaxKind::COLON_EQ => {
                 let callee = self.allocate(
-                    ExpressionKind::NameRef(":=".to_owned()),
+                    ExpressionKind::NameRef(Symbol::new(":=")),
                     operator_token.text_range(),
                 );
                 let arguments = [lhs, rhs]
@@ -590,7 +748,7 @@ impl Module {
             }
         }
         let special_name =
-            (operator == BinaryOperator::Special).then(|| operator_token.text().to_owned());
+            (operator == BinaryOperator::Special).then(|| Symbol::new(operator_token.text()));
         self.allocate(
             ExpressionKind::Binary {
                 operator,
@@ -632,7 +790,13 @@ impl Module {
                 },
             );
         }
-        Some(self.allocate(ExpressionKind::Call { callee, arguments }, range))
+        Some(self.allocate(
+            ExpressionKind::Call {
+                callee,
+                arguments: arguments.into(),
+            },
+            range,
+        ))
     }
 
     /// The `_` placeholder never becomes an expression, so nothing dangles in the arena.
@@ -691,7 +855,7 @@ impl Module {
             .collect()
     }
 
-    fn lower_parameters(&mut self, list: &SyntaxNode) -> Vec<Parameter> {
+    fn lower_parameters(&mut self, list: &SyntaxNode) -> Box<[Parameter]> {
         list.children()
             .filter(|child| child.kind() == SyntaxKind::PARAMETER)
             .map(|parameter| {
@@ -704,6 +868,7 @@ impl Module {
                             .unwrap_or(text)
                             .to_owned()
                     })
+                    .map(Symbol::from)
                     .unwrap_or_default();
                 let default = expression_children(&parameter)
                     .next()
@@ -757,11 +922,11 @@ fn literal_kind(node: &SyntaxNode) -> LiteralKind {
         return LiteralKind::Null;
     };
     match token.kind() {
-        SyntaxKind::INTEGER => LiteralKind::Integer(token.text().to_owned()),
-        SyntaxKind::DOUBLE => LiteralKind::Double(token.text().to_owned()),
+        SyntaxKind::INTEGER => LiteralKind::Integer(token.text().into()),
+        SyntaxKind::DOUBLE => LiteralKind::Double(token.text().into()),
         SyntaxKind::COMPLEX => LiteralKind::Complex,
         SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
-            LiteralKind::String(string_value(token.text()))
+            LiteralKind::String(string_value(token.text()).into())
         }
         SyntaxKind::TRUE_KW => LiteralKind::Logical(true),
         SyntaxKind::FALSE_KW => LiteralKind::Logical(false),
@@ -829,12 +994,14 @@ fn string_value(text: &str) -> String {
     text.trim_matches(['"', '\'']).to_owned()
 }
 
-fn field_name_text(node: &SyntaxNode) -> Option<String> {
+fn field_name_text(node: &SyntaxNode) -> Option<Symbol> {
     match node.kind() {
-        SyntaxKind::NAME => Name::cast(node.clone()).and_then(|name| name.text()),
+        SyntaxKind::NAME => Name::cast(node.clone())
+            .and_then(|name| name.text())
+            .map(Symbol::from),
         SyntaxKind::LITERAL => {
             let token = node.first_token()?;
-            (token.kind() == SyntaxKind::STRING).then(|| string_value(token.text()))
+            (token.kind() == SyntaxKind::STRING).then(|| Symbol::new(&string_value(token.text())))
         }
         _ => None,
     }

@@ -562,8 +562,8 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
 
 fn callee_name(hir: &Module, callee: ExprId) -> Option<String> {
     match &hir.expression(callee).kind {
-        ExpressionKind::NameRef(name) => Some(name.clone()),
-        ExpressionKind::Namespace { name, .. } => name.clone(),
+        ExpressionKind::NameRef(name) => Some(name.to_string()),
+        ExpressionKind::Namespace { name, .. } => name.map(|name| name.to_string()),
         _ => None,
     }
 }
@@ -718,7 +718,7 @@ pub fn completion(
                         })
                         .map(|info| {
                             CompletionItem::new(
-                                info.name.clone(),
+                                info.name.to_string(),
                                 CompletionKind::Variable,
                                 CompletionSource::Local,
                             )
@@ -744,7 +744,7 @@ pub fn completion(
                                         })
                                         .map(|info| {
                                             CompletionItem::new(
-                                                info.name.clone(),
+                                                info.name.to_string(),
                                                 CompletionKind::Variable,
                                                 CompletionSource::Global,
                                             )
@@ -2405,7 +2405,7 @@ fn target_at<'db>(
             // Cross-item reads resolve to the name, so the item's own top-level binding is the
             // global.
             if info.kind == BindingKind::TopLevel {
-                return Some(Target::Global(info.name.clone()));
+                return Some(Target::Global(info.name.to_string()));
             }
             return Some(Target::Slot {
                 item: position.item,
@@ -2420,10 +2420,10 @@ fn target_at<'db>(
             .or_else(|| naming.quiet_reads.get(&expression))
         {
             if global_declaration_exists(db, files, name) {
-                return Some(Target::Global(name.clone()));
+                return Some(Target::Global(name.to_string()));
             }
             if stub_declaration(db, name).is_some() {
-                return Some(Target::StubGlobal(name.clone()));
+                return Some(Target::StubGlobal(name.to_string()));
             }
         }
     }
@@ -2454,7 +2454,7 @@ fn target_at<'db>(
         .filter(|(_, info)| info.range.contains_inclusive(position.relative))
         .min_by_key(|(binding, info)| (info.range.len(), binding.0))?;
     if info.kind == BindingKind::TopLevel {
-        return Some(Target::Global(info.name.clone()));
+        return Some(Target::Global(info.name.to_string()));
     }
     Some(Target::Slot {
         item: position.item,
