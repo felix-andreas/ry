@@ -1,9 +1,13 @@
 //! `Rf_eval` and the primitives behind it.
 //!
-//! ry's interpreter comes later, so evaluation here covers what native code needs to drive
-//! native code: constants evaluate to themselves, symbols look up their binding, promises are
-//! forced, and a call evaluates when its function is one of the primitives below. Calling an R
-//! closure is reported as unsupported rather than approximated.
+//! Evaluation belongs to ry's interpreter, which lives in its own crate and plugs in through
+//! [`Evaluator`] with [`install_evaluator`]. Every evaluation entry point of the C API
+//! (`Rf_eval`, `R_tryEval`, `R_forceAndCall`, `R_ParseVector`, `Rf_PrintValue`, R-level
+//! finalizers) goes through the installed evaluator. Until one is installed, a small built-in
+//! evaluator covers what native code needs to drive native code: constants evaluate to
+//! themselves, symbols look up their binding, promises are forced, and a call evaluates when its
+//! function is one of the primitives below. Calling an R closure is then reported as unsupported
+//! rather than approximated.
 
 use crate::{
     boundary::{ApiResult, Unwind, call_native, enter, error, error_in, report, warn},
@@ -51,13 +55,79 @@ pub(crate) unsafe fn install_primitives(heap: &mut Heap) {
     }
 }
 
+/// The interpreter's side of evaluation. libR calls it for every evaluation the C API performs;
+/// the interpreter in turn calls back into libR (environments, `.Call` through
+/// [`native_call`], connections) as ordinary Rust.
+///
+/// Each method runs inside an API function's `enter`, so it reports a non-local exit as
+/// `Err(Unwind)` and must not `longjmp` itself.
+pub trait Evaluator: Sync {
+    /// Evaluates `expression` in `env`, as `Rf_eval` does.
+    unsafe fn eval(&self, expression: Sexp, env: Sexp) -> ApiResult<Sexp>;
+
+    /// Calls `function` with already evaluated arguments, given as a pairlist whose tags are the
+    /// argument names. `call` is the call reported in errors and seen by `sys.call()`.
+    unsafe fn apply(&self, call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
+    -> ApiResult<Sexp>;
+
+    /// Parses `text` (a character vector) into an expression vector, as `R_ParseVector` does;
+    /// `count` is the number of expressions to read, or a negative number for all of them.
+    unsafe fn parse(&self, text: Sexp, count: c_int, srcfile: Sexp) -> ApiResult<ParseOutcome>;
+
+    /// Evaluates `call`, forcing the promises of its first `count` arguments before the
+    /// function's body runs, as `R_forceAndCall` does.
+    unsafe fn force_and_call(&self, call: Sexp, count: c_int, env: Sexp) -> ApiResult<Sexp>;
+
+    /// Prints `value` as auto-printing at top level would, as `Rf_PrintValue` does.
+    unsafe fn print_value(&self, value: Sexp, env: Sexp) -> ApiResult<()>;
+}
+
+/// `ParseStatus` from `R_ext/Parse.h`, with GNU R's numbering.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseStatus {
+    Null = 0,
+    Ok = 1,
+    Incomplete = 2,
+    Error = 3,
+    Eof = 4,
+}
+
+/// The result of a parse: the expression vector (`R_NilValue` unless the status is
+/// `ParseStatus::Ok`) and the status.
+#[derive(Clone, Copy, Debug)]
+pub struct ParseOutcome {
+    pub expressions: Sexp,
+    pub status: ParseStatus,
+}
+
+static EVALUATOR: crate::Global<Option<&'static dyn Evaluator>> = crate::Global::new(None);
+
+/// Makes `evaluator` the one every evaluation entry point of the C API uses. The interpreter
+/// calls this once at startup, before any package code runs.
+pub fn install_evaluator(evaluator: &'static dyn Evaluator) {
+    EVALUATOR.set(Some(evaluator));
+}
+
+pub fn evaluator() -> Option<&'static dyn Evaluator> {
+    EVALUATOR.get()
+}
+
 pub fn primitive_name(index: u32) -> &'static str {
     PRIMITIVES
         .get(index as usize)
         .map_or("<unknown primitive>", |(name, _, _)| name)
 }
 
+/// Evaluates through the installed [`Evaluator`], or the built-in one when none is installed.
 pub unsafe fn eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
+    if let Some(evaluator) = evaluator() {
+        return evaluator.eval(expression, env);
+    }
+    builtin_eval(expression, env)
+}
+
+unsafe fn builtin_eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
     let known = *runtime().heap.known();
     match expression.kind() {
         SexpType::Symbol => {
@@ -167,6 +237,14 @@ pub unsafe fn apply_closure_or_primitive(
     let nil = runtime.nil();
     let call = crate::lists::list_of(SexpType::Language, &[function])?;
     runtime.heap.root(call);
+    if let Some(evaluator) = evaluator() {
+        let mut list = nil;
+        for &value in arguments.iter().rev() {
+            list = runtime.heap.cons(value, list)?;
+            runtime.heap.root(list);
+        }
+        return evaluator.apply(call, function, list, env);
+    }
     match function.kind() {
         SexpType::Builtin | SexpType::Special => {
             let tagged: Vec<(Sexp, Sexp)> = arguments.iter().map(|&value| (nil, value)).collect();
@@ -187,7 +265,9 @@ unsafe fn dot_external(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> Ap
     native_call(call, arguments, RoutineKind::External)
 }
 
-unsafe fn native_call(
+/// `.Call` and `.External` for the interpreter: `arguments` are the evaluated arguments with
+/// their tags, the first being `.NAME`.
+pub unsafe fn native_call(
     call: Sexp,
     arguments: &[(Sexp, Sexp)],
     kind: RoutineKind,
@@ -607,4 +687,78 @@ impl crate::boundary::Handout for Option<Sexp> {
             value.hand_out(runtime);
         }
     }
+}
+
+unsafe fn installed_evaluator(what: &str) -> ApiResult<&'static dyn Evaluator> {
+    evaluator().ok_or_else(|| error(format!("{what} needs ry's interpreter, which is not loaded")))
+}
+
+/// `R_ParseVector(text, n, status, srcfile)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ParseVector(
+    text: Sexp,
+    count: c_int,
+    status: *mut ParseStatus,
+    srcfile: Sexp,
+) -> Sexp {
+    enter(|| {
+        let outcome = installed_evaluator("R_ParseVector")?.parse(text, count, srcfile)?;
+        if !status.is_null() {
+            *status = outcome.status;
+        }
+        Ok(outcome.expressions)
+    })
+}
+
+/// `R_ParseString(text)`: the single expression `text` holds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ParseString(text: *const c_char) -> Sexp {
+    enter(|| parse_one(text))
+}
+
+unsafe fn parse_one(text: *const c_char) -> ApiResult<Sexp> {
+    let charsxp = runtime()
+        .heap
+        .mk_char(crate::strings::c_bytes(text), Encoding::Utf8)?;
+    let vector = crate::memory::scalar_string(charsxp)?;
+    runtime().heap.root(vector);
+    let nil = runtime().nil();
+    let outcome = installed_evaluator("R_ParseString")?.parse(vector, -1, nil)?;
+    if outcome.status != ParseStatus::Ok {
+        return Err(error("parse error"));
+    }
+    match xlength(outcome.expressions)? {
+        0 => Ok(nil),
+        1 => Ok(outcome.expressions.element(0)),
+        _ => Err(error("parse error: more than one expression")),
+    }
+}
+
+/// `R_ParseEvalString(text, env)`: parses one expression and evaluates it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ParseEvalString(text: *const c_char, env: Sexp) -> Sexp {
+    enter(|| {
+        let expression = parse_one(text)?;
+        runtime().heap.root(expression);
+        eval(expression, env)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_PrintValue(value: Sexp) {
+    enter(|| {
+        let global = runtime().heap.known().global_env;
+        installed_evaluator("Rf_PrintValue")?.print_value(value, global)
+    })
+}
+
+/// `R_forceAndCall(call, n, rho)`: evaluates `call`, forcing the promises of the first `n`
+/// arguments before the function body runs. Without an interpreter every argument is evaluated
+/// eagerly anyway, which is the same thing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_forceAndCall(call: Sexp, count: c_int, env: Sexp) -> Sexp {
+    enter(|| match evaluator() {
+        Some(evaluator) => evaluator.force_and_call(call, count, env),
+        None => builtin_eval(call, env),
+    })
 }
