@@ -1,0 +1,80 @@
+#==== records_and_tags
+#---- literals_space_like_calls
+p <- (x=1,y = 2)
+t <- ( 1L , "a" )
+e <- ( )
+#++++
+p <- (x = 1, y = 2)
+t <- (1L, "a")
+e <- ()
+
+#---- one_item_literals_keep_a_hugged_comma
+one <- (x = 1 , )
+single <- (1L ,)
+#++++
+one <- (x = 1,)
+single <- (1L,)
+
+#---- tags_hug_their_payload
+s <- :Rect(width=2,height = 3)
+n <- :None
+#++++
+s <- :Rect(width = 2, height = 3)
+n <- :None
+
+#---- match_puts_one_arm_per_line
+r <- match(s){
+:Circle(radius=r)=>r
+:Rect(width = w,..) if(w>0)=>w
+(a,_)|(_,a) => a
+-1L=>0; _=>NULL
+}
+#++++
+r <- match (s) {
+  :Circle(radius = r) => r
+  :Rect(width = w, ..) if (w > 0) => w
+  (a, _) | (_, a) => a
+  -1L => 0
+  _ => NULL
+}
+
+#---- match_keeps_comma_separators_and_comments
+z <- match (y) { # lead
+  1 => a, 2 => b   # trailing
+
+
+  # own line
+  _ => { c }
+}
+#++++
+z <- match (y) { # lead
+  1 => a,
+  2 => b # trailing
+
+  # own line
+  _ => { c }
+}
+
+#---- empty_match
+x <- match (y) {  }
+#++++
+x <- match (y) {}
+
+#---- pattern_strings_use_double_quotes
+w <- match ((1L, 'a')) { (a, 'b') => a; _ => 0 }
+#++++
+w <- match ((1L, "a")) {
+  (a, "b") => a
+  _ => 0
+}
+
+#---- tag_and_record_types
+x: :Some(integer)|:None|.. <- :None
+f <- function(p: record{ x:double }, t: tuple{integer}) ->:Ok(value: double) p
+#: :Some(integer)|:None
+y <- :None
+#++++
+x: :Some(integer) | :None | .. <- :None
+f <- function(p: record{x: double}, t: tuple{integer}) -> :Ok(value: double) p
+#: :Some(integer) | :None
+y <- :None

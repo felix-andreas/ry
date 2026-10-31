@@ -263,6 +263,11 @@ impl Formatter<'_> {
             WHILE_EXPR => self.conditional(node, level, true),
             FOR_EXPR => self.for_expression(node, level),
             REPEAT_EXPR => self.repeat_expression(node, level),
+            MATCH_EXPR => self.match_expression(node, level),
+            MATCH_ARM => self.match_arm(node, level),
+            MATCH_GUARD => self.match_guard(node, level),
+            PATTERN_WILDCARD | PATTERN_BIND | PATTERN_LITERAL | PATTERN_TAG | PATTERN_LIST
+            | PATTERN_REST | PATTERN_OR | PATTERN_PAREN => self.pattern(node),
             ANNOTATION => {
                 self.annotation(node, level);
                 // Nothing may follow an annotation on its line either.
@@ -629,9 +634,15 @@ impl Formatter<'_> {
             .iter()
             .find(|element| matches!(element.kind(), R_PAREN | R_BRACKET))
             .and_then(|close| last_token_before(node, close.text_range().start()));
-        let trailing_space = close_previous_token
-            .as_ref()
-            .is_none_or(|token| token.kind() == COMMA);
+        // A one-item literal keeps its comma hugged, `(x = 1,)`: it is a
+        // marker, not a hole argument.
+        let is_literal = node
+            .parent()
+            .is_some_and(|parent| matches!(parent.kind(), RECORD_EXPR | TUPLE_EXPR));
+        let trailing_space = !is_literal
+            && close_previous_token
+                .as_ref()
+                .is_none_or(|token| token.kind() == COMMA);
         // Hug: some argument starts on the open line and ends on the closer's
         // line. A multiline signature always expands one parameter per line.
         let hug = node.kind() != PARAMETER_LIST
@@ -712,6 +723,129 @@ impl Formatter<'_> {
         }
     }
 
+    /// Arms go one per line, whatever separated them. A `;` separator is
+    /// dropped like a statement's, and a `,` stays glued to its arm.
+    fn match_expression(&mut self, node: &SyntaxNode, level: usize) {
+        let elements = child_elements(node);
+        let Some(open) = elements
+            .iter()
+            .position(|element| element.kind() == L_BRACE)
+        else {
+            self.out.push_str(&self.source[node.text_range()]);
+            return;
+        };
+        for (previous, element) in with_previous(&elements[..open]) {
+            match element.kind() {
+                COMMENT | ANNOTATION => self.place_comment(previous, element, level + 1, level),
+                _ => {
+                    if previous.is_some() {
+                        self.space();
+                    }
+                    self.element(element, level, false);
+                }
+            }
+        }
+        self.out.push_str(" {");
+        let body: Vec<&SyntaxElement> = elements[open + 1..]
+            .iter()
+            .filter(|element| !matches!(element.kind(), R_BRACE | SEMICOLON))
+            .collect();
+        let open_line = self.line(elements[open].text_range().start());
+        let leading = body
+            .iter()
+            .take_while(|element| {
+                element.kind() == COMMENT && self.line(element.text_range().start()) == open_line
+            })
+            .count();
+        for element in &body[..leading] {
+            self.space();
+            self.element(element, level, false);
+        }
+        let rest = &body[leading..];
+        if !rest.is_empty() {
+            self.out.push_str(self.line_ending);
+        }
+        let mut previous: Option<&SyntaxElement> = None;
+        for element in rest.iter().copied() {
+            if element.kind() == COMMA {
+                if previous.is_some_and(is_comment) {
+                    self.newline(level + 1);
+                }
+                self.out.push(',');
+                continue;
+            }
+            if is_comment(element) && self.trails(previous, element) {
+                self.space();
+            } else {
+                self.newlines_between(previous, element, level + 1);
+            }
+            self.element(element, level + 1, false);
+            previous = Some(element);
+        }
+        if !body.is_empty() {
+            self.newline(level);
+        }
+        self.out.push('}');
+    }
+
+    fn match_arm(&mut self, node: &SyntaxNode, level: usize) {
+        let elements = child_elements(node);
+        for (previous, element) in with_previous(&elements) {
+            match element.kind() {
+                COMMENT | ANNOTATION => self.place_comment(previous, element, level + 1, level + 1),
+                FAT_ARROW => self.out.push_str(" =>"),
+                _ if previous.is_some() => {
+                    self.space();
+                    self.element(element, level, false);
+                }
+                _ => self.element(element, level, false),
+            }
+        }
+    }
+
+    fn match_guard(&mut self, node: &SyntaxNode, level: usize) {
+        for (previous, element) in with_previous(&child_elements(node)) {
+            match element.kind() {
+                COMMENT | ANNOTATION => self.place_comment(previous, element, level + 1, level + 1),
+                IF_KW => self.out.push_str("if "),
+                _ => self.element(element, level, false),
+            }
+        }
+    }
+
+    /// A pattern prints on one line: `, ` between items, ` = ` in a field and
+    /// ` | ` between alternatives. One holding a comment is copied as written,
+    /// because joining its lines would comment out the rest of the pattern.
+    fn pattern(&mut self, node: &SyntaxNode) {
+        if node
+            .descendants_with_tokens()
+            .any(|element| element.kind() == COMMENT)
+        {
+            self.out.push_str(&self.source[node.text_range()]);
+            return;
+        }
+        let mut pending_space = false;
+        for token in node
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|token| !token.kind().is_trivia())
+        {
+            match token.kind() {
+                R_PAREN => pending_space = false,
+                EQ | PIPE => pending_space = true,
+                _ => {}
+            }
+            if pending_space {
+                self.space();
+            }
+            match token.kind() {
+                STRING => self.string(&token),
+                _ => self.out.push_str(token.text()),
+            }
+            pending_space = matches!(token.kind(), COMMA | EQ | PIPE);
+        }
+    }
+
     fn argument(&mut self, node: &SyntaxNode, level: usize) {
         if self.skip_exempt(node) {
             self.emit_skipped(node);
@@ -750,7 +884,7 @@ impl Formatter<'_> {
             .filter_map(|element| element.into_token())
             .filter(|token| !token.kind().is_trivia())
         {
-            let Some(kind) = annotation_token_kind(token.kind()) else {
+            let Some(kind) = annotation_token_kind(&token) else {
                 self.out.push_str(token.text());
                 previous = None;
                 continue;
@@ -1028,7 +1162,7 @@ impl Formatter<'_> {
             if token.kind() == ANNOTATION_MARKER {
                 continue;
             }
-            let kind = annotation_token_kind(token.kind())?;
+            let kind = annotation_token_kind(&token)?;
             let tokens = line_tokens.last_mut()?;
             // Directive names lex as `@` plus adjacent tokens; glue them back.
             if kind == AnnotationTokenKind::Word
@@ -1437,6 +1571,8 @@ enum AnnotationTokenKind {
     Pipe,
     Comma,
     Colon,
+    /// The `:` that starts a tag type, `:Some(integer)`.
+    TagMarker,
     OpenParen,
     CloseParen,
     OpenBracket,
@@ -1447,9 +1583,17 @@ enum AnnotationTokenKind {
     CloseAngle,
 }
 
-fn annotation_token_kind(kind: SyntaxKind) -> Option<AnnotationTokenKind> {
+fn annotation_token_kind(token: &SyntaxToken) -> Option<AnnotationTokenKind> {
     use AnnotationTokenKind::*;
+    let kind = token.kind();
     Some(match kind {
+        COLON
+            if token
+                .parent()
+                .is_some_and(|parent| parent.kind() == TYPE_TAG) =>
+        {
+            TagMarker
+        }
         L_PAREN => OpenParen,
         R_PAREN => CloseParen,
         L_BRACKET => OpenBracket,
@@ -1487,8 +1631,13 @@ fn annotation_space_between(previous: &AnnotationToken, current: AnnotationToken
         }
         OpenAngle if previous.kind == Word => return false,
         OpenBracket if matches!(previous.kind, Word | CloseAngle | CloseBracket) => return false,
-        OpenBrace if previous.kind == Word && previous.text == "list" => return false,
-        Word if previous.kind == Dots => return false,
+        OpenBrace
+            if previous.kind == Word
+                && matches!(previous.text.as_str(), "list" | "record" | "tuple") =>
+        {
+            return false;
+        }
+        Word if matches!(previous.kind, Dots | TagMarker) => return false,
         _ => {}
     }
     !is_opener(previous.kind)
