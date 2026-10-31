@@ -66,19 +66,23 @@ The comma is what makes it a literal. R reads `(x = 1)` as a parenthesized assig
 a parenthesized expression, and both keep that meaning, so a one-field record and a one-item tuple
 need a trailing comma, as a one-item tuple does in Python. R rejects a comma directly inside
 parentheses, so every form in the table is new syntax with no prior meaning. A literal is all
-fields or all items: `(1L, y = 2)` is a syntax error, and so is a repeated field name.
+fields or all items: `(1L, y = 2)` is a syntax error, and so is a repeated field name or a spliced
+`...`.
 
 **Types.** `record{name: T}` and `tuple{T1, T2}` are new types, spelled like the existing
 `list{...}` and `frame{...}`. They cannot reuse `list{...}`, because a record is not a list: passing
 `(x = 1,)` where `list{x: double}` is expected is a type error, and so is the reverse. A record's
-fields are all required, and its field order is part of neither its identity nor its type, so
-`(x = 1, y = 2)` and `(y = 2, x = 1)` have the same type and are equal values.
+fields are all required, and field order is part of neither its identity nor its type, so
+`(x = 1, y = 2)` and `(y = 2, x = 1)` have the same type and are equal values. A record stores and
+prints its fields sorted by name in byte order, independent of the locale, so the second literal
+prints as `(x = 1, y = 2)`.
 
 **Access and update.** `point$x` reads a field by its exact name, and a name the record lacks is an
-error, never a partial match or `NULL`. `pair[[1L]]` reads a tuple item, and an index past the end
-is an error. `point$x <- 3` rebinds `point` to a copy with that field replaced, because records
+error, never a partial match or `NULL`. `point[["x"]]` is the same read with a string. `pair[[1L]]`
+reads a tuple item, an index past the end is an error, and `length()` counts fields or items. `point$x <- 3` rebinds `point` to a copy with that field replaced, because records
 have value semantics, and it cannot add a field or change its type. Nothing else from R applies:
-`[`, `names()`, attributes and arithmetic are errors. Destructuring happens in `match` arms. A
+`[`, `names()`, attributes, arithmetic and `==` are errors, and `identical()` is equality. A tag
+has no accessors at all: its payload is read with `match`. Destructuring happens in `match` arms. A
 destructuring assignment such as `(q, r) <- divmod(7L, 2L)` would also be unambiguous, because R
 rejects `(q, r)`, and is left as follow-up work.
 
@@ -96,7 +100,14 @@ is written with a leading colon:
 The colon is the marker because R's `:` is binary only, so a `:` where an expression starts is a
 syntax error in R. Tag names follow Roc's convention of a capital letter, though any R name is
 accepted. A payload is positional (`:Some(5L)`) or named (`:Rect(width = 2, height = 3)`), never
-both, mirroring tuples and records.
+both, mirroring tuples and records, and the `(` must follow the name with no space. `:Some()` is
+an error, because a tag without a payload is written `:Some`.
+
+Two places need care, because the leading colon meets R's binary `:` and `::`. A parameter or
+binding annotated with a tag type needs a space after its own colon (`x: :None`), because `x::None`
+is namespace access; ry reports `x::None` in a parameter list with that fix. And inside `( )` or
+`[ ]`, where R ignores newlines, a tag at the start of a continuation line continues the previous
+line instead, so `f(y\n  :None)` is `f(y:None)`, exactly as R reads it.
 
 Tags are structural and need no declaration: `:Some(5L)` means the same tag wherever it appears, as
 in Roc and as OCaml's polymorphic variants do.
@@ -118,10 +129,13 @@ it when it fits one member. That gives Roc's open producer for free. `:Some(5L)`
 needs to know the union it will flow into. An `if` whose branches build different tags joins them
 into their union.
 
-Union normalization gains one rule: two members with the same tag name and payload shape merge into
-one member with the payloads joined position by position, so joining `:Some(1L)` with `:Some("a")`
+A tag name has one payload shape within a union. Union normalization (`union_of`, which builds
+every union, written or inferred) merges two members with the same tag name and shape into one
+member with the payloads joined position by position, so joining `:Some(1L)` with `:Some("a")`
 gives `:Some(integer | character)`. With several payload positions this loses which combinations
-occur together, which is the price of keeping one member per tag.
+occur together, which is the price of keeping one member per tag. Two members with the same name
+and a different shape (`:Some(1L)` and `:Some(1L, 2L)`, or `:Rect(w = 1)` and `:Rect(width = 1)`)
+are a `type-mismatch` where they meet, because a `:Some(x)` pattern could not tell them apart.
 
 **Closed and open unions.** A union of tags is *closed*: a `match` over it must cover every member,
 and a tag outside it is rejected. A union that ends in `..` is *open*: `:Ok(integer) | ..` holds
@@ -132,6 +146,18 @@ lets a function pass unknown tags through with their types. ry does not have row
 a union never unifies with a variable (`decisions.md`, "A multi-member union is for joins and
 annotations"), and adding row unification is a new algorithm. `..` is the part of open unions that
 needs no new algorithm, and pass-through typing is recorded as an open question.
+
+`..` is a union member of its own, the *other tags* member, so an open union is a union whose
+members include it, and only its compatibility rules are new:
+
+- a tag value fits an open union when the union lists its name with a compatible payload, or does
+  not list its name at all;
+- a closed union fits an open one when each of its members does;
+- an open union fits a closed union never, and fits another open union only when every tag the
+  target lists is also listed by the source with a compatible payload, since a tag hidden in the
+  source's `..` could otherwise break the target's payload type.
+
+Inside patterns and types, `..` is reserved and never the R symbol of that name.
 
 **Generic tag unions** come from aliases: `#: @alias Option<T> {:Some(T) | :None}` and
 `#: @alias Result<T, E> {:Ok(T) | :Err(E)}`. Neither is built in, because each is one line, and a
@@ -144,7 +170,9 @@ every file runnable by GNU R (`[check] inline-annotations = false`) cannot creat
 what it has today: `list{...}` types on `list(...)`, and unions of list records with a literal
 discriminating field, narrowed by guards. The `record{...}`, `tuple{...}` and tag types are still
 accepted in `#:` comments, for code that receives values from files that use the inline syntax.
-It does not get exhaustiveness checking, because plain R has no construct whose arms the checker
+With the setting off, each record, tuple, tag or `match` is still checked but is reported as a
+`ry-syntax` warning, as each inline annotation is reported as `inline-annotation`. It does not get
+exhaustiveness checking, because plain R has no construct whose arms the checker
 could count without blessing particular call shapes, and blessing `switch()` would give one R
 function a meaning R does not have.
 
@@ -173,21 +201,30 @@ in working R code. `->` was rejected for arms because it is R's right assignment
 | Pattern | Matches |
 | --- | --- |
 | `_` | anything, binding nothing |
-| `name` | anything, binding it to `name` |
+| `name` | anything, binding it to `name`; `T` and `F` are errors that suggest `TRUE` and `FALSE` |
 | `1L`, `"a"`, `TRUE`, `NA`, `NULL`, `-1` | a length-one value equal to the literal (`NA` matches only `NA`, `NULL` only `NULL`) |
 | `:Tag`, `:Tag(p1, p2)`, `:Tag(field = p)` | a tag value with that name, whose payload matches |
-| `(p1, p2)` | a tuple of that length whose items match |
-| `(name = p, ..)` | a record with those fields, whose values match; without `..`, exactly those fields |
+| `(p1, p2)`, `(p,)` | a tuple of that length whose items match |
+| `(name = p, ..)`, `(name = p,)` | a record with those fields, whose values match; without `..`, exactly those fields |
 | `p1 \| p2` | either pattern; both sides must bind the same names |
+
+Patterns follow the literals' trailing-comma rule: `(p)` only groups, and a one-item tuple or
+one-field record pattern is `(p,)` or `(name = p,)`. A literal pattern matches a length-one value
+of the same kind (numbers with numbers, so `1` matches `1L`) that is equal to it; `NA` matches a
+missing value of any type, and `NaN` matches `NaN`.
 
 The value of a `match` is the value of the first arm whose pattern matches and whose guard is
 `TRUE`, and its type is the join of the arm types, as for `if`. When no arm matches, evaluation
-stops with an error, which an exhaustive `match` never reaches.
+stops with an error. An exhaustive `match` reaches it only when a value's type was not what the
+checker was told, through `Any`, an untyped value or a `@trust` signature.
 
 **Bindings are assignments.** A pattern's names are bound in the current environment when its arm
 is chosen, the same way a `for` loop binds its variable, so assignments in an arm body reach the
 enclosing function as in R. A fresh environment per arm would have made `<-` in an arm body
-invisible after the `match`.
+invisible after the `match`. A guard runs before the arm is chosen, so it sees the bindings in a
+temporary child environment, and a guard that fails leaves the current environment untouched.
+After the `match`, a name that only some arms bind is typed like a variable assigned in only some
+branches of an `if`.
 
 ### Exhaustiveness
 
@@ -197,7 +234,8 @@ scrutinee's type:
 - a tag union contributes its tags, and an open union an unlisted "other tags" case that only a
   catch-all covers;
 - a tuple and a record are one constructor each, with their items or fields as columns;
-- `logical` has three constructors, `TRUE`, `FALSE` and `NA`, because R's logical has three values;
+- a scalar `logical` has three constructors, `TRUE`, `FALSE` and `NA`, because R's logical has
+  three values (a `logical[]` vector is unbounded, like the types below);
 - `NULL` is one constructor, and a union adds one case per member;
 - every other type (numbers, strings, `Unknown`) has unboundedly many values, so only a binding or
   `_` covers it.
@@ -217,46 +255,61 @@ open one when a catch-all arm exists. So an unannotated `function(r) match (r) {
 
 ## Runtime representation
 
-Records, tuples and tags share one heap object kind of ry's own. GNU R leaves type codes above 25
-unused, so the object takes one of them, and every value has the same shape:
+Records, tuples and tags share one heap object kind of ry's own, with type code 27, which GNU R
+leaves unused (ry already uses 26 for binding cells). Every value has the same shape:
 
-- a *layout*: the tag (or none, for a record or tuple), the field names in a canonical order (or
-  none, for a tuple), and the storage of each slot. Layouts are interned in a runtime table that
-  never shrinks, so the object stores a 32-bit layout id and two values have the same shape exactly
-  when their ids are equal;
-- the slots, eight bytes each. A slot holding a length-one `double`, `integer` or `logical` without
-  attributes stores the number itself; any other value is stored as a handle, which the collector
-  traces by reading the layout.
+- a *layout* id: the layout is the tag (or none, for a record or tuple), the number of slots, and
+  the field names sorted in byte order (or none, for a tuple). Layouts are interned in a runtime
+  table that never shrinks, so two values have the same shape exactly when their 32-bit ids are
+  equal, whatever their slots hold;
+- an *unboxed mask*, one bit per slot, saying which slots hold a raw number;
+- the slots, eight bytes each. A length-one `double`, `integer` or `logical` without attributes is
+  stored as the number itself with its mask bit set; any other value is stored as a handle, which
+  the collector traces by reading the mask. Slots past the 64th are always handles.
 
 A tag is a small integer, its index in a runtime interner of tag names, so a tag test is one integer
-comparison and the name exists only for printing. A record's fields are sorted by name in its
-layout, which is what makes field order irrelevant, and a field whose type is known at compile time
-resolves to its slot index then. Values are immutable: `$<-` builds a new object, or reuses the old
-one when no other reference to it exists.
+comparison and the name exists only for printing. A field whose type is known at compile time
+resolves to its slot index then. Values are immutable: `$<-` builds a new object with the same
+layout, or reuses the old one when no other reference to it exists.
 
 **The R boundary is explicit.** `as.list()` converts a record to a named list, a tuple to an
-unnamed list, and a tag to the list of its payload, and `as_record()` and `as_tuple()` convert a
-list back, checking that its names make a valid record. Without a conversion, a native value that
-reaches R code which inspects it is an error that names the conversion:
+unnamed list, and a tag to `list(tag = "Circle", payload = list(radius = 2))`. `as.record()`,
+`as.tuple()` and `as.tag(name, payload)` convert back, checking that the names make a valid
+record. They live in base, so a user's own function of the same name shadows them, as with any base
+function; a built-in `Option` type is declined for a different reason, which is that type names
+have no such shadowing.
+
+Each kind has an implicit class, `ry_record`, `ry_tuple` or `ry_tag`, which is what `class()` and
+`inherits()` report and what S3 dispatch uses, so `as.list()` is an ordinary S3 method and a user
+can write `format.ry_record`. Builtins split into three groups:
+
+- **Builtins that understand native values:** `print`, `format` and `deparse` use ry's own printer
+  (`(x = 1, y = 2)`, `:Circle(radius = 2)`); `identical` compares structure; `$`, `[[`, `$<-` and
+  `length` work as above; `all.equal` compares structure, so testthat's expectations work.
+- **Builtins that never look inside a value:** the type and class predicates (`is.null`, `is.list`
+  and the other `is.*` functions, `typeof`, which reports `"record"`, `"tuple"` or `"tag"`, `class`,
+  `inherits`), `missing`, `force`, `invisible`, `return`, `assign`, `get`, `identity`, and the
+  builtins that store a value, such as `list` and element access on lists, so a list of records
+  works.
+- **Every other builtin** refuses a native value with an error that names the conversion:
 
 ```text
 Error in sum(point) : `point` is a ry record, not an R object; convert it with `as.list()`
 ```
 
-A short list of builtins handles native values directly: `print`, `format` and `deparse` use ry's
-own printer (`(x = 1, y = 2)`, `:Circle(radius = 2)`); `identical` compares structure; `$`, `[[`,
-`$<-` and `length` work as above; and the builtins that only store or pass a value along (`list`,
-`invisible`, `return`, `assign`, `get`, `identity`, and element access on lists) accept it as any
-other value, so a list of records works. Every other builtin, `.Call`, `.External` and the rest of
-the C API boundary refuse a native value with the error above, which also covers `serialize` and
-`saveRDS`. Native code never sees one.
+**C code sees an opaque object.** A list of records can still reach `.Call`, through purrr's `map`
+or a data.table column of records, and checking every argument deeply would cost time in
+proportion to the data. So the boundary does not scan: `TYPEOF` returns 27, `VECTOR_ELT` and
+`SET_VECTOR_ELT` on a list move the handle like any other element, and every other C API accessor
+applied to a native value raises the conversion error above. `serialize` and `saveRDS` raise it as
+well, when they reach the value, so a native value never leaves the session.
 
 **Language objects.** R code inspects code (`quote`, `body`, `deparse`), so the new syntax lowers to
-calls, as `if` and `for` do. A record or tuple literal lowers to a call of the `.ry_record` or
-`.ry_tuple` primitive, a tag to a call of the `.ry_tag` primitive with the name as its first
-argument, and a `match` to a call of the `.ry_match` special with the scrutinee followed by one
-`` `=>` `` call per arm, whose patterns stay unevaluated. The primitive itself is the call's
-function rather than a symbol, so rebinding a name cannot change what a literal builds, and
+calls, as `if` and `for` do. A record or tuple literal lowers to a call of `.ry_record` or
+`.ry_tuple`, a tag to a call of `.ry_tag` with the name as a string first, and a `match` to a call
+of the `.ry_match` special with the scrutinee followed by one `` `=>` `` call per arm, whose
+patterns stay unevaluated. The function of each call is a symbol, as for every other call, because
+code that inspects calls (`as.character(call[[1]])` in rlang-style evaluation) expects one, and
 `deparse` prints all four back in ry syntax.
 
 ### What the JIT gets
@@ -265,7 +318,8 @@ function rather than a symbol, so rebinding a name cannot change what a literal 
   name in the union's sorted tag list, as Roc assigns discriminants, so a `match` compiles to a
   jump table.
 - **Shapes as one comparison.** A guard that a value has a known shape is one comparison of its
-  layout id, and a field read after it is an indexed load of a slot whose storage is known.
+  layout id, and a field read after it is an indexed load, plus a mask test when the slot's
+  storage is not known statically.
 - **Unboxed fields.** Scalar slots already hold raw numbers, and a value that compiled code builds
   and consumes without letting it escape needs no heap object at all: its fields live in registers
   or stack slots (scalar replacement, which the [prior-art page](/contributing/design/prior-art/)
