@@ -10,7 +10,7 @@ use miette::{
 };
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
 use semantics::metadata::{
-    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+    PackageMetadata, attached_union, file_attached_namespaces, normalized_imports, parse_description_collate,
     parse_description_dependencies, parse_description_package, parse_namespace_exports,
     parse_namespace_imports,
 };
@@ -203,7 +203,6 @@ pub fn check(
                 .and_then(parse_description_package),
         );
 
-        let mut used_tokens = BTreeSet::new();
         let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
         let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
         for path in paths {
@@ -222,7 +221,6 @@ pub fn check(
                 n_files += 1;
             }
             reported.push(asked_about);
-            namespace::collect_used_tokens(&source, &mut used_tokens);
             checked.push((path, source));
         }
 
@@ -245,6 +243,42 @@ pub fn check(
         }
         let files: Vec<SourceFile> = files.into_iter().flatten().collect();
         ProjectFiles::new(&db, project.clone());
+        // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
+        let workers = thread::available_parallelism()
+            .map(NonZero::get)
+            .unwrap_or(1)
+            .min(checked.len().max(1));
+        // Parsing is the one serial cost left in setup, so it runs across cores here and the
+        // `library()` scan and the used-token scan read the memoized trees.
+        let want_tokens = namespace_source.is_some();
+        let mut used_tokens = BTreeSet::new();
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|worker| {
+                    let db = db.clone();
+                    let files = &files;
+                    thread::Builder::new()
+                        .stack_size(crate::ANALYSIS_STACK_SIZE)
+                        .spawn_scoped(scope, move || {
+                            let mut tokens = BTreeSet::new();
+                            for &file in files.iter().skip(worker).step_by(workers) {
+                                let _ = file_attached_namespaces(&db, file);
+                                if want_tokens {
+                                    namespace::collect_used_tokens(
+                                        &semantics::parse(&db, file).syntax_node(),
+                                        &mut tokens,
+                                    );
+                                }
+                            }
+                            tokens
+                        })
+                        .expect("check worker thread should spawn")
+                })
+                .collect();
+            for handle in handles {
+                used_tokens.extend(handle.join().expect("parse worker should not panic"));
+            }
+        });
         let attached = attached_union(&db, project);
         if !attached.is_empty() {
             use salsa::Setter;
@@ -256,11 +290,6 @@ pub fn check(
             .zip(&checked)
             .map(|(&file, (path, _))| (file, path))
             .collect();
-        // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
-        let workers = thread::available_parallelism()
-            .map(NonZero::get)
-            .unwrap_or(1)
-            .min(checked.len().max(1));
         // Warm per-item naming across cores first: inside the project-wide interface walk
         // it would serialize on one thread. Largest files first so one cannot skew a chunk.
         // Workers need the analysis stack: interface resolution recurses per dependency edge.
@@ -374,6 +403,9 @@ pub fn check(
                 &|_| None,
             );
         }
+        // Freeing every memo one by one costs close to a second on a large project, and the
+        // process is about to exit.
+        std::mem::forget(db);
     }
 
     if n_failures > 0 {

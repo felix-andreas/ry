@@ -2,7 +2,7 @@
 //! while still producing the same type.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::hir::{ExprId, ExpressionKind, Module};
+use semantics::hir::{ExprId, ExpressionKind, Module, Symbol};
 use semantics::naming::{BindingKind, ItemNaming};
 use semantics::testing::with_fixture_project;
 use semantics::{DocumentKind, item_hir, item_naming, item_tree};
@@ -100,7 +100,7 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     }
     for (&expression, read) in &naming.namespace_reads {
         let separator = if read.internal { ":::" } else { "::" };
-        let name = read.name.clone().unwrap_or_else(|| "?".to_owned());
+        let name = read.name.map_or_else(|| "?".to_owned(), |name| name.to_string());
         reads.push((
             start_of(module, expression),
             format!(
@@ -143,8 +143,8 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     }
 }
 
-fn render_set<'a>(output: &mut String, label: &str, values: impl Iterator<Item = &'a String>) {
-    let joined: Vec<&str> = values.map(String::as_str).collect();
+fn render_set<'a>(output: &mut String, label: &str, values: impl Iterator<Item = &'a Symbol>) {
+    let joined: Vec<&str> = values.map(|value| value.as_str()).collect();
     if !joined.is_empty() {
         output.push_str(&format!("  {label}: {}\n", joined.join(", ")));
     }
@@ -164,7 +164,7 @@ fn assignment_targets(module: &Module) -> BTreeSet<ExprId> {
 /// A quoted target (`"x" <- 1`) lowers to a string literal, so it renders as its kind.
 fn name_at(module: &Module, expression: ExprId) -> String {
     match &module.expression(expression).kind {
-        ExpressionKind::NameRef(name) => name.clone(),
+        ExpressionKind::NameRef(name) => name.to_string(),
         other => format!("{other:?}")
             .split(['(', ' '])
             .next()

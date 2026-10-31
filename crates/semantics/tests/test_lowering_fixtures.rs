@@ -79,7 +79,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
                 .iter()
                 .map(|parameter| match parameter.default {
                     Some(_) => format!("{} = …", parameter.name),
-                    None => parameter.name.clone(),
+                    None => parameter.name.to_string(),
                 })
                 .collect();
             format!("Function({})", spelled.join(", "))

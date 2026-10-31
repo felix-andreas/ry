@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 dirs = "6"
+mimalloc = "0.1"
 console.workspace = true
 ignore.workspace = true
 miette.workspace = true

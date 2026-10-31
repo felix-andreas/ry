@@ -9,6 +9,7 @@ use crate::metadata::{
     Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
     parse_namespace_spec, string_content,
 };
+use crate::hir::Symbol;
 use crate::{Db, Item, ItemKind, SourceFile, item_naming, item_spans, item_syntax, parse};
 use rowan::{GreenNodeData, Language, NodeOrToken};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -104,7 +105,7 @@ pub fn item_load<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLoad {
 /// when the function is called and find the current binding then. A reload reruns a statement
 /// whose immediate reads changed, because it captured their old values.
 #[salsa::tracked(returns(ref))]
-pub fn item_immediate_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<String> {
+pub fn item_immediate_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
     let Some(naming) = item_naming(db, item) else {
         return BTreeSet::new();
     };
@@ -112,7 +113,7 @@ pub fn item_immediate_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         .non_locals
         .iter()
         .filter(|(expression, _)| !naming.deferred_non_locals.contains(expression))
-        .map(|(_, name)| name.clone())
+        .map(|(_, name)| *name)
         .collect()
 }
 
@@ -335,7 +336,10 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                         .into_iter()
                         .map(str::to_owned)
                         .collect(),
-                    item_immediate_reads(db, item).iter().cloned().collect(),
+                    item_immediate_reads(db, item)
+                        .iter()
+                        .map(|name| name.to_string())
+                        .collect(),
                 ),
             };
             IndexedItem {
@@ -402,7 +406,7 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
 fn top_level_writes<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<&'db str> {
     let mut names: Vec<&str> = crate::item_top_level_names(db, item)
         .iter()
-        .map(String::as_str)
+        .map(|name| name.as_str())
         .collect();
     if matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
         && let Some(name) = item.name(db).as_deref()
