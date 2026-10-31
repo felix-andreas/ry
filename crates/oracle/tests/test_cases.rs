@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use oracle::{
-    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases, gnu_r_available,
-    parse, render,
+    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
+    gnu_r_available, parse, render,
 };
 
 fn cases() -> Vec<PathBuf> {
@@ -23,12 +23,16 @@ fn recorded_outcomes_match_gnu_r() {
     let mut failures = Vec::new();
     assert!(!cases().is_empty(), "no oracle cases found");
     for case in cases() {
-        let actual = gnu_r.run(&case).unwrap_or_else(|error| panic!("{}: {error}", case.display()));
+        let actual = gnu_r
+            .run(&case)
+            .unwrap_or_else(|error| panic!("{}: {error}", case.display()));
         if bless {
             std::fs::write(expected_path(&case), render(&actual)).expect("write expectation");
             continue;
         }
-        let expected = std::fs::read_to_string(expected_path(&case)).ok().and_then(|text| parse(&text));
+        let expected = std::fs::read_to_string(expected_path(&case))
+            .ok()
+            .and_then(|text| parse(&text));
         match expected {
             None => failures.push(format!("{}: no readable expectation", case.display())),
             Some(expected) => {
@@ -54,7 +58,9 @@ fn second_engine_matches_gnu_r() {
             Err(EngineError::Unavailable(_)) => return,
             Err(error) => failures.push(format!("{}: {error}", case.display())),
             Ok(actual) => {
-                let expected = gnu_r.run(&case).unwrap_or_else(|error| panic!("{}: {error}", case.display()));
+                let expected = gnu_r
+                    .run(&case)
+                    .unwrap_or_else(|error| panic!("{}: {error}", case.display()));
                 if let Some(difference) = diff("GNU R", &expected, &second.name(), &actual) {
                     failures.push(format!("{}\n{difference}", case.display()));
                 }
@@ -71,7 +77,10 @@ fn rendering_round_trips() {
         messages: vec!["multi\nline \\ text".to_string()],
         warnings: vec!["w".to_string()],
         errors: vec![],
-        value: Some(oracle::Value { kind: "double".to_string(), deparsed: "c(1,\n2)".to_string() }),
+        value: Some(oracle::Value {
+            kind: "double".to_string(),
+            deparsed: "c(1,\n2)".to_string(),
+        }),
     };
     assert_eq!(parse(&render(&outcome)), Some(outcome));
 }

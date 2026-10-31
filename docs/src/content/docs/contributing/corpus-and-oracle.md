@@ -60,7 +60,9 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 `from f (in f())`. The cases live in `crates/oracle/cases/`, one `group__name.R` file with a
 `.expected` file beside it holding GNU R's recorded outcome. They cover promises,
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
-control flow and printing. `cargo test -p oracle` replays them and passes without R installed.
+control flow and printing. `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
+
+The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()`; `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
 The second engine is anything that implements the `Engine` trait. `ProcessEngine` covers a
 command line: it is invoked as `<command…> <script> <report>`, must print the script's output

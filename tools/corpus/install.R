@@ -42,7 +42,8 @@ options(HTTPUserAgent = sprintf(
   "R/%s R (%s)", getRversion(),
   paste(getRversion(), R.version$platform, R.version$arch, R.version$os)
 ))
-distro <- sub("^VERSION_CODENAME=", "", grep("^VERSION_CODENAME=", readLines("/etc/os-release"), value = TRUE))
+distro <- if (file.exists("/etc/os-release")) sub("^VERSION_CODENAME=", "", grep("^VERSION_CODENAME=", readLines("/etc/os-release"), value = TRUE)) else character()
+if (length(distro) != 1 || !nzchar(distro)) stop("cannot determine the Linux distribution from /etc/os-release")
 options(repos = c(
   CRAN = sprintf("https://packagemanager.posit.co/cran/__linux__/%s/%s", distro, snapshot),
   FINCCAM = extra_repo
@@ -63,10 +64,10 @@ with_warnings <- function(expression) {
   })
 }
 
-installed <- function() rownames(installed.packages(lib.loc = library_dir))
+installed <- function() rownames(installed.packages(lib.loc = library_dir, noCache = TRUE))
 
 with_warnings({
-  install.packages(c("remotes", "pak"), lib = library_dir)
+  install.packages("remotes", lib = library_dir)
   install.packages(roots, lib = library_dir, dependencies = TRUE)
 })
 
@@ -83,7 +84,8 @@ for (remote in remotes) {
   checkout <- file.path(source_dir, remote$name)
   if (!dir.exists(checkout)) {
     status <- system2("git", c("clone", "--quiet", remote$url, checkout))
-    if (status == 0 && !is.na(remote$ref)) system2("git", c("-C", checkout, "checkout", "--quiet", remote$ref))
+    if (status == 0 && !is.na(remote$ref)) status <- system2("git", c("-C", checkout, "checkout", "--quiet", remote$ref))
+    if (status != 0) unlink(checkout, recursive = TRUE)
   }
   if (dir.exists(checkout)) {
     with_warnings({
@@ -94,7 +96,7 @@ for (remote in remotes) {
 }
 
 # Record the outcome per package: every root and remote, with its reason when missing.
-have <- rownames(installed.packages())
+have <- rownames(installed.packages(noCache = TRUE))
 targets <- c(roots, vapply(remotes, `[[`, "", "name"))
 suggested <- unlist(lapply(intersect(roots, have), function(package) {
   tools::package_dependencies(package, db = installed.packages(lib.loc = library_dir), which = "Suggests")[[package]]
@@ -108,7 +110,7 @@ reason_for <- function(package) {
   gsub("\\s+", " ", paste(unique(hits), collapse = " | "))
 }
 row <- function(package, role) {
-  ok <- package %in% rownames(installed.packages())
+  ok <- package %in% have
   data.frame(
     package = package, role = role, installed = ok,
     version = if (ok) as.character(packageVersion(package, lib.loc = library_dir)) else "",

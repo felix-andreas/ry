@@ -6,7 +6,6 @@
 //! script's own output to stdout, and must write the JSON report that `driver.R` defines.
 //! GNU R is one such engine, and ry's runtime will be another.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -64,7 +63,9 @@ impl Engine for StubEngine {
     }
 
     fn run(&self, _script: &Path) -> Result<Outcome, EngineError> {
-        Err(EngineError::Unavailable("the ry runtime does not exist yet".to_string()))
+        Err(EngineError::Unavailable(
+            "the ry runtime does not exist yet".to_string(),
+        ))
     }
 }
 
@@ -78,11 +79,12 @@ pub struct ProcessEngine {
 
 impl ProcessEngine {
     pub fn gnu_r() -> Self {
-        let program = std::env::var("ORACLE_R").unwrap_or_else(|_| "R".to_string());
         ProcessEngine {
             name: "GNU R".to_string(),
-            program,
-            arguments: ["--vanilla", "--slave", "--no-restore"].map(String::from).to_vec(),
+            program: gnu_r_program(),
+            arguments: ["--vanilla", "--slave", "--no-restore"]
+                .map(String::from)
+                .to_vec(),
             driver: Some(DRIVER),
         }
     }
@@ -91,7 +93,12 @@ impl ProcessEngine {
     pub fn from_command(command: &str) -> Option<Self> {
         let mut parts = command.split_whitespace().map(String::from);
         let program = parts.next()?;
-        Some(ProcessEngine { name: command.to_string(), program, arguments: parts.collect(), driver: None })
+        Some(ProcessEngine {
+            name: command.to_string(),
+            program,
+            arguments: parts.collect(),
+            driver: None,
+        })
     }
 }
 
@@ -101,8 +108,8 @@ impl Engine for ProcessEngine {
     }
 
     fn run(&self, script: &Path) -> Result<Outcome, EngineError> {
-        let scratch = scratch_directory(script).map_err(EngineError::Failed)?;
-        let report_path = scratch.join("report.json");
+        let scratch = Scratch::new(script).map_err(EngineError::Failed)?;
+        let report_path = scratch.path().join("report.json");
         let script = script
             .canonicalize()
             .map_err(|error| EngineError::Failed(format!("{}: {error}", script.display())))?;
@@ -110,8 +117,9 @@ impl Engine for ProcessEngine {
         let mut command = Command::new(&self.program);
         command.args(&self.arguments);
         if let Some(driver) = self.driver {
-            let driver_path = scratch.join("driver.R");
-            std::fs::write(&driver_path, driver).map_err(|error| EngineError::Failed(error.to_string()))?;
+            let driver_path = scratch.path().join("driver.R");
+            std::fs::write(&driver_path, driver)
+                .map_err(|error| EngineError::Failed(error.to_string()))?;
             command.arg("-f").arg(&driver_path).arg("--args");
         }
         command.arg(&script).arg(&report_path);
@@ -120,14 +128,18 @@ impl Engine for ProcessEngine {
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .env("TZ", "UTC")
-            .env("R_DEFAULT_PACKAGES", "datasets,utils,grDevices,graphics,stats,methods");
+            .env(
+                "R_DEFAULT_PACKAGES",
+                "datasets,utils,grDevices,graphics,stats,methods",
+            );
 
         let output = command.output().map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => EngineError::Unavailable(format!("`{}` was not found", self.program)),
+            std::io::ErrorKind::NotFound => {
+                EngineError::Unavailable(format!("`{}` was not found", self.program))
+            }
             _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
         })?;
         let report = std::fs::read_to_string(&report_path);
-        let _ = std::fs::remove_dir_all(&scratch);
         let report = report.map_err(|_| {
             EngineError::Failed(format!(
                 "{} wrote no report ({}): {}",
@@ -136,8 +148,9 @@ impl Engine for ProcessEngine {
                 String::from_utf8_lossy(&output.stderr).trim()
             ))
         })?;
-        let report: Report = serde_json::from_str(&report)
-            .map_err(|error| EngineError::Failed(format!("{} wrote an unreadable report: {error}", self.name)))?;
+        let report: Report = serde_json::from_str(&report).map_err(|error| {
+            EngineError::Failed(format!("{} wrote an unreadable report: {error}", self.name))
+        })?;
         Ok(Outcome {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             messages: report.messages,
@@ -148,23 +161,54 @@ impl Engine for ProcessEngine {
     }
 }
 
-fn scratch_directory(script: &Path) -> Result<PathBuf, String> {
-    let stem = script.file_stem().and_then(|stem| stem.to_str()).unwrap_or("case");
-    static RUNS: AtomicUsize = AtomicUsize::new(0);
-    let run = RUNS.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir().join(format!("ry-oracle-{}-{run}-{stem}", std::process::id()));
-    std::fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
-    Ok(directory)
+/// A scratch directory that is removed when it goes out of scope, on every exit path.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(script: &Path) -> Result<Self, String> {
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        let stem = script
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("case");
+        let run = RUNS.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("ry-oracle-{}-{run}-{stem}", std::process::id()));
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        Ok(Scratch(directory))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            eprintln!("could not remove {}: {error}", self.0.display());
+        }
+    }
+}
+
+fn gnu_r_program() -> String {
+    std::env::var("ORACLE_R").unwrap_or_else(|_| "R".to_string())
 }
 
 pub fn gnu_r_available() -> bool {
-    let program = std::env::var("ORACLE_R").unwrap_or_else(|_| "R".to_string());
-    Command::new(program).arg("--version").output().is_ok_and(|output| output.status.success())
+    Command::new(gnu_r_program())
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// The engine named by `ORACLE_ENGINE`, or the stub.
 pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE").ok().and_then(|command| ProcessEngine::from_command(&command)) {
+    match std::env::var("ORACLE_ENGINE")
+        .ok()
+        .and_then(|command| ProcessEngine::from_command(&command))
+    {
         Some(engine) => Box::new(engine),
         None => Box::new(StubEngine),
     }
@@ -200,7 +244,7 @@ pub fn expected_path(case: &Path) -> PathBuf {
 pub fn render(outcome: &Outcome) -> String {
     let mut text = String::from("[stdout]\n");
     for line in outcome.stdout.split_inclusive('\n') {
-        let _ = writeln!(text, "| {}", line.strip_suffix('\n').unwrap_or(line));
+        text.push_str(&format!("| {}\n", line.strip_suffix('\n').unwrap_or(line)));
     }
     if !outcome.stdout.is_empty() && !outcome.stdout.ends_with('\n') {
         text.push_str("\\ no newline at end of output\n");
@@ -210,16 +254,16 @@ pub fn render(outcome: &Outcome) -> String {
         ("warnings", &outcome.warnings),
         ("errors", &outcome.errors),
     ] {
-        let _ = writeln!(text, "[{header}]");
+        text.push_str(&format!("[{header}]\n"));
         for entry in entries {
-            let _ = writeln!(text, "- {}", escape(entry));
+            text.push_str(&format!("- {}\n", escape(entry)));
         }
     }
     text.push_str("[value]\n");
     if let Some(value) = &outcome.value {
-        let _ = writeln!(text, "{}", value.kind);
+        text.push_str(&format!("{}\n", value.kind));
         for line in value.deparsed.split('\n') {
-            let _ = writeln!(text, "| {line}");
+            text.push_str(&format!("| {line}\n"));
         }
     }
     text
@@ -230,8 +274,11 @@ pub fn parse(text: &str) -> Option<Outcome> {
     let mut section = "";
     let mut value_lines: Vec<&str> = Vec::new();
     let mut kind = None;
-    for line in text.lines() {
-        if let Some(header) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+    for line in text.strip_suffix('\n').unwrap_or(text).split('\n') {
+        if let Some(header) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
             section = match header {
                 "stdout" => "stdout",
                 "messages" => "messages",
@@ -245,7 +292,9 @@ pub fn parse(text: &str) -> Option<Outcome> {
                 outcome.stdout.pop();
             }
         } else if section == "stdout" {
-            outcome.stdout.push_str(line.strip_prefix("| ").unwrap_or(line));
+            outcome
+                .stdout
+                .push_str(line.strip_prefix("| ").unwrap_or(line));
             outcome.stdout.push('\n');
         } else if section == "value" {
             match line.strip_prefix("| ") {
@@ -262,12 +311,17 @@ pub fn parse(text: &str) -> Option<Outcome> {
             }
         }
     }
-    outcome.value = kind.map(|kind| Value { kind, deparsed: value_lines.join("\n") });
+    outcome.value = kind.map(|kind| Value {
+        kind,
+        deparsed: value_lines.join("\n"),
+    });
     Some(outcome)
 }
 
 fn escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('\n', "\\n")
+    text.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn unescape(text: &str) -> String {
@@ -277,6 +331,7 @@ fn unescape(text: &str) -> String {
         if character == '\\' {
             match characters.next() {
                 Some('n') => result.push('\n'),
+                Some('r') => result.push('\r'),
                 Some(other) => result.push(other),
                 None => result.push('\\'),
             }
@@ -288,10 +343,18 @@ fn unescape(text: &str) -> String {
 }
 
 /// A unified diff of two outcomes, or `None` when they are equal.
-pub fn diff(expected_label: &str, expected: &Outcome, actual_label: &str, actual: &Outcome) -> Option<String> {
+pub fn diff(
+    expected_label: &str,
+    expected: &Outcome,
+    actual_label: &str,
+    actual: &Outcome,
+) -> Option<String> {
     if expected == actual {
         return None;
     }
-    let diff = TextDiff::from_lines(&render(expected), &render(actual)).unified_diff().header(expected_label, actual_label).to_string();
+    let diff = TextDiff::from_lines(&render(expected), &render(actual))
+        .unified_diff()
+        .header(expected_label, actual_label)
+        .to_string();
     Some(diff)
 }

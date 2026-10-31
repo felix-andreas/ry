@@ -64,6 +64,8 @@ def main():
     parser.add_argument("--files", type=int, help="number of R files per package (default: lines / 600)")
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
+    if args.lines < 1 or (args.files is not None and args.files < 1):
+        parser.error("--lines and --files must be at least 1")
 
     here = os.path.dirname(os.path.abspath(__file__))
     templates = {domain: load_templates(os.path.join(here, "templates", domain), domain) for domain in [*DOMAINS, "shared"]}

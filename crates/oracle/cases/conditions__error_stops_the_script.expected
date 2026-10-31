@@ -5,6 +5,3 @@
 [errors]
 - bad input: 3 (in f(3))
 [value]
-closure
-| function (x) 
-| stop("bad input: ", x)

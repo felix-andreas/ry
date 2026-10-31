@@ -3,8 +3,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use oracle::{
-    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases, gnu_r_available,
-    parse, render,
+    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
+    gnu_r_available, parse, render,
 };
 
 /// Differential testing of R engines against GNU R.
@@ -42,8 +42,14 @@ fn main() -> ExitCode {
         Command::Verify { paths } => verify(&gnu_r, &cases(paths)),
         Command::Record { paths } => record(&gnu_r, &cases(paths)),
         Command::Compare { engine, paths } => {
-            let second: Box<dyn Engine> = match engine.as_deref().and_then(ProcessEngine::from_command) {
-                Some(engine) => Box::new(engine),
+            let second: Box<dyn Engine> = match engine.as_deref() {
+                Some(command) => match ProcessEngine::from_command(command) {
+                    Some(engine) => Box::new(engine),
+                    None => {
+                        eprintln!("--engine needs a command");
+                        return ExitCode::from(2);
+                    }
+                },
                 None => engine_from_environment(),
             };
             compare(&gnu_r, second.as_ref(), &cases(paths))
@@ -62,14 +68,29 @@ fn main() -> ExitCode {
 }
 
 fn cases(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let paths = if paths.is_empty() { vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")] } else { paths };
-    paths.iter().flat_map(|path| find_cases(path)).collect()
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")]
+    } else {
+        paths
+    };
+    let mut found = Vec::new();
+    for path in &paths {
+        let cases = find_cases(path);
+        if cases.is_empty() {
+            eprintln!("no .R files under {}", path.display());
+            std::process::exit(2);
+        }
+        found.extend(cases);
+    }
+    found
 }
 
 fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
     let mut failures = 0;
     for case in cases {
-        let expected = std::fs::read_to_string(expected_path(case)).ok().and_then(|text| parse(&text));
+        let expected = std::fs::read_to_string(expected_path(case))
+            .ok()
+            .and_then(|text| parse(&text));
         let Some(expected) = expected else {
             println!("MISSING {}", case.display());
             failures += 1;
@@ -140,12 +161,22 @@ fn compare(gnu_r: &ProcessEngine, second: &dyn Engine, cases: &[PathBuf]) -> Exi
         }
     }
     if skipped > 0 {
-        println!("skipped {skipped} case(s): engine `{}` is unavailable", second.name());
+        println!(
+            "skipped {skipped} case(s): engine `{}` is unavailable",
+            second.name()
+        );
+    }
+    if skipped == cases.len() {
+        return ExitCode::SUCCESS;
     }
     summarize(cases.len() - skipped, failures)
 }
 
 fn summarize(total: usize, failures: usize) -> ExitCode {
     println!("{} of {total} passed", total - failures);
-    if failures == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

@@ -3,6 +3,11 @@
 # output cannot show to a JSON report: messages, warnings, the error that stopped the
 # run, and the last value. Any engine that accepts `<script> <report>` and writes the same
 # report can stand in for GNU R.
+#
+# Known differences from Rscript, which the cases avoid: the file is parsed as a whole, so a
+# syntax error hides the output of the lines before it; the driver's own frames show up in
+# sys.nframe() and sys.calls(); commandArgs(TRUE) holds the two paths; and quit() ends the
+# run without a report.
 local({
   argv <- commandArgs(trailingOnly = TRUE)
   script <- argv[1L]
@@ -30,6 +35,9 @@ local({
     text <- gsub("\n", "\\n", text, fixed = TRUE)
     text <- gsub("\r", "\\r", text, fixed = TRUE)
     text <- gsub("\t", "\\t", text, fixed = TRUE)
+    for (code in setdiff(1:31, c(9L, 10L, 13L))) {
+      text <- gsub(rawToChar(as.raw(code)), sprintf("\\u%04x", code), text, fixed = TRUE, useBytes = TRUE)
+    }
     paste0("\"", text, "\"")
   }
   json_array <- function(items) paste0("[", paste(vapply(items, json_string, ""), collapse = ","), "]")
@@ -69,11 +77,13 @@ local({
         },
         error = function(condition) {
           errors <<- c(errors, describe(condition))
+          last <<- NULL
           failed <<- TRUE
         }
       ),
       warning = function(condition) {
         warnings <<- c(warnings, describe(condition))
+        if (isTRUE(getOption("warn") >= 2)) return(invisible())
         invokeRestart("muffleWarning")
       },
       message = function(condition) {
