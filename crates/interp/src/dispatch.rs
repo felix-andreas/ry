@@ -26,7 +26,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("unclass", 1, do_unclass),
     internal("inherits", 3, do_inherits),
     builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
-    builtin(".cache_class", -1, |call| unsafe { Ok(call.arg(1)) }),
+    builtin(".cache_class", 2, |call| unsafe { do_cache_class(call) }),
     builtin(".isMethodsDispatchOn", -1, do_is_methods_dispatch_on),
     builtin("isS4", 1, |call| unsafe { values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT)) }),
     internal("setS4Object", 3, do_set_s4_object),
@@ -50,11 +50,15 @@ pub unsafe fn class_of(object: Sexp) -> R<Sexp> {
     scalar_string(basic_class(object, false))
 }
 
-/// The class `UseMethod` dispatches on: the class attribute, or the implicit class, which adds
-/// `matrix`/`array`, and for numbers both the type and `numeric`.
+/// The class `UseMethod` dispatches on: for an S4 object, its class and every class it
+/// extends; otherwise the class attribute, or the implicit class, which adds `matrix`/`array`,
+/// and for numbers both the type and `numeric`.
 pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
     let class = values::class_attr(object);
     if class != nil() && length(class) > 0 {
+        if object.has_gp(gp::S4_OBJECT) {
+            return s4_extends(class);
+        }
         return Ok(class);
     }
     let mut classes: Vec<&str> = Vec::new();
@@ -71,6 +75,47 @@ pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
         _ => classes.push(basic_class(object, true)),
     }
     string_vector(&classes)
+}
+
+/// An S4 class's S3 class vector, from the methods package's `.extendsForS3`, cached by class
+/// name as GNU R does. Without the methods package the class attribute stands alone.
+unsafe fn s4_extends(class: Sexp) -> R<Sexp> {
+    let name = class.element(0).bytes();
+    if let Some(&extends) = interp().globals.s4_extends.get(name) {
+        return Ok(extends);
+    }
+    let namespace = interp().globals.methods_namespace;
+    if namespace == nil() {
+        return Ok(class);
+    }
+    let function = eval::value_of(eval::find_var_in_frame(
+        values::install(".extendsForS3")?,
+        namespace,
+    )?)?;
+    if !values::is_function(function) {
+        return Ok(class);
+    }
+    let call = values::call(function, &[class])?;
+    let extends = eval::eval(call, values::base_env())?;
+    interp().globals.s4_extends.insert(name.into(), extends);
+    Ok(extends)
+}
+
+/// `.cache_class(class, extends)`: records the S3 class vector of an S4 class, or with
+/// `extends = NULL` forgets it.
+unsafe fn do_cache_class(call: &Call<'_>) -> R<Sexp> {
+    let class = call.arg(0);
+    let extends = call.arg(1);
+    if class.kind() != SexpType::String || length(class) < 1 {
+        return Err(call.error("invalid class argument to internal .class_cache"));
+    }
+    let name: Box<[u8]> = class.element(0).bytes().into();
+    if extends == nil() {
+        interp().globals.s4_extends.remove(&name);
+    } else {
+        interp().globals.s4_extends.insert(name, extends);
+    }
+    Ok(extends)
 }
 
 unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {

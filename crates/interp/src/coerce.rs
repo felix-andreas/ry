@@ -715,7 +715,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 | SexpType::Builtin
                 | SexpType::ExternalPtr
                 | SexpType::WeakRef
-                | SexpType::Object
+                | SexpType::Promise
+                | SexpType::Dots
+                | SexpType::Bytecode
         ))
     } }),
     builtin("is.call", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Language) }),

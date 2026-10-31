@@ -298,7 +298,13 @@ impl Deparser {
                 self.print(")");
             }
             SexpType::List => self.list(object, "list("),
-            SexpType::Expression => self.list(object, "expression("),
+            SexpType::Expression => {
+                // The elements of `expression()` are code, which its call does not evaluate.
+                let saved = self.opts;
+                self.opts &= !options::QUOTE_EXPRESSIONS;
+                self.list(object, "expression(");
+                self.opts = saved;
+            }
             SexpType::Object => self.print("<S4 object of class structure>"),
             kind if kind.is_atomic() => self.vector(object),
             _ => self.print("<unknown>"),
@@ -751,20 +757,13 @@ impl Deparser {
             return;
         }
         let names = get_attr(vector, symbols().names);
-        let nice = self.opts & options::NICE_NAMES != 0 && names != nil();
+        let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector);
         let keep_integer = self.opts & options::KEEP_INTEGER != 0;
         let keep_na = self.opts & options::KEEP_NA != 0;
-        // A run of consecutive integers, increasing or decreasing, deparses as `from:to`.
-        if kind == SexpType::Integer && count > 1 && !nice {
+        if is_integer_run(vector) {
             let data = values::ints(vector);
-            let step = data[1] as i64 - data[0] as i64;
-            let is_run = data[0] != NA_INTEGER
-                && (step == 1 || step == -1)
-                && data.windows(2).all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + step);
-            if is_run {
-                self.print(&format!("{}:{}", data[0], data[count - 1]));
-                return;
-            }
+            self.print(&format!("{}:{}", data[0], data[count - 1]));
+            return;
         }
         if kind == SexpType::Raw {
             self.print("as.raw(c(");
@@ -923,10 +922,31 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
     // All-empty names, or an `NA` name, need the attribute form.
     let any_named = (0..length(names)).any(|index| !values::is_blank(names.element(index)));
     let any_na = (0..length(names)).any(|index| names.element(index) == values::na_string());
-    any_named && !any_na
+    // In `c(...)` these names would match `c()`'s own arguments instead of naming elements.
+    let names_an_argument = object.kind().is_atomic()
+        && (0..length(names)).any(|index| {
+            matches!(values::string_at(names, index).as_deref(), Some("recursive" | "use.names"))
+        });
+    // A run deparses as `from:to`, which has no room for names.
+    any_named && !any_na && !names_an_argument && !is_integer_run(object)
 }
 
-/// Whether deparsing `object` needs `structure(...)` around it.
+/// A run of at least two consecutive integers, increasing or decreasing, which deparses as
+/// `from:to`.
+unsafe fn is_integer_run(object: Sexp) -> bool {
+    if object.kind() != SexpType::Integer || length(object) < 2 {
+        return false;
+    }
+    let data = values::ints(object);
+    let step = data[1] as i64 - data[0] as i64;
+    data[0] != NA_INTEGER
+        && (step == 1 || step == -1)
+        && data
+            .windows(2)
+            .all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + step)
+}
+
+/// The parts of an S4 object that its `new()` call names.
 struct S4Parts {
     class: String,
     slots: Vec<(String, Sexp)>,
