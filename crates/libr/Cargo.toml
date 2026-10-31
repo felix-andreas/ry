@@ -39,3 +39,7 @@ path = "tests/test_gnu_r_binaries.rs"
 [[test]]
 name = "test_fuzz_native"
 path = "tests/test_fuzz_native.rs"
+
+[[test]]
+name = "test_altrep"
+path = "tests/test_altrep.rs"

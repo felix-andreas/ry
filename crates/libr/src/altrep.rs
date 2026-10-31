@@ -265,7 +265,7 @@ pub unsafe fn length(object: Sexp) -> ApiResult<R_xlen_t> {
     match methods(object).length {
         Method::Native(method) => native(0, |result| ry_altrep_length(method, object, result)),
         Method::Builtin(method) => method(object),
-        Method::Default => Err(error("no ALTREP Length method defined")),
+        Method::Default => Err(class_error(object, "no ALTREP Length method defined")),
     }
 }
 
@@ -279,7 +279,10 @@ pub unsafe fn dataptr(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
         .cast::<u8>(),
         Method::Builtin(method) => method(object, writable)?,
         Method::Default => {
-            return Err(error("cannot access data pointer for this ALTVEC object"));
+            return Err(class_error(
+                object,
+                "cannot access data pointer for this ALTVEC object",
+            ));
         }
     };
     if writable
@@ -364,10 +367,14 @@ pub unsafe fn sexp_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
             Sexp::from_raw(element).ok_or_else(|| error("an ALTREP Elt method returned NULL"))
         }
         Method::Builtin(method) => method(object, index),
-        Method::Default => Err(error(format!(
-            "{} classes must provide an Elt method",
-            class_family(object.kind())
-        ))),
+        Method::Default => Err(class_error(
+            object,
+            if object.kind() == SexpType::String {
+                "No Elt method found for ALTSTRING class"
+            } else {
+                "ALTLIST classes must provide an Elt method"
+            },
+        )),
     }
 }
 
@@ -377,18 +384,25 @@ pub unsafe fn set_sexp_elt(object: Sexp, index: R_xlen_t, value: Sexp) -> ApiRes
             with_native_scope(|| ry_altrep_set_elt(method, object, index, value))
         }
         Method::Builtin(method) => method(object, index, value),
-        Method::Default => Err(error(format!(
-            "{} classes must provide a Set_elt method",
-            class_family(object.kind())
-        ))),
+        Method::Default => Err(class_error(
+            object,
+            if object.kind() == SexpType::String {
+                "No Set_elt found for ALTSTRING class"
+            } else {
+                "ALTLIST classes must provide a Set_elt method"
+            },
+        )),
     }
 }
 
-fn class_family(kind: SexpType) -> &'static str {
-    match kind {
-        SexpType::String => "ALTSTRING",
-        _ => "ALTLIST",
-    }
+/// An error about a missing method, naming the class as GNU R does.
+unsafe fn class_error(object: Sexp, message: &str) -> crate::boundary::Unwind {
+    let info = object.tag().attrib();
+    error(format!(
+        "{message} [class: {}, pkg: {}]",
+        symbol_text(info.car()),
+        symbol_text(info.cdr().car())
+    ))
 }
 
 /// An element of an atomic vector of type `T`, ALTREP or not.
@@ -929,11 +943,88 @@ pub unsafe extern "C" fn R_tryWrap(object: Sexp) -> Sexp {
     enter(|| wrap(object, UNKNOWN_SORTEDNESS, 0))
 }
 
-/// GNU R's `R_compact_intrange`, the value of `n1:n2`, which libR exports.
+/// `n1:n2` as a compact sequence, for an embedding host. GNU R keeps the same function
+/// internal, so it carries ry's prefix.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn R_compact_intrange(first: R_xlen_t, last: R_xlen_t) -> Sexp {
+pub unsafe extern "C" fn ry_compact_intrange(first: R_xlen_t, last: R_xlen_t) -> Sexp {
     enter(|| compact_intrange(first, last))
 }
+
+// GNU R's libR exports its dispatch functions too, and binaries built against older headers,
+// whose inline accessors called them, import them.
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ALTREP_LENGTH(object: Sexp) -> R_xlen_t {
+    enter(|| length(object))
+}
+
+/// ALTREP objects have no spare capacity.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ALTREP_TRUELENGTH(_object: Sexp) -> R_xlen_t {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ALTVEC_DATAPTR(object: Sexp) -> *mut c_void {
+    enter(|| Ok(dataptr(object, true)?.cast::<c_void>()))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ALTVEC_DATAPTR_RO(object: Sexp) -> *const c_void {
+    enter(|| Ok(dataptr(object, false)? as *const c_void))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ALTVEC_DATAPTR_OR_NULL(object: Sexp) -> *const c_void {
+    enter(|| dataptr_or_null(object))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ALTSTRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
+    enter(|| sexp_elt(object, index))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ALTLIST_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
+    enter(|| sexp_elt(object, index))
+}
+
+macro_rules! set_elt_api {
+    ($name:ident, $type:ty) => {
+        /// Writes through the class's writable data pointer, as GNU R does.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(object: Sexp, index: R_xlen_t, value: $type) {
+            enter(|| {
+                *(dataptr(object, true)? as *mut $type).add(index as usize) = value;
+                Ok(())
+            })
+        }
+    };
+}
+
+set_elt_api!(ALTINTEGER_SET_ELT, c_int);
+set_elt_api!(ALTLOGICAL_SET_ELT, c_int);
+set_elt_api!(ALTREAL_SET_ELT, f64);
+set_elt_api!(ALTRAW_SET_ELT, u8);
+set_elt_api!(ALTCOMPLEX_SET_ELT, Rcomplex);
+
+macro_rules! summary_api {
+    ($name:ident, $function:ident) => {
+        /// The class's answer, or C `NULL` when it has none.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(object: Sexp, remove_na: Rboolean) -> Option<Sexp> {
+            enter(|| $function(object, remove_na != 0))
+        }
+    };
+}
+
+summary_api!(ALTINTEGER_SUM, sum);
+summary_api!(ALTINTEGER_MIN, min);
+summary_api!(ALTINTEGER_MAX, max);
+summary_api!(ALTREAL_SUM, sum);
+summary_api!(ALTREAL_MIN, min);
+summary_api!(ALTREAL_MAX, max);
+summary_api!(ALTLOGICAL_SUM, sum);
 
 // The built-in classes.
 

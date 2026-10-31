@@ -316,7 +316,7 @@ pub fn format_complex(value: Rcomplex) -> String {
         return "NA".into();
     }
     let imaginary = format_real(value.i.abs());
-    let sign = if value.i < 0.0 || (value.i == 0.0 && value.i.is_sign_negative()) {
+    let sign = if value.i < 0.0 {
         '-'
     } else {
         '+'
