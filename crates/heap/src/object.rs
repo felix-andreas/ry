@@ -377,6 +377,12 @@ impl Sexp {
         NonNull::new(pointer).map(Sexp)
     }
 
+    /// A placeholder for a handle slot that is filled before first use, such as an exported
+    /// data symbol before the runtime starts. It must never be dereferenced.
+    pub const fn dangling() -> Sexp {
+        Sexp(NonNull::dangling())
+    }
+
     pub fn as_ptr(self) -> *mut Header {
         self.0.as_ptr()
     }
