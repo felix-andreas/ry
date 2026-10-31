@@ -47,3 +47,29 @@ fn render_errors(source: &str) -> String {
     }
     out
 }
+
+#[test]
+fn a_console_reads_on_only_when_the_input_ended_too_early() {
+    let unfinished = [
+        "f <- function(x) {\n",
+        "print(1)\nf <- function(x) {\n  x +\n",
+        "c(1,\n",
+        "x <-\n",
+        "x +\n",
+        "if (TRUE) {\n  1\n",
+    ];
+    let finished = [
+        "x <- 1\n",
+        "{ x y\n",
+        "f(1))\n",
+        "{ f(1))\n",
+        "#: fn(x: \nx <- 1\n",
+        "",
+    ];
+    for text in unfinished {
+        assert!(syntax::input_is_unfinished(text), "unfinished: {text:?}");
+    }
+    for text in finished {
+        assert!(!syntax::input_is_unfinished(text), "finished: {text:?}");
+    }
+}

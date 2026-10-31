@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, interp, libr, and rcmd crates
+description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, interp, libr, table, and rcmd crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -117,7 +117,7 @@ The library root is `src/ry.rs`, and the binary root is `src/main.rs`.
 - **`stats.rs`**: the performance diagnosis behind `ry debug analysis-stats`.
 - **`repl_completer.rs`**: completion for the interactive console.
 - **`load.rs`**: package loading in R sessions: the `.Call` routines and file watcher behind
-  `ry repl`, the plan emitter behind `ry load --emit-plan`, and the R code that installs the
+  `ry repl`, the plan emitter behind the hidden `ry load --emit-plan`, and the R code that installs the
   runtime, byte-compiled once and cached.
 
 ## `repl`
@@ -234,6 +234,18 @@ runtime state and R's C API. Each exported function that can fail runs its body 
   `include/ry_embed.h`, and the embedding functions of `Rembedded.h`.
 - **`include/`**: the header set, written independently and source-compatible with R 4.6.
   `BLAS.h` and `Lapack.h` declare the system's BLAS and LAPACK, which packages link themselves.
+
+## `table`
+
+The crate root is `src/table.rs`. It is ry's built-in typed table, an engine over Polars.
+
+- **`table.rs`**: `Table`, a Polars `DataFrame` whose columns are restricted to the types that have
+  an R vector type, so every column crosses into R and back without loss.
+- **`convert.rs`**: conversion between Arrow columns and R vectors, including `NA`.
+- **`query.rs`**: the query IR, and its lowering of `tbl[i, j, by]` to a Polars lazy plan with
+  data.table's semantics.
+- **`altrep.rs`** (feature `runtime`): exposes columns to R and native code as ALTREP vectors.
+- **`ffi.rs`**: the C entry points.
 
 ## `rcmd`
 

@@ -37,20 +37,29 @@ illegal dependency unrepresentable.
   that, it can never come to depend on an analysis result.
 - **`loader`** is the package-development loader. It reads a package into the analysis, diffs the
   load index against what a session has loaded, and produces a backend-neutral plan. Its GNU R
-  backend hands the plan to R code running in the session; ry's own runtime will take the same plan.
+  backend hands the plan to R code running in the session. ry's own runtime does not take a plan yet.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
   and under another engine and compares the observable results. It depends on nothing else in the
   workspace.
 - **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
-  `repl` included, needs R to build.
+  `repl` included, needs R to build. With `--runtime ry` it loads ry's `libR.so` instead of GNU R's,
+  and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
   allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
   environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
-  `heap`. Its design is the draft at
+  `heap` and `interp`. Its design is the draft at
   [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/). Evaluation belongs to the
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
+- **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
+  dispatch, and base R's primitives and internals in Rust, plus the check of
+  [inline annotations](/type-checking/inline-annotations) at function boundaries. It depends on
+  `heap` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows nothing
+  about C.
+- **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
+  `tbl[i, j, by]` to a lazy plan. Its `runtime` feature, which links `libr` and `heap`, exposes
+  columns to R as ALTREP vectors. No interpreter code calls it yet.
 - **`rcmd`** is ry's R home and the `R CMD` commands that build and install packages against
   ry's headers and `libR`. It depends on nothing else in the workspace; `libr`'s tests use it.
 - **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,

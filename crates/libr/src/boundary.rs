@@ -400,9 +400,15 @@ pub static R_interrupts_suspended: Global<c_int> = Global::new(0);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_CheckUserInterrupt() {
-    if R_interrupts_pending.get() != 0 && R_interrupts_suspended.get() == 0 {
+    if R_interrupts_suspended.get() != 0 {
+        return;
+    }
+    if R_interrupts_pending.get() != 0 {
         R_interrupts_pending.set(0);
         raise(Unwind::Interrupt);
+    }
+    if let Err(unwind) = interp::unwind::poll_interrupt() {
+        raise(unwind);
     }
 }
 

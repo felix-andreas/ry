@@ -22,6 +22,7 @@
 // Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
 #![allow(clippy::missing_safety_doc)]
 
+pub mod annotations;
 pub mod arith;
 pub mod builtin_libraries;
 pub mod builtins;
@@ -127,6 +128,8 @@ pub struct Interp {
     pub command_args: Vec<String>,
     /// The default packages' libraries `dyn.load` loaded, with the paths it was given.
     pub builtin_libraries: Vec<(&'static str, String)>,
+    /// Inline type annotations turned into checks at function boundaries.
+    pub annotations: annotations::State,
 }
 
 struct InterpState {
@@ -217,6 +220,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         started: std::time::Instant::now(),
         command_args: Vec::new(),
         builtin_libraries: Vec::new(),
+        annotations: annotations::State::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -323,6 +327,7 @@ impl RootSource for InterpRoots {
             }
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
+            interp.annotations.trace(marker);
         }
     }
 }

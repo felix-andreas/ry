@@ -633,7 +633,7 @@ pub(crate) fn project_order<'a>(
 }
 
 /// Renders the findings at or above the floor and returns how many it rendered.
-fn render_findings<'a>(
+pub(crate) fn render_findings<'a>(
     output: OutputFormat,
     min_severity: MinSeverity,
     path: &Path,
@@ -664,11 +664,11 @@ fn render_findings<'a>(
 }
 
 /// A related range often sits in another document, so each note carries its own text.
-struct RelatedNote<'a> {
-    path: &'a Path,
-    source: &'a str,
-    range: TextRange,
-    message: &'static str,
+pub(crate) struct RelatedNote<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) source: &'a str,
+    pub(crate) range: TextRange,
+    pub(crate) message: &'static str,
 }
 
 fn render_human_diagnostic(
