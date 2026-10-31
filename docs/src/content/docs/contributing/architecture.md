@@ -43,8 +43,10 @@ illegal dependency unrepresentable.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
   `heap`. Its design is the draft at
-  [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/), and nothing else in the
-  workspace uses it yet.
+  [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/). Evaluation belongs to the
+  interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
+- **`rcmd`** is ry's R home and the `R CMD` commands that build and install packages against
+  ry's headers and `libR`. It depends on nothing else in the workspace; `libr`'s tests use it.
 - **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
   `run`, and `debug` commands. It owns configuration, conversion between position encodings,
   assembling and publishing diagnostics, and suppression comments.

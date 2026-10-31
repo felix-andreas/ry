@@ -351,12 +351,30 @@ The packages are brio from the benchmark closure, vendored in `tests/packages/br
 
 - `test_native.rs` builds both against ry's headers and checks the results, collection stress, the
   handle scope, `PROTECT` imbalance, errors unwinding through C and C++ frames, `R_alloc` release,
-  finalizers, ALTREP dispatch, coercion, and the random number generator against GNU R's output. It
-  also checks that every name the headers declare is exported, and that of the 150 names the
-  measured closure uses most, only `R_ParseVector` is missing.
+  finalizers, coercion, and the random number generator against GNU R's output.
 - `test_gnu_r_binaries.rs` builds both with GNU R's `R CMD SHLIB`, against GNU R's headers and
   linked to GNU R's `libR.so`, and runs them under ry's. It runs in a process of its own, so the two
   builds of one package never share a session.
+- `test_headers.rs` compiles every header as C11 and C++17 with warnings as errors, checks with
+  the compiler that every declared name is exported, runs BLAS and LAPACK calls through the
+  headers, and compares the graphics structs' layout with GNU R's.
+- `test_altrep.rs` and `test_altrep_api.rs` drive the `altreptest` package's classes of every
+  kind and base R's own classes, against a report recorded from GNU R.
+- `test_serialize.rs` and `test_serialize_native.rs` read and write GNU R's recorded streams byte
+  for byte in every format and version, read installed lazy-load databases, and fuzz the reader.
+- `test_connections.rs` runs one connection scenario list in GNU R and in ry and compares the
+  transcripts; `test_connections_gnu_binary.rs` repeats it with the `ryconn` package built by GNU R.
+- `test_install.rs` assembles ry's R home and installs packages with `R CMD INSTALL` semantics.
+  With `RY_SOURCE_PACKAGES` set to a directory of source tarballs, it builds each one against ry's
+  headers and reports the outcome.
+- `test_corpus_binaries.rs` loads every compiled package of the installed corpus
+  (`RY_CORPUS_LIBRARY`, default `.corpus/library`) under ry, each in a child process with its
+  dependencies, and writes `target/tmp/corpus-binaries.tsv`.
+- `test_corpus_calls.rs` replays native routine calls that `tests/data/corpus_calls/record.R`
+  recorded under GNU R, reading arguments and results with ry's unserializer, and requires every
+  routine whose library loads to return what it returned under GNU R.
+
+The two corpus suites pass without a corpus and report that they skipped.
 
 These suites need a C and C++ toolchain, and GNU R for the second suite and the generator check.
 `RY_SKIP_GNU_R=1` skips the parts that need GNU R, and without it a missing R is a failure.
