@@ -630,7 +630,7 @@ fn persistence_hooks_replace_and_restore_objects() {
         };
         let hook: PersistHook = &mut name_env;
         R::serialize::serialize(list, Format::Xdr, 3, &mut sink, Some(hook)).expect("written");
-        assert_eq!(named, 1, "the second occurrence is a back-reference");
+        assert_eq!(named, 2, "the hook names every occurrence, as in GNU R");
         assert!(from_bytes(&bytes).is_err(), "restoring needs a hook");
         let mut restored = 0;
         let replacement = runtime()
@@ -646,7 +646,7 @@ fn persistence_hooks_replace_and_restore_objects() {
         let mut source = R::serialize::SliceSource::new(&bytes);
         let (read, _) =
             R::serialize::unserialize(&mut source, Some(&mut restore)).expect("restored");
-        assert_eq!(restored, 1);
+        assert_eq!(restored, 2);
         assert_eq!(read.element(0), replacement);
         assert_eq!(read.element(1), replacement);
     }

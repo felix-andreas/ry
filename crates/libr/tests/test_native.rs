@@ -523,9 +523,19 @@ fn every_declared_name_is_exported() {
                 statements.push(std::mem::take(&mut current));
             }
         }
+        // Members of a struct body (the stream structs' callback fields) are not declarations.
+        let mut in_struct = false;
         for statement in statements {
             let line = statement.trim();
-            if line.starts_with("typedef") || line.starts_with('}') || !line.ends_with(';') {
+            if line.starts_with("struct ") && line.ends_with('{') {
+                in_struct = true;
+                continue;
+            }
+            if line.starts_with('}') {
+                in_struct = false;
+                continue;
+            }
+            if in_struct || line.starts_with("typedef") || !line.ends_with(';') {
                 continue;
             }
             let name = if let Some(variable) = line.strip_prefix("LibExtern ") {

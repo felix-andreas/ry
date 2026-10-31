@@ -47,3 +47,7 @@ path = "tests/test_fuzz_native.rs"
 [[test]]
 name = "test_serialize"
 path = "tests/test_serialize.rs"
+
+[[test]]
+name = "test_serialize_native"
+path = "tests/test_serialize_native.rs"

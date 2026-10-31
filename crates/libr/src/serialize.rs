@@ -612,9 +612,9 @@ impl Writer<'_, '_> {
             }
             _ => return Ok(None),
         }
-        if self.refs.contains_key(&object) {
-            return Ok(None);
-        }
+        // GNU R asks the hook again for an object it already wrote, before looking for a
+        // back-reference, and writes the name again; hooks that name objects keep their own
+        // table, as the lazy-load database writer does.
         let name = hook(object)?;
         runtime().heap.root(name);
         if name.kind() == SexpType::Nil {
@@ -2059,6 +2059,9 @@ pub struct R_inpstream_st {
     pub nat2nat_obj: *mut c_void,
     pub nat2utf8_obj: *mut c_void,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<R_outpstream_st>() == 48 && size_of::<R_inpstream_st>() == 128);
 
 unsafe extern "C" {
     fn ry_stream_out_bytes(
