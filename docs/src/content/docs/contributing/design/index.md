@@ -56,3 +56,10 @@ index, a table type on Polars, and the order to build it in. Nothing on it is im
 What Roc, Bend, goose and Vx do best in memory management, compilation, typing and C interop, and
 which of their ideas the R runtime adopts or rejects given that R's C API must keep working. It is
 written as an Open Knowledge Format v0.2 concept document, with sources in its frontmatter.
+
+### [Packages and R versions in the runtime](/contributing/design/packaging/)
+
+How packages install into ry's runtime (prebuilt GNU R 4.6 binaries load unchanged through the
+ABI-compatible `libR`), how ry chooses between GNU R and its own runtime and between R versions while
+the runtime is incomplete, and what the lazy loader, the analysis and the corpus read from an
+installed library. A package manager of ry's own is left open. Nothing on it is implemented.
