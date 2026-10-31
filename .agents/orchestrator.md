@@ -60,14 +60,12 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 ## In flight
 
 - Runtime step 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): tier-0 bytecode interpreter and base R loaded from the user's GNU R installation.
-- Runtime step 4a (session_0111kWqESzY2bDUMNQAL2or6, Opus): full C API surface, ALTREP, BLAS/LAPACK, connections, package install (owns `crates/libr`).
 - Runtime step 8 core (session_0111kWqBmuEsPtQfPJkP31Vx, Opus): the polars-backed table engine crate, query lowering to Polars lazy plans, ALTREP column seam, checker support, and the benchmark harness against data.table.
-- Analysis performance (session_0111kWqD76vZ2gv5bRe1mtDm, Sonnet): cut cold `ry check` time (6 to 7 s) and peak memory (~1 GiB) on the full-size benchmark code bases, without regressing incremental latency or diagnostics; measured with `just bench`.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
 
-1. Finish step 4: all 232 corpus packages pass their own tests.
+1. Finish step 4 once the interpreter lands: all 232 corpus packages install and pass their own tests under ry. #110 delivered the interpreter-independent part (all 444 header names, 192/199 corpus binaries load, 111/113 source builds).
 2. Move the lazy loader from the GNU R backend onto ry's own interpreter once step 3 lands.
 3. Inline syntax in the runtime.
 4. The Cranelift JIT.
@@ -75,5 +73,4 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 Follow-ups:
 
 - Install R 4.6 via rig for data.table's version check.
-- Recheck the Dependabot alerts.
 - Run a docs pass after the feature PRs land.

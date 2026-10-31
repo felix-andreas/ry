@@ -23,15 +23,31 @@ fn main() {
 
     let text =
         fs::read_to_string(source).unwrap_or_else(|error| panic!("cannot read {source}: {error}"));
-    let exported: Vec<String> = text
+    // `RY_EXPORT` marks a function (the name precedes the first parenthesis) and
+    // `RY_EXPORT_DATA` a variable (the name precedes the initializer or the semicolon, or an
+    // array bound).
+    let functions = text
         .lines()
         .filter_map(|line| line.strip_prefix("RY_EXPORT "))
         .filter_map(|declaration| {
             let name_end = declaration.find('(')?;
             let name = declaration[..name_end].trim().rsplit([' ', '*']).next()?;
             Some(name.to_owned())
-        })
-        .collect();
+        });
+    let variables = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("RY_EXPORT_DATA "))
+        .filter_map(|declaration| {
+            // A function pointer names itself inside `(*name)`.
+            if let Some(start) = declaration.find("(*") {
+                let rest = &declaration[start + 2..];
+                return Some(rest[..rest.find(')')?].trim().to_owned());
+            }
+            let name_end = declaration.find(['=', ';', '['])?;
+            let name = declaration[..name_end].trim().rsplit([' ', '*']).next()?;
+            Some(name.to_owned())
+        });
+    let exported: Vec<String> = functions.chain(variables).collect();
     let out_dir =
         PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|error| panic!("OUT_DIR: {error}")));
     let script = out_dir.join("exports.map");
@@ -52,5 +68,11 @@ fn main() {
         // dynamic linker satisfies that from ry's already loaded libR instead of searching for
         // GNU R's.
         println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libR.so");
+        // GNU R's libR depends on zlib, bzip2 and xz, and package binaries that call zlib
+        // without linking it themselves (gert, httpuv) find it through that dependency. ry's
+        // libR records the same dependencies, which the linker would otherwise drop as unused.
+        for library in ["z", "bz2", "lzma"] {
+            println!("cargo:rustc-cdylib-link-arg=-Wl,--no-as-needed,-l{library},--as-needed");
+        }
     }
 }

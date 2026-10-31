@@ -16,20 +16,28 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod altrep;
+pub mod applic;
 pub mod arith;
 pub mod attributes;
 pub mod boundary;
+pub mod classes;
+pub mod connections;
 pub mod dynload;
 pub mod embed;
 pub mod environments;
 pub mod eval;
 pub mod extptr;
 pub mod globals;
+pub mod graphics;
+pub mod hashtab;
+pub mod legacy;
+pub mod linpack;
 pub mod lists;
 pub mod memory;
-pub mod methods;
+pub mod rmath;
+pub mod serialize;
 pub mod strings;
-pub mod utilities;
+pub mod utils;
 pub mod vectors;
 
 use crate::{boundary::Unwind, dynload::Dll};
@@ -43,6 +51,8 @@ pub type R_xlen_t = isize;
 pub type R_len_t = c_int;
 /// `Rboolean` is a C enum, so it has the size of `int`.
 pub type Rboolean = c_int;
+/// The R version ry presents, which `Rversion.h` and `R.version` report too.
+pub const R_VERSION_STRING: &str = "4.6.2";
 pub const TRUE: Rboolean = 1;
 pub const FALSE: Rboolean = 0;
 
@@ -64,6 +74,11 @@ pub struct Runtime {
     pub dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
     pub options: Sexp,
+    /// `TRUELENGTH` values set on objects whose storage has no field for one: strings and
+    /// vectors set to a value other than their capacity. Each key is preserved while it has an
+    /// entry, so its address cannot be reused by another object.
+    pub truelengths: FxHashMap<Sexp, isize>,
+    pub rng: arith::Rng,
     pub console: Console,
     running_finalizers: bool,
 }
@@ -115,6 +130,7 @@ pub fn runtime() -> &'static mut Runtime {
             *slot = Some(Runtime::start());
             globals::publish(slot.as_mut().unwrap_or_else(|| unreachable!()));
             eval::install_interpreter(slot.as_mut().unwrap_or_else(|| unreachable!()));
+            embed::start_frontend();
         }
         slot.as_mut().unwrap_or_else(|| unreachable!())
     }
@@ -139,6 +155,8 @@ impl Runtime {
             dlls: Vec::new(),
             c_callables: FxHashMap::default(),
             options,
+            truelengths: FxHashMap::default(),
+            rng: arith::Rng::default(),
             console: Box::new(boundary::default_console),
             running_finalizers: false,
         };
@@ -146,6 +164,7 @@ impl Runtime {
         unsafe {
             runtime.heap.inhibit_collection();
             globals::install_symbols(&mut runtime.heap);
+            legacy::start_pointer_protection(&mut runtime.heap);
             runtime.heap.allow_collection();
         }
         runtime

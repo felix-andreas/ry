@@ -1,15 +1,16 @@
 ---
 title: The R runtime
-description: "Proposal, not implemented: how ry runs R, from the C API up to the JIT, the table type and lazy package loading"
+description: "Design draft: how ry runs R, from the C API up to the JIT, the table type and lazy package loading"
 ---
 
-This is a design draft. Step 2 of the build order (section 10) is implemented: the object model and
-collector in `crates/heap`, and the C API as `libR.so` in `crates/libr`, which loads and runs real
-package binaries. Everything after it is not, so ry's console (`ry repl`) still drives a GNU R that
-it loads at runtime. The page sets out how ry becomes an R implementation of its own, in what order
-to build it, and why. The C API measurements in section 2 are real and reproducible; where section 4
-describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and
-native boundary") records the settled details.
+This is a design draft: how ry becomes an R implementation of its own, in what order to build it,
+and why. Built so far are step 2 of the build order (section 10), the object model and collector in
+`crates/heap` and the C API as `libR.so` in `crates/libr`, and the part of step 4 that needs no
+interpreter: the whole measured C API, ALTREP, connections and package installation in
+`crates/rcmd`. The interpreter is not built, so `ry repl` still drives a GNU R that it loads at
+runtime. The C API measurements in section 2 are real and reproducible. Where section 4 describes
+something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
+boundary") records the settled details.
 
 ## 1. The recommendations
 
@@ -795,6 +796,20 @@ Each step ends with something real running, and each one is a large, whole chang
    232 packages of the closure install and pass their own tests under ry (with their `Suggests`
    installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
+
+   The part that needs no interpreter is done, with evaluation behind a hook the interpreter
+   installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
+   names the closure uses (the rest of the 792 are types, macros and enum constants in the headers)
+   and implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
+   are declared in headers and come from the system libraries. Against the corpus library (GNU R
+   4.3.3 binaries, `tests/test_corpus_binaries.rs`), 192 of the closure's 199 non-base compiled
+   packages load and register under ry. Of the other seven, six evaluate R code while loading (S7,
+   arrow, nanoarrow, reticulate, minqa, yaml) and tesseract needs a system library that is not
+   installed. All 23 recorded `.Call` routines that need no evaluation return what GNU R returns
+   (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
+   `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
+   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
+   R-level half of installation waits for the interpreter.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.

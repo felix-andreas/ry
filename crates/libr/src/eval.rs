@@ -4,14 +4,20 @@
 //! `.Fortran` and the `dyn.load` family.
 
 use crate::{
-    Runtime,
-    boundary::{ApiResult, DlFunc, Unwind, call_native, enter, error, error_in, report},
+    Rboolean, Runtime,
+    boundary::{
+        ApiResult, DlFunc, Unwind, call_native, enter, error, error_in, report, with_native_scope,
+    },
     dynload::{Dll, RoutineKind, find_routine},
+    globals::R_NamesSymbol,
     runtime,
     strings::utf8_text,
-    vectors::xlength,
+    vectors::{format_real, xlength},
 };
-use heap::object::{Sexp, SexpType};
+use heap::{
+    object::{NA_INTEGER, Sexp, SexpType},
+    strings::Encoding,
+};
 use interp::{
     builtin_libraries,
     builtins::{Arg, BuiltinDef, Call, builtin, internal},
@@ -29,6 +35,192 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     interp::install(&mut runtime.heap, hooks);
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
+    install_evaluator(&Interpreter);
+}
+
+/// ry's interpreter behind the [`Evaluator`] hook.
+struct Interpreter;
+
+impl Evaluator for Interpreter {
+    unsafe fn eval(&self, expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
+        interp::eval::eval(expression, env)
+    }
+
+    unsafe fn apply(&self, call: Sexp, function: Sexp, arguments: Sexp, env: Sexp) -> ApiResult<Sexp> {
+        let args: Vec<Arg> = interp::values::pairlist_items(arguments)
+            .into_iter()
+            .map(|(tag, value)| Arg { tag, value })
+            .collect();
+        interp::eval::apply(call, function, &args, env)
+    }
+
+    unsafe fn parse(&self, text: Sexp, count: c_int, _srcfile: Sexp) -> ApiResult<ParseOutcome> {
+        let lines: Vec<String> = interp::values::strings(text)
+            .into_iter()
+            .map(|line| line.unwrap_or_else(|| "NA".into()))
+            .collect();
+        let Ok(expressions) = interp::lower::parse_text(&lines.join("\n"), "<text>") else {
+            return Ok(ParseOutcome {
+                expressions: runtime().nil(),
+                status: ParseStatus::Error,
+            });
+        };
+        let expressions = if count >= 0 && (count as usize) < interp::values::length(expressions) {
+            let truncated = interp::values::alloc(SexpType::Expression, count as usize)?;
+            for index in 0..count as usize {
+                interp::values::set_elt(truncated, index, expressions.element(index));
+            }
+            truncated
+        } else {
+            expressions
+        };
+        Ok(ParseOutcome {
+            expressions,
+            status: ParseStatus::Ok,
+        })
+    }
+
+    unsafe fn force_and_call(&self, call: Sexp, count: c_int, env: Sexp) -> ApiResult<Sexp> {
+        let function = call.car();
+        let function = if function.kind() == SexpType::Symbol {
+            interp::eval::find_fun(function, env)?
+        } else {
+            interp::eval::eval(function, env)?
+        };
+        let args = interp::eval::promise_args(call.cdr(), env)?;
+        for arg in args.iter().take(count.max(0) as usize) {
+            if arg.value.kind() == SexpType::Promise {
+                interp::eval::force_promise(arg.value)?;
+            }
+        }
+        interp::eval::apply(call, function, &args, env)
+    }
+
+    unsafe fn print_value(&self, value: Sexp, env: Sexp) -> ApiResult<()> {
+        interp::print::print_value_top(value, env)
+    }
+
+    unsafe fn current_env(&self) -> Sexp {
+        interp::interp()
+            .frames
+            .last()
+            .map_or(runtime().heap.known().global_env, |frame| frame.env)
+    }
+
+    unsafe fn current_srcref(&self, _skip: c_int) -> ApiResult<Sexp> {
+        Ok(runtime().nil())
+    }
+
+    unsafe fn dot_last(&self) -> ApiResult<()> {
+        Ok(())
+    }
+}
+
+/// The interpreter's side of evaluation. libR calls it for every evaluation the C API performs;
+/// the interpreter in turn calls back into libR (environments, `.Call` through
+/// [`native_call`], connections) as ordinary Rust.
+///
+/// Each method runs inside an API function's `enter`, so it reports a non-local exit as
+/// `Err(Unwind)` and must not `longjmp` itself.
+pub trait Evaluator: Sync {
+    /// Evaluates `expression` in `env`, as `Rf_eval` does.
+    unsafe fn eval(&self, expression: Sexp, env: Sexp) -> ApiResult<Sexp>;
+
+    /// Calls `function` with already evaluated arguments, given as a pairlist whose tags are the
+    /// argument names. `call` is the call reported in errors and seen by `sys.call()`.
+    unsafe fn apply(
+        &self,
+        call: Sexp,
+        function: Sexp,
+        arguments: Sexp,
+        env: Sexp,
+    ) -> ApiResult<Sexp>;
+
+    /// Parses `text` (a character vector) into an expression vector, as `R_ParseVector` does;
+    /// `count` is the number of expressions to read, or a negative number for all of them.
+    unsafe fn parse(&self, text: Sexp, count: c_int, srcfile: Sexp) -> ApiResult<ParseOutcome>;
+
+    /// Evaluates `call`, forcing the promises of its first `count` arguments before the
+    /// function's body runs, as `R_forceAndCall` does.
+    unsafe fn force_and_call(&self, call: Sexp, count: c_int, env: Sexp) -> ApiResult<Sexp>;
+
+    /// Prints `value` as auto-printing at top level would, as `Rf_PrintValue` does.
+    unsafe fn print_value(&self, value: Sexp, env: Sexp) -> ApiResult<()>;
+
+    /// The environment of the innermost closure call on the stack, or the global environment
+    /// at top level, as `R_GetCurrentEnv` reports it.
+    unsafe fn current_env(&self) -> Sexp;
+
+    /// The source reference of a call on the stack, as `R_GetCurrentSrcref(skip)` reports it:
+    /// with `skip >= 0`, `skip` frames above the innermost; with `skip < 0`, the `-skip`th frame
+    /// from the top level. `R_NilValue` when there is none.
+    unsafe fn current_srcref(&self, skip: c_int) -> ApiResult<Sexp>;
+
+    /// Runs `.Last()` and `.Last.sys()` as R's shutdown does, as `R_dot_Last` does.
+    unsafe fn dot_last(&self) -> ApiResult<()>;
+}
+
+/// `ParseStatus` from `R_ext/Parse.h`, with GNU R's numbering.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseStatus {
+    Null = 0,
+    Ok = 1,
+    Incomplete = 2,
+    Error = 3,
+    Eof = 4,
+}
+
+/// The result of a parse: the expression vector (`R_NilValue` unless the status is
+/// `ParseStatus::Ok`) and the status.
+#[derive(Clone, Copy, Debug)]
+pub struct ParseOutcome {
+    pub expressions: Sexp,
+    pub status: ParseStatus,
+}
+
+static EVALUATOR: crate::Global<Option<&'static dyn Evaluator>> = crate::Global::new(None);
+
+/// Makes `evaluator` the one every evaluation entry point of the C API uses. The interpreter
+/// calls this once at startup, before any package code runs.
+pub fn install_evaluator(evaluator: &'static dyn Evaluator) {
+    EVALUATOR.set(Some(evaluator));
+}
+
+pub fn evaluator() -> Option<&'static dyn Evaluator> {
+    EVALUATOR.get()
+}
+
+unsafe extern "C" {
+    fn ry_run_task_callbacks(
+        expression: Sexp,
+        value: Sexp,
+        succeeded: Rboolean,
+        visible: Rboolean,
+        status: *mut c_int,
+    );
+}
+
+/// Runs the task callbacks packages registered with `Rf_addTaskCallback`. The interpreter calls
+/// this after each top-level task, as GNU R's REPL does; an error a callback raises comes back
+/// as `Err`.
+pub unsafe fn run_task_callbacks(
+    expression: Sexp,
+    value: Sexp,
+    succeeded: bool,
+    visible: bool,
+) -> ApiResult<()> {
+    with_native_scope(|| {
+        let mut status = 0;
+        ry_run_task_callbacks(
+            expression,
+            value,
+            succeeded as Rboolean,
+            visible as Rboolean,
+            &mut status,
+        );
+        status
+    })
 }
 
 /// Stand-ins for a few base R closures, so a host that never loads base R (the C API tests) can
@@ -172,21 +364,7 @@ pub unsafe extern "C" fn R_tryEvalSilent(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_forceAndCall(call: Sexp, count: c_int, env: Sexp) -> Sexp {
-    enter(|| {
-        let function = call.car();
-        let function = if function.kind() == SexpType::Symbol {
-            interp::eval::find_fun(function, env)?
-        } else {
-            eval(function, env)?
-        };
-        let args = interp::eval::promise_args(call.cdr(), env)?;
-        for arg in args.iter().take(count.max(0) as usize) {
-            if arg.value.kind() == SexpType::Promise {
-                force_promise(arg.value)?;
-            }
-        }
-        interp::eval::apply(call, function, &args, env)
-    })
+    enter(|| Interpreter.force_and_call(call, count, env))
 }
 
 #[unsafe(no_mangle)]
@@ -211,43 +389,6 @@ pub unsafe extern "C" fn Rf_PrintValue(value: Sexp) {
     enter(|| {
         interp::print::print_value_top(value, runtime().heap.known().global_env)?;
         Ok(())
-    })
-}
-
-/// `R_ParseVector(text, n, status, srcfile)`: status 1 is `PARSE_OK`, 3 `PARSE_ERROR`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn R_ParseVector(
-    text: Sexp,
-    count: c_int,
-    status: *mut c_int,
-    _srcfile: Sexp,
-) -> Sexp {
-    enter(|| {
-        let lines: Vec<String> = interp::values::strings(text)
-            .into_iter()
-            .map(|line| line.unwrap_or_else(|| "NA".into()))
-            .collect();
-        match interp::lower::parse_text(&lines.join("\n"), "<text>") {
-            Ok(expressions) => {
-                if !status.is_null() {
-                    *status = 1;
-                }
-                if count >= 0 && (count as usize) < interp::values::length(expressions) {
-                    let truncated = interp::values::alloc(SexpType::Expression, count as usize)?;
-                    for index in 0..count as usize {
-                        interp::values::set_elt(truncated, index, expressions.element(index));
-                    }
-                    return Ok(truncated);
-                }
-                Ok(expressions)
-            }
-            Err(_) => {
-                if !status.is_null() {
-                    *status = 3;
-                }
-                Ok(runtime().nil())
-            }
-        }
     })
 }
 
@@ -302,90 +443,9 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     internal("is.loaded", 3, |call| unsafe { do_is_loaded(call) }),
 ];
 
-/// The arguments of a foreign call: `.NAME`, the routine's arguments, and `PACKAGE`.
-struct ForeignArgs {
-    name: Sexp,
-    values: Vec<(Sexp, Sexp)>,
-    package: Option<String>,
-}
-
-unsafe fn foreign_args(call: &Call<'_>) -> ApiResult<ForeignArgs> {
-    let Some((first, rest)) = call.args.split_first() else {
-        return Err(error_in(call.call, "'.NAME' is missing"));
-    };
-    let package_symbol = runtime().heap.install(b"PACKAGE")?;
-    let ignored: Vec<Sexp> = ["NAOK", "DUP", "ENCODING"]
-        .iter()
-        .map(|name| runtime().heap.install(name.as_bytes()))
-        .collect::<Result<_, _>>()?;
-    let mut package = None;
-    let mut values = Vec::new();
-    for arg in rest {
-        if arg.tag == package_symbol {
-            if arg.value.kind() != SexpType::String || xlength(arg.value)? < 1 {
-                return Err(error_in(call.call, "PACKAGE argument must be a single character string"));
-            }
-            package = Some(utf8_text(arg.value.element(0))?.into_owned());
-        } else if ignored.contains(&arg.tag) {
-            continue;
-        } else {
-            values.push((arg.tag, arg.value));
-        }
-    }
-    Ok(ForeignArgs {
-        name: first.value,
-        values,
-        package,
-    })
-}
-
-/// The native routine `.NAME` names: a string, a `NativeSymbolInfo`, or an external pointer.
-unsafe fn resolve_routine(
-    call: Sexp,
-    name: Sexp,
-    package: Option<&str>,
-    kind: RoutineKind,
-) -> ApiResult<(DlFunc, Option<c_int>, String)> {
-    match name.kind() {
-        SexpType::String if xlength(name)? >= 1 => {
-            let routine_name = utf8_text(name.element(0))?.into_owned();
-            let (function, arity) = find_routine(&routine_name, package, kind).map_err(|unwind| match unwind {
-                Unwind::Error(failure) => error_in(call, failure.message),
-                other => other,
-            })?;
-            Ok((function, arity, routine_name))
-        }
-        SexpType::List => {
-            let address = interp::values::list_get(name, "address");
-            let routine_name = interp::values::list_get(name, "name");
-            let routine_name = interp::values::first_string(routine_name)
-                .map(|text| text.into_owned())
-                .unwrap_or_default();
-            let arity = interp::values::list_get(name, "numParameters");
-            let arity = (arity != runtime().nil()).then(|| interp::values::as_integer_scalar(arity));
-            let (function, _, _) = resolve_routine(call, address, package, kind)?;
-            Ok((function, arity, routine_name))
-        }
-        SexpType::ExternalPtr => {
-            let address = name.external_address();
-            if address.is_null() {
-                return Err(error_in(call, "NULL value passed as symbol address"));
-            }
-            Ok((std::mem::transmute::<*mut c_void, DlFunc>(address), None, String::new()))
-        }
-        _ => Err(error_in(
-            call,
-            "first argument must be a string (of length 1) or native symbol reference",
-        )),
-    }
-}
-
-/// `.Call` and `.External`.
+/// `.Call` and `.External`. Base R's own routines and the default packages' routines run in
+/// Rust; any other routine is native code in a loaded library.
 unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
-    let what = match kind {
-        RoutineKind::External => ".External",
-        _ => ".Call",
-    };
     if kind == RoutineKind::Call
         && let Some(result) = interp::native::call_base_routine(call, Interface::Call)?
     {
@@ -394,54 +454,10 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
         return Ok(value);
     }
-    let args = foreign_args(call)?;
-    let (function, arity, routine_name) =
-        resolve_routine(call.call, args.name, args.package.as_deref(), kind)?;
-    match kind {
-        RoutineKind::External => {
-            let nil = runtime().nil();
-            let mut list = nil;
-            for &(tag, value) in args.values.iter().rev() {
-                list = runtime().heap.alloc_triple(SexpType::Pairlist, value, list, tag)?;
-                runtime().heap.root(list);
-            }
-            let list = runtime().heap.alloc_triple(SexpType::Language, args.name, list, nil)?;
-            runtime().heap.root(list);
-            call_native(function, &[list], what)
-        }
-        _ => {
-            if args.values.len() > 65 {
-                return Err(error_in(call.call, "too many arguments, sorry"));
-            }
-            if let Some(arity) = arity
-                && arity >= 0
-                && arity as usize != args.values.len()
-            {
-                return Err(error_in(
-                    call.call,
-                    format!(
-                        "Incorrect number of arguments ({}), expecting {arity} for '{routine_name}'",
-                        args.values.len()
-                    ),
-                ));
-            }
-            let values: Vec<Sexp> = args.values.iter().map(|(_, value)| *value).collect();
-            call_native(function, &values, what)
-        }
-    }
+    native_call(call.call, &tagged_values(call), kind)
 }
 
-unsafe extern "C" {
-    fn ry_call_native(
-        function: DlFunc,
-        count: c_int,
-        args: *const Sexp,
-        result: *mut *mut heap::object::Header,
-    ) -> c_int;
-}
-
-/// `.C` and `.Fortran`: each argument is copied into native memory, the routine receives
-/// pointers, and the copies come back as a list.
+/// `.C` and `.Fortran`, routed like [`dot_call`].
 unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     let interface = if kind == RoutineKind::Fortran { Interface::Fortran } else { Interface::C };
     if let Some(result) = interp::native::call_base_routine(call, interface)? {
@@ -450,75 +466,311 @@ unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
         return Ok(value);
     }
-    let args = foreign_args(call)?;
-    let (function, _, _) = resolve_routine(call.call, args.name, args.package.as_deref(), kind)?;
-    let mut copies = Vec::with_capacity(args.values.len());
-    let mut strings: Vec<Vec<Vec<u8>>> = Vec::new();
-    let mut string_pointers: Vec<Vec<*mut c_char>> = Vec::new();
-    for &(_, value) in &args.values {
-        let copy = match value.kind() {
-            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw => {
-                let copy = interp::values::duplicate(value)?;
-                runtime().heap.root(copy);
-                copy
+    native_call(call.call, &tagged_values(call), kind)
+}
+
+fn tagged_values(call: &Call<'_>) -> Vec<(Sexp, Sexp)> {
+    call.args.iter().map(|arg| (arg.tag, arg.value)).collect()
+}
+
+/// `.Call` and `.External` for the interpreter: `arguments` are the evaluated arguments with
+/// their tags, the first being `.NAME`.
+pub unsafe fn native_call(
+    call: Sexp,
+    arguments: &[(Sexp, Sexp)],
+    kind: RoutineKind,
+) -> ApiResult<Sexp> {
+    let what = kind.interface();
+    let Some(((_, name), rest)) = arguments.split_first() else {
+        return Err(error_in(call, "'.NAME' is missing"));
+    };
+    let package_symbol = runtime().heap.install(b"PACKAGE")?;
+    let control_symbols = [
+        runtime().heap.install(b"NAOK")?,
+        runtime().heap.install(b"DUP")?,
+        runtime().heap.install(b"ENCODING")?,
+    ];
+    let mut package = None;
+    let mut na_ok = false;
+    let mut values = Vec::new();
+    for &(tag, value) in rest {
+        if matches!(kind, RoutineKind::C | RoutineKind::Fortran) && control_symbols.contains(&tag) {
+            if tag == control_symbols[0] {
+                na_ok = crate::vectors::as_logical(value)? == 1;
             }
-            SexpType::String => value,
+            continue;
+        }
+        if tag == package_symbol {
+            if value.kind() != SexpType::String || xlength(value)? < 1 {
+                return Err(error_in(
+                    call,
+                    "PACKAGE argument must be a single character string",
+                ));
+            }
+            package = Some(utf8_text(crate::vectors::sexp_elt(value, 0)?)?.into_owned());
+        } else {
+            values.push((tag, value));
+        }
+    }
+    let (function, arity, routine_name) = match name.kind() {
+        SexpType::String if xlength(*name)? >= 1 => {
+            let routine_name = utf8_text(crate::vectors::sexp_elt(*name, 0)?)?.into_owned();
+            let (function, arity) = find_routine(&routine_name, package.as_deref(), kind).map_err(
+                |unwind| match unwind {
+                    Unwind::Error(error) => error_in(call, error.message),
+                    other => other,
+                },
+            )?;
+            (function, arity, routine_name)
+        }
+        // A `NativeSymbolInfo` list carries the routine's address in its `address` element.
+        SexpType::List if native_symbol_address(*name)?.is_some() => {
+            let address = native_symbol_address(*name)?
+                .unwrap_or(*name)
+                .external_address();
+            if address.is_null() {
+                return Err(error_in(call, "NULL value passed as symbol address"));
+            }
+            let arity = crate::attributes::get_attrib(*name, R_NamesSymbol.get())
+                .ok()
+                .and_then(|_| list_element(*name, "numParameters"))
+                .filter(|value| value.kind() == SexpType::Integer && value.length() == 1)
+                .map(|value| value.slice::<i32>()[0]);
+            (
+                std::mem::transmute::<*mut std::ffi::c_void, crate::boundary::DlFunc>(address),
+                arity,
+                list_element(*name, "name")
+                    .filter(|value| value.kind() == SexpType::String)
+                    .and_then(|value| {
+                        utf8_text(value.element(0))
+                            .ok()
+                            .map(|text| text.into_owned())
+                    })
+                    .unwrap_or_default(),
+            )
+        }
+        SexpType::ExternalPtr => {
+            let address = name.external_address();
+            if address.is_null() {
+                return Err(error_in(call, "NULL value passed as symbol address"));
+            }
+            (
+                std::mem::transmute::<*mut std::ffi::c_void, crate::boundary::DlFunc>(address),
+                None,
+                String::new(),
+            )
+        }
+        _ => {
+            return Err(error_in(
+                call,
+                "first argument must be a string (of length 1) or native symbol reference",
+            ));
+        }
+    };
+    match kind {
+        RoutineKind::Call => {
+            if values.len() > 65 {
+                return Err(error_in(call, "too many arguments, sorry"));
+            }
+            if let Some(arity) = arity
+                && arity >= 0
+                && arity as usize != values.len()
+            {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "Incorrect number of arguments ({}), expecting {arity} for '{routine_name}'",
+                        values.len()
+                    ),
+                ));
+            }
+            let args: Vec<Sexp> = values.iter().map(|(_, value)| *value).collect();
+            call_native(function, &args, what)
+        }
+        RoutineKind::External => {
+            let nil = runtime().nil();
+            let mut list = nil;
+            for &(tag, value) in values.iter().rev() {
+                list = runtime()
+                    .heap
+                    .alloc_triple(SexpType::Pairlist, value, list, tag)?;
+                runtime().heap.root(list);
+            }
+            let list = runtime()
+                .heap
+                .alloc_triple(SexpType::Language, *name, list, nil)?;
+            runtime().heap.root(list);
+            call_native(function, &[list], what)
+        }
+        RoutineKind::C | RoutineKind::Fortran => {
+            if values.len() > 65 {
+                return Err(error_in(call, "too many arguments, sorry"));
+            }
+            if let Some(arity) = arity
+                && arity >= 0
+                && arity as usize != values.len()
+            {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "Incorrect number of arguments ({}), expecting {arity} for '{routine_name}'",
+                        values.len()
+                    ),
+                ));
+            }
+            c_call(call, function, &values, kind, na_ok)
+        }
+    }
+}
+
+/// One `.C` or `.Fortran` argument as native code receives it: a pointer into a fresh copy, so
+/// the routine's writes land in the copy that is returned.
+enum CArgument {
+    Vector(Sexp),
+    Strings(Sexp, Vec<*mut c_char>),
+    Object(Sexp),
+}
+
+/// `.C` and `.Fortran`: each argument is copied, the routine receives pointers to the copies'
+/// data, and the result is the list of copies, named as the arguments were.
+unsafe fn c_call(
+    call: Sexp,
+    function: crate::boundary::DlFunc,
+    values: &[(Sexp, Sexp)],
+    kind: RoutineKind,
+    na_ok: bool,
+) -> ApiResult<Sexp> {
+    let runtime = runtime();
+    let mut arguments = Vec::with_capacity(values.len());
+    let mut pointers: Vec<*mut std::ffi::c_void> = Vec::with_capacity(values.len());
+    for (position, &(_, value)) in values.iter().enumerate() {
+        let argument = match value.kind() {
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw => {
+                // The copy is an ordinary vector even when the argument is ALTREP, so the
+                // checks below read its storage directly.
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                if !na_ok && !c_values_finite(copy)? {
+                    return Err(error_in(
+                        call,
+                        format!("NA/NaN/Inf in foreign function call (arg {})", position + 1),
+                    ));
+                }
+                pointers.push(crate::vectors::data_pointer(copy, true)? as *mut std::ffi::c_void);
+                CArgument::Vector(copy)
+            }
+            SexpType::String => {
+                // An ALTREP class may duplicate into another ALTREP object, so the copy is
+                // materialized: the routine writes back into ordinary storage.
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                let copy = if copy.is_altrep() {
+                    crate::altrep::materialize(copy)?
+                } else {
+                    copy
+                };
+                runtime.heap.root(copy);
+                let length = xlength(copy)? as usize;
+                let mut strings = Vec::with_capacity(length);
+                for index in 0..length {
+                    let element = copy.element(index);
+                    if !na_ok && element == runtime.heap.known().na_string {
+                        return Err(error_in(
+                            call,
+                            format!("NA/NaN/Inf in foreign function call (arg {})", position + 1),
+                        ));
+                    }
+                    strings.push(crate::strings::arena_c_string(element.bytes())? as *mut c_char);
+                }
+                let pointer = if kind == RoutineKind::Fortran {
+                    strings.first().copied().unwrap_or(std::ptr::null_mut())
+                        as *mut std::ffi::c_void
+                } else {
+                    strings.as_mut_ptr() as *mut std::ffi::c_void
+                };
+                pointers.push(pointer);
+                CArgument::Strings(copy, strings)
+            }
+            SexpType::List if kind == RoutineKind::C => {
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                runtime.heap.escape(copy);
+                pointers.push(copy.data() as *mut std::ffi::c_void);
+                CArgument::Vector(copy)
+            }
+            _ if kind == RoutineKind::C => {
+                pointers.push(value.as_ptr() as *mut std::ffi::c_void);
+                CArgument::Object(value)
+            }
             other => {
                 return Err(error_in(
-                    call.call,
-                    format!("invalid mode ({}) to pass to C or Fortran", other.name()),
+                    call,
+                    format!(
+                        "invalid mode ({}) to pass to Fortran (arg {})",
+                        other.name(),
+                        position + 1
+                    ),
                 ));
             }
         };
-        copies.push(copy);
+        arguments.push(argument);
     }
-    let mut pointers: Vec<*mut c_void> = Vec::with_capacity(copies.len());
-    for &copy in &copies {
-        if copy.kind() == SexpType::String {
-            let mut buffers: Vec<Vec<u8>> = (0..interp::values::length(copy))
-                .map(|index| {
-                    let mut bytes = copy.element(index).bytes().to_vec();
-                    bytes.push(0);
-                    bytes
-                })
-                .collect();
-            let mut list: Vec<*mut c_char> = buffers.iter_mut().map(|buffer| buffer.as_mut_ptr() as *mut c_char).collect();
-            pointers.push(list.as_mut_ptr() as *mut c_void);
-            strings.push(buffers);
-            string_pointers.push(list);
-        } else {
-            pointers.push(copy.data() as *mut c_void);
+    crate::boundary::call_native_pointers(function, &pointers, kind.interface())?;
+    let runtime = crate::runtime();
+    let result = runtime
+        .heap
+        .alloc_vector(SexpType::List, values.len() as isize)?;
+    runtime.heap.root(result);
+    let mut named = false;
+    let names = runtime
+        .heap
+        .alloc_vector(SexpType::String, values.len() as isize)?;
+    runtime.heap.root(names);
+    for (index, argument) in arguments.iter().enumerate() {
+        let value = match argument {
+            CArgument::Vector(copy) | CArgument::Object(copy) => *copy,
+            CArgument::Strings(copy, strings) => {
+                for (element, &pointer) in strings.iter().enumerate() {
+                    let text = crate::strings::c_bytes(pointer);
+                    let charsxp = runtime.heap.mk_char(text, Encoding::Native)?;
+                    runtime.heap.set_element(*copy, element, charsxp);
+                }
+                *copy
+            }
+        };
+        runtime.heap.set_element(result, index, value);
+        let tag = values[index].0;
+        if tag.kind() == SexpType::Symbol {
+            named = true;
+            runtime.heap.set_element(names, index, tag.car());
         }
     }
-    let status = crate::boundary::with_native_scope(|| {
-        let mut ignored = std::ptr::null_mut();
-        ry_call_native(function, pointers.len() as c_int, pointers.as_ptr() as *const Sexp, &mut ignored)
-    });
-    status?;
-    let result = runtime().heap.alloc_vector(SexpType::List, copies.len() as isize)?;
-    runtime().heap.root(result);
-    for (index, &copy) in copies.iter().enumerate() {
-        runtime().heap.set_element(result, index, copy);
-    }
-    if args.values.iter().any(|(tag, _)| *tag != runtime().nil()) {
-        let names: Vec<String> = args
-            .values
-            .iter()
-            .map(|(tag, _)| {
-                if tag.kind() == SexpType::Symbol {
-                    interp::values::symbol_name(*tag).into_owned()
-                } else {
-                    String::new()
-                }
-            })
-            .collect();
-        let names = interp::values::string_vector(&names)?;
-        interp::values::set_attr(result, interp::values::symbols().names, names)?;
+    if named {
+        crate::attributes::install_attribute(result, R_NamesSymbol.get(), names)?;
     }
     Ok(result)
 }
 
-// The `dyn.load` family.
+/// Whether a numeric vector has no `NA`, `NaN` or infinite element, which `.C` requires
+/// unless `NAOK = TRUE`.
+unsafe fn c_values_finite(value: Sexp) -> ApiResult<bool> {
+    let length = xlength(value)? as usize;
+    Ok(match value.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            (0..length).all(|index| value.slice::<i32>()[index] != NA_INTEGER)
+        }
+        SexpType::Real => value.slice::<f64>().iter().all(|number| number.is_finite()),
+        SexpType::Complex => value
+            .slice::<heap::object::Rcomplex>()
+            .iter()
+            .all(|number| number.r.is_finite() && number.i.is_finite()),
+        _ => true,
+    })
+}
 
 /// A `DLLInfo` object: name, path, dynamic lookup flag, and the handle and record pointers.
 unsafe fn dll_info(dll: *mut Dll) -> ApiResult<Sexp> {
@@ -542,7 +794,8 @@ unsafe fn do_dyn_load(call: &Call<'_>) -> ApiResult<Sexp> {
     if let Some(package) = builtin_libraries::builtin_library(&path) {
         return Ok(builtin_libraries::load(package, &path)?);
     }
-    let dll = crate::dynload::load_library(&path)?;
+    let local = call.arg(1) == runtime().nil() || crate::vectors::as_logical(call.arg(1))? != 0;
+    let dll = crate::dynload::load_library(&path, local)?;
     dll_info(dll)
 }
 
@@ -725,4 +978,303 @@ pub unsafe extern "C" fn ry_run_file(
         interp::session::Outcome::Completed => 0,
         interp::session::Outcome::Failed => 1,
     }
+}
+
+unsafe fn installed_evaluator(what: &str) -> ApiResult<&'static dyn Evaluator> {
+    evaluator().ok_or_else(|| {
+        error(format!(
+            "{what} needs ry's interpreter, which is not loaded"
+        ))
+    })
+}
+
+/// `R_ParseVector(text, n, status, srcfile)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ParseVector(
+    text: Sexp,
+    count: c_int,
+    status: *mut ParseStatus,
+    srcfile: Sexp,
+) -> Sexp {
+    enter(|| {
+        let outcome = installed_evaluator("R_ParseVector")?.parse(text, count, srcfile)?;
+        if !status.is_null() {
+            *status = outcome.status;
+        }
+        Ok(outcome.expressions)
+    })
+}
+
+/// `R_ParseString(text)`: the single expression `text` holds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ParseString(text: *const c_char) -> Sexp {
+    enter(|| parse_one(text))
+}
+
+unsafe fn parse_one(text: *const c_char) -> ApiResult<Sexp> {
+    let charsxp = runtime()
+        .heap
+        .mk_char(crate::strings::c_bytes(text), Encoding::Utf8)?;
+    let vector = crate::memory::scalar_string(charsxp)?;
+    runtime().heap.root(vector);
+    let nil = runtime().nil();
+    let outcome = installed_evaluator("R_ParseString")?.parse(vector, -1, nil)?;
+    if outcome.status != ParseStatus::Ok {
+        return Err(error("parse error"));
+    }
+    match xlength(outcome.expressions)? {
+        0 => Ok(nil),
+        1 => Ok(outcome.expressions.element(0)),
+        _ => Err(error("parse error: more than one expression")),
+    }
+}
+
+/// `R_ParseEvalString(text, env)`: parses one expression and evaluates it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ParseEvalString(text: *const c_char, env: Sexp) -> Sexp {
+    enter(|| {
+        let expression = parse_one(text)?;
+        runtime().heap.root(expression);
+        eval(expression, env)
+    })
+}
+
+/// Evaluates `package::function(arguments...)` in the global environment, which loads the
+/// package's namespace when needed. The C API uses this for entry points that GNU R implements
+/// by calling R code, such as the S4 class functions that call into `methods`.
+pub unsafe fn call_namespaced(
+    package: &str,
+    function: &str,
+    arguments: &[Sexp],
+) -> ApiResult<Sexp> {
+    let runtime = runtime();
+    let nil = runtime.nil();
+    let mut list = nil;
+    for &argument in arguments.iter().rev() {
+        list = runtime.heap.cons(argument, list)?;
+        runtime.heap.root(list);
+    }
+    let colons = runtime.heap.install(b"::")?;
+    let package = runtime.heap.install(package.as_bytes())?;
+    let function = runtime.heap.install(function.as_bytes())?;
+    let head = crate::lists::list_of(SexpType::Language, &[colons, package, function])?;
+    runtime.heap.root(head);
+    let call = runtime
+        .heap
+        .alloc_triple(SexpType::Language, head, list, nil)?;
+    runtime.heap.root(call);
+    let global = runtime.heap.known().global_env;
+    installed_evaluator(&format!(
+        "{}::{}",
+        utf8_text(package.car())?,
+        utf8_text(function.car())?
+    ))?;
+    eval(call, global)
+}
+
+/// `R_GetCurrentEnv()`: the environment code calling it runs in. Native code is called from a
+/// closure's frame, which only the interpreter knows; without one it is the global environment.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetCurrentEnv() -> Sexp {
+    enter(|| {
+        Ok(match evaluator() {
+            Some(evaluator) => evaluator.current_env(),
+            None => runtime().heap.known().global_env,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetCurrentSrcref(skip: c_int) -> Sexp {
+    enter(|| match evaluator() {
+        Some(evaluator) => evaluator.current_srcref(skip),
+        None => Ok(runtime().nil()),
+    })
+}
+
+/// `R_GetSrcFilename(srcref)`: the file name recorded in a source reference's `srcfile`
+/// environment, or `""`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GetSrcFilename(srcref: Sexp) -> Sexp {
+    enter(|| {
+        let srcfile =
+            crate::attributes::raw_attribute(srcref, crate::globals::R_SrcfileSymbol.get());
+        let empty = || -> ApiResult<Sexp> {
+            let blank = runtime().heap.known().blank_string;
+            crate::memory::scalar_string(blank)
+        };
+        if srcfile.kind() != SexpType::Environment {
+            return empty();
+        }
+        let filename = runtime().heap.install(b"filename")?;
+        let value = crate::environments::frame_lookup(srcfile, filename)?;
+        if value.kind() == SexpType::String {
+            Ok(value)
+        } else {
+            empty()
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_dot_Last() {
+    enter(|| match evaluator() {
+        Some(evaluator) => evaluator.dot_last(),
+        None => Ok(()),
+    })
+}
+
+/// The element of a named list called `name`.
+unsafe fn list_element(list: Sexp, name: &str) -> Option<Sexp> {
+    let names = crate::attributes::raw_attribute(list, R_NamesSymbol.get());
+    if names.kind() != SexpType::String {
+        return None;
+    }
+    (0..names.length() as usize)
+        .find(|&index| names.element(index).bytes() == name.as_bytes())
+        .map(|index| list.element(index))
+}
+
+/// The routine address of a `NativeSymbolInfo` list, if `value` is one.
+unsafe fn native_symbol_address(value: Sexp) -> ApiResult<Option<Sexp>> {
+    if !crate::attributes::inherits(value, "NativeSymbolInfo")? {
+        return Ok(None);
+    }
+    Ok(list_element(value, "address").filter(|address| address.kind() == SexpType::ExternalPtr))
+}
+
+const INFIX: &[&str] = &[
+    "+", "-", "*", "/", "^", "==", "!=", "<", ">", "<=", ">=", "&", "|", "&&", "||", "<-", "<<-",
+    "=", "$", "@", ":", "~", "|>",
+];
+
+/// A compact deparser for error messages: symbols, constants and calls.
+pub unsafe fn deparse(object: Sexp, depth: usize) -> String {
+    if depth > 20 {
+        return "...".into();
+    }
+    // The vector arms below read storage directly, so an ALTREP vector is expanded first.
+    if object.is_altrep() {
+        return match crate::altrep::materialize(object) {
+            Ok(expanded) => {
+                runtime().heap.root(expanded);
+                deparse(expanded, depth)
+            }
+            Err(_) => format!("<{}>", object.kind().name()),
+        };
+    }
+    match object.kind() {
+        SexpType::Nil => "NULL".into(),
+        SexpType::Symbol => utf8_text(object.car())
+            .map(|text| text.into_owned())
+            .unwrap_or_default(),
+        SexpType::Language => {
+            let head = deparse(object.car(), depth + 1);
+            let mut arguments = Vec::new();
+            let mut cell = object.cdr();
+            while cell.kind() == SexpType::Pairlist {
+                let value = deparse(cell.car(), depth + 1);
+                if cell.tag().kind() == SexpType::Symbol {
+                    let name = utf8_text(cell.tag().car())
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default();
+                    arguments.push(format!("{name} = {value}"));
+                } else {
+                    arguments.push(value);
+                }
+                cell = cell.cdr();
+            }
+            if object.car().kind() == SexpType::Symbol
+                && arguments.len() == 2
+                && INFIX.contains(&head.as_str())
+            {
+                let separator = if matches!(head.as_str(), "$" | "@" | ":") {
+                    head.clone()
+                } else {
+                    format!(" {head} ")
+                };
+                return format!("{}{separator}{}", arguments[0], arguments[1]);
+            }
+            if head == "[" && !arguments.is_empty() {
+                return format!("{}[{}]", arguments[0], arguments[1..].join(", "));
+            }
+            if head == "[[" && !arguments.is_empty() {
+                return format!("{}[[{}]]", arguments[0], arguments[1..].join(", "));
+            }
+            format!("{head}({})", arguments.join(", "))
+        }
+        SexpType::String => {
+            let elements: Vec<String> = (0..object.length() as usize)
+                .map(|index| {
+                    let element = object.element(index);
+                    if element == runtime().heap.known().na_string {
+                        "NA".into()
+                    } else {
+                        format!("{:?}", utf8_text(element).unwrap_or_default())
+                    }
+                })
+                .collect();
+            vector_literal(elements)
+        }
+        SexpType::Integer => {
+            let elements: Vec<String> = object
+                .slice::<i32>()
+                .iter()
+                .map(|&value| {
+                    if value == NA_INTEGER {
+                        "NA".into()
+                    } else {
+                        format!("{value}L")
+                    }
+                })
+                .collect();
+            vector_literal(elements)
+        }
+        SexpType::Real => vector_literal(
+            object
+                .slice::<f64>()
+                .iter()
+                .map(|&value| format_real(value))
+                .collect(),
+        ),
+        SexpType::Logical => vector_literal(
+            object
+                .slice::<i32>()
+                .iter()
+                .map(|&value| match value {
+                    NA_INTEGER => "NA".to_owned(),
+                    0 => "FALSE".to_owned(),
+                    _ => "TRUE".to_owned(),
+                })
+                .collect(),
+        ),
+        SexpType::Builtin | SexpType::Special => format!(
+            ".Primitive(\"{}\")",
+            primitive_name(object.primitive_index())
+        ),
+        kind => format!("<{}>", kind.name()),
+    }
+}
+
+fn vector_literal(elements: Vec<String>) -> String {
+    if elements.len() == 1 {
+        elements.into_iter().next().unwrap_or_default()
+    } else {
+        format!("c({})", elements.join(", "))
+    }
+}
+
+/// The name of the interpreter's primitive with this index.
+pub unsafe fn primitive_name(index: u32) -> &'static str {
+    interp::interp()
+        .builtin(index)
+        .map_or("<unknown primitive>", |definition| definition.name)
+}
+
+/// Whether base R's namespace loader exists. A host that never loads base R (the C API tests)
+/// still has the interpreter, but no `loadNamespace` to call.
+pub unsafe fn namespaces_loadable() -> ApiResult<bool> {
+    let symbol = runtime().heap.install(b"loadNamespace")?;
+    let base = runtime().heap.known().base_env;
+    Ok(crate::environments::find_var(symbol, base)? != runtime().heap.known().unbound)
 }

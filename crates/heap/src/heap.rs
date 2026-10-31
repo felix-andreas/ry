@@ -168,6 +168,7 @@ pub enum HeapError {
     LockedEnvironmentRemove,
     NotResizable,
     ResizeBeyondCapacity { capacity: isize, length: isize },
+    IncompatibleRetype { from: SexpType, to: SexpType },
 }
 
 impl fmt::Display for HeapError {
@@ -240,6 +241,12 @@ impl fmt::Display for HeapError {
                 )
             }
             HeapError::NotResizable => write!(formatter, "the vector is not resizable"),
+            HeapError::IncompatibleRetype { from, to } => write!(
+                formatter,
+                "cannot change the type of a '{}' object to '{}'",
+                from.name(),
+                to.name()
+            ),
             HeapError::ResizeBeyondCapacity { capacity, length } => write!(
                 formatter,
                 "a resizable vector of capacity {capacity} cannot grow to length {length}"
@@ -433,6 +440,38 @@ impl Heap {
             }
         }
         vector.set_length(length);
+        Ok(())
+    }
+
+/// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
+    /// the length it was allocated with. GNU R before 4.6 let native code shrink any vector this
+    /// way (`SETLENGTH`), and binaries built then still do.
+    pub unsafe fn mark_resizable(&mut self, vector: Sexp) {
+        vector.set_flag(flag_bits::RESIZABLE, true);
+    }
+
+    /// Changes an object's type to another of the same shape (`SET_TYPEOF`): pairlist, call and
+    /// dots cells among themselves, integer and logical vectors, lists and expression vectors.
+    pub unsafe fn retype(&mut self, object: Sexp, kind: SexpType) -> HeapResult<()> {
+        use SexpType::*;
+        let compatible = |a: SexpType, b: SexpType| {
+            matches!(
+                (a, b),
+                (Pairlist | Language | Dots, Pairlist | Language | Dots)
+                    | (Integer | Logical, Integer | Logical)
+                    | (List | Expression, List | Expression)
+            )
+        };
+        if object.kind() == kind {
+            return Ok(());
+        }
+        if object.is_altrep() || !compatible(object.kind(), kind) {
+            return Err(HeapError::IncompatibleRetype {
+                from: object.kind(),
+                to: kind,
+            });
+        }
+        object.header().kind.set(kind as u8);
         Ok(())
     }
 

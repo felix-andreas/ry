@@ -168,7 +168,7 @@ fn main() {
     for (index, &item) in nodes.iter().enumerate() {
         if let Some(naming) = item_naming(&db, item) {
             for name in naming.non_locals.values() {
-                if let Some(target) = winners.get(name)
+                if let Some(target) = winners.get(name.as_str())
                     && let Some(&target_index) = position.get(target)
                     && target_index != index
                 {

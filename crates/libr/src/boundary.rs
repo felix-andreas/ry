@@ -55,6 +55,11 @@ unsafe extern "C" {
         result: *mut *mut heap::object::Header,
     ) -> c_int;
     fn ry_call_finalizer(function: unsafe extern "C" fn(Sexp), object: Sexp) -> c_int;
+    pub(crate) fn ry_call_dlopen(
+        path: *const std::ffi::c_char,
+        flags: c_int,
+        status: *mut c_int,
+    ) -> *mut c_void;
     /// `info` is a `Dll`, which C sees only as the opaque `DllInfo *`.
     pub(crate) fn ry_call_init(
         function: unsafe extern "C" fn(*mut c_void),
@@ -85,7 +90,17 @@ macro_rules! plain_handout {
     ($($type:ty),*) => { $(impl Handout for $type {})* };
 }
 
-plain_handout!((), i32, u32, isize, usize, f64, u8, heap::object::Rcomplex);
+plain_handout!(
+    (),
+    bool,
+    i32,
+    u32,
+    isize,
+    usize,
+    f64,
+    u8,
+    heap::object::Rcomplex
+);
 
 impl<T> Handout for *mut T {}
 impl<T> Handout for *const T {}
@@ -199,6 +214,35 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
     runtime.heap.root(result);
     run_pending_finalizers();
     Ok(result)
+}
+
+/// Runs a `.C` or `.Fortran` routine, whose arguments are data pointers rather than handles,
+/// inside a C context. Every argument is a pointer, so the routine is called through the same
+/// dispatcher as `.Call`, and its return value is ignored.
+pub unsafe fn call_native_pointers(
+    function: DlFunc,
+    pointers: &[*mut c_void],
+    what: &str,
+) -> ApiResult<()> {
+    let mut ignored = std::ptr::null_mut();
+    let entry_depth = runtime().heap.roots.protect.depth();
+    let result = with_native_scope(|| {
+        ry_call_native(
+            function,
+            pointers.len() as c_int,
+            pointers.as_ptr() as *const Sexp,
+            &mut ignored,
+        )
+    });
+    let exit_depth = runtime().heap.roots.protect.depth();
+    if result.is_ok() && exit_depth != entry_depth {
+        warn(format!(
+            "stack imbalance in '{what}', {entry_depth} then {exit_depth}"
+        ));
+    }
+    result?;
+    run_pending_finalizers();
+    Ok(())
 }
 
 /// Runs `function(data)` inside a C context, for callbacks that return nothing.

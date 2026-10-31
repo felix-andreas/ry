@@ -8,6 +8,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing_subscriber::prelude::*;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())

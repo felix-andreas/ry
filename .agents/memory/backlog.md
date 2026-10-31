@@ -1766,8 +1766,7 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the runtime
 
-What steps 2 and 3 of `contributing/design/r-runtime.md` left for later steps, most pressing
-first.
+What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
 
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
@@ -1785,14 +1784,22 @@ first.
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
-- **The rest of the measured C API surface.** Of the 409 measured API and experimental names, 310 are
-  exported. The missing ones include connections and the graphics engine.
-- **`R_GetCCallable` cannot load the providing namespace**, so a callable registered by a package
-  that is not loaded yet is an error instead of a namespace load.
-- **ALTREP `Duplicate`, `Inspect` and `Extract_subset` are stored but never called**; duplication
-  materializes a regular vector.
-- **R-level finalizers** (`reg.finalizer`, `R_RegisterFinalizer` with a closure) are accepted and
-  never run, and a finalized weak reference stays in the weak list with a `NULL` key.
+- **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
+  compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
+  exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
+  GNU R until then, because configure scripts run R code through them.
+- **Connections gaps:** bzip2 and xz file connections, sockets, and `pipe()` are not implemented.
+- **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
+  interpreter's `.Internal(inspect)` and subsetting.
+- **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
+- **Task callbacks never run.** The interpreter does not yet call `libr::eval::run_task_callbacks`
+  after each top-level task.
+- **The interpreter keeps its own connections and RNG beside libr's.** Both RNGs sync through
+  `.Random.seed`; the interpreter's connection builtins should move onto `libr::connections`, and
+  libr's primitive table and built-in evaluator are unused while the interpreter is installed, so
+  the libr connection tests that call `file()`/`stdout()` without base R fail until then.
+- **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
+  weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
   push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
   `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
@@ -1808,6 +1815,23 @@ first.
   `Rprofmem` warn and do nothing.
 - **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
   context, so it prints `Calls: print -> .Call` where ry prints none.
+- **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
+  unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
+  length enough to allocate before the read fails. Bound the allocation by the bytes remaining
+  when the source can tell.
+- **Slow numerical cases inherited from GNU R.** `phyper`, `qhyper`, `qnbinom`, `qnbinom_mu`
+  and `bessel_i` with huge arguments take tens of seconds, as in GNU R (`phyper` 32 s and
+  `qhyper` 74 s there), and `nmmin` with an infinite start loops as GNU R's does. Fix them with
+  asymptotic expansions or argument limits when a package hits them.
+- **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
+  that needs closures from the interpreter.
+- **Routines left to audit clean room:** `lbfgsb`, the `optif9`/UNCMIN helpers, `fdhess`, the
+  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
+  `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
+  `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
+- **Platforms.** The C symbol export relies on lld merging two version scripts, `dlopen` is the
+  only loader, and the `rcmd` toolchain assumes gcc and gfortran on Linux, so macOS and Windows
+  need their own paths.
 
 ## Explicitly out of scope for now
 
@@ -2401,12 +2425,24 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 6.1 s | 997 MiB | 1005 `unused` (genuine) | 3 / 118 ms | 3 / 112 ms |
-| data science | 6.7 s | 1006 MiB | none | 5 / 116 ms | 3 / 122 ms |
-| biostatistics | 6.2 s | 1020 MiB | none | 3 / 94 ms | 3 / 105 ms |
+| finance | 3.4 s | 760 MiB | 1005 `unused` (genuine) | 2 / 47 ms | 3 / 48 ms |
+| data science | 3.6 s | 756 MiB | none | 2 / 55 ms | 2 / 56 ms |
+| biostatistics | 2.8 s | 790 MiB | none | 2 / 45 ms | 2 / 44 ms |
+
+Before the cold-path work the same machine measured 6.1, 6.7 and 6.2 s, about 1 GiB each, and
+3 to 5 ms / 95 to 120 ms edit latency.
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak memory is about 2.4 KiB per line with tests, above the 2 KiB budget in `test_perf.rs`.
+- Peak memory is about 1.8 KiB per line with tests, with no single dominant holder left: rowan
+  trees, then per-item naming `BTreeMap`s (`resolutions`, `non_locals`, `bindings`), check memos
+  (`errors`, `selected_overloads`, `masked_reads` as hash maps), and a second copy of each file's
+  source text (`SourceFile` and the checked document). Next steps: dense `Vec`s indexed by `ExprId`
+  for the naming maps, one source copy, `CallArgument.name` and `StrictOriginKind` as `Symbol`, and
+  a smaller `Expression` layout. Salsa's LRU eviction runs only at revision boundaries, so it cannot
+  shrink a single cold CLI pass; the CLI stays at memoize-everything.
+- Parses outside salsa remain in `server.rs` range formatting (re-parses the document text per request instead of reading `semantics::parse`) and the `ry debug` dumps; route range formatting through the memoized tree.
+- The CLI forgets the database instead of dropping it (about 0.9 s of frees on these code bases), so
+  `check` cannot reuse a process for a second analysis without leaking the first.
 - "Settled" includes the server's idle delay, so it is an upper bound on the semantic wave.
 - An `Unknown` argument to an overloaded call now yields `Unknown` when numeric results disagree
   (`sum(x[[i]])`); other disagreements still take the first candidate.

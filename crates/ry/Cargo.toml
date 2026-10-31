@@ -17,9 +17,14 @@ path = "src/ry.rs"
 name = "ry"
 path = "src/main.rs"
 
+[features]
+# Heap profilers such as massif only see the system allocator, so profiling builds drop it.
+default = ["mimalloc"]
+
 [dependencies]
 clap.workspace = true
 dirs = "6"
+mimalloc = { version = "0.1", optional = true }
 console.workspace = true
 ignore.workspace = true
 miette.workspace = true

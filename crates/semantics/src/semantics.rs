@@ -11,6 +11,7 @@ pub mod stubs;
 pub mod testing;
 pub mod types;
 
+use crate::hir::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -594,8 +595,8 @@ pub fn conditional_slot_items<'db>(
         for &item in item_tree(db, file) {
             let own_name = item.name(db).clone();
             for name in item_top_level_names(db, item) {
-                if own_name.as_ref() != Some(name) {
-                    writers.entry(name.clone()).or_default().push(item);
+                if own_name.as_deref() != Some(name.as_str()) {
+                    writers.entry(name.to_string()).or_default().push(item);
                 }
             }
         }
@@ -745,11 +746,11 @@ fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
 /// A firewall: whole-project walks depend on this read set rather than the full naming,
 /// so a body edit that only shifts ranges backdates here.
 #[salsa::tracked(returns(ref))]
-pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<String> {
+pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
     let Some(naming) = item_naming(db, item) else {
         return BTreeSet::new();
     };
-    let mut reads: BTreeSet<String> = naming.non_locals.values().cloned().collect();
+    let mut reads: BTreeSet<Symbol> = naming.non_locals.values().copied().collect();
     reads.extend(
         naming
             .namespace_reads
@@ -760,7 +761,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<String> {
+pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
     let Some(naming) = item_naming(db, item) else {
         return BTreeSet::new();
     };
@@ -804,7 +805,7 @@ pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceScc
     let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (index, &item) in nodes.iter().enumerate() {
         for name in item_interface_reads(db, item) {
-            if let Some(target) = winners.get(name)
+            if let Some(target) = winners.get(name.as_str())
                 && let Some(&target_index) = position.get(target)
             {
                 edges[index].push(target_index);
@@ -1195,8 +1196,11 @@ fn file_binders<'db>(
             binders.entry(name.clone()).or_default().push((index, item));
         }
         for name in item_top_level_names(db, item) {
-            if own_name.as_ref() != Some(name) {
-                binders.entry(name.clone()).or_default().push((index, item));
+            if own_name.as_deref() != Some(name.as_str()) {
+                binders
+                    .entry(name.to_string())
+                    .or_default()
+                    .push((index, item));
             }
         }
     }
@@ -1572,7 +1576,10 @@ mod tests {
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
-            top_level_bindings: vec![("value".to_owned(), types::TypeScheme::monomorphic(integer))],
+            top_level_bindings: vec![(
+                hir::Symbol::new("value"),
+                types::TypeScheme::monomorphic(integer),
+            )],
         };
 
         let once = refuse_check(&db, check);
@@ -1581,7 +1588,10 @@ mod tests {
 
         let unknown = types::TypeScheme::monomorphic(types::unknown(&db));
         assert_eq!(once.scheme.as_ref(), Some(&unknown));
-        assert_eq!(once.top_level_bindings, vec![("value".to_owned(), unknown)]);
+        assert_eq!(
+            once.top_level_bindings,
+            vec![(hir::Symbol::new("value"), unknown)]
+        );
     }
 
     #[test]
