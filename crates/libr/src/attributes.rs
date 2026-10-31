@@ -559,3 +559,164 @@ pub unsafe extern "C" fn SET_NAMED(_object: Sexp, _value: c_int) {}
 pub unsafe extern "C" fn MARK_NOT_MUTABLE(object: Sexp) {
     object.mark_not_mutable();
 }
+
+/// The attribute names in storage order, as symbols. Pairlists have their tags as names.
+unsafe fn attribute_names(object: Sexp) -> Vec<Sexp> {
+    let mut names = Vec::new();
+    let mut cell = object.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        names.push(cell.tag());
+        cell = cell.cdr();
+    }
+    names
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_getAttribCount(object: Sexp) -> crate::R_xlen_t {
+    enter(|| Ok(attribute_names(object).len() as crate::R_xlen_t))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_getAttribNames(object: Sexp) -> Sexp {
+    enter(|| {
+        let names = attribute_names(object);
+        let runtime = runtime();
+        let result = runtime
+            .heap
+            .alloc_vector(SexpType::String, names.len() as isize)?;
+        for (index, name) in names.into_iter().enumerate() {
+            runtime.heap.set_element(result, index, name.car());
+        }
+        Ok(result)
+    })
+}
+
+/// `R_getAttributes(x)`: the attributes as a named list, as `attributes(x)` returns them, with
+/// compact row names expanded.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_getAttributes(object: Sexp) -> Sexp {
+    enter(|| {
+        let names = attribute_names(object);
+        let runtime = runtime();
+        if names.is_empty() {
+            return Ok(runtime.nil());
+        }
+        let result = runtime
+            .heap
+            .alloc_vector(SexpType::List, names.len() as isize)?;
+        runtime.heap.root(result);
+        let labels = runtime
+            .heap
+            .alloc_vector(SexpType::String, names.len() as isize)?;
+        runtime.heap.root(labels);
+        for (index, &name) in names.iter().enumerate() {
+            let value = get_attrib(object, name)?;
+            runtime.heap.set_element(result, index, value);
+            runtime.heap.set_element(labels, index, name.car());
+        }
+        install_attribute(result, R_NamesSymbol.get(), labels)?;
+        Ok(result)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_hasAttrib(object: Sexp, name: Sexp) -> bool {
+    enter(|| {
+        let symbol = attribute_symbol(name)?;
+        Ok(raw_attribute(object, symbol).kind() != SexpType::Nil)
+    })
+}
+
+/// The row count R reports for `x`: a data frame's row names, a matrix's first dimension, or a
+/// vector's length.
+unsafe fn row_count(object: Sexp) -> ApiResult<crate::R_xlen_t> {
+    if inherits(object, "data.frame")? {
+        let row_names = get_attrib(object, R_RowNamesSymbol.get())?;
+        return xlength(row_names);
+    }
+    let dim = raw_attribute(object, R_DimSymbol.get());
+    if dim.kind() == SexpType::Integer && dim.length() >= 1 {
+        return Ok(integers(dim)?[0] as crate::R_xlen_t);
+    }
+    generic_length(object)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_nrow(object: Sexp) -> crate::R_xlen_t {
+    enter(|| row_count(object))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ncol(object: Sexp) -> crate::R_xlen_t {
+    enter(|| {
+        if inherits(object, "data.frame")? {
+            return generic_length(object);
+        }
+        let dim = raw_attribute(object, R_DimSymbol.get());
+        if dim.kind() == SexpType::Integer && dim.length() >= 2 {
+            return Ok(integers(dim)?[1] as crate::R_xlen_t);
+        }
+        Ok(1)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_nlevels(factor: Sexp) -> c_int {
+    enter(|| {
+        let levels = get_attrib(factor, crate::globals::R_LevelsSymbol.get())?;
+        Ok(if levels.kind() == SexpType::Nil {
+            0
+        } else {
+            xlength(levels)? as c_int
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_GetColNames(dimnames: Sexp) -> Sexp {
+    enter(|| dimnames_element(dimnames, 1))
+}
+
+unsafe fn dimnames_element(dimnames: Sexp, index: usize) -> ApiResult<Sexp> {
+    if dimnames.kind() == SexpType::List && dimnames.length() as usize > index {
+        Ok(dimnames.element(index))
+    } else {
+        Ok(runtime().nil())
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_GetArrayDimnames(object: Sexp) -> Sexp {
+    enter(|| get_attrib(object, R_DimNamesSymbol.get()))
+}
+
+/// `Rf_GetMatrixDimnames(x, rl, cl, rn, cn)`: the row and column names of a matrix, and the
+/// names of the dimnames themselves as C strings (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_GetMatrixDimnames(
+    object: Sexp,
+    row_labels: *mut Sexp,
+    column_labels: *mut Sexp,
+    row_title: *mut *const c_char,
+    column_title: *mut *const c_char,
+) {
+    enter(|| {
+        let dimnames = get_attrib(object, R_DimNamesSymbol.get())?;
+        let nil = runtime().nil();
+        *row_labels = nil;
+        *column_labels = nil;
+        *row_title = std::ptr::null();
+        *column_title = std::ptr::null();
+        if dimnames.kind() != SexpType::List || dimnames.length() < 2 {
+            return Ok(());
+        }
+        *row_labels = dimnames.element(0);
+        *column_labels = dimnames.element(1);
+        let names = raw_attribute(dimnames, R_NamesSymbol.get());
+        if names.kind() == SexpType::String && names.length() >= 2 {
+            *row_title = crate::strings::arena_c_string(names.element(0).bytes())?;
+            *column_title = crate::strings::arena_c_string(names.element(1).bytes())?;
+        }
+        Ok(())
+    })
+}

@@ -211,7 +211,7 @@ pub enum Shape {
 /// The header every object starts with. Sixteen bytes on a 64-bit target.
 #[repr(C)]
 pub struct Header {
-    kind: Cell<u8>,
+    pub(crate) kind: Cell<u8>,
     gc: Cell<u8>,
     flags: Cell<u8>,
     size_class: Cell<u8>,
@@ -391,7 +391,7 @@ impl Sexp {
         Sexp(pointer)
     }
 
-    unsafe fn header<'a>(self) -> &'a Header {
+    pub(crate) unsafe fn header<'a>(self) -> &'a Header {
         unsafe { self.0.as_ref() }
     }
 

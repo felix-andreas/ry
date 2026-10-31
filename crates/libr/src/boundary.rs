@@ -101,7 +101,7 @@ macro_rules! plain_handout {
     ($($type:ty),*) => { $(impl Handout for $type {})* };
 }
 
-plain_handout!((), i32, u32, isize, usize, f64, u8, heap::object::Rcomplex);
+plain_handout!((), bool, i32, u32, isize, usize, f64, u8, heap::object::Rcomplex);
 
 impl<T> Handout for *mut T {}
 impl<T> Handout for *const T {}

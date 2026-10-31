@@ -762,3 +762,26 @@ pub unsafe extern "C" fn R_forceAndCall(call: Sexp, count: c_int, env: Sexp) -> 
         None => builtin_eval(call, env),
     })
 }
+
+/// Evaluates `package::function(arguments...)` in the global environment, which loads the
+/// package's namespace when needed. The C API uses this for entry points that GNU R implements
+/// by calling R code, such as the S4 class functions that call into `methods`.
+pub unsafe fn call_namespaced(package: &str, function: &str, arguments: &[Sexp]) -> ApiResult<Sexp> {
+    let runtime = runtime();
+    let nil = runtime.nil();
+    let mut list = nil;
+    for &argument in arguments.iter().rev() {
+        list = runtime.heap.cons(argument, list)?;
+        runtime.heap.root(list);
+    }
+    let colons = runtime.heap.install(b"::")?;
+    let package = runtime.heap.install(package.as_bytes())?;
+    let function = runtime.heap.install(function.as_bytes())?;
+    let head = crate::lists::list_of(SexpType::Language, &[colons, package, function])?;
+    runtime.heap.root(head);
+    let call = runtime.heap.alloc_triple(SexpType::Language, head, list, nil)?;
+    runtime.heap.root(call);
+    let global = runtime.heap.known().global_env;
+    installed_evaluator(&format!("{}::{}", utf8_text(package.car())?, utf8_text(function.car())?))?;
+    eval(call, global)
+}

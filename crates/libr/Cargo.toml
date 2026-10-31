@@ -20,6 +20,7 @@ crate-type = ["cdylib", "rlib"]
 heap = { path = "../heap" }
 libc = "0.2"
 rustc-hash.workspace = true
+unicode-width.workspace = true
 
 [build-dependencies]
 cc = "1.2"
