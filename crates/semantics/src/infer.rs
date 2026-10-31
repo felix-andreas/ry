@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
     Unbound { level: u32, constraint: Constraint },
-    Bound(Ty<'db>),
+    /// `numeric` records that the variable was numeric-constrained when it bound, which
+    /// lets a later, wider numeric argument rebind it (`f(1L, 0.5)`).
+    Bound { ty: Ty<'db>, numeric: bool },
     Redirect(InferenceVar),
 }
 
@@ -131,7 +133,7 @@ impl<'db> InferenceTable<'db> {
         loop {
             match current.kind(db) {
                 TyKind::Var(var) => match self.entry(*var) {
-                    Entry::Bound(bound) => current = *bound,
+                    Entry::Bound { ty: bound, .. } => current = *bound,
                     _ => {
                         let representative = self.find(*var);
                         return if representative == *var {
@@ -254,7 +256,8 @@ impl<'db> InferenceTable<'db> {
             return Err(error);
         }
         self.adjust_levels(db, level, ty);
-        self.set(representative, Entry::Bound(ty));
+        let numeric = matches!(constraint, Constraint::Numeric | Constraint::ScalarNumeric);
+        self.set(representative, Entry::Bound { ty, numeric });
         Ok(())
     }
 
@@ -470,7 +473,7 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
-            Entry::Bound(ty) => match constraint_rejects(db, self, constraint, ty) {
+            Entry::Bound { ty, .. } => match constraint_rejects(db, self, constraint, ty) {
                 Some(error) => Err(error),
                 None => Ok(()),
             },
@@ -503,6 +506,51 @@ impl<'db> InferenceTable<'db> {
         verdict
     }
 
+    /// A numeric type variable that bound to `integer` meets a `double` argument of the
+    /// same shape (`f(1L, 0.5)` for `function(a, b) a * b`): R's arithmetic promotes, so
+    /// the variable widens to the wider type. Earlier arguments still fit, because
+    /// `integer` is compatible with `double`. Logicals never widen a binding, since a
+    /// body like `stopifnot(x + 1L > 0L); x` returns the argument's own type.
+    fn widen_numeric_binding(&mut self, db: &'db dyn Db, actual: Ty<'db>, expected: Ty<'db>) -> bool {
+        let TyKind::Var(var) = expected.kind(db) else {
+            return false;
+        };
+        let representative = self.find(*var);
+        let Entry::Bound {
+            ty: bound,
+            numeric: true,
+        } = *self.entry(representative)
+        else {
+            return false;
+        };
+        let actual = self.resolve(db, actual);
+        let rank = |ty: Ty<'db>| match ty.kind(db) {
+            TyKind::Scalar(Atomic::Integer) => Some((false, 1)),
+            TyKind::Scalar(Atomic::Double) => Some((false, 2)),
+            TyKind::Vector(element) => match element.kind(db) {
+                TyKind::Scalar(Atomic::Integer) => Some((true, 1)),
+                TyKind::Scalar(Atomic::Double) => Some((true, 2)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match (rank(bound), rank(actual)) {
+            (Some((bound_vector, bound_rank)), Some((actual_vector, actual_rank)))
+                if bound_vector == actual_vector && actual_rank > bound_rank =>
+            {
+                self.set(
+                    representative,
+                    Entry::Bound {
+                        ty: actual,
+                        numeric: true,
+                    },
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn compatible_inner(
         &mut self,
         db: &'db dyn Db,
@@ -510,6 +558,9 @@ impl<'db> InferenceTable<'db> {
         expected: Ty<'db>,
         depth: usize,
     ) -> bool {
+        if self.widen_numeric_binding(db, actual, expected) {
+            return true;
+        }
         let actual = self.resolve(db, actual);
         let expected = self.resolve(db, expected);
         // Mirrors `unify`: neither `Any` nor `Unknown` is a checkable claim.
