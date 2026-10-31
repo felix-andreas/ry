@@ -1772,13 +1772,17 @@ What steps 2 and 4 of `contributing/design/r-runtime.md` left for later, most pr
   finalizers, S4 class lookup and namespace loading all go through `libr::eval::Evaluator`; until
   the interpreter installs one, only the built-in evaluator of native calls and nine primitives
   runs. Packages whose `R_init_*` evaluates R code (S7, yaml, nanoarrow) cannot load before then.
+- **Task callbacks need a caller.** The interpreter must call `libr::eval::run_task_callbacks`
+  after each top-level task; nothing runs `Rf_addTaskCallback` callbacks before then, and the
+  runner has no direct test because it is reachable only from Rust.
 - **Base packages' own libraries** (utils, tools, methods, grDevices, stats) import GNU R
   internals (`R_print`, `getPRIMNAME`, `R_ParseContextLast`, `Rf_utf8towcs`, ...). ry implements
   those packages' internals in Rust instead, so their `.so` files are not a target; decide per
   name when the interpreter reaches them.
 - **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
-  exists. `bin/Rscript` in ry's R home delegates to GNU R until then.
+  exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
+  GNU R until then, because configure scripts run R code through them.
 - **Graphics devices.** The engine is exported and errors when used (`graphics.rs`).
 - **Connections gaps:** bzip2 and xz file connections, sockets, and `pipe()` are not implemented.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
@@ -1791,6 +1795,10 @@ What steps 2 and 4 of `contributing/design/r-runtime.md` left for later, most pr
   `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
 - **The handle scope retains a native loop's dropped temporaries until the call returns.** If a real
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
+- **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
+  unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
+  length enough to allocate before the read fails. Bound the allocation by the bytes remaining
+  when the source can tell.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, `dlopen` is the
   only loader, and the `rcmd` toolchain assumes gcc and gfortran on Linux, so macOS and Windows
   need their own paths.
