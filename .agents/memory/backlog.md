@@ -1806,8 +1806,9 @@ What steps 2 and 4 of `contributing/design/r-runtime.md` left for later, most pr
 - **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
   that needs closures from the interpreter.
 - **Routines left to audit clean room:** `lbfgsb`, the `optif9`/UNCMIN helpers, `fdhess`, the
-  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance and
-  `d1mach`/`i1mach`. Rewrite each from its published source as `decisions.md` describes.
+  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
+  `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
+  `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, `dlopen` is the
   only loader, and the `rcmd` toolchain assumes gcc and gfortran on Linux, so macOS and Windows
   need their own paths.

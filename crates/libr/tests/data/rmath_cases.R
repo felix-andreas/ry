@@ -163,6 +163,18 @@ add_pq("pnbinom", "qnbinom", kx, size = c(0, 0.5, 3, 40, 1e10), prob = c(0.01, 0
 add("dnbinom_mu", x = kx, size = c(0, 1e-12, 0.5, 3, 40, 1e12, Inf), mu = c(0, 0.01, 2.5, 90), log = flags)
 add_pq("pnbinom_mu", "qnbinom_mu", kx, size = c(0, 0.5, 3, 40, 1e10, Inf), mu = c(0, 0.01, 2.5, 90))
 hx <- c(NaN, -1, 0, 1, 2, 3.5, 5, 10, 20)
+# Probabilities that are the distribution function at an integer, where the quantile is that
+# integer rather than its neighbour.
+add_exact <- function(.q_name, .p_function, .k, ...) {
+    for (lower in flags) for (log in flags)
+        add(.q_name, p = .p_function(.k, ..., lower.tail = lower == 1, log.p = log == 1), ...,
+            lower = lower, log = log)
+}
+add_exact("qpois", ppois, c(0, 1, 4, 12), lambda = 3)
+add_exact("qpois", ppois, c(9800, 10000, 10300), lambda = 1e4)
+add_exact("qbinom", pbinom, c(0, 20, 30, 45, 100), size = 100, prob = 0.3)
+add_exact("qnbinom", pnbinom, c(0, 3, 10, 60), size = 2.5, prob = 0.2)
+add_exact("qnbinom_mu", pnbinom, c(0, 3, 10, 60), size = 2.5, mu = 10)
 add("dhyper", x = hx, r = c(0, 5, 10, 400), b = c(3, 10, 2000), n = c(0, 2, 8, 12), log = flags)
 add("phyper", x = hx, r = c(0, 5, 10, 400), b = c(3, 10, 2000), n = c(0, 2, 8, 12), lower = flags, log = flags)
 add("qhyper", p = probs, r = c(5, 10, 400), b = c(3, 10, 2000), n = c(2, 8, 12), lower = flags, log = 0)
@@ -178,6 +190,11 @@ add("dnbeta", x = c(NaN, -0.1, 0, 0.01, 0.3, 0.6, 0.99, 1), a = c(0.5, 2, 10), b
 add("pnbeta", x = c(NaN, -0.1, 0, 0.01, 0.3, 0.6, 0.99, 1), a = c(0.5, 2, 10), b = c(0.5, 3), ncp = c(0, 1, 20, 300),
     lower = flags, log = flags)
 add("qnbeta", p = c(0, 1e-6, 0.05, 0.5, 0.95, 1), a = c(0.5, 10), b = c(0.5, 3), ncp = c(1, 20), lower = flags, log = 0)
+# Long Poisson mixtures.
+add("qnchisq", p = c(1e-6, 0.3, 0.5, 0.999), df = c(0, 3), ncp = c(2000, 1e5), lower = flags, log = 0)
+add("dnbeta", x = c(0.2, 0.9, 0.95, 0.999), a = c(2, 50), b = c(0.5, 3), ncp = 3000, log = flags)
+add("pnbeta", x = c(0.2, 0.9, 0.95, 0.999), a = c(2, 50), b = c(0.5, 3), ncp = 3000, lower = flags, log = flags)
+add("qnbeta", p = c(1e-6, 0.3, 0.999), a = c(2, 50), b = c(0.5, 3), ncp = 3000, lower = flags, log = 0)
 add("dnf", x = c(NaN, -1, 0, 0.2, 1, 4, 30), m = c(1, 3, 20), n = c(2, 15, 1e9, Inf), ncp = c(0, 2, 40), log = flags)
 add("pnf", x = c(NaN, -1, 0, 0.2, 1, 4, 30), m = c(1, 3, 20), n = c(2, 15, 1e9), ncp = c(0, 2, 40), lower = flags, log = flags)
 add("qnf", p = c(0, 0.05, 0.5, 0.95, 1), m = c(1, 20), n = c(2, 15, 1e9), ncp = c(0, 2, 40), lower = flags, log = 0)

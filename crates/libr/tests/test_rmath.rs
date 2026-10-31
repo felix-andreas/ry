@@ -32,23 +32,62 @@ fn tolerance(name: &str, arguments: &[f64], expected: f64) -> (f64, f64) {
         "digamma" | "trigamma" | "tetragamma" | "pentagamma" | "psigamma" | "dpsifn" => {
             (1e-13, 1e-15)
         }
-        // GNU R accumulates these series in long double, which ry does not have. Where a
-        // result is the complement of a sum near one, that is visible at about 1e-16
-        // absolute, and AS 226 itself stops at an error bound of 1e-9.
-        "pnbeta" | "pnf" | "dnbeta" | "dnf" => (1e-9, 1e-15),
+        // GNU R stops its noncentral beta sum (AS 226) once the Poisson weight it has left
+        // out is below 1e-9, so its probabilities are good to 1e-9 absolute; ry sums to
+        // rounding.
+        "pnbeta" | "pnf" => (1e-9, 1e-9),
+        "dnbeta" | "dnf" => (1e-9, 1e-15),
+        // For ncp >= 80, GNU R computes the upper tail as one minus the lower one, which
+        // leaves about 3e-14 of absolute noise; ry sums the upper tail directly.
+        "pnchisq" if arguments[2] >= 80.0 && arguments[3] == 0.0 => (1e-11, 3e-14),
         "pnchisq" | "phyper" | "pnt" => (1e-11, 1e-14),
         // dnt is a difference quotient of two values of pnt.
         "dnt" => (1e-6, 1e-14),
         // Bisection on those sums stops within 1e-13 of the root (qnchisq, qnt, qnbeta, qnf),
         // and qtukey's secant method within 1e-4, so where they stop depends on the last bits
-        // of the distribution function.
+        // of the distribution function. GNU R's noncentral chi-squared and beta quantiles
+        // also inherit the absolute error of its distribution functions; `root_error` checks
+        // those instead.
         "qnchisq" | "qnt" | "qnbeta" | "qnf" => (1e-10, 0.0),
         "qtukey" => (1e-11, 0.0),
+        // Beyond about 1e9 a discrete distribution function moves by less than its own
+        // rounding from one integer to the next, so near the quantile it stays within
+        // rounding of p over a run of integers, and GNU R and ry may stop at different ones.
+        // Below 1e9 this still demands the same integer.
+        "qbinom" | "qpois" | "qnbinom" | "qnbinom_mu" => (1e-9, 0.0),
         "ptukey" => (5e-13, 1e-16),
         // GNU R 4.3 computes the Poisson density with the extended deviance ebd0; ry uses
         // Loader's bd0, which agrees to about 1e-14 at moderate arguments.
         "dpois" | "dpois_raw" | "dgamma" | "dchisq" | "dnbinom_mu" | "dnchisq" => (2e-13, 0.0),
-        "pgamma" | "pchisq" | "ppois" => (2e-13, 0.0),
+        // A probability p far below one is the exponential of an exponent near ln p, and
+        // the rounding of that exponent alone moves the result by about |ln p| units in the
+        // last place, in GNU R as in ry. (On the log scale of the complement, the result is
+        // -p itself.) A negative binomial of infinite size is the Poisson distribution.
+        "pgamma" | "pchisq" | "ppois" | "pnbinom_mu"
+            if name != "pnbinom_mu" || arguments[1] == f64::INFINITY =>
+        {
+            let exponent = if expected != 0.0 && expected.is_finite() {
+                expected.abs().ln().abs()
+            } else {
+                0.0
+            };
+            (2e-13f64.max(4.0 * f64::EPSILON * exponent), 0.0)
+        }
+        // Within 1e-8 of one, the lower probability the AS 91 stage solves for has fewer than
+        // eight digits of its complement left. GNU R then stops after a single Newton step,
+        // about 1e-11 short of the root; ry keeps iterating on the log scale to convergence.
+        "qgamma" | "qchisq" | "qf"
+            if {
+                let log_flag = if name == "qchisq" {
+                    arguments[3]
+                } else {
+                    arguments[4]
+                };
+                log_flag == 1.0 && arguments[0] > -1e-8
+            } =>
+        {
+            (1e-10, 0.0)
+        }
         // qbeta solves pbeta(x) = p by its own Newton iteration rather than GNU R's AS 109
         // based one; both converge to the root up to pbeta's rounding.
         "qbeta" => (1e-12, 0.0),
@@ -66,11 +105,54 @@ fn tolerance(name: &str, arguments: &[f64], expected: f64) -> (f64, f64) {
 /// Quantiles beyond the double range: where the true quantile underflows below the smallest
 /// normal number, GNU R's qbeta reports a placeholder (DBL_MIN/2 or DBL_MIN/4) and qf the
 /// matching huge value, while ry reports 0 and infinity.
-fn beyond_range(name: &str, expected: f64, actual: f64) -> bool {
+///
+/// GNU R's upper noncentral chi-squared tail for ncp >= 80, computed as one minus the lower
+/// tail, goes negative below its noise and so has no logarithm: it reports NaN where ry
+/// reports a log probability below that noise.
+fn beyond_range(name: &str, arguments: &[f64], expected: f64, actual: f64) -> bool {
     let tiny = |value: f64| value.abs() < f64::MIN_POSITIVE;
     let huge = |value: f64| value.abs() > 1e300;
-    matches!(name, "qbeta" | "qf")
-        && ((tiny(expected) && tiny(actual)) || (huge(expected) && huge(actual)))
+    let quantile_out_of_range = matches!(name, "qbeta" | "qf")
+        && ((tiny(expected) && tiny(actual)) || (huge(expected) && huge(actual)));
+    let chi_squared_noise = name == "pnchisq"
+        && arguments[2] >= 80.0
+        && arguments[3] == 0.0
+        && arguments[4] == 1.0
+        && expected.is_nan()
+        && actual < (3e-14f64).ln();
+    // An upper-tail probability within 1e-15 of one names the lowest support point, but
+    // GNU R has been observed to return the next integer there. ry returns the point whose
+    // upper tail equals p.
+    let lower_flag = arguments[arguments.len() - 2];
+    let log_flag = arguments[arguments.len() - 1];
+    let discrete_upper_near_one = matches!(name, "qbinom" | "qpois" | "qnbinom" | "qnbinom_mu")
+        && lower_flag == 0.0
+        && log_flag == 0.0
+        && arguments[0] > 1.0 - 1e-15
+        && (actual - expected).abs() <= 1.0;
+    quantile_out_of_range || chi_squared_noise || discrete_upper_near_one
+}
+
+/// The distribution function that inverts a quantile, with the absolute error of GNU R's
+/// version of it: GNU R stops its noncentral chi-squared sum at 1e-12 and its noncentral
+/// beta sum (AS 226) at 1e-9. At a noncentrality near 1e5 GNU R's chi-squared upper tail
+/// near 1e-6 is off by about 1e-11 (checked against mpmath), so its quantile is allowed
+/// that much more. A GNU R quantile is only as good as that, so it agrees when
+/// ry's distribution function maps it to the requested probability within that error. The
+/// quantile and distribution functions share their argument layout.
+fn root_error(name: &str) -> Option<(&'static str, f64)> {
+    match name {
+        "qnchisq" => Some(("pnchisq", 1e-10)),
+        "qnbeta" => Some(("pnbeta", 1e-9)),
+        "qnf" => Some(("pnf", 1e-9)),
+        _ => None,
+    }
+}
+
+/// Where the log flag sits in a quantile's arguments.
+fn log_flag(name: &str, arguments: &[f64]) -> bool {
+    let index = if name == "qnchisq" { 4 } else { 5 };
+    arguments[index] == 1.0
 }
 
 fn parse(text: &str) -> f64 {
@@ -185,13 +267,40 @@ fn rmath_agrees_with_gnu_r() {
         .expect("rmath_eval");
     let actual = r.reals(result);
 
+    // GNU R's quantiles, mapped back through ry's distribution functions (see `root_error`).
+    let probes: Vec<(usize, &str, [f64; 6])> = cases
+        .iter()
+        .enumerate()
+        .filter_map(|(index, case)| {
+            let (distribution, _) = root_error(&case.name)?;
+            let mut arguments = case.arguments;
+            arguments[0] = case.expected;
+            Some((index, distribution, arguments))
+        })
+        .collect();
+    let probe_names: Vec<&str> = probes.iter().map(|(_, name, _)| *name).collect();
+    let probe_arguments: Vec<f64> = probes
+        .iter()
+        .flat_map(|(_, _, arguments)| *arguments)
+        .collect();
+    let probe_names = strings(&r, &probe_names);
+    let probe_arguments = reals(&r, &probe_arguments);
+    let probe_result = r
+        .call("rmath_eval", &[probe_names, probe_arguments])
+        .expect("rmath_eval");
+    let round_trips: BTreeMap<usize, f64> = probes
+        .iter()
+        .map(|(index, _, _)| *index)
+        .zip(r.reals(probe_result).iter().copied())
+        .collect();
+
     // RMATH_EXAMPLES=n lists up to n failing cases per function instead of 4.
     let examples = std::env::var("RMATH_EXAMPLES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(4);
     let mut failures: BTreeMap<&str, (usize, usize, Vec<String>)> = BTreeMap::new();
-    for (case, &actual) in cases.iter().zip(&actual) {
+    for (index, (case, &actual)) in cases.iter().zip(&actual).enumerate() {
         let entry = failures.entry(&case.name).or_default();
         entry.1 += 1;
         let tolerance = tolerance(&case.name, &case.arguments, case.expected);
@@ -204,9 +313,23 @@ fn rmath_agrees_with_gnu_r() {
                 &case.arguments,
                 tolerance,
             );
+        let root_agrees = match (root_error(&case.name), round_trips.get(&index)) {
+            (Some((_, error)), Some(&probability)) if case.expected.is_finite() => {
+                let scale = |value: f64| {
+                    if log_flag(&case.name, &case.arguments) {
+                        value.exp()
+                    } else {
+                        value
+                    }
+                };
+                (scale(probability) - scale(case.arguments[0])).abs() <= error
+            }
+            _ => false,
+        };
         if !agrees(case.expected, actual, &case.arguments, tolerance)
-            && !beyond_range(&case.name, case.expected, actual)
+            && !beyond_range(&case.name, &case.arguments, case.expected, actual)
             && !as_probability
+            && !root_agrees
         {
             entry.0 += 1;
             if entry.2.len() < examples {

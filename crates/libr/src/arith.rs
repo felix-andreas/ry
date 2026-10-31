@@ -11,13 +11,30 @@ use crate::{
     runtime,
 };
 use heap::object::{NA_INTEGER, Rcomplex, SexpType, is_na_real};
-use std::{cmp::Ordering, ffi::c_int};
+use std::{cmp::Ordering, f64::consts::LN_2, ffi::c_int};
 
 const STATE_WORDS: usize = 624;
 /// `.Random.seed[1]` for the default kinds: Mersenne Twister, inversion for normals, and
 /// rejection sampling.
 const DEFAULT_KIND: i32 = 10403;
 const I2_32M1: f64 = 2.328306437080797e-10;
+
+/// `q_k = sum_{i=1..k} (ln 2)^i / i!` for algorithm SA, the partial sums of
+/// `e^(ln 2) - 1 = 1`. `exp_rand` takes the minimum of `k` uniforms for the first `k` with
+/// `u <= q_k`; the last entry rounds to one, so that search always ends.
+const EXPONENTIAL_TAIL: [f64; 16] = {
+    let mut table = [0.0; 16];
+    let mut term = 1.0;
+    let mut sum = 0.0;
+    let mut index = 0;
+    while index < table.len() {
+        term *= LN_2 / (index + 1) as f64;
+        sum += term;
+        table[index] = sum;
+        index += 1;
+    }
+    table
+};
 
 pub struct Rng {
     /// `dummy[0]` is the position in the state, `dummy[1..]` the state itself, as R lays out
@@ -106,58 +123,39 @@ impl Rng {
         crate::rmath::qnorm(u / BIG, 0.0, 1.0, true, false)
     }
 
-    /// A standard exponential deviate by Ahrens and Dieter's algorithm SA (1972).
+    /// A standard exponential deviate by algorithm SA of Ahrens and Dieter (1972), "Computer
+    /// methods for sampling from the exponential and normal distributions".
+    ///
+    /// The deviate is split as `k ln 2 + y` with `y` in `[0, ln 2)`. Since
+    /// `P(X >= k ln 2) = 2^-k`, the count `k` is the number of leading zero bits of one
+    /// uniform, read off by doubling it. What is left of that uniform, `u`, is itself `y`
+    /// when `u <= ln 2`. Otherwise `y` is `ln 2` times the minimum of `k` further uniforms,
+    /// where `k >= 2` is the first index with `u <= q_k` (see `EXPONENTIAL_TAIL`).
     pub fn exp_rand(&mut self) -> f64 {
-        // q[k] = sum_{i=1}^{k+1} log(2)^i / i!, truncated to sixteen digits as the paper
-        // tabulates them.
-        #[allow(clippy::excessive_precision)]
-        const Q: [f64; 16] = [
-            std::f64::consts::LN_2,
-            0.9333736875190459,
-            0.9888777961838675,
-            0.9984959252914960040,
-            0.9998292811061389,
-            0.9999833164100727,
-            0.9999985691438767,
-            0.9999998906925558,
-            0.9999999924734159,
-            0.9999999995283275,
-            0.9999999999728814,
-            0.9999999999985598,
-            0.9999999999999289,
-            0.9999999999999968,
-            0.9999999999999999,
-            1.0000000000000000,
-        ];
-        let mut a = 0.0;
-        let mut u = self.unif_rand();
-        while u <= 0.0 || u >= 1.0 {
-            u = self.unif_rand();
+        let mut uniform = self.unif_rand();
+        while uniform <= 0.0 || uniform >= 1.0 {
+            uniform = self.unif_rand();
         }
+        let mut offset = 0.0;
         loop {
-            u += u;
-            if u > 1.0 {
+            uniform += uniform;
+            if uniform > 1.0 {
                 break;
             }
-            a += Q[0];
+            offset += LN_2;
         }
-        u -= 1.0;
-        if u <= Q[0] {
-            return a + u;
+        uniform -= 1.0;
+        if uniform <= LN_2 {
+            return offset + uniform;
         }
-        let mut i = 0;
-        let mut umin = self.unif_rand();
-        loop {
-            let ustar = self.unif_rand();
-            if umin > ustar {
-                umin = ustar;
-            }
-            i += 1;
-            if u <= Q[i] {
+        let mut smallest = self.unif_rand();
+        for &bound in &EXPONENTIAL_TAIL[1..] {
+            smallest = smallest.min(self.unif_rand());
+            if uniform <= bound {
                 break;
             }
         }
-        a + umin * Q[0]
+        offset + smallest * LN_2
     }
 
     /// `R_unif_index` under rejection sampling: uniform on `0..n` without the bias of

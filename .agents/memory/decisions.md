@@ -1878,7 +1878,11 @@ primitives, and nothing built or installed packages.
   the published algorithms (LINPACK's users' guide, Nash's *Compact Numerical Methods*, Nelder
   and Mead, the Wilcoxon and signed-rank recurrences) and R's documentation, with GNU R used only
   as a black-box oracle through recorded cases. Results match GNU R exactly except where the
-  system BLAS (OpenBLAS) reorders sums; those cases carry a named tolerance. SANN does not accept a
+  system BLAS (OpenBLAS) reorders sums; those cases carry a named tolerance. The rewritten incomplete
+  gamma, noncentral chi-squared and beta, and discrete quantiles are more accurate than GNU R in
+  far tails (checked with mpmath), so `test_rmath` accepts a quantile when ry's own distribution
+  function maps GNU R's answer back to p within GNU R's error, and a noncentral function whose
+  Poisson index exceeds i32 returns NaN with a precision warning. SANN does not accept a
   custom candidate generator and always takes the Gaussian step.
 - **`R CMD SHLIB` passes `-l`, `-L` and `.a` arguments through to the link,** because configure
   scripts probe for system libraries with `R CMD SHLIB conftest.c -lfoo` (Rglpk). Other options

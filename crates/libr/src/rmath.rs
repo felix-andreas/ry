@@ -41,7 +41,6 @@ const DBL_MANT_DIG: i32 = 53;
 const M_PI: f64 = std::f64::consts::PI;
 const M_2PI: f64 = 2.0 * std::f64::consts::PI;
 const M_LN2: f64 = std::f64::consts::LN_2;
-const M_LN10: f64 = std::f64::consts::LN_10;
 const M_1_PI: f64 = std::f64::consts::FRAC_1_PI;
 const M_PI_2: f64 = std::f64::consts::FRAC_PI_2;
 const M_SQRT2: f64 = std::f64::consts::SQRT_2;
@@ -2205,293 +2204,8 @@ pub fn dgamma(x: f64, shape: f64, scale: f64, log: bool) -> f64 {
     if log { pr - scale.ln() } else { pr / scale }
 }
 
-/// 2^256, the rescaling step of continued fractions whose convergents grow without bound.
-const SCALE_FACTOR: f64 = 1.157_920_892_373_162e77;
-
-/// The continued fraction of the lower incomplete gamma ratio (Welinder's pgamma).
-fn pd_lower_cf(y: f64, d: f64) -> f64 {
-    const MAX_IT: f64 = 200000.0;
-    let mut f = 0.0;
-    if y == 0.0 {
-        return 0.0;
-    }
-    let mut f0 = y / d;
-    if (y - 1.0).abs() < d.abs() * DBL_EPSILON {
-        return f0;
-    }
-    if f0 > 1.0 {
-        f0 = 1.0;
-    }
-    let mut c2 = y;
-    let mut c4 = d;
-    let (mut a1, mut b1) = (0.0, 1.0);
-    let (mut a2, mut b2) = (y, d);
-    while b2 > SCALE_FACTOR {
-        a1 /= SCALE_FACTOR;
-        b1 /= SCALE_FACTOR;
-        a2 /= SCALE_FACTOR;
-        b2 /= SCALE_FACTOR;
-    }
-    let mut i = 0.0;
-    let mut of = -1.0;
-    while i < MAX_IT {
-        i += 1.0;
-        c2 -= 1.0;
-        let mut c3 = i * c2;
-        c4 += 2.0;
-        a1 = c4 * a2 + c3 * a1;
-        b1 = c4 * b2 + c3 * b1;
-        i += 1.0;
-        c2 -= 1.0;
-        c3 = i * c2;
-        c4 += 2.0;
-        a2 = c4 * a1 + c3 * a2;
-        b2 = c4 * b1 + c3 * b2;
-        if b2 > SCALE_FACTOR {
-            a1 /= SCALE_FACTOR;
-            b1 /= SCALE_FACTOR;
-            a2 /= SCALE_FACTOR;
-            b2 /= SCALE_FACTOR;
-        }
-        if b2 != 0.0 {
-            f = a2 / b2;
-            if (f - of).abs() <= DBL_EPSILON * fmax2(f0, f.abs()) {
-                return f;
-            }
-            of = f;
-        }
-    }
-    warning(format!(
-        " ** NON-convergence in pgamma()'s pd_lower_cf() f= {f}."
-    ));
-    f
-}
-
-fn pd_upper_series(x: f64, y: f64, log: bool) -> f64 {
-    let mut y = y;
-    let mut term = x / y;
-    let mut sum = term;
-    loop {
-        y += 1.0;
-        term *= x / y;
-        sum += term;
-        if !(term > sum * DBL_EPSILON) {
-            break;
-        }
-    }
-    if log { sum.ln() } else { sum }
-}
-
-fn pd_lower_series(lambda: f64, y: f64) -> f64 {
-    let mut y = y;
-    let mut term = 1.0;
-    let mut sum = 0.0;
-    while y >= 1.0 && term > sum * DBL_EPSILON {
-        term *= y / lambda;
-        sum += term;
-        y -= 1.0;
-    }
-    if y != y.floor() {
-        sum += term * pd_lower_cf(y, lambda + 1.0 - y);
-    }
-    sum
-}
-
-/// `dnorm(x) / pnorm(x)` in the tail `lower`, given `lp = log pnorm(x)`.
-fn dpnorm(x: f64, lower: bool, lp: f64) -> f64 {
-    let (x, lower) = if x < 0.0 { (-x, !lower) } else { (x, lower) };
-    if x > 10.0 && !lower {
-        let mut term = 1.0 / x;
-        let mut sum = term;
-        let x2 = x * x;
-        let mut i = 1.0;
-        loop {
-            term *= -i / x2;
-            sum += term;
-            i += 2.0;
-            if !(term.abs() > DBL_EPSILON * sum) {
-                break;
-            }
-        }
-        1.0 / sum
-    } else {
-        dnorm(x, 0.0, 1.0, false) / lp.exp()
-    }
-}
-
-/// Temme's uniform asymptotic expansion of the Poisson distribution function.
-fn ppois_asymp(x: f64, lambda: f64, lower: bool, log: bool) -> f64 {
-    const COEFS_A: [f64; 8] = [
-        -1e99,
-        2.0 / 3.0,
-        -4.0 / 135.0,
-        8.0 / 2835.0,
-        16.0 / 8505.0,
-        -8992.0 / 12629925.0,
-        -334144.0 / 492567075.0,
-        698752.0 / 1477701225.0,
-    ];
-    const COEFS_B: [f64; 8] = [
-        -1e99,
-        1.0 / 12.0,
-        1.0 / 288.0,
-        -139.0 / 51840.0,
-        -571.0 / 2488320.0,
-        163879.0 / 209018880.0,
-        5246819.0 / 75246796800.0,
-        -534703531.0 / 902961561600.0,
-    ];
-    let dfm = lambda - x;
-    let pt_ = -log1pmx(dfm / x);
-    let mut s2pt = (2.0 * x * pt_).sqrt();
-    if dfm < 0.0 {
-        s2pt = -s2pt;
-    }
-    let mut res12 = 0.0;
-    let mut res1_term = x.sqrt();
-    let mut res1_ig = res1_term;
-    let mut res2_term = s2pt;
-    let mut res2_ig = res2_term;
-    for i in 1..8 {
-        res12 += res1_ig * COEFS_A[i];
-        res12 += res2_ig * COEFS_B[i];
-        res1_term *= pt_ / i as f64;
-        res2_term *= 2.0 * pt_ / (2 * i + 1) as f64;
-        res1_ig = res1_ig / x + res1_term;
-        res2_ig = res2_ig / x + res2_term;
-    }
-    let mut elfb = x;
-    let mut elfb_term = 1.0;
-    for coefficient in &COEFS_B[1..] {
-        elfb += elfb_term * coefficient;
-        elfb_term /= x;
-    }
-    if !lower {
-        elfb = -elfb;
-    }
-    let f = res12 / elfb;
-    let np = pnorm(s2pt, 0.0, 1.0, !lower, log);
-    if log {
-        let n_d_over_p = dpnorm(s2pt, !lower, np);
-        np + (f * n_d_over_p).ln_1p()
-    } else {
-        let nd = dnorm(s2pt, 0.0, 1.0, log);
-        np + f * nd
-    }
-}
-
-/// `dpois(x_plus_1 - 1, lambda)`, also for non-integer and small `x_plus_1`.
-fn dpois_wrap(x_plus_1: f64, lambda: f64, log: bool) -> f64 {
-    let cutoff = M_LN2 * f64::MAX_EXP as f64 / DBL_EPSILON;
-    if !finite(lambda) {
-        return d0(log);
-    }
-    if x_plus_1 > 1.0 {
-        return dpois_raw(x_plus_1 - 1.0, lambda, log);
-    }
-    if lambda > (x_plus_1 - 1.0).abs() * cutoff {
-        d_exp(-lambda - lgammafn(x_plus_1), log)
-    } else {
-        let d = dpois_raw(x_plus_1, lambda, log);
-        if log {
-            d + (x_plus_1 / lambda).ln()
-        } else {
-            d * (x_plus_1 / lambda)
-        }
-    }
-}
-
-fn pgamma_smallx(x: f64, alph: f64, lower: bool, log: bool) -> f64 {
-    let mut sum = 0.0;
-    let mut c = alph;
-    let mut n = 0.0;
-    loop {
-        n += 1.0;
-        c *= -x / n;
-        let term = c / (alph + n);
-        sum += term;
-        if !(term.abs() > DBL_EPSILON * sum.abs()) {
-            break;
-        }
-    }
-    if lower {
-        let f1 = if log { sum.ln_1p() } else { 1.0 + sum };
-        let f2 = if alph > 1.0 {
-            let f2 = dpois_raw(alph, x, log);
-            if log { f2 + x } else { f2 * x.exp() }
-        } else {
-            let f2 = alph * x.ln() - lgamma1p(alph);
-            if log { f2 } else { f2.exp() }
-        };
-        if log { f1 + f2 } else { f1 * f2 }
-    } else {
-        let lf2 = alph * x.ln() - lgamma1p(alph);
-        if log {
-            log1_exp(sum.ln_1p() + lf2)
-        } else {
-            let f1m1 = sum;
-            let f2m1 = lf2.exp_m1();
-            -(f1m1 + f2m1 + f1m1 * f2m1)
-        }
-    }
-}
-
-/// The regularized incomplete gamma function by Welinder's algorithm: a power series for
-/// small `x`, continued fractions on either side of the mode, and Temme's expansion near it.
-fn pgamma_raw(x: f64, alph: f64, lower: bool, log: bool) -> f64 {
-    if x <= 0.0 {
-        return dt0(lower, log);
-    }
-    if x >= f64::INFINITY {
-        return dt1(lower, log);
-    }
-    let res = if x < 1.0 {
-        pgamma_smallx(x, alph, lower, log)
-    } else if x <= alph - 1.0 && x < 0.8 * (alph + 50.0) {
-        let sum = pd_upper_series(x, alph, log);
-        let d = dpois_wrap(alph, x, log);
-        if !lower {
-            if log {
-                log1_exp(d + sum)
-            } else {
-                1.0 - d * sum
-            }
-        } else if log {
-            sum + d
-        } else {
-            sum * d
-        }
-    } else if alph - 1.0 < x && alph < 0.8 * (x + 50.0) {
-        let d = dpois_wrap(alph, x, log);
-        let sum = if alph < 1.0 {
-            if x * DBL_EPSILON > 1.0 - alph {
-                d1(log)
-            } else {
-                let f = pd_lower_cf(alph, x - (alph - 1.0)) * x / alph;
-                if log { f.ln() } else { f }
-            }
-        } else {
-            let sum = pd_lower_series(x, alph - 1.0);
-            if log { sum.ln_1p() } else { 1.0 + sum }
-        };
-        if !lower {
-            if log { sum + d } else { sum * d }
-        } else if log {
-            log1_exp(d + sum)
-        } else {
-            1.0 - d * sum
-        }
-    } else {
-        ppois_asymp(alph - 1.0, x, !lower, log)
-    };
-    // Close to the smallest normal number the linear scale has lost digits to underflow.
-    if !log && res < DBL_MIN / DBL_EPSILON {
-        pgamma_raw(x, alph, lower, true).exp()
-    } else {
-        res
-    }
-}
-
+/// The gamma distribution function: the regularized incomplete gamma ratio `P(shape, x /
+/// scale)` or its complement `Q`.
 pub fn pgamma(x: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
     if x.is_nan() || shape.is_nan() || scale.is_nan() {
         return x + shape + scale;
@@ -2510,8 +2224,494 @@ pub fn pgamma(x: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
             dt1(lower, log)
         };
     }
-    pgamma_raw(x, shape, lower, log)
+    regularized_gamma(x, shape, lower, log)
 }
+
+/// `P(shape, x)` when `lower`, else `Q(shape, x) = 1 - P(shape, x)`, for `shape > 0`.
+///
+/// Each method computes one tail directly, and the other comes from its complement only
+/// where the direct tail is at most about 0.9, so neither tail loses relative accuracy. The
+/// methods are those of DiDonato and Morris (1986) and Gautschi (1979): the power series of
+/// the lower tail below the mode, Legendre's continued fraction for the upper tail above it,
+/// a series for `Q` itself when the shape is below one and `x` is small (where `Q` can be
+/// tiny while `P` is near one), and Temme's (1979) uniform asymptotic expansion near the
+/// mode of a large shape, where the series and the fraction would need `O(sqrt(shape))`
+/// terms.
+fn regularized_gamma(x: f64, shape: f64, lower: bool, log: bool) -> f64 {
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    if x == f64::INFINITY {
+        return dt1(lower, log);
+    }
+    let ratio = x / shape;
+    let (value, is_upper) = if shape < 1.0 && x < 1.5 {
+        if gamma_lower_series(x, shape, false) < 0.5 {
+            (gamma_lower_series(x, shape, log), false)
+        } else {
+            (gamma_upper_small_shape(x, shape, log), true)
+        }
+    } else if shape >= 20.0 && (0.3..=2.4).contains(&ratio) {
+        gamma_uniform_expansion(x, shape, log)
+    } else if x < shape + 1.0 {
+        (gamma_lower_series(x, shape, log), false)
+    } else {
+        (gamma_upper_fraction(x, shape, log), true)
+    };
+    if is_upper != lower {
+        value
+    } else if log {
+        log1_exp(value)
+    } else {
+        0.5 - value + 0.5
+    }
+}
+
+/// `P(shape, x) = x^shape e^-x / Gamma(shape + 1) * sum_n x^n / ((shape + 1) ... (shape +
+/// n))`, the series of Abramowitz and Stegun 6.5.29, for `x` below about `shape + 1`.
+fn gamma_lower_series(x: f64, shape: f64, log: bool) -> f64 {
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut index = 1.0;
+    while index < 1e6 {
+        term *= x / (shape + index);
+        sum += term;
+        if term <= sum * DBL_EPSILON * 0.5 {
+            break;
+        }
+        index += 1.0;
+    }
+    if log {
+        gamma_density_factor(x, shape, true) + sum.ln()
+    } else {
+        gamma_density_factor(x, shape, false) * sum
+    }
+}
+
+/// `Q(shape, x)` from Legendre's continued fraction (Abramowitz and Stegun 6.5.31),
+///
+/// `Gamma(shape, x) = e^-x x^shape / (x + 1 - shape - 1 (1 - shape) / (x + 3 - shape - 2 (2
+/// - shape) / (x + 5 - shape - ...)))`,
+///
+/// evaluated by Lentz's method (Thompson and Barnett 1986) for `x` above about `shape + 1`.
+fn gamma_upper_fraction(x: f64, shape: f64, log: bool) -> f64 {
+    const TINY: f64 = 1e-300;
+    let nonzero = |value: f64| if value.abs() < TINY { TINY } else { value };
+    let mut denominator = nonzero(x + 1.0 - shape);
+    let mut numerator_ratio = denominator;
+    let mut inverse_ratio = 0.0;
+    let mut index = 1.0;
+    while index < 1e6 {
+        let partial_numerator = -index * (index - shape);
+        let partial_denominator = x + 2.0 * index + 1.0 - shape;
+        inverse_ratio = 1.0 / nonzero(partial_denominator + partial_numerator * inverse_ratio);
+        numerator_ratio = nonzero(partial_denominator + partial_numerator / numerator_ratio);
+        let step = numerator_ratio * inverse_ratio;
+        denominator *= step;
+        if (step - 1.0).abs() <= DBL_EPSILON {
+            break;
+        }
+        index += 1.0;
+    }
+    if log {
+        shape.ln() + gamma_density_factor(x, shape, true) - denominator.ln()
+    } else {
+        shape * gamma_density_factor(x, shape, false) / denominator
+    }
+}
+
+/// `Q(shape, x)` for `shape < 1` and small `x`, from the expansion of the lower incomplete
+/// gamma function `gamma(shape, x) = x^shape sum_n (-x)^n / (n! (shape + n))` with its
+/// first term split off (Gautschi 1979, section 4.1):
+///
+/// `Q = 1 - x^shape / Gamma(shape + 1) - x^shape / Gamma(shape + 1) * shape * sum_{n >= 1}
+/// (-x)^n / (n! (shape + n))`.
+///
+/// The first difference is `-expm1(shape ln x - ln Gamma(shape + 1))`, which stays accurate
+/// as `shape` goes to zero, where `Q` is about `shape E1(x)`.
+fn gamma_upper_small_shape(x: f64, shape: f64, log: bool) -> f64 {
+    let log_power = shape * x.ln() - lgamma1p(shape);
+    let mut factor = 1.0;
+    let mut sum = 0.0;
+    let mut index = 1.0;
+    while index < 1000.0 {
+        factor *= -x / index;
+        let term = factor / (shape + index);
+        sum += term;
+        if term.abs() <= sum.abs() * DBL_EPSILON * 0.5 {
+            break;
+        }
+        index += 1.0;
+    }
+    let upper = -log_power.exp_m1() - log_power.exp() * shape * sum;
+    if log { upper.ln() } else { upper }
+}
+
+/// The smaller tail of the gamma distribution near the mode of a large shape, by Temme's
+/// (1979) uniform asymptotic expansion (DLMF 8.12.3, 8.12.7-8.12.11):
+///
+/// `Q(a, x) = erfc(eta sqrt(a / 2)) / 2 + e^(-a eta^2 / 2) / sqrt(2 pi a) sum_k c_k(eta) a^-k`
+///
+/// with `eta^2 / 2 = lambda - 1 - ln lambda`, `lambda = x / a`, and `eta` of the sign of
+/// `lambda - 1`. Factoring out the normal density turns the error function into Mills'
+/// ratio, so a tail far below the double range keeps its logarithm. Returns the tail on the
+/// requested scale and whether it is the upper one.
+fn gamma_uniform_expansion(x: f64, shape: f64, log: bool) -> (f64, bool) {
+    let exponent = gamma_deviance(x, shape);
+    let is_upper = x > shape;
+    let magnitude = (2.0 * exponent / shape).sqrt();
+    let eta = if is_upper { magnitude } else { -magnitude };
+    let mut correction = 0.0;
+    for row in TEMME_COEFFICIENTS.iter().rev() {
+        let coefficient = row.iter().rev().fold(0.0, |sum, &value| sum * eta + value);
+        correction = correction / shape + coefficient;
+    }
+    let root_shape = shape.sqrt();
+    let mills = mills_ratio(magnitude * root_shape) * root_shape;
+    let bracket = if is_upper {
+        mills + correction
+    } else {
+        mills - correction
+    };
+    let value = if log {
+        -exponent - 0.5 * (M_2PI * shape).ln() + bracket.ln()
+    } else {
+        (-exponent).exp() * bracket / (M_2PI * shape).sqrt()
+    };
+    (value, is_upper)
+}
+
+/// `x^shape e^-x / Gamma(shape + 1)` on the requested scale, as `exp(-stirlerr(shape) -
+/// deviance) / sqrt(2 pi shape)` (Loader 2000), which keeps the large exponents of the two
+/// factors from cancelling.
+fn gamma_density_factor(x: f64, shape: f64, log: bool) -> f64 {
+    let exponent = -stirlerr(shape) - gamma_deviance(x, shape);
+    if log {
+        exponent - 0.5 * (M_2PI * shape).ln()
+    } else {
+        exponent.exp() / (M_2PI * shape).sqrt()
+    }
+}
+
+/// The deviance `shape ln(shape / x) + x - shape = shape (lambda - 1 - ln lambda)`, with
+/// `lambda = x / shape`. Near `lambda = 1` the direct form cancels almost completely; there
+/// `-shape log1pmx(lambda - 1)` is accurate to a few rounding errors relative. Far below,
+/// `lambda - 1` would round away `lambda` itself, but the logarithm dominates the direct form.
+fn gamma_deviance(x: f64, shape: f64) -> f64 {
+    if x >= 0.25 * shape {
+        -shape * log1pmx((x - shape) / shape)
+    } else {
+        shape * (shape.ln() - x.ln()) + x - shape
+    }
+}
+
+/// Mills' ratio `(1 - Phi(t)) / phi(t)` for `t >= 0`. Below 30 the normal tail does not
+/// underflow and the quotient is exact to rounding; above, Laplace's continued fraction
+/// `1 / (t + 1 / (t + 2 / (t + 3 / (t + ...))))` converges in a few terms.
+fn mills_ratio(t: f64) -> f64 {
+    if t < 30.0 {
+        return pnorm(t, 0.0, 1.0, false, false) / dnorm(t, 0.0, 1.0, false);
+    }
+    let mut tail = t;
+    for index in (1..=40).rev() {
+        tail = t + index as f64 / tail;
+    }
+    1.0 / tail
+}
+
+/// The Taylor coefficients in `eta` of Temme's `c_k(eta)`, one row per `k`, derived from
+/// `c_0 = 1 / (lambda - 1) - 1 / eta` and `c_k = c_{k-1}'(eta) / eta + (-1)^k g_k /
+/// (lambda - 1)` (DLMF 8.12.10-8.12.11), with `g_k` the coefficients of Stirling's series
+/// for the gamma function, by exact rational series reversion of `eta^2 / 2 = lambda - 1 -
+/// ln lambda`. Rows stop where their terms fall below 1e-19 for `|eta| <= 1.05` and shapes
+/// of at least 20.
+const TEMME_COEFFICIENTS: [&[f64]; 11] = [
+    &[
+        -0.3333333333333333,
+        0.08333333333333333,
+        -0.014814814814814815,
+        0.0011574074074074073,
+        0.0003527336860670194,
+        -0.0001787551440329218,
+        3.919263178522438e-05,
+        -2.185448510679992e-06,
+        -1.85406221071516e-06,
+        8.296711340953087e-07,
+        -1.7665952736826078e-07,
+        6.707853543401498e-09,
+        1.0261809784240309e-08,
+        -4.382036018453353e-09,
+        9.14769958223679e-10,
+        -2.5514193994946248e-11,
+        -5.830772132550426e-11,
+        2.4361948020667415e-11,
+        -5.0276692801141755e-12,
+        1.1004392031956135e-13,
+        3.371763262400985e-13,
+        -1.392388722418162e-13,
+        2.8534893807047445e-14,
+        -5.139111834242572e-16,
+        -1.9752288294349442e-15,
+        8.099521156704561e-16,
+        -1.6522531216398162e-16,
+        2.5305430097478883e-18,
+        1.1686939738559576e-17,
+        -4.770037049820485e-18,
+    ],
+    &[
+        -0.001851851851851852,
+        -0.003472222222222222,
+        0.0026455026455026454,
+        -0.0009902263374485596,
+        0.00020576131687242798,
+        -4.018775720164609e-07,
+        -1.8098550334489977e-05,
+        7.64916091608111e-06,
+        -1.6120900894563446e-06,
+        4.647127802807434e-09,
+        1.378633446915721e-07,
+        -5.752545603517705e-08,
+        1.1951628599778148e-08,
+        -1.7543241719747647e-11,
+        -1.0091543710600413e-09,
+        4.162792991842583e-10,
+        -8.56390702649298e-11,
+        6.067215101604758e-14,
+        7.1624989648114856e-12,
+        -2.933186643771437e-12,
+        5.996696365683689e-13,
+        -2.1671786527323313e-16,
+        -4.978339972369262e-14,
+        2.0291628823713425e-14,
+        -4.13125571381061e-15,
+        8.286516239883097e-19,
+        3.4100308869333327e-16,
+        -1.3854195302893971e-16,
+        2.812346653228875e-17,
+    ],
+    &[
+        0.004133597883597883,
+        -0.0026813271604938273,
+        0.0007716049382716049,
+        2.0093878600823047e-06,
+        -0.0001073665322636516,
+        5.2923448829120125e-05,
+        -1.2760635188618728e-05,
+        3.423578734096138e-08,
+        1.3721957309062934e-06,
+        -6.298992138380055e-07,
+        1.4280614206064242e-07,
+        -2.0477098421990866e-10,
+        -1.409252991086752e-08,
+        6.228974084922022e-09,
+        -1.3670488396617114e-09,
+        9.428356159014678e-13,
+        1.2872252400089318e-10,
+        -5.5645956134363323e-11,
+        1.197593554636698e-11,
+        -4.1689782251838634e-15,
+        -1.0940640427884595e-12,
+        4.662239946390136e-13,
+        -9.905105763906907e-14,
+        1.8931876768373515e-17,
+        8.859221872591127e-15,
+        -3.737820398046405e-15,
+        7.868833639035156e-16,
+        -9.000027395741211e-20,
+        -6.928881229347671e-17,
+        2.9020384270164786e-17,
+    ],
+    &[
+        0.0006494341563786008,
+        0.00022947209362139917,
+        -0.0004691894943952557,
+        0.00026772063206283885,
+        -7.561801671883977e-05,
+        -2.396505113867297e-07,
+        1.1082654115347302e-05,
+        -5.6749528269915965e-06,
+        1.4230900732435883e-06,
+        -2.7861080291528143e-11,
+        -1.6958404091930278e-07,
+        8.099464905388083e-08,
+        -1.9111168485973655e-08,
+        2.3928620439808118e-12,
+        2.0620131815488797e-09,
+        -9.460496661855133e-10,
+        2.1541049775774907e-10,
+        -1.388823336813903e-14,
+        -2.1894761681963938e-11,
+        9.790998951171684e-12,
+        -2.178219188018096e-12,
+        6.208819573407901e-17,
+        2.126978363279737e-13,
+        -9.344688791517433e-14,
+        2.045367122678285e-14,
+        -2.58260790403495e-19,
+        -1.9405297673344544e-15,
+        8.415979290484816e-16,
+    ],
+    &[
+        -0.0008618882909167117,
+        0.0007840392217200666,
+        -0.0002990724803031902,
+        -1.4638452578843418e-06,
+        6.641498215465122e-05,
+        -3.968365047179435e-05,
+        1.1375726970678419e-05,
+        2.507497226237533e-10,
+        -1.6954149536558305e-06,
+        8.907507532205309e-07,
+        -2.292934834000805e-07,
+        2.956794137544049e-11,
+        2.8865829742708783e-08,
+        -1.4189739437803219e-08,
+        3.4463580499464896e-09,
+        -2.3024517174528067e-13,
+        -3.9409233028046403e-10,
+        1.86023389685045e-10,
+        -4.356323005056618e-11,
+        1.278600101629623e-15,
+        4.67927502665792e-12,
+        -2.149246470613483e-12,
+        4.908815614809652e-13,
+        -6.33859148489156e-18,
+        -5.045332069080094e-14,
+        2.2722958222901286e-14,
+        -5.096082608472402e-15,
+    ],
+    &[
+        -0.00033679855336635813,
+        -6.972813758365857e-05,
+        0.0002772753244959392,
+        -0.00019932570516188847,
+        6.797780477937208e-05,
+        1.419062920643967e-07,
+        -1.3594048189768693e-05,
+        8.018470256334202e-06,
+        -2.291481176508095e-06,
+        -3.252473551298454e-10,
+        3.4652846491085265e-07,
+        -1.8447187191171344e-07,
+        4.8240967037894184e-08,
+        -1.7989466721743514e-14,
+        -6.306194500013523e-09,
+        3.162417628774568e-09,
+        -7.840924253697429e-10,
+        5.192679165254041e-15,
+        9.358944242306784e-11,
+        -4.513426216163278e-11,
+        1.0799129993116828e-11,
+        -3.661886712685252e-17,
+        -1.210902069055155e-12,
+        5.680743584990564e-13,
+        -1.3249659916340829e-13,
+    ],
+    &[
+        0.0005313079364639922,
+        -0.0005921664373536939,
+        0.0002708782096718045,
+        7.902353232660328e-07,
+        -8.153969367561969e-05,
+        5.61168275310625e-05,
+        -1.8329116582843375e-05,
+        -3.0796134506033047e-09,
+        3.465155368803609e-06,
+        -2.0291327396058603e-06,
+        5.788792863149004e-07,
+        2.338630673826657e-13,
+        -8.828600746330484e-08,
+        4.7435958880408125e-08,
+        -1.2545415020710383e-08,
+        8.649648858010293e-14,
+        1.6846058979264062e-09,
+        -8.575492823577594e-10,
+        2.1598224929232125e-10,
+        -7.613230520476153e-16,
+        -2.6639822008536144e-11,
+        1.3065700536611057e-11,
+        -3.1799163902367977e-12,
+    ],
+    &[
+        0.00034436760689237765,
+        5.171790908260592e-05,
+        -0.00033493161081142234,
+        0.0002812695154763237,
+        -0.00010976582244684731,
+        -1.2741009095484485e-07,
+        2.7744451511563645e-05,
+        -1.8263488805711332e-05,
+        5.7876949497350525e-06,
+        4.93875893393627e-10,
+        -1.0595367014026043e-06,
+        6.166714376110408e-07,
+        -1.7562973359060463e-07,
+        -1.297447328701544e-12,
+        2.695423606288966e-08,
+        -1.4578352908731272e-08,
+        3.887645959386175e-09,
+        -3.881002251019412e-17,
+        -5.327994173877286e-10,
+        2.7437977643314844e-10,
+        -6.995796092070568e-11,
+    ],
+    &[
+        -0.0006526239185953094,
+        0.0008394987206720873,
+        -0.000438297098541721,
+        -6.969091458420552e-07,
+        0.00016644846642067547,
+        -0.00012783517679769218,
+        4.629953263691304e-05,
+        4.557909867922708e-09,
+        -1.0595271125805195e-05,
+        6.783342904865167e-06,
+        -2.1075476666258803e-06,
+        -1.7213731432817144e-11,
+        3.773587741611098e-07,
+        -2.1867506700122867e-07,
+        6.220228804018927e-08,
+        6.597703826733e-16,
+        -9.590386497425686e-09,
+        5.213214492280807e-09,
+        -1.3991589583935709e-09,
+    ],
+    &[
+        -0.0005967612901927463,
+        -7.204895416020011e-05,
+        0.0006782308837667328,
+        -0.0006401475260262758,
+        0.00027750107634328704,
+        1.819700838046515e-07,
+        -8.479507117068503e-05,
+        6.105192082501531e-05,
+        -2.1073920183404862e-05,
+        -8.858589014125599e-10,
+        4.5284535953805374e-06,
+        -2.8427815022504407e-06,
+        8.708234177864641e-07,
+        3.6886101871706966e-12,
+        -1.534469519070206e-07,
+        8.862466778790695e-08,
+        -2.5184812301826817e-08,
+    ],
+    &[
+        0.0013324454494800656,
+        -0.0019144384985654776,
+        0.0011089369134596636,
+        9.9324041226423e-07,
+        -0.0005087450129309319,
+        0.00042735056665392886,
+        -0.00016858853767910798,
+        -8.1301893922785e-09,
+        4.5284402370562144e-05,
+        -3.127053674781734e-05,
+        1.044986828530338e-05,
+        4.8435226265680926e-11,
+        -2.148256587345626e-06,
+        1.329369701097492e-06,
+    ],
+];
 
 /// The starting value of `qgamma`: AS 91's chi-squared approximations.
 pub fn qchisq_appr(p: f64, nu: f64, g: f64, lower: bool, log: bool, tol: f64) -> f64 {
@@ -2584,8 +2784,17 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
     if alpha == 0.0 {
         return 0.0;
     }
-    let mut max_it_newton = if alpha < 1e-10 { 7 } else { 1 };
     let mut p_ = dt_qiv(p, lower, log);
+    // Within 1e-8 of one, the lower probability that the AS 91 stage solves for keeps fewer
+    // than eight significant digits of its complement, so Newton's method on the requested
+    // scale has to carry the quantile the rest of the way.
+    let mut max_it_newton = if alpha < 1e-10 {
+        7
+    } else if p_ > 1.0 - 1e-8 {
+        20
+    } else {
+        1
+    };
     let g = lgammafn(alpha);
     let mut ch = qchisq_appr(p, 2.0 * alpha, g, lower, log, EPS1);
     'iterate: {
@@ -2603,7 +2812,7 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
         for _ in 1..=MAXIT {
             let q = ch;
             let p1 = 0.5 * ch;
-            let p2 = p_ - pgamma_raw(p1, alpha, true, false);
+            let p2 = p_ - regularized_gamma(p1, alpha, true, false);
             if !finite(p2) || ch <= 0.0 {
                 ch = ch0;
                 max_it_newton = 27;
@@ -4975,46 +5184,16 @@ pub fn pbinom(x: f64, n: f64, p: f64, lower: bool, log: bool) -> f64 {
     pbeta(p, x + 1.0, n - x, !lower, log)
 }
 
-/// The search shared by the discrete quantile functions: from the Cornish-Fisher start `y`,
-/// step by `increment` until the distribution function crosses `p`. `z` holds the
-/// distribution function at `y`.
-fn discrete_search(
-    mut y: f64,
-    z: &mut f64,
-    p: f64,
-    increment: f64,
-    lower: bool,
-    maximum: f64,
-    distribution: &dyn Fn(f64) -> f64,
-) -> f64 {
-    let left = if lower { *z >= p } else { *z < p };
-    if left {
-        loop {
-            let mut new_z = -1.0;
-            if y > 0.0 {
-                new_z = distribution(y - increment);
-            } else if y < 0.0 {
-                y = 0.0;
-            }
-            if y == 0.0 || new_z.is_nan() || if lower { new_z < p } else { new_z >= p } {
-                return y;
-            }
-            y = fmax2(0.0, y - increment);
-            *z = new_z;
-        }
-    } else {
-        loop {
-            y = fmin2(y + increment, maximum);
-            *z = distribution(y);
-            if y == maximum || z.is_nan() || if lower { *z >= p } else { *z < p } {
-                return y;
-            }
-        }
-    }
-}
-
-/// The body of `qbinom`, `qpois` and `qnbinom`: a Cornish-Fisher expansion about the normal
-/// quantile, then a search, with large steps first when the start is far from zero.
+/// The quantile of a distribution on the integers `0..=maximum`: the smallest `y` whose lower
+/// tail `distribution(y, true, log)` reaches `p`, or for the upper tail the smallest `y` whose
+/// upper tail `distribution(y, false, log)` has fallen to `p`.
+///
+/// The search starts from the Cornish-Fisher expansion `mu + sigma (z + gamma (z^2 - 1) / 6)`
+/// about the normal quantile `z`, where `gamma` is the skewness (Cornish and Fisher (1937);
+/// Johnson, Kemp and Kotz (2005), section 1.8). From there it doubles its step until it
+/// passes the quantile, then halves the bracket. A probability given as the distribution
+/// function at an integer may have been rounded on the way in, so `p` is relaxed by a few
+/// units in the last place: that integer, not its successor, is the answer.
 #[allow(clippy::too_many_arguments)]
 fn discrete_quantile(
     p: f64,
@@ -5026,46 +5205,65 @@ fn discrete_quantile(
     maximum: f64,
     distribution: &dyn Fn(f64, bool, bool) -> f64,
 ) -> f64 {
-    let z = qnorm(p, 0.0, 1.0, lower, log);
-    let mut y = forceint(mu + sigma * (z + gamma * (z * z - 1.0) / 6.0));
-    if y < 0.0 {
-        y = 0.0;
-    }
-    if y > maximum {
-        y = maximum;
-    }
-    let mut z = distribution(y, lower, log);
-    let mut p = p;
-    // Fuzz towards the inside so the left-continuous answer survives rounding.
-    if log {
-        let e = 2.0 * DBL_EPSILON;
-        if lower && p > -DBL_MAX {
-            p *= 1.0 + e;
-        } else {
-            p *= 1.0 - e;
+    let slack = 64.0 * DBL_EPSILON * p.abs();
+    let reached = |y: f64| {
+        let value = distribution(y, lower, log);
+        value.is_nan()
+            || if lower {
+                value >= p - slack
+            } else {
+                value <= p + slack
+            }
+    };
+    let normal = qnorm(p, 0.0, 1.0, lower, log);
+    let start = (mu + sigma * (normal + gamma * (normal * normal - 1.0) / 6.0)).round();
+    let start = if start.is_nan() { mu.round() } else { start };
+    let start = start.clamp(0.0, maximum);
+
+    // Gallop away from the start until the quantile lies in (below, above].
+    let (mut below, mut above);
+    let mut step = 1.0;
+    if reached(start) {
+        above = start;
+        loop {
+            if above == 0.0 {
+                return 0.0;
+            }
+            let candidate = (above - step).max(0.0);
+            if reached(candidate) {
+                above = candidate;
+                step *= 2.0;
+            } else {
+                below = candidate;
+                break;
+            }
         }
     } else {
-        let e = 8.0 * DBL_EPSILON;
-        if lower {
-            p *= 1.0 - e;
-        } else if 1.0 - p > 4.0 * e {
-            p *= 1.0 + e;
+        below = start;
+        loop {
+            if below >= maximum {
+                return maximum;
+            }
+            let candidate = (below + step).min(maximum);
+            if reached(candidate) {
+                above = candidate;
+                break;
+            }
+            below = candidate;
+            step *= 2.0;
         }
     }
-    let at = |y: f64| distribution(y, lower, log);
-    if y < 4096.0 {
-        return discrete_search(y, &mut z, p, 1.0, lower, maximum, &at);
-    }
-    let mut increment = (y / 64.0).floor();
     loop {
-        let old_increment = increment;
-        y = discrete_search(y, &mut z, p, increment, lower, maximum, &at);
-        increment = fmax2(1.0, (increment / 8.0).floor());
-        if !(old_increment > 1.0 && increment > y * 1e-15) {
-            break;
+        let middle = (below + (above - below) / 2.0).floor();
+        if middle <= below || middle >= above {
+            return above;
+        }
+        if reached(middle) {
+            above = middle;
+        } else {
+            below = middle;
         }
     }
-    y
 }
 
 pub fn qbinom(p: f64, n: f64, pr: f64, lower: bool, log: bool) -> f64 {
@@ -5878,9 +6076,6 @@ pub fn qf(p: f64, df1: f64, df2: f64, lower: bool, log: bool) -> f64 {
 
 // Non-central distributions.
 
-/// `log(DBL_MIN)` in base 2 terms: below it, `exp` underflows.
-const DBL_MIN_LOG: f64 = M_LN2 * DBL_MIN_EXP as f64;
-
 pub fn dnchisq(x: f64, df: f64, ncp: f64, log: bool) -> f64 {
     const EPS: f64 = 5e-15;
     if x.is_nan() || df.is_nan() || ncp.is_nan() {
@@ -5958,162 +6153,11 @@ pub fn dnchisq(x: f64, df: f64, ncp: f64, log: bool) -> f64 {
     d_val(sum, log)
 }
 
-/// The non-central chi-squared distribution function: a Poisson mixture of central ones for
-/// `ncp < 80`, Ding's series otherwise.
-#[allow(clippy::too_many_arguments)]
-fn pnchisq_raw(
-    x: f64,
-    f: f64,
-    theta: f64,
-    errmax: f64,
-    reltol: f64,
-    itrmax: i32,
-    lower: bool,
-    log: bool,
-) -> f64 {
-    if x <= 0.0 {
-        if x == 0.0 && f == 0.0 {
-            let minus_lambda = -0.5 * theta;
-            return if lower {
-                d_exp(minus_lambda, log)
-            } else if log {
-                log1_exp(minus_lambda)
-            } else {
-                -minus_lambda.exp_m1()
-            };
-        }
-        return if lower { d0(log) } else { d1(log) };
-    }
-    if !finite(x) {
-        return if lower { d1(log) } else { d0(log) };
-    }
-    if theta < 80.0 {
-        if lower && f > 0.0 && x.ln() < M_LN2 + 2.0 / f * (lgammafn(f / 2.0 + 1.0) + DBL_MIN_LOG) {
-            // Every term would underflow, so sum on the log scale.
-            let lambda = 0.5 * theta;
-            let mut sum = f64::NEG_INFINITY;
-            let mut sum2 = f64::NEG_INFINITY;
-            let mut pr = -lambda;
-            let mut i = 0;
-            while i < 110 {
-                sum2 = logspace_add(sum2, pr);
-                sum = logspace_add(sum, pr + pchisq(x, f + 2.0 * i as f64, lower, true));
-                if sum2 >= -1e-15 {
-                    break;
-                }
-                i += 1;
-                pr += lambda.ln() - (i as f64).ln();
-            }
-            let answer = sum - sum2;
-            return if log { answer } else { answer.exp() };
-        }
-        let lambda = 0.5 * theta;
-        let mut sum = 0.0;
-        let mut sum2 = 0.0;
-        let mut pr = (-lambda).exp();
-        let mut i = 0;
-        // GNU R stops once the Poisson weights sum to 1 - 1e-15, even where later terms
-        // would still add to a tiny upper tail.
-        while i < 110 {
-            sum2 += pr;
-            sum += pr * pchisq(x, f + 2.0 * i as f64, lower, false);
-            if sum2 >= 1.0 - 1e-15 {
-                break;
-            }
-            i += 1;
-            pr *= lambda / i as f64;
-        }
-        let answer = sum / sum2;
-        return if log { answer.ln() } else { answer };
-    }
-
-    let lam = 0.5 * theta;
-    let mut lam_sml = -lam < DBL_MIN_LOG;
-    let mut lu = -1.0;
-    let mut l_lam = -1.0;
-    let mut u;
-    if lam_sml {
-        u = 0.0;
-        lu = -lam;
-        l_lam = lam.ln();
-    } else {
-        u = (-lam).exp();
-    }
-    let mut v = u;
-    let x2 = 0.5 * x;
-    let f2 = 0.5 * f;
-    let mut f_x_2n = f - x;
-    let mut t;
-    let mut lt;
-    if f2 * DBL_EPSILON > 0.125 && (x2 - f2).abs() < DBL_EPSILON.sqrt() * f2 {
-        t = x2 - f2;
-        lt = (1.0 - t) * (2.0 - t / (f2 + 1.0)) - M_LN_SQRT_2PI - 0.5 * (f2 + 1.0).ln();
-    } else {
-        lt = f2 * x2.ln() - x2 - lgammafn(f2 + 1.0);
-    }
-    let mut t_sml = lt < DBL_MIN_LOG;
-    let mut l_x = -1.0;
-    let mut answer;
-    let mut term;
-    if t_sml {
-        if x > f + theta + 5.0 * (2.0 * (f + 2.0 * theta)).sqrt() {
-            return dt1(lower, log);
-        }
-        l_x = x.ln();
-        answer = 0.0;
-        term = 0.0;
-        t = 0.0;
-    } else {
-        t = lt.exp();
-        answer = v * t;
-        term = answer;
-    }
-    let mut n = 1;
-    let mut f_2n = f + 2.0;
-    f_x_2n += 2.0;
-    while n <= itrmax {
-        if f_x_2n > 0.0 {
-            let bound = t * x / f_x_2n;
-            if bound <= errmax && term <= reltol * answer {
-                break;
-            }
-        }
-        if lam_sml {
-            lu += l_lam - (n as f64).ln();
-            if lu >= DBL_MIN_LOG {
-                u = lu.exp();
-                v = u;
-                lam_sml = false;
-            }
-        } else {
-            u *= lam / n as f64;
-            v += u;
-        }
-        if t_sml {
-            lt += l_x - f_2n.ln();
-            if lt >= DBL_MIN_LOG {
-                t = lt.exp();
-                t_sml = false;
-            }
-        } else {
-            t *= x / f_2n;
-        }
-        if !lam_sml && !t_sml {
-            term = v * t;
-            answer += term;
-        }
-        n += 1;
-        f_2n += 2.0;
-        f_x_2n += 2.0;
-    }
-    if n > itrmax {
-        warning(format!(
-            "pnchisq(x={x}, f={f}, theta={theta}, ..): not converged in {itrmax} iter."
-        ));
-    }
-    dt_val(answer, lower, log)
-}
-
+/// The noncentral chi-squared distribution function, the Poisson mixture
+/// `sum_k w_k(ncp / 2) P(df / 2 + k, x / 2)` of regularized lower incomplete gamma functions
+/// (Johnson, Kotz and Balakrishnan (1995), chapter 29). Neighbouring components differ by
+/// `P(s, y) - P(s + 1, y) = y^s e^-y / Gamma(s + 1)`, the Poisson density at a real `s`, so
+/// the mixture is summed as `poisson_mixture_tails` describes.
 pub fn pnchisq(x: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
     if x.is_nan() || df.is_nan() || ncp.is_nan() {
         return x + df + ncp;
@@ -6121,110 +6165,192 @@ pub fn pnchisq(x: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
     if !finite(df) || !finite(ncp) || df < 0.0 || ncp < 0.0 {
         return f64::NAN;
     }
-    let mut answer = pnchisq_raw(x, df, ncp, 1e-12, 8.0 * DBL_EPSILON, 1000000, lower, log);
-    if x <= 0.0 || x == f64::INFINITY {
-        return answer;
+    let rate = ncp / 2.0;
+    if x < 0.0 || (x == 0.0 && df > 0.0) {
+        return dt0(lower, log);
     }
-    if ncp >= 80.0 {
-        if lower {
-            answer = fmin2(answer, d1(log));
-        } else {
-            if answer < if log { -10.0 * M_LN10 } else { 1e-10 } {
-                precision_warning("pnchisq");
-            }
-            if !log && answer < 0.0 {
-                answer = 0.0;
-            }
-        }
+    if x == 0.0 {
+        // With no degrees of freedom the first component is an atom at zero.
+        return match (lower, log) {
+            (true, _) => d_exp(-rate, log),
+            (false, true) => log1_exp(-rate),
+            (false, false) => -(-rate).exp_m1(),
+        };
     }
-    if !log || answer < -1e-8 {
-        return answer;
+    if x == f64::INFINITY {
+        return dt1(lower, log);
     }
-    // A log probability this close to zero is better computed from the other tail.
-    let other = pnchisq_raw(x, df, ncp, 1e-12, 8.0 * DBL_EPSILON, 1000000, !lower, false);
-    (-other).ln_1p()
+    let mode = rate.floor();
+    if mode > i32::MAX as f64 {
+        precision_warning("pnchisq");
+        return f64::NAN;
+    }
+    let half = x / 2.0;
+    let shape = df / 2.0 + mode;
+    let log_half = half.ln();
+    let (lower_sum, upper_sum) = poisson_mixture_tails(
+        rate,
+        mode,
+        (
+            pgamma(half, shape, 1.0, true, false),
+            pgamma(half, shape, 1.0, false, false),
+        ),
+        dpois_raw(shape, half, true),
+        |index| log_half - (df / 2.0 + index + 1.0).ln(),
+    );
+    mixture_tail(lower_sum, upper_sum, lower, log)
 }
 
+/// Both tails of a Poisson mixture `sum_k w_k(rate) F_k` whose component distribution
+/// functions fall by `F_k - F_(k+1) = g_k`, given the tails of `F_mode` at the Poisson mode,
+/// `ln g_mode`, and `ln(g_(k+1) / g_k)` as `log_ratio(k)`. This is the summation of Lenth
+/// (1987) AS 226, with the remainders bounded by the Poisson tails as in Frick (1990) AS R84.
+///
+/// The sum runs outward from the mode, where the weights are largest. Each tail is
+/// accumulated in both directions, which means that in one direction its recurrence
+/// subtracts; there its rounding error stays below that of the starting value at the mode,
+/// whose term alone is a fixed share of the sum. Both tails are therefore summed directly,
+/// rather than one being the complement of the other, and a small tail keeps its relative
+/// accuracy. The weights beyond index `k` sum to at most `w_(k+1) / (1 - rate / (k + 2))`, and
+/// those below it to at most `w_(k-1) / (1 - (k - 1) / rate)`; a component's tail lies in
+/// [0, 1] and only grows away from the mode on the side being bounded.
+fn poisson_mixture_tails(
+    rate: f64,
+    mode: f64,
+    (start_lower, start_upper): (f64, f64),
+    start_log_step: f64,
+    log_ratio: impl Fn(f64) -> f64,
+) -> (f64, f64) {
+    let tolerance = DBL_EPSILON / 4.0;
+    let start_weight = dpois_raw(mode, rate, false);
+    let mut lower_sum = start_weight * start_lower;
+    let mut upper_sum = start_weight * start_upper;
+
+    let (mut index, mut weight, mut log_step) = (mode, start_weight, start_log_step);
+    let (mut lower_part, mut upper_part) = (start_lower, start_upper);
+    while index > 0.0 {
+        log_step -= log_ratio(index - 1.0);
+        let step = log_step.exp();
+        lower_part = (lower_part + step).min(1.0);
+        upper_part = (upper_part - step).max(0.0);
+        weight *= index / rate;
+        index -= 1.0;
+        lower_sum += weight * lower_part;
+        upper_sum += weight * upper_part;
+        let remainder = if index == 0.0 {
+            0.0
+        } else {
+            weight * (index / rate) / (1.0 - (index - 1.0) / rate)
+        };
+        if weight == 0.0
+            || (remainder <= tolerance * lower_sum
+                && upper_part * remainder <= tolerance * upper_sum)
+        {
+            break;
+        }
+    }
+
+    let (mut index, mut weight, mut log_step) = (mode, start_weight, start_log_step);
+    let (mut lower_part, mut upper_part) = (start_lower, start_upper);
+    loop {
+        let step = log_step.exp();
+        lower_part = (lower_part - step).max(0.0);
+        upper_part = (upper_part + step).min(1.0);
+        log_step += log_ratio(index);
+        weight *= rate / (index + 1.0);
+        index += 1.0;
+        lower_sum += weight * lower_part;
+        upper_sum += weight * upper_part;
+        let remainder = weight * (rate / (index + 1.0)) / (1.0 - rate / (index + 2.0));
+        if weight == 0.0
+            || (lower_part * remainder <= tolerance * lower_sum
+                && remainder <= tolerance * upper_sum)
+        {
+            break;
+        }
+    }
+    (lower_sum, upper_sum)
+}
+
+/// The requested tail and scale from both tails of a mixture. A log probability near zero
+/// comes from the other tail, which keeps the digits the direct one has lost.
+fn mixture_tail(lower_sum: f64, upper_sum: f64, lower: bool, log: bool) -> f64 {
+    let (direct, other) = if lower {
+        (lower_sum, upper_sum)
+    } else {
+        (upper_sum, lower_sum)
+    };
+    if !log {
+        direct.min(1.0)
+    } else if direct > 0.5 {
+        (-other).ln_1p()
+    } else {
+        direct.ln()
+    }
+}
+
+/// The quantile of the noncentral chi-squared distribution, by bisection on the distribution
+/// function. The search starts from Patnaik's (1949) approximation, which matches the first
+/// two moments with a scaled central chi-squared, `c * chi2(nu)` with
+/// `c = (df + 2 ncp) / (df + ncp)` and `nu = (df + ncp)^2 / (df + 2 ncp)`, and widens a
+/// bracket around it by doubling or halving.
 pub fn qnchisq(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
-    const ACCU: f64 = 1e-13;
-    const RACC: f64 = 4.0 * DBL_EPSILON;
-    const EPS: f64 = 1e-11;
-    const REPS: f64 = 1e-10;
     if p.is_nan() || df.is_nan() || ncp.is_nan() {
         return p + df + ncp;
     }
-    if !finite(df) || df < 0.0 || ncp < 0.0 {
+    if !finite(df) || !finite(ncp) || df < 0.0 || ncp < 0.0 || (df == 0.0 && ncp == 0.0) {
         return f64::NAN;
     }
     if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
         return boundary;
     }
-    let mut pp = d_qiv(p, log);
-    if pp > 1.0 - DBL_EPSILON {
-        return if lower { f64::INFINITY } else { 0.0 };
+    let below_root = |x: f64| {
+        let value = pnchisq(x, df, ncp, lower, log);
+        if lower { value < p } else { value > p }
+    };
+    let scale = (df + 2.0 * ncp) / (df + ncp);
+    let shape = (df + ncp) * (df + ncp) / (df + 2.0 * ncp);
+    let mut start = scale * qchisq(p, shape, lower, log);
+    if !(start > 0.0 && start.is_finite()) {
+        start = (df + ncp).max(1.0);
     }
-    // Pearson's approximation for the starting bracket.
-    let mut ux = {
-        let b = (ncp * ncp) / (df + 3.0 * ncp);
-        let c = (df + 3.0 * ncp) / (df + 2.0 * ncp);
-        let ff = (df + 2.0 * ncp) / (c * c);
-        let ux = b + c * qchisq(p, ff, lower, log);
-        // A zero bracket would never grow by doubling.
-        if ux > 0.0 { ux } else { 1.0 }
-    };
-    let ux0 = ux;
-    let mut lower = lower;
-    let p = if !lower && ncp >= 80.0 {
-        if pp < 1e-10 {
-            precision_warning("qnchisq");
-        }
-        lower = true;
-        if log { -p.exp_m1() } else { 0.5 - p + 0.5 }
-    } else {
-        pp
-    };
-    pp = fmin2(1.0 - DBL_EPSILON, p * (1.0 + EPS));
-    let mut lx;
-    if lower {
-        while ux < DBL_MAX && pnchisq_raw(ux, df, ncp, EPS, REPS, 10000, true, false) < pp {
-            ux *= 2.0;
-        }
-        pp = p * (1.0 - EPS);
-        lx = fmin2(ux0, DBL_MAX);
-        while lx > DBL_MIN && pnchisq_raw(lx, df, ncp, EPS, REPS, 10000, true, false) > pp {
-            lx *= 0.5;
+    let (mut low, mut high);
+    if below_root(start) {
+        low = start;
+        high = 2.0 * start;
+        while below_root(high) {
+            low = high;
+            high *= 2.0;
+            if high == f64::INFINITY {
+                return f64::INFINITY;
+            }
         }
     } else {
-        while ux < DBL_MAX && pnchisq_raw(ux, df, ncp, EPS, REPS, 10000, false, false) > pp {
-            ux *= 2.0;
-        }
-        pp = p * (1.0 - EPS);
-        lx = fmin2(ux0, DBL_MAX);
-        while lx > DBL_MIN && pnchisq_raw(lx, df, ncp, EPS, REPS, 10000, false, false) < pp {
-            lx *= 0.5;
-        }
-    }
-    loop {
-        let nx = 0.5 * (lx + ux);
-        let value = pnchisq_raw(nx, df, ncp, ACCU, RACC, 100000, lower, false);
-        if lower == (value > p) {
-            ux = nx;
-        } else {
-            lx = nx;
-        }
-        if !((ux - lx) / nx > ACCU) {
-            break;
+        high = start;
+        low = 0.5 * start;
+        // With df = 0 the distribution has an atom at zero, so the bracket may close on it.
+        while !below_root(low) {
+            high = low;
+            low *= 0.5;
+            if low < DBL_MIN {
+                return 0.0;
+            }
         }
     }
-    0.5 * (ux + lx)
+    bisect(low, high, below_root)
 }
 
+/// The density of the noncentral beta distribution, the Poisson mixture
+/// `sum_k w_k(ncp / 2) dbeta(x; a + k, b)` (Johnson, Kotz and Balakrishnan (1995), chapter
+/// 30). Consecutive terms have the ratio `r(k) = (ncp / 2) x (a + b + k) / ((k + 1)(a + k))`,
+/// which decreases in `k`, so the largest term sits where `r(k) = 1`, a quadratic in `k`. The
+/// sum runs outward from there in both directions, and because the ratios keep shrinking
+/// away from the peak, the terms not yet added are bounded by a geometric series.
 pub fn dnbeta(x: f64, a: f64, b: f64, ncp: f64, log: bool) -> f64 {
-    const EPS: f64 = 1e-15;
     if x.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
         return x + a + b + ncp;
     }
-    if ncp < 0.0 || a <= 0.0 || b <= 0.0 || !finite(a) || !finite(b) || !finite(ncp) {
+    if a <= 0.0 || b <= 0.0 || ncp < 0.0 || !finite(a) || !finite(b) || !finite(ncp) {
         return f64::NAN;
     }
     if !(0.0..=1.0).contains(&x) {
@@ -6233,121 +6359,72 @@ pub fn dnbeta(x: f64, a: f64, b: f64, ncp: f64, log: bool) -> f64 {
     if ncp == 0.0 {
         return dbeta(x, a, b, log);
     }
-    let ncp2 = 0.5 * ncp;
-    let dx2 = ncp2 * x;
-    let d = (dx2 - a - 1.0) / 2.0;
-    let big_d = d * d + dx2 * (a + b) - a;
-    let k_max = if big_d <= 0.0 {
-        0.0
-    } else {
-        let big_d = (d + big_d.sqrt()).ceil();
-        if big_d > 0.0 { big_d.trunc() } else { 0.0 }
-    };
-    // Past the integers, `k -= 1.0` stops changing `k` and the sum below never ends.
-    if k_max > f64::from(i32::MAX) {
+    let rate = ncp / 2.0;
+    if x == 0.0 {
+        // Only the first component can put density at zero.
+        return d_exp(dbeta(0.0, a, b, true) - rate, log);
+    }
+    if x == 1.0 {
+        // Every component has density b^0 (a + k) at one when b = 1, so the mixture is the
+        // Poisson mean shifted by a.
+        return if b < 1.0 {
+            f64::INFINITY
+        } else if b > 1.0 {
+            d0(log)
+        } else {
+            d_val(a + rate, log)
+        };
+    }
+    let linear = a + 1.0 - rate * x;
+    let constant = a - rate * x * (a + b);
+    let root = (-linear + (linear * linear - 4.0 * constant).sqrt()) / 2.0;
+    let peak = if root > 0.0 { root.floor() } else { 0.0 };
+    if peak > i32::MAX as f64 {
         precision_warning("dnbeta");
         return f64::NAN;
     }
-    let term = dbeta(x, a + k_max, b, true);
-    let mut p_k = dpois_raw(k_max, ncp2, true);
-    if x == 0.0 || !finite(term) || !finite(p_k) {
-        return d_exp(p_k + term, log);
+    let peak_log = dbeta(x, a + peak, b, true) + dpois_raw(peak, rate, true);
+    if !peak_log.is_finite() {
+        return if peak_log > 0.0 {
+            f64::INFINITY
+        } else {
+            d0(log)
+        };
     }
-    p_k += term;
+    let ratio = |k: f64| rate * x * (a + b + k) / ((k + 1.0) * (a + k));
+    let tolerance = DBL_EPSILON / 4.0;
     let mut sum = 1.0;
     let mut term = 1.0;
-    let mut k = k_max;
-    while k > 0.0 && term > sum * EPS {
-        k -= 1.0;
-        let q = (k + 1.0) * (k + a) / (k + a + b) / dx2;
-        term *= q;
+    let mut index = peak;
+    loop {
+        let step = ratio(index);
+        term *= step;
+        index += 1.0;
         sum += term;
+        if term == 0.0 || (step < 1.0 && term * step / (1.0 - step) <= tolerance * sum) {
+            break;
+        }
     }
     term = 1.0;
-    k = k_max;
-    loop {
-        let q = dx2 * (k + a + b) / (k + a) / (k + 1.0);
-        k += 1.0;
-        term *= q;
+    index = peak;
+    while index > 0.0 {
+        let step = 1.0 / ratio(index - 1.0);
+        term *= step;
+        index -= 1.0;
         sum += term;
-        if !(term > sum * EPS) {
+        if term == 0.0 || (step < 1.0 && term * step / (1.0 - step) <= tolerance * sum) {
             break;
         }
     }
-    d_exp(p_k + sum.ln(), log)
-}
-
-/// The non-central beta distribution function by AS 226 with Frick's AS R84 correction.
-fn pnbeta_raw(x: f64, o_x: f64, a: f64, b: f64, ncp: f64) -> f64 {
-    const ERRMAX: f64 = 1.0e-9;
-    const ITRMAX: f64 = 10000.0;
-    if ncp < 0.0 || a <= 0.0 || b <= 0.0 {
-        return f64::NAN;
-    }
-    if x < 0.0 || o_x > 1.0 || (x == 0.0 && o_x == 1.0) {
-        return 0.0;
-    }
-    if x > 1.0 || o_x < 0.0 || (x == 1.0 && o_x == 0.0) {
-        return 1.0;
-    }
-    let c = ncp / 2.0;
-    let x0 = fmax2(c - 7.0 * c.sqrt(), 0.0).floor();
-    let a0 = a + x0;
-    let lbeta = lgammafn(a0) + lgammafn(b) - lgammafn(a0 + b);
-    let (mut temp, _, _) = bratio(a0, b, x, o_x, false);
-    let mut gx =
-        (a0 * x.ln() + b * if x < 0.5 { (-x).ln_1p() } else { o_x.ln() } - lbeta - a0.ln()).exp();
-    let mut q = if a0 > a {
-        (-c + x0 * c.ln() - lgammafn(x0 + 1.0)).exp()
-    } else {
-        (-c).exp()
-    };
-    let mut sumq = 1.0 - q;
-    let mut answer = q * temp;
-    let mut j = x0.floor();
-    let mut errbd;
-    loop {
-        j += 1.0;
-        temp -= gx;
-        gx *= x * (a + b + j - 1.0) / (a + j);
-        q *= c / j;
-        sumq -= q;
-        answer += temp * q;
-        errbd = (temp - gx) * sumq;
-        if !(errbd > ERRMAX && j < ITRMAX + x0) {
-            break;
-        }
-    }
-    if errbd > ERRMAX {
-        precision_warning("pnbeta");
-    }
-    if j >= ITRMAX + x0 {
-        convergence_warning("pnbeta");
-    }
-    answer
-}
-
-fn pnbeta2(x: f64, o_x: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
-    let mut answer = pnbeta_raw(x, o_x, a, b, ncp);
-    if answer.is_nan() {
-        return answer;
-    }
-    if lower {
-        if log { answer.ln() } else { answer }
-    } else {
-        if answer > 1.0 - 1e-10 {
-            precision_warning("pnbeta");
-        }
-        if answer > 1.0 {
-            answer = 1.0;
-        }
-        if log { (-answer).ln_1p() } else { 1.0 - answer }
-    }
+    d_exp(peak_log + sum.ln(), log)
 }
 
 pub fn pnbeta(x: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
     if x.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
         return x + a + b + ncp;
+    }
+    if a <= 0.0 || b <= 0.0 || ncp < 0.0 || !finite(a) || !finite(b) || !finite(ncp) {
+        return f64::NAN;
     }
     if x <= 0.0 {
         return dt0(lower, log);
@@ -6355,47 +6432,86 @@ pub fn pnbeta(x: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
     if x >= 1.0 {
         return dt1(lower, log);
     }
-    pnbeta2(x, 1.0 - x, a, b, ncp, lower, log)
+    pnbeta_both(x, 0.5 - x + 0.5, a, b, ncp, lower, log)
 }
 
+/// The noncentral beta distribution function at `x`, with `complement = 1 - x` passed
+/// separately so that a caller near one keeps its precision. It is the Poisson mixture
+/// `sum_k w_k(ncp / 2) I_x(a + k, b)` of incomplete beta ratios, whose neighbours differ by
+/// `I_x(s, b) - I_x(s + 1, b) = x^s (1 - x)^b / (s B(s, b))`, summed as
+/// `poisson_mixture_tails` describes.
+fn pnbeta_both(x: f64, complement: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    let rate = ncp / 2.0;
+    let mode = rate.floor();
+    if mode > i32::MAX as f64 {
+        precision_warning("pnbeta");
+        return f64::NAN;
+    }
+    let shape = a + mode;
+    let (start_lower, start_upper, error) = bratio(shape, b, x, complement, false);
+    if error != 0 {
+        precision_warning("pnbeta");
+    }
+    let log_x = x.ln();
+    // x^s (1 - x)^b / (s B(s, b)) is the beta density times x (1 - x) / s.
+    let start_log_step = dbeta(x, shape, b, true) + log_x + complement.ln() - shape.ln();
+    let (lower_sum, upper_sum) = poisson_mixture_tails(
+        rate,
+        mode,
+        (start_lower, start_upper),
+        start_log_step,
+        |index| {
+            let shape = a + index;
+            log_x + (shape + b).ln() - (shape + 1.0).ln()
+        },
+    );
+    mixture_tail(lower_sum, upper_sum, lower, log)
+}
+
+/// The quantile of the noncentral beta distribution, by bisection on its distribution
+/// function over (0, 1).
 pub fn qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
-    const ACCU: f64 = 1e-15;
-    const EPS: f64 = 1e-14;
     if p.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
         return p + a + b + ncp;
     }
-    if ncp < 0.0 || a <= 0.0 || b <= 0.0 {
+    if a <= 0.0 || b <= 0.0 || ncp < 0.0 || !finite(a) || !finite(b) || !finite(ncp) {
         return f64::NAN;
     }
     if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, 1.0) {
         return boundary;
     }
-    let p = dt_qiv(p, lower, log);
-    if p > 1.0 - DBL_EPSILON {
-        return 1.0;
+    if (ncp / 2.0).floor() > i32::MAX as f64 {
+        precision_warning("qnbeta");
+        return f64::NAN;
     }
-    let mut pp = fmin2(1.0 - DBL_EPSILON, p * (1.0 + EPS));
-    let mut ux = 0.5;
-    while ux < 1.0 - DBL_EPSILON && pnbeta(ux, a, b, ncp, true, false) < pp {
-        ux = 0.5 * (1.0 + ux);
-    }
-    pp = p * (1.0 - EPS);
-    let mut lx = 0.5;
-    while lx > DBL_MIN && pnbeta(lx, a, b, ncp, true, false) > pp {
-        lx *= 0.5;
-    }
+    bisect(0.0, 1.0, |x| {
+        let value = pnbeta_both(x, 0.5 - x + 0.5, a, b, ncp, lower, log);
+        if lower { value < p } else { value > p }
+    })
+}
+
+/// The point where `below_root` turns from true to false within `(low, high)`, to the
+/// resolution of a double. While the bracket spans more than a factor of four, its geometric
+/// mean is tried, so a root many orders of magnitude below `high` is found in a number of
+/// steps that grows with the number of exponent bits rather than mantissa bits.
+fn bisect(mut low: f64, mut high: f64, below_root: impl Fn(f64) -> bool) -> f64 {
     loop {
-        let nx = 0.5 * (lx + ux);
-        if pnbeta(nx, a, b, ncp, true, false) > p {
-            ux = nx;
+        let middle = if low == 0.0 {
+            if high > 0.5 { 0.5 * high } else { high * high }
+        } else if high > 4.0 * low {
+            (low.sqrt()) * (high.sqrt())
         } else {
-            lx = nx;
+            low + 0.5 * (high - low)
+        };
+        if middle <= low || middle >= high {
+            return 0.5 * (low + high);
         }
-        if !((ux - lx) / nx > ACCU) {
-            break;
+        if below_root(middle) {
+            low = middle;
+        } else {
+            high = middle;
         }
     }
-    0.5 * (ux + lx)
 }
 
 pub fn dnf(x: f64, df1: f64, df2: f64, ncp: f64, log: bool) -> f64 {
@@ -6452,7 +6568,7 @@ pub fn pnf(x: f64, df1: f64, df2: f64, ncp: f64, lower: bool, log: bool) -> f64 
         return pnchisq(x * df1, df1, ncp, lower, log);
     }
     let y = (df1 / df2) * x;
-    pnbeta2(
+    pnbeta_both(
         y / (1.0 + y),
         1.0 / (1.0 + y),
         df1 / 2.0,
@@ -6976,7 +7092,9 @@ fn wilcox_valid(m: f64, n: f64) -> Option<(usize, usize)> {
     }
     let small = m.min(n);
     if small * small * (m + n) > MAX_COUNT_CELLS {
-        warning(format!("wilcox: samples of sizes {m} and {n} are too large"));
+        warning(format!(
+            "wilcox: samples of sizes {m} and {n} are too large"
+        ));
         return None;
     }
     Some((m as usize, n as usize))
