@@ -38,8 +38,21 @@ pub struct Routine {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RoutineKind {
+    C,
     Call,
+    Fortran,
     External,
+}
+
+impl RoutineKind {
+    pub fn interface(self) -> &'static str {
+        match self {
+            RoutineKind::C => ".C",
+            RoutineKind::Call => ".Call",
+            RoutineKind::Fortran => ".Fortran",
+            RoutineKind::External => ".External",
+        }
+    }
 }
 
 /// `R_CallMethodDef` and `R_ExternalMethodDef`.
@@ -76,7 +89,9 @@ impl Dll {
 
     fn registered(&self, kind: RoutineKind) -> &[Routine] {
         match kind {
+            RoutineKind::C => &self.c_routines,
             RoutineKind::Call => &self.call_routines,
+            RoutineKind::Fortran => &self.fortran_routines,
             RoutineKind::External => &self.external_routines,
         }
     }
@@ -113,7 +128,12 @@ pub unsafe fn load_library(path: &str) -> ApiResult<*mut Dll> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let name = file_name.split('.').next().unwrap_or(&file_name).to_owned();
+    // The library's name is its file name without the extension (`data_table.so` is
+    // `data_table`), which `R_init_<name>` and `PACKAGE =` use.
+    let name = file_name
+        .rsplit_once('.')
+        .map_or(file_name.as_str(), |(stem, _)| stem)
+        .to_owned();
     runtime
         .dlls
         .push(Box::new(Dll::new(canonical, name.clone(), handle)));
@@ -176,17 +196,20 @@ pub unsafe fn find_routine(
             return Ok((routine.function, Some(routine.arity)));
         }
         if dll.use_dynamic_symbols {
-            let c_name = CString::new(name).map_err(|_| error("invalid routine name"))?;
+            // Fortran compilers append an underscore to external names.
+            let symbol_name = if kind == RoutineKind::Fortran {
+                format!("{}_", name.to_ascii_lowercase())
+            } else {
+                name.to_owned()
+            };
+            let c_name = CString::new(symbol_name).map_err(|_| error("invalid routine name"))?;
             let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
             if !symbol.is_null() {
                 return Ok((std::mem::transmute::<*mut c_void, DlFunc>(symbol), None));
             }
         }
     }
-    let interface = match kind {
-        RoutineKind::Call => ".Call",
-        RoutineKind::External => ".External",
-    };
+    let interface = kind.interface();
     Err(match package {
         Some(package) => error(format!(
             "\"{name}\" not available for {interface}() for package \"{package}\""
@@ -348,8 +371,9 @@ pub unsafe extern "C" fn R_RegisterCCallable(
     runtime().c_callables.insert(key, address);
 }
 
-/// `R_GetCCallable`. GNU R loads the providing namespace when the callable is missing; without
-/// the interpreter that cannot happen yet, so a missing callable is an error.
+/// `R_GetCCallable`. A callable that is not registered yet makes GNU R load the providing
+/// package's namespace, whose initialization registers it; ry does the same through the
+/// interpreter when one is installed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GetCCallable(
     package: *const c_char,
@@ -358,13 +382,52 @@ pub unsafe extern "C" fn R_GetCCallable(
     enter(|| {
         let package = String::from_utf8_lossy(c_bytes(package)).into_owned();
         let name = String::from_utf8_lossy(c_bytes(name)).into_owned();
-        match runtime().c_callables.get(&(package.clone(), name.clone())) {
+        let key = (package.clone(), name.clone());
+        let registered = |key: &(String, String)| match runtime().c_callables.get(key) {
             Some(&address) if address != 0 => {
-                Ok(Some(std::mem::transmute::<usize, DlFunc>(address)))
+                Some(std::mem::transmute::<usize, DlFunc>(address))
             }
-            _ => Err(error(format!(
-                "function '{name}' not provided by package '{package}'"
-            ))),
+            _ => None,
+        };
+        if let Some(function) = registered(&key) {
+            return Ok(Some(function));
         }
+        if crate::eval::evaluator().is_some()
+            && crate::environments::registered_namespace(package.as_bytes())?.kind()
+                == SexpType::Nil
+        {
+            let package_name = crate::strings::mk_char(package.as_bytes(), Encoding::Utf8)?;
+            let package_name = crate::memory::scalar_string(package_name)?;
+            runtime().heap.root(package_name);
+            crate::eval::call_namespaced("base", "loadNamespace", &[package_name])?;
+            if let Some(function) = registered(&key) {
+                return Ok(Some(function));
+            }
+        }
+        Err(error(format!(
+            "function '{name}' not provided by package '{package}'"
+        )))
+    })
+}
+
+/// The loaded libraries, oldest first, as `getLoadedDLLs()` lists them.
+pub fn loaded_libraries() -> Vec<(String, String)> {
+    runtime()
+        .dlls
+        .iter()
+        .map(|dll| (dll.name.clone(), dll.path.clone()))
+        .collect()
+}
+
+/// How many routines of each interface a library registered: `.C`, `.Call`, `.Fortran` and
+/// `.External`.
+pub fn registered_counts(name: &str) -> Option<[usize; 4]> {
+    runtime().dlls.iter().find(|dll| dll.name == name).map(|dll| {
+        [
+            dll.c_routines.len(),
+            dll.call_routines.len(),
+            dll.fortran_routines.len(),
+            dll.external_routines.len(),
+        ]
     })
 }

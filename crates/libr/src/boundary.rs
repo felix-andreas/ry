@@ -217,6 +217,35 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
     Ok(result)
 }
 
+/// Runs a `.C` or `.Fortran` routine, whose arguments are data pointers rather than handles,
+/// inside a C context. Every argument is a pointer, so the routine is called through the same
+/// dispatcher as `.Call`, and its return value is ignored.
+pub unsafe fn call_native_pointers(
+    function: DlFunc,
+    pointers: &[*mut c_void],
+    what: &str,
+) -> ApiResult<()> {
+    let mut ignored = std::ptr::null_mut();
+    let entry_depth = runtime().heap.roots.protect.depth();
+    let result = with_native_scope(|| {
+        ry_call_native(
+            function,
+            pointers.len() as c_int,
+            pointers.as_ptr() as *const Sexp,
+            &mut ignored,
+        )
+    });
+    let exit_depth = runtime().heap.roots.protect.depth();
+    if result.is_ok() && exit_depth != entry_depth {
+        warn(format!(
+            "stack imbalance in '{what}', {entry_depth} then {exit_depth}"
+        ));
+    }
+    result?;
+    run_pending_finalizers();
+    Ok(())
+}
+
 /// Runs `function(data)` inside a C context, for callbacks that return nothing.
 pub unsafe fn call_void(
     function: unsafe extern "C" fn(*mut c_void),

@@ -32,6 +32,8 @@ type Primitive = unsafe fn(call: Sexp, args: &[(Sexp, Sexp)], env: Sexp) -> ApiR
 const PRIMITIVES: &[(&str, SexpType, Primitive)] = &[
     (".Call", SexpType::Builtin, dot_call),
     (".External", SexpType::Builtin, dot_external),
+    (".C", SexpType::Builtin, dot_c_primitive),
+    (".Fortran", SexpType::Builtin, dot_fortran_primitive),
     ("stop", SexpType::Builtin, stop),
     ("warning", SexpType::Builtin, warning),
     ("dyn.load", SexpType::Builtin, dyn_load),
@@ -271,6 +273,18 @@ unsafe fn dot_call(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiRes
     native_call(call, arguments, RoutineKind::Call)
 }
 
+unsafe fn dot_c_primitive(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiResult<Sexp> {
+    native_call(call, arguments, RoutineKind::C)
+}
+
+unsafe fn dot_fortran_primitive(
+    call: Sexp,
+    arguments: &[(Sexp, Sexp)],
+    _env: Sexp,
+) -> ApiResult<Sexp> {
+    native_call(call, arguments, RoutineKind::Fortran)
+}
+
 /// `.External(.NAME, ..., PACKAGE)`: the routine receives the whole call as one pairlist, whose
 /// first element is the routine's name.
 unsafe fn dot_external(call: Sexp, arguments: &[(Sexp, Sexp)], _env: Sexp) -> ApiResult<Sexp> {
@@ -284,17 +298,27 @@ pub unsafe fn native_call(
     arguments: &[(Sexp, Sexp)],
     kind: RoutineKind,
 ) -> ApiResult<Sexp> {
-    let what = match kind {
-        RoutineKind::Call => ".Call",
-        RoutineKind::External => ".External",
-    };
+    let what = kind.interface();
     let Some(((_, name), rest)) = arguments.split_first() else {
         return Err(error_in(call, "'.NAME' is missing"));
     };
     let package_symbol = runtime().heap.install(b"PACKAGE")?;
+    let control_symbols = [
+        runtime().heap.install(b"NAOK")?,
+        runtime().heap.install(b"DUP")?,
+        runtime().heap.install(b"ENCODING")?,
+    ];
     let mut package = None;
+    let mut na_ok = false;
     let mut values = Vec::new();
     for &(tag, value) in rest {
+        if matches!(kind, RoutineKind::C | RoutineKind::Fortran) && control_symbols.contains(&tag)
+        {
+            if tag == control_symbols[0] {
+                na_ok = crate::vectors::as_logical(value)? == 1;
+            }
+            continue;
+        }
         if tag == package_symbol {
             if value.kind() != SexpType::String || xlength(value)? < 1 {
                 return Err(error_in(
@@ -371,7 +395,159 @@ pub unsafe fn native_call(
             runtime().heap.root(list);
             call_native(function, &[list], what)
         }
+        RoutineKind::C | RoutineKind::Fortran => {
+            if values.len() > 65 {
+                return Err(error_in(call, "too many arguments, sorry"));
+            }
+            if let Some(arity) = arity
+                && arity >= 0
+                && arity as usize != values.len()
+            {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "Incorrect number of arguments ({}), expecting {arity} for '{routine_name}'",
+                        values.len()
+                    ),
+                ));
+            }
+            dot_c(call, function, &values, kind, na_ok)
+        }
     }
+}
+
+/// One `.C` or `.Fortran` argument as native code receives it: a pointer into a fresh copy, so
+/// the routine's writes land in the copy that is returned.
+enum CArgument {
+    Vector(Sexp),
+    Strings(Sexp, Vec<*mut c_char>),
+    Object(Sexp),
+}
+
+/// `.C` and `.Fortran`: each argument is copied, the routine receives pointers to the copies'
+/// data, and the result is the list of copies, named as the arguments were.
+unsafe fn dot_c(
+    call: Sexp,
+    function: crate::boundary::DlFunc,
+    values: &[(Sexp, Sexp)],
+    kind: RoutineKind,
+    na_ok: bool,
+) -> ApiResult<Sexp> {
+    let runtime = runtime();
+    let mut arguments = Vec::with_capacity(values.len());
+    let mut pointers: Vec<*mut std::ffi::c_void> = Vec::with_capacity(values.len());
+    for (position, &(_, value)) in values.iter().enumerate() {
+        let argument = match value.kind() {
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw => {
+                if !na_ok && !c_values_finite(value)? {
+                    return Err(error_in(
+                        call,
+                        format!("NA/NaN/Inf in foreign function call (arg {})", position + 1),
+                    ));
+                }
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                pointers.push(crate::vectors::data_pointer(copy, true)? as *mut std::ffi::c_void);
+                CArgument::Vector(copy)
+            }
+            SexpType::String => {
+                let length = xlength(value)? as usize;
+                let mut strings = Vec::with_capacity(length);
+                for index in 0..length {
+                    let element = value.element(index);
+                    if !na_ok && element == runtime.heap.known().na_string {
+                        return Err(error_in(
+                            call,
+                            format!("NA/NaN/Inf in foreign function call (arg {})", position + 1),
+                        ));
+                    }
+                    strings.push(crate::strings::arena_c_string(element.bytes())? as *mut c_char);
+                }
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                let pointer = if kind == RoutineKind::Fortran {
+                    strings.first().copied().unwrap_or(std::ptr::null_mut()) as *mut std::ffi::c_void
+                } else {
+                    strings.as_mut_ptr() as *mut std::ffi::c_void
+                };
+                pointers.push(pointer);
+                CArgument::Strings(copy, strings)
+            }
+            SexpType::List if kind == RoutineKind::C => {
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                runtime.heap.escape(copy);
+                pointers.push(copy.data() as *mut std::ffi::c_void);
+                CArgument::Vector(copy)
+            }
+            _ if kind == RoutineKind::C => {
+                pointers.push(value.as_ptr() as *mut std::ffi::c_void);
+                CArgument::Object(value)
+            }
+            other => {
+                return Err(error_in(
+                    call,
+                    format!("invalid mode ({}) to pass to Fortran (arg {})", other.name(), position + 1),
+                ));
+            }
+        };
+        arguments.push(argument);
+    }
+    crate::boundary::call_native_pointers(function, &pointers, kind.interface())?;
+    let runtime = crate::runtime();
+    let result = runtime
+        .heap
+        .alloc_vector(SexpType::List, values.len() as isize)?;
+    runtime.heap.root(result);
+    let mut named = false;
+    let names = runtime
+        .heap
+        .alloc_vector(SexpType::String, values.len() as isize)?;
+    runtime.heap.root(names);
+    for (index, argument) in arguments.iter().enumerate() {
+        let value = match argument {
+            CArgument::Vector(copy) | CArgument::Object(copy) => *copy,
+            CArgument::Strings(copy, strings) => {
+                for (element, &pointer) in strings.iter().enumerate() {
+                    let text = crate::strings::c_bytes(pointer);
+                    let charsxp = runtime.heap.mk_char(text, Encoding::Native)?;
+                    runtime.heap.set_element(*copy, element, charsxp);
+                }
+                *copy
+            }
+        };
+        runtime.heap.set_element(result, index, value);
+        let tag = values[index].0;
+        if tag.kind() == SexpType::Symbol {
+            named = true;
+            runtime.heap.set_element(names, index, tag.car());
+        }
+    }
+    if named {
+        crate::attributes::install_attribute(result, R_NamesSymbol.get(), names)?;
+    }
+    Ok(result)
+}
+
+/// Whether a numeric vector has no `NA`, `NaN` or infinite element, which `.C` requires
+/// unless `NAOK = TRUE`.
+unsafe fn c_values_finite(value: Sexp) -> ApiResult<bool> {
+    let length = xlength(value)? as usize;
+    Ok(match value.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            (0..length).all(|index| value.slice::<i32>()[index] != NA_INTEGER)
+        }
+        SexpType::Real => value.slice::<f64>().iter().all(|number| number.is_finite()),
+        SexpType::Complex => value
+            .slice::<heap::object::Rcomplex>()
+            .iter()
+            .all(|number| number.r.is_finite() && number.i.is_finite()),
+        _ => true,
+    })
 }
 
 /// `stop(...)`: the arguments pasted together become the message.
