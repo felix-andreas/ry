@@ -541,7 +541,7 @@ unsafe fn array_subset(
             if position == usize::MAX {
                 na = true;
             }
-            offset += position.wrapping_mul(stride);
+            offset = offset.wrapping_add(position.wrapping_mul(stride));
             stride *= dims[dimension];
         }
         flat.push(if na { usize::MAX } else { offset });

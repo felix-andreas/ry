@@ -34,7 +34,7 @@ use heap::{
     Marker,
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub const BUILTINS: &[BuiltinDef] = &[];
 
@@ -73,7 +73,8 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     let state = &mut interp().bytecode;
     let calls = state.calls.entry(body).or_insert(0);
     *calls += 1;
-    if *calls < COMPILE_AFTER_CALLS {
+    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes.
+    if *calls < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
         if state.calls.len() > MAX_TRACKED_BODIES {
             state.calls.clear();
         }
@@ -81,7 +82,7 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     }
     state.calls.remove(&body);
     // A body the compiler cannot handle still runs correctly on the AST evaluator.
-    match compile(body, function.tag()) {
+    match compile(body, function.car(), function.tag()) {
         Ok(Some(code)) => {
             crate::heap().set_cdr(function, code);
             run(code, env)
@@ -123,6 +124,32 @@ unsafe fn source_of(code: Sexp) -> Sexp {
     code.cdr().element(SOURCE)
 }
 
+const LOOP_SEARCH_DEPTH: u32 = 32;
+
+unsafe fn contains_loop(expression: Sexp, depth: u32) -> bool {
+    if depth == 0 || expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol {
+        if matches!(&*symbol_name(head), "for" | "while" | "repeat") {
+            return true;
+        }
+        // A nested function's loops run when it is called, not when this body runs.
+        if &*symbol_name(head) == "function" {
+            return false;
+        }
+    }
+    let mut cell = expression.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        if contains_loop(cell.car(), depth - 1) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
+}
+
 /// A body is worth compiling when it does more than evaluate one constant or symbol.
 unsafe fn worth_compiling(body: Sexp) -> bool {
     body.kind() == SexpType::Language
@@ -151,7 +178,8 @@ enum Op {
     CallGeneric,
     /// `dst expression`: evaluates an expression the compiler did not compile.
     Ast,
-    /// `symbol expected cache target`: jumps unless `symbol` names the function `expected`.
+    /// `symbol expected cache probe target`: jumps unless `symbol` names the function `expected`.
+    /// `probe` is 0 when the frame cannot bind `symbol`, so only the cache is checked.
     Guard,
     /// `target`
     Jump,
@@ -251,6 +279,9 @@ struct Compiler {
     /// The closure's enclosure, against which the compiler checks that a construct's symbol
     /// names the base primitive.
     enclosure: Sexp,
+    /// The symbols the call frame can bind: formals and assignment targets. `None` when the body
+    /// reflects on its frame (`assign`, `eval`, ...), so any symbol may appear in it.
+    local_symbols: Option<FxHashSet<Sexp>>,
 }
 
 #[derive(Clone, Copy)]
@@ -262,8 +293,9 @@ struct Loop {
 }
 
 /// Compiles a closure body, or reports that it is better left to the AST evaluator.
-unsafe fn compile(body: Sexp, enclosure: Sexp) -> R<Option<Sexp>> {
+unsafe fn compile(body: Sexp, formals: Sexp, enclosure: Sexp) -> R<Option<Sexp>> {
     let mut compiler = Compiler {
+        local_symbols: local_symbols(body, formals),
         code: Vec::new(),
         constants: Vec::new(),
         caches: 0,
@@ -306,7 +338,66 @@ unsafe fn compile(body: Sexp, enclosure: Sexp) -> R<Option<Sexp>> {
     Ok(Some(code))
 }
 
+/// The symbols a call frame of a closure with `formals` and `body` can bind, or `None` when the
+/// body names a function that binds in a frame it is given (so the set cannot be known). A callee
+/// could still assign into this frame through `parent.frame()`; like GNU R's compiler, this
+/// assumes it does not rebind the syntax and operators the guards check.
+unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>> {
+    let mut symbols_found = FxHashSet::default();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        symbols_found.insert(formal.tag());
+        formal = formal.cdr();
+    }
+    if collect_bindings(body, &mut symbols_found) { Some(symbols_found) } else { None }
+}
+
+/// Adds the symbols `expression` assigns locally; `false` when it reflects on its frame.
+unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> bool {
+    if expression.kind() != SexpType::Language {
+        return true;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol {
+        let name = symbol_name(head);
+        if matches!(
+            &*name,
+            "assign" | "eval" | "evalq" | "delayedAssign" | "makeActiveBinding" | "local" | "sys.function"
+                | "environment" | "list2env" | "sys.frame" | "sys.frames" | "attach" | "with" | "within"
+                | "source" | "rm" | "remove" | "lockBinding" | "on.exit" | "Recall" | "do.call"
+        ) {
+            return false;
+        }
+        if matches!(&*name, "<-" | "=" | "for") {
+            let mut target = expression.cdr().car();
+            while target.kind() == SexpType::Language {
+                target = target.cdr().car();
+            }
+            if target.kind() == SexpType::Symbol {
+                found.insert(target);
+            } else if target.kind() == SexpType::String && length(target) == 1 {
+                return false;
+            }
+        }
+        if &*name == "function" {
+            return true;
+        }
+    }
+    let mut cell = expression;
+    while cell.kind() == SexpType::Pairlist || cell.kind() == SexpType::Language {
+        if !collect_bindings(cell.car(), found) {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
+}
+
 impl Compiler {
+    unsafe fn frame_may_bind(&self, symbol: Sexp) -> bool {
+        self.local_symbols.as_ref().is_none_or(|found| found.contains(&symbol))
+    }
+
     fn allocate(&mut self) -> u32 {
         let register = self.next_register;
         self.next_register += 1;
@@ -454,7 +545,8 @@ impl Compiler {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
         let cache = self.cache();
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, 0]);
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
         self.inline(call, primitive, dst, name, args)?;
         let done = self.emit_patchable(Op::Jump, &[0]);
         self.patch(guard);
@@ -688,7 +780,7 @@ fn operand_count(op: Op) -> usize {
         Op::CallBuiltin => 5,
         Op::CallGeneric => 3,
         Op::Ast => 2,
-        Op::Guard => 4,
+        Op::Guard => 5,
         Op::Jump => 1,
         Op::JumpUnless => 3,
         Op::Arithmetic => 7,
@@ -853,9 +945,13 @@ unsafe fn step(
         Op::Guard => {
             let symbol = constants.element(operand(0));
             let expected = constants.element(operand(1));
-            let found = lookup_function(symbol, env, constants, caches, operand(2));
+            let found = if operand(3) == 0 {
+                lookup_enclosing_function(symbol, env, constants, caches, operand(2))
+            } else {
+                lookup_function(symbol, env, constants, caches, operand(2))
+            };
             if !matches!(found, Ok(function) if function == expected) {
-                *pc = operand(3);
+                *pc = operand(4);
                 return Ok(None);
             }
         }
@@ -1074,8 +1170,13 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
 /// enclosing environments, or a full lookup that refills the cache.
 unsafe fn lookup_variable(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> R<Sexp> {
     let heap = crate::heap();
-    if heap.frame_cell(env, symbol).is_some() {
-        return eval::eval_symbol(symbol, env);
+    if let Some(cell) = heap.frame_cell(env, symbol) {
+        let value = cell.cdr();
+        let plain = !cell.has_gp(gp::ACTIVE_BINDING)
+            && value.kind() != SexpType::Promise
+            && value != missing_arg()
+            && value != unbound();
+        return if plain { Ok(value) } else { eval::eval_symbol(symbol, env) };
     }
     let enclosure = env.enclosure();
     if let Some(cell) = cached_cell(enclosure, constants, caches, slot)
@@ -1117,6 +1218,20 @@ unsafe fn lookup_function(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp
         fill_cache(enclosure, cell, constants, caches, slot);
     }
     eval::find_fun(symbol, env)
+}
+
+/// [`lookup_function`] for a symbol the frame cannot bind: the frame is not probed.
+unsafe fn lookup_enclosing_function(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> R<Sexp> {
+    let enclosure = env.enclosure();
+    if let Some(cell) = cached_cell(enclosure, constants, caches, slot)
+        && !cell.has_gp(gp::ACTIVE_BINDING)
+    {
+        let value = cell.cdr();
+        if values::is_function(value) {
+            return Ok(value);
+        }
+    }
+    lookup_function(symbol, env, constants, caches, slot)
 }
 
 unsafe fn cached_cell(enclosure: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> Option<Sexp> {

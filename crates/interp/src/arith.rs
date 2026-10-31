@@ -181,7 +181,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("Mod", 1, |call| unsafe { complex_part(call, 2) }).generic(Generic::Complex),
     builtin("Arg", 1, |call| unsafe { complex_part(call, 3) }).generic(Generic::Complex),
     builtin("Conj", 1, |call| unsafe { complex_part(call, 4) }).generic(Generic::Complex),
-    internal("complex", 4, do_complex),
+    internal("complex", 3, do_complex),
     internal("polyroot", 1, |call| unsafe { Err(call.error("polyroot is not supported")) }),
     internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
     internal("pmax", -1, |call| unsafe { parallel_extreme(call, true) }),
