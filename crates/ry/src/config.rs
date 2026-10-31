@@ -18,6 +18,8 @@ pub const LEGACY_CONFIG_FILE_NAME: &str = "roughly.toml";
 
 pub const CONFIG_FILE_NAMES: [&str; 2] = [CONFIG_FILE_NAME, LEGACY_CONFIG_FILE_NAME];
 
+pub const INLINE_ANNOTATIONS_OFF: &str = "inline type annotations are turned off (`[check] inline-annotations = false`), so ry does not check them and reports each one it finds";
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     pub format: format::Config,
@@ -41,6 +43,9 @@ pub struct CheckConfig {
     pub typing: bool,
     /// Also escalates unresolved-name findings to errors.
     pub strict: bool,
+    /// Inline type annotations (`x: integer <- 1L`). Off, they type nothing and each
+    /// one warns, for code that must also run under R, which cannot parse them.
+    pub inline_annotations: bool,
     /// Gitignore-style patterns anchored at the config file's directory; files named
     /// explicitly on the command line are always checked.
     pub exclude: Vec<String>,
@@ -53,12 +58,32 @@ impl Default for CheckConfig {
             maybe_undefined: false,
             typing: false,
             strict: false,
+            inline_annotations: true,
             exclude: Vec::new(),
         }
     }
 }
 
 impl Config {
+    /// What a host tells the user once per load: unknown keys, and inline annotations
+    /// being turned off, which ry warns about for as long as it lasts.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings: Vec<String> = self
+            .unknown_keys
+            .iter()
+            .map(|key| match suggested_table(key) {
+                Some(table) => format!(
+                    "ignoring config key `{key}`. It belongs under `[{table}]`, and nothing outside a table sets it"
+                ),
+                None => format!("ignoring unknown config key `{key}`. Check the spelling, or update ry"),
+            })
+            .collect();
+        if !self.check.inline_annotations {
+            warnings.push(INLINE_ANNOTATIONS_OFF.to_owned());
+        }
+        warnings
+    }
+
     /// Falls back to the default configuration when no config file governs `target`.
     pub fn discover(target: impl AsRef<Path>) -> Result<Config, ConfigError> {
         match find_config_file(target.as_ref())? {
