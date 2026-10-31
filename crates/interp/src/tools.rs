@@ -281,12 +281,14 @@ unsafe fn do_split_string(call: &NativeCall<'_>) -> R<Sexp> {
     string_vector(&pieces)
 }
 
-/// `getfmts(format)`: the conversion specifications of a `sprintf` format, without `%%` and
-/// without `n$` positions; a `*` width or precision adds a `*` entry before its specification.
+/// `getfmts(format)`: the conversion specifications of a `sprintf` format, one per argument
+/// they consume: without `%%`, a `*` width or precision taking an argument of its own before
+/// its specification, and an `n$` specification put at argument `n` without the position.
 unsafe fn do_getfmts(call: &NativeCall<'_>) -> R<Sexp> {
     let format = values::require_string(call.arg(0), "format")?;
     let bytes = format.as_bytes();
-    let mut specifications = Vec::new();
+    let mut specifications: Vec<String> = Vec::new();
+    let mut argument = 0;
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] != b'%' {
@@ -304,10 +306,12 @@ unsafe fn do_getfmts(call: &NativeCall<'_>) -> R<Sexp> {
             index += 1;
         }
         let mut specification = String::from("%");
-        if bytes.get(index) != Some(&b'$') {
-            index = digits_start;
-        } else {
+        if bytes.get(index) == Some(&b'$') {
+            let position: usize = format[digits_start..index].parse().unwrap_or(1);
+            argument = position.max(1) - 1;
             index += 1;
+        } else {
+            index = digits_start;
         }
         let mut stars = 0;
         while let Some(&byte) = bytes.get(index) {
@@ -332,8 +336,13 @@ unsafe fn do_getfmts(call: &NativeCall<'_>) -> R<Sexp> {
                 return Err(error(format!("unrecognised format specification '{shown}'")));
             }
         }
-        specifications.extend(std::iter::repeat_n("*".to_owned(), stars));
-        specifications.push(specification);
+        for entry in std::iter::repeat_n("*".to_owned(), stars).chain(std::iter::once(specification)) {
+            if specifications.len() <= argument {
+                specifications.resize(argument + 1, String::new());
+            }
+            specifications[argument] = entry;
+            argument += 1;
+        }
     }
     string_vector(&specifications)
 }

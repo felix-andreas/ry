@@ -1290,8 +1290,8 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         } else {
             nil()
         };
-        // Language arguments are evaluated by the call, as in GNU R; `quote = TRUE` quotes them
-        // in the R wrapper.
+        // A symbol or call among the arguments is evaluated in `envir`, as in GNU R; the R
+        // code quotes them first when `quote = TRUE`.
         items.push((tag, arguments.element(index)));
     }
     let new_call = values::pairlist(&items, SexpType::Language)?;

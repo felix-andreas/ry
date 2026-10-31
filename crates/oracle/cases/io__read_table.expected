@@ -1,0 +1,233 @@
+[stdout]
+|   a b c
+| 1 1 2 x
+| 2 3 4 y
+|           a           b           c 
+|   "integer"   "integer" "character" 
+| dim: 2 3  rownames: 1 2 
+|   V1 V2 V3
+| 1  a  b  c
+| 2  1  2  x
+| 3  3  4  y
+|          V1          V2          V3 
+| "character" "character" "character" 
+| dim: 3 3  rownames: 1 2 3 
+|    b c
+| r1 2 x
+| r2 4 y
+|           b           c 
+|   "integer" "character" 
+| dim: 2 2  rownames: r1 r2 
+|   x y
+| 1 1 2
+| 2 3 4
+|         x         y 
+| "integer" "integer" 
+| dim: 2 2  rownames: 1 2 
+|      x y
+| 1 1.50 a
+| 2 2.25 b
+|           x           y 
+|   "numeric" "character" 
+| dim: 2 2  rownames: 1 2 
+|   id     name score
+| 1  1 Smith, J   3.5
+| 2  2  O'Brien    NA
+| 3  3            4.0
+|          id        name       score 
+|   "integer" "character"   "numeric" 
+| dim: 3 3  rownames: 1 2 3 
+|   id name
+| 1  1    a
+| 2  2    b
+|        id      name 
+| "integer"  "factor" 
+| dim: 2 2  rownames: 1 2 
+|   id val
+| 1  1   2
+| 2  3   4
+|          id         val 
+| "character"   "numeric" 
+| dim: 2 2  rownames: 1 2 
+|   id val z
+| 1  1   2 a
+| 2  3   4 b
+|          id         val           z 
+|   "integer" "character" "character" 
+| dim: 2 3  rownames: 1 2 
+|   id z
+| 1  1 a
+| 2  3 b
+|        id         z 
+| "integer"  "factor" 
+| dim: 2 2  rownames: 1 2 
+|   V1 V2 V3
+| 1  1  2  3
+| 2  4  5 NA
+| 3  6 NA NA
+|        V1        V2        V3 
+| "integer" "integer" "integer" 
+| dim: 3 3  rownames: 1 2 3 
+|   a b
+| 1 1 2
+|         a         b 
+| "integer" "integer" 
+| dim: 1 2  rownames: 1 
+|   a b
+| 1 1 2
+| 2 3 4
+|         a         b 
+| "integer" "integer" 
+| dim: 2 2  rownames: 1 2 
+|    a  b
+| 1  1 NA
+| 2 NA  4
+|         a         b 
+| "integer" "integer" 
+| dim: 2 2  rownames: 1 2 
+|   a b
+| 1 1 x
+| 2 2 y
+|           a           b 
+|   "integer" "character" 
+| dim: 2 2  rownames: 1 2 
+|   a   b
+| 1 1  x 
+| 2 2   y
+|           a           b 
+|   "numeric" "character" 
+| dim: 2 2  rownames: 1 2 
+|   a           b
+| 1 1 hello world
+| 2 2            
+|           a           b 
+|   "integer" "character" 
+| dim: 2 2  rownames: 1 2 
+|     a    b
+| 1 1.5 2.00
+| 2 3.0 4.25
+|         a         b 
+| "numeric" "numeric" 
+| dim: 2 2  rownames: 1 2 
+|   my.col X2nd
+| 1      1    2
+|    my.col      X2nd 
+| "integer" "integer" 
+| dim: 1 2  rownames: 1 
+|   my col 2nd
+| 1      1   2
+|    my col       2nd 
+| "integer" "integer" 
+| dim: 1 2  rownames: 1 
+|   x y
+| 1 1 2
+| 2 1 3
+|         x         y 
+| "integer" "integer" 
+| dim: 2 2  rownames: 1 2 
+|   y
+| A 2
+| B 3
+|         y 
+| "integer" 
+| dim: 2 1  rownames: A B 
+|       x y
+| 1  TRUE 2
+| 2 FALSE 3
+| 3  TRUE 1
+|         x         y 
+| "logical" "integer" 
+| dim: 3 2  rownames: 1 2 3 
+|         x
+| 1 1.0e+05
+| 2 2.5e-03
+| 3    -Inf
+|         x 
+| "numeric" 
+| dim: 3 1  rownames: 1 2 3 
+|   a.b c.d
+| 1 1 2   3
+|         a.b         c.d 
+| "character"   "integer" 
+| dim: 1 2  rownames: 1 
+|     a b
+| 1 x"y 2
+|           a           b 
+| "character"   "integer" 
+| dim: 1 2  rownames: 1 
+|   P Q
+| 1 1 2
+|         P         Q 
+| "integer" "integer" 
+| dim: 1 2  rownames: 1 
+|   P Q
+| 1 1 2
+| 2 3 4
+|         P         Q 
+| "integer" "integer" 
+| dim: 2 2  rownames: 1 2 
+|   a b  c
+| 1 1 2 NA
+| 2 3 4  5
+|         a         b         c 
+| "integer" "integer" "integer" 
+| dim: 2 3  rownames: 1 2 
+|    a  b
+| 1  1  2
+| 2 NA NA
+| 3  3  4
+|         a         b 
+| "integer" "integer" 
+| dim: 3 2  rownames: 1 2 3 
+|            d
+| 1 2024-01-01
+| 2 2024-02-03
+|           d 
+| "character" 
+| dim: 2 1  rownames: 1 2 
+|   a a.1 b
+| 1 1   2 3
+|         a       a.1         b 
+| "integer" "integer" "integer" 
+| dim: 1 3  rownames: 1 
+|      x
+| 1 0001
+| 2 0002
+|           x 
+| "character" 
+| dim: 2 1  rownames: 1 2 
+|   x
+| 1 1
+| 2 2
+|         x 
+| "integer" 
+| dim: 2 1  rownames: 1 2 
+|   x y
+| 1 1 a
+| 2 2 b
+|         x         y 
+| "integer"  "factor" 
+| dim: 2 2  rownames: 1 2 
+| [1] "line 2 did not have 3 elements"
+| [1] "no lines available in input"
+| [1] "more columns than column names"
+|   a b
+| 1 1 2
+| 2 3 4
+|         a         b 
+| "integer" "integer" 
+| dim: 2 2  rownames: 1 2 
+| [1] 2 2 2
+| [1] "a,b"
+|   V1 V2
+| 1  1  2
+| 2  3  4
+|        V1        V2 
+| "integer" "integer" 
+| dim: 2 2  rownames: 1 2 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L
