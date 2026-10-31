@@ -207,6 +207,7 @@ If the user says:
 # Design bar
 
 - Aim for world-class implementation quality, not merely passing behavior.
+- (user directive) For compiler, runtime and JIT design, the quality bar is the state-of-the-art implementations Bend, vx-lang, goose and Roc. Measure design choices against them and adopt their best ideas where they fit R's C API constraints; the comparison lives in `docs/src/content/docs/contributing/design/prior-art.md`.
 - Use the simplest correct data model and implementation that can express the required semantics.
 - Do not introduce a complicated abstraction unless it removes real complexity.
 - Make illegal states unrepresentable whenever practical.
