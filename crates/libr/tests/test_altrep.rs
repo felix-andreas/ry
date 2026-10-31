@@ -55,9 +55,8 @@ fn integer_vector(r: &R, values: &[c_int]) -> Sexp {
 fn string_vector(r: &R, values: &[&str]) -> Sexp {
     let vector = r.keep(unsafe { (r.api().Rf_allocVector)(STRSXP, values.len() as isize) });
     for (index, value) in values.iter().enumerate() {
-        let element = unsafe {
-            (r.api().Rf_mkCharLenCE)(value.as_ptr().cast(), value.len() as c_int, 1)
-        };
+        let element =
+            unsafe { (r.api().Rf_mkCharLenCE)(value.as_ptr().cast(), value.len() as c_int, 1) };
         unsafe { (r.api().SET_STRING_ELT)(vector, index as isize, element) };
     }
     vector
@@ -94,8 +93,7 @@ fn the_expectation_is_gnu_r_s_report() {
     }
     let library = build_package("altreptest", Headers::GnuR);
     let output = temporary_file("altreptest-gnu-r.txt");
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packages/altreptest/expected.R");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packages/altreptest/expected.R");
     let status = Command::new("Rscript")
         .arg(script)
         .arg(&library)
@@ -133,7 +131,9 @@ fn classes_have_gnu_r_s_layout_and_names() {
     assert_eq!(text(r.element(names, 0)), "elt_only");
     assert_eq!(text(r.element(names, 1)), "altreptest");
     let plain = r.integer(1);
-    let names = r.call("altreptest_class_name", &[plain]).expect("class name");
+    let names = r
+        .call("altreptest_class_name", &[plain])
+        .expect("class name");
     assert_eq!(r.element(names, 0), r.nil());
 }
 
@@ -148,7 +148,8 @@ fn re_registering_a_class_updates_its_instances() {
     );
     let logical: unsafe extern "C" fn(c_int) -> Sexp = function(&r, "Rf_ScalarLogical");
     let yes = r.keep(unsafe { logical(1) });
-    r.call("altreptest_reregister", &[yes]).expect("re-register");
+    r.call("altreptest_reregister", &[yes])
+        .expect("re-register");
     let shifted = r.call("altreptest_integer_elts", &[x]).expect("elts");
     let no = r.keep(unsafe { logical(0) });
     r.call("altreptest_reregister", &[no]).expect("re-register");
@@ -163,7 +164,10 @@ fn defaults_fall_back_as_gnu_r_s_do() {
     // Get_region falls back to Elt one element at a time.
     let x = make(&r, "elt_only", 5);
     let region = r
-        .call("altreptest_integer_region", &[x, r.integer(1), r.integer(3)])
+        .call(
+            "altreptest_integer_region",
+            &[x, r.integer(1), r.integer(3)],
+        )
         .expect("region");
     assert_eq!(r.integers(region), vec![2, 4, 6]);
     assert_eq!(
@@ -172,7 +176,10 @@ fn defaults_fall_back_as_gnu_r_s_do() {
     );
     // A region past the end is cut short, and one starting at the end is empty.
     let region = r
-        .call("altreptest_integer_region", &[x, r.integer(5), r.integer(3)])
+        .call(
+            "altreptest_integer_region",
+            &[x, r.integer(5), r.integer(3)],
+        )
         .expect("region");
     assert_eq!(r.length(region), 0);
     // A class without Sum, Min or Max has no answer.
@@ -193,8 +200,13 @@ fn defaults_fall_back_as_gnu_r_s_do() {
     let view = r
         .call("altreptest_view", &[integer_vector(&r, &[1, 2])])
         .expect("view");
-    let copy = r.call("altreptest_shallow_duplicate", &[view]).expect("copy");
-    assert_eq!(class_of(&r, copy).expect("ALTREP")[0], Some("allocating".into()));
+    let copy = r
+        .call("altreptest_shallow_duplicate", &[view])
+        .expect("copy");
+    assert_eq!(
+        class_of(&r, copy).expect("ALTREP")[0],
+        Some("allocating".into())
+    );
     assert_eq!(
         r.integers(r.call("altreptest_counters", &[]).expect("counters"))[2],
         1
@@ -214,7 +226,10 @@ fn errors_in_methods_surface_as_r_errors() {
     let error = r
         .call("altreptest_integer_pointer", &[x])
         .expect_err("Dataptr raises");
-    assert!(error.contains("no data pointer for a failing vector"), "{error}");
+    assert!(
+        error.contains("no data pointer for a failing vector"),
+        "{error}"
+    );
     let error = r.call("altreptest_sums", &[x]).expect_err("Sum raises");
     assert!(error.contains("cannot sum a failing vector"), "{error}");
     let error = r
@@ -229,7 +244,10 @@ fn errors_in_methods_surface_as_r_errors() {
     assert_eq!(r.runtime_protect_depth(), 0);
     // The vector still works after its methods failed.
     let region = r
-        .call("altreptest_integer_region", &[x, r.integer(0), r.integer(3)])
+        .call(
+            "altreptest_integer_region",
+            &[x, r.integer(0), r.integer(3)],
+        )
         .expect("region before the failing element");
     assert_eq!(r.integers(region), vec![0, 1, 2]);
 }
@@ -245,7 +263,10 @@ fn a_writable_list_pointer_keeps_what_is_stored_through_it() {
     let stored = r
         .call("altreptest_store_through_pointer", &[view])
         .expect("store");
-    assert_eq!(r.strings(stored), vec![Some("stored through the pointer".into())]);
+    assert_eq!(
+        r.strings(stored),
+        vec![Some("stored through the pointer".into())]
+    );
     unsafe { (r.api().ry_collect)(0) };
     let again = r.call("altreptest_list_elts", &[view]).expect("elements");
     assert_eq!(
@@ -273,7 +294,10 @@ fn built_in_classes_behave_as_gnu_r_s() {
     assert_eq!(r.integers(r.element(sums, 0)), vec![55]);
     let descending = r.keep(unsafe { range(5, 3) });
     assert_eq!(
-        r.integers(r.call("altreptest_integer_elts", &[descending]).expect("elts")),
+        r.integers(
+            r.call("altreptest_integer_elts", &[descending])
+                .expect("elts")
+        ),
         vec![5, 4, 3]
     );
     assert_eq!(
@@ -287,16 +311,25 @@ fn built_in_classes_behave_as_gnu_r_s() {
     let doubles = r
         .call("altreptest_coerce", &[sequence, r.integer(REALSXP)])
         .expect("as double");
-    assert_eq!(class_of(&r, doubles).expect("compact")[0], Some("compact_realseq".into()));
+    assert_eq!(
+        class_of(&r, doubles).expect("compact")[0],
+        Some("compact_realseq".into())
+    );
     assert_eq!(r.reals(doubles)[9], 10.0);
     let strings = r
         .call("altreptest_coerce", &[sequence, r.integer(STRSXP)])
         .expect("as character");
-    assert_eq!(class_of(&r, strings).expect("deferred")[0], Some("deferred_string".into()));
+    assert_eq!(
+        class_of(&r, strings).expect("deferred")[0],
+        Some("deferred_string".into())
+    );
     assert_eq!(r.strings(strings)[9], Some("10".into()));
     // Writing materializes the sequence into data2 and drops what it vouched for.
     let written = r
-        .call("altreptest_set_integer", &[sequence, r.integer(1), r.integer(5)])
+        .call(
+            "altreptest_set_integer",
+            &[sequence, r.integer(1), r.integer(5)],
+        )
         .expect("write");
     assert_eq!(
         r.integers(r.call("altreptest_integer_elts", &[written]).expect("elts"))[..3],
@@ -317,7 +350,10 @@ fn built_in_classes_behave_as_gnu_r_s() {
     let source = integer_vector(&r, &[3, 1]);
     let wrap: unsafe extern "C" fn(Sexp) -> Sexp = function(&r, "R_tryWrap");
     let wrapped = r.keep(unsafe { wrap(source) });
-    assert_eq!(class_of(&r, wrapped).expect("wrapper")[0], Some("wrap_integer".into()));
+    assert_eq!(
+        class_of(&r, wrapped).expect("wrapper")[0],
+        Some("wrap_integer".into())
+    );
     let complex = r.keep(unsafe { (r.api().Rf_allocVector)(CPLXSXP, 1) });
     let wrapped_complex = r.keep(unsafe { wrap(complex) });
     assert_eq!(

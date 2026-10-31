@@ -170,12 +170,19 @@ unsafe extern "C" {
         x: Sexp,
         result: *mut *const c_void,
     ) -> c_int;
-    fn ry_altrep_int_elt(method: NativeIntElt, x: Sexp, index: R_xlen_t, result: *mut c_int)
-    -> c_int;
-    fn ry_altrep_real_elt(method: NativeRealElt, x: Sexp, index: R_xlen_t, result: *mut f64)
-    -> c_int;
-    fn ry_altrep_raw_elt(method: NativeRawElt, x: Sexp, index: R_xlen_t, result: *mut u8)
-    -> c_int;
+    fn ry_altrep_int_elt(
+        method: NativeIntElt,
+        x: Sexp,
+        index: R_xlen_t,
+        result: *mut c_int,
+    ) -> c_int;
+    fn ry_altrep_real_elt(
+        method: NativeRealElt,
+        x: Sexp,
+        index: R_xlen_t,
+        result: *mut f64,
+    ) -> c_int;
+    fn ry_altrep_raw_elt(method: NativeRawElt, x: Sexp, index: R_xlen_t, result: *mut u8) -> c_int;
     fn ry_altrep_complex_elt(
         method: NativeComplexElt,
         x: Sexp,
@@ -319,9 +326,9 @@ pub unsafe fn dataptr_or_null(object: Sexp) -> ApiResult<*const c_void> {
 
 pub unsafe fn int_elt(object: Sexp, index: R_xlen_t) -> ApiResult<i32> {
     match methods(object).int_elt {
-        Method::Native(method) => native(0, |result| {
-            ry_altrep_int_elt(method, object, index, result)
-        }),
+        Method::Native(method) => {
+            native(0, |result| ry_altrep_int_elt(method, object, index, result))
+        }
         Method::Builtin(method) => method(object, index),
         Method::Default => Ok(*(dataptr(object, true)? as *const i32).add(index as usize)),
     }
@@ -339,9 +346,9 @@ pub unsafe fn real_elt(object: Sexp, index: R_xlen_t) -> ApiResult<f64> {
 
 pub unsafe fn raw_elt(object: Sexp, index: R_xlen_t) -> ApiResult<u8> {
     match methods(object).raw_elt {
-        Method::Native(method) => native(0, |result| {
-            ry_altrep_raw_elt(method, object, index, result)
-        }),
+        Method::Native(method) => {
+            native(0, |result| ry_altrep_raw_elt(method, object, index, result))
+        }
         Method::Builtin(method) => method(object, index),
         Method::Default => Ok(*dataptr(object, true)?.add(index as usize)),
     }
@@ -652,6 +659,9 @@ pub unsafe fn unserialize(
     object_bit: c_int,
     levels: c_int,
 ) -> ApiResult<Option<Sexp>> {
+    for handle in [info, state, attributes] {
+        runtime().heap.root(handle);
+    }
     let class_symbol = info.car();
     let package_symbol = info.cdr().car();
     let Some(class) = find_class(class_symbol, package_symbol)? else {
@@ -724,7 +734,10 @@ fn registry<'a>() -> &'a mut Vec<Sexp> {
 
 /// The registered class with this class name and package, both symbols. ry's built-in classes
 /// are registered under package `base`.
-pub unsafe fn find_class(class_symbol: Sexp, package_symbol: Sexp) -> ApiResult<Option<AltrepClass>> {
+pub unsafe fn find_class(
+    class_symbol: Sexp,
+    package_symbol: Sexp,
+) -> ApiResult<Option<AltrepClass>> {
     builtins()?;
     Ok(lookup(class_symbol, package_symbol).map(|pointer| AltrepClass { pointer }))
 }
@@ -770,7 +783,10 @@ unsafe fn register(name: &[u8], package: &[u8], kind: SexpType) -> ApiResult<Alt
     let info = heap.cons(class_symbol, info)?;
     heap.set_attrib(pointer, info);
     heap.preserve(pointer);
-    match registry().iter_mut().find(|class| Some(**class) == existing) {
+    match registry()
+        .iter_mut()
+        .find(|class| Some(**class) == existing)
+    {
         Some(slot) => *slot = pointer,
         None => registry().push(pointer),
     }
@@ -814,17 +830,41 @@ macro_rules! method_setter {
     };
 }
 
-method_setter!(R_set_altrep_UnserializeEX_method, unserialize_ex, NativeUnserializeEx);
-method_setter!(R_set_altrep_Unserialize_method, unserialize, NativeUnserialize);
-method_setter!(R_set_altrep_Serialized_state_method, serialized_state, NativeState);
-method_setter!(R_set_altrep_DuplicateEX_method, duplicate_ex, NativeWithFlag);
+method_setter!(
+    R_set_altrep_UnserializeEX_method,
+    unserialize_ex,
+    NativeUnserializeEx
+);
+method_setter!(
+    R_set_altrep_Unserialize_method,
+    unserialize,
+    NativeUnserialize
+);
+method_setter!(
+    R_set_altrep_Serialized_state_method,
+    serialized_state,
+    NativeState
+);
+method_setter!(
+    R_set_altrep_DuplicateEX_method,
+    duplicate_ex,
+    NativeWithFlag
+);
 method_setter!(R_set_altrep_Duplicate_method, duplicate, NativeWithFlag);
 method_setter!(R_set_altrep_Coerce_method, coerce, NativeCoerce);
 method_setter!(R_set_altrep_Inspect_method, inspect, NativeInspect);
 method_setter!(R_set_altrep_Length_method, length, NativeLength);
 method_setter!(R_set_altvec_Dataptr_method, dataptr, NativeDataptr);
-method_setter!(R_set_altvec_Dataptr_or_null_method, dataptr_or_null, NativeDataptrOrNull);
-method_setter!(R_set_altvec_Extract_subset_method, extract_subset, NativeExtractSubset);
+method_setter!(
+    R_set_altvec_Dataptr_or_null_method,
+    dataptr_or_null,
+    NativeDataptrOrNull
+);
+method_setter!(
+    R_set_altvec_Extract_subset_method,
+    extract_subset,
+    NativeExtractSubset
+);
 method_setter!(R_set_altinteger_Elt_method, int_elt, NativeIntElt);
 method_setter!(R_set_altinteger_Get_region_method, get_region, NativeRegion);
 method_setter!(R_set_altinteger_Is_sorted_method, is_sorted, NativeQuery);
@@ -1347,14 +1387,15 @@ unsafe fn realseq_sum(object: Sexp, _remove_na: bool) -> ApiResult<Option<Sexp>>
     if expanded(object).is_some() {
         return Ok(None);
     }
-    Ok(Some(memory::scalar(SexpType::Real, sequence_total(object))?))
+    Ok(Some(memory::scalar(
+        SexpType::Real,
+        sequence_total(object),
+    )?))
 }
 
 /// `as.double(1:n)` stays compact.
 unsafe fn intseq_coerce(object: Sexp, target: SexpType) -> ApiResult<Option<Sexp>> {
-    if target != SexpType::Real
-        || expanded(object).is_some()
-        || object.attrib() != runtime().nil()
+    if target != SexpType::Real || expanded(object).is_some() || object.attrib() != runtime().nil()
     {
         return Ok(None);
     }
@@ -1451,9 +1492,9 @@ pub unsafe fn deferred_string(source: Sexp) -> ApiResult<Sexp> {
             "a deferred string conversion needs an integer or double vector without attributes",
         ));
     }
+    runtime().heap.root(source);
     let class = builtins()?.deferred_string;
     let heap = &mut runtime().heap;
-    heap.root(source);
     source.mark_not_mutable();
     let scipen = heap.alloc_vector(SexpType::Integer, 1)?;
     heap.root(scipen);
@@ -1491,7 +1532,9 @@ unsafe fn deferred_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
     let element = vectors::element_as_charsxp(source, index as usize)?;
     runtime().heap.root(element);
     let converted = deferred_storage(object)?;
-    runtime().heap.set_element(converted, index as usize, element);
+    runtime()
+        .heap
+        .set_element(converted, index as usize, element);
     Ok(element)
 }
 
@@ -1592,6 +1635,7 @@ unsafe fn deferred_unserialize(class: Sexp, state: Sexp) -> ApiResult<Sexp> {
 /// `x` under a wrapper that records `sorted` and `no_na`, or `x` itself when its type has no
 /// wrapper class. The wrapper carries a shallow copy of `x`'s attributes.
 pub unsafe fn wrap(object: Sexp, sorted: c_int, no_na: c_int) -> ApiResult<Sexp> {
+    runtime().heap.root(object);
     let builtins = builtins()?;
     let class = match object.kind() {
         SexpType::Integer => builtins.wrap_integer,
@@ -1602,10 +1646,11 @@ pub unsafe fn wrap(object: Sexp, sorted: c_int, no_na: c_int) -> ApiResult<Sexp>
         SexpType::String => builtins.wrap_string,
         _ => return Ok(object),
     };
-    runtime().heap.root(object);
     let metadata = runtime().heap.alloc_vector(SexpType::Integer, 2)?;
     runtime().heap.root(metadata);
-    metadata.slice_mut::<i32>().copy_from_slice(&[sorted, no_na]);
+    metadata
+        .slice_mut::<i32>()
+        .copy_from_slice(&[sorted, no_na]);
     let wrapper = new_altrep(class, object, metadata)?;
     memory::copy_attributes(wrapper, object, false)?;
     Ok(wrapper)
@@ -1697,7 +1742,9 @@ unsafe fn wrapper_duplicate(object: Sexp, deep: bool) -> ApiResult<Option<Sexp>>
     let (sorted, no_na) = wrapper_metadata(object);
     let metadata = runtime().heap.alloc_vector(SexpType::Integer, 2)?;
     runtime().heap.root(metadata);
-    metadata.slice_mut::<i32>().copy_from_slice(&[sorted, no_na]);
+    metadata
+        .slice_mut::<i32>()
+        .copy_from_slice(&[sorted, no_na]);
     let class = AltrepClass {
         pointer: object.tag(),
     };

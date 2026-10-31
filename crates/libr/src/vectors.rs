@@ -316,11 +316,7 @@ pub fn format_complex(value: Rcomplex) -> String {
         return "NA".into();
     }
     let imaginary = format_real(value.i.abs());
-    let sign = if value.i < 0.0 {
-        '-'
-    } else {
-        '+'
-    };
+    let sign = if value.i < 0.0 { '-' } else { '+' };
     format!("{}{sign}{imaginary}i", format_real(value.r))
 }
 
@@ -531,9 +527,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                 let value = match object.kind() {
                     SexpType::Integer | SexpType::Logical => int_to_real(int_elt(object, index)?),
                     SexpType::Real => real_elt(object, index)?,
-                    SexpType::Complex => {
-                        altrep::elt::<Rcomplex>(object, index as R_xlen_t)?.r
-                    }
+                    SexpType::Complex => altrep::elt::<Rcomplex>(object, index as R_xlen_t)?.r,
                     SexpType::String => {
                         let element = sexp_elt(object, index)?;
                         if element == runtime().heap.known().na_string {
@@ -1112,10 +1106,22 @@ macro_rules! or_null_api {
     };
 }
 
-or_null_api!(LOGICAL_OR_NULL, c_int, [SexpType::Logical], "LOGICAL", "logical");
+or_null_api!(
+    LOGICAL_OR_NULL,
+    c_int,
+    [SexpType::Logical],
+    "LOGICAL",
+    "logical"
+);
 or_null_api!(INTEGER_OR_NULL, c_int, INTEGER_TYPES, "INTEGER", "integer");
 or_null_api!(REAL_OR_NULL, f64, [SexpType::Real], "REAL", "numeric");
-or_null_api!(COMPLEX_OR_NULL, Rcomplex, [SexpType::Complex], "COMPLEX", "complex");
+or_null_api!(
+    COMPLEX_OR_NULL,
+    Rcomplex,
+    [SexpType::Complex],
+    "COMPLEX",
+    "complex"
+);
 or_null_api!(RAW_OR_NULL, u8, [SexpType::Raw], "RAW", "raw");
 
 #[unsafe(no_mangle)]

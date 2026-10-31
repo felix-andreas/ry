@@ -43,3 +43,7 @@ path = "tests/test_fuzz_native.rs"
 [[test]]
 name = "test_altrep"
 path = "tests/test_altrep.rs"
+
+[[test]]
+name = "test_altrep_api"
+path = "tests/test_altrep_api.rs"
