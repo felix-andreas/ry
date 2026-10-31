@@ -308,7 +308,11 @@ pub fn check_item_with_annotation<'db>(
                 // arguments against the definition's formals, so annotation mistakes report once.
                 let declared = TypeScheme {
                     binders: declared.binders,
-                    body: context.check_declared_function(*value, &function),
+                    body: context.check_declared_function(
+                        *value,
+                        &function,
+                        annotation.is_some_and(|annotation| annotation.inline_signature),
+                    ),
                 };
                 context.recorded.insert(root, declared.body);
                 scheme = Some(declared);
@@ -1079,7 +1083,8 @@ impl<'db> Checker<'db, '_> {
                         }
                         let body = match declared.body.kind(self.db) {
                             TyKind::Function(function) => {
-                                self.check_declared_function(value, function)
+                                let inline = self.is_inline_signature(id);
+                                self.check_declared_function(value, function, inline)
                             }
                             _ => declared.body,
                         };
@@ -1181,7 +1186,8 @@ impl<'db> Checker<'db, '_> {
                     let TyKind::Function(function) = declared.body.kind(self.db) else {
                         return unknown(self.db);
                     };
-                    let signature = self.check_declared_function(id, function);
+                    let inline = self.is_inline_signature(id);
+                    let signature = self.check_declared_function(id, function, inline);
                     return self.record(id, signature);
                 }
                 let parameters = parameters.clone();
@@ -1325,6 +1331,12 @@ impl<'db> Checker<'db, '_> {
         }
         let declared = annotation.declared.clone()?;
         matches!(declared.body.kind(self.db), TyKind::Function(_)).then_some(declared)
+    }
+
+    fn is_inline_signature(&self, annotated: ExprId) -> bool {
+        self.expression_annotations
+            .get(&annotated)
+            .is_some_and(|annotation| annotation.inline_signature)
     }
 
     fn apply_expression_annotation(
@@ -3022,10 +3034,13 @@ impl<'db> Checker<'db, '_> {
     /// An annotation declares parameter types, never the parameter list: R matches
     /// arguments against the `function(...)` formals, so the signature keeps their
     /// names, order, optionality, and `...`. Disagreements report here, never at a call.
+    /// An inline signature sits on the formals and cannot restate optionality, so
+    /// `inline_signature` skips the optionality checks: the formals alone decide it.
     fn check_declared_function(
         &mut self,
         function_id: ExprId,
         declared: &FunctionType<'db>,
+        inline_signature: bool,
     ) -> Ty<'db> {
         let module = self.module;
         let expression = module.expression(function_id);
@@ -3104,7 +3119,8 @@ impl<'db> Checker<'db, '_> {
             (None, None) => false,
             _ => true,
         };
-        let optional_mismatch = parameters.iter().any(|parameter| {
+        let optional_mismatch = !inline_signature
+            && parameters.iter().any(|parameter| {
             !is_optional(parameter)
                 && declared
                     .named
@@ -3123,7 +3139,7 @@ impl<'db> Checker<'db, '_> {
         }
         // A defaulted formal is optional whatever the annotation says; reporting it once
         // here keeps it from resurfacing at every caller.
-        for field in &declared.named {
+        for field in declared.named.iter().filter(|_| !inline_signature) {
             let name = field.name.text(self.db);
             if !field.optional
                 && parameters

@@ -26,6 +26,9 @@ pub struct Annotation<'db> {
     pub trusted: bool,
     /// `@if-unknown TYPE`: applies only where the checker has nothing better than `Unknown`.
     pub if_unknown: bool,
+    /// A function's own inline signature, which sits on the formals and so never restates
+    /// which parameters are optional.
+    pub inline_signature: bool,
     /// Shape violations. A block with any carries no typing payload, so it never cascades.
     pub errors: Vec<(String, TextRange)>,
     /// Violations reported only when type checking is on; like `errors`, they strip the payload.
@@ -272,6 +275,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
         .find(|child| child.kind() == SyntaxKind::RETURN_TYPE)
         .and_then(|ret| lowering.lower_child_type(&ret))
         .unwrap_or_else(|| unknown(db));
+    annotation.inline_signature = true;
     annotation.declared = Some(TypeScheme {
         binders: forall,
         body: Ty::new(
@@ -430,6 +434,8 @@ pub fn merge_annotations<'db>(
                 }),
             ),
         }),
+        // The comment's entries do restate optionality, so they are checked as written.
+        inline_signature: false,
         ..inline
     })
 }

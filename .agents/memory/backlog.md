@@ -201,6 +201,14 @@ type-level function the annotation language does not have.
 - A missing-argument error does not name the parameter, although the sibling wrong-name error lists
   all of them.
 - A near-miss suggestion has a length floor that misses a short field name, such as `person$nam`.
+- A generic lambda passed as an argument keeps its binders rigid, so
+  `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
+  on a function that is not bound should instantiate its binders like a call does.
+- A call that fails against a generic signature types its statement as the leaked rigid name, so
+  `twice("a")` against `<T: numeric> fn(x: T) -> T` renders `T` in the typing fixtures. It should
+  be `Unknown`.
+- The add-annotation code action writes a `#:` comment even in a project that uses inline
+  annotations. It could offer the inline form where inline annotations are on.
 
 ### What the round said overall
 
@@ -1753,6 +1761,8 @@ The end-to-end guard rests on the corpus suites.
   validation. All three need R.
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+
+- **Inline type annotations, the comment-agreement warning, and strict mode's untyped parameters.** `name: TYPE <- value`, typed parameters, `-> TYPE` and `function<T>`, sharing the `#:` grammar and lowering, with `annotation-mismatch`, `[check] inline-annotations`, and erasure to plain R. `decisions.md` has the record.
 
 - **`declares_arithmetic` is computed from the project as well as the stubs.** It consulted the stub
   library alone, while operator dispatch resolves a method through the global scope, which includes

@@ -104,6 +104,13 @@ greet <- function(name: character | NULL = NULL) -> character {
 #++++
 greet: fn([name]: character | NULL) -> character
 
+#---- missing_tested_parameter_is_optional_without_restating_it
+pad <- function(width: integer) if (missing(width)) 0L else width
+pad()
+#++++
+pad: fn([width]: integer) -> integer
+integer
+
 #---- rest_parameter_type
 join <- function(...: character) -> character paste0(...)
 join("a", 1L)
