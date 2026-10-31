@@ -497,8 +497,22 @@ fn every_declared_name_is_exported() {
         include.join("ry_embed.h"),
     ];
     for entry in std::fs::read_dir(include.join("R_ext")).expect("R_ext") {
-        headers.push(entry.expect("an entry").path());
+        let path = entry.expect("an entry").path();
+        // The stats headers declare routines the stats package provides through
+        // R_GetCCallable, defined package-locally by stats_stubs.h, not by libR.
+        if path
+            .file_name()
+            .is_some_and(|name| name == "stats_package.h" || name == "stats_stubs.h")
+        {
+            continue;
+        }
+        headers.push(path);
     }
+    headers.extend(
+        ["Rdefines.h", "Rembedded.h", "Rinterface.h"]
+            .iter()
+            .map(|name| include.join(name)),
+    );
     let mut missing = Vec::new();
     let mut checked = 0;
     for header in headers {
@@ -526,9 +540,19 @@ fn every_declared_name_is_exported() {
                 statements.push(std::mem::take(&mut current));
             }
         }
+        // Members of a struct body (the stream structs' callback fields) are not declarations.
+        let mut in_struct = false;
         for statement in statements {
             let line = statement.trim();
-            if line.starts_with("typedef") || line.starts_with('}') || !line.ends_with(';') {
+            if line.starts_with("struct ") && line.ends_with('{') {
+                in_struct = true;
+                continue;
+            }
+            if line.starts_with('}') {
+                in_struct = false;
+                continue;
+            }
+            if in_struct || line.starts_with("typedef") || !line.ends_with(';') {
                 continue;
             }
             let name = if let Some(variable) = line.strip_prefix("LibExtern ") {

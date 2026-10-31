@@ -897,6 +897,18 @@ RY_EXPORT void R_RestoreGlobalEnvFromFile(const char *name, Rboolean quiet)
     (void) quiet;
 }
 RY_EXPORT void R_setupHistory(void) {}
+RY_EXPORT void CleanEd(void) {}
+
+/* Reading Renviron files is the front end's job; the `ry` binary does it before libR starts. */
+RY_EXPORT void process_site_Renviron(void) {}
+RY_EXPORT void process_system_Renviron(void) {}
+RY_EXPORT void process_user_Renviron(void) {}
+
+/* Abandons the current computation, as an error with an empty message does. */
+RY_EXPORT void Rf_jump_to_toplevel(void)
+{
+    Rf_error("%s", "");
+}
 
 /* Task callbacks run after each top-level task; the interpreter calls ry_run_task_callbacks. */
 
@@ -1074,3 +1086,60 @@ RY_ALTREP_TRAMPOLINE(ry_altrep_inspect,
                       SEXP x, int pre, int deep, int pvec, void (*subtree)(SEXP, int, int, int),
                       int *result),
                      method(x, pre, deep, pvec, subtree))
+
+/* Serialization streams (crates/libr/src/serialize.rs). A stream's callbacks and persistence
+ * hooks are native code, so each runs inside its own context. */
+
+int ry_stream_out_bytes(void (*function)(R_outpstream_t, void *, int), R_outpstream_t stream,
+                        void *bytes, int length)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    function(stream, bytes, length);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_stream_in_bytes(void (*function)(R_inpstream_t, void *, int), R_inpstream_t stream,
+                       void *bytes, int length)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    function(stream, bytes, length);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_stream_in_char(int (*function)(R_inpstream_t), R_inpstream_t stream, int *result)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    *result = function(stream);
+    ry_context_pop(&context);
+    return 0;
+}
+
+int ry_stream_hook(SEXP (*function)(SEXP, SEXP), SEXP object, SEXP data, SEXP *result)
+{
+    RyContext context;
+    ry_context_push(&context);
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        return 1;
+    }
+    *result = function(object, data);
+    ry_context_pop(&context);
+    return 0;
+}

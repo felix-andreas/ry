@@ -31,6 +31,7 @@ pub mod hashtab;
 pub mod legacy;
 pub mod lists;
 pub mod memory;
+pub mod serialize;
 pub mod strings;
 pub mod vectors;
 
