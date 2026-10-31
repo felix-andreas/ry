@@ -1,0 +1,14 @@
+[package]
+name = "rcmd"
+description = "ry's R home and R CMD front end: package installation, SHLIB builds and R CMD config"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/rcmd.rs"
+
+[[bin]]
+name = "ry-rcmd"
+path = "src/main.rs"
