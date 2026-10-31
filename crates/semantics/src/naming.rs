@@ -4,6 +4,7 @@
 
 use crate::hir::{
     Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, UnaryOperator,
+    destructure_leaves,
 };
 use rustc_hash::FxHashMap;
 use std::collections::btree_map::Entry;
@@ -255,7 +256,9 @@ impl Context<'_> {
             } => {
                 // Value first: `x <- x + 1` reads the previous state. A replacement target goes
                 // first, so in `self$i <- self$i + 1` the value's reads land on the fresh binding.
-                if matches!(module.expression(*target).kind, ExpressionKind::NameRef(_)) {
+                if *spelling == AssignSpelling::Destructure
+                    || matches!(module.expression(*target).kind, ExpressionKind::NameRef(_))
+                {
                     self.resolve(*value);
                     self.resolve_assignment_target(id, *target, *spelling);
                 } else {
@@ -629,6 +632,17 @@ impl Context<'_> {
                 target,
                 value,
             } => {
+                if *spelling == AssignSpelling::Destructure {
+                    for leaf in destructure_leaves(module, *target).unwrap_or_default() {
+                        if let ExpressionKind::NameRef(name) = &module.expression(leaf).kind {
+                            self.frame_slot(
+                                name,
+                                module.expression(leaf).range,
+                                BindingKind::Local,
+                            );
+                        }
+                    }
+                }
                 let target = module.expression(*target);
                 if *spelling != AssignSpelling::Super
                     && let ExpressionKind::NameRef(name) = &target.kind
@@ -744,6 +758,18 @@ impl Context<'_> {
             return;
         }
         let module = self.module;
+        if spelling == AssignSpelling::Destructure {
+            for leaf in destructure_leaves(module, target).unwrap_or_default() {
+                if let ExpressionKind::NameRef(name) = &module.expression(leaf).kind {
+                    let range = module.expression(leaf).range;
+                    let kind = self.assignment_binding_kind();
+                    let slot = self.frame_slot(name, range, kind);
+                    self.naming.resolutions.insert(leaf, slot);
+                    self.record_write_site(assignment, name, range, slot, false);
+                }
+            }
+            return;
+        }
         let target_expression = module.expression(target);
         match &target_expression.kind {
             // `"x" <- 1` is `x <- 1` in R.
