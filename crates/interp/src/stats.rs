@@ -10,7 +10,7 @@
 use crate::{
     builtin_libraries::{NativeCall, NativeFn, c_result},
     coerce::coerce_vector,
-    stats_models, stats_optimize,
+    stats_deriv, stats_models, stats_optimize,
     unwind::R,
     values::{self, length, symbols},
 };
@@ -33,6 +33,8 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("do_fmin", stats_optimize::do_fmin),
     ("call_dqags", stats_optimize::call_dqags),
     ("call_dqagi", stats_optimize::call_dqagi),
+    ("doD", stats_deriv::do_d),
+    ("deriv", stats_deriv::deriv),
     ("cov", cov),
     ("cor", cor),
     ("Cdist", cdist),

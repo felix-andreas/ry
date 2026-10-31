@@ -996,6 +996,10 @@ unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
     };
     let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
     let nlines = values::as_integer_scalar(call.arg(4));
+    // `backtick = FALSE`, the default for a symbol, prints a non-syntactic name bare.
+    if object.kind() == SexpType::Symbol && values::as_logical_scalar(call.arg(2)) == 0 && opts & options::QUOTE_EXPRESSIONS == 0 {
+        return values::scalar_string(&symbol_name(object));
+    }
     let mut lines = deparse_lines(object, cutoff, opts);
     if nlines > 0 && (nlines as usize) < lines.len() {
         lines.truncate(nlines as usize);
