@@ -56,3 +56,11 @@ index, a table type on Polars, and the order to build it in. Nothing on it is im
 What Roc, Bend, goose and Vx do best in memory management, compilation, typing and C interop, and
 which of their ideas the R runtime adopts or rejects given that R's C API must keep working. It is
 written as an Open Knowledge Format v0.2 concept document, with sources in its frontmatter.
+
+### [Packaging and R versions](/contributing/design/packaging/)
+
+How ry installs packages, pins environments and picks an R version and runtime, so that its
+packaging works as well as uv's does for Python while renv projects keep working unchanged. It
+compares rv, rig, rpx, renv, pak, P3M and r-universe, with measured install times for the benchmark
+closure, and decides on a package manager built into ry whose lockfile feeds the checker. Nothing on
+it is implemented.
