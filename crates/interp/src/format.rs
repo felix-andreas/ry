@@ -254,20 +254,32 @@ pub fn format_complex_with(value: Rcomplex, real: RealFormat, imaginary: RealFor
 }
 
 pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFormat, RealFormat) {
-    let reals: Vec<f64> = values
+    // GNU R first rounds each number to `digits` significant digits of its larger part, so
+    // a small part shows no more decimals than that precision supports.
+    let rounded: Vec<Rcomplex> = values
         .iter()
         .filter(|value| !is_na_real(value.r) && !is_na_real(value.i))
-        .map(|value| value.r)
+        .map(|value| round_complex(*value, settings.digits))
         .collect();
-    let imaginaries: Vec<f64> = values
-        .iter()
-        .filter(|value| !is_na_real(value.r) && !is_na_real(value.i))
-        .map(|value| value.i.abs())
-        .collect();
+    let reals: Vec<f64> = rounded.iter().map(|value| value.r).collect();
+    let imaginaries: Vec<f64> = rounded.iter().map(|value| value.i.abs()).collect();
     (
         format_real_common(&reals, settings),
         format_real_common(&imaginaries, settings),
     )
+}
+
+/// `value` with both parts rounded to `digits` significant digits of the larger part.
+fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
+    let magnitude = [value.r.abs(), value.i.abs()].into_iter().filter(|part| part.is_finite()).fold(0.0, f64::max);
+    if magnitude == 0.0 {
+        return value;
+    }
+    let decimals = digits as i32 - magnitude.log10().floor() as i32 - 1;
+    if decimals > 306 {
+        return value;
+    }
+    Rcomplex { r: crate::arith::round_digits(value.r, decimals), i: crate::arith::round_digits(value.i, decimals) }
 }
 
 pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
