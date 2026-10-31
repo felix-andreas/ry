@@ -1,5 +1,6 @@
 use salsa::Setter;
 use semantics::diagnostics::file_diagnostics;
+use semantics::load_index::{PackageFile, PackageSources, package_index};
 use semantics::testing::ProbeDatabase;
 use semantics::types::{Atomic, scalar, unknown};
 use semantics::{
@@ -216,4 +217,109 @@ fn editing_an_inline_annotation_rechecks_the_item_and_its_readers_only() {
     db.edit(files[0], "count: double <- 1L\n".to_owned());
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["count", "use_count"]);
+}
+
+fn package(
+    db: &ProbeDatabase,
+    files: &[(&str, &str)],
+    namespace: &str,
+) -> (PackageSources, Vec<SourceFile>) {
+    let files: Vec<PackageFile> = files
+        .iter()
+        .map(|(path, text)| PackageFile {
+            path: (*path).to_owned(),
+            file: SourceFile::new(db, (*text).to_owned(), DocumentKind::Package),
+        })
+        .collect();
+    let handles = files.iter().map(|file| file.file).collect();
+    let sources = PackageSources::new(
+        db,
+        files,
+        namespace.to_owned(),
+        "Package: demo\nVersion: 1.0\n".to_owned(),
+    );
+    (sources, handles)
+}
+
+const LOAD_QUERIES: &[&str] = &[
+    "item_load",
+    "file_items",
+    "item_immediate_reads",
+    "package_index",
+];
+
+#[test]
+fn a_body_edit_rederives_one_item_of_the_load_index() {
+    let mut db = ProbeDatabase::default();
+    let (sources, files) = package(
+        &db,
+        &[
+            (
+                "R/a.R",
+                "first <- function() 1\nsecond <- function() 2\nvalue <- first()\n",
+            ),
+            ("R/b.R", "third <- function() 3\nsetClass(\"Point\")\n"),
+        ],
+        "export(first)\n",
+    );
+    package_index(&db, sources);
+    db.executions_since(&[]);
+
+    db.edit(
+        files[0],
+        "first <- function() 10\nsecond <- function() 2\nvalue <- first()\n",
+    );
+    let index = package_index(&db, sources);
+    assert_eq!(
+        db.executions_since(LOAD_QUERIES),
+        [1, 1, 0, 1],
+        "only the edited item's load facts and its own file's layer run again"
+    );
+    assert_eq!(
+        index.files[0].items.items[0].hash,
+        item_hash("first <- function() 10")
+    );
+}
+
+#[test]
+fn a_namespace_edit_rederives_no_item() {
+    let mut db = ProbeDatabase::default();
+    let (sources, _) = package(
+        &db,
+        &[("R/a.R", "first <- function() 1\nvalue <- first()\n")],
+        "export(first)\n",
+    );
+    package_index(&db, sources);
+    db.executions_since(&[]);
+
+    sources
+        .set_namespace(&mut db)
+        .to("export(first)\nexport(value)\n".to_owned());
+    let index = package_index(&db, sources);
+    assert_eq!(db.executions_since(LOAD_QUERIES), [0, 0, 0, 1]);
+    assert_eq!(index.namespace.exports, ["first", "value"]);
+}
+
+#[test]
+fn moving_a_statement_down_keeps_its_load_facts() {
+    let mut db = ProbeDatabase::default();
+    let (sources, files) = package(
+        &db,
+        &[("R/a.R", "value <- helper()\nhelper <- function() 1\n")],
+        "",
+    );
+    package_index(&db, sources);
+    db.executions_since(&[]);
+
+    db.edit(files[0], "\n\nvalue <- helper()\nhelper <- function() 1\n");
+    package_index(&db, sources);
+    assert_eq!(
+        db.executions_since(LOAD_QUERIES),
+        [0, 1, 0, 1],
+        "positions are per-file facts, so only the file layer runs again"
+    );
+}
+
+fn item_hash(text: &str) -> u64 {
+    semantics::load_index::fnv1a(text.as_bytes())
 }

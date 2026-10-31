@@ -20,6 +20,34 @@ impl Module {
     }
 }
 
+/// The names a zeallot pattern binds, in order; `None` unless the pattern is `c()` or `list()`
+/// of names and nested patterns (a computed element makes it an ordinary operator call).
+pub fn destructure_leaves(module: &Module, pattern: ExprId) -> Option<Vec<ExprId>> {
+    fn collect(module: &Module, pattern: ExprId, leaves: &mut Vec<ExprId>) -> Option<()> {
+        let ExpressionKind::Call { callee, arguments } = &module.expression(pattern).kind else {
+            return None;
+        };
+        let ExpressionKind::NameRef(name) = &module.expression(*callee).kind else {
+            return None;
+        };
+        if name != "c" && name != "list" {
+            return None;
+        }
+        for argument in arguments {
+            let value = argument.value?;
+            match module.expression(value).kind {
+                ExpressionKind::NameRef(_) => leaves.push(value),
+                ExpressionKind::Call { .. } => collect(module, value, leaves)?,
+                _ => return None,
+            }
+        }
+        Some(())
+    }
+    let mut leaves = Vec::new();
+    collect(module, pattern, &mut leaves)?;
+    Some(leaves)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expression {
     pub kind: ExpressionKind,
@@ -32,6 +60,9 @@ pub enum AssignSpelling {
     Local,
     Equals,
     Super,
+    /// zeallot's `c(a, b) %<-% value` (and `value %->% c(a, b)`): binds every name in the
+    /// `c()` or `list()` pattern, so the target is the pattern call, not a single name.
+    Destructure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -541,6 +572,23 @@ impl Module {
         };
         let lhs = self.lower_optional(lhs, range);
         let rhs = self.lower_optional(rhs, range);
+        if operator == BinaryOperator::Special {
+            let (pattern, value) = match operator_token.text() {
+                "%<-%" => (lhs, rhs),
+                "%->%" => (rhs, lhs),
+                _ => (lhs, lhs),
+            };
+            if pattern != value && destructure_leaves(self, pattern).is_some() {
+                return self.allocate(
+                    ExpressionKind::Assign {
+                        spelling: AssignSpelling::Destructure,
+                        target: pattern,
+                        value,
+                    },
+                    range,
+                );
+            }
+        }
         let special_name =
             (operator == BinaryOperator::Special).then(|| operator_token.text().to_owned());
         self.allocate(

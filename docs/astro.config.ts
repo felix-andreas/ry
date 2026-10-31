@@ -68,6 +68,7 @@ export default defineConfig({
 						{ slug: 'guides/formatting' },
 						{ slug: 'guides/editors' },
 						{ slug: 'guides/console' },
+						{ slug: 'guides/loading-packages' },
 					],
 				},
 				{
@@ -91,6 +92,7 @@ export default defineConfig({
 					items: [
 						{ slug: 'reference/configuration' },
 						{ slug: 'reference/cli' },
+						{ slug: 'reference/package-loading' },
 						{ slug: 'reference/diagnostic-codes' },
 						{ slug: 'reference/formatting-rules' },
 						{ slug: 'reference/type-system' },

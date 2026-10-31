@@ -648,6 +648,8 @@ as.difftime : fn(tim: Any, [format]: character, [units]: character) -> difftime
 strftime : fn(x: Any, [format]: character, [tz]: character, [usetz]: logical, ...: Any) -> character
 strptime : fn(x: Any, format: character, [tz]: character) -> POSIXct
 weekdays : fn(x: Any, [abbreviate]: logical) -> character
+# lubridate adds months.numeric, which builds a period (`months(1)`).
+months : fn(x: double | integer) -> Any
 months : fn(x: Any, [abbreviate]: logical) -> character
 julian : Any
 

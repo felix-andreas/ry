@@ -48,6 +48,11 @@ stats path=".":
 perf:
     cargo test -p semantics --release --test test_perf -- --ignored --nocapture
 
+# Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
+bench *args:
+    cargo build --release -p ry-lang
+    python3 -I tools/bench/run.py {{ args }}
+
 # Drives `ry repl` through a pty against the system R; skips without R.
 repl-e2e:
     cargo test -p ry-lang --test test_repl_e2e -- --nocapture
