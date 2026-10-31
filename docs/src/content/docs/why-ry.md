@@ -49,10 +49,10 @@ functions and lists. [Limitations](/type-checking/limitations) lists what is not
 ry is growing into a backwards-compatible implementation of R itself, so that existing R code and
 packages run unchanged with static typing on top. Today it is a type-checked R toolchain: a checker,
 a language server, a formatter, a loader that runs a package from its sources, and a console that
-runs your installed R. Beside these, the first parts of a runtime exist: an ABI-compatible C API
-for compiled packages, an interpreter (`ry run --runtime ry`) that already checks
-[inline annotations](/type-checking/inline-annotations) while it runs, and an engine for a typed
-table type. The runtime is incomplete: it still reads base R from your GNU R installation, and a
+runs your installed R. Beside these, the first parts of a runtime exist. There is an ABI-compatible C API for compiled
+packages, and an interpreter (`ry run --runtime ry`) that already checks
+[inline annotations](/type-checking/inline-annotations) while it runs. There is also an engine for a
+typed table type. The runtime is incomplete: it still reads base R from your GNU R installation, and a
 script that uses something it lacks stops with an error that names it. For real work, run on GNU R.
 
 ## Status

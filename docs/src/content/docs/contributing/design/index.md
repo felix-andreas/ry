@@ -59,5 +59,5 @@ written as an Open Knowledge Format v0.2 concept document, with sources in its f
 How packages install into ry's runtime (prebuilt GNU R 4.6 binaries load unchanged through the
 ABI-compatible `libR`), how ry chooses between GNU R and its own runtime and between R versions while
 the runtime is incomplete, and what the lazy loader, the analysis and the corpus read from an
-installed library. A package manager of ry's own is left open. Only package installation and the explicit runtime
-choice are implemented.
+installed library. A package manager of ry's own is left open. Only package installation and the
+explicit runtime choice are implemented.
