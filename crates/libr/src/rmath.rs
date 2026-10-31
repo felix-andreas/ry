@@ -16,6 +16,14 @@
 //! those from its vectorized wrappers, not from C), and an `NA` argument comes back as that
 //! same `NA` because the arithmetic that propagates it keeps the payload.
 
+// The coefficients are the published ones, written with the digits their sources give (some
+// round to a `std::f64::consts` value, some carry more digits than a double holds) so that
+// they read against the papers.
+#![allow(clippy::excessive_precision, clippy::approx_constant)]
+// Loops written `if !(a > b) { break }` must end when a comparison meets NaN, as the C
+// `do ... while (a > b)` they follow does; `a <= b` would loop forever.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 use crate::{
     arith::Rng,
     boundary::{self, ApiResult, enter, error},
@@ -1613,9 +1621,9 @@ fn dpsifn(x: f64, n: c_int, kode: c_int, ans: &mut [f64]) -> c_int {
                 pi_power *= M_PI;
             }
             // ans holds (-1)^(k+1)/k! psi^(k)(1 - x); convert, reflect and convert back.
-            let sign = if k % 2 == 0 { -1.0 } else { 1.0 };
+            let sign = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
             let psi_reflected = sign * factorial * *slot;
-            let parity = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let parity = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
             let psi = parity * psi_reflected - pi_power * cot[k];
             *slot = sign * psi / factorial;
         }
@@ -2266,7 +2274,7 @@ fn pd_upper_series(x: f64, y: f64, log: bool) -> f64 {
         y += 1.0;
         term *= x / y;
         sum += term;
-        if term <= sum * DBL_EPSILON {
+        if !(term > sum * DBL_EPSILON) {
             break;
         }
     }
@@ -2300,7 +2308,7 @@ fn dpnorm(x: f64, lower: bool, lp: f64) -> f64 {
             term *= -i / x2;
             sum += term;
             i += 2.0;
-            if term.abs() <= DBL_EPSILON * sum {
+            if !(term.abs() > DBL_EPSILON * sum) {
                 break;
             }
         }
@@ -2401,7 +2409,7 @@ fn pgamma_smallx(x: f64, alph: f64, lower: bool, log: bool) -> f64 {
         c *= -x / n;
         let term = c / (alph + n);
         sum += term;
-        if term.abs() <= DBL_EPSILON * sum.abs() {
+        if !(term.abs() > DBL_EPSILON * sum.abs()) {
             break;
         }
     }
@@ -2543,7 +2551,7 @@ pub fn qchisq_appr(p: f64, nu: f64, g: f64, lower: bool, log: bool, tol: f64) ->
             let p2 = ch * (C9 + ch * (C8 + ch));
             let t = -0.5 + (C7 + 2.0 * ch) * p1 - (C9 + ch * (C10 + 3.0 * ch)) / p2;
             ch -= (1.0 - (a + 0.5 * ch).exp() * p2 * p1) / t;
-            if (q - ch).abs() <= tol * ch.abs() {
+            if !((q - ch).abs() > tol * ch.abs()) {
                 break;
             }
         }
@@ -3405,7 +3413,7 @@ fn fpser(a: f64, b: f64, x: f64, eps: f64, log: bool) -> f64 {
         t *= x;
         let c = t / an;
         s += c;
-        if c.abs() <= tol {
+        if !(c.abs() > tol) {
             break;
         }
     }
@@ -3435,7 +3443,7 @@ fn apser(a: f64, b: f64, x: f64, eps: f64) -> f64 {
         t *= x - bx / j;
         let aj = t / j;
         s += aj;
-        if aj.abs() <= tol {
+        if !(aj.abs() > tol) {
             break;
         }
     }
@@ -4007,7 +4015,7 @@ fn grat_r(a: f64, x: f64, log_r: f64, eps: f64) -> f64 {
             c *= -(x / an);
             let t = c / (a + an);
             sum += t;
-            if t.abs() <= tol {
+            if !(t.abs() > tol) {
                 break;
             }
         }
@@ -4038,7 +4046,7 @@ fn grat_r(a: f64, x: f64, log_r: f64, eps: f64) -> f64 {
             a2n = a2n_1 + c_a * a2n;
             b2n = b2n_1 + c_a * b2n;
             let an0 = a2n / b2n;
-            if (an0 - am0).abs() < eps * an0 {
+            if !((an0 - am0).abs() >= eps * an0) {
                 return an0;
             }
         }
@@ -4796,7 +4804,11 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
     // quantile near either end keeps its relative precision. When the quantile lies above
     // 1/2, t = 1 - x follows Beta(q, p). The equation is on the log scale of whichever tail
     // probability is smaller, the one the arguments represent accurately.
-    let near_zero = log_lower <= pbeta(0.5, p, q, true, true);
+    let log_half = pbeta(0.5, p, q, true, true);
+    if log_lower == log_half {
+        return 0.5;
+    }
+    let near_zero = log_lower < log_half;
     let (a, b) = if near_zero { (p, q) } else { (q, p) };
     let use_lower = log_lower <= log_upper;
     let (target, t_lower) = match (near_zero, use_lower) {
@@ -4815,6 +4827,10 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
         t = 0.25;
     }
     let lbeta_ab = lbeta(a, b);
+    if !lbeta_ab.is_finite() || !(a + b).is_finite() {
+        // The parameters are beyond what the density can be evaluated at, as in GNU R.
+        return f64::NAN;
+    }
     let mut lo = 0.0_f64;
     let mut hi = 0.5_f64;
     for _ in 0..1000 {
@@ -5712,7 +5728,7 @@ pub fn qt(p: f64, ndf: f64, lower: bool, log: bool) -> f64 {
             if ndf < 5.0 {
                 c += 0.3 * (ndf - 4.5) * (x + 0.6);
             }
-            c = (((0.05 * d * x - 5.0) * x - 7.0) * x - 2.0) * x + b + c;
+            c += (((0.05 * d * x - 5.0) * x - 7.0) * x - 2.0) * x + b;
             y = (((((0.4 * y + 6.3) * y + 36.0) * y + 94.5) / c - y - 3.0) / b + 1.0) * x;
             y = (a * y * y).exp_m1();
             q = (ndf * y).sqrt();
@@ -6194,7 +6210,7 @@ pub fn qnchisq(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         } else {
             lx = nx;
         }
-        if (ux - lx) / nx <= ACCU {
+        if !((ux - lx) / nx > ACCU) {
             break;
         }
     }
@@ -6247,7 +6263,7 @@ pub fn dnbeta(x: f64, a: f64, b: f64, ncp: f64, log: bool) -> f64 {
         k += 1.0;
         term *= q;
         sum += term;
-        if term <= sum * EPS {
+        if !(term > sum * EPS) {
             break;
         }
     }
@@ -6368,7 +6384,7 @@ pub fn qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         } else {
             lx = nx;
         }
-        if (ux - lx) / nx <= ACCU {
+        if !((ux - lx) / nx > ACCU) {
             break;
         }
     }
@@ -6630,7 +6646,7 @@ pub fn qnt(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         } else {
             lx = nx;
         }
-        if (ux - lx) <= fmax2(lx.abs(), ux.abs()) * ACCU {
+        if !((ux - lx) > fmax2(lx.abs(), ux.abs()) * ACCU) {
             break;
         }
     }
@@ -7018,7 +7034,7 @@ pub fn qwilcox(x: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
     let mut q = 0usize;
     if x <= 0.5 {
         x -= 10.0 * DBL_EPSILON;
-        loop {
+        while q + 1 < counts.len() {
             p += counts[q] / c;
             if p >= x {
                 break;
@@ -7028,13 +7044,14 @@ pub fn qwilcox(x: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
         q as f64
     } else {
         x = 1.0 - x + 10.0 * DBL_EPSILON;
-        loop {
+        while q + 1 < counts.len() {
             p += counts[q] / c;
             if p > x {
-                return m * n - q as f64;
+                break;
             }
             q += 1;
         }
+        m * n - q as f64
     }
 }
 
@@ -7136,7 +7153,7 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
     let mut q = 0usize;
     if x <= 0.5 {
         x -= 10.0 * DBL_EPSILON;
-        loop {
+        while q + 1 < counts.len() {
             p += counts[q] * f;
             if p >= x {
                 break;
@@ -7146,13 +7163,14 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
         q as f64
     } else {
         x = 1.0 - x + 10.0 * DBL_EPSILON;
-        loop {
+        while q + 1 < counts.len() {
             p += counts[q] * f;
             if p > x {
-                return n * (n + 1.0) / 2.0 - q as f64;
+                break;
             }
             q += 1;
         }
+        n * (n + 1.0) / 2.0 - q as f64
     }
 }
 
@@ -7220,8 +7238,45 @@ const BESSEL_MAXIT: usize = 10_000_000;
 /// Downward recurrences rescale past this magnitude so that a high order does not overflow.
 const BESSEL_BIG: f64 = 1e250;
 
-/// `exp(-x) I_nu(x)` and `exp(x) K_nu(x)` for `x > 0` and `nu >= 0`.
+/// `exp(-x) I_nu(x)` and `exp(x) K_nu(x)` for `x > 0` and `nu >= 0`, by the asymptotic
+/// expansion where `x` is large against `nu^2` and by Temme's method elsewhere.
 fn bessel_ik_scaled(x: f64, nu: f64) -> (f64, f64) {
+    if x >= 50.0 && x >= 2.0 * nu * nu {
+        return bessel_ik_asymptotic(x, nu);
+    }
+    bessel_ik_temme(x, nu)
+}
+
+/// `exp(-x) I_nu(x) ~ (2 pi x)^(-1/2) sum (-1)^k a_k / x^k` and
+/// `exp(x) K_nu(x) ~ (pi / (2 x))^(1/2) sum a_k / x^k`, with
+/// `a_k = prod_{j <= k} (4 nu^2 - (2j - 1)^2) / (k! 8^k)`.
+fn bessel_ik_asymptotic(x: f64, nu: f64) -> (f64, f64) {
+    let mu = 4.0 * nu * nu;
+    let z8 = 8.0 * x;
+    let mut term: f64 = 1.0;
+    let mut i_sum = 1.0;
+    let mut k_sum = 1.0;
+    let mut k = 1.0;
+    loop {
+        let next = term * (mu - (2.0 * k - 1.0) * (2.0 * k - 1.0)) / (k * z8);
+        if next.abs() > term.abs() || next == 0.0 {
+            break;
+        }
+        term = next;
+        k_sum += term;
+        i_sum += if (k as i64) % 2 == 1 { -term } else { term };
+        if term.abs() < DBL_EPSILON * 1e-3 {
+            break;
+        }
+        k += 1.0;
+    }
+    (
+        i_sum / (2.0 * M_PI * x).sqrt(),
+        k_sum * (M_PI / (2.0 * x)).sqrt(),
+    )
+}
+
+fn bessel_ik_temme(x: f64, nu: f64) -> (f64, f64) {
     let nl = (nu + 0.5) as usize;
     let xmu = nu - nl as f64;
     let xmu2 = xmu * xmu;
@@ -7240,7 +7295,9 @@ fn bessel_ik_scaled(x: f64, nu: f64) -> (f64, f64) {
         c = b + 1.0 / c;
         let del = c * d;
         h *= del;
-        if (del - 1.0).abs() < BESSEL_EPS {
+        // At tiny x the terms overflow; callers then use only the parts that do not need
+        // the ratio.
+        if !((del - 1.0).abs() >= BESSEL_EPS) {
             break;
         }
     }
@@ -7323,7 +7380,7 @@ fn bessel_ik_scaled(x: f64, nu: f64) -> (f64, f64) {
             q += c * qnew;
             b += 2.0;
             d = 1.0 / (b + a * d);
-            delh = (b * d - 1.0) * delh;
+            delh *= b * d - 1.0;
             h += delh;
             let dels = q * delh;
             s += dels;
@@ -7384,7 +7441,7 @@ fn bessel_jy(x: f64, nu: f64) -> (f64, f64) {
         if d < 0.0 {
             isign = -isign;
         }
-        if (del - 1.0).abs() < BESSEL_EPS {
+        if !((del - 1.0).abs() >= BESSEL_EPS) {
             break;
         }
     }
@@ -7581,7 +7638,7 @@ fn bessel_i_series(x: f64, nu: f64) -> f64 {
     loop {
         term *= quarter_square / (k * (nu + k));
         sum += term;
-        if term < DBL_EPSILON * 0.25 * sum {
+        if !(term >= DBL_EPSILON * 0.25 * sum) {
             break;
         }
         k += 1.0;
@@ -7759,7 +7816,7 @@ fn bessel_j_series(x: f64, nu: f64) -> f64 {
     loop {
         term *= -quarter_square / (k * (nu + k));
         sum += term;
-        if term.abs() < DBL_EPSILON * 0.25 * sum.abs() {
+        if !(term.abs() >= DBL_EPSILON * 0.25 * sum.abs()) {
             break;
         }
         k += 1.0;
@@ -8219,10 +8276,10 @@ pub fn rpois(rng: &mut Rng, mu: f64) -> f64 {
                 }
             }
             l += 1;
-            for k in l..=35 {
+            for (k, cumulative) in pp.iter_mut().enumerate().skip(l) {
                 p *= mu / k as f64;
                 q += p;
-                pp[k] = q;
+                *cumulative = q;
                 if u <= q {
                     return k as f64;
                 }

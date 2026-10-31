@@ -538,7 +538,16 @@ fn every_declared_name_is_exported() {
                 declared_function(line)
             };
             let Some(name) = name else { continue };
-            if name.is_empty() || name == "void" {
+            // A package that supplies its own uniform generator defines these; libR only
+            // declares them.
+            const PACKAGE_SUPPLIED: [&str; 5] = [
+                "user_unif_rand",
+                "user_unif_init",
+                "user_unif_nseed",
+                "user_unif_seedloc",
+                "user_norm_rand",
+            ];
+            if name.is_empty() || name == "void" || PACKAGE_SUPPLIED.contains(&name.as_str()) {
                 continue;
             }
             checked += 1;

@@ -43,3 +43,7 @@ path = "tests/test_fuzz_native.rs"
 [[test]]
 name = "test_rmath"
 path = "tests/test_rmath.rs"
+
+[[test]]
+name = "test_fuzz_rmath"
+path = "tests/test_fuzz_rmath.rs"

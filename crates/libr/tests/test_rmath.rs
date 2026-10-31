@@ -296,6 +296,64 @@ fn random_streams_match_gnu_r() {
     );
 }
 
+/// Every name Rmath.h remaps, and the ones it declares unremapped, is a symbol of libR, so a
+/// package that links against them loads.
+#[test]
+fn every_rmath_name_is_exported() {
+    // Declared by Rmath.h but, as in GNU R, internal to the library.
+    const INTERNAL: [&str; 2] = ["Rf_pbeta_raw", "Rf_qchisq_appr"];
+    let r = r();
+    let header =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("include/Rmath.h"))
+            .expect("Rmath.h");
+    let mut names: Vec<String> = header
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.strip_prefix("#define ")?.split_whitespace();
+            let target = words.nth(1)?;
+            target.starts_with("Rf_").then(|| target.to_owned())
+        })
+        .filter(|name| !INTERNAL.contains(&name.as_str()))
+        .collect();
+    assert!(
+        names.len() > 130,
+        "found only {} remapped names",
+        names.len()
+    );
+    names.extend(
+        [
+            "R_pow",
+            "R_pow_di",
+            "norm_rand",
+            "unif_rand",
+            "exp_rand",
+            "R_unif_index",
+            "cospi",
+            "sinpi",
+            "tanpi",
+            "Rtanpi",
+            "wilcox_free",
+            "signrank_free",
+            "R_sample_kind",
+            "R_binom_kind",
+        ]
+        .map(str::to_owned),
+    );
+    let missing: Vec<&String> = names
+        .iter()
+        .filter(|name| {
+            let symbol = format!("{name}\0");
+            unsafe {
+                r.api()
+                    .library
+                    .get::<*mut std::ffi::c_void>(symbol.as_bytes())
+            }
+            .is_err()
+        })
+        .collect();
+    assert!(missing.is_empty(), "not exported: {missing:?}");
+}
+
 #[test]
 fn header_constants_match_gnu_r() {
     let r = r();

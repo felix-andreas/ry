@@ -110,8 +110,9 @@ impl Rng {
     pub fn exp_rand(&mut self) -> f64 {
         // q[k] = sum_{i=1}^{k+1} log(2)^i / i!, truncated to sixteen digits as the paper
         // tabulates them.
+        #[allow(clippy::excessive_precision)]
         const Q: [f64; 16] = [
-            0.6931471805599453,
+            std::f64::consts::LN_2,
             0.9333736875190459,
             0.9888777961838675,
             0.9984959252914960040,
