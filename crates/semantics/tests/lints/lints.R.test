@@ -86,3 +86,26 @@ clean
 count: integer = 1L
 #++++
 15..16 warning[assignment-operator] Use <-, not =, for assignment
+
+#==== object-system
+#---- definitions_warn
+setClass("Person", representation(name = "character"))
+setGeneric("greet", function(x) standardGeneric("greet"))
+setMethod("greet", "Person", function(x) x@name)
+setValidity("Person", function(object) TRUE)
+Account <- setRefClass("Account", fields = list(total = "numeric"))
+Queue <- R6::R6Class("Queue")
+#++++
+0..8 warning[object-system] `setClass` defines an S4 class. ry recommends a record or a tagged union instead
+55..65 warning[object-system] `setGeneric` defines an S4 generic. ry recommends a record or a tagged union instead
+113..122 warning[object-system] `setMethod` defines an S4 method. ry recommends a record or a tagged union instead
+162..173 warning[object-system] `setValidity` defines an S4 validity check. ry recommends a record or a tagged union instead
+218..229 warning[object-system] `setRefClass` defines a Reference Class. ry recommends a record or a tagged union instead
+288..295 warning[object-system] `R6Class` defines an R6 class. ry recommends a record or a tagged union instead
+
+#---- other_packages_and_uses_are_clean
+mypkg::setClass("Person")
+p <- new("Person")
+q <- Queue$new()
+#++++
+clean

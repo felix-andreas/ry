@@ -2332,12 +2332,7 @@ impl<'db> Checker<'db, '_> {
             if passes >= LOOP_PASS_CAP {
                 for slot in changed {
                     self.environment.set(slot, EnvEntry::Mono(unknown(self.db)));
-                    if let Some(name) = self
-                        .naming
-                        .bindings
-                        .get(&slot)
-                        .map(|info| info.name)
-                    {
+                    if let Some(name) = self.naming.bindings.get(&slot).map(|info| info.name) {
                         self.record_strict_origin(
                             loop_expression,
                             StrictOriginKind::LoopWidened(name.to_string()),
@@ -5497,9 +5492,7 @@ impl<'db> Checker<'db, '_> {
                                 continue;
                             };
                             let ty = self.infer(item);
-                            let name = argument
-                                .name
-                                .or_else(|| variable_name(module, item));
+                            let name = argument.name.or_else(|| variable_name(module, item));
                             match name {
                                 Some(name) => {
                                     let field = self.column_field(&name, ty);
@@ -6495,7 +6488,9 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                         }
                     }
                     ("." | "list", ExpressionKind::NameRef(y)) => keys.push(JoinKey {
-                        x: argument.name.map_or_else(|| y.to_string(), |name| name.to_string()),
+                        x: argument
+                            .name
+                            .map_or_else(|| y.to_string(), |name| name.to_string()),
                         y: y.to_string(),
                         x_range,
                         y_range: value_range,

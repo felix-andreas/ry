@@ -708,6 +708,12 @@ impl Writer {
     }
 
     unsafe fn item(&mut self, object: Sexp) -> R<()> {
+        // A ry value has no R serialization, and writing one as something else would let it
+        // leave the session as a value it is not.
+        if object.kind() == SexpType::Record {
+            let kind = crate::records::native_kind(object);
+            return Err(error(crate::records::boundary_message("the value", kind)));
+        }
         let known = *crate::heap().known();
         if object == known.nil {
             self.integer(NILVALUE_SXP as i32);

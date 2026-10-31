@@ -10,6 +10,7 @@ use heap::object::{Sexp, SexpType, Shape};
 use std::ffi::c_int;
 
 unsafe fn triple(object: Sexp, accessor: &str) -> ApiResult<Sexp> {
+    crate::vectors::refuse_native(object)?;
     if object.kind().shape() != Shape::Triple || object.is_altrep() {
         return Err(error(format!(
             "bad {accessor}: a '{}' has no cells",

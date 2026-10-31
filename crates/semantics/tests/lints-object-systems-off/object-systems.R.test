@@ -1,0 +1,9 @@
+#==== object-systems-off
+#---- definitions_are_errors
+setClass("Person", representation(name = "character"))
+Account <- methods::setRefClass("Account")
+Queue <- R6Class("Queue")
+#++++
+0..8 error[object-system] S4 classes are turned off in this project (`[check] object-systems = false`), so `setClass` cannot define an S4 class. Use a record or a tagged union instead
+75..86 error[object-system] Reference Classes are turned off in this project (`[check] object-systems = false`), so `setRefClass` cannot define a Reference Class. Use a record or a tagged union instead
+107..114 error[object-system] R6 classes are turned off in this project (`[check] object-systems = false`), so `R6Class` cannot define an R6 class. Use a record or a tagged union instead

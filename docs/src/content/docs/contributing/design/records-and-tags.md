@@ -267,6 +267,13 @@ leaves unused (ry already uses 26 for binding cells). Every value has the same s
   stored as the number itself with its mask bit set; any other value is stored as a handle, which
   the collector traces by reading the mask. Slots past the 64th are always handles.
 
+A raw `double` is stored as its bits, and a raw `integer` or `logical` as its 32 bits under one of
+two reserved quiet-NaN prefixes, so one mask bit per slot is enough and a slot read can tell the
+three apart. A `double` whose upper word happens to equal a prefix is stored boxed instead, which
+keeps every NaN payload, `NA_real_` among them, exact. The object also carries its slot count, in
+what would otherwise be header padding, so the collector sizes and traces it without consulting
+the layout table.
+
 A tag is a small integer, its index in a runtime interner of tag names, so a tag test is one integer
 comparison and the name exists only for printing. A field whose type is known at compile time
 resolves to its slot index then. Values are immutable: `$<-` builds a new object with the same
@@ -297,6 +304,25 @@ can write `format.ry_record`. Builtins split into three groups:
 Error in sum(point) : `point` is a ry record, not an R object; convert it with `as.list()`
 ```
 
+The subject is the argument's source text when it is short. When it is longer than 60 characters,
+or when a `...` before it makes its source unknown, the message says `argument 2` instead, and a
+`for` loop, an `if` condition or `serialize` without source text says `the value`. Each builtin
+carries a flag saying whether it accepts native values, set at startup from one list
+(`ACCEPTS_NATIVE` in `crates/interp/src/records.rs`), so the check is one flag test plus a type
+test per top-level argument, and nothing looks inside lists.
+
+Field access names what went wrong and never falls back to a partial match:
+
+```text
+the record has no field `z`; its fields are `x`, `y`
+a tuple has no field `x`; read its items by position, as in `x[[1L]]`
+a tag has no fields; read its payload with `match`
+index 3L is out of range for a tuple of length 2
+no arm of this `match` matches :Triangle(sides = 3L)
+```
+
+`[[` on a record also takes a position, which counts fields in their sorted order.
+
 **C code sees an opaque object.** A list of records can still reach `.Call`, through purrr's `map`
 or a data.table column of records, and checking every argument deeply would cost time in
 proportion to the data. So the boundary does not scan: `TYPEOF` returns 27, `VECTOR_ELT` and
@@ -311,6 +337,13 @@ of the `.ry_match` special with the scrutinee followed by one `` `=>` `` call pe
 patterns stay unevaluated. The function of each call is a symbol, as for every other call, because
 code that inspects calls (`as.character(call[[1]])` in rlang-style evaluation) expects one, and
 `deparse` prints all four back in ry syntax.
+
+An arm is `` `=>`(pattern, body) ``, or `` `=>`(pattern, guard, body) `` with a guard. A pattern is
+encoded like the value it matches: `_`, `..` and a binding are symbols, a literal is its constant
+(`-1L` folded to one), tag, tuple and record patterns are `.ry_tag`, `.ry_tuple` and `.ry_record`
+calls, and alternatives and grouping are `|` and `(` calls. So `quote(match (x) { :Some(..) => 1
+})[[3]][[2]]` is the call `.ry_tag("Some", ..)`, which prints as `:Some(..)`. A parenthesized
+scrutinee lowers to its inner expression, as the condition of `if` does.
 
 ### What the JIT gets
 

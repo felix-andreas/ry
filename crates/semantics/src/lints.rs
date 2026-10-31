@@ -41,6 +41,13 @@ pub struct LintConfig {
     /// Off by default: rebinding a `base` name is often deliberate (an S3 method, script masking).
     pub shadows_builtin: LintLevel,
     pub shadows_namespace: LintLevel,
+    /// Warns by default: S4, R6 and Reference Classes still run, but ry recommends
+    /// records and tagged unions, which it checks statically.
+    pub object_system: LintLevel,
+    /// Copied from `[check] object-systems = false` when the config loads, which turns
+    /// every definition into an error whatever `object_system` says.
+    #[serde(skip)]
+    pub object_systems_disabled: bool,
 }
 
 /// Sorted by position. Unmemoized: syntax walks plus per-item naming output are cheap.
@@ -150,6 +157,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
                     trailing_comma_lint(&node, config, diagnostics);
                 }
                 SyntaxKind::PARAMETER => parameter_name_lint(&node, config, diagnostics),
+                SyntaxKind::CALL_EXPR => object_system_lint(&node, config, diagnostics),
                 _ => {}
             },
             WalkEvent::Enter(NodeOrToken::Token(token))
@@ -224,6 +232,60 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             ));
         }
     }
+}
+
+/// Only the definitions: a class has to be defined before anything can use it, so they
+/// mark every place the object system enters the code without flagging each `new()`.
+fn object_system_lint(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diagnostic>) {
+    let Some(callee) = call.first_child() else {
+        return;
+    };
+    let (package, name) = match callee.kind() {
+        SyntaxKind::NAME => (None, callee),
+        SyntaxKind::NAMESPACE_EXPR => {
+            let mut names = callee
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::NAME);
+            let (Some(package), Some(name)) = (names.next(), names.next()) else {
+                return;
+            };
+            (Some(package.text().to_string()), name)
+        }
+        _ => return,
+    };
+    let function = name.text().to_string();
+    let (system, defines, home) = match function.as_str() {
+        "setClass" => ("S4 classes", "an S4 class", "methods"),
+        "setGeneric" => ("S4 classes", "an S4 generic", "methods"),
+        "setMethod" => ("S4 classes", "an S4 method", "methods"),
+        "setValidity" => ("S4 classes", "an S4 validity check", "methods"),
+        "setRefClass" => ("Reference Classes", "a Reference Class", "methods"),
+        "R6Class" => ("R6 classes", "an R6 class", "R6"),
+        _ => return,
+    };
+    if package.as_deref().is_some_and(|package| package != home) {
+        return;
+    }
+    let range = name.text_range();
+    if config.object_systems_disabled {
+        diagnostics.push(Diagnostic::new(
+            range,
+            Severity::Error,
+            "object-system",
+            format!(
+                "{system} are turned off in this project (`[check] object-systems = false`), so `{function}` cannot define {defines}. Use a record or a tagged union instead"
+            ),
+        ));
+        return;
+    }
+    push_lint(
+        diagnostics,
+        config.object_system,
+        Severity::Warning,
+        "object-system",
+        range,
+        format!("`{function}` defines {defines}. ry recommends a record or a tagged union instead"),
+    );
 }
 
 fn trailing_comma_lint(
