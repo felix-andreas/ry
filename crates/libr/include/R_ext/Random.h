@@ -7,6 +7,7 @@
 extern "C" {
 #endif
 
+/* The uniform generators RNGkind() names, in the order of their codes. */
 typedef enum {
     WICHMANN_HILL,
     MARSAGLIA_MULTICARRY,
@@ -18,6 +19,7 @@ typedef enum {
     LECUYER_CMRG
 } RNGtype;
 
+/* How normal deviates are made from uniform ones. */
 typedef enum {
     BUGGY_KINDERMAN_RAMAGE,
     AHRENS_DIETER,
@@ -27,13 +29,32 @@ typedef enum {
     KINDERMAN_RAMAGE
 } N01type;
 
+/* How sample() draws a discrete uniform index. */
 typedef enum { ROUNDING, REJECTION } Sampletype;
+Sampletype R_sample_kind(void);
 
+/* Which variant of the BTPE binomial generator rbinom() uses. */
+typedef enum { BUGGY_BTPE, BTPE } Binomtype;
+Binomtype R_binom_kind(void);
+
+/* Bracket a run of draws: GetRNGstate() reads .Random.seed, PutRNGstate() writes it back. */
 void GetRNGstate(void);
 void PutRNGstate(void);
+
 double unif_rand(void);
-/* GNU R declares this in Rmath.h, which ry does not provide yet. */
 double R_unif_index(double);
+/* Rmath.h declares these too. */
+double norm_rand(void);
+double exp_rand(void);
+
+/* A package that supplies its own generator (RNGkind("user-supplied")) defines these; R
+   looks them up in the package's shared library. */
+typedef unsigned int Int32;
+double *user_unif_rand(void);
+void user_unif_init(Int32);
+int *user_unif_nseed(void);
+int *user_unif_seedloc(void);
+double *user_norm_rand(void);
 
 #ifdef __cplusplus
 }

@@ -27,6 +27,7 @@ pub mod extptr;
 pub mod globals;
 pub mod lists;
 pub mod memory;
+pub mod rmath;
 pub mod strings;
 pub mod vectors;
 
