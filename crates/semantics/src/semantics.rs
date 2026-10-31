@@ -361,7 +361,10 @@ fn file_item_annotations<'db>(
 /// The annotation the checker applies to an item's root: its `#:` block merged with the
 /// root statement's inline annotation. Not tracked, for the reason
 /// [`item_expression_annotations`] gives.
-pub fn item_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations::Annotation<'db>> {
+pub fn item_annotation<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> Option<annotations::Annotation<'db>> {
     let comment = item_annotation_syntax(db, item)
         .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
     let root = item_syntax(db, item)?.syntax_node();
@@ -421,9 +424,7 @@ pub fn item_expression_annotations<'db>(
             // statement types its binding itself.
             let statement = site
                 .parent()
-                .filter(|parent| {
-                    annotations::statement_inline_site(parent).as_ref() == Some(&site)
-                })
+                .filter(|parent| annotations::statement_inline_site(parent).as_ref() == Some(&site))
                 .unwrap_or(site);
             if statement == root || targets.iter().any(|(target, _)| *target == statement) {
                 continue;

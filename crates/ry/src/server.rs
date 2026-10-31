@@ -2350,9 +2350,11 @@ fn annotation_semantic_tokens(
 ) -> Vec<lsp_types::SemanticToken> {
     let parse = semantics::parse(db, file);
     let mut spans: Vec<(TextRange, u32)> = Vec::new();
-    for annotation in parse.syntax_node().descendants().filter(|node| {
-        node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(node)
-    }) {
+    for annotation in parse
+        .syntax_node()
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(node))
+    {
         for element in annotation.descendants_with_tokens() {
             let SyntaxElement::Token(token) = element else {
                 continue;

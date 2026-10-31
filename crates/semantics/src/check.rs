@@ -311,7 +311,7 @@ pub fn check_item_with_annotation<'db>(
                     body: context.check_declared_function(
                         *value,
                         &function,
-                        annotation.is_some_and(|annotation| annotation.inline_signature),
+                        annotation.map_or(&[], |annotation| &annotation.inline_parameters),
                     ),
                 };
                 context.recorded.insert(root, declared.body);
@@ -1083,8 +1083,8 @@ impl<'db> Checker<'db, '_> {
                         }
                         let body = match declared.body.kind(self.db) {
                             TyKind::Function(function) => {
-                                let inline = self.is_inline_signature(id);
-                                self.check_declared_function(value, function, inline)
+                                let inline = self.inline_parameters(id);
+                                self.check_declared_function(value, function, &inline)
                             }
                             _ => declared.body,
                         };
@@ -1186,8 +1186,8 @@ impl<'db> Checker<'db, '_> {
                     let TyKind::Function(function) = declared.body.kind(self.db) else {
                         return unknown(self.db);
                     };
-                    let inline = self.is_inline_signature(id);
-                    let signature = self.check_declared_function(id, function, inline);
+                    let inline = self.inline_parameters(id);
+                    let signature = self.check_declared_function(id, function, &inline);
                     return self.record(id, signature);
                 }
                 let parameters = parameters.clone();
@@ -1333,10 +1333,11 @@ impl<'db> Checker<'db, '_> {
         matches!(declared.body.kind(self.db), TyKind::Function(_)).then_some(declared)
     }
 
-    fn is_inline_signature(&self, annotated: ExprId) -> bool {
+    fn inline_parameters(&self, annotated: ExprId) -> Vec<String> {
         self.expression_annotations
             .get(&annotated)
-            .is_some_and(|annotation| annotation.inline_signature)
+            .map(|annotation| annotation.inline_parameters.clone())
+            .unwrap_or_default()
     }
 
     fn apply_expression_annotation(
@@ -3035,12 +3036,13 @@ impl<'db> Checker<'db, '_> {
     /// arguments against the `function(...)` formals, so the signature keeps their
     /// names, order, optionality, and `...`. Disagreements report here, never at a call.
     /// An inline signature sits on the formals and cannot restate optionality, so
-    /// `inline_signature` skips the optionality checks: the formals alone decide it.
+    /// `inline_parameters` (typed only inline) skip the optionality checks: the formals
+    /// alone decide them.
     fn check_declared_function(
         &mut self,
         function_id: ExprId,
         declared: &FunctionType<'db>,
-        inline_signature: bool,
+        inline_parameters: &[String],
     ) -> Ty<'db> {
         let module = self.module;
         let expression = module.expression(function_id);
@@ -3119,9 +3121,10 @@ impl<'db> Checker<'db, '_> {
             (None, None) => false,
             _ => true,
         };
-        let optional_mismatch = !inline_signature
-            && parameters.iter().any(|parameter| {
+        let restates = |name: &str| !inline_parameters.iter().any(|inline| inline == name);
+        let optional_mismatch = parameters.iter().any(|parameter| {
             !is_optional(parameter)
+                && restates(&parameter.name)
                 && declared
                     .named
                     .iter()
@@ -3139,7 +3142,11 @@ impl<'db> Checker<'db, '_> {
         }
         // A defaulted formal is optional whatever the annotation says; reporting it once
         // here keeps it from resurfacing at every caller.
-        for field in declared.named.iter().filter(|_| !inline_signature) {
+        for field in declared
+            .named
+            .iter()
+            .filter(|field| restates(field.name.text(self.db)))
+        {
             let name = field.name.text(self.db);
             if !field.optional
                 && parameters

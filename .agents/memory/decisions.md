@@ -824,9 +824,10 @@ alone would never fire. Returns and bindings get no finding of their own: every 
 traces to an origin, a type error, or a project binding reported at its definition, and a separate
 finding would break "one undetermined value, one finding".
 
-**Optionality** comes from the formals alone under an inline signature (`Annotation::inline_signature`
-skips the restatement checks in `check_declared_function`), because the inline form has no `[name]`:
-a defaultless formal the body tests with `missing()` stays optional.
+**Optionality** comes from the formals alone for a parameter typed only inline
+(`Annotation::inline_parameters` skips the restatement checks in `check_declared_function`), because
+the inline form has no `[name]`: a defaultless formal the body tests with `missing()` stays optional.
+A parameter a `#:` block also names keeps the comment's `[name]`, which is checked as written.
 
 **Known gap.** A generic lambda passed as an argument keeps its binders rigid, so
 `lapply(xs, function<T>(v: T) -> T v)` is reported. `backlog.md` tracks it.

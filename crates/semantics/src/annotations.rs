@@ -26,9 +26,9 @@ pub struct Annotation<'db> {
     pub trusted: bool,
     /// `@if-unknown TYPE`: applies only where the checker has nothing better than `Unknown`.
     pub if_unknown: bool,
-    /// A function's own inline signature, which sits on the formals and so never restates
-    /// which parameters are optional.
-    pub inline_signature: bool,
+    /// Parameters typed only by an inline signature. It sits on the formals and so never
+    /// restates which parameters are optional; the formals alone decide it.
+    pub inline_parameters: Vec<String>,
     /// Shape violations. A block with any carries no typing payload, so it never cascades.
     pub errors: Vec<(String, TextRange)>,
     /// Violations reported only when type checking is on; like `errors`, they strip the payload.
@@ -275,7 +275,10 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
         .find(|child| child.kind() == SyntaxKind::RETURN_TYPE)
         .and_then(|ret| lowering.lower_child_type(&ret))
         .unwrap_or_else(|| unknown(db));
-    annotation.inline_signature = true;
+    annotation.inline_parameters = named
+        .iter()
+        .map(|parameter: &Parameter<'db>| parameter.name.text(db).to_owned())
+        .collect();
     annotation.declared = Some(TypeScheme {
         binders: forall,
         body: Ty::new(
@@ -348,8 +351,7 @@ pub fn merge_annotations<'db>(
     if comment.trusted || comment.if_unknown || comment.new_nominal.is_some() {
         return Some(comment);
     }
-    let (Some(comment_scheme), Some(inline_scheme)) = (&comment.declared, &inline.declared)
-    else {
+    let (Some(comment_scheme), Some(inline_scheme)) = (&comment.declared, &inline.declared) else {
         return Some(comment);
     };
     // A binding's `: TYPE` replaces the whole declared type; only a signature merges by slot.
@@ -386,7 +388,14 @@ pub fn merge_annotations<'db>(
             .iter()
             .find(|parameter| parameter.name.text(db) == formal.name)
             .cloned();
-        named.extend(from_inline.or(from_comment));
+        // Where the comment restates optionality, its `[name]` is checked as written.
+        named.extend(match (from_inline, from_comment) {
+            (Some(inline), Some(comment)) => Some(Parameter {
+                optional: comment.optional,
+                ..inline
+            }),
+            (inline, comment) => inline.or(comment),
+        });
     }
     // Comment entries no formal receives are kept, so the definition check still reports them.
     named.extend(
@@ -434,8 +443,17 @@ pub fn merge_annotations<'db>(
                 }),
             ),
         }),
-        // The comment's entries do restate optionality, so they are checked as written.
-        inline_signature: false,
+        inline_parameters: inline
+            .inline_parameters
+            .iter()
+            .filter(|name| {
+                !comment_function
+                    .named
+                    .iter()
+                    .any(|parameter| parameter.name.text(db) == name.as_str())
+            })
+            .cloned()
+            .collect(),
         ..inline
     })
 }

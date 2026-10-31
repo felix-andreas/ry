@@ -1,14 +1,14 @@
 use crate::annotations::{
-    Annotation, NamedDefinition, Slot, comment_slots, inline_slots,
-    is_inline_site, lower_annotation, lower_inline_annotation, statement_inline_site,
+    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_inline_site,
+    lower_annotation, lower_inline_annotation, statement_inline_site,
 };
 use crate::check::{ItemCheck, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind};
 use crate::hir::{ExprId, ExpressionKind};
+use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
 use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
-use crate::infer::apply_definition;
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, TypeScheme, map_child_types,
     union_of,
@@ -18,10 +18,10 @@ use crate::{
     inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
     item_tree, parse, project_type_definitions, statement_annotations,
 };
-use syntax::SyntaxNode;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{iter, mem};
+use syntax::SyntaxNode;
 use syntax::{SyntaxKind, TextRange, is_syntactic_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
@@ -673,10 +673,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             parents.push(parent);
         }
     }
-    for (comment, target) in parents
-        .iter()
-        .flat_map(|parent| statement_annotations(parent))
-    {
+    for (comment, target) in parents.iter().flat_map(statement_annotations) {
         let AnnotationTarget::Attached(statement) = target else {
             continue;
         };

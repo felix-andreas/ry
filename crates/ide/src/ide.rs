@@ -12,8 +12,8 @@ use semantics::types::{FunctionType, Ty, TyKind, TypeScheme, contains_inference_
 use semantics::{
     Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
     item_annotation, item_annotation_syntax, item_check, item_expression_annotations, item_hir,
-    item_name_range,
-    item_naming, item_node, item_tree, package_definitions, project_type_definitions,
+    item_name_range, item_naming, item_node, item_tree, package_definitions,
+    project_type_definitions,
 };
 use std::collections::BTreeSet;
 use std::iter::once;
@@ -1533,9 +1533,8 @@ fn binder_names(region: &SyntaxNode) -> Vec<String> {
 
 /// The type region holding `offset`: a `#:` block, or an inline annotation.
 fn annotation_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxNode> {
-    root.descendants().find(|node| {
-        is_type_region(node) && node.text_range().contains_inclusive(offset)
-    })
+    root.descendants()
+        .find(|node| is_type_region(node) && node.text_range().contains_inclusive(offset))
 }
 
 fn is_type_region(node: &SyntaxNode) -> bool {

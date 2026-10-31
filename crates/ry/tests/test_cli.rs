@@ -1291,8 +1291,7 @@ fn check_types_inline_annotations_by_default() {
     let run = ry(directory.path(), &["check"]);
     assert_eq!(run.code, 1, "{}", run.stderr);
     assert!(
-        run.stderr
-            .contains("expected `integer`, found `character`"),
+        run.stderr.contains("expected `integer`, found `character`"),
         "{}",
         run.stderr
     );
@@ -1311,14 +1310,18 @@ fn check_warns_while_inline_annotations_are_off_and_ignores_them() {
     let run = ry(directory.path(), &["check"]);
     assert_eq!(run.code, 1, "{}", run.stderr);
     assert!(
-        run.stderr
-            .contains("inline type annotations are turned off (`[check] inline-annotations = false`)"),
+        run.stderr.contains(
+            "inline type annotations are turned off (`[check] inline-annotations = false`)"
+        ),
         "{}",
         run.stderr
     );
     assert!(
-        run.stderr
-            .contains(&heading("inline-annotation", '!', "inline type annotations are turned off in `ry.toml`, so this one is not checked")),
+        run.stderr.contains(&heading(
+            "inline-annotation",
+            '!',
+            "inline type annotations are turned off in `ry.toml`, so this one is not checked"
+        )),
         "{}",
         run.stderr
     );
@@ -1337,7 +1340,8 @@ fn turning_inline_annotations_off_warns_even_without_any() {
     ]);
     let run = ry(directory.path(), &["check"]);
     assert!(
-        run.stderr.contains("inline type annotations are turned off"),
+        run.stderr
+            .contains("inline type annotations are turned off"),
         "{}",
         run.stderr
     );

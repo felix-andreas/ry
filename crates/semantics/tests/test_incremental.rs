@@ -3,7 +3,8 @@ use semantics::diagnostics::file_diagnostics;
 use semantics::testing::ProbeDatabase;
 use semantics::types::{Atomic, scalar, unknown};
 use semantics::{
-    AnalysisSettings, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme, package_definitions,
+    AnalysisSettings, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme,
+    package_definitions,
 };
 use std::thread;
 

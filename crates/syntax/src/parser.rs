@@ -1065,7 +1065,11 @@ impl Parser<'_> {
         self.bump();
         self.inline_type(|parser, end| parser.ann_type(end, false));
         let mut next = self.pos;
-        while self.tokens.get(next).is_some_and(|token| token.kind == WHITESPACE) {
+        while self
+            .tokens
+            .get(next)
+            .is_some_and(|token| token.kind == WHITESPACE)
+        {
             next += 1;
         }
         if next < assignment {
