@@ -40,6 +40,14 @@ illegal dependency unrepresentable.
   backend hands the plan to R code running in the session; ry's own runtime will take the same plan.
 - **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
   `repl` included, needs R to build.
+- **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
+  allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
+  environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
+- **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
+  against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
+  `heap`. Its design is the draft at
+  [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/), and nothing else in the
+  workspace uses it yet.
 - **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
   `run`, `load`, and `debug` commands. It owns configuration, conversion between position encodings,
   assembling and publishing diagnostics, and suppression comments.

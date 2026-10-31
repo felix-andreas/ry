@@ -1765,6 +1765,29 @@ pins to interact. What is pinned instead is the structural property the fix rest
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
 
+## Open: the runtime
+
+What step 2 of `contributing/design/r-runtime.md` left for later steps, most pressing first.
+
+- **`Rf_eval` evaluates only constants, symbols, promises and calls to nine primitives.** Closures,
+  `R_ParseVector` and `Rf_PrintValue` wait for the interpreter (step 3).
+- **The rest of the measured API surface.** Of the 409 measured API and experimental names, 310 are
+  exported. The missing ones include Rmath (`Rf_sign`, the distribution functions), the S4 slot
+  functions, connections, `.C` and `.Fortran`, BLAS and LAPACK, and the graphics engine.
+- **`R_GetCCallable` cannot load the providing namespace**, so a callable registered by a package
+  that is not loaded yet is an error instead of a namespace load.
+- **ALTREP `Duplicate`, `Inspect` and `Extract_subset` are stored but never called**; duplication
+  materializes a regular vector.
+- **R-level finalizers** (`R_RegisterFinalizer` with a closure) cannot run until closures can, and a
+  finalized weak reference stays in the weak list with a `NULL` key.
+- **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
+  push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
+  `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
+- **The handle scope retains a native loop's dropped temporaries until the call returns.** If a real
+  package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
+- **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
+  only loader, so macOS and Windows need their own paths.
+
 ## Explicitly out of scope for now
 
 - Tags and discriminated unions, through a stdlib `match` the checker knows about. Design it in
@@ -1778,6 +1801,7 @@ The end-to-end guard rests on the corpus suites.
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
 - **Inline type annotations, the comment-agreement warning, and strict mode's untyped parameters.** `name: TYPE <- value`, typed parameters, `-> TYPE` and `function<T>`, sharing the `#:` grammar and lowering, with `annotation-mismatch`, `[check] inline-annotations`, and erasure to plain R. `decisions.md` has the record.
 
 - **`declares_arithmetic` is computed from the project as well as the stubs.** It consulted the stub

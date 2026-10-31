@@ -1,0 +1,22 @@
+#ifndef R_EXT_CONSTANTS_H_
+#define R_EXT_CONSTANTS_H_
+
+#include <float.h>
+
+#ifndef M_PI
+#define M_PI 3.141592653589793238462643383280
+#endif
+
+#ifndef STRICT_R_HEADERS
+#define PI M_PI
+#define SINGLE_EPS FLT_EPSILON
+#define SINGLE_BASE FLT_RADIX
+#define SINGLE_XMIN FLT_MIN
+#define SINGLE_XMAX FLT_MAX
+#define DOUBLE_DIGITS DBL_MANT_DIG
+#define DOUBLE_EPS DBL_EPSILON
+#define DOUBLE_XMAX DBL_MAX
+#define DOUBLE_XMIN DBL_MIN
+#endif
+
+#endif

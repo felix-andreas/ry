@@ -1,0 +1,15 @@
+[stdout]
+| [1] "Woof generic animal noise"
+| [1] "..."
+| $ 12.50 
+| $ 12.50 
+| [1] "$12.5"
+| [1] "money!"
+| [1] TRUE
+| [1] 0 2
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(0L, 2L)

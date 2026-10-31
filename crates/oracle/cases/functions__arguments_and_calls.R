@@ -1,0 +1,26 @@
+f <- function(first, second = 2, ...) list(first = first, second = second, dots = list(...))
+str(f(1))
+str(f(second = 5, 1, 9, extra = "x"))
+g <- function(abc, abd) c(abc, abd)
+tryCatch(g(ab = 1, 2), error = function(e) conditionMessage(e))
+g(abc = 1, abd = 2)
+h <- function(x, ...) UseMethod("h")
+h.default <- function(x, ...) names(list(...))
+h(1, p = 1, q = 2)
+args <- list(1:10)
+do.call(mean, args)
+Reduce(function(a, b) paste0(a, b), c("x", "y", "z"), accumulate = TRUE)
+compose <- function(f, g) function(x) g(f(x))
+inc_then_double <- compose(function(x) x + 1, function(x) x * 2)
+inc_then_double(3)
+(\(x) x^2)(4)
+sapply(1:3, \(i) i + 0.5)
+1:3 |> rev() |> paste(collapse = "")
+formals(f)$second
+body(function(x) x + 1)
+arity <- function(fn) length(formals(fn))
+arity(f)
+`my var` <- 3
+`my var` + 1
+"%+%" <- function(a, b) paste(a, b)
+"x" %+% "y"

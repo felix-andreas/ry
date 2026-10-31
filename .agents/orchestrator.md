@@ -52,16 +52,28 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - **One persistent in-session subagent merges** those pull requests.
 - **Merge with the squash method.** The repository allows only squash merges.
 - **Model and effort for delegated work:** Sonnet at high effort by default, Opus at high effort for a hard problem, and Opus at extra-high effort for an exceptionally hard one.
-- **Reread this file every two hours** through a scheduled check-in.
+- **Reread this file every hour** (trig_01AqDtgjMPTkniw7hzX4x4d1, at minute 41) and check that every piece of work that could start now is running.
 - **Run a docs pass from time to time,** at least every few check-ins and after each feature PR lands, applying the docs directive in `AGENTS.md`.
+- **Babysit every cloud session.** Each session prompt must tell it to report to the orchestrator with the claude-code-remote `send_message` tool, session_id session_011xBmXWNoPRHsr6SYcwTwtm, when its PR is ready, when it is blocked, and at major milestones. An hourly scheduled check (trig_01LuX97P7ZbAg4TRxYu7c1tu, at minute 11) checks every in-flight session, resumes stalled ones and merges finished PRs; the hourly goal reread is trig_01AqDtgjMPTkniw7hzX4x4d1.
+- **Check a new cloud session's context window.** After creating a cloud session, read its record with `get_session` and check that `external_metadata.context_usage.max_tokens` is 300000 (the repo's `.claude/settings.json` sets `autoCompactWindow`). If it still shows 1000000, ask the user to set `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` in the cloud environment's variables.
 
 ## In flight
 
-- Runtime step 1 session session_0111kWqDPNiugVJPvUec1xKs: corpus, differential oracle, benchmark generator.
-- Runtime step 2 session session_0111kWqDWCzM9zgtXPN1prpJ: object model, GC, libR skeleton.
-- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa: item index, lazy bindings and item-level reload, on the GNU R backend first.
+- Runtime step 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): tier-0 bytecode interpreter and base R loaded from the user's GNU R installation.
+- Runtime step 4a (session_0111kWqESzY2bDUMNQAL2or6, Opus): full C API surface, ALTREP, BLAS/LAPACK, connections, package install (owns `crates/libr`).
+- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa (branch `feat/lazy-loader`): item index, lazy bindings and item-level reload, on the GNU R backend first.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
 
-- Step 3 (interpreter and base R) starts when step 2 merges; steps 5-8 follow `r-runtime.md`'s build order.
+1. Finish step 4: all 232 corpus packages pass their own tests.
+2. Inline syntax in the runtime.
+3. The Cranelift JIT.
+4. The polars-backed table type.
+
+Follow-ups:
+
+- Run `ry check` over the generated benchmark code bases and file the findings.
+- Install R 4.6 via rig for data.table's version check.
+- Recheck the Dependabot alerts.
+- Run a docs pass after the feature PRs land.

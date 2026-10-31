@@ -292,6 +292,22 @@ the test a check on erasure too: an annotated fixture whose erased text tree-sit
 `check_parse_invariants` pins erasure from the other side, for every fuzz input that parses cleanly:
 the erased text parses cleanly, holds no inline annotation, and erases to itself.
 
+### The runtime
+
+The runtime has no fixtures yet, because there is no R-level behavior to render until the
+interpreter exists, so its contract is model-based. `crates/heap/tests/test_gc.rs` builds random
+object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
+into old ones and collects at random points, with and without collection stress, and after every
+collection checks each object the model still reaches. It also re-interns every string ever made,
+so an intern-table entry that outlived its string shows up. A disabled write barrier, a frame whose
+cells are not traced, and a minor collection that keeps dead strings in the table each turn it red.
+
+`crates/libr/tests/test_fuzz_native.rs` fuzzes the native boundary itself. It nests every
+non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`, `R_tryCatchError`,
+`R_UnwindProtect`, `R_ExecWithCleanup` and a cpp11-style C++ unwind) around values and errors, and
+checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
+released. A second battery drives random API sequences under collection stress against a model.
+
 ### Coverage-guided fuzzing
 
 `fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. It holds the
@@ -354,6 +370,26 @@ the loaded result: `Collate` order, imports, S3 and S4 registration, `Depends`, 
 source references, reloads that rebind, rerun and remove, undoing deleted S4 definitions, the error
 locations, and the `ry load --r-entry` entry point. `test_repl_e2e.rs` checks that `ry repl` loads
 the package it starts in and reloads an edit before the next command. Both skip without R.
+
+### Native packages
+
+The `libr` tests load `libR.so` the way an R host does, build packages from source with the system C
+and C++ compilers, load them with `dyn.load` (which runs `R_init_<pkg>`), and call their routines
+through `.Call`, all through the exported C API. The shared harness is `crates/libr/tests/harness.rs`.
+The packages are brio from the benchmark closure, vendored in `tests/packages/brio`, and
+`tests/packages/rytest`, written for these tests.
+
+- `test_native.rs` builds both against ry's headers and checks the results, collection stress, the
+  handle scope, `PROTECT` imbalance, errors unwinding through C and C++ frames, `R_alloc` release,
+  finalizers, ALTREP dispatch, coercion, and the random number generator against GNU R's output. It
+  also checks that every name the headers declare is exported, and that of the 150 names the
+  measured closure uses most, only `R_ParseVector` is missing.
+- `test_gnu_r_binaries.rs` builds both with GNU R's `R CMD SHLIB`, against GNU R's headers and
+  linked to GNU R's `libR.so`, and runs them under ry's. It runs in a process of its own, so the two
+  builds of one package never share a session.
+
+These suites need a C and C++ toolchain, and GNU R for the second suite and the generator check.
+`RY_SKIP_GNU_R=1` skips the parts that need GNU R, and without it a missing R is a failure.
 
 ### The language server
 

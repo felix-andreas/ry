@@ -1,0 +1,14 @@
+#ifndef R_RCONFIG_H
+#define R_RCONFIG_H
+
+#define HAVE_F77_UNDERSCORE 1
+#define IEEE_754 1
+#define SUPPORT_UTF8 1
+#define SUPPORT_MBCS 1
+#define ENABLE_NLS 1
+#define HAVE_VISIBILITY_ATTRIBUTE 1
+#define SIZEOF_SIZE_T 8
+#define HAVE_ALLOCA_H 1
+#define HAVE_UINTPTR_T 1
+
+#endif

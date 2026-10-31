@@ -1,0 +1,13 @@
+[stdout]
+| [1] 1
+| [1] 2
+| [1] 1
+| [1] "local"
+| [1] TRUE
+| [1] 2
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 2

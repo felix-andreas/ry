@@ -1,0 +1,14 @@
+[stdout]
+| handler saw: custom 
+| [1] "finished"
+| [1] "myCondition" "condition"  
+| [1] "custom: custom failure"
+| <simpleCondition: m>
+| [1] "simpleWarning" "warning"       "condition"    
+| [1] ""
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| ""

@@ -1,0 +1,21 @@
+[stdout]
+| log: w1 
+| after w1
+| [1] "done"
+| start
+| [1] 42
+| NULL
+| [1] 10
+| [1] 10
+| [1] 1
+| [1] NA
+[messages]
+- note to stderr
+[warnings]
+- from f (in f())
+- NAs introduced by coercion
+- top level warning
+[errors]
+[value]
+character
+| "top level warning"

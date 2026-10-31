@@ -1,0 +1,17 @@
+[package]
+name = "heap"
+description = "ry's R object model and garbage collector"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/heap.rs"
+
+[dependencies]
+hashbrown = "0.16"
+rustc-hash.workspace = true
+
+[dev-dependencies]
+syntax = { path = "../syntax" }
