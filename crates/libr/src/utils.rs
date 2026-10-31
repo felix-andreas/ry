@@ -39,7 +39,10 @@ pub unsafe extern "C" fn R_ExpandFileName(name: *const c_char) -> *const c_char 
 
 fn expand_tilde(name: &[u8]) -> Option<Vec<u8>> {
     let rest = name.strip_prefix(b"~")?;
-    let user_end = rest.iter().position(|&byte| byte == b'/').unwrap_or(rest.len());
+    let user_end = rest
+        .iter()
+        .position(|&byte| byte == b'/')
+        .unwrap_or(rest.len());
     let (user, tail) = rest.split_at(user_end);
     let home = if user.is_empty() {
         match std::env::var_os("HOME") {
@@ -152,17 +155,17 @@ pub unsafe extern "C" fn Rf_isBlankString(text: *const c_char) -> Rboolean {
     blank as Rboolean
 }
 
-// Fortran's printing and signalling helpers. Fortran appends hidden string lengths to the
-// argument list; these signatures ignore them, as GNU R's do, and take the label's length from
-// `nchar` (negative meaning "up to the terminating NUL").
+// Fortran's printing and signalling helpers. Fortran passes each string's length as a hidden
+// trailing argument, and a negative `nchar` selects it, as in GNU R. A C caller that passes a
+// negative `nchar` leaves that argument undefined, there as here.
 
 /// The label's bytes, or `None` after warning about a length GNU R also rejects.
-unsafe fn label<'a>(text: *const c_char, length: *const c_int) -> Option<&'a [u8]> {
-    let length = if length.is_null() { -1 } else { *length };
-    let length = if length < 0 {
-        if text.is_null() { 0 } else { c_bytes(text).len() }
+unsafe fn label<'a>(text: *const c_char, length: *const c_int, hidden: usize) -> Option<&'a [u8]> {
+    let requested = if length.is_null() { -1 } else { *length };
+    let length = if requested < 0 {
+        hidden
     } else {
-        length as usize
+        requested as usize
     };
     if length > 255 {
         crate::boundary::warn("invalid character length in Fortran printing");
@@ -171,11 +174,14 @@ unsafe fn label<'a>(text: *const c_char, length: *const c_int) -> Option<&'a [u8
     if length == 0 || text.is_null() {
         return Some(&[]);
     }
-    Some(std::slice::from_raw_parts(text as *const u8, length))
+    // Printed with C's `%.*s`, which also stops at a NUL.
+    let bytes = std::slice::from_raw_parts(text as *const u8, length);
+    let end = bytes.iter().position(|&byte| byte == 0).unwrap_or(length);
+    Some(&bytes[..end])
 }
 
-unsafe fn print_label(text: *const c_char, length: *const c_int) {
-    if let Some(label) = label(text, length).filter(|label| !label.is_empty()) {
+unsafe fn print_label(text: *const c_char, length: *const c_int, hidden: usize) {
+    if let Some(label) = label(text, length, hidden).filter(|label| !label.is_empty()) {
         let mut line = label.to_vec();
         line.push(b'\n');
         write_console(&line, false);
@@ -183,8 +189,12 @@ unsafe fn print_label(text: *const c_char, length: *const c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn labelpr_(text: *const c_char, length: *const c_int) -> c_int {
-    print_label(text, length);
+pub unsafe extern "C" fn labelpr_(
+    text: *const c_char,
+    length: *const c_int,
+    hidden: usize,
+) -> c_int {
+    print_label(text, length, hidden);
     0
 }
 
@@ -194,8 +204,9 @@ pub unsafe extern "C" fn intpr_(
     length: *const c_int,
     data: *const c_int,
     count: *const c_int,
+    hidden: usize,
 ) -> c_int {
-    print_label(text, length);
+    print_label(text, length, hidden);
     if *count > 0 {
         let values = std::slice::from_raw_parts(data, *count as usize);
         write_console(format_integer_vector(values).as_bytes(), false);
@@ -209,8 +220,9 @@ pub unsafe extern "C" fn dblepr_(
     length: *const c_int,
     data: *const f64,
     count: *const c_int,
+    hidden: usize,
 ) -> c_int {
-    print_label(text, length);
+    print_label(text, length, hidden);
     if *count > 0 {
         let values = std::slice::from_raw_parts(data, *count as usize);
         write_console(format_real_vector(values).as_bytes(), false);
@@ -224,8 +236,9 @@ pub unsafe extern "C" fn realpr_(
     length: *const c_int,
     data: *const f32,
     count: *const c_int,
+    hidden: usize,
 ) -> c_int {
-    print_label(text, length);
+    print_label(text, length, hidden);
     if *count > 0 {
         let values: Vec<f64> = std::slice::from_raw_parts(data, *count as usize)
             .iter()
@@ -237,21 +250,36 @@ pub unsafe extern "C" fn realpr_(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn intpr1_(text: *const c_char, length: *const c_int, value: *const c_int) -> c_int {
+pub unsafe extern "C" fn intpr1_(
+    text: *const c_char,
+    length: *const c_int,
+    value: *const c_int,
+    hidden: usize,
+) -> c_int {
     let one = 1;
-    intpr_(text, length, value, &one)
+    intpr_(text, length, value, &one, hidden)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dblepr1_(text: *const c_char, length: *const c_int, value: *const f64) -> c_int {
+pub unsafe extern "C" fn dblepr1_(
+    text: *const c_char,
+    length: *const c_int,
+    value: *const f64,
+    hidden: usize,
+) -> c_int {
     let one = 1;
-    dblepr_(text, length, value, &one)
+    dblepr_(text, length, value, &one, hidden)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn realpr1_(text: *const c_char, length: *const c_int, value: *const f32) -> c_int {
+pub unsafe extern "C" fn realpr1_(
+    text: *const c_char,
+    length: *const c_int,
+    value: *const f32,
+    hidden: usize,
+) -> c_int {
     let one = 1;
-    realpr_(text, length, value, &one)
+    realpr_(text, length, value, &one, hidden)
 }
 
 /// Fortran's interrupt check.
@@ -336,7 +364,7 @@ pub fn format_reals(values: &[f64]) -> Vec<String> {
     let wide_exponent = finite.iter().any(|&(exponent, _, _)| exponent.abs() >= 100);
     let decimals = mantissa_digits - 1;
     let scientific_width =
-        negative + (decimals > 0) as usize + decimals + 4 + wide_exponent as usize;
+        negative + 1 + (decimals > 0) as usize + decimals + 4 + wide_exponent as usize;
     values
         .iter()
         .map(|&value| {
@@ -394,9 +422,18 @@ mod tests {
     fn real_vectors_print_like_r() {
         assert_eq!(format_real_vector(&[1.0, 2.5, 3.0]), "[1] 1.0 2.5 3.0\n");
         assert_eq!(format_real_vector(&[1e10, 1.0]), "[1] 1e+10 1e+00\n");
-        assert_eq!(format_real_vector(&[std::f64::consts::PI]), "[1] 3.141593\n");
-        assert_eq!(format_real_vector(&[0.1, f64::NAN, -2.0]), "[1]  0.1  NaN -2.0\n");
-        assert_eq!(format_integer_vector(&[1, NA_INTEGER, 300]), "[1]   1  NA 300\n");
+        assert_eq!(
+            format_real_vector(&[std::f64::consts::PI]),
+            "[1] 3.141593\n"
+        );
+        assert_eq!(
+            format_real_vector(&[0.1, f64::NAN, -2.0]),
+            "[1]  0.1  NaN -2.0\n"
+        );
+        assert_eq!(
+            format_integer_vector(&[1, NA_INTEGER, 300]),
+            "[1]   1  NA 300\n"
+        );
     }
 
     #[test]

@@ -499,10 +499,25 @@ fn every_declared_name_is_exported() {
     for entry in std::fs::read_dir(include.join("R_ext")).expect("R_ext") {
         headers.push(entry.expect("an entry").path());
     }
+    let texts: Vec<String> = headers
+        .iter()
+        .map(|header| strip_comments(&std::fs::read_to_string(header).expect("a header")))
+        .collect();
+    // `#define revsort Rf_revsort`: the library exports the name the macro expands to.
+    let remaps: std::collections::HashMap<String, String> = texts
+        .iter()
+        .flat_map(|text| text.lines())
+        .filter_map(|line| {
+            let mut words = line.trim().strip_prefix("#define ")?.split_whitespace();
+            let (name, target) = (words.next()?, words.next()?);
+            let identifier = |word: &str| word.chars().all(|c| c.is_alphanumeric() || c == '_');
+            (words.next().is_none() && identifier(name) && identifier(target))
+                .then(|| (name.to_owned(), target.to_owned()))
+        })
+        .collect();
     let mut missing = Vec::new();
     let mut checked = 0;
-    for header in headers {
-        let text = std::fs::read_to_string(&header).expect("a header");
+    for text in texts {
         // One declaration per statement: a declaration may span lines, and preprocessor lines
         // (with their continuations) are not declarations.
         let mut statements = Vec::new();
@@ -538,6 +553,7 @@ fn every_declared_name_is_exported() {
                 declared_function(line)
             };
             let Some(name) = name else { continue };
+            let name = remaps.get(&name).cloned().unwrap_or(name);
             if name.is_empty() || name == "void" {
                 continue;
             }
@@ -594,7 +610,35 @@ fn declared_function(statement: &str) -> Option<String> {
         .collect();
     let name: String = name.chars().rev().collect();
     let has_type = head.len() > name.len();
+    // `F77_NAME(dqrdc2)` declares the Fortran symbol `dqrdc2_`.
+    let before = head[..head.len() - name.len()].trim_end();
+    let fortran = ["F77_NAME(", "F77_SUB(", "F77_CALL("]
+        .iter()
+        .any(|wrapper| before.ends_with(wrapper));
+    let name = if fortran { format!("{name}_") } else { name };
     (!name.is_empty() && has_type).then_some(name)
+}
+
+/// The header text without its comments, which may contain semicolons and span lines.
+fn strip_comments(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("/*") {
+        result.push_str(&rest[..start]);
+        rest = match rest[start + 2..].find("*/") {
+            Some(end) => &rest[start + 2 + end + 2..],
+            None => "",
+        };
+    }
+    result.push_str(rest);
+    result
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(position) => &line[..position],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The coverage of the API the benchmark closure uses, measured in `tools/research/data`.

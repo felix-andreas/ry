@@ -9,6 +9,10 @@
 //! (`dqrsl` is called with `y` and `qty` in the same storage), so the code works on raw
 //! pointers with the 1-based indexing of the published algorithms.
 
+// The routines index several arrays in lockstep exactly as LINPACK does, which keeps them
+// checkable line by line against the published code.
+#![allow(clippy::needless_range_loop)]
+
 use std::ffi::c_int;
 
 /// A column-major matrix with leading dimension `ld`, addressed 1-based.
@@ -63,7 +67,11 @@ pub(crate) unsafe fn dnrm2(count: isize, x: *const f64) -> f64 {
             }
         }
     }
-    if scale == 0.0 { 0.0 } else { scale * sum.sqrt() }
+    if scale == 0.0 {
+        0.0
+    } else {
+        scale * sum.sqrt()
+    }
 }
 
 pub(crate) unsafe fn ddot(count: isize, x: *const f64, y: *const f64) -> f64 {
@@ -131,7 +139,7 @@ fn drotg(a: &mut f64, b: &mut f64) -> (f64, f64) {
         return (1.0, 0.0);
     }
     let mut r = scale * ((*a / scale).powi(2) + (*b / scale).powi(2)).sqrt();
-    r = 1.0f64.copysign(roe) * r;
+    r *= 1.0f64.copysign(roe);
     let c = *a / r;
     let s = *b / r;
     let mut z = 1.0;
@@ -601,7 +609,14 @@ pub unsafe extern "C" fn dqrqty_(
     let dummy: *mut f64 = &mut unused;
     for_each_column(x, n, k, qraux, ny, 1000, std::ptr::null_mut(), |column| {
         let offset = column * rows;
-        [y.offset(offset), dummy, qty.offset(offset), dummy, dummy, dummy]
+        [
+            y.offset(offset),
+            dummy,
+            qty.offset(offset),
+            dummy,
+            dummy,
+            dummy,
+        ]
     });
 }
 
@@ -620,7 +635,14 @@ pub unsafe extern "C" fn dqrqy_(
     let dummy: *mut f64 = &mut unused;
     for_each_column(x, n, k, qraux, ny, 10000, std::ptr::null_mut(), |column| {
         let offset = column * rows;
-        [y.offset(offset), qy.offset(offset), dummy, dummy, dummy, dummy]
+        [
+            y.offset(offset),
+            qy.offset(offset),
+            dummy,
+            dummy,
+            dummy,
+            dummy,
+        ]
     });
 }
 
@@ -667,7 +689,14 @@ pub unsafe extern "C" fn dqrrsd_(
     let dummy: *mut f64 = &mut unused;
     for_each_column(x, n, k, qraux, ny, 10, std::ptr::null_mut(), |column| {
         let offset = column * rows;
-        [y.offset(offset), dummy, y.offset(offset), dummy, rsd.offset(offset), dummy]
+        [
+            y.offset(offset),
+            dummy,
+            y.offset(offset),
+            dummy,
+            rsd.offset(offset),
+            dummy,
+        ]
     });
 }
 
@@ -686,7 +715,14 @@ pub unsafe extern "C" fn dqrxb_(
     let dummy: *mut f64 = &mut unused;
     for_each_column(x, n, k, qraux, ny, 1, std::ptr::null_mut(), |column| {
         let offset = column * rows;
-        [y.offset(offset), dummy, y.offset(offset), dummy, dummy, xb.offset(offset)]
+        [
+            y.offset(offset),
+            dummy,
+            y.offset(offset),
+            dummy,
+            dummy,
+            xb.offset(offset),
+        ]
     });
 }
 
@@ -728,7 +764,12 @@ pub(crate) unsafe fn triangular_solve(
         (false, false) => {
             *b /= t.get(1, 1);
             for j in 2..=n {
-                daxpy(n - j + 1, -*element(b, j - 1), t.at(j, j - 1), element(b, j));
+                daxpy(
+                    n - j + 1,
+                    -*element(b, j - 1),
+                    t.at(j, j - 1),
+                    element(b, j),
+                );
                 *element(b, j) /= t.get(j, j);
             }
         }
@@ -1066,16 +1107,14 @@ pub unsafe extern "C" fn dpbfa_(
     for j in 1..=n {
         *info = j as c_int;
         let mut s = 0.0;
-        let mut ik = m + 1;
-        let mut jk = (j - m).max(1);
+        let first_column = (j - m).max(1);
         let mu = (m + 2 - j).max(1);
-        for k in mu..=m {
-            let t = (abd.get(k, j) - ddot(k - mu, abd.at(ik, jk), abd.at(mu, j)))
-                / abd.get(m + 1, jk);
+        for (offset, k) in (mu..=m).enumerate() {
+            let (ik, jk) = (m + 1 - offset as isize, first_column + offset as isize);
+            let t =
+                (abd.get(k, j) - ddot(k - mu, abd.at(ik, jk), abd.at(mu, j))) / abd.get(m + 1, jk);
             abd.set(k, j, t);
             s += t * t;
-            ik -= 1;
-            jk += 1;
         }
         let s = abd.get(m + 1, j) - s;
         if s <= 0.0 {
@@ -1182,7 +1221,7 @@ pub unsafe extern "C" fn dsvdc_(
                 *e_at(l + 1) += 1.0;
             }
             *e_at(l) = -*e_at(l);
-            if l + 1 <= n && *e_at(l) != 0.0 {
+            if l < n && *e_at(l) != 0.0 {
                 for i in l + 1..=n {
                     *element(work, i) = 0.0;
                 }
@@ -1488,7 +1527,10 @@ mod tests {
             );
         }
         assert_eq!(k, 2);
-        assert!((b[0] - 2.0).abs() < 1e-12 && (b[1] - 3.0).abs() < 1e-12, "{b:?}");
+        assert!(
+            (b[0] - 2.0).abs() < 1e-12 && (b[1] - 3.0).abs() < 1e-12,
+            "{b:?}"
+        );
         assert!(rsd.iter().all(|value| value.abs() < 1e-12), "{rsd:?}");
     }
 }

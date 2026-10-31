@@ -12,6 +12,11 @@
 //! trampolines in `native.c`. An error inside one comes back as `Err` and leaves through
 //! `enter` like any other API error, after every buffer here has been dropped.
 
+// The algorithms index several arrays in lockstep exactly as published, which keeps them
+// checkable line by line against the papers; the quadrature constants are quoted at their
+// published precision.
+#![allow(clippy::needless_range_loop, clippy::excessive_precision)]
+
 use crate::{
     arith::{read_seed, write_seed},
     boundary::{ApiResult, enter, error, take_pending, warn, write_console},
@@ -86,7 +91,11 @@ struct Objective {
 }
 
 impl Objective {
-    fn new(function: Option<OptimFn>, gradient: Option<OptimGr>, ex: *mut c_void) -> ApiResult<Objective> {
+    fn new(
+        function: Option<OptimFn>,
+        gradient: Option<OptimGr>,
+        ex: *mut c_void,
+    ) -> ApiResult<Objective> {
         let function = function.ok_or_else(|| error("the objective function is NULL"))?;
         Ok(Objective {
             function,
@@ -314,7 +323,8 @@ pub unsafe extern "C" fn vmmin(
                         d2 = 1.0 + d2 / d1;
                         for i in 0..n {
                             for j in 0..=i {
-                                hessian[i][j] += (d2 * t[i] * t[j] - x[i] * t[j] - t[i] * x[j]) / d1;
+                                hessian[i][j] +=
+                                    (d2 * t[i] * t[j] - x[i] * t[j] - t[i] * x[j]) / d1;
                             }
                         }
                     } else {
@@ -407,7 +417,10 @@ pub unsafe extern "C" fn nmmin(
         let mut function_count: c_int = 1;
         let tolerance = intol * (f.abs() + intol);
         if trace != 0 {
-            print(&format!("  Scaled convergence tolerance is {}\n", format_g(tolerance)));
+            print(&format!(
+                "  Scaled convergence tolerance is {}\n",
+                format_g(tolerance)
+            ));
         }
         simplex[n][0] = f;
         for i in 0..n {
@@ -476,7 +489,9 @@ pub unsafe extern "C" fn nmmin(
                 break;
             }
             if trace != 0 {
-                print(&format!("{action}{function_count:5} {high_value:.6} {low_value:.6}\n"));
+                print(&format!(
+                    "{action}{function_count:5} {high_value:.6} {low_value:.6}\n"
+                ));
             }
             for i in 0..n {
                 let mut sum = -simplex[i][highest - 1];
@@ -625,7 +640,9 @@ pub unsafe extern "C" fn cgmin(
             _ => return Err(error("unknown 'type' in \"CG\" method of 'optim'")),
         };
         if trace != 0 {
-            print(&format!("  Conjugate gradients function minimizer\nMethod: {method}\n"));
+            print(&format!(
+                "  Conjugate gradients function minimizer\nMethod: {method}\n"
+            ));
         }
         let mut c = vec![0.0; n];
         let mut g = vec![0.0; n];
@@ -635,7 +652,10 @@ pub unsafe extern "C" fn cgmin(
         let cycle_limit = n;
         let tolerance = intol * n as f64 * intol.sqrt();
         if trace != 0 {
-            print(&format!("tolerance used in gradient test={}\n", format_g(tolerance)));
+            print(&format!(
+                "tolerance used in gradient test={}\n",
+                format_g(tolerance)
+            ));
         }
         let mut f = objective.value(bvec)?;
         if !f.is_finite() {
@@ -645,10 +665,8 @@ pub unsafe extern "C" fn cgmin(
         let mut function_count: c_int = 1;
         let mut gradient_count: c_int = 0;
         loop {
-            for i in 0..n {
-                t[i] = 0.0;
-                c[i] = bvec[i];
-            }
+            t.fill(0.0);
+            c.fill(0.0);
             let mut cycle = 0;
             let mut old_step = 1.0;
             let mut count;
@@ -863,7 +881,14 @@ struct Integrand {
 
 impl Integrand {
     unsafe fn evaluate(&self, points: &mut [f64]) -> ApiResult<()> {
-        callback(|| ry_call_integrand(self.function, points.as_mut_ptr(), points.len() as c_int, self.ex))
+        callback(|| {
+            ry_call_integrand(
+                self.function,
+                points.as_mut_ptr(),
+                points.len() as c_int,
+                self.ex,
+            )
+        })
     }
 }
 
@@ -1161,7 +1186,8 @@ impl Extrapolation {
                 let delta1 = e1 - e3;
                 let error1 = delta1.abs();
                 let tolerance1 = e1_magnitude.max(e3.abs()) * epsilon;
-                let mut irregular = error1 <= tolerance1 || error2 <= tolerance2 || error3 <= tolerance3;
+                let mut irregular =
+                    error1 <= tolerance1 || error2 <= tolerance2 || error3 <= tolerance3;
                 let mut ss = 0.0;
                 if !irregular {
                     ss = 1.0 / delta1 + 1.0 / delta2 - 1.0 / delta3;
@@ -1183,17 +1209,15 @@ impl Extrapolation {
             if n == LIMIT {
                 n = 2 * (LIMIT / 2) - 1;
             }
-            let mut ib = if original % 2 == 0 { 2 } else { 1 };
+            let mut ib = if original.is_multiple_of(2) { 2 } else { 1 };
             for _ in 1..=new_elements + 1 {
                 let ib2 = ib + 2;
                 table[at(ib)] = table[at(ib2)];
                 ib = ib2;
             }
             if original != n {
-                let mut index = original - n + 1;
-                for i in 1..=n {
-                    table[at(i)] = table[at(index)];
-                    index += 1;
+                for (i, source) in (1..=n).zip(original - n + 1..) {
+                    table[at(i)] = table[at(source)];
                 }
             }
             if self.calls < 4 {
@@ -1225,7 +1249,13 @@ struct Subintervals<'a> {
 impl Subintervals<'_> {
     /// QUADPACK's `dqpsrt`: keeps `order` descending by error after interval `maxerr` was
     /// bisected into `maxerr` and `last`. Returns the new `maxerr`, its error, and `nrmax`.
-    fn sort(&mut self, limit: usize, last: usize, maxerr: usize, nrmax: &mut usize) -> (usize, f64) {
+    fn sort(
+        &mut self,
+        limit: usize,
+        last: usize,
+        maxerr: usize,
+        nrmax: &mut usize,
+    ) -> (usize, f64) {
         let order = &mut *self.order;
         let error = &*self.error;
         let at = |index: usize| index - 1;
@@ -1247,7 +1277,11 @@ impl Subintervals<'_> {
                     *nrmax -= 1;
                 }
             }
-            let upper = if last > limit / 2 + 2 { limit + 3 - last } else { last };
+            let upper = if last > limit / 2 + 2 {
+                limit + 3 - last
+            } else {
+                last
+            };
             let smallest = error[at(last)];
             let bound = upper - 1;
             let start = *nrmax + 1;
@@ -1359,7 +1393,11 @@ unsafe fn adaptive(
     let mut no_extrapolation = false;
     let mut ierro = 0;
     let (mut iroff1, mut iroff2, mut iroff3) = (0, 0, 0);
-    let ksgn = if dres >= (1.0 - 50.0 * epsilon) * defabs { 1 } else { -1 };
+    let ksgn = if dres >= (1.0 - 50.0 * epsilon) * defabs {
+        1
+    } else {
+        -1
+    };
     let mut small = 0.0;
     let mut erlarg = 0.0;
     let mut ertest = 0.0;
@@ -1376,7 +1414,8 @@ unsafe fn adaptive(
         let first_half = rule(a1, b1)?;
         let second_half = rule(a2, b2)?;
         let (area1, error1, defab1) = (first_half.result, first_half.error, first_half.deviation);
-        let (area2, error2, defab2) = (second_half.result, second_half.error, second_half.deviation);
+        let (area2, error2, defab2) =
+            (second_half.result, second_half.error, second_half.deviation);
         let area12 = area1 + area2;
         let erro12 = error1 + error2;
         errsum = errsum + erro12 - errmax;
@@ -1460,8 +1499,13 @@ unsafe fn adaptive(
         let mut keep_bisecting = false;
         if ierro != 3 && erlarg > ertest {
             // Bisect the large intervals before extrapolating again.
-            let upper = if last > 2 + limit / 2 { limit + 3 - last } else { last };
-            for _ in nrmax..=upper {
+            let upper = if last > 2 + limit / 2 {
+                limit + 3 - last
+            } else {
+                last
+            };
+            let first = nrmax;
+            for _ in first..=upper {
                 maxerr = intervals.order[at(nrmax)] as usize;
                 errmax = intervals.error[at(maxerr)];
                 if (intervals.right[at(maxerr)] - intervals.left[at(maxerr)]).abs() > small {
@@ -1619,7 +1663,11 @@ pub unsafe extern "C" fn Rdqags(
         *abserr = outcome.error;
         *ier = outcome.status;
         *last = outcome.last as c_int;
-        *neval = if outcome.last == 0 { 0 } else { 42 * outcome.last as c_int - 21 };
+        *neval = if outcome.last == 0 {
+            0
+        } else {
+            42 * outcome.last as c_int - 21
+        };
         Ok(())
     })
 }
@@ -1657,13 +1705,18 @@ pub unsafe extern "C" fn Rdqagi(
         let integrand = Integrand { function, ex };
         let infinity = *inf;
         let start = if infinity == 2 { 0.0 } else { *bound };
-        let mut rule = |low: f64, high: f64| kronrod15_infinite(integrand, start, infinity, low, high);
+        let mut rule =
+            |low: f64, high: f64| kronrod15_infinite(integrand, start, infinity, low, high);
         let outcome = adaptive(&mut rule, 0.0, 1.0, *epsabs, *epsrel, limit, &mut intervals)?;
         *result = outcome.result;
         *abserr = outcome.error;
         *ier = outcome.status;
         *last = outcome.last as c_int;
-        let mut evaluations = if outcome.last == 0 { 0 } else { 30 * outcome.last as c_int - 15 };
+        let mut evaluations = if outcome.last == 0 {
+            0
+        } else {
+            30 * outcome.last as c_int - 15
+        };
         if infinity == 2 {
             evaluations *= 2;
         }
@@ -1868,7 +1921,12 @@ pub unsafe extern "C" fn R_pretty(
         small = true;
     } else {
         cell = low.abs().max(high.abs());
-        let mut u = 1.0 + if h5 >= 1.5 * h + 0.5 { 1.0 / (1.0 + h) } else { 1.5 / (1.0 + h5) };
+        let mut u = 1.0
+            + if h5 >= 1.5 * h + 0.5 {
+                1.0 / (1.0 + h)
+            } else {
+                1.5 / (1.0 + h5)
+            };
         u *= (*ndiv).max(1) as f64 * f64::EPSILON;
         small = dx < cell * u * 3.0;
     }
@@ -1922,8 +1980,16 @@ pub unsafe extern "C" fn R_pretty(
     let mut ns = (low / unit + ROUNDING_EPSILON).floor();
     let mut nu = (high / unit - ROUNDING_EPSILON).ceil();
     if eps_correction != 0 && (eps_correction > 1 || !small) {
-        *lo = if low != 0.0 { low * (1.0 - f64::EPSILON) } else { -f64::MIN_POSITIVE };
-        *up = if high != 0.0 { high * (1.0 + f64::EPSILON) } else { f64::MIN_POSITIVE };
+        *lo = if low != 0.0 {
+            low * (1.0 - f64::EPSILON)
+        } else {
+            -f64::MIN_POSITIVE
+        };
+        *up = if high != 0.0 {
+            high * (1.0 + f64::EPSILON)
+        } else {
+            f64::MIN_POSITIVE
+        };
     }
     while ns * unit > *lo + ROUNDING_EPSILON * unit {
         ns -= 1.0;
@@ -1978,7 +2044,13 @@ impl Problem {
     unsafe fn value(&self, x: &mut [f64]) -> ApiResult<f64> {
         let mut value = 0.0;
         callback(|| {
-            ry_call_fcn(self.function, x.len() as c_int, x.as_mut_ptr(), &mut value, self.state)
+            ry_call_fcn(
+                self.function,
+                x.len() as c_int,
+                x.as_mut_ptr(),
+                &mut value,
+                self.state,
+            )
         })?;
         Ok(value)
     }
@@ -2048,6 +2120,7 @@ struct HookState {
     dltp: f64,
     phi: f64,
     phip0: f64,
+    phip: f64,
 }
 
 /// `optif9`'s scalar arguments, normalized by `optchk`.
@@ -2135,7 +2208,15 @@ pub unsafe extern "C" fn optif9(
             base: a,
             rows: nr.max(0) as usize,
         };
-        uncmin(problem, a, n, vector(x, size), vector(typsiz, size), settings, outputs)
+        uncmin(
+            problem,
+            a,
+            n,
+            vector(x, size),
+            vector(typsiz, size),
+            settings,
+            outputs,
+        )
     })
 }
 
@@ -2188,6 +2269,15 @@ unsafe fn uncmin(
     }
     if settings.iexp != 0 {
         settings.iexp = 1;
+    }
+    // Asking to skip the check of a derivative that was not supplied is an error.
+    if (*msg / 2) % 2 == 1 && settings.iagflg == 0 {
+        *msg = -6;
+        return Ok(());
+    }
+    if (*msg / 4) % 2 == 1 && settings.iahflg == 0 {
+        *msg = -7;
+        return Ok(());
     }
     if n_declared <= 0 {
         *msg = -1;
@@ -2274,7 +2364,19 @@ unsafe fn uncmin(
         }
     }
     let mut consecutive_maximal = 0;
-    *itrmcd = stopping_reason(x, f, &g, &work, *itncnt, &mut consecutive_maximal, &sx, limits, iretcd, false);
+    let mut stopped_at_new_iterate = false;
+    *itrmcd = stopping_reason(
+        x,
+        f,
+        &g,
+        &work,
+        *itncnt,
+        &mut consecutive_maximal,
+        &sx,
+        limits,
+        iretcd,
+        false,
+    );
     if *itrmcd == 0 {
         if expensive {
             for j in 0..n {
@@ -2290,7 +2392,9 @@ unsafe fn uncmin(
                 second_order_hessian(&problem, a, x, f, &sx, rnf)?;
             }
         } else if (*msg / 4) % 2 == 0 {
-            if !hessian_agrees(&problem, a, x, f, &g, typsiz, &sx, rnf, analtl, iagflg, &mut udiag)? {
+            if !hessian_agrees(
+                &problem, a, x, f, &g, typsiz, &sx, rnf, analtl, iagflg, &mut udiag,
+            )? {
                 *msg = -22;
                 return Ok(());
             }
@@ -2413,20 +2517,18 @@ unsafe fn uncmin(
             x.copy_from_slice(xpls);
             g.copy_from_slice(gpls);
         }
-        if *itrmcd != 3 {
-            if !quiet {
-                print_iterate(xpls, *fpls, gpls, &p, *itncnt, false);
-            }
-            return Ok(());
-        }
+        stopped_at_new_iterate = *itrmcd != 3;
     }
-    // Stopped at the previous iterate, or before the first step.
-    *fpls = f;
-    xpls.copy_from_slice(x);
-    gpls.copy_from_slice(&g);
+    if !stopped_at_new_iterate {
+        // Stopped at the previous iterate, or before the first step.
+        *fpls = f;
+        xpls.copy_from_slice(x);
+        gpls.copy_from_slice(&g);
+    }
     if !quiet {
         print_iterate(xpls, *fpls, gpls, &p, *itncnt, false);
     }
+    *msg = 0;
     Ok(())
 }
 
@@ -2597,13 +2699,21 @@ unsafe fn second_order_hessian(
         let saved = x[i];
         x[i] = saved + step[i] * 2.0;
         let double = problem.value(x)?;
-        a.set(i, i, ((f - neighbour[i]) + (double - neighbour[i])) / (step[i] * step[i]));
+        a.set(
+            i,
+            i,
+            ((f - neighbour[i]) + (double - neighbour[i])) / (step[i] * step[i]),
+        );
         x[i] = saved + step[i];
         for j in 0..i {
             let other = x[j];
             x[j] = other + step[j];
             let both = problem.value(x)?;
-            a.set(i, j, ((f - neighbour[i]) + (both - neighbour[j])) / (step[i] * step[j]));
+            a.set(
+                i,
+                j,
+                ((f - neighbour[i]) + (both - neighbour[j])) / (step[i] * step[j]),
+            );
             x[j] = other;
         }
         x[i] = saved;
@@ -3073,8 +3183,8 @@ unsafe fn dogleg_driver(
                     steepest[i] = -(alpha / beta) * sx[i] * g[i] / (sx[i] * sx[i]);
                 }
                 cauchy_length = alpha * alpha.sqrt() / beta;
-                eta = 0.8 * alpha * alpha / (-beta * ddot(n as isize, g.as_ptr(), p.as_ptr()))
-                    + 0.2;
+                eta =
+                    0.8 * alpha * alpha / (-beta * ddot(n as isize, g.as_ptr(), p.as_ptr())) + 0.2;
                 for i in 0..n {
                     v[i] = eta * sx[i] * p[i] - steepest[i];
                 }
@@ -3094,8 +3204,7 @@ unsafe fn dogleg_driver(
                 let dot1 = ddot(n as isize, v.as_ptr(), steepest.as_ptr());
                 let dot2 = ddot(n as isize, v.as_ptr(), v.as_ptr());
                 let lambda = (-dot1
-                    + (dot1 * dot1 - dot2 * (cauchy_length * cauchy_length - *dlt * *dlt))
-                        .sqrt())
+                    + (dot1 * dot1 - dot2 * (cauchy_length * cauchy_length - *dlt * *dlt)).sqrt())
                     / dot2;
                 for i in 0..n {
                     sc[i] = (steepest[i] + lambda * v[i]) / sx[i];
@@ -3103,7 +3212,17 @@ unsafe fn dogleg_driver(
             }
         }
         let mxtake = trust_region_update(
-            problem, a, step, &sc, newton_taken, dlt, &mut attempt, xpls, fpls, 2, &[],
+            problem,
+            a,
+            step,
+            &sc,
+            newton_taken,
+            dlt,
+            &mut attempt,
+            xpls,
+            fpls,
+            2,
+            &[],
         )?;
         if attempt.iretcd <= 1 {
             return Ok((attempt.iretcd, mxtake));
@@ -3161,7 +3280,17 @@ unsafe fn hook_driver(
         );
         hook.dltp = *dlt;
         let mxtake = trust_region_update(
-            problem, a, step, &sc, newton_taken, dlt, &mut attempt, xpls, fpls, 3, udiag,
+            problem,
+            a,
+            step,
+            &sc,
+            newton_taken,
+            dlt,
+            &mut attempt,
+            xpls,
+            fpls,
+            3,
+            udiag,
         )?;
         if attempt.iretcd <= 1 {
             return Ok((attempt.iretcd, mxtake));
@@ -3197,7 +3326,7 @@ unsafe fn hook_step(
         return true;
     }
     if hook.amu > 0.0 {
-        hook.amu -= (hook.phi + hook.dltp) * (hook.dltp - *dlt + hook.phi) / (*dlt * hook.phip0);
+        hook.amu -= (hook.phi + hook.dltp) * (hook.dltp - *dlt + hook.phi) / (*dlt * hook.phip);
     }
     hook.phi = newton_length - *dlt;
     let mut info = 0;
@@ -3240,7 +3369,11 @@ unsafe fn hook_step(
         triangular_solve(a.linpack(), n as isize, work.as_mut_ptr(), 0, &mut info);
         let norm = dnrm2(n as isize, work.as_ptr());
         let phip = -(norm * norm) / step_length;
-        if (LOW * *dlt <= step_length && step_length <= HIGH * *dlt) || amu_up - amu_low <= 0.0 {
+        hook.phip = phip;
+        // Dennis and Schnabel stop when the bracket on mu is empty; GNU R's UNCMIN tests the
+        // opposite, so it accepts the first step whenever the bracket is not empty, and its
+        // callers see those steps.
+        if (LOW * *dlt <= step_length && step_length <= HIGH * *dlt) || amu_up - amu_low > 0.0 {
             return false;
         }
         amu_low = amu_low.max(hook.amu - hook.phi / phip);
@@ -3314,9 +3447,8 @@ unsafe fn secant_factored(a: Dense, secant: &Secant, no_update: &mut bool) {
     } else {
         secant.rnf
     };
-    let skip = (0..n).all(|i| {
-        (y[i] - w[i]).abs() < tolerance * secant.g[i].abs().max(secant.gpls[i].abs())
-    });
+    let skip = (0..n)
+        .all(|i| (y[i] - w[i]).abs() < tolerance * secant.g[i].abs().max(secant.gpls[i].abs()));
     if skip {
         return;
     }
@@ -3436,7 +3568,9 @@ unsafe fn secant_unfactored(a: Dense, secant: &Secant, udiag: &mut [f64], no_upd
     }
     for j in 0..n {
         for i in j..n {
-            a.update(i, j, |value| value + y[i] * y[j] / den1 - t[i] * t[j] / den2);
+            a.update(i, j, |value| {
+                value + y[i] * y[j] / den1 - t[i] * t[j] / den2
+            });
         }
     }
 }
@@ -3489,13 +3623,21 @@ pub unsafe extern "C" fn fdhess(
             let saved = x[i];
             x[i] += step[i] * 2.0;
             let double = problem.value(x)?;
-            h.set(i, i, ((fval - values[i]) + (double - values[i])) / (step[i] * step[i]));
+            h.set(
+                i,
+                i,
+                ((fval - values[i]) + (double - values[i])) / (step[i] * step[i]),
+            );
             x[i] = saved + step[i];
             for j in i + 1..x.len() {
                 let other = x[j];
                 x[j] += step[j];
                 let both = problem.value(x)?;
-                h.set(i, j, ((fval - values[i]) + (both - values[j])) / (step[i] * step[j]));
+                h.set(
+                    i,
+                    j,
+                    ((fval - values[i]) + (both - values[j])) / (step[i] * step[j]),
+                );
                 x[j] = other;
             }
             x[i] = saved;
@@ -3585,7 +3727,10 @@ pub unsafe extern "C" fn lbfgsb(
             if outcome.iterations < maxit && outcome.fail == 0 {
                 print(&format!("final  value {:.6} \nconverged\n", outcome.value));
             } else {
-                print(&format!("stopped after {} iterations\n", outcome.iterations));
+                print(&format!(
+                    "stopped after {} iterations\n",
+                    outcome.iterations
+                ));
             }
         }
         set_message(msg, &outcome.message);
@@ -3838,16 +3983,24 @@ unsafe fn minimize_bounded(
     let mut f = evaluate(x, &mut g)?;
     let mut evaluations: c_int = 1;
     let mut iterations: c_int = 0;
-    let finish = |outcome: &mut LbfgsbOutcome, f: f64, evaluations, iterations, fail, message: &str| {
-        outcome.value = f;
-        outcome.evaluations = evaluations;
-        outcome.iterations = iterations;
-        outcome.fail = fail;
-        outcome.message = message.into();
-    };
+    let finish =
+        |outcome: &mut LbfgsbOutcome, f: f64, evaluations, iterations, fail, message: &str| {
+            outcome.value = f;
+            outcome.evaluations = evaluations;
+            outcome.iterations = iterations;
+            outcome.fail = fail;
+            outcome.message = message.into();
+        };
     let mut projected = bounds.projected_gradient_norm(x, &g);
     if projected <= settings.pgtol {
-        finish(&mut outcome, f, evaluations, iterations, 0, "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL");
+        finish(
+            &mut outcome,
+            f,
+            evaluations,
+            iterations,
+            0,
+            "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+        );
         return Ok(outcome);
     }
     loop {
@@ -3926,7 +4079,7 @@ unsafe fn minimize_bounded(
             }
             trials += 1;
             evaluations += 1;
-            if trials - 1 >= 20 {
+            if trials > 20 {
                 evaluations -= 1;
                 failed = true;
                 break;
@@ -3975,12 +4128,26 @@ unsafe fn minimize_bounded(
             return Ok(outcome);
         }
         if projected <= settings.pgtol {
-            finish(&mut outcome, f, evaluations, iterations, 0, "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL");
+            finish(
+                &mut outcome,
+                f,
+                evaluations,
+                iterations,
+                0,
+                "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+            );
             return Ok(outcome);
         }
         let scale = f_old.abs().max(f.abs()).max(1.0);
         if f_old - f <= tolerance * scale {
-            finish(&mut outcome, f, evaluations, iterations, 0, "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH");
+            finish(
+                &mut outcome,
+                f,
+                evaluations,
+                iterations,
+                0,
+                "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH",
+            );
             return Ok(outcome);
         }
         // Update the memory unless the curvature condition fails.
@@ -4044,7 +4211,12 @@ fn cauchy_point(x: &[f64], g: &[f64], bounds: &Bounds, memory: &Memory) -> (Vec<
         return (z, c);
     }
     let initial_curvature = -theta * fp;
-    let mut fpp = initial_curvature - if k2 > 0 { dot(&p, &memory.times_middle(&p)) } else { 0.0 };
+    let mut fpp = initial_curvature
+        - if k2 > 0 {
+            dot(&p, &memory.times_middle(&p))
+        } else {
+            0.0
+        };
     let curvature = |fpp: f64| fpp.max(f64::EPSILON * initial_curvature);
     let mut dt_min = -fp / curvature(fpp);
     let mut t_old = 0.0;
@@ -4053,7 +4225,11 @@ fn cauchy_point(x: &[f64], g: &[f64], bounds: &Bounds, memory: &Memory) -> (Vec<
         if dt_min < dt {
             break;
         }
-        z[b] = if d[b] > 0.0 { bounds.upper[b] } else { bounds.lower[b] };
+        z[b] = if d[b] > 0.0 {
+            bounds.upper[b]
+        } else {
+            bounds.lower[b]
+        };
         let zb = z[b] - x[b];
         let gb = g[b];
         for j in 0..k2 {
@@ -4271,7 +4447,8 @@ impl MoreThuente {
         if self.bracketed && (*step <= self.interval_min || *step >= self.interval_max) {
             status = Some(SearchStatus::Warning);
         }
-        if self.bracketed && self.interval_max - self.interval_min <= self.xtol * self.interval_max {
+        if self.bracketed && self.interval_max - self.interval_min <= self.xtol * self.interval_max
+        {
             status = Some(SearchStatus::Warning);
         }
         if *step == self.step_max && f <= f_test && g <= self.g_test {

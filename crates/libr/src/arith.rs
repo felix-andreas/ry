@@ -518,7 +518,7 @@ fn singleton_sort<T: Copy + PartialOrd>(
                         index[k] = index[k - 1];
                     }
                     k -= 1;
-                    if k < first || !(value < at(values, k)) {
+                    if k < first || value.partial_cmp(&at(values, k)) != Some(Ordering::Less) {
                         break;
                     }
                 }
