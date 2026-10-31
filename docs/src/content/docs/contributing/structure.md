@@ -172,8 +172,10 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
 - **`linalg.rs`**: BLAS and LAPACK (opened at runtime) and base's LINPACK routines.
   **`distributions.rs`**: the probability distributions. **`random.rs`**: the random number
   generators.
-- **`connections.rs`**, **`serialize.rs`**, **`system.rs`**: connections and `cat`, serialization
-  and the lazy-load database, and the operating system (files, time, the environment).
+- **`connections.rs`**, **`serialize.rs`**, **`system.rs`**: the connection table (the `Rconn`
+  struct native code sees, the built-in connection kinds, custom connections, sinks and `cat`),
+  serialization and the lazy-load database, and the operating system (files, time, the
+  environment).
 - **`native.rs`**: the foreign-function builtins for a session without libR, and base's routines.
   **`builtin_libraries.rs`**: the default packages' routine tables, which `dyn.load` hands out
   instead of loading their shared libraries; **`utils.rs`**, **`tools.rs`** and **`graphics.rs`**
@@ -212,8 +214,8 @@ runtime state and R's C API. Each exported function that can fail runs its body 
   classes (compact sequences, deferred strings, wrappers).
 - **`serialize.rs`**: R's serialization format in every variant, the stream API, RDS files and
   lazy-load databases.
-- **`connections.rs`**: the connection table, the `Rconn` struct native code sees, the built-in
-  connection kinds, custom connections, and the connection primitives.
+- **`connections.rs`**: the `R_ext/Connections.h` entry points over the interpreter's
+  connection table, and the trampolines that call a package's own connection methods.
 - **`classes.rs`**: the implicit class and the S4 slot and class functions.
 - **`hashtab.rs`**: R's hash tables, kept in heap objects.
 - **`legacy.rs`**: names R 4.6 no longer declares that binaries built against older R import

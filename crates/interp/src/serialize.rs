@@ -992,13 +992,13 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
-    let bytes = crate::connections::read_all_bytes(call.arg(0))?;
+    let bytes = crate::connections::read_binary(call.arg(0))?;
     unserialize(&bytes, call.arg(1))
 }
 
 unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {
     let bytes = serialize(call.arg(0))?;
-    crate::connections::write_bytes(call.arg(1), &bytes)?;
+    crate::connections::write_binary(call.arg(1), &bytes)?;
     Ok(nil())
 }
 
@@ -1008,7 +1008,7 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
         let bytes = values::raws(source).to_vec();
         return unserialize(&bytes, call.arg(1));
     }
-    let bytes = crate::connections::read_all_bytes(source)?;
+    let bytes = crate::connections::read_binary(source)?;
     unserialize(&bytes, call.arg(1))
 }
 
@@ -1020,6 +1020,6 @@ unsafe fn do_serialize(call: &Call<'_>) -> R<Sexp> {
         values::raws_mut(result).copy_from_slice(&bytes);
         return Ok(result);
     }
-    crate::connections::write_bytes(connection, &bytes)?;
+    crate::connections::write_binary(connection, &bytes)?;
     Ok(nil())
 }

@@ -106,6 +106,15 @@ pub struct Hooks {
     /// Base's task-callback routines, which keep their list in the host so that callbacks
     /// registered from R and from native code share one list and one numbering.
     pub task_callback_routine: unsafe fn(TaskCallbackRoutine, &[Sexp]) -> R<Sexp>,
+    /// Calls a C method of a custom connection under the host's native-code boundary, which
+    /// turns an R error the method raises into an unwind.
+    pub connection_method: unsafe fn(connections::Rconnection, connections::NativeMethod<'_>) -> R<()>,
+    /// Runs `body` as an entry from native code: the host's boundary turns an unwind into a
+    /// `longjmp` into whatever native frame called the connection.
+    pub enter_from_native: unsafe fn(&mut dyn FnMut() -> R<()>),
+    /// The host's C `vfprintf` method for connections, which formats a C variadic argument
+    /// list. Without a host no C code can call it, so it is `None`.
+    pub connection_vfprintf: Option<connections::OpaqueMethod>,
 }
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
@@ -230,6 +239,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);
+    let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
         handlers: None,
@@ -249,7 +259,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         hooks,
         bytecode: bytecode::State::default(),
         random: random::Rng::default(),
-        connections: connections::Table::default(),
+        connections: connection_table,
         depth: 0,
         max_depth: 5000,
         started: std::time::Instant::now(),
@@ -280,6 +290,14 @@ pub fn default_hooks() -> Hooks {
         task_callback_routine: |_, _| {
             Err(unwind::error("top-level task callbacks need the libR host"))
         },
+        connection_method: |_, _| Err(unwind::error("custom connections need the libR host")),
+        enter_from_native: |body| {
+            // Only native code calls this hook, and without the libR host there is none.
+            if body().is_err() {
+                panic!("an R error escaped into native code without the libR host");
+            }
+        },
+        connection_vfprintf: None,
     }
 }
 

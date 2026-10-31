@@ -1800,7 +1800,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Connections gaps:** bzip2 and xz file connections, sockets, and `pipe()` are not implemented.
+- **Connections gaps:** bzip2 and xz file connections, `fifo()`, URL connections and sockets are
+  not implemented.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
@@ -1815,10 +1816,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
   bodies, `example()` echo without `keep.source` (GNU R shows the original text and comments), and
   the "deparse may be incomplete" warning.
-- **The interpreter keeps its own connections and RNG beside libr's.** Both RNGs sync through
-  `.Random.seed`; the interpreter's connection builtins should move onto `libr::connections`, and
-  libr's primitive table and built-in evaluator are unused while the interpreter is installed, so
-  the libr connection tests that call `file()`/`stdout()` without base R fail until then.
+- **The interpreter keeps its own RNG beside libr's.** Both sync through `.Random.seed`, and
+  libr's built-in evaluator is unused while the interpreter is installed.
 - **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
   weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack

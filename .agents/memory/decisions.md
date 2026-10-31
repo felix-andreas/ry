@@ -1841,6 +1841,36 @@ there was no evaluator, so there was no previous source of truth.
 - **`.External2` routines get GNU R's four-argument convention** `(call, op, args, env)`, which
   rlang's `ffi_eval` relies on to evaluate in the caller's environment.
 
+# Decision record: one connection table, in the interpreter
+
+- **Previous sources of truth.** There were two connection tables. `libr::connections` held GNU R's
+  `struct Rconn` table (128 slots, the devices, custom connections, the C entry points) and an R
+  function table (`PRIMITIVES`) that nothing registered once the interpreter was installed.
+  `interp::connections` held a second, simpler table (its own connection records and class enum)
+  with the sinks, `cat` and every connection builtin the interpreter actually ran. A connection that
+  R code opened was therefore invisible to `R_GetConnection`, and a custom connection a package
+  created could not be read with `readLines`.
+- **What was duplicated.** The table, the slot numbering, the R-level connection object, every
+  device kind and the read and write paths existed twice, and the libr copy was dead code apart from
+  the C entry points. Warnings were also kept twice: libr's `Runtime.warnings` beside the
+  interpreter's deferred list.
+- **Target shape.** `interp::connections` owns the `#[repr(C)] Rconn`, the table, the devices, the
+  sinks and every connection internal, registered with GNU R 4.3.3's arities. A package's own C
+  method is called through the `Hooks::connection_method` hook, which libr implements with the
+  `native.c` trampolines under a native scope, and ry's methods that C calls enter through
+  `Hooks::enter_from_native`, libr's `enter`, so an R error becomes the `longjmp` C expects. The
+  default `vfprintf` is native code, so its address comes in as `Hooks::connection_vfprintf`. libr
+  keeps only `R_new_custom_connection`, `R_GetConnection`, `R_ReadConnection`, `R_WriteConnection`
+  and `ry_connection_count`. The interpreter's root source traces what the table holds (a text
+  output connection's variable and environment), replacing preserve and release. libr's
+  `boundary::warn` defers onto the interpreter's warning list, which the test exports read.
+- **Impact.** One table means R code and C code see the same connections, which makes the custom
+  connections of curl and processx readable from R. The interpreter still builds and tests
+  without libR, because native calls go through hooks whose defaults error, and the merged table
+  is about 750 lines smaller than the two were.
+- **`closeAllConnections` is not an internal.** GNU R defines it as a base closure over
+  `getAllConnections` and `close`, so ry registers no internal for it.
+
 # Decision record: the full C API surface and package installation
 
 This settles the part of step 4 of `contributing/design/r-runtime.md` that does not need the

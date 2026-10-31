@@ -35,6 +35,9 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             run_task_callbacks(expression, value, succeeded, visible)
         },
         task_callback_routine: |routine, args| unsafe { task_callback_routine(routine, args) },
+        connection_method: |con, call| unsafe { crate::connections::call_method(con, call) },
+        enter_from_native: |body| unsafe { crate::boundary::enter(|| body()) },
+        connection_vfprintf: Some(crate::connections::default_vfprintf()),
     };
     interp::install(&mut runtime.heap, hooks);
     interp::register_builtins(NATIVE_BUILTINS);
@@ -979,6 +982,29 @@ unsafe fn do_is_loaded(call: &Call<'_>) -> ApiResult<Sexp> {
 /// For tests that build a call by hand.
 pub unsafe fn quote_error(message: &str) -> Unwind {
     error(message)
+}
+
+/// Starts the R session (base R and the default packages from the GNU R installation) without
+/// running a script, for hosts and tests that call R functions directly. Returns 0 once the
+/// session runs and nonzero when base R did not load. Starting twice does nothing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_start_session() -> c_int {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    runtime();
+    if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    let options = interp::session::StartOptions {
+        command_args: vec!["ry".to_owned()],
+        vanilla: true,
+    };
+    match interp::session::start(options) {
+        Ok(()) => 0,
+        Err(unwind) => {
+            interp::session::report_toplevel(unwind);
+            1
+        }
+    }
 }
 
 /// Runs an R script on ry's runtime the way `Rscript` does: starts the session (base R and the
