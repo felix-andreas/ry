@@ -608,6 +608,72 @@ add_revenue <- function(dt) {
   56..64 quantity -> quiet deferred
   masked-subset 32..65
 
+#---- walrus_on_a_global_inside_a_function_binds_nothing
+add_flag <- function() {
+  dt[, flag := TRUE]
+  dt[flag == TRUE]
+}
+#++++
+# add_flag
+  b0 add_flag top-level 0..8
+  0..8 add_flag <- b0
+  27..29 dt -> non-local deferred
+  32..36 flag -> quiet deferred
+  37..39 := -> quiet deferred
+  48..50 dt -> non-local deferred
+  51..55 flag -> non-local deferred
+  masked-subset 27..45
+
+#---- walrus_on_a_parameter_writes_its_slot
+add_flag <- function(dt) {
+  dt[, flag := TRUE]
+  dt
+}
+#++++
+# add_flag
+  b0 dt parameter 21..23
+  b1 add_flag top-level 0..8
+  0..8 add_flag <- b1
+  29..31 dt -> b0
+  34..38 flag -> quiet deferred
+  39..41 := -> quiet deferred
+  50..52 dt -> b0
+  masked-subset 29..47
+
+#---- walrus_at_the_top_level_binds_the_name
+dt[, flag := TRUE]
+#++++
+# <statement>
+  b0 dt top-level 0..2
+  0..2 dt -> non-local
+  5..9 flag -> quiet
+  10..12 := -> quiet
+  masked-subset 0..18
+
+#---- dot_dot_reads_the_enclosing_variable
+pick <- function(dt) {
+  columns <- c("a", "b")
+  dt[, ..columns]
+}
+#++++
+# pick
+  b0 dt parameter 17..19
+  b1 columns local 25..32
+  b2 pick top-level 0..4
+  0..4 pick <- b2
+  25..32 columns <- b1
+  36..37 c -> non-local deferred
+  50..52 dt -> b0
+  55..64 ..columns -> b1
+
+#---- dot_dot_outside_a_bracket_is_an_ordinary_name
+f <- function() ..columns
+#++++
+# f
+  b0 f top-level 0..1
+  0..1 f <- b0
+  16..25 ..columns -> non-local deferred
+
 #---- base_indexing_stays_lexical
 pick <- function(m) {
   m[not_a_column]

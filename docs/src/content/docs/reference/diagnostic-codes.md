@@ -65,7 +65,9 @@ both types and says which one ry uses, so a stale comment cannot silently contra
 
 **`unresolved`** (warning): a name that is defined nowhere ry can see, with a suggestion for a near
 miss. It also covers `pkg::name` where `pkg` does not export `name`, and an unknown package.
-`pkg:::name` is exempt, because it reaches internal names on purpose. In `NAMESPACE`, an
+`pkg:::name` is exempt, because it reaches internal names on purpose. Inside a frame query such as
+`f[amuont > 1]`, a bare name that is neither a column of `f` nor defined anywhere is reported the
+same way, with the closest column as the suggestion. In `NAMESPACE`, an
 `importFrom` of a name the package does not export and an `export` of a name you never define are
 errors, because R refuses to load such a package. Attaching a package ry knows nothing about turns
 off this check for bare names, as [stubs](/type-checking/stubs) explains.
@@ -98,7 +100,7 @@ checking any R.
 ## Opt-in
 
 **`type-mismatch`** (error), with `[check] typing = true` or `# typing: on`: a value of the wrong
-type, a call with the wrong arguments, a field that does not exist, and every other rule in the
+type, a call with the wrong arguments, a field or frame column that does not exist, and every other rule in the
 [type system](/reference/type-system).
 
 **`strict`** (error), with `[check] strict = true` or `# typing: strict`: each place where a value's

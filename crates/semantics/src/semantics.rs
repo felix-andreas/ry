@@ -755,7 +755,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         naming
             .namespace_reads
             .values()
-            .filter_map(|read| read.name.clone()),
+            .filter_map(|read| read.name),
     );
     reads
 }
@@ -769,7 +769,7 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         .bindings
         .values()
         .filter(|binding| binding.kind == naming::BindingKind::TopLevel)
-        .map(|binding| binding.name.clone())
+        .map(|binding| binding.name)
         .collect()
 }
 
@@ -1137,7 +1137,7 @@ fn refuse_check<'db>(db: &'db dyn Db, check: check::ItemCheck<'db>) -> check::It
         top_level_bindings: check
             .top_level_bindings
             .iter()
-            .map(|(name, _)| (name.clone(), refused.clone()))
+            .map(|(name, _)| (*name, refused.clone()))
             .collect(),
         ..check
     }
@@ -1576,6 +1576,7 @@ mod tests {
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
+            column_misses: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),

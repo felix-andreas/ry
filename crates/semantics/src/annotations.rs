@@ -6,7 +6,7 @@
 use crate::Db;
 use crate::types::{
     Atomic, Constraint, FunctionType, Name, Parameter, RecordField, RestParameter, Ty, TyKind,
-    TypeScheme, any, null, scalar, substitute_rigid, union_of, unknown,
+    TypeScheme, any, column_type, null, scalar, substitute_rigid, union_of, unknown,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem::take;
@@ -857,6 +857,11 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
     )
 }
 
+/// `frame{...}` shares the brace grammar of `list{...}`; the head word tells them apart.
+fn is_frame_type(node: &SyntaxNode) -> bool {
+    name_text(node).as_deref() == Some("frame")
+}
+
 /// Joins adjacent tokens after `@`: `@if-unknown` lexes as `if` `-` `unknown`.
 fn directive_name(node: &SyntaxNode) -> String {
     let mut name = String::new();
@@ -1121,10 +1126,25 @@ impl<'db> Lowering<'db> {
                     && node.children().any(|c| is_type_kind(c.kind())) =>
             {
                 self.errors.push((
-                    "a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them".to_owned(),
+                    if is_frame_type(node) {
+                        "a `frame{...}` type names every column: write each one as `name: TYPE`".to_owned()
+                    } else {
+                        "a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them".to_owned()
+                    },
                     node.text_range(),
                 ));
                 unknown(self.db)
+            }
+            SyntaxKind::TYPE_TUPLE if is_frame_type(node) => {
+                if node.children().any(|c| is_type_kind(c.kind())) {
+                    self.errors.push((
+                        "a `frame{...}` type names every column: write each one as `name: TYPE`"
+                            .to_owned(),
+                        node.text_range(),
+                    ));
+                    return unknown(self.db);
+                }
+                Ty::new(self.db, TyKind::Frame(Some(Vec::new())))
             }
             SyntaxKind::TYPE_TUPLE => {
                 let items = node
@@ -1135,6 +1155,7 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, TyKind::Tuple(items))
             }
             SyntaxKind::TYPE_RECORD => {
+                let frame = is_frame_type(node);
                 let fields: Vec<(String, SyntaxNode)> = node
                     .children()
                     .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -1144,22 +1165,40 @@ impl<'db> Lowering<'db> {
                 for (name, field) in &fields {
                     if !seen.insert(name.as_str()) {
                         self.errors.push((
-                            format!("the field `{name}` appears twice in this `list{{...}}` type"),
+                            if frame {
+                                format!(
+                                    "the column `{name}` appears twice in this `frame{{...}}` type"
+                                )
+                            } else {
+                                format!(
+                                    "the field `{name}` appears twice in this `list{{...}}` type"
+                                )
+                            },
                             field.text_range(),
                         ));
                     }
                 }
                 let fields = fields
                     .into_iter()
-                    .map(|(name, field)| RecordField {
-                        name: Name::new(self.db, name),
-                        ty: self
+                    .map(|(name, field)| {
+                        let ty = self
                             .lower_child_type(&field)
-                            .unwrap_or_else(|| unknown(self.db)),
-                        optional: false,
+                            .unwrap_or_else(|| unknown(self.db));
+                        RecordField {
+                            name: Name::new(self.db, name),
+                            ty: if frame { column_type(self.db, ty) } else { ty },
+                            optional: false,
+                        }
                     })
                     .collect();
-                Ty::new(self.db, TyKind::Record(fields))
+                Ty::new(
+                    self.db,
+                    if frame {
+                        TyKind::Frame(Some(fields))
+                    } else {
+                        TyKind::Record(fields)
+                    },
+                )
             }
             SyntaxKind::TYPE_APPLY => {
                 let name_node = node.children().find(|c| c.kind() == SyntaxKind::NAME);
@@ -1217,6 +1256,7 @@ impl<'db> Lowering<'db> {
             "complex" => return scalar(self.db, Atomic::Complex),
             "character" => return scalar(self.db, Atomic::Character),
             "raw" => return scalar(self.db, Atomic::Raw),
+            "frame" => return Ty::new(self.db, TyKind::Frame(None)),
             _ => {}
         }
         let name = Name::new(self.db, text.to_owned());

@@ -10,8 +10,8 @@ use crate::metadata::{declared_dependency, imported_by_name, imports_every_name,
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, TypeScheme, map_child_types,
-    substitute_rigid, union_of,
+    Atomic, Constraint, FunctionType, InferenceVar, Name, RecordField, Ty, TyKind, TypeScheme,
+    map_child_types, substitute_rigid, union_of,
 };
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
@@ -234,7 +234,7 @@ fn frame_slot_positions(db: &dyn Db, file: SourceFile) -> FxHashMap<Symbol, usiz
             if binding.kind != BindingKind::TopLevel {
                 continue;
             }
-            positions.entry(binding.name.clone()).or_insert(index);
+            positions.entry(binding.name).or_insert(index);
         }
     }
     positions
@@ -354,6 +354,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // nested function run after the frame settled, so any slot in the document
         // resolves them (including self-recursion).
         for (expression, name) in &naming.non_locals {
+            if check.column_misses.contains_key(expression) {
+                continue;
+            }
             let NonLocalRead::Unresolved { suggestion } =
                 classify_non_local_read(db, file, item_index, &check, naming, expression, name)
             else {
@@ -367,6 +370,40 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic::new(range, Severity::Warning, "unresolved", format!(
                     "I could not resolve `{display}` in this package, its imports, or builtins.{suggestion}"
                 )));
+        }
+        // A name inside a frame query is a column first, and R falls back to the enclosing
+        // scope only for a non-column, so a miss is reported only when nothing defines it.
+        for (expression, miss) in &check.column_misses {
+            let Some(name) = naming
+                .non_locals
+                .get(expression)
+                .or_else(|| naming.quiet_reads.get(expression))
+            else {
+                continue;
+            };
+            let NonLocalRead::Unresolved { suggestion } =
+                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+            else {
+                continue;
+            };
+            let suggestion = nearest_name(name, miss.columns.iter().map(String::as_str))
+                .or(suggestion)
+                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .unwrap_or_default();
+            let subject = match &miss.frame {
+                Some(frame) => format!("the frame `{frame}`"),
+                None => "this frame".to_owned(),
+            };
+            let range = module.expression(*expression).range + offset;
+            diagnostics.push(Diagnostic::new(
+                range,
+                Severity::Warning,
+                "unresolved",
+                format!(
+                    "{subject} has no column `{}`, and nothing else defines that name.{suggestion}",
+                    display_name(name)
+                ),
+            ));
         }
     }
 
@@ -406,7 +443,9 @@ fn classify_non_local_read(
         return NonLocalRead::Resolvable;
     }
     if let Some(&earliest) = frame_slot_positions(db, file).get(name)
-        && (earliest < item_index || naming.deferred_non_locals.contains(expression))
+        && (earliest < item_index
+            || naming.deferred_non_locals.contains(expression)
+            || naming.deferred_quiet_reads.contains(expression))
     {
         return NonLocalRead::Resolvable;
     }
@@ -914,6 +953,7 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
     "complex",
     "character",
     "raw",
+    "frame",
 ];
 
 #[salsa::tracked(returns(ref))]
@@ -1621,7 +1661,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if let ExpressionKind::Assign { target, value, .. } = &expression.kind
                 && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
             {
-                assignment_targets.insert(*value, name.clone());
+                assignment_targets.insert(*value, *name);
             }
         }
         for origin in &check.strict_origins {
@@ -1878,6 +1918,41 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 renderer.render(db, *container)
             )
         }
+        TypeErrorKind::ColumnDoesNotExist {
+            column,
+            frame,
+            columns,
+            suggestion,
+        } => {
+            let subject = match frame {
+                Some(frame) => format!("the frame `{frame}`"),
+                None => "this frame".to_owned(),
+            };
+            let hint = match suggestion {
+                Some(nearest) => format!(". Did you mean `{nearest}`?"),
+                None if columns.is_empty() => ", which has no columns".to_owned(),
+                None => format!(
+                    ". Its columns are {}",
+                    columns
+                        .iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            format!("{subject} has no column `{column}`{hint}")
+        }
+        TypeErrorKind::BadRowIndex { found } => {
+            let hint = if matches!(found.kind(db), TyKind::Frame(_)) {
+                ". To join two frames, add `on =`."
+            } else {
+                ""
+            };
+            format!(
+                "a frame's row index must be logical (a filter) or numeric (row positions), but this is `{}`{hint}",
+                renderer.render(db, *found)
+            )
+        }
         TypeErrorKind::DollarOnAtomicVector { found } => format!(
             "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
             renderer.render(db, *found)
@@ -1962,23 +2037,11 @@ impl<'db> TypeRenderer<'db> {
                 let items: Vec<String> = items.iter().map(|&item| self.render(db, item)).collect();
                 format!("list{{{}}}", items.join(", "))
             }
-            TyKind::Record(fields) => {
-                let fields: Vec<String> = fields
-                    .iter()
-                    .map(|field| {
-                        let name = field.name.text(db);
-                        // Rendered types must be copyable into annotations, and an unquoted
-                        // non-syntactic name can even parse as a different type
-                        // (`list{a,b: integer}`).
-                        if is_syntactic_name(name) {
-                            format!("{name}: {}", self.render(db, field.ty))
-                        } else {
-                            format!("`{name}`: {}", self.render(db, field.ty))
-                        }
-                    })
-                    .collect();
-                format!("list{{{}}}", fields.join(", "))
+            TyKind::Record(fields) => format!("list{{{}}}", self.render_fields(db, fields)),
+            TyKind::Frame(Some(columns)) => {
+                format!("frame{{{}}}", self.render_fields(db, columns))
             }
+            TyKind::Frame(None) => "frame".to_owned(),
             TyKind::Function(function) => self.render_function(db, function),
             TyKind::Union(members) => {
                 let members: Vec<String> = members
@@ -2035,6 +2098,24 @@ impl<'db> TypeRenderer<'db> {
             })
             .collect();
         Some(format!("<{}>", binders.join(", ")))
+    }
+
+    fn render_fields(&mut self, db: &'db dyn Db, fields: &[RecordField<'db>]) -> String {
+        let fields: Vec<String> = fields
+            .iter()
+            .map(|field| {
+                let name = field.name.text(db);
+                // Rendered types must be copyable into annotations, and an unquoted
+                // non-syntactic name can even parse as a different type
+                // (`list{a,b: integer}`).
+                if is_syntactic_name(name) {
+                    format!("{name}: {}", self.render(db, field.ty))
+                } else {
+                    format!("`{name}`: {}", self.render(db, field.ty))
+                }
+            })
+            .collect();
+        fields.join(", ")
     }
 
     fn render_function(&mut self, db: &'db dyn Db, function: &FunctionType<'db>) -> String {
