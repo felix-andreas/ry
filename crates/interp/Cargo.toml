@@ -21,3 +21,4 @@ lzma-rs = "0.3"
 libc = "0.2"
 stacker.workspace = true
 unicode-width.workspace = true
+lzma-rs = "0.3.0"
