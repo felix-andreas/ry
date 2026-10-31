@@ -21,7 +21,9 @@ discount("a", 0.2)   # expected a numeric value (`integer` or `double`), found `
 ```
 
 The annotations you do write are `#:` comments, so the file stays plain R that every other tool can
-read.
+read. If you would rather put types in the code, [inline annotations](/type-checking/inline-annotations)
+such as `function(x: integer) -> integer` are on by default, at the price that R itself cannot run
+the file unless it goes through `ry run`.
 
 ## Fast enough for every keystroke
 
@@ -45,8 +47,13 @@ functions and lists. [Limitations](/type-checking/limitations) lists what is not
 ## Where ry is going
 
 ry is growing into a backwards-compatible implementation of R itself, so that existing R code and
-packages run unchanged with static typing on top. Today it is the tooling: a checker, a language
-server, a formatter, and a console that runs your installed R.
+packages run unchanged with static typing on top. Today it is a type-checked R toolchain: a checker,
+a language server, a formatter, a loader that runs a package from its sources, and a console that
+runs your installed R. Beside these, the first parts of a runtime exist: an ABI-compatible C API
+for compiled packages, an interpreter (`ry run --runtime ry`) that already checks
+[inline annotations](/type-checking/inline-annotations) while it runs, and an engine for a typed
+table type. The runtime is incomplete: it still reads base R from your GNU R installation, and a
+script that uses something it lacks stops with an error that names it. For real work, run on GNU R.
 
 ## Status
 

@@ -4,11 +4,12 @@ description: "Design draft: how ry runs R, from the C API up to the JIT, the tab
 ---
 
 This is a design draft: how ry becomes an R implementation of its own, in what order to build it,
-and why. Built so far are step 2 of the build order (section 10), the object model and collector in
-`crates/heap` and the C API as `libR.so` in `crates/libr`, and the part of step 4 that needs no
-interpreter: the whole measured C API, ALTREP, connections and package installation in
-`crates/rcmd`. The interpreter is not built, so `ry repl` still drives a GNU R that it loads at
-runtime. The C API measurements in section 2 are real and reproducible. Where section 4 describes
+and why. Built so far are the object model and collector in `crates/heap`, the C API as `libR.so`
+in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
+`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run --runtime ry`),
+and a table engine in `crates/table`. Not built are the Cranelift JIT, ry's own base R (base R's R
+code still comes from a GNU R installation), and the table type's use from the interpreter. `ry repl`
+and `ry run` still drive GNU R by default. The C API measurements in section 2 are real and reproducible. Where section 4 describes
 something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
 boundary") records the settled details.
 

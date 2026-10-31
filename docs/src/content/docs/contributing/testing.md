@@ -294,8 +294,13 @@ the erased text parses cleanly, holds no inline annotation, and erases to itself
 
 ### The runtime
 
-The runtime has no fixtures yet, because there is no R-level behavior to render until the
-interpreter exists, so its contract is model-based. `crates/heap/tests/test_gc.rs` builds random
+The runtime is tested against models and against GNU R rather than with fixtures. The oracle's
+cases (`crates/oracle/cases/`, [Corpus and oracle](/contributing/corpus-and-oracle)) hold the
+R-level behavior, and `crates/interp/tests/test_fuzz.rs` fuzzes lowering and checks that the
+tier-0 bytecode agrees with the evaluator. `crates/interp/tests/test_linalg.rs` pins base R's linear
+algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` checks the table engine
+against values read from data.table, and `test_altrep.rs` there checks the columns as ALTREP
+vectors (feature `runtime`). `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
 collection checks each object the model still reaches. It also re-interns every string ever made,
