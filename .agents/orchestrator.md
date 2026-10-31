@@ -48,9 +48,11 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - **Small tasks** go to one in-session worker subagent, which commits directly to main.
 - **Large tasks, research included,** go to separate cloud sessions. Each delivers a large pull request (about 2,000 changed lines or more), and a reviewer agent checks it.
 - **One persistent in-session subagent merges** those pull requests.
+- **Merge with the squash method.** The repository allows only squash merges.
 - **Model and effort for delegated work:** Sonnet at high effort by default, Opus at high effort for a hard problem, and Opus at extra-high effort for an exceptionally hard one.
 - **Reread this file every two hours** through a scheduled check-in.
 
 ## In flight
 
-- A research session on the runtime architecture is running. Its pull request delivers `docs/src/content/docs/contributing/design/r-runtime.md`.
+- Research session session_0111kWqBCyqwWYwvbAi7TQGr: R runtime and C API architecture, delivering `r-runtime.md`.
+- Typing session session_0111kWqDjwjNJcGFMYNSyybM: inline annotation syntax, the comment/inline disagreement warning, and strict mode. It delivers one large PR.
