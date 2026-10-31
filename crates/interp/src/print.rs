@@ -612,7 +612,7 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
             || name == symbols.srcfile
             || (name == symbols.comment)
             || (name == symbols.row_names && values::inherits(value, "data.frame"))
-            || (matches!(value.kind(), SexpType::Pairlist | SexpType::Language));
+            || value.kind() == SexpType::Pairlist;
         if !skip {
             let saved = tag.clone();
             // An attribute's label continues the labels of the attributes it is nested in, but
