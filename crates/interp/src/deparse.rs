@@ -97,7 +97,8 @@ fn operator_info(name: &[u8]) -> Option<OperatorInfo> {
     use precedence::*;
     let (kind, precedence, right_associative) = match name {
         b"+" | b"-" => (Kind::Binary, SUM, false),
-        b"*" | b"/" => (Kind::Binary, PRODUCT, false),
+        b"*" => (Kind::Binary, PRODUCT, false),
+        b"/" => (Kind::Binary2, PRODUCT, false),
         b"^" => (Kind::Binary2, POWER, true),
         b"%%" | b"%/%" => (Kind::Binary2, PERCENT, false),
         b"%*%" => (Kind::Binary, PERCENT, false),
