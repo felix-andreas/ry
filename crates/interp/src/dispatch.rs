@@ -1173,9 +1173,19 @@ unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
     } else {
         classes
     };
-    if what.kind() != SexpType::String {
-        return Err(call.error("'what' must be a character vector or an object with a nameOfClass() method"));
-    }
+    // A class generator (an R6 or S4 generator, say) names its class through `nameOfClass()`.
+    let what = if what.kind() == SexpType::String {
+        what
+    } else {
+        let generic = values::install("nameOfClass")?;
+        let quoted = values::call(symbols().quote, &[what])?;
+        let name_call = values::call(generic, &[quoted])?;
+        let name = eval::eval(name_call, values::base_namespace())?;
+        if name.kind() != SexpType::String {
+            return Err(call.error("'what' must be a character vector or an object with a nameOfClass() method"));
+        }
+        name
+    };
     let class_names: Vec<&[u8]> = (0..length(classes))
         .map(|index| classes.element(index).bytes())
         .collect();
