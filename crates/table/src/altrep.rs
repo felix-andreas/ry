@@ -347,7 +347,10 @@ unsafe fn new_altrep(payload: Payload) -> ApiResult<Sexp> {
         runtime
             .heap
             .alloc_weak_ref(pointer, nil, nil, finalizer, true)?;
-        Ok(R_new_altrep(class, pointer, nil))
+        // `R_new_altrep` roots its result only inside a native call, and this may run outside one.
+        let object = R_new_altrep(class, pointer, nil);
+        runtime().heap.root(object);
+        Ok(object)
     }
 }
 
