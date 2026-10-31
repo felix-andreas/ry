@@ -222,6 +222,7 @@ const ROUTINE_MARKER: &str = "ry builtin routine";
 fn implementation(package: &str, name: &str) -> Option<NativeFn> {
     let table: &[(&str, NativeFn)] = match package {
         "methods" => crate::methods::ROUTINES,
+        "stats" => crate::distributions::ROUTINES,
         _ => &[],
     };
     table.iter().find(|(routine, _)| *routine == name).map(|(_, function)| *function)

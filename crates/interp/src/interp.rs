@@ -30,6 +30,7 @@ pub mod coerce;
 pub mod conditions;
 pub mod connections;
 pub mod deparse;
+pub mod distributions;
 pub mod dispatch;
 pub mod envir;
 pub mod eval;
