@@ -67,7 +67,6 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Native records, tuples and tagged unions; S4/R6 discouraged (session_0111kWqDq53tu9KBVLAT5WSn, Opus).
 - Runtime step 7: the Cranelift JIT (session_0111kWqBQdpLjmrdiA5ajbhR, Opus).
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
-- Docs pass after the runtime merges (session_0111kWqCJM53e7kuJi8FNrEU, Sonnet).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -77,3 +76,4 @@ Nothing queued: every build-order step is in flight.
 Follow-ups:
 
 - Install R 4.6 via rig for data.table's version check.
+- Run the next docs pass after the records/tags, JIT and table-in-interpreter PRs land.
