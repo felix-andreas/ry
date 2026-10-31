@@ -25,10 +25,9 @@ read.
 
 ## Fast enough for every keystroke
 
-ry is written in Rust, and after an edit it re-checks only what the edit could affect. The target is
-a re-check within 30 ms of a keystroke for half of all edits and within 100 ms for 95 percent of
-them, on a 300,000-line project. Every rule in the type system has to be that cheap, which explains
-the trade-offs below.
+ry is written in Rust, and after an edit it re-checks only what the edit could affect, so findings
+keep up with your typing. Every rule in the type system has to be cheap enough to run on each
+keystroke, which explains the trade-offs below.
 
 ## What it leaves out
 
@@ -38,7 +37,7 @@ the trade-offs below.
   [Custom types](/type-checking/custom-types) keep values apart without it.
 - **What it cannot model.** S4 and R6 objects and data frame columns get a type that is compatible
   with everything, so they never cause a false error, but they are not checked either.
-  [Strict mode](/type-checking/unknown) shows where that happens.
+  [Strict mode](/type-checking/strict-mode) shows where that happens.
 
 A clean run therefore says less about code built on data frames or R6 than about code built from
 functions and lists. [Limitations](/type-checking/limitations) lists what is not checked.

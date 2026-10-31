@@ -2,7 +2,7 @@
 //! live in the server. Per-item query results carry item-relative ranges, while this API speaks
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
-use semantics::annotations::{block_refusal, lower_annotation};
+use semantics::annotations::{block_refusal, statement_inline_site};
 use semantics::check::ItemCheck;
 use semantics::diagnostics::TypeRenderer;
 use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
@@ -11,14 +11,18 @@ use semantics::stubs::{declaring_namespace, stub_declaration, stubs};
 use semantics::types::{FunctionType, Ty, TyKind, TypeScheme, contains_inference_var};
 use semantics::{
     Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
-    item_annotation_syntax, item_check, item_expression_annotations, item_hir, item_name_range,
-    item_naming, item_node, item_tree, package_definitions, project_type_definitions,
+    item_annotation, item_annotation_syntax, item_check, item_expression_annotations, item_hir,
+    item_name_range, item_naming, item_node, item_tree, package_definitions,
+    project_type_definitions,
 };
 use std::collections::BTreeSet;
 use std::iter::once;
 use syntax::SyntaxKind::{self, *};
 use syntax::kind::KEYWORDS;
-use syntax::{SyntaxElement, SyntaxNode, SyntaxToken, TextRange, TextSize, is_syntactic_name};
+use syntax::{
+    SyntaxElement, SyntaxNode, SyntaxToken, TextRange, TextSize, is_inline_annotation,
+    is_syntactic_name,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hover {
@@ -418,9 +422,8 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
         };
         // Only a surviving payload types the binding: refused, definitions-only, and toggle-only
         // blocks leave it hintable.
-        let annotated = item_annotation_syntax(db, item).is_some_and(|annotation| {
-            let lowered = lower_annotation(db, &annotation.syntax_node());
-            lowered.declared.is_some() || lowered.new_nominal.is_some() || lowered.trusted
+        let annotated = item_annotation(db, item).is_some_and(|annotation| {
+            annotation.declared.is_some() || annotation.new_nominal.is_some() || annotation.trusted
         });
         // A hint on an annotated nested statement would restate the line above.
         let annotated_expressions: BTreeSet<ExprId> = item_expression_annotations(db, item)
@@ -655,7 +658,7 @@ pub fn completion(
 ) -> Option<CompletionResult> {
     let (context, query) = completion_context(file.text(db), offset)?;
     let root = semantics::parse(db, file).syntax_node();
-    if annotation_at(&root, offset).is_some() {
+    if annotation_at(&root, offset).is_some() || at_inline_type_start(&root, offset) {
         return annotation_completion(db, files, file, &query);
     }
     // R value names never resolve inside string content; only record-field subscripts complete
@@ -911,8 +914,14 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         let Some(check) = item_check(db, item) else {
             continue;
         };
+        // A statement typed inline, or by a `#:` block that survived, needs no second annotation.
         let annotated = item_annotation_syntax(db, item)
-            .is_some_and(|annotation| block_refusal(&annotation.syntax_node()).is_none());
+            .is_some_and(|annotation| block_refusal(&annotation.syntax_node()).is_none())
+            || statement_inline_site(&node).is_some();
+        let annotated_expressions: BTreeSet<ExprId> = item_expression_annotations(db, item)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         for (index, expression) in hir.expressions.iter().enumerate() {
             let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
                 continue;
@@ -922,7 +931,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             };
             let id = ExprId(index as u32);
             let is_root = hir.root == Some(id);
-            if is_root && annotated {
+            if (is_root && annotated) || annotated_expressions.contains(&id) {
                 continue;
             }
             let start = usize::from(expression.range.start() + item_offset);
@@ -1495,8 +1504,27 @@ fn is_type_directive(directive: &SyntaxNode) -> bool {
     matches!(directive_name(directive).as_deref(), Some("type" | "alias"))
 }
 
-fn binder_names(annotation: &SyntaxNode) -> Vec<String> {
-    annotation
+/// The type parameters a region's types may name: a `#:` block's own binders, or the
+/// `<...>` of the function an inline parameter or return type belongs to.
+fn binder_names(region: &SyntaxNode) -> Vec<String> {
+    // A binding's type sees no enclosing function's binders, as in the checker.
+    let binders = if region.kind() == ANNOTATION {
+        Some(region.clone())
+    } else if region
+        .parent()
+        .is_some_and(|parent| parent.kind() == BINARY_EXPR)
+    {
+        None
+    } else {
+        region
+            .ancestors()
+            .find(|node| node.kind() == FUNCTION_DEF)
+            .and_then(|function| child_node(&function, TYPE_BINDER_LIST))
+    };
+    let Some(binders) = binders else {
+        return Vec::new();
+    };
+    binders
         .descendants()
         .filter(|node| node.kind() == TYPE_BINDER)
         .filter_map(|binder| {
@@ -1509,9 +1537,51 @@ fn binder_names(annotation: &SyntaxNode) -> Vec<String> {
         .collect()
 }
 
+/// The type region holding `offset`: a `#:` block, or an inline annotation.
 fn annotation_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxNode> {
     root.descendants()
-        .find(|node| node.kind() == ANNOTATION && node.text_range().contains_inclusive(offset))
+        .find(|node| is_type_region(node) && node.text_range().contains_inclusive(offset))
+}
+
+fn is_type_region(node: &SyntaxNode) -> bool {
+    node.kind() == ANNOTATION || is_inline_annotation(node)
+}
+
+/// Whether `offset` is where a type is being typed inline: right after a parameter's or a
+/// binding's `:`, or a function's `->`, before any type exists to form a region.
+fn at_inline_type_start(root: &SyntaxNode, offset: TextSize) -> bool {
+    let Some(mut token) = root.token_at_offset(offset).left_biased() else {
+        return false;
+    };
+    // Step back over the word being typed and the spacing before it.
+    if token.kind() == IDENT {
+        let Some(previous) = token.prev_token() else {
+            return false;
+        };
+        token = previous;
+    }
+    if token.kind() == WHITESPACE {
+        let Some(previous) = token.prev_token() else {
+            return false;
+        };
+        token = previous;
+    }
+    if token
+        .parent_ancestors()
+        .any(|ancestor| is_inline_annotation(&ancestor))
+    {
+        return true;
+    }
+    // `count: ` at the start of a statement still reads as R's `:` until a type and an
+    // assignment follow.
+    token.kind() == COLON
+        && token.parent().is_some_and(|parent| {
+            parent.kind() == BINARY_EXPR
+                && parent.first_child().is_some_and(|lhs| lhs.kind() == NAME)
+                && parent
+                    .parent()
+                    .is_some_and(|statement| matches!(statement.kind(), SOURCE_FILE | BRACE_EXPR))
+        })
 }
 
 fn child_node(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
@@ -1613,7 +1683,7 @@ fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Oc
     let mut result = Vec::new();
     for &file in files.files(db) {
         let root = semantics::parse(db, file).syntax_node();
-        for annotation in root.descendants().filter(|node| node.kind() == ANNOTATION) {
+        for annotation in root.descendants().filter(is_type_region) {
             let shadowed = binder_names(&annotation)
                 .iter()
                 .any(|binder| binder == name);

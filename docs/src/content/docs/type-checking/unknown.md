@@ -1,58 +1,37 @@
 ---
-title: Unknown and strict mode
-description: What ry does with code it cannot type, and how to see where that happens
+title: Unknown and Any
+description: What ry does with code it cannot type
 ---
 
 R has constructs no static checker can follow, such as data frame columns and S4 and R6 objects.
 Their values are `Unknown`, which is compatible with everything. ry would rather skip a check than
 report something false, so one unmodeled construct never causes a cascade of errors.
 
-The cost is that a clean run does not say how much was checked. Strict mode reports the places where
-a value became `Unknown`:
-
-```toml
-[check]
-typing = true
-strict = true
-```
-
-```r
-#: fn(df: data.frame) -> double
-total <- function(df) sum(df$amount)
-```
-
-```text
-strict
-
-  x strict mode: this expression has an undetermined type (`Unknown`)
-   --[R/total.R:2:27]
- 1 | #: fn(df: data.frame) -> double
- 2 | total <- function(df) sum(df$amount)
-   |                           ^^^^^^^^^
-```
-
-A `# typing: strict` comment turns strict mode on for one file.
+The cost is that a clean run does not say how much was checked.
+[Strict mode](/type-checking/strict-mode) reports every place a value became `Unknown`.
 
 ## Giving a value a type
 
-A plain `#:` annotation gives an `Unknown` value a type, so every later use is checked against it,
-and the strict finding goes away. [Annotations](/type-checking/annotations) shows `@if-unknown`
-and `@trust` for the cases where a checked annotation does not fit.
+An annotation gives an `Unknown` value a type, so every later use is checked against it:
 
-`Any` is also compatible with everything, but a value declared `Any` is a deliberate choice, so
-strict mode does not report it. File reads such as `readRDS()`, `eval()`, and calls to S3 generics
-that dispatch through `UseMethod()` return `Any`, so strict mode does not report them either.
+```r
+#: double
+amount <- df$amount
+```
+
+[Annotations](/type-checking/annotations) shows `@if-unknown` and `@trust` for the cases where a
+checked annotation does not fit.
+
+## `Any`
+
+`Any` is also compatible with everything, but it is a deliberate choice rather than a gap. A value
+declared `Any`, file reads such as `readRDS()`, `eval()`, and calls to S3 generics that dispatch
+through `UseMethod()` are `Any`, and strict mode does not report them.
 
 ## Data frames
 
-Columns are not typed, so `df$amount` is `Unknown`. An annotation such as `df: data.frame` checks that a data frame
-arrives but not which columns it has. For analysis code this is the gap that matters most, and
-`data.frame()` is usually the first place strict mode reports. Bare column names inside dplyr verbs
-and the other data-masking functions are recognized, as [checking code](/guides/checking#names)
-shows.
-
-## What strict mode misses
-
-Strict mode does not yet report R6 objects or bare names from packages ry knows only by name, and it
-wrongly reports a `stop()` guard such as `if (x < 0) stop("negative")`. `# ry: allow(strict)` on
-that line silences it.
+Columns are not typed, so `df$amount` is `Unknown`. An annotation such as `df: data.frame` checks
+that a data frame arrives, but not which columns it has. For analysis code this is the gap that
+matters most, and `data.frame()` is usually the first place strict mode reports. Bare column names
+inside dplyr verbs and the other data-masking functions are recognized, as
+[checking code](/guides/checking#names) shows.

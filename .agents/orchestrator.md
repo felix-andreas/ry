@@ -18,6 +18,8 @@ ry becomes a full, backwards-compatible reimplementation of R, extended with ry'
 
 Most of the benchmark dependencies ship compiled C, C++ or Rust code written against R's C API (`SEXP`, memory protection, `.Call`). Full compatibility therefore means implementing that C API, not only R's language semantics. That interface shapes the architecture more than the JIT does, so it is designed first.
 
+The runtime is the highest priority (user directive). Packaging work covers only what affects the runtime directly. Existing R ecosystem tools (package managers and the like) are inspiration, not the design bar; the bar is the one in `AGENTS.md`.
+
 ## Benchmark
 
 Three synthetic code bases (finance, data science, and biostatistics), each about 300,000 lines in about 500 files. Each uses this dependency set:
@@ -55,6 +57,12 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 ## In flight
 
-- Research session session_0111kWqBCyqwWYwvbAi7TQGr: R runtime and C API architecture, delivering `r-runtime.md`.
-- Typing session session_0111kWqDjwjNJcGFMYNSyybM: inline annotation syntax, the comment/inline disagreement warning, and strict mode. It delivers one large PR.
-- Docs session session_0111kWqCgbHESLzg96ct5Rm8: restructuring the introduction and type-checking sections.
+- Runtime step 1 session session_0111kWqDPNiugVJPvUec1xKs: corpus, differential oracle, benchmark generator.
+- Runtime step 2 session session_0111kWqDWCzM9zgtXPN1prpJ: object model, GC, libR skeleton.
+- Docs session session_0111kWqCgbHESLzg96ct5Rm8: PR #100, integrating #102's typing pages before merge.
+- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa: item index, lazy bindings and item-level reload, on the GNU R backend first.
+- Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
+
+## Next
+
+- Step 3 (interpreter and base R) starts when step 2 merges; steps 5-8 follow `r-runtime.md`'s build order.

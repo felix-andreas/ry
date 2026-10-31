@@ -1,20 +1,20 @@
 //! Lowering is total: malformed pieces lower to `Unknown` (their syntax errors already mark
-//! them), so annotations never cascade.
+//! them), so annotations never cascade. A `#:` block and an inline annotation lower through
+//! the same type lowering into the same `Annotation`, so the checker sees one shape whichever
+//! way a type was written.
 
 use crate::Db;
 use crate::types::{
     Atomic, Constraint, FunctionType, Name, Parameter, RecordField, RestParameter, Ty, TyKind,
-    TypeScheme, any, null, scalar, union_of, unknown,
+    TypeScheme, any, null, scalar, substitute_rigid, union_of, unknown,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem::take;
-use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Annotation<'db> {
     pub declared: Option<TypeScheme<'db>>,
-    /// Named parameter types, for name-aware matching against the definition's formals.
-    pub parameter_names: Vec<(String, Ty<'db>, bool)>,
     pub definitions: Vec<NamedDefinition<'db>>,
     /// Parallel to `definitions`; kept out of `NamedDefinition` so interface maps built from
     /// definitions stay position-independent.
@@ -26,6 +26,9 @@ pub struct Annotation<'db> {
     pub trusted: bool,
     /// `@if-unknown TYPE`: applies only where the checker has nothing better than `Unknown`.
     pub if_unknown: bool,
+    /// Parameters typed only by an inline signature. It sits on the formals and so never
+    /// restates which parameters are optional; the formals alone decide it.
+    pub inline_parameters: Vec<String>,
     /// Shape violations. A block with any carries no typing payload, so it never cascades.
     pub errors: Vec<(String, TextRange)>,
     /// Violations reported only when type checking is on; like `errors`, they strip the payload.
@@ -39,7 +42,6 @@ pub struct Annotation<'db> {
     /// Excludes primitives and in-scope binders, so each entry must resolve through project
     /// declarations or the stubs.
     pub nominal_references: Vec<(String, TextRange)>,
-    pub range: TextRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -53,22 +55,8 @@ pub struct NamedDefinition<'db> {
 
 pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'db> {
     debug_assert_eq!(node.kind(), SyntaxKind::ANNOTATION);
-    let mut lowering = Lowering {
-        db,
-        binders: Vec::new(),
-        nominal_references: Vec::new(),
-        applied_references: Vec::new(),
-        errors: Vec::new(),
-        vector_elements: Vec::new(),
-        depth: 0,
-        beyond_check_depth: false,
-        beyond_parse_depth: false,
-        definition_type: false,
-    };
-    let mut annotation = Annotation {
-        range: node.text_range(),
-        ..Annotation::default()
-    };
+    let mut lowering = Lowering::new(db);
+    let mut annotation = Annotation::default();
     match block_refusal(node) {
         Some(BlockRefusal::FormMixing(message)) => {
             annotation
@@ -174,13 +162,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 lowering.definition_type = true;
                 let body = lowering.lower_type(&child);
                 lowering.definition_type = false;
-                if let TyKind::Function(function) = body.kind(db) {
-                    annotation.parameter_names = function
-                        .named
-                        .iter()
-                        .map(|field| (field.name.text(db).to_owned(), field.ty, field.optional))
-                        .collect();
-                }
                 annotation.declared = Some(TypeScheme {
                     binders: take(&mut forall),
                     body,
@@ -189,37 +170,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             _ => {}
         }
     }
-
-    if lowering.beyond_parse_depth {
-        lowering.errors.push((
-            "This type annotation is nested too deeply (more than 160 levels).".to_owned(),
-            node.text_range(),
-        ));
-    } else if lowering.beyond_check_depth {
-        annotation.typing_errors.push((
-            "This type is nested too deeply to check (more than 128 levels).".to_owned(),
-            node.text_range(),
-        ));
-    }
-    // Declared type names stay declared, with `Unknown` bodies, or every use of one would add an
-    // unknown-type finding to the one already made.
-    if !lowering.errors.is_empty() || !annotation.typing_errors.is_empty() {
-        for definition in &mut annotation.definitions {
-            definition.body = unknown(db);
-        }
-        return Annotation {
-            errors: lowering.errors,
-            typing_errors: annotation.typing_errors,
-            definitions: annotation.definitions,
-            definition_sites: annotation.definition_sites,
-            range: annotation.range,
-            ..Annotation::default()
-        };
-    }
-
-    annotation.nominal_references = lowering.nominal_references;
-    annotation.applied_references = lowering.applied_references;
-    annotation.vector_elements = lowering.vector_elements;
 
     if annotation.declared.is_none() && (!params.is_empty() || ret.is_some()) {
         // An annotation states a parameter's type, never its default: the default lives in the
@@ -242,14 +192,563 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             }),
             ret: ret.unwrap_or_else(|| unknown(db)),
         };
-        annotation.parameter_names = params;
         annotation.declared = Some(TypeScheme {
             binders: forall,
             body: Ty::new(db, TyKind::Function(function)),
         });
     }
+    lowering.finish(annotation, node.text_range())
+}
 
-    annotation
+/// A binding (`name: TYPE <- value`) or a function literal with any of `<...>`, a
+/// parameter's `: TYPE`, or `-> TYPE`.
+pub fn is_inline_site(node: &SyntaxNode) -> bool {
+    match node.kind() {
+        SyntaxKind::BINARY_EXPR => node
+            .children()
+            .any(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION),
+        SyntaxKind::FUNCTION_DEF => node.children().any(|child| match child.kind() {
+            SyntaxKind::TYPE_BINDER_LIST | SyntaxKind::RETURN_TYPE => true,
+            SyntaxKind::PARAMETER_LIST => child.children().any(|parameter| {
+                parameter
+                    .children()
+                    .any(|part| part.kind() == SyntaxKind::TYPE_ASCRIPTION)
+            }),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// An inline site lowers exactly as the equivalent `#:` block would: a binding's type as
+/// a checked annotation, and a function's signature as a compact `fn(...)` naming the
+/// annotated parameters, with an elided return inferred from the body.
+pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annotation<'db> {
+    debug_assert!(is_inline_site(site));
+    let mut lowering = Lowering::new(db);
+    let mut annotation = Annotation::default();
+    if site.kind() == SyntaxKind::BINARY_EXPR {
+        lowering.definition_type = true;
+        let ty = site
+            .children()
+            .find(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION)
+            .and_then(|ascription| lowering.lower_child_type(&ascription))
+            .unwrap_or_else(|| unknown(db));
+        lowering.definition_type = false;
+        annotation.declared = Some(TypeScheme::monomorphic(ty));
+        return lowering.finish(annotation, inline_range(site));
+    }
+    let mut forall = Vec::new();
+    if let Some(list) = site
+        .children()
+        .find(|child| child.kind() == SyntaxKind::TYPE_BINDER_LIST)
+    {
+        lowering.lower_binders(&list, &mut forall, "a function's type parameters");
+    }
+    let mut named = Vec::new();
+    let mut variadic = None;
+    for (index, formal) in formals(site).into_iter().enumerate() {
+        let Some(ascription) = formal.ascription else {
+            continue;
+        };
+        let ty = lowering
+            .lower_child_type(&ascription)
+            .unwrap_or_else(|| unknown(db));
+        if formal.name == "..." {
+            // Every formal before `...` counts, annotated or not: R places the rest
+            // parameter by the formal list, which is what the definition checks against.
+            variadic = Some(RestParameter {
+                element: ty,
+                preceding_named: index,
+            });
+        } else {
+            named.push(Parameter {
+                name: Name::new(db, formal.name),
+                ty,
+                optional: formal.has_default,
+                default: None,
+            });
+        }
+    }
+    let ret = site
+        .children()
+        .find(|child| child.kind() == SyntaxKind::RETURN_TYPE)
+        .and_then(|ret| lowering.lower_child_type(&ret))
+        .unwrap_or_else(|| unknown(db));
+    annotation.inline_parameters = named
+        .iter()
+        .map(|parameter: &Parameter<'db>| parameter.name.text(db).to_owned())
+        .collect();
+    annotation.declared = Some(TypeScheme {
+        binders: forall,
+        body: Ty::new(
+            db,
+            TyKind::Function(FunctionType {
+                positional: Vec::new(),
+                named,
+                variadic,
+                ret,
+            }),
+        ),
+    });
+    lowering.finish(annotation, inline_range(site))
+}
+
+/// The written inline annotations of a site, from the first to the last, so a finding
+/// about the whole annotation never covers the value or the body.
+fn inline_range(site: &SyntaxNode) -> TextRange {
+    let mut parts = site
+        .descendants()
+        .filter(is_inline_annotation)
+        .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
+        .map(|node| node.text_range());
+    let Some(first) = parts.next() else {
+        return site.text_range();
+    };
+    parts.fold(first, |covered, part| covered.cover(part))
+}
+
+/// One formal of a `function(...)` literal, as the parser wrote it.
+pub struct Formal {
+    pub name: String,
+    pub has_default: bool,
+    pub ascription: Option<SyntaxNode>,
+}
+
+pub fn formals(function: &SyntaxNode) -> Vec<Formal> {
+    let Some(list) = function
+        .children()
+        .find(|child| child.kind() == SyntaxKind::PARAMETER_LIST)
+    else {
+        return Vec::new();
+    };
+    list.children()
+        .filter(|child| child.kind() == SyntaxKind::PARAMETER)
+        .filter_map(|parameter| {
+            let token = parameter.first_token()?;
+            let text = token.text();
+            let name = text
+                .strip_prefix('`')
+                .and_then(|text| text.strip_suffix('`'))
+                .unwrap_or(text)
+                .to_owned();
+            Some(Formal {
+                name,
+                has_default: has_token(&parameter, SyntaxKind::EQ),
+                ascription: parameter
+                    .children()
+                    .find(|part| part.kind() == SyntaxKind::TYPE_ASCRIPTION),
+            })
+        })
+        .collect()
+}
+
+/// What a statement's two annotations mean together. A coercion form in the comment
+/// (`@trust`, `@if-unknown`, `@new`) says how the value gets its type, so it governs;
+/// otherwise both are declarations, merged one slot (the value, a parameter, the rest
+/// parameter, the return) at a time, with the inline type winning where both give one.
+/// Where they differ, the disagreement warning has already said so.
+pub fn merge_annotations<'db>(
+    db: &'db dyn Db,
+    comment: Option<Annotation<'db>>,
+    inline: Option<Annotation<'db>>,
+    signature: Option<&SyntaxNode>,
+) -> Option<Annotation<'db>> {
+    let (comment, inline) = match (comment, inline) {
+        (comment, None) => return comment,
+        (None, inline) => return inline,
+        (Some(comment), Some(inline)) => (comment, inline),
+    };
+    if comment.declared.is_none() && comment.new_nominal.is_none() {
+        return Some(inline);
+    }
+    if comment.trusted || comment.if_unknown || comment.new_nominal.is_some() {
+        return Some(comment);
+    }
+    let (Some(comment_scheme), Some(inline_scheme)) = (&comment.declared, &inline.declared) else {
+        return Some(comment);
+    };
+    // A binding's `: TYPE` replaces the whole declared type; only a signature merges by slot.
+    let (TyKind::Function(_), TyKind::Function(inline_function), Some(signature)) = (
+        comment_scheme.body.kind(db),
+        inline_scheme.body.kind(db),
+        signature.filter(|site| site.kind() == SyntaxKind::FUNCTION_DEF),
+    ) else {
+        return Some(inline);
+    };
+    // Type parameters pair by position, so the comment's types are read in the inline
+    // names before slots mix.
+    let renaming: FxHashMap<Name<'db>, Ty<'db>> = comment_scheme
+        .binders
+        .iter()
+        .zip(&inline_scheme.binders)
+        .map(|((comment_name, _), (inline_name, _))| {
+            (*comment_name, Ty::new(db, TyKind::Rigid(*inline_name)))
+        })
+        .collect();
+    let renamed = substitute_rigid(db, comment_scheme.body, &renaming);
+    let TyKind::Function(comment_function) = renamed.kind(db) else {
+        return Some(inline);
+    };
+    let formals = formals(signature);
+    let mut used = vec![false; comment_function.named.len()];
+    let mut positional = comment_function.positional.iter();
+    let mut named = Vec::new();
+    for formal in formals.iter().filter(|formal| formal.name != "...") {
+        let from_comment = match comment_function
+            .named
+            .iter()
+            .position(|parameter| parameter.name.text(db) == formal.name)
+        {
+            Some(index) => {
+                used[index] = true;
+                Some(comment_function.named[index].clone())
+            }
+            None => positional.next().map(|&ty| Parameter {
+                name: Name::new(db, formal.name.clone()),
+                ty,
+                optional: formal.has_default,
+                default: None,
+            }),
+        };
+        let from_inline = inline_function
+            .named
+            .iter()
+            .find(|parameter| parameter.name.text(db) == formal.name)
+            .cloned();
+        // Where the comment restates optionality, its `[name]` is checked as written.
+        named.extend(match (from_inline, from_comment) {
+            (Some(inline), Some(comment)) => Some(Parameter {
+                optional: comment.optional,
+                ..inline
+            }),
+            (inline, comment) => inline.or(comment),
+        });
+    }
+    // Comment entries no formal receives are kept, so the definition check still reports them.
+    named.extend(
+        comment_function
+            .named
+            .iter()
+            .zip(&used)
+            .filter(|(_, used)| !**used)
+            .map(|(parameter, _)| parameter.clone()),
+    );
+    let surplus: Vec<Ty<'db>> = positional.copied().collect();
+    let variadic = match (&inline_function.variadic, &comment_function.variadic) {
+        (Some(rest), _) => Some(RestParameter {
+            element: rest.element,
+            preceding_named: rest.preceding_named.saturating_sub(surplus.len()),
+        }),
+        (None, Some(rest)) => Some(RestParameter {
+            element: rest.element,
+            preceding_named: (comment_function.positional.len() + rest.preceding_named)
+                .saturating_sub(surplus.len()),
+        }),
+        (None, None) => None,
+    };
+    let ret = if matches!(inline_function.ret.kind(db), TyKind::Unknown) {
+        comment_function.ret
+    } else {
+        inline_function.ret
+    };
+    // An inline binder wins over the comment binder in its position, constraint included.
+    let mut binders = inline_scheme.binders.clone();
+    binders.extend(
+        comment_scheme
+            .binders
+            .iter()
+            .skip(inline_scheme.binders.len())
+            .copied(),
+    );
+    Some(Annotation {
+        declared: Some(TypeScheme {
+            binders,
+            body: Ty::new(
+                db,
+                TyKind::Function(FunctionType {
+                    positional: surplus,
+                    named,
+                    variadic,
+                    ret,
+                }),
+            ),
+        }),
+        inline_parameters: inline
+            .inline_parameters
+            .iter()
+            .filter(|name| {
+                !comment_function
+                    .named
+                    .iter()
+                    .any(|parameter| parameter.name.text(db) == name.as_str())
+            })
+            .cloned()
+            .collect(),
+        ..inline
+    })
+}
+
+/// A place an annotation gives a type. Parameters are keyed by formal name, so a
+/// positional comment type is resolved against the definition's formals first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Slot {
+    Value,
+    Parameter(String),
+    Rest,
+    Return,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlotType<'db> {
+    pub slot: Slot,
+    pub ty: Ty<'db>,
+    /// The written type, for pointing at it.
+    pub range: TextRange,
+}
+
+/// The slots a `#:` block gives a type, with the range of each written type. A block with
+/// errors has no trustworthy slots, and an elided return is no slot at all. Against an
+/// inline binding type (`signature` is `None`), the whole declared type is one value slot;
+/// against a signature, a function annotation splits into parameter and return slots.
+pub fn comment_slots<'db>(
+    db: &'db dyn Db,
+    node: &SyntaxNode,
+    signature: Option<&SyntaxNode>,
+) -> Vec<SlotType<'db>> {
+    let annotation = lower_annotation(db, node);
+    if !annotation.errors.is_empty() || !annotation.typing_errors.is_empty() {
+        return Vec::new();
+    }
+    if let Some((name, arguments, range)) = annotation.new_nominal {
+        let ty = Ty::new(db, TyKind::Named(name, arguments));
+        return vec![SlotType {
+            slot: Slot::Value,
+            ty,
+            range,
+        }];
+    }
+    let Some(declared) = annotation.declared else {
+        return Vec::new();
+    };
+    // A coercion's type sits after its directive; a compact type is a direct child.
+    let value_node = node
+        .children()
+        .find(|child| is_type_kind(child.kind()) && child.kind() != SyntaxKind::TYPE_BINDER_LIST)
+        .or_else(|| {
+            node.children()
+                .filter(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
+                .find_map(|directive| {
+                    directive.children().find(|child| {
+                        is_type_kind(child.kind()) && child.kind() != SyntaxKind::TYPE_BINDER_LIST
+                    })
+                })
+        });
+    let (TyKind::Function(declared_function), Some(function)) = (declared.body.kind(db), signature)
+    else {
+        return value_node
+            .map(|value| SlotType {
+                slot: Slot::Value,
+                ty: declared.body,
+                range: value.text_range(),
+            })
+            .into_iter()
+            .collect();
+    };
+    // Each written parameter type, in source order, with its name (`None` when positional).
+    let mut written: Vec<(Option<String>, bool, Option<TextRange>)> = Vec::new();
+    let mut written_return = None;
+    match value_node.filter(|value| value.kind() == SyntaxKind::TYPE_FUNCTION) {
+        Some(compact) => {
+            for parameter in compact
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::TYPE_PARAMETER_LIST)
+                .flat_map(|list| list.children())
+                .filter(|child| child.kind() == SyntaxKind::TYPE_PARAMETER)
+            {
+                let range = parameter
+                    .children()
+                    .find(|child| is_type_kind(child.kind()))
+                    .map(|ty| ty.text_range());
+                written.push((
+                    name_text(&parameter),
+                    has_token(&parameter, SyntaxKind::DOTS),
+                    range,
+                ));
+            }
+            if has_token(&compact, SyntaxKind::MINUS_GREATER) {
+                written_return = compact
+                    .children()
+                    .filter(|child| is_type_kind(child.kind()))
+                    .last()
+                    .map(|ty| ty.text_range());
+            }
+        }
+        None => {
+            for directive in node
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
+            {
+                let range = directive
+                    .children()
+                    .find(|child| is_type_kind(child.kind()))
+                    .map(|ty| ty.text_range());
+                match directive_name(&directive).as_str() {
+                    "param" => {
+                        let name = name_text(&directive);
+                        let dots = name.as_deref() == Some("...");
+                        written.push((name.filter(|_| !dots), dots, range));
+                    }
+                    "return" | "returns" => written_return = range,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let formal_names: Vec<String> = formals(function)
+        .into_iter()
+        .map(|formal| formal.name)
+        .filter(|name| name != "...")
+        .collect();
+    let mut slots = Vec::new();
+    let mut named = declared_function.named.iter();
+    let mut positional = declared_function.positional.iter();
+    let mut positional_names = formal_names.iter().filter(|name| {
+        !declared_function
+            .named
+            .iter()
+            .any(|parameter| parameter.name.text(db) == name.as_str())
+    });
+    for (name, dots, range) in written {
+        let Some(range) = range else {
+            continue;
+        };
+        if dots {
+            if let Some(rest) = &declared_function.variadic {
+                slots.push(SlotType {
+                    slot: Slot::Rest,
+                    ty: rest.element,
+                    range,
+                });
+            }
+        } else if name.is_some() {
+            if let Some(parameter) = named.next() {
+                slots.push(SlotType {
+                    slot: Slot::Parameter(parameter.name.text(db).to_owned()),
+                    ty: parameter.ty,
+                    range,
+                });
+            }
+        } else if let (Some(&ty), Some(formal)) = (positional.next(), positional_names.next()) {
+            slots.push(SlotType {
+                slot: Slot::Parameter(formal.clone()),
+                ty,
+                range,
+            });
+        }
+    }
+    if let Some(range) = written_return {
+        slots.push(SlotType {
+            slot: Slot::Return,
+            ty: declared_function.ret,
+            range,
+        });
+    }
+    slots
+}
+
+/// The slots an inline site gives a type. A site with lowering errors has none.
+pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db>> {
+    let annotation = lower_inline_annotation(db, site);
+    let Some(declared) = annotation.declared else {
+        return Vec::new();
+    };
+    let type_range = |node: &SyntaxNode| {
+        node.children()
+            .find(|child| is_type_kind(child.kind()))
+            .map(|ty| ty.text_range())
+    };
+    if site.kind() == SyntaxKind::BINARY_EXPR {
+        return site
+            .children()
+            .find(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION)
+            .and_then(|ascription| type_range(&ascription))
+            .map(|range| SlotType {
+                slot: Slot::Value,
+                ty: declared.body,
+                range,
+            })
+            .into_iter()
+            .collect();
+    }
+    let TyKind::Function(function) = declared.body.kind(db) else {
+        return Vec::new();
+    };
+    let mut slots = Vec::new();
+    for formal in formals(site) {
+        let Some(range) = formal.ascription.as_ref().and_then(type_range) else {
+            continue;
+        };
+        if formal.name == "..." {
+            if let Some(rest) = &function.variadic {
+                slots.push(SlotType {
+                    slot: Slot::Rest,
+                    ty: rest.element,
+                    range,
+                });
+            }
+        } else if let Some(parameter) = function
+            .named
+            .iter()
+            .find(|parameter| parameter.name.text(db) == formal.name)
+        {
+            slots.push(SlotType {
+                slot: Slot::Parameter(formal.name),
+                ty: parameter.ty,
+                range,
+            });
+        }
+    }
+    if let Some(range) = site
+        .children()
+        .find(|child| child.kind() == SyntaxKind::RETURN_TYPE)
+        .as_ref()
+        .and_then(type_range)
+    {
+        slots.push(SlotType {
+            slot: Slot::Return,
+            ty: function.ret,
+            range,
+        });
+    }
+    slots
+}
+
+/// The inline site a statement carries: its own `: TYPE`, or else the signature on the
+/// function literal it assigns or is.
+pub fn statement_inline_site(statement: &SyntaxNode) -> Option<SyntaxNode> {
+    if is_inline_site(statement) {
+        return Some(statement.clone());
+    }
+    let function = assigned_function(statement)?;
+    is_inline_site(&function).then_some(function)
+}
+
+/// The function literal a statement assigns (either direction) or is.
+pub fn assigned_function(statement: &SyntaxNode) -> Option<SyntaxNode> {
+    match statement.kind() {
+        SyntaxKind::FUNCTION_DEF => Some(statement.clone()),
+        SyntaxKind::BINARY_EXPR => {
+            let binary = ast::BinaryExpr::cast(statement.clone())?;
+            let value = match binary.operator()?.kind() {
+                SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::EQ => binary.rhs(),
+                SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => binary.lhs(),
+                _ => None,
+            }?;
+            (value.kind() == SyntaxKind::FUNCTION_DEF).then_some(value)
+        }
+        _ => None,
+    }
 }
 
 /// A `#:` block must commit to exactly one form.
@@ -424,6 +923,56 @@ struct Lowering<'db> {
 }
 
 impl<'db> Lowering<'db> {
+    fn new(db: &'db dyn Db) -> Lowering<'db> {
+        Lowering {
+            db,
+            binders: Vec::new(),
+            nominal_references: Vec::new(),
+            applied_references: Vec::new(),
+            errors: Vec::new(),
+            vector_elements: Vec::new(),
+            depth: 0,
+            beyond_check_depth: false,
+            beyond_parse_depth: false,
+            definition_type: false,
+        }
+    }
+
+    /// Attaches what lowering collected. Any error strips the typing payload, so a broken
+    /// annotation reports once and never cascades.
+    fn finish(self, mut annotation: Annotation<'db>, range: TextRange) -> Annotation<'db> {
+        let mut errors = self.errors;
+        if self.beyond_parse_depth {
+            errors.push((
+                "This type annotation is nested too deeply (more than 160 levels).".to_owned(),
+                range,
+            ));
+        } else if self.beyond_check_depth {
+            annotation.typing_errors.push((
+                "This type is nested too deeply to check (more than 128 levels).".to_owned(),
+                range,
+            ));
+        }
+        // Declared type names stay declared, with `Unknown` bodies, or every use of one would
+        // add an unknown-type finding to the one already made.
+        if !errors.is_empty() || !annotation.typing_errors.is_empty() {
+            for definition in &mut annotation.definitions {
+                definition.body = unknown(self.db);
+            }
+            return Annotation {
+                errors,
+                typing_errors: annotation.typing_errors,
+                definitions: annotation.definitions,
+                definition_sites: annotation.definition_sites,
+                ..Annotation::default()
+            };
+        }
+        annotation.nominal_references = self.nominal_references;
+        annotation.applied_references = self.applied_references;
+        annotation.vector_elements = self.vector_elements;
+        annotation
+    }
+
     /// `bound` spans every binder list of the block, so a duplicate across lists is caught too.
     fn lower_binders(
         &mut self,

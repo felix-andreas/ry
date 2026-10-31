@@ -75,11 +75,13 @@ export default defineConfig({
 					items: [
 						{ slug: 'type-checking/overview' },
 						{ slug: 'type-checking/annotations' },
+						{ slug: 'type-checking/inline-annotations' },
 						{ slug: 'type-checking/vectors-and-lists' },
 						{ slug: 'type-checking/null' },
 						{ slug: 'type-checking/functions' },
 						{ slug: 'type-checking/custom-types' },
 						{ slug: 'type-checking/unknown' },
+						{ slug: 'type-checking/strict-mode' },
 						{ slug: 'type-checking/stubs' },
 						{ slug: 'type-checking/limitations' },
 					],

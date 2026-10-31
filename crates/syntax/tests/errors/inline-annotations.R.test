@@ -1,0 +1,79 @@
+#==== inline_bindings
+#---- missing_binding_type
+count: <- 1L
+#++++
+error: expected a type, found `<-`
+ --> 1:8
+  | count: <- 1L
+  |        ^^
+
+#---- trailing_text_after_binding_type
+count: integer extra <- 1L
+#++++
+error: unexpected identifier in this type annotation; expected `<-` after the type
+ --> 1:16
+  | count: integer extra <- 1L
+  |                ^^^^^
+
+#---- unclosed_binding_type
+count: list[integer <- 1L
+#++++
+error: unclosed `[`; expected `]` to close it
+ --> 1:12
+  | count: list[integer <- 1L
+  |            ^
+
+#---- ordinary_range_assignment_reads_as_annotation
+a:b <- 1
+#++++
+no errors
+
+#==== inline_functions
+#---- missing_parameter_type
+f <- function(x:) x
+#++++
+error: expected a type, found `)`
+ --> 1:17
+  | f <- function(x:) x
+  |                 ^
+
+#---- missing_return_type
+f <- function(x) -> 
+  x
+#++++
+error: expected a type, found end of line
+ --> 1:19
+  | f <- function(x) ->
+  |                   ^
+
+#---- return_type_without_body
+f <- function(x) -> integer
+#++++
+error: expected a function body
+ --> 1:6
+  | f <- function(x) -> integer
+  |      ^^^^^^^^
+
+#---- higher_rank_return_type
+f <- function(x) -> <T> fn(T) -> T x
+#++++
+error: higher-rank polymorphism is not supported: type parameter binders may only appear at the outermost level
+ --> 1:21
+  | f <- function(x) -> <T> fn(T) -> T x
+  |                     ^
+
+#---- empty_binder_list
+f <- function<>(x) x
+#++++
+error: expected a type parameter name in `<...>`
+ --> 1:15
+  | f <- function<>(x) x
+  |               ^
+
+#---- one_error_per_type
+f <- function(x: list{a: , b: fn(}) x
+#++++
+error: expected a type, found `,`
+ --> 1:26
+  | f <- function(x: list{a: , b: fn(}) x
+  |                          ^

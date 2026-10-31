@@ -1,0 +1,685 @@
+#==== inline_bindings
+#---- annotated_binding
+count: integer <- 1L
+#++++
+SOURCE_FILE@0..20
+  BINARY_EXPR@0..20
+    NAME@0..5
+      IDENT@0..5 "count"
+    TYPE_ASCRIPTION@5..14
+      COLON@5..6 ":"
+      WHITESPACE@6..7 " "
+      TYPE_REF@7..14
+        IDENT@7..14 "integer"
+    WHITESPACE@14..15 " "
+    LESS_MINUS@15..17 "<-"
+    WHITESPACE@17..18 " "
+    LITERAL@18..20
+      INTEGER@18..20 "1L"
+
+#---- annotated_binding_with_equals
+count: integer = 1L
+#++++
+SOURCE_FILE@0..19
+  BINARY_EXPR@0..19
+    NAME@0..5
+      IDENT@0..5 "count"
+    TYPE_ASCRIPTION@5..14
+      COLON@5..6 ":"
+      WHITESPACE@6..7 " "
+      TYPE_REF@7..14
+        IDENT@7..14 "integer"
+    WHITESPACE@14..15 " "
+    EQ@15..16 "="
+    WHITESPACE@16..17 " "
+    LITERAL@17..19
+      INTEGER@17..19 "1L"
+
+#---- annotated_binding_union_type
+label: character | NULL <- NULL
+#++++
+SOURCE_FILE@0..31
+  BINARY_EXPR@0..31
+    NAME@0..5
+      IDENT@0..5 "label"
+    TYPE_ASCRIPTION@5..23
+      COLON@5..6 ":"
+      WHITESPACE@6..7 " "
+      TYPE_UNION@7..23
+        TYPE_REF@7..16
+          IDENT@7..16 "character"
+        WHITESPACE@16..17 " "
+        PIPE@17..18 "|"
+        WHITESPACE@18..19 " "
+        TYPE_REF@19..23
+          NULL_KW@19..23 "NULL"
+    WHITESPACE@23..24 " "
+    LESS_MINUS@24..26 "<-"
+    WHITESPACE@26..27 " "
+    LITERAL@27..31
+      NULL_KW@27..31 "NULL"
+
+#---- annotated_binding_record_type
+person: list{name: character, age: integer} <- list(name = "Ada", age = 36L)
+#++++
+SOURCE_FILE@0..76
+  BINARY_EXPR@0..76
+    NAME@0..6
+      IDENT@0..6 "person"
+    TYPE_ASCRIPTION@6..43
+      COLON@6..7 ":"
+      WHITESPACE@7..8 " "
+      TYPE_RECORD@8..43
+        NAME@8..12
+          IDENT@8..12 "list"
+        L_BRACE@12..13 "{"
+        TYPE_FIELD@13..28
+          NAME@13..17
+            IDENT@13..17 "name"
+          COLON@17..18 ":"
+          WHITESPACE@18..19 " "
+          TYPE_REF@19..28
+            IDENT@19..28 "character"
+        COMMA@28..29 ","
+        WHITESPACE@29..30 " "
+        TYPE_FIELD@30..42
+          NAME@30..33
+            IDENT@30..33 "age"
+          COLON@33..34 ":"
+          WHITESPACE@34..35 " "
+          TYPE_REF@35..42
+            IDENT@35..42 "integer"
+        R_BRACE@42..43 "}"
+    WHITESPACE@43..44 " "
+    LESS_MINUS@44..46 "<-"
+    WHITESPACE@46..47 " "
+    CALL_EXPR@47..76
+      NAME@47..51
+        IDENT@47..51 "list"
+      ARGUMENT_LIST@51..76
+        L_PAREN@51..52 "("
+        ARGUMENT@52..64
+          NAME@52..56
+            IDENT@52..56 "name"
+          WHITESPACE@56..57 " "
+          EQ@57..58 "="
+          WHITESPACE@58..59 " "
+          LITERAL@59..64
+            STRING@59..64 "\"Ada\""
+        COMMA@64..65 ","
+        WHITESPACE@65..66 " "
+        ARGUMENT@66..75
+          NAME@66..69
+            IDENT@66..69 "age"
+          WHITESPACE@69..70 " "
+          EQ@70..71 "="
+          WHITESPACE@71..72 " "
+          LITERAL@72..75
+            INTEGER@72..75 "36L"
+        R_PAREN@75..76 ")"
+
+#---- annotated_binding_function_type
+step: fn(x: integer) -> integer <- function(x) x + 1L
+#++++
+SOURCE_FILE@0..53
+  BINARY_EXPR@0..53
+    NAME@0..4
+      IDENT@0..4 "step"
+    TYPE_ASCRIPTION@4..31
+      COLON@4..5 ":"
+      WHITESPACE@5..6 " "
+      TYPE_FUNCTION@6..31
+        NAME@6..8
+          IDENT@6..8 "fn"
+        TYPE_PARAMETER_LIST@8..20
+          L_PAREN@8..9 "("
+          TYPE_PARAMETER@9..19
+            NAME@9..10
+              IDENT@9..10 "x"
+            COLON@10..11 ":"
+            WHITESPACE@11..12 " "
+            TYPE_REF@12..19
+              IDENT@12..19 "integer"
+          R_PAREN@19..20 ")"
+        WHITESPACE@20..21 " "
+        MINUS_GREATER@21..23 "->"
+        WHITESPACE@23..24 " "
+        TYPE_REF@24..31
+          IDENT@24..31 "integer"
+    WHITESPACE@31..32 " "
+    LESS_MINUS@32..34 "<-"
+    WHITESPACE@34..35 " "
+    FUNCTION_DEF@35..53
+      FUNCTION_KW@35..43 "function"
+      PARAMETER_LIST@43..46
+        L_PAREN@43..44 "("
+        PARAMETER@44..45
+          IDENT@44..45 "x"
+        R_PAREN@45..46 ")"
+      WHITESPACE@46..47 " "
+      BINARY_EXPR@47..53
+        NAME@47..48
+          IDENT@47..48 "x"
+        WHITESPACE@48..49 " "
+        PLUS@49..50 "+"
+        WHITESPACE@50..51 " "
+        LITERAL@51..53
+          INTEGER@51..53 "1L"
+
+#---- range_without_assignment_stays_a_range
+x:y
+#++++
+SOURCE_FILE@0..3
+  BINARY_EXPR@0..3
+    NAME@0..1
+      IDENT@0..1 "x"
+    COLON@1..2 ":"
+    NAME@2..3
+      IDENT@2..3 "y"
+
+#---- range_compared_stays_a_range
+x:y < -1
+#++++
+SOURCE_FILE@0..8
+  BINARY_EXPR@0..8
+    BINARY_EXPR@0..4
+      NAME@0..1
+        IDENT@0..1 "x"
+      COLON@1..2 ":"
+      NAME@2..3
+        IDENT@2..3 "y"
+      WHITESPACE@3..4 " "
+    LESS@4..5 "<"
+    WHITESPACE@5..6 " "
+    UNARY_EXPR@6..8
+      MINUS@6..7 "-"
+      LITERAL@7..8
+        DOUBLE@7..8 "1"
+
+#---- annotated_binding_inside_a_block
+{
+  total: double <- 0
+}
+#++++
+SOURCE_FILE@0..24
+  BRACE_EXPR@0..24
+    L_BRACE@0..1 "{"
+    NEWLINE@1..2 "\n"
+    WHITESPACE@2..4 "  "
+    BINARY_EXPR@4..22
+      NAME@4..9
+        IDENT@4..9 "total"
+      TYPE_ASCRIPTION@9..17
+        COLON@9..10 ":"
+        WHITESPACE@10..11 " "
+        TYPE_REF@11..17
+          IDENT@11..17 "double"
+      WHITESPACE@17..18 " "
+      LESS_MINUS@18..20 "<-"
+      WHITESPACE@20..21 " "
+      LITERAL@21..22
+        DOUBLE@21..22 "0"
+    NEWLINE@22..23 "\n"
+    R_BRACE@23..24 "}"
+
+#==== inline_functions
+#---- parameter_types
+add <- function(x: integer, y: integer = 1L) x + y
+#++++
+SOURCE_FILE@0..50
+  BINARY_EXPR@0..50
+    NAME@0..3
+      IDENT@0..3 "add"
+    WHITESPACE@3..4 " "
+    LESS_MINUS@4..6 "<-"
+    WHITESPACE@6..7 " "
+    FUNCTION_DEF@7..50
+      FUNCTION_KW@7..15 "function"
+      PARAMETER_LIST@15..44
+        L_PAREN@15..16 "("
+        PARAMETER@16..26
+          IDENT@16..17 "x"
+          TYPE_ASCRIPTION@17..26
+            COLON@17..18 ":"
+            WHITESPACE@18..19 " "
+            TYPE_REF@19..26
+              IDENT@19..26 "integer"
+        COMMA@26..27 ","
+        WHITESPACE@27..28 " "
+        PARAMETER@28..43
+          IDENT@28..29 "y"
+          TYPE_ASCRIPTION@29..38
+            COLON@29..30 ":"
+            WHITESPACE@30..31 " "
+            TYPE_REF@31..38
+              IDENT@31..38 "integer"
+          WHITESPACE@38..39 " "
+          EQ@39..40 "="
+          WHITESPACE@40..41 " "
+          LITERAL@41..43
+            INTEGER@41..43 "1L"
+        R_PAREN@43..44 ")"
+      WHITESPACE@44..45 " "
+      BINARY_EXPR@45..50
+        NAME@45..46
+          IDENT@45..46 "x"
+        WHITESPACE@46..47 " "
+        PLUS@47..48 "+"
+        WHITESPACE@48..49 " "
+        NAME@49..50
+          IDENT@49..50 "y"
+
+#---- return_type
+add <- function(x: integer) -> integer x + 1L
+#++++
+SOURCE_FILE@0..45
+  BINARY_EXPR@0..45
+    NAME@0..3
+      IDENT@0..3 "add"
+    WHITESPACE@3..4 " "
+    LESS_MINUS@4..6 "<-"
+    WHITESPACE@6..7 " "
+    FUNCTION_DEF@7..45
+      FUNCTION_KW@7..15 "function"
+      PARAMETER_LIST@15..27
+        L_PAREN@15..16 "("
+        PARAMETER@16..26
+          IDENT@16..17 "x"
+          TYPE_ASCRIPTION@17..26
+            COLON@17..18 ":"
+            WHITESPACE@18..19 " "
+            TYPE_REF@19..26
+              IDENT@19..26 "integer"
+        R_PAREN@26..27 ")"
+      WHITESPACE@27..28 " "
+      RETURN_TYPE@28..38
+        MINUS_GREATER@28..30 "->"
+        WHITESPACE@30..31 " "
+        TYPE_REF@31..38
+          IDENT@31..38 "integer"
+      WHITESPACE@38..39 " "
+      BINARY_EXPR@39..45
+        NAME@39..40
+          IDENT@39..40 "x"
+        WHITESPACE@40..41 " "
+        PLUS@41..42 "+"
+        WHITESPACE@42..43 " "
+        LITERAL@43..45
+          INTEGER@43..45 "1L"
+
+#---- return_type_before_braced_body
+add <- function(x: integer) -> integer {
+  x + 1L
+}
+#++++
+SOURCE_FILE@0..51
+  BINARY_EXPR@0..51
+    NAME@0..3
+      IDENT@0..3 "add"
+    WHITESPACE@3..4 " "
+    LESS_MINUS@4..6 "<-"
+    WHITESPACE@6..7 " "
+    FUNCTION_DEF@7..51
+      FUNCTION_KW@7..15 "function"
+      PARAMETER_LIST@15..27
+        L_PAREN@15..16 "("
+        PARAMETER@16..26
+          IDENT@16..17 "x"
+          TYPE_ASCRIPTION@17..26
+            COLON@17..18 ":"
+            WHITESPACE@18..19 " "
+            TYPE_REF@19..26
+              IDENT@19..26 "integer"
+        R_PAREN@26..27 ")"
+      WHITESPACE@27..28 " "
+      RETURN_TYPE@28..38
+        MINUS_GREATER@28..30 "->"
+        WHITESPACE@30..31 " "
+        TYPE_REF@31..38
+          IDENT@31..38 "integer"
+      WHITESPACE@38..39 " "
+      BRACE_EXPR@39..51
+        L_BRACE@39..40 "{"
+        NEWLINE@40..41 "\n"
+        WHITESPACE@41..43 "  "
+        BINARY_EXPR@43..49
+          NAME@43..44
+            IDENT@43..44 "x"
+          WHITESPACE@44..45 " "
+          PLUS@45..46 "+"
+          WHITESPACE@46..47 " "
+          LITERAL@47..49
+            INTEGER@47..49 "1L"
+        NEWLINE@49..50 "\n"
+        R_BRACE@50..51 "}"
+
+#---- type_parameters
+first <- function<T>(items: list[T]) -> T items[[1L]]
+#++++
+SOURCE_FILE@0..53
+  BINARY_EXPR@0..53
+    NAME@0..5
+      IDENT@0..5 "first"
+    WHITESPACE@5..6 " "
+    LESS_MINUS@6..8 "<-"
+    WHITESPACE@8..9 " "
+    FUNCTION_DEF@9..53
+      FUNCTION_KW@9..17 "function"
+      TYPE_BINDER_LIST@17..20
+        LESS@17..18 "<"
+        TYPE_BINDER@18..19
+          NAME@18..19
+            IDENT@18..19 "T"
+        GREATER@19..20 ">"
+      PARAMETER_LIST@20..36
+        L_PAREN@20..21 "("
+        PARAMETER@21..35
+          IDENT@21..26 "items"
+          TYPE_ASCRIPTION@26..35
+            COLON@26..27 ":"
+            WHITESPACE@27..28 " "
+            TYPE_LIST@28..35
+              NAME@28..32
+                IDENT@28..32 "list"
+              L_BRACKET@32..33 "["
+              TYPE_REF@33..34
+                IDENT@33..34 "T"
+              R_BRACKET@34..35 "]"
+        R_PAREN@35..36 ")"
+      WHITESPACE@36..37 " "
+      RETURN_TYPE@37..41
+        MINUS_GREATER@37..39 "->"
+        WHITESPACE@39..40 " "
+        TYPE_REF@40..41
+          IDENT@40..41 "T"
+      WHITESPACE@41..42 " "
+      SUBSET2_EXPR@42..53
+        NAME@42..47
+          IDENT@42..47 "items"
+        ARGUMENT_LIST@47..53
+          L_BRACKET2@47..49 "[["
+          ARGUMENT@49..51
+            LITERAL@49..51
+              INTEGER@49..51 "1L"
+          R_BRACKET@51..52 "]"
+          R_BRACKET@52..53 "]"
+
+#---- constrained_type_parameters_on_a_lambda
+twice <- \<T: numeric>(x: T) -> T x + x
+#++++
+SOURCE_FILE@0..39
+  BINARY_EXPR@0..39
+    NAME@0..5
+      IDENT@0..5 "twice"
+    WHITESPACE@5..6 " "
+    LESS_MINUS@6..8 "<-"
+    WHITESPACE@8..9 " "
+    FUNCTION_DEF@9..39
+      BACKSLASH@9..10 "\\"
+      TYPE_BINDER_LIST@10..22
+        LESS@10..11 "<"
+        TYPE_BINDER@11..21
+          NAME@11..12
+            IDENT@11..12 "T"
+          COLON@12..13 ":"
+          WHITESPACE@13..14 " "
+          NAME@14..21
+            IDENT@14..21 "numeric"
+        GREATER@21..22 ">"
+      PARAMETER_LIST@22..28
+        L_PAREN@22..23 "("
+        PARAMETER@23..27
+          IDENT@23..24 "x"
+          TYPE_ASCRIPTION@24..27
+            COLON@24..25 ":"
+            WHITESPACE@25..26 " "
+            TYPE_REF@26..27
+              IDENT@26..27 "T"
+        R_PAREN@27..28 ")"
+      WHITESPACE@28..29 " "
+      RETURN_TYPE@29..33
+        MINUS_GREATER@29..31 "->"
+        WHITESPACE@31..32 " "
+        TYPE_REF@32..33
+          IDENT@32..33 "T"
+      WHITESPACE@33..34 " "
+      BINARY_EXPR@34..39
+        NAME@34..35
+          IDENT@34..35 "x"
+        WHITESPACE@35..36 " "
+        PLUS@36..37 "+"
+        WHITESPACE@37..38 " "
+        NAME@38..39
+          IDENT@38..39 "x"
+
+#---- rest_parameter_type
+join <- function(...: character) -> character paste0(...)
+#++++
+SOURCE_FILE@0..57
+  BINARY_EXPR@0..57
+    NAME@0..4
+      IDENT@0..4 "join"
+    WHITESPACE@4..5 " "
+    LESS_MINUS@5..7 "<-"
+    WHITESPACE@7..8 " "
+    FUNCTION_DEF@8..57
+      FUNCTION_KW@8..16 "function"
+      PARAMETER_LIST@16..32
+        L_PAREN@16..17 "("
+        PARAMETER@17..31
+          DOTS@17..20 "..."
+          TYPE_ASCRIPTION@20..31
+            COLON@20..21 ":"
+            WHITESPACE@21..22 " "
+            TYPE_REF@22..31
+              IDENT@22..31 "character"
+        R_PAREN@31..32 ")"
+      WHITESPACE@32..33 " "
+      RETURN_TYPE@33..45
+        MINUS_GREATER@33..35 "->"
+        WHITESPACE@35..36 " "
+        TYPE_REF@36..45
+          IDENT@36..45 "character"
+      WHITESPACE@45..46 " "
+      CALL_EXPR@46..57
+        NAME@46..52
+          IDENT@46..52 "paste0"
+        ARGUMENT_LIST@52..57
+          L_PAREN@52..53 "("
+          ARGUMENT@53..56
+            NAME@53..56
+              DOTS@53..56 "..."
+          R_PAREN@56..57 ")"
+
+#---- parameters_across_lines
+f <- function(
+  x: integer,
+  y: list[named: double] = list()
+) -> double {
+  x
+}
+#++++
+SOURCE_FILE@0..82
+  BINARY_EXPR@0..82
+    NAME@0..1
+      IDENT@0..1 "f"
+    WHITESPACE@1..2 " "
+    LESS_MINUS@2..4 "<-"
+    WHITESPACE@4..5 " "
+    FUNCTION_DEF@5..82
+      FUNCTION_KW@5..13 "function"
+      PARAMETER_LIST@13..64
+        L_PAREN@13..14 "("
+        NEWLINE@14..15 "\n"
+        WHITESPACE@15..17 "  "
+        PARAMETER@17..27
+          IDENT@17..18 "x"
+          TYPE_ASCRIPTION@18..27
+            COLON@18..19 ":"
+            WHITESPACE@19..20 " "
+            TYPE_REF@20..27
+              IDENT@20..27 "integer"
+        COMMA@27..28 ","
+        NEWLINE@28..29 "\n"
+        WHITESPACE@29..31 "  "
+        PARAMETER@31..63
+          IDENT@31..32 "y"
+          TYPE_ASCRIPTION@32..53
+            COLON@32..33 ":"
+            WHITESPACE@33..34 " "
+            TYPE_LIST@34..53
+              NAME@34..38
+                IDENT@34..38 "list"
+              L_BRACKET@38..39 "["
+              IDENT@39..44 "named"
+              COLON@44..45 ":"
+              WHITESPACE@45..46 " "
+              TYPE_REF@46..52
+                IDENT@46..52 "double"
+              R_BRACKET@52..53 "]"
+          WHITESPACE@53..54 " "
+          EQ@54..55 "="
+          WHITESPACE@55..56 " "
+          CALL_EXPR@56..62
+            NAME@56..60
+              IDENT@56..60 "list"
+            ARGUMENT_LIST@60..62
+              L_PAREN@60..61 "("
+              R_PAREN@61..62 ")"
+          NEWLINE@62..63 "\n"
+        R_PAREN@63..64 ")"
+      WHITESPACE@64..65 " "
+      RETURN_TYPE@65..74
+        MINUS_GREATER@65..67 "->"
+        WHITESPACE@67..68 " "
+        TYPE_REF@68..74
+          IDENT@68..74 "double"
+      WHITESPACE@74..75 " "
+      BRACE_EXPR@75..82
+        L_BRACE@75..76 "{"
+        NEWLINE@76..77 "\n"
+        WHITESPACE@77..79 "  "
+        NAME@79..80
+          IDENT@79..80 "x"
+        NEWLINE@80..81 "\n"
+        R_BRACE@81..82 "}"
+
+#---- anonymous_function_argument
+lapply(xs, function(x: integer) -> integer x + 1L)
+#++++
+SOURCE_FILE@0..50
+  CALL_EXPR@0..50
+    NAME@0..6
+      IDENT@0..6 "lapply"
+    ARGUMENT_LIST@6..50
+      L_PAREN@6..7 "("
+      ARGUMENT@7..9
+        NAME@7..9
+          IDENT@7..9 "xs"
+      COMMA@9..10 ","
+      WHITESPACE@10..11 " "
+      ARGUMENT@11..49
+        FUNCTION_DEF@11..49
+          FUNCTION_KW@11..19 "function"
+          PARAMETER_LIST@19..31
+            L_PAREN@19..20 "("
+            PARAMETER@20..30
+              IDENT@20..21 "x"
+              TYPE_ASCRIPTION@21..30
+                COLON@21..22 ":"
+                WHITESPACE@22..23 " "
+                TYPE_REF@23..30
+                  IDENT@23..30 "integer"
+            R_PAREN@30..31 ")"
+          WHITESPACE@31..32 " "
+          RETURN_TYPE@32..42
+            MINUS_GREATER@32..34 "->"
+            WHITESPACE@34..35 " "
+            TYPE_REF@35..42
+              IDENT@35..42 "integer"
+          WHITESPACE@42..43 " "
+          BINARY_EXPR@43..49
+            NAME@43..44
+              IDENT@43..44 "x"
+            WHITESPACE@44..45 " "
+            PLUS@45..46 "+"
+            WHITESPACE@46..47 " "
+            LITERAL@47..49
+              INTEGER@47..49 "1L"
+      R_PAREN@49..50 ")"
+
+#==== inline_lookahead
+#---- comparisons_on_two_lines_stay_two_statements
+x:y < z
+a > b <- 1
+#++++
+SOURCE_FILE@0..18
+  BINARY_EXPR@0..7
+    BINARY_EXPR@0..4
+      NAME@0..1
+        IDENT@0..1 "x"
+      COLON@1..2 ":"
+      NAME@2..3
+        IDENT@2..3 "y"
+      WHITESPACE@3..4 " "
+    LESS@4..5 "<"
+    WHITESPACE@5..6 " "
+    NAME@6..7
+      IDENT@6..7 "z"
+  NEWLINE@7..8 "\n"
+  BINARY_EXPR@8..18
+    BINARY_EXPR@8..14
+      NAME@8..9
+        IDENT@8..9 "a"
+      WHITESPACE@9..10 " "
+      GREATER@10..11 ">"
+      WHITESPACE@11..12 " "
+      NAME@12..13
+        IDENT@12..13 "b"
+      WHITESPACE@13..14 " "
+    LESS_MINUS@14..16 "<-"
+    WHITESPACE@16..17 " "
+    LITERAL@17..18
+      DOUBLE@17..18 "1"
+
+#---- spaced_list_brace_starts_the_body
+g <- function(x) -> list {
+  list(x)
+}
+#++++
+SOURCE_FILE@0..38
+  BINARY_EXPR@0..38
+    NAME@0..1
+      IDENT@0..1 "g"
+    WHITESPACE@1..2 " "
+    LESS_MINUS@2..4 "<-"
+    WHITESPACE@4..5 " "
+    FUNCTION_DEF@5..38
+      FUNCTION_KW@5..13 "function"
+      PARAMETER_LIST@13..16
+        L_PAREN@13..14 "("
+        PARAMETER@14..15
+          IDENT@14..15 "x"
+        R_PAREN@15..16 ")"
+      WHITESPACE@16..17 " "
+      RETURN_TYPE@17..24
+        MINUS_GREATER@17..19 "->"
+        WHITESPACE@19..20 " "
+        TYPE_REF@20..24
+          IDENT@20..24 "list"
+      WHITESPACE@24..25 " "
+      BRACE_EXPR@25..38
+        L_BRACE@25..26 "{"
+        NEWLINE@26..27 "\n"
+        WHITESPACE@27..29 "  "
+        CALL_EXPR@29..36
+          NAME@29..33
+            IDENT@29..33 "list"
+          ARGUMENT_LIST@33..36
+            L_PAREN@33..34 "("
+            ARGUMENT@34..35
+              NAME@34..35
+                IDENT@34..35 "x"
+            R_PAREN@35..36 ")"
+        NEWLINE@36..37 "\n"
+        R_BRACE@37..38 "}"

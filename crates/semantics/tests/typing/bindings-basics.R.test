@@ -6,7 +6,9 @@ value <- "ok"
 value: integer
 value: character
 0..5 warning[duplicate] Top-level binding `value` is overwritten by a later top-level binding in this package.
+  = 12..17 the later binding is here.
 12..17 warning[duplicate] Top-level binding `value` overwrites an earlier top-level binding in this package.
+  = 0..5 the earlier binding is here.
 
 #---- reserved_atomic_constants
 na <- NA

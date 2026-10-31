@@ -1,0 +1,322 @@
+#==== inline_bindings
+#---- binding_declares_its_type
+count: integer <- 1L
+#++++
+count: integer
+
+#---- binding_widens_like_a_checked_annotation
+ids: integer[] <- 1L
+#++++
+ids: integer[]
+
+#---- binding_value_must_fit
+count: integer <- "one"
+#++++
+count: integer
+18..23 error[type-mismatch] expected `integer`, found `character`
+
+#---- equals_spelling_binds_too
+count: integer = 1L
+#++++
+count: integer
+
+#---- binding_inside_a_function_body
+total <- function() {
+  sum: double <- 0L
+  sum
+}
+#++++
+total: fn() -> double
+
+#---- binding_inside_a_function_body_is_checked
+total <- function() {
+  sum: double <- "zero"
+  sum
+}
+#++++
+total: Unknown
+39..45 error[type-mismatch] expected `double`, found `character`
+
+#---- binding_with_a_function_type
+step: fn(x: integer) -> integer <- function(x) x + 1L
+#++++
+step: fn(x: integer) -> integer
+
+#---- dict_like_list_needs_its_annotation
+counts: list[named: integer] <- list(apples = 3L)
+#++++
+counts: list[named: integer]
+
+#---- nominal_binding_does_not_create_a_value
+#: @type Person {list{name: character}}
+person: Person <- list(name = "Ada")
+#++++
+person: Person
+58..76 error[type-mismatch] expected `Person`, found `list{name: character}`
+
+#==== inline_signatures
+#---- parameter_and_return_types
+add <- function(x: integer, y: integer) -> integer x + y
+#++++
+add: fn(x: integer, y: integer) -> integer
+
+#---- partial_parameters_infer_the_rest
+add <- function(x: integer, y) x + y
+#++++
+add: <T: numeric> fn(x: integer, y: T) -> T
+
+#---- elided_return_is_inferred
+half <- function(x: double) x / 2
+#++++
+half: fn(x: double) -> double
+
+#---- return_type_is_checked
+label <- function(x: integer) -> character x
+#++++
+label: fn(x: integer) -> character
+43..44 error[type-mismatch] expected `character`, found `integer`
+
+#---- calls_are_checked_against_the_signature
+add <- function(x: integer, y: integer = 1L) -> integer x + y
+add("a")
+#++++
+add: fn(x: integer, [y]: integer) -> integer
+integer
+66..69 error[type-mismatch] expected `integer`, found `character`
+
+#---- default_must_fit_the_parameter_type
+pad <- function(width: integer = "wide") width
+#++++
+pad: fn([width]: integer) -> integer
+33..39 error[type-mismatch] expected `integer`, found `character`
+
+#---- null_default_needs_a_nullable_type
+greet <- function(name: character = NULL) name
+#++++
+greet: fn([name]: character) -> character
+36..40 error[type-mismatch] `name` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
+
+#---- nullable_default_parameter
+greet <- function(name: character | NULL = NULL) -> character {
+  if (is.null(name)) return("hello")
+  name
+}
+#++++
+greet: fn([name]: character | NULL) -> character
+
+#---- missing_tested_parameter_is_optional_without_restating_it
+pad <- function(width: integer) if (missing(width)) 0L else width
+pad()
+#++++
+pad: fn([width]: integer) -> integer
+integer
+
+#---- rest_parameter_type
+join <- function(...: character) -> character paste0(...)
+join("a", 1L)
+#++++
+join: fn(...: character) -> character
+character
+68..70 error[type-mismatch] expected `character`, found `integer`
+
+#---- type_parameters
+first <- function<T>(items: list[T]) -> T items[[1L]]
+first(list(1L, 2L))
+#++++
+first: <T> fn(items: list[T]) -> T
+integer
+
+#---- constrained_type_parameters
+twice <- function<T: numeric>(x: T) -> T x + x
+twice("a")
+#++++
+twice: <T: numeric> fn(x: T) -> T
+T
+53..56 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- lambda_spelling
+square <- \(x: double) -> double x * x
+#++++
+square: fn(x: double) -> double
+
+#---- anonymous_function_argument
+lapply(1:3, function(x: character) x)
+#++++
+Unknown
+12..36 error[type-mismatch] this function is passed `integer`, but its parameter `x` accepts `character`
+
+#---- nested_function_signature
+outer <- function() {
+  inner <- function(x: integer) -> integer x + 1L
+  inner("a")
+}
+#++++
+outer: Unknown
+80..83 error[type-mismatch] expected `integer`, found `character`
+
+#---- binding_type_and_signature_together
+step: fn(x: integer) -> integer <- function(x: integer) -> integer x + 1L
+#++++
+step: fn(x: integer) -> integer
+
+#---- binding_type_and_signature_disagree
+step: fn(x: integer) -> integer <- function(x: character) -> character x
+#++++
+step: fn(x: integer) -> integer
+35..72 error[type-mismatch] expected `fn(x: integer) -> integer`, found `fn(x: character) -> character`
+
+#==== inline_and_comment
+#---- agreeing_annotations_are_quiet
+#: integer
+count: integer <- 1L
+#++++
+count: integer
+
+#---- disagreeing_binding_types
+#: double
+count: integer <- 1L
+#++++
+count: integer
+17..24 warning[annotation-mismatch] this binding's inline annotation says `integer`, but its `#:` comment says `double`. ry uses the inline type; make the two agree, or delete one
+  = 3..9 the `#:` comment's type is here
+
+#---- disagreeing_parameter_types
+#: fn(x: double) -> double
+half <- function(x: integer) x / 2
+#++++
+half: fn(x: integer) -> double
+47..54 warning[annotation-mismatch] the inline annotation gives parameter `x` the type `integer`, but the `#:` comment gives it `double`. ry uses the inline type; make the two agree, or delete one
+  = 9..15 the `#:` comment's type is here
+
+#---- disagreeing_return_types
+#: fn(x: integer) -> integer
+step <- function(x) -> double x + 1L
+#++++
+step: fn(x: integer) -> double
+52..58 warning[annotation-mismatch] the inline annotation says this function returns `double`, but the `#:` comment says it returns `integer`. ry uses the inline type; make the two agree, or delete one
+  = 21..28 the `#:` comment's type is here
+
+#---- disagreeing_expanded_annotation
+#: @param x {double}
+#: @return {double}
+half <- function(x: integer) -> integer x
+#++++
+half: fn(x: integer) -> integer
+61..68 warning[annotation-mismatch] the inline annotation gives parameter `x` the type `integer`, but the `#:` comment gives it `double`. ry uses the inline type; make the two agree, or delete one
+  = 13..19 the `#:` comment's type is here
+73..80 warning[annotation-mismatch] the inline annotation says this function returns `integer`, but the `#:` comment says it returns `double`. ry uses the inline type; make the two agree, or delete one
+  = 33..39 the `#:` comment's type is here
+
+#---- positional_comment_types_pair_by_formal
+#: fn(integer, character) -> character
+label <- function(count, unit: integer) paste(count, unit)
+#++++
+label: fn(count: integer, unit: integer) -> character
+70..77 warning[annotation-mismatch] the inline annotation gives parameter `unit` the type `integer`, but the `#:` comment gives it `character`. ry uses the inline type; make the two agree, or delete one
+  = 15..24 the `#:` comment's type is here
+
+#---- slots_merge_across_the_two
+#: fn(unit: character)
+label <- function(count: integer, unit) paste(count, unit)
+label(1L, 2L)
+#++++
+label: fn(count: integer, unit: character) -> character
+character
+92..94 error[type-mismatch] expected `character`, found `integer`
+
+#---- alias_and_expansion_agree
+#: @alias Id {integer}
+
+#: Id
+id: integer <- 1L
+#++++
+id: integer
+
+#---- union_member_order_does_not_matter
+#: character | integer
+key: integer | character <- 1L
+#++++
+key: integer | character
+
+#---- comment_new_governs_the_value
+#: @type Person {list{name: character}}
+
+#: @new Person
+person: Person <- list(name = "Ada")
+#++++
+person: Person
+
+#---- comment_trust_governs_and_disagreement_still_warns
+#: @trust double
+count: integer <- "one"
+#++++
+count: double
+24..31 warning[annotation-mismatch] this binding's inline annotation says `integer`, but its `#:` comment says `double`. ry applies the comment's `@trust`; make the two agree, or delete one
+  = 10..16 the `#:` comment's type is here
+
+#---- annotations_inside_a_body
+outer <- function() {
+  #: double
+  total: integer <- 0L
+  total
+}
+#++++
+outer: fn() -> integer
+43..50 warning[annotation-mismatch] this binding's inline annotation says `integer`, but its `#:` comment says `double`. ry uses the inline type; make the two agree, or delete one
+  = 27..33 the `#:` comment's type is here
+
+#==== inline_errors
+#---- unknown_type_name
+count: Integr <- 1L
+#++++
+count: Integr
+7..13 error[annotation] I do not know the type `Integr`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- generic_without_arguments
+#: @type Box<T> {list{value: T}}
+box: Box <- list(value = 1L)
+#++++
+box: Box
+38..41 error[annotation] generic type `Box` expects 1 type argument, but found 0.
+
+#---- record_cannot_mix_named_and_positional_items
+pair: list{a: integer, character} <- list(a = 1L, "b")
+#++++
+pair: list[integer | character]
+6..33 error[annotation] a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them
+
+#---- duplicate_type_parameter
+pick <- function<T, T>(x: T) -> T x
+#++++
+pick: <T> fn(x: T) -> T
+20..21 error[annotation] duplicate type parameter name `T` in a function's type parameters.
+
+#---- unknown_constraint
+twice <- function<T: number>(x: T) -> T x + x
+#++++
+twice: <T: numeric> fn(x: T) -> T
+21..27 error[annotation] unknown type-parameter constraint `number`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
+
+#---- syntax_error_in_a_type_is_a_syntax_error
+count: list[integer <- 1L
+#++++
+Unknown
+11..12 error[syntax-error] unclosed `[`; expected `]` to close it
+
+#==== inline_binders
+#---- inline_binder_constraint_wins
+#: <T> fn(x: T) -> T
+g <- function<T: numeric>(x: T) -> T x
+g("a")
+#++++
+g: <T: numeric> fn(x: T) -> T
+T
+35..45 warning[annotation-mismatch] the inline annotation gives this type parameter `numeric`, but the `#:` comment gives it no constraint. ry uses the inline one; make the two agree, or delete one
+  = 4..5 the `#:` comment's type parameter is here
+62..65 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- differently_named_binders_agree
+#: <T> fn(x: T) -> T
+h <- function<U>(x: U) -> U x
+#++++
+h: <T> fn(x: T) -> T

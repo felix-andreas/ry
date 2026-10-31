@@ -18,7 +18,7 @@ use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
     shipped_stub_sources, stub_source_problems, stubs,
 };
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZero;
@@ -101,7 +101,7 @@ pub fn check(
                 return Err(CommandError);
             }
         };
-        warn_unknown_config_keys(&config);
+        warn_config(&config);
         let target = fs::canonicalize(file).map_err(|err| {
             error_because(&format!("failed to resolve: {}", file.display()), &err);
             CommandError
@@ -148,6 +148,7 @@ pub fn check(
 
         let mut db = RootDatabase::default();
         StubSources::new(&db, stub_sources, shipped_export_manifests());
+        AnalysisSettings::new(&db, config.check.inline_annotations);
 
         // A broken override stub silently changes what every file checks against, so
         // its dropped declarations are reported as findings.
@@ -418,17 +419,9 @@ pub(crate) fn analysable_source(path: &Path, text: String) -> String {
     }
 }
 
-pub(crate) fn warn_unknown_config_keys(config: &config::Config) {
-    for key in &config.unknown_keys {
-        match config::suggested_table(key) {
-            Some(table) => warn(&format!(
-                "ignoring config key `{key}`. It belongs under `[{table}]`, and nothing outside a \
-                 table sets it"
-            )),
-            None => warn(&format!(
-                "ignoring unknown config key `{key}`. Check the spelling, or update ry"
-            )),
-        }
+pub(crate) fn warn_config(config: &config::Config) {
+    for warning in config.warnings() {
+        warn(&warning);
     }
 }
 
@@ -1087,7 +1080,7 @@ pub fn fmt(
                 report(&err);
                 CommandError
             })?;
-            warn_unknown_config_keys(&config);
+            warn_config(&config);
             // `[check] exclude` scopes analysis, not formatting. Literate documents are never
             // formatted: most of an `.Rmd` is prose.
             let paths: Vec<PathBuf> = collect_r_files(file, None)?

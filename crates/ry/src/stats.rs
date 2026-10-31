@@ -13,7 +13,7 @@ use semantics::metadata::{
     parse_description_dependencies, parse_namespace_imports,
 };
 use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs;
@@ -30,7 +30,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         cli::report(&error);
         CommandError
     })?;
-    cli::warn_unknown_config_keys(&config);
+    cli::warn_config(&config);
     let target = fs::canonicalize(target).map_err(|error| {
         cli::error(&format!("failed to resolve {}: {error}", target.display()));
         CommandError
@@ -75,6 +75,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     let rss_baseline = proc_status_field("VmRSS:");
     let mut db = RootDatabase::default();
     StubSources::new(&db, stub_sources, shipped_export_manifests());
+    AnalysisSettings::new(&db, config.check.inline_annotations);
     let metadata = PackageMetadata::new(
         &db,
         normalized_imports(&namespace_imports),

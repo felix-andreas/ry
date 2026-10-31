@@ -27,12 +27,14 @@ other <- 2L
 == R/a.R
 person: integer
 3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..24 another declaration of this name is here.
 == R/b.R
 value: Person
 19..21 error[type-mismatch] expected `Person`, found `integer`
 == R/c.R
 other: integer
 3..24 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
 
 #---- kind_flip_on_non_dirty_referrer
 #~~~~ R/a.R

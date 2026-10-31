@@ -6,7 +6,7 @@ use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
 use crate::hir::{
     Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
-    UnaryOperator, integer_literal_position, is_whole_number_double,
+    Parameter as Formal, UnaryOperator, integer_literal_position, is_whole_number_double,
 };
 use crate::infer::{
     Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
@@ -179,6 +179,9 @@ pub enum StrictOriginKind {
     /// A recursive definition that checked clean yet exports `Unknown`: the reference
     /// cycle is the only possible source.
     RecursiveUnknown(String),
+    /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
+    /// `expression` is the function and `range` the parameter's name.
+    UntypedParameter(String),
 }
 
 /// No method has a default body: adding a fact must be a compile error at every
@@ -290,11 +293,13 @@ pub fn check_item_with_annotation<'db>(
             }
         });
         match (&module.expression(root).kind, declared_fn) {
+            // A function literal with its own signature is typed by it, and the binding's
+            // declared type is then checked against that like any other value.
             (ExpressionKind::Assign { value, .. }, Some((declared, function)))
                 if matches!(
                     module.expression(*value).kind,
                     ExpressionKind::Function { .. }
-                ) =>
+                ) && !context.expression_annotations.contains_key(value) =>
             {
                 for (name, constraint) in &declared.binders {
                     context.table.rigid_constraints.insert(*name, *constraint);
@@ -303,7 +308,11 @@ pub fn check_item_with_annotation<'db>(
                 // arguments against the definition's formals, so annotation mistakes report once.
                 let declared = TypeScheme {
                     binders: declared.binders,
-                    body: context.check_declared_function(*value, &function),
+                    body: context.check_declared_function(
+                        *value,
+                        &function,
+                        annotation.map_or(&[], |annotation| &annotation.inline_parameters),
+                    ),
                 };
                 context.recorded.insert(root, declared.body);
                 scheme = Some(declared);
@@ -1065,7 +1074,7 @@ impl<'db> Checker<'db, '_> {
                     matches!(
                         self.module.expression(value).kind,
                         ExpressionKind::Function { .. }
-                    )
+                    ) && !self.expression_annotations.contains_key(&value)
                 });
                 let value_ty = match declares_function {
                     Some(declared) => {
@@ -1074,7 +1083,8 @@ impl<'db> Checker<'db, '_> {
                         }
                         let body = match declared.body.kind(self.db) {
                             TyKind::Function(function) => {
-                                self.check_declared_function(value, function)
+                                let inline = self.inline_parameters(id);
+                                self.check_declared_function(value, function, &inline)
                             }
                             _ => declared.body,
                         };
@@ -1176,7 +1186,8 @@ impl<'db> Checker<'db, '_> {
                     let TyKind::Function(function) = declared.body.kind(self.db) else {
                         return unknown(self.db);
                     };
-                    let signature = self.check_declared_function(id, function);
+                    let inline = self.inline_parameters(id);
+                    let signature = self.check_declared_function(id, function, &inline);
                     return self.record(id, signature);
                 }
                 let parameters = parameters.clone();
@@ -1233,6 +1244,13 @@ impl<'db> Checker<'db, '_> {
                     .pop()
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty);
+                let signature: Vec<(&Formal, Option<Ty<'db>>)> = parameters
+                    .iter()
+                    .filter(|parameter| parameter.name != "...")
+                    .zip(&named)
+                    .map(|(parameter, typed)| (parameter, Some(typed.ty)))
+                    .collect();
+                self.record_untyped_parameters(id, &signature, return_ty);
                 self.environment.rollback(mark);
                 self.reapply_enclosing_writes(pending_mark);
                 self.frame_level = enclosing_frame_level;
@@ -1315,6 +1333,13 @@ impl<'db> Checker<'db, '_> {
         matches!(declared.body.kind(self.db), TyKind::Function(_)).then_some(declared)
     }
 
+    fn inline_parameters(&self, annotated: ExprId) -> Vec<String> {
+        self.expression_annotations
+            .get(&annotated)
+            .map(|annotation| annotation.inline_parameters.clone())
+            .unwrap_or_default()
+    }
+
     fn apply_expression_annotation(
         &mut self,
         annotated: ExprId,
@@ -1368,6 +1393,72 @@ impl<'db> Checker<'db, '_> {
             self.errors.push(error);
         }
         declared.body
+    }
+
+    /// Strict mode's untyped parameters, judged once the body is inferred. A parameter is
+    /// untyped when nothing constrains it: its type is `Unknown`, or still a fresh type
+    /// variable of this function that no other parameter and not the return mentions, so
+    /// any value is accepted unchecked. A variable shared with another part of the
+    /// signature is genuine polymorphism (`function(x) x`). `parameters` pairs each formal
+    /// with its type, or with `None` where an annotation declared it.
+    fn record_untyped_parameters(
+        &mut self,
+        function: ExprId,
+        parameters: &[(&Formal, Option<Ty<'db>>)],
+        ret: Ty<'db>,
+    ) {
+        let db = self.db;
+        let level = self.table.level;
+        let mut mentioned: FxHashMap<InferenceVar, usize> = FxHashMap::default();
+        for ty in parameters.iter().filter_map(|(_, ty)| *ty).chain([ret]) {
+            let mut found = FxHashSet::default();
+            self.table.collect_unbound_vars(db, ty, &mut found);
+            for var in found {
+                *mentioned.entry(var).or_default() += 1;
+            }
+        }
+        for (parameter, ty) in parameters {
+            let Some(ty) = ty else {
+                continue;
+            };
+            let untyped = match self.table.shallow_resolve(db, *ty).kind(db) {
+                TyKind::Unknown => true,
+                TyKind::Var(var) => {
+                    let representative = self.table.find(*var);
+                    matches!(
+                        self.table.entry(representative),
+                        Entry::Unbound {
+                            level: var_level,
+                            constraint: Constraint::Unconstrained,
+                        } if *var_level >= level
+                    ) && mentioned.get(&representative) == Some(&1)
+                }
+                _ => false,
+            };
+            if !untyped {
+                continue;
+            }
+            // A lambda passed as an argument gets its parameters' types from the call, which
+            // unifies only after the lambda is inferred, so it is not judged here.
+            let is_argument = self.module.expressions.iter().any(|expression| {
+                matches!(
+                    &expression.kind,
+                    ExpressionKind::Call { arguments, .. } | ExpressionKind::Index { arguments, .. }
+                        if arguments.iter().any(|argument| argument.value == Some(function))
+                )
+            });
+            if is_argument {
+                return;
+            }
+            let origin = StrictOrigin {
+                expression: function,
+                range: parameter.range,
+                kind: StrictOriginKind::UntypedParameter(parameter.name.clone()),
+            };
+            if !self.strict_origins.contains(&origin) {
+                self.strict_origins.push(origin);
+            }
+        }
     }
 
     /// Annotating is exactly what a strict finding asks for, so it clears the origin.
@@ -2959,10 +3050,14 @@ impl<'db> Checker<'db, '_> {
     /// An annotation declares parameter types, never the parameter list: R matches
     /// arguments against the `function(...)` formals, so the signature keeps their
     /// names, order, optionality, and `...`. Disagreements report here, never at a call.
+    /// An inline signature sits on the formals and cannot restate optionality, so
+    /// `inline_parameters` (typed only inline) skip the optionality checks: the formals
+    /// alone decide them.
     fn check_declared_function(
         &mut self,
         function_id: ExprId,
         declared: &FunctionType<'db>,
+        inline_parameters: &[String],
     ) -> Ty<'db> {
         let module = self.module;
         let expression = module.expression(function_id);
@@ -2973,7 +3068,7 @@ impl<'db> Checker<'db, '_> {
 
         let mut missing_tested = FxHashSet::default();
         self.collect_missing_tested(*body, &mut missing_tested);
-        let is_optional = |parameter: &crate::hir::Parameter| {
+        let is_optional = |parameter: &Formal| {
             parameter.default.is_some() || missing_tested.contains(&parameter.name)
         };
 
@@ -3041,8 +3136,10 @@ impl<'db> Checker<'db, '_> {
             (None, None) => false,
             _ => true,
         };
+        let restates = |name: &str| !inline_parameters.iter().any(|inline| inline == name);
         let optional_mismatch = parameters.iter().any(|parameter| {
             !is_optional(parameter)
+                && restates(&parameter.name)
                 && declared
                     .named
                     .iter()
@@ -3060,7 +3157,11 @@ impl<'db> Checker<'db, '_> {
         }
         // A defaulted formal is optional whatever the annotation says; reporting it once
         // here keeps it from resurfacing at every caller.
-        for field in &declared.named {
+        for field in declared
+            .named
+            .iter()
+            .filter(|field| restates(field.name.text(self.db)))
+        {
             let name = field.name.text(self.db);
             if !field.optional
                 && parameters
@@ -3088,6 +3189,12 @@ impl<'db> Checker<'db, '_> {
 
         let pending_mark = self.pending_enclosing_writes.len();
         let mark = self.environment.mark();
+        let untyped_candidates: Vec<(&Formal, Option<Ty<'db>>)> = parameters
+            .iter()
+            .zip(&formal_types)
+            .filter(|(parameter, _)| parameter.name != "...")
+            .map(|(parameter, &(ty, declared))| (parameter, (!declared).then_some(ty)))
+            .collect();
         for (parameter, (parameter_ty, declared)) in parameters.iter().zip(formal_types) {
             if let Some(slot) = self
                 .naming
@@ -3149,7 +3256,9 @@ impl<'db> Checker<'db, '_> {
         // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
             signature.ret = self.join_early_returns(&early_returns, trailing_ty);
+            self.record_untyped_parameters(function_id, &untyped_candidates, signature.ret);
         } else {
+            self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
             // Each `return` is checked at its own site, not as one union blamed on the tail.
             let mut early_return_failed = false;
             for &(returned, return_range) in &early_returns {

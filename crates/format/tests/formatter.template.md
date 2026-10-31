@@ -434,6 +434,17 @@ and mixed closer shapes normalize to the nearest consistent style:
 
 A blank line, a non-`#:` comment, or ordinary code ends an annotation block, so unrelated comments are never pulled into one. Trailing empty `#:` lines at the end of a block are dropped.
 
+### Inline type annotations
+
+An [inline annotation](/reference/type-system#inline-annotation-syntax) is rendered on one line with the same spacing as a `#:` type: no space before `:` and one after, spaces around `|` and `->`, and no padding inside brackets. The `<...>` of a function's type parameters hugs `function` and the parameter list, and the return type sits between the parameter list and the body with one space on each side. A type written across several lines is joined onto one, unless it holds a comment, in which case it is kept as written.
+
+```r
+# inline_annotations : compare
+count:integer<-0L
+add<-function(x:integer,y:  list[ named:double ]=list())->double{x}
+pick <- function <T:numeric> (x : T) -> T x
+```
+
 ### Line spacing
 
 The formatter normalizes line spacing between expressions, allowing at most one empty line:

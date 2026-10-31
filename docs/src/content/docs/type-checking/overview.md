@@ -36,8 +36,14 @@ switched off, because hover, completion, and inlay hints in your editor are buil
 
 ## Annotations where they help
 
-R has no syntax for types, so annotations are `#:` comments. The file stays plain R, and removing ry
-changes nothing at run time:
+You write a type after a name, and a function's return type after its parameters:
+
+```r
+apply_discount <- function(price: double, rate: double) -> double price * (1 - rate)
+```
+
+R itself cannot run that, so the same types can also go in `#:` comments, which keep the file plain
+R that every other tool can read:
 
 ```r
 #: fn(price: double, rate: double) -> double
@@ -46,7 +52,8 @@ apply_discount <- function(price, rate) price * (1 - rate)
 
 Inference already covers the inside of a function, so annotate where code meets other code:
 exported functions, values read from files, and anything whose contract you want enforced.
-[Annotations](/type-checking/annotations) shows every form.
+[Annotations](/type-checking/annotations) shows every form, and
+[inline annotations](/type-checking/inline-annotations) covers using both spellings.
 
 ## Adopting it one file at a time
 
@@ -63,5 +70,5 @@ it on for the project and switch it off where a file is not ready.
 
 What ry cannot model, such as data frame columns and R6 objects, becomes `Unknown`, which is
 compatible with everything. That way an unmodeled construct never causes a false error, but a clean
-run also proves less than it seems. [Unknown and strict mode](/type-checking/unknown) shows how to
-find these places, and [limitations](/type-checking/limitations) lists them.
+run also proves less than it seems. [Strict mode](/type-checking/strict-mode) finds these places, and
+[limitations](/type-checking/limitations) lists them.

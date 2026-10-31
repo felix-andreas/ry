@@ -190,7 +190,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (21): alarm, alias, alist, all, all.equal, all.equal.character, all.equal.default, all.equal.environment
+completion: none
 
 #---- case_insensitive_prefix
 MyValue <- 1L

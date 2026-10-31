@@ -11,7 +11,7 @@ mod lexer;
 mod parser;
 mod reparse;
 
-use rowan::{GreenNode, NodeOrToken};
+use rowan::{GreenNode, NodeOrToken, WalkEvent};
 use std::mem;
 use std::sync::Arc;
 
@@ -110,6 +110,37 @@ impl Parse {
             ));
         }
         out
+    }
+}
+
+/// The plain R program an annotated one means: every inline annotation removed,
+/// which is a binding's or parameter's `: TYPE`, a function's `<...>` type
+/// parameters, and its `-> TYPE`. Comments and `#:` annotations are kept.
+pub fn erase_inline_annotations(parse: &Parse) -> String {
+    let root = parse.syntax_node();
+    let mut out = String::with_capacity(usize::from(root.text_range().len()));
+    let mut preorder = root.preorder_with_tokens();
+    while let Some(event) = preorder.next() {
+        let WalkEvent::Enter(element) = event else {
+            continue;
+        };
+        match element {
+            NodeOrToken::Token(token) => out.push_str(token.text()),
+            NodeOrToken::Node(node) if is_inline_annotation(&node) => preorder.skip_subtree(),
+            NodeOrToken::Node(_) => {}
+        }
+    }
+    out
+}
+
+/// Inline annotation syntax: R's own grammar has no reading for these nodes.
+pub fn is_inline_annotation(node: &SyntaxNode) -> bool {
+    match node.kind() {
+        SyntaxKind::TYPE_ASCRIPTION | SyntaxKind::RETURN_TYPE => true,
+        SyntaxKind::TYPE_BINDER_LIST => {
+            node.parent().map(|parent| parent.kind()) == Some(SyntaxKind::FUNCTION_DEF)
+        }
+        _ => false,
     }
 }
 

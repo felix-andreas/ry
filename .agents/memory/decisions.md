@@ -278,8 +278,9 @@ time. Both the contract and the implementation match by name where names exist.
 
 ## Strict mode
 
-Under strict mode an `Unknown` origin is an error, and an unresolved-name reference is an error
-rather than a plain naming warning. A recursion-induced `Unknown` return is an origin. Explicit
+Under strict mode an `Unknown` origin is an error, an unannotated parameter nothing constrains is an
+error (see the inline-annotations record), and an unresolved-name reference is an error rather than
+a plain naming warning. A recursion-induced `Unknown` return is an origin. Explicit
 `Any` remains the sanctioned escape hatch, so an allowed unknown is expressed by annotating it and
 never silently.
 
@@ -754,13 +755,84 @@ the shifting problem.
 
 ## An annotation is one concept with pluggable spellings
 
-Annotations are one internal concept, and the surface spelling is pluggable. The seam sits at
-annotation recognition during lowering, not in the lexer. `#:` is structured trivia today. R 4.4
-ships `declare()` as an experimental base primitive, which is a runtime no-op, and Posit's quickr
-already annotates with `declare(type(...))`. A valid-R inline form is therefore ordinary call
-syntax recognized at lowering. A true superset dialect, which is the TypeScript road of inline
-syntax plus a strip step, stays a product decision that the pluggable design keeps open. A `#:`
-file must always remain valid ordinary R.
+Annotations are one internal concept, and the surface spelling is pluggable: both spellings lower
+through `annotations.rs` into one `Annotation`. `#:` is structured trivia, and a `#:` file must
+always remain valid ordinary R. The inline spelling is the superset dialect this seam kept open,
+chosen by the mandate in `AGENTS.md` (the next two records).
+
+## The inline annotation syntax is a superset of R
+
+The previous position was that a superset dialect "stays a product decision" (the entry above),
+with `declare()` as the valid-R route. The mandate in `AGENTS.md` makes that decision: the inline
+syntax is on by default and ry warns when it is turned off, which only makes sense for a syntax that
+GNU R cannot parse. So the inline form is the superset that `contributing/design/inline-type-syntax.md`
+costed (generic binder, parameter, return and binding positions), typed files keep the `.R`
+extension because ry executes them directly, and `declare(type(...))` stays a recognized spelling for
+code that must remain valid R. The cost is that other R tools fail on a typed file, so code that must
+run on GNU R goes through a strip step that moves inline types into `#:` comments. The reasoning is in
+`contributing/design/r-runtime.md`, section 8.
+
+## How inline annotations are built
+
+**Syntax.** `name: TYPE <- value` (or `= value`) for a binding, `name: TYPE` (and `...: TYPE`) in a
+parameter list, `-> TYPE` between the parameter list and the body, and `function<T: numeric>(...)`
+(or `\<T>(...)`) for type parameters. Every `TYPE` is the `#:` type grammar, run on R's token stream
+by the same parser functions, so there is one type grammar. A function header reads like the compact
+annotation it means: `function(x: integer) -> integer` is `fn(x: integer) -> integer` with formals.
+Docs: `reference/type-system.md#inline-annotation-syntax`.
+
+**Why this shape.** The record above gives the product reasons. The binding form is recognized only where a statement starts
+(top level, directly inside `{}`), by a shallow token scan for a `<-` or `=` outside every bracket, where only `(`, `[` and `{` carry
+the scan past a line break (`<` and `>` are also comparisons), so `x:y`, `x:y < -1` and every argument stay ranges. Rejected: `declare(type(...))` calls (valid
+R, but a runtime call per binding and no natural place for parameter or return types), `let x: T`
+(new keyword), `x <- value :: T` (`::` is R's namespace operator), and `function(x): T` (`->`
+mirrors the existing `fn(...) -> T`).
+
+**Erasure.** Deleting `TYPE_ASCRIPTION`, `RETURN_TYPE`, and a `FUNCTION_DEF`'s `TYPE_BINDER_LIST`
+gives the plain R program (`syntax::erase_inline_annotations`). The tree-sitter acceptance oracle
+judges the erased text, and `check_parse_invariants` pins that erasing a clean parse yields a clean,
+annotation-free, idempotent result.
+
+**Trivia.** Inline type grammar defers the trivia it skips and emits it only when the type continues
+(`Parser::deferred_trivia`), so whitespace and comments after a type sit outside its node. Without it
+every range, the erasure, and the formatter had to strip absorbed trailing trivia.
+
+**One meaning.** An inline site lowers to exactly the `Annotation` the equivalent `#:` block would
+(`lower_inline_annotation`). A signature attaches to the statement assigning its function, so it
+merges with that statement's `#:` block and exports a declared scheme at an item root, or else to
+the function expression itself, which is how a lambda passed as an argument is checked. When a
+binding also has a `: TYPE`, the function's own signature types it and the binding type is checked
+against the result (`check_item_with_annotation` skips the declared-function path when the value
+carries its own annotation).
+
+**Both spellings on one statement** merge per slot (value, parameter, rest, return), and type
+parameters pair by position (the comment's are renamed to the inline names first), with the inline
+side winning, except that a `#:` coercion form (`@trust`, `@if-unknown`, `@new`) governs the value
+(`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
+file-absolute ranges, comparing types after alias expansion and union-member sorting, so the warning
+can point at both written types. Positional comment parameter types pair with formals the way
+`check_declared_function` pairs them.
+
+**Turning it off** is a salsa input (`AnalysisSettings`), not host-side filtering, because it changes
+what types mean. It is read only where an inline site exists, which `test_incremental.rs` pins. Off,
+sites type nothing and each warns (`inline-annotation`), and hosts warn once per load.
+
+**Strict mode reports untyped parameters**, by a `noImplicitAny`-style rule: an unannotated parameter
+whose type is `Unknown`, or a fresh unconstrained variable of its own function's level that no other
+parameter and not the return mentions. The level check keeps a closure parameter tied to an
+enclosing function clean, and a lambda passed as an argument is skipped, because the call types its
+parameters only after the lambda is inferred. Unification with `Unknown` never binds a variable, so a rule on `Unknown`
+alone would never fire. Returns and bindings get no finding of their own: every undetermined one
+traces to an origin, a type error, or a project binding reported at its definition, and a separate
+finding would break "one undetermined value, one finding".
+
+**Optionality** comes from the formals alone for a parameter typed only inline
+(`Annotation::inline_parameters` skips the restatement checks in `check_declared_function`), because
+the inline form has no `[name]`: a defaultless formal the body tests with `missing()` stays optional.
+A parameter a `#:` block also names keeps the comment's `[name]`, which is checked as written.
+
+**Known gap.** A generic lambda passed as an argument keeps its binders rigid, so
+`lapply(xs, function<T>(v: T) -> T v)` is reported. `backlog.md` tracks it.
 
 ## Testing doctrine for `syntax`
 
@@ -1572,3 +1644,46 @@ NixOS without nix-ld. NixOS users install the flake's `default`, and Alpine user
 **Field practice.** rust-analyzer's main Linux binary targets glibc 2.28. uv and ruff default to
 glibc builds (2.17 and 2.31) and fall back to static musl only where glibc is missing or too old.
 rustc's Linux toolchain targets glibc 2.17.
+
+# Decision record: runtime licensing
+
+ry is UPL-1.0, so no GPL code from GNU R is copied into the repository. The runtime's headers and
+implementation are written independently.
+
+Base R's R-level sources (the open question in `contributing/design/r-runtime.md`, section 11) are
+GPL-2-or-later. The default is to load them at runtime from the user's own GNU R installation
+rather than vendor them, the way the `repl` crate already loads R at runtime. Relicensing the
+project is the owner's call and is not assumed.
+
+# Decision record: packages and R versions in the runtime
+
+`contributing/design/packaging.md` holds the design and the measurements. Nothing existed before, so
+there was no previous source of truth; the choices that settle architecture are these.
+
+- **One installed package directory serves GNU R 4.6 and ry's runtime,** because ry's `libR` is
+  ABI-compatible and presents as R 4.6. ry treats the `Built:` field as GNU R does (refusing only
+  pre-3.0.0 builds), so existing libraries load unchanged. A package built under ry carries an extra
+  `RyBuilt:` field until the oracle shows ry-built binaries load under GNU R, and the corpus is built
+  only by GNU R.
+- **ry's per-package data (object index, bytecode) lives in ry's own cache, never inside the
+  package,** so the differential oracle loads byte-identical packages under both runtimes and shared
+  libraries (site libraries, renv's cache) are never written to. It is filled on first load, keyed by
+  a hash of the installed `DESCRIPTION` and `.rdx` plus the runtime version, because hashing the whole
+  directory on every load would cost what the cache saves.
+- **Package management runs as R code under the runtime** (`install.packages`, renv, pak). A package
+  manager of ry's own (`ry add`, `ry sync`, a lockfile) is deliberately left open, because the runtime
+  does not need it; if it comes, it must read and write `renv.lock`.
+- **The runtime is chosen by configuration, never by failure** (`[r] runtime`, `--runtime`,
+  `RY_RUNTIME`), because a switch on failure hides what the transition must surface. GNU R is the
+  default until build step 4's exit criterion, then ry. An explicit version other than 4.6 selects GNU
+  R, and combined with `runtime = "ry"` it is an error. The `renv.lock` R version and `Depends: R` are
+  advisory only, or most renv projects would stay on GNU R after the flip. ry's own `R_HOME` has
+  `bin/` scripts that start ry (so `parallel` and `callr` workers inherit the runtime), ry's `etc/`
+  and `include/`, and `library/` and `share/` linked to a GNU R 4.6 installation.
+- **The analysis reads the installed library, not a running R,** found by a fixed rule (`[r]
+  libraries`, else renv's project library, else `R_LIBS`/`R_LIBS_USER` and the selected R's
+  libraries; `.Rprofile` is never evaluated). Per package name it reads the installed `DESCRIPTION`,
+  `NAMESPACE` and `.rdx` object names through a tracked by-name lookup, with stubs chosen by version
+  range. Generated export manifests remain for base R and as the no-library fallback.
+- **The corpus is pinned with renv** on a dated P3M snapshot in build step 1, because renv is in the
+  benchmark set and R's own installer cannot backtrack to older compatible versions.

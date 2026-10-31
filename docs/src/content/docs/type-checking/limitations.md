@@ -4,7 +4,7 @@ description: What ry does not check, and where it reports correct code
 ---
 
 When ry cannot determine a type, the value becomes `Unknown` and its checks are skipped, so most
-gaps on this page are silent. [Strict mode](/type-checking/unknown) shows where they occur. The last
+gaps on this page are silent. [Strict mode](/type-checking/strict-mode) shows where they occur. The last
 section lists the places where ry reports correct code instead.
 
 ## Not checked
@@ -61,3 +61,6 @@ These are known bugs, not design decisions:
   even then.
 - **A `stop()` guard in strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an
   undetermined type.
+- **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
+  reported, because type parameters on a function that is not bound to a name are not instantiated.
+  Leave the function's types off, or bind it to a name first.

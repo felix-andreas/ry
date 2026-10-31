@@ -275,6 +275,12 @@ broken sources. Accepting what tree-sitter rejects is gated there against
 running R itself, and must say which of two things it is: tree-sitter being wrong, or a known gap in
 this parser.
 
+Inline type annotations are ry syntax that R rejects by design, so tree-sitter judges the plain R
+program a source erases to (`syntax::erase_inline_annotations`), not the source itself. That makes
+the test a check on erasure too: an annotated fixture whose erased text tree-sitter rejects fails it.
+`check_parse_invariants` pins erasure from the other side, for every fuzz input that parses cleanly:
+the erased text parses cleanly, holds no inline annotation, and erases to itself.
+
 ### Coverage-guided fuzzing
 
 `fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. It holds the

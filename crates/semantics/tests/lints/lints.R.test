@@ -74,3 +74,15 @@ mean <- function(x) x
 sd <- 1
 #++++
 clean
+
+#==== inline_annotations
+#---- type_names_in_inline_annotations_are_not_boolean_shorthand
+pick <- function<T, F>(x: T, y: F) -> T x
+flags: list[T] <- list(TRUE)
+#++++
+clean
+
+#---- equals_binding_with_an_annotation_still_lints
+count: integer = 1L
+#++++
+15..16 warning[assignment-operator] Use <-, not =, for assignment

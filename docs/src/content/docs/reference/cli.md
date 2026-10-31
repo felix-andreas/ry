@@ -12,8 +12,8 @@ ry run FILE        # run an R script and exit
 ```
 
 `format` and `lsp` are aliases for `fmt` and `server`. Only `repl` and `run` need R: they use the R in
-`R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be R 4.2 or
-newer, built as a shared library, which every CRAN build is.
+`R_HOME` if it is set, and otherwise the one `R RHOME` reports on your `PATH`. It must be built as a
+shared library, as the CRAN builds are, and on Windows it must be R 4.2 or newer.
 
 ## check
 
