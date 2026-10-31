@@ -575,3 +575,17 @@ fn fuzz_boundary_round_trip() {
         }
     }
 }
+
+#[test]
+fn factors_with_different_levels_join_by_label() {
+    let factor = |codes: &[i32], levels: &[&str]| RVector::Factor {
+        codes: codes.to_vec(),
+        levels: levels.iter().map(|level| level.to_string()).collect(),
+    };
+    let mut x = frame(vec![("k", factor(&[1, 2, 3], &["a", "b", "c"])), ("v", ints(&[1, 2, 3]))]);
+    let mut i = frame(vec![("k", factor(&[2, 1, 1], &["b", "d"])), ("w", doubles(&[1.0, 2.0, 3.0]))]);
+    let rows = join(&mut i, &[("k", "k")], false, Roll::None);
+    let mut result = run_table(&mut x, Query { rows, ..Query::default() });
+    assert_eq!(read(&mut result, "k"), factor(&[2, 1, 1], &["b", "d"]), "the join column keeps i's levels");
+    assert_eq!(read(&mut result, "v"), ints(&[NA_INTEGER, 2, 2]));
+}

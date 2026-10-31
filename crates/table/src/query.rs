@@ -354,14 +354,37 @@ const I_PREFIX: &str = "i.";
 const CLASH_SUFFIX: &str = "\u{1}x";
 
 fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, PlSmallStr)]) -> Result<LazyFrame> {
-    let i_schema = Table::new(join.other.clone())?.schema();
+    let i_table = Table::new(join.other.clone())?;
+    let i_schema = i_table.schema();
+    let mut x = x;
+    let mut i = i_table.into_frame()?.lazy();
+    // Join columns of different types are matched through a common type, and the result's join
+    // column is cast back to `i`'s type, because it carries `i`'s values. Two factors meet as
+    // strings, since their codes index different level sets.
+    let mut restore = Vec::new();
     for (x_column, i_column) in on {
-        x_schema.column(x_column).ok_or_else(|| Error::NoColumn(x_column.to_string()))?;
-        i_schema.column(i_column).ok_or_else(|| Error::NoColumn(i_column.to_string()))?;
+        let x_type = x_schema.column(x_column).ok_or_else(|| Error::NoColumn(x_column.to_string()))?;
+        let i_type = i_schema.column(i_column).ok_or_else(|| Error::NoColumn(i_column.to_string()))?;
+        let common = match (x_type, i_type) {
+            (ColumnType::Factor, ColumnType::Factor | ColumnType::Character)
+            | (ColumnType::Character, ColumnType::Factor) => DataType::String,
+            (ColumnType::Integer, ColumnType::Double) | (ColumnType::Double, ColumnType::Integer) => DataType::Float64,
+            (x_type, i_type) if x_type == i_type => continue,
+            (x_type, i_type) => {
+                return Err(Error::Query(format!(
+                    "cannot join {} column `{x_column}` to {} column `{i_column}`",
+                    x_type.name(),
+                    i_type.name()
+                )));
+            }
+        };
+        let i_dtype = column_dtype(&i, i_column)?;
+        x = x.with_column(col(x_column.clone()).cast(common.clone()));
+        i = i.with_column(col(i_column.clone()).cast(common));
+        restore.push((i_column.clone(), i_dtype));
     }
     let left_on: Vec<PolarsExpr> = on.iter().map(|(_, column)| col(column.clone())).collect();
     let right_on: Vec<PolarsExpr> = on.iter().map(|(column, _)| col(column.clone())).collect();
-    let i = join.other.clone().lazy();
     let joined = match join.roll {
         Roll::None => i
             .join_builder()
@@ -430,7 +453,11 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
     let mut select = Vec::new();
     for (column, _) in &x_schema.columns {
         if let Some((_, i_column)) = on.iter().find(|(x_column, _)| x_column == column) {
-            select.push(col(i_column.clone()).alias(column.clone()));
+            let value = match restore.iter().find(|(restored, _)| restored == i_column) {
+                Some((_, dtype)) => col(i_column.clone()).cast(dtype.clone()),
+                None => col(i_column.clone()),
+            };
+            select.push(value.alias(column.clone()));
         } else if i_schema.column(column).is_some() {
             select.push(col(format!("{column}{CLASH_SUFFIX}")).alias(column.clone()));
         } else {
@@ -448,6 +475,11 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
         }
     }
     Ok(joined.select(select))
+}
+
+fn column_dtype(i: &LazyFrame, column: &str) -> Result<DataType> {
+    let schema = i.clone().collect_schema()?;
+    Ok(schema.get(column).ok_or_else(|| Error::NoColumn(column.to_string()))?.clone())
 }
 
 fn join_schema(x: &Schema, join: &Join) -> Result<Schema> {

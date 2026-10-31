@@ -38,3 +38,7 @@ heap = { path = "../heap", optional = true }
 
 [dev-dependencies]
 syntax = { path = "../syntax" }
+
+[[bench]]
+name = "db_benchmark"
+harness = false
