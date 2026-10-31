@@ -36,7 +36,7 @@ use interp::{
     values,
 };
 use rustc_hash::FxHashMap;
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::atomic::AtomicBool};
 
 /// The compiled entry point.
 pub type Entry = unsafe extern "C" fn(*mut Activation) -> *mut heap::object::Header;
@@ -369,6 +369,16 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Action::Jump => {
                 let target = jump_target(inst).ok_or(Refusal("a jump without a target"))?;
+                if target <= pc {
+                    // A pending interrupt hands the activation to tier 0 at this jump, which
+                    // raises it.
+                    let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
+                    let address = self.builder.ins().iconst(I64, flag);
+                    let requested = self.builder.ins().uload8(I32, flags(), address, 0);
+                    let interrupted = self.deopt(pc, before.clone(), plan.live[position].clone(), reason::INTERRUPT);
+                    let calm = self.builder.ins().icmp_imm_s(IntCC::Equal, requested, 0);
+                    self.guard(calm, interrupted);
+                }
                 let label = self.edge(position, target)?;
                 self.builder.ins().jump(label, &[]);
                 self.fill_edges()?;

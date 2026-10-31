@@ -1,8 +1,9 @@
 //! R source to R language objects. ry's parser (the `syntax` crate) builds a lossless tree; this
 //! lowers it to exactly the calls, symbols and constants GNU R's parser produces, because R code
 //! inspects them (`quote`, `substitute`, `deparse`, `body`, `match.call`). The pipe `|>` is
-//! rewritten at parse time and `->` becomes `<-`, as in GNU R, and ry's inline type annotations
-//! are dropped.
+//! rewritten at parse time and `->` becomes `<-`, as in GNU R. ry's inline type annotations are
+//! dropped from the language objects, and a function's parameter and return types are registered
+//! as checks at its boundary instead (`annotations`).
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
@@ -22,7 +23,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// Parses `text` into an expression vector, or reports the first syntax error in GNU R's form.
 pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
     let parse = syntax::parse(text);
-    if let Some(failure) = parse.errors().first() {
+    // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
+    if let Some(failure) = parse.errors().iter().find(|failure| !failure.in_annotation) {
         let offset = usize::from(failure.range.start()).min(text.len());
         let before = &text[..offset];
         let line = before.matches('\n').count() + 1;
@@ -382,6 +384,7 @@ unsafe fn function_definition(node: &SyntaxNode) -> R<Sexp> {
     }
     let formals = values::pairlist(&formals, SexpType::Pairlist)?;
     let body = body.unwrap_or(nil());
+    crate::annotations::register_definition(node, formals, body)?;
     let items = [
         (nil(), symbols().function),
         (nil(), formals),

@@ -1235,6 +1235,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let target = operand(0);
             if target < at {
                 crate::heap().release_handles(machine.mark);
+                crate::unwind::poll_interrupt()?;
             }
             *pc = target;
             return Ok(None);

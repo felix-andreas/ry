@@ -230,12 +230,16 @@ impl Parser<'_, '_> {
     }
 
     fn error_unclosed(&mut self, range: TextRange, message: impl Into<String>) {
+        let reported = self.errors.len();
         if !self.type_region {
             self.error_at(range, message);
         } else if !self.annotation_unclosed_reported {
             self.annotation_unclosed_reported = true;
             self.annotation_reported = true;
             self.push_error(range, message);
+        }
+        if let Some(error) = self.errors.get_mut(reported) {
+            error.incomplete = true;
         }
     }
 
@@ -247,6 +251,7 @@ impl Parser<'_, '_> {
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
+        error.incomplete = self.peek_significant(self.pos, true).is_none();
         self.errors.push(error);
     }
 
@@ -1310,7 +1315,7 @@ impl Parser<'_, '_> {
                 if self.at(R_PAREN) {
                     self.bump();
                 } else {
-                    self.error_at(open_range, "unclosed `(`; expected a matching `)`");
+                    self.error_unclosed(open_range, "unclosed `(`; expected a matching `)`");
                 }
                 self.finish();
             }
@@ -1324,7 +1329,7 @@ impl Parser<'_, '_> {
                 if self.at(R_BRACE) {
                     self.bump();
                 } else {
-                    self.error_at(open_range, "unclosed `{`; expected a matching `}`");
+                    self.error_unclosed(open_range, "unclosed `{`; expected a matching `}`");
                 }
                 self.finish();
             }
@@ -1415,7 +1420,7 @@ impl Parser<'_, '_> {
             if self.at(R_PAREN) {
                 self.bump();
             } else {
-                self.error_at(
+                self.error_unclosed(
                     open_range,
                     "unclosed `(` in the `for` head; expected a matching `)`",
                 );
@@ -1459,7 +1464,7 @@ impl Parser<'_, '_> {
         if self.at(R_PAREN) {
             self.bump();
         } else {
-            self.error_at(
+            self.error_unclosed(
                 open_range,
                 format!("unclosed `(` in the `{construct}` condition; expected a matching `)`"),
             );
@@ -1559,7 +1564,7 @@ impl Parser<'_, '_> {
         if self.at(R_PAREN) {
             self.bump();
         } else {
-            self.error_at(
+            self.error_unclosed(
                 open_range,
                 "unclosed `(`; expected `)` to close the parameter list",
             );
@@ -1630,7 +1635,7 @@ impl Parser<'_, '_> {
                 }
             }
         } else {
-            self.error_at(
+            self.error_unclosed(
                 open_range,
                 format!(
                     "unclosed {}; expected {} to close it",

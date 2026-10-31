@@ -75,6 +75,10 @@ pub struct ProcessEngine {
     arguments: Vec<String>,
     /// Written next to the report and passed before the script, for engines that need a driver.
     driver: Option<Driver>,
+    /// GNU R cannot parse inline type annotations, so it runs the plain program an annotated
+    /// case means. Comparing that against an engine that reads the annotations is what shows
+    /// they never change what correct code does.
+    erases_annotations: bool,
 }
 
 /// How an engine is handed `driver.R`.
@@ -95,6 +99,7 @@ impl ProcessEngine {
                 .map(String::from)
                 .to_vec(),
             driver: Some(Driver::GnuR),
+            erases_annotations: true,
         }
     }
 
@@ -112,6 +117,7 @@ impl ProcessEngine {
             program,
             arguments: ["run", "--runtime", "ry"].map(String::from).to_vec(),
             driver: Some(Driver::Script),
+            erases_annotations: false,
         }
     }
 
@@ -124,6 +130,7 @@ impl ProcessEngine {
             program,
             arguments: parts.collect(),
             driver: None,
+            erases_annotations: false,
         })
     }
 }
@@ -139,6 +146,11 @@ impl Engine for ProcessEngine {
         let script = script
             .canonicalize()
             .map_err(|error| EngineError::Failed(format!("{}: {error}", script.display())))?;
+        let directory = script.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let script = match self.erases_annotations {
+            true => erased_copy(&script, scratch.path())?,
+            false => script,
+        };
 
         let mut command = Command::new(&self.program);
         command.args(&self.arguments);
@@ -157,7 +169,7 @@ impl Engine for ProcessEngine {
         }
         command.arg(&script).arg(&report_path);
         command
-            .current_dir(script.parent().unwrap_or(Path::new(".")))
+            .current_dir(&directory)
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .env("TZ", "UTC")
@@ -192,6 +204,25 @@ impl Engine for ProcessEngine {
             value: report.value,
         })
     }
+}
+
+/// The script itself when it has no inline annotation, else its erasure written to `scratch`
+/// under the same file name.
+fn erased_copy(script: &Path, scratch: &Path) -> Result<PathBuf, EngineError> {
+    let text = std::fs::read_to_string(script)
+        .map_err(|error| EngineError::Failed(format!("{}: {error}", script.display())))?;
+    let parse = syntax::parse(&text);
+    let annotated = parse
+        .syntax_node()
+        .descendants()
+        .any(|node| syntax::is_inline_annotation(&node));
+    if !annotated {
+        return Ok(script.to_path_buf());
+    }
+    let copy = scratch.join(script.file_name().unwrap_or("case.R".as_ref()));
+    std::fs::write(&copy, syntax::erase_inline_annotations(&parse))
+        .map_err(|error| EngineError::Failed(format!("{}: {error}", copy.display())))?;
+    Ok(copy)
 }
 
 /// A scratch directory that is removed when it goes out of scope, on every exit path.

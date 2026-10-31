@@ -1,11 +1,13 @@
 use clap::{Parser, Subcommand};
 use ry::cli::{self, CommandError, Outcome, OutputFormat};
+use ry::config::Config;
 use ry::load;
+use ry::preflight::{ConsoleFilter, Erase, Preflight, Verdict};
 use ry::server;
 use ry::stats::analysis_stats;
-use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::{env, fs};
 use tracing_subscriber::prelude::*;
 
 #[cfg(feature = "mimalloc")]
@@ -33,22 +35,53 @@ fn main() -> ExitCode {
             keybindings,
             file,
             no_load,
+            runtime,
         } => {
+            let working_directory = match env::current_dir() {
+                Ok(directory) => directory,
+                Err(error) => {
+                    cli::error(&format!("cannot read the working directory: {error}"));
+                    return ExitCode::from(2);
+                }
+            };
+            let Some(preflight) =
+                Preflight::discover(&working_directory, PathBuf::from("<console>"))
+            else {
+                return ExitCode::from(2);
+            };
+            let flags = runtime_flags(preflight.config());
+            let on_ry_runtime = runtime.resolve() == Runtime::Ry;
+            let keybindings = match keybindings {
+                ReplKeybindings::Emacs => repl::Keybindings::Emacs,
+                ReplKeybindings::Vi => repl::Keybindings::Vi,
+            };
+            let filter: Box<dyn repl::InputFilter> =
+                Box::new(ConsoleFilter::new(preflight, !on_ry_runtime));
+            if on_ry_runtime {
+                // ry's runtime has no `.Call` routines or package loader of ry's yet, so the
+                // console starts bare.
+                let options = repl::RunOptions {
+                    keybindings,
+                    file: file.clone(),
+                    filter: Some(filter),
+                    completer: Some(Box::new(ry::repl_completer::AnalysisCompleter::new())),
+                    ..repl::RunOptions::default()
+                };
+                return runtime_exit(repl::run_console_on_ry_runtime(options, flags));
+            }
             let mut startup = vec![load::embedded_runtime()];
             let package = (!no_load).then(load::current_package).flatten();
             if let Some(root) = &package {
                 startup.push(load::load_statement(root, true));
             }
             Some(repl::RunOptions {
-                keybindings: match keybindings {
-                    ReplKeybindings::Emacs => repl::Keybindings::Emacs,
-                    ReplKeybindings::Vi => repl::Keybindings::Vi,
-                },
+                keybindings,
                 routines: load::call_routines(),
                 startup,
                 file: file.clone(),
                 completer: Some(Box::new(ry::repl_completer::AnalysisCompleter::new())),
                 hooks: Some(Box::new(load::ReloadWatcher)),
+                filter: Some(filter),
                 ..repl::RunOptions::default()
             })
         }
@@ -56,22 +89,29 @@ fn main() -> ExitCode {
             file,
             runtime,
             arguments,
-        } if runtime.resolve() == Runtime::Ry => {
-            return match repl::run_on_ry_runtime(file, arguments) {
-                Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),
-                Err(error) => {
-                    eprintln!("error: {error}");
-                    ExitCode::from(2)
-                }
+        } => {
+            let Some(mut preflight) = Preflight::discover(file, file.clone()) else {
+                return ExitCode::from(2);
             };
+            // An unreadable script is the runtime's to report, in its own words.
+            if let Ok(source) = fs::read_to_string(file)
+                && preflight.check(&source) == Verdict::Refuse
+            {
+                return ExitCode::from(1);
+            }
+            if runtime.resolve() == Runtime::Ry {
+                let flags = runtime_flags(preflight.config());
+                return runtime_exit(repl::run_on_ry_runtime(file, arguments, flags));
+            }
+            Some(repl::RunOptions {
+                routines: load::call_routines(),
+                startup: vec![load::embedded_runtime()],
+                file: Some(file.clone()),
+                batch: true,
+                filter: Some(Box::new(Erase)),
+                ..repl::RunOptions::default()
+            })
         }
-        Command::Run { file, .. } => Some(repl::RunOptions {
-            routines: load::call_routines(),
-            startup: vec![load::embedded_runtime()],
-            file: Some(file.clone()),
-            batch: true,
-            ..repl::RunOptions::default()
-        }),
         Command::Load {
             path,
             expressions,
@@ -175,6 +215,24 @@ fn main() -> ExitCode {
         .expect("command thread should not panic")
 }
 
+/// With inline annotations turned off they are erased and nothing checks them, at run time
+/// as in analysis.
+fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
+    repl::RuntimeFlags {
+        annotation_checks: config.check.inline_annotations,
+    }
+}
+
+fn runtime_exit(result: Result<i32, repl::ReplError>) -> ExitCode {
+    match result {
+        Ok(status) => ExitCode::from(status.clamp(0, 255) as u8),
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Documented contract: 0 clean, 1 findings, 2 usage/configuration/IO errors
 /// (clap's own usage errors also exit 2).
 fn exit_code(result: Result<Outcome, CommandError>) -> ExitCode {
@@ -274,6 +332,10 @@ enum Command {
         /// Do not load the package the working directory belongs to
         #[clap(long, default_value_t = false)]
         no_load: bool,
+        /// The R implementation behind the console: GNU R (the default), or ry's own runtime
+        /// (also `RY_RUNTIME=ry`)
+        #[clap(long, value_enum)]
+        runtime: Option<Runtime>,
     },
     /// Load an R package from source into the embedded R, lazily, and run code against it
     ///

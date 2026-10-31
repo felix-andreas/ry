@@ -57,6 +57,8 @@ pub mod reason {
     pub const SPECULATION: i32 = 0;
     /// An instruction raised an error or a `break`/`next`; the interpreter handles it.
     pub const PENDING: i32 = 1;
+    /// A user interrupt is pending; the interpreter raises it.
+    pub const INTERRUPT: i32 = 2;
 }
 
 /// Results of [`jit_step`] and the load helpers.
