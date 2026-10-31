@@ -1871,6 +1871,21 @@ primitives, and nothing built or installed packages.
 - **The headers keep declaring the names R 4.6 removed** (`SETLENGTH`, `SET_TRUELENGTH`,
   `FRAME`, ...) and ship an empty `R_ext/PrtUtil.h`, because pinned package sources (readr,
   isoband, yaml) still use them and `legacy.rs` exports them anyway.
+- **The numerical routines were audited and rewritten clean room.** A review flagged routines
+  whose structure tracked GNU R's C closely (the LINPACK QR family `dqrdc2`/`dqrls` and friends,
+  the optimizers `vmmin`, `nmmin`, `cgmin`, `samin`, plus `R_max_col`, `R_pretty`, and parts of
+  Rmath). Their bodies were deleted and rewritten by agents that never read GNU R's sources, from
+  the published algorithms (LINPACK's users' guide, Nash's *Compact Numerical Methods*, Nelder
+  and Mead, the Wilcoxon and signed-rank recurrences) and R's documentation, with GNU R used only
+  as a black-box oracle through recorded cases. Results match GNU R exactly except where the
+  system BLAS (OpenBLAS) reorders sums; those cases carry a named tolerance. SANN does not accept a
+  custom candidate generator and always takes the Gaussian step.
+- **`R CMD SHLIB` passes `-l`, `-L` and `.a` arguments through to the link,** because configure
+  scripts probe for system libraries with `R CMD SHLIB conftest.c -lfoo` (Rglpk). Other options
+  are ignored, as before.
+- **`Rf_rnbeta` is exported** although GNU R's library does not define it, because R's `Rmath.h`
+  declares `rnbeta` and Rcpp's sugar headers refer to `::Rf_rnbeta`, so a declaration with no
+  symbol fails the header coverage test and a missing declaration breaks Rcpp builds.
 
 # Decision record: the package-development loader
 

@@ -1799,6 +1799,15 @@ What steps 2 and 4 of `contributing/design/r-runtime.md` left for later, most pr
   unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
   length enough to allocate before the read fails. Bound the allocation by the bytes remaining
   when the source can tell.
+- **Slow numerical cases inherited from GNU R.** `phyper`, `qhyper`, `qnbinom`, `qnbinom_mu`
+  and `bessel_i` with huge arguments take tens of seconds, as in GNU R (`phyper` 32 s and
+  `qhyper` 74 s there), and `nmmin` with an infinite start loops as GNU R's does. Fix them with
+  asymptotic expansions or argument limits when a package hits them.
+- **SANN ignores a custom candidate generator** passed in `ex` and always takes the Gaussian step;
+  that needs closures from the interpreter.
+- **Routines left to audit clean room:** `lbfgsb`, the `optif9`/UNCMIN helpers, `fdhess`, the
+  QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance and
+  `d1mach`/`i1mach`. Rewrite each from its published source as `decisions.md` describes.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, `dlopen` is the
   only loader, and the `rcmd` toolchain assumes gcc and gfortran on Linux, so macOS and Windows
   need their own paths.

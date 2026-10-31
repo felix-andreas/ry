@@ -807,8 +807,9 @@ Each step ends with something real running, and each one is a large, whole chang
    arrow, nanoarrow, reticulate, minqa, yaml) and tesseract needs a system library that is not
    installed. All 23 recorded `.Call` routines that need no evaluation return what GNU R returns
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
-   `R CMD INSTALL` does (the count against the pinned sources is pending a rerun). The R-level half of installation waits for the
-   interpreter.
+   `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
+   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
+   R-level half of installation waits for the interpreter.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
