@@ -110,6 +110,7 @@ pub fn type_c_name(kind: SexpType) -> &'static CStr {
         SexpType::WeakRef => c"weakref",
         SexpType::Raw => c"raw",
         SexpType::Object => c"S4",
+        SexpType::Record => c"record",
         SexpType::Binding => c"binding",
         SexpType::Free => c"FREESXP",
     }
