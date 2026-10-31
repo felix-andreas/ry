@@ -8,7 +8,8 @@ select_lots_@ID@ <- function(values, costs, budget = @BUDGET@L) {
     ompr::add_variable(x[i], i = 1:n, type = "binary") |>
     ompr::set_objective(ompr::sum_over(values[i] * x[i], i = 1:n), "max") |>
     ompr::add_constraint(ompr::sum_over(costs[i] * x[i], i = 1:n) <= budget)
-  result <- ompr::solve_model(model, ompr.roi::with_ROI(solver = "glpk"))
+  loadNamespace("ROI.plugin.highs")
+  result <- ompr::solve_model(model, ompr.roi::with_ROI(solver = "highs"))
   as.integer(round(ompr::get_solution(result, x[i])$value))
 }
 

@@ -34,7 +34,7 @@ test_that("serialization @ID@ round trips", {
   expect_equal(back[[1]]$id, 1L)
   expect_equal(vapply(back, function(r) r$score, numeric(1)), seq_len(@ROWS@) / 7)
   fast <- fast_parse_@ID@(text)
-  expect_equal(length(fast), @ROWS@)
+  expect_equal(NROW(fast), @ROWS@)
   expect_equal(nchar(fingerprint_@ID@(records)), 64L)
   expect_equal(fingerprint_@ID@(records), fingerprint_@ID@(records))
   expect_match(make_record_@ID@(1L)$key, "^[0-9a-f-]{36}$")

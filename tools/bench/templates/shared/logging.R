@@ -20,7 +20,7 @@ log_batch_@ID@ <- function(logger, items) {
 }
 
 log_messages_@ID@ <- function(logger) {
-  logger$appenders$memory$get_data()$msg
+  logger$appenders$memory$data$msg
 }
 #@ test
 test_that("logging @ID@ keeps every record", {

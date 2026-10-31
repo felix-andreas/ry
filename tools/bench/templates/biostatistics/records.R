@@ -15,7 +15,7 @@ parse_documents_@ID@ <- function(text) {
   data.frame(
     id = parsed$id,
     birth = as.Date(parsed$birthDate),
-    age_2024 = lubridate::interval(as.Date(parsed$birthDate), as.Date("2024-01-01")) %/% lubridate::years(1)
+    age_2024 = as.numeric(difftime(as.Date("2024-01-01"), as.Date(parsed$birthDate), units = "days")) / 365.25
   )
 }
 

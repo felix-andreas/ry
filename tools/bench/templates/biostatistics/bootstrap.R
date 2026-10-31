@@ -1,6 +1,7 @@
 #@ weight 2
 #@ param REPS int 50 300
 #@ param SAMPLE int 20 120
+#@ ns importFrom(foreach,"%do%")
 # Bootstrap confidence intervals through foreach.
 bootstrap_means_@ID@ <- function(x, reps = @REPS@L, seed = 41L) {
   set.seed(seed)

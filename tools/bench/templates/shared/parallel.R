@@ -1,5 +1,6 @@
 #@ weight 2
 #@ param CHUNKS int 2 8
+#@ ns importFrom(foreach,"%do%")
 # The same reduction through foreach, parallel and purrr, which must agree.
 chunk_sums_@ID@ <- function(x, chunks = @CHUNKS@L) {
   groups <- split(x, rep_len(seq_len(chunks), length(x)))
