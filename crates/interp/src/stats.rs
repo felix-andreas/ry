@@ -11,7 +11,7 @@ use crate::{
     builtin_libraries::{NativeCall, NativeFn, c_result},
     linalg,
     coerce::coerce_vector,
-    stats_cluster, stats_deriv, stats_models, stats_optimize, stats_tests,
+    stats_arima, stats_cluster, stats_deriv, stats_models, stats_optimize, stats_tests,
     unwind::R,
     values::{self, length, symbols},
 };
@@ -89,6 +89,17 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pKendall", stats_tests::p_kendall),
     ("pRho", stats_tests::p_rho),
     ("d2x2xk", stats_tests::d2x2xk),
+    ("ARIMA_transPars", stats_arima::transpars),
+    ("ARIMA_undoPars", stats_arima::undopars),
+    ("ARIMA_Invtrans", stats_arima::invtrans),
+    ("ARIMA_Gradtrans", stats_arima::gradtrans),
+    ("ARIMA_Like", stats_arima::arima_like),
+    ("ARIMA_CSS", stats_arima::css),
+    ("getQ0", stats_arima::get_q0),
+    ("getQ0bis", stats_arima::get_q0_bis),
+    ("KalmanLike", stats_arima::kalman_like),
+    ("KalmanFore", stats_arima::kalman_fore),
+    ("KalmanSmooth", stats_arima::kalman_smooth),
 ];
 
 /// The arguments of a `.C` or `.Fortran` call, coerced as the routine's declared types, ready
@@ -2156,3 +2167,4 @@ unsafe fn burg(call: &NativeCall<'_>) -> R<Sexp> {
     }
     values::list_vector(&[values::real_vector(&coefficients)?, values::real_vector(&variance1)?, values::real_vector(&variance2)?])
 }
+

@@ -182,7 +182,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("Arg", 1, |call| unsafe { complex_part(call, 3) }).generic(Generic::Complex),
     builtin("Conj", 1, |call| unsafe { complex_part(call, 4) }).generic(Generic::Complex),
     internal("complex", 3, do_complex),
-    internal("polyroot", 1, |call| unsafe { Err(call.error("polyroot is not supported")) }),
+    internal("polyroot", 1, do_polyroot),
     internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
     internal("pmax", -1, |call| unsafe { parallel_extreme(call, true) }),
     internal("cumall", 1, |call| unsafe { Ok(call.arg(0)) }),
@@ -2732,4 +2732,79 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
             Ok(result)
         }
     }
+}
+
+/// `polyroot(z)`: the roots of the polynomial with coefficients `z` in increasing order, by
+/// the Aberth-Ehrlich simultaneous iteration, listed by increasing modulus (the order in which
+/// Jenkins and Traub's deflation tends to find them).
+unsafe fn do_polyroot(call: &Call<'_>) -> R<Sexp> {
+    let input = coerce_vector(call.arg(0), SexpType::Complex)?;
+    let coefficients: Vec<Rcomplex> = values::complexes(input).to_vec();
+    if coefficients.iter().any(|value| !value.r.is_finite() || !value.i.is_finite()) {
+        return Err(call.error("invalid polynomial coefficient"));
+    }
+    let Some(degree) = coefficients.iter().rposition(|value| value.r != 0.0 || value.i != 0.0) else {
+        return alloc(SexpType::Complex, 0);
+    };
+    type C = (f64, f64);
+    let mul = |a: C, b: C| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+    let div = |a: C, b: C| {
+        let d = b.0 * b.0 + b.1 * b.1;
+        ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+    };
+    let zeros_at_origin = coefficients.iter().take_while(|value| value.r == 0.0 && value.i == 0.0).count();
+    let polynomial: Vec<C> = coefficients[zeros_at_origin..=degree].iter().map(|value| (value.r, value.i)).collect();
+    let n = polynomial.len() - 1;
+    let lead = polynomial[n];
+    let monic: Vec<C> = polynomial.iter().map(|&value| div(value, lead)).collect();
+    let evaluate = |x: C| -> (C, C) {
+        let mut value = monic[n];
+        let mut derivative = (0.0, 0.0);
+        for k in (0..n).rev() {
+            derivative = mul(derivative, x);
+            derivative = (derivative.0 + value.0, derivative.1 + value.1);
+            value = mul(value, x);
+            value = (value.0 + monic[k].0, value.1 + monic[k].1);
+        }
+        (value, derivative)
+    };
+    let radius = 1.0 + monic[..n].iter().map(|value| value.0.hypot(value.1)).fold(0.0, f64::max);
+    let mut roots: Vec<C> = (0..n)
+        .map(|k| {
+            let angle = 2.0 * std::f64::consts::PI * k as f64 / n as f64 + 0.4;
+            (0.5 * radius * angle.cos(), 0.5 * radius * angle.sin())
+        })
+        .collect();
+    for _ in 0..500 {
+        let mut largest_step = 0.0_f64;
+        for k in 0..n {
+            let (value, derivative) = evaluate(roots[k]);
+            if value == (0.0, 0.0) {
+                continue;
+            }
+            let ratio = div(value, derivative);
+            let mut sum = (0.0, 0.0);
+            for j in 0..n {
+                if j != k {
+                    let inverse = div((1.0, 0.0), (roots[k].0 - roots[j].0, roots[k].1 - roots[j].1));
+                    sum = (sum.0 + inverse.0, sum.1 + inverse.1);
+                }
+            }
+            let denominator = (1.0 - (ratio.0 * sum.0 - ratio.1 * sum.1), -(ratio.0 * sum.1 + ratio.1 * sum.0));
+            let step = div(ratio, denominator);
+            roots[k] = (roots[k].0 - step.0, roots[k].1 - step.1);
+            largest_step = largest_step.max(step.0.hypot(step.1) / roots[k].0.hypot(roots[k].1).max(1e-300));
+        }
+        if largest_step < 1e-15 {
+            break;
+        }
+    }
+    let mut all: Vec<C> = vec![(0.0, 0.0); zeros_at_origin];
+    all.extend(roots);
+    all.sort_by(|a, b| a.0.hypot(a.1).total_cmp(&b.0.hypot(b.1)));
+    let result = alloc(SexpType::Complex, all.len())?;
+    for (slot, root) in values::complexes_mut(result).iter_mut().zip(all) {
+        *slot = Rcomplex { r: root.0, i: root.1 };
+    }
+    Ok(result)
 }

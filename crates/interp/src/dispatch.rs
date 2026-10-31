@@ -1069,6 +1069,10 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let value = call.arg(1);
     if object == nil() {
+        // Removing the class of NULL is a no-op, which `arima` relies on.
+        if value == nil() {
+            return Ok(nil());
+        }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
     let object = modifiable(object)?;
