@@ -2121,10 +2121,15 @@ and gives NA on overflow, where R gives a double.
 - **Types:** `record{...}` and `tuple{...}` are distinct from `list{...}`, since the values differ.
   Tags are structural; a tag union is an ordinary union, `..` makes it open, and there are no row
   variables, which keeps the checker Hindley-Milner.
-- **R boundary:** explicit. `as.list()` converts out, `as_record()`/`as_tuple()` convert in. A small
-  allowlist of builtins accepts native values (printing, `identical`, field access, and builtins
-  that only store a value such as `list`); every other builtin and the C API boundary (`.Call`,
-  `.External`, `serialize`) raise one error that names the conversion, so native code never sees one.
+- **R boundary:** explicit. `as.list()` converts out, `as.record()`/`as.tuple()`/`as.tag()` convert
+  in. Each kind has an implicit class (`ry_record`, `ry_tuple`, `ry_tag`) for `class`, `inherits` and
+  S3 dispatch. Printing, `identical`, `all.equal`, field access, the type predicates and builtins
+  that only store a value (such as `list`) accept native values; every other builtin raises one
+  error that names the conversion. C code sees an opaque object (`TYPEOF` 27): list element moves
+  work and every other accessor raises the same error, because a deep scan at `.Call` would cost
+  time in proportion to the data. `serialize` refuses them, so they never leave the session.
+- **Layout:** keyed on tag and sorted field names only; which slots hold raw scalars is a per-object
+  mask, so same-typed values share a layout id whatever their contents.
 - **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
   a known type compile to a slot load after one layout-id comparison, and tag tests are integer
   comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
