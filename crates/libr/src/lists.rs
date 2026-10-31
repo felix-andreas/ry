@@ -66,8 +66,13 @@ pub unsafe fn vector_to_pairlist(vector: Sexp) -> ApiResult<Sexp> {
     let names = crate::attributes::raw_attribute(vector, R_NamesSymbol.get());
     let mut list = nil;
     for index in (0..length).rev() {
-        let tag = if names.kind() == SexpType::String && !names.element(index).bytes().is_empty() {
-            runtime.heap.install_char(names.element(index))?
+        let name = if names.kind() == SexpType::String {
+            crate::vectors::sexp_elt(names, index)?
+        } else {
+            nil
+        };
+        let tag = if name != nil && !name.bytes().is_empty() {
+            runtime.heap.install_char(name)?
         } else {
             nil
         };

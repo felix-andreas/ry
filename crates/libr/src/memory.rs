@@ -68,7 +68,17 @@ pub unsafe fn scalar_string(charsxp: Sexp) -> ApiResult<Sexp> {
 /// `Rf_duplicate` and `Rf_shallow_duplicate`.
 pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
     if object.is_altrep() {
+        runtime().heap.root(object);
+        if let Some(copy) = crate::altrep::duplicate(object, deep)? {
+            return Ok(copy);
+        }
         let copy = crate::altrep::materialize(object)?;
+        if deep && matches!(object.kind(), SexpType::List | SexpType::Expression) {
+            for index in 0..copy.length() as usize {
+                let element = duplicate(copy.element(index), true)?;
+                runtime().heap.set_element(copy, index, element);
+            }
+        }
         copy_attributes(copy, object, deep)?;
         return Ok(copy);
     }
@@ -220,7 +230,7 @@ pub unsafe fn length_gets(object: Sexp, length: R_xlen_t) -> ApiResult<Sexp> {
             }
             SexpType::Complex => {
                 let value = if present {
-                    *(crate::vectors::data_pointer(object, false)? as *const Rcomplex).add(index)
+                    crate::altrep::elt::<Rcomplex>(object, index as R_xlen_t)?
                 } else {
                     Rcomplex {
                         r: NA_REAL,
@@ -231,7 +241,7 @@ pub unsafe fn length_gets(object: Sexp, length: R_xlen_t) -> ApiResult<Sexp> {
             }
             SexpType::Raw => {
                 let value = if present {
-                    *(crate::vectors::data_pointer(object, false)? as *const u8).add(index)
+                    crate::altrep::elt::<u8>(object, index as R_xlen_t)?
                 } else {
                     0
                 };
@@ -259,7 +269,7 @@ pub unsafe fn length_gets(object: Sexp, length: R_xlen_t) -> ApiResult<Sexp> {
         runtime().heap.root(new_names);
         for index in 0..length as usize {
             let name = if index < kept {
-                names.element(index)
+                crate::vectors::sexp_elt(names, index)?
             } else {
                 blank
             };

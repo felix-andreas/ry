@@ -514,6 +514,9 @@ fn every_declared_name_is_exported() {
                 in_directive = line.ends_with('\\');
                 continue;
             }
+            if line.is_empty() {
+                continue;
+            }
             if current.is_empty() && (line.starts_with("/*") || line.starts_with("//")) {
                 continue;
             }

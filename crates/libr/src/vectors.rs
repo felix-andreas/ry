@@ -92,6 +92,16 @@ unsafe fn typed_data(
     wanted: &str,
     writable: bool,
 ) -> ApiResult<*mut u8> {
+    check_type(object, accepted, accessor, wanted)?;
+    data_pointer(object, writable)
+}
+
+unsafe fn check_type(
+    object: Sexp,
+    accepted: &[SexpType],
+    accessor: &str,
+    wanted: &str,
+) -> ApiResult<()> {
     let kind = object.kind();
     if !accepted.contains(&kind) {
         return Err(error(format!(
@@ -99,7 +109,7 @@ unsafe fn typed_data(
             kind.name()
         )));
     }
-    data_pointer(object, writable)
+    Ok(())
 }
 
 const INTEGER_TYPES: &[SexpType] = &[SexpType::Integer, SexpType::Logical];
@@ -306,11 +316,7 @@ pub fn format_complex(value: Rcomplex) -> String {
         return "NA".into();
     }
     let imaginary = format_real(value.i.abs());
-    let sign = if value.i < 0.0 || (value.i == 0.0 && value.i.is_sign_negative()) {
-        '-'
-    } else {
-        '+'
-    };
+    let sign = if value.i < 0.0 { '-' } else { '+' };
     format!("{}{sign}{imaginary}i", format_real(value.r))
 }
 
@@ -336,13 +342,13 @@ pub unsafe fn element_as_charsxp(object: Sexp, index: usize) -> ApiResult<Sexp> 
             format_real(value)
         }
         SexpType::Complex => {
-            let value = *(data_pointer(object, false)? as *const Rcomplex).add(index);
+            let value = altrep::elt::<Rcomplex>(object, index as R_xlen_t)?;
             if is_na_real(value.r) || is_na_real(value.i) {
                 return Ok(na);
             }
             format_complex(value)
         }
-        SexpType::Raw => format!("{:02x}", *data_pointer(object, false)?.add(index)),
+        SexpType::Raw => format!("{:02x}", altrep::elt::<u8>(object, index as R_xlen_t)?),
         kind => {
             return Err(error(format!(
                 "cannot coerce type '{}' to character",
@@ -379,6 +385,19 @@ pub unsafe fn coerce_vector(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
     }
     if target == SexpType::String && source == SexpType::Integer && inherits(object, "factor")? {
         return as_character_factor(object);
+    }
+    if object.is_altrep()
+        && let Some(converted) = altrep::coerce(object, target)?
+    {
+        return Ok(converted);
+    }
+    // As in GNU R, a number vector without attributes converts to character lazily, which
+    // makes `as.character(1:n)` cheap when only some elements are read.
+    if target == SexpType::String
+        && matches!(source, SexpType::Integer | SexpType::Real)
+        && object.attrib() == runtime.nil()
+    {
+        return altrep::deferred_string(object);
     }
     match source {
         SexpType::Nil => alloc_vector(target, 0),
@@ -447,7 +466,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     }
                     SexpType::Real => real_to_logical(real_elt(object, index)?),
                     SexpType::Complex => {
-                        let value = *(data_pointer(object, false)? as *const Rcomplex).add(index);
+                        let value = altrep::elt::<Rcomplex>(object, index as R_xlen_t)?;
                         if value.r.is_nan() || value.i.is_nan() {
                             NA_LOGICAL
                         } else {
@@ -462,7 +481,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             string_to_logical(element.bytes())
                         }
                     }
-                    SexpType::Raw => (*data_pointer(object, false)?.add(index) != 0) as i32,
+                    SexpType::Raw => (altrep::elt::<u8>(object, index as R_xlen_t)? != 0) as i32,
                     _ => NA_LOGICAL,
                 };
                 *(result.data() as *mut i32).add(index) = value;
@@ -476,7 +495,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                         value
                     }
                     SexpType::Complex => {
-                        let value = *(data_pointer(object, false)? as *const Rcomplex).add(index);
+                        let value = altrep::elt::<Rcomplex>(object, index as R_xlen_t)?;
                         let (converted, range) = real_to_int(value.r);
                         out_of_range |= range;
                         converted
@@ -499,7 +518,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             }
                         }
                     }
-                    SexpType::Raw => *data_pointer(object, false)?.add(index) as i32,
+                    SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as i32,
                     _ => NA_INTEGER,
                 };
                 *(result.data() as *mut i32).add(index) = value;
@@ -508,9 +527,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                 let value = match object.kind() {
                     SexpType::Integer | SexpType::Logical => int_to_real(int_elt(object, index)?),
                     SexpType::Real => real_elt(object, index)?,
-                    SexpType::Complex => {
-                        (*(data_pointer(object, false)? as *const Rcomplex).add(index)).r
-                    }
+                    SexpType::Complex => altrep::elt::<Rcomplex>(object, index as R_xlen_t)?.r,
                     SexpType::String => {
                         let element = sexp_elt(object, index)?;
                         if element == runtime().heap.known().na_string {
@@ -522,7 +539,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             })
                         }
                     }
-                    SexpType::Raw => *data_pointer(object, false)?.add(index) as f64,
+                    SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
                     _ => NA_REAL,
                 };
                 *(result.data() as *mut f64).add(index) = value;
@@ -542,7 +559,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                             })
                         }
                     }
-                    SexpType::Raw => *data_pointer(object, false)?.add(index) as f64,
+                    SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
                     _ => NA_REAL,
                 };
                 let imaginary = if is_na_real(real) { NA_REAL } else { 0.0 };
@@ -599,11 +616,15 @@ unsafe fn element_vector(object: Sexp, index: usize) -> ApiResult<Sexp> {
         SexpType::String => runtime
             .heap
             .set_element(element, 0, sexp_elt(object, index)?),
-        _ => {
-            let size = kind.element_size().unwrap_or(0);
-            let source = data_pointer(object, false)?.add(index * size);
-            std::ptr::copy_nonoverlapping(source, element.data(), size);
+        SexpType::Integer | SexpType::Logical => {
+            *(element.data() as *mut i32) = int_elt(object, index)?
         }
+        SexpType::Real => *(element.data() as *mut f64) = real_elt(object, index)?,
+        SexpType::Complex => {
+            *(element.data() as *mut Rcomplex) = altrep::elt(object, index as R_xlen_t)?
+        }
+        SexpType::Raw => *element.data() = altrep::elt(object, index as R_xlen_t)?,
+        _ => return Err(error("cannot take an element of this vector")),
     }
     Ok(element)
 }
@@ -619,9 +640,8 @@ unsafe fn coerce_list(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                 let converted = runtime().heap.alloc_vector(target, length)?;
                 runtime().heap.root(converted);
                 for index in 0..length as usize {
-                    runtime()
-                        .heap
-                        .set_element(converted, index, object.element(index));
+                    let element = sexp_elt(object, index)?;
+                    runtime().heap.set_element(converted, index, element);
                 }
                 crate::memory::copy_attributes(converted, object, false)?;
                 converted
@@ -832,11 +852,15 @@ pub unsafe fn identical(left: Sexp, right: Sexp, flags: c_int) -> ApiResult<bool
                     single_na,
                 ),
                 SexpType::Complex => {
-                    let a = *(data_pointer(left, false)? as *const Rcomplex).add(index);
-                    let b = *(data_pointer(right, false)? as *const Rcomplex).add(index);
+                    let a = altrep::elt::<Rcomplex>(left, index as R_xlen_t)?;
+                    let b = altrep::elt::<Rcomplex>(right, index as R_xlen_t)?;
                     same_real(a.r, b.r, num_eq, single_na) && same_real(a.i, b.i, num_eq, single_na)
                 }
-                SexpType::Raw | SexpType::Char => {
+                SexpType::Raw => {
+                    altrep::elt::<u8>(left, index as R_xlen_t)?
+                        == altrep::elt::<u8>(right, index as R_xlen_t)?
+                }
+                SexpType::Char => {
                     *data_pointer(left, false)?.add(index)
                         == *data_pointer(right, false)?.add(index)
                 }
@@ -1039,6 +1063,67 @@ pub unsafe extern "C" fn DATAPTR_OR_NULL(object: Sexp) -> *const c_void {
     })
 }
 
+/// `DATAPTR_RW`, which GNU R declares for implementing `Dataptr` methods.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn DATAPTR_RW(object: Sexp) -> *mut c_void {
+    enter(|| Ok(data_pointer(object, true)? as *mut c_void))
+}
+
+/// Binaries built against older headers call this after checking `ALTREP(x)`; an ALTREP
+/// object still dispatches, so a stale check cannot read the instance's triple as data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn STDVEC_DATAPTR(object: Sexp) -> *mut c_void {
+    enter(|| Ok(data_pointer(object, true)? as *mut c_void))
+}
+
+/// GNU R refuses this for safety; ry hands out the writable pointer, which the collector
+/// tolerates because the vector joins the escaped set, so binaries that import it keep working.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn VECTOR_PTR(object: Sexp) -> *mut Sexp {
+    enter(|| {
+        Ok(typed_data(
+            object,
+            &[SexpType::List, SexpType::Expression],
+            "VECTOR_PTR",
+            "list",
+            true,
+        )? as *mut Sexp)
+    })
+}
+
+macro_rules! or_null_api {
+    ($name:ident, $type:ty, $accepted:expr, $accessor:literal, $wanted:literal) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(object: Sexp) -> *const $type {
+            enter(|| {
+                check_type(object, &$accepted, $accessor, $wanted)?;
+                if object.is_altrep() {
+                    return Ok(altrep::dataptr_or_null(object)? as *const $type);
+                }
+                Ok(object.data() as *const $type)
+            })
+        }
+    };
+}
+
+or_null_api!(
+    LOGICAL_OR_NULL,
+    c_int,
+    [SexpType::Logical],
+    "LOGICAL",
+    "logical"
+);
+or_null_api!(INTEGER_OR_NULL, c_int, INTEGER_TYPES, "INTEGER", "integer");
+or_null_api!(REAL_OR_NULL, f64, [SexpType::Real], "REAL", "numeric");
+or_null_api!(
+    COMPLEX_OR_NULL,
+    Rcomplex,
+    [SexpType::Complex],
+    "COMPLEX",
+    "complex"
+);
+or_null_api!(RAW_OR_NULL, u8, [SexpType::Raw], "RAW", "raw");
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
     enter(|| {
@@ -1229,21 +1314,7 @@ macro_rules! region_api {
                         " applied to the wrong type"
                     )));
                 }
-                if object.is_altrep() {
-                    if let Some(copied) = altrep::get_region::<$type>(object, start, count, buffer)?
-                    {
-                        return Ok(copied);
-                    }
-                }
-                let length = xlength(object)?;
-                if start < 0 || start > length || count < 0 {
-                    return Ok(0);
-                }
-                let copied = count.min(length - start);
-                for index in 0..copied {
-                    *buffer.add(index as usize) = altrep::elt::<$type>(object, start + index)?;
-                }
-                Ok(copied)
+                altrep::get_region::<$type>(object, start, count, buffer)
             })
         }
     };

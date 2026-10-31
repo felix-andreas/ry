@@ -940,6 +940,7 @@ dependencies = [
  "libloading",
  "rustc-hash 2.1.3",
  "syntax",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

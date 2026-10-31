@@ -131,6 +131,11 @@ const Rcomplex *(COMPLEX_RO)(SEXP x);
 void *(DATAPTR)(SEXP x);
 const void *(DATAPTR_RO)(SEXP x);
 const void *(DATAPTR_OR_NULL)(SEXP x);
+const int *(LOGICAL_OR_NULL)(SEXP x);
+const int *(INTEGER_OR_NULL)(SEXP x);
+const double *(REAL_OR_NULL)(SEXP x);
+const Rcomplex *(COMPLEX_OR_NULL)(SEXP x);
+const Rbyte *(RAW_OR_NULL)(SEXP x);
 SEXP (STRING_ELT)(SEXP x, R_xlen_t i);
 SEXP (VECTOR_ELT)(SEXP x, R_xlen_t i);
 void SET_STRING_ELT(SEXP x, R_xlen_t i, SEXP v);
@@ -167,7 +172,22 @@ int STRING_NO_NA(SEXP x);
 #define SORTED_DECR -1
 #define SORTED_INCR 1
 #define SORTED_INCR_NA_1ST 2
+#define KNOWN_UNSORTED 0
 #define KNOWN_SORTED(sorted) (sorted == SORTED_DECR || sorted == SORTED_INCR || sorted == SORTED_DECR_NA_1ST || sorted == SORTED_INCR_NA_1ST)
+#define KNOWN_NA_1ST(sorted) (sorted == SORTED_INCR_NA_1ST || sorted == SORTED_DECR_NA_1ST)
+#define KNOWN_INCR(sorted) (sorted == SORTED_INCR || sorted == SORTED_INCR_NA_1ST)
+#define KNOWN_DECR(sorted) (sorted == SORTED_DECR || sorted == SORTED_DECR_NA_1ST)
+
+/* ALTREP instances: their data slots and class, the class's name and package symbols, and a
+   wrapper that can carry sortedness metadata. The class interface is in R_ext/Altrep.h. */
+SEXP ALTREP_CLASS(SEXP x);
+SEXP R_altrep_data1(SEXP x);
+SEXP R_altrep_data2(SEXP x);
+void R_set_altrep_data1(SEXP x, SEXP v);
+void R_set_altrep_data2(SEXP x, SEXP v);
+SEXP R_altrep_class_name(SEXP x);
+SEXP R_altrep_class_package(SEXP x);
+SEXP R_tryWrap(SEXP x);
 
 SEXP R_allocResizableVector(SEXPTYPE type, R_xlen_t maxlen);
 void R_resizeVector(SEXP x, R_xlen_t newlen);
