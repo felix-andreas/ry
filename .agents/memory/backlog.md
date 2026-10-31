@@ -1776,6 +1776,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   file defines, which `ry check` accepts.
 - **`ry repl --runtime ry` starts bare**: no `tools:ry` environment, no `.Call` routines and no
   package autoload, because the loader's R code targets the GNU R backend.
+- **ry's console evaluates a chunk only once all of it parses** (`interp::session::run_console`): a
+  `-f` script that ends inside an unfinished expression runs none of its complete expressions until
+  the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each

@@ -144,11 +144,18 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
     if let Some(script) = script {
         let script = normalize_line_endings(&script);
         // A script whose filter refuses it does not run at all, and an unfinished one is R's
-        // to report.
-        let script = match filter.as_mut().map(|filter| filter.filter(&script)) {
-            Some(Filtered::Run(script)) => script,
-            Some(Filtered::Refuse) => String::new(),
-            Some(Filtered::Hold) | None => script,
+        // to report, so the filter forgets it rather than prepend it to the first command.
+        let script = match filter
+            .as_mut()
+            .map(|filter| (filter.filter(&script), filter))
+        {
+            Some((Filtered::Run(script), _)) => script,
+            Some((Filtered::Refuse, _)) => String::new(),
+            Some((Filtered::Hold, filter)) => {
+                filter.interrupt();
+                script
+            }
+            None => script,
         };
         pending.extend(script.into_bytes());
         pending.push_back(b'\n');

@@ -211,7 +211,9 @@ these rules:
   checked when it is forced, so laziness, `missing()`, and `substitute()` behave as in R, and an
   argument that is never used is never checked. An argument that is already a value, such as a
   constant, is checked when the function is entered.
-- **Every `...` argument is checked against the rest parameter's type**, under the same rule.
+- **Every `...` argument is checked against the rest parameter's type**, under the same rule. An
+  argument forwarded through `...` to another typed function is checked against both functions'
+  types when it is forced.
 - **The return value is checked when the function returns**, including through `return()`, and
   before `on.exit` code runs.
 - **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
@@ -226,7 +228,13 @@ these rules:
 - **A function with no parameters whose body is a constant or a bare name is not checked**, because
   it has no language object to carry its signature.
 
-A failed check is an ordinary R error, so `tryCatch()` and `try()` handle it.
+A failed check is an ordinary R error, so `tryCatch()` and `try()` handle it. A parameter whose
+check failed stays unevaluated, as it would after an error while computing it, so code that catches
+the error and uses the parameter again computes it again and checks it again.
+
+The checks belong to the function definition that carried the annotations. A closure built from
+another function's `formals()` with a body of its own, as `rlang::new_function()` builds one, is a
+new definition and is not checked.
 
 Before running anything, `ry run` checks the script and `ry repl` checks each command, with the
 project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In

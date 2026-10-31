@@ -508,6 +508,42 @@ fn ry_runtime_checks_arguments_and_returns_at_the_boundary() {
 }
 
 #[test]
+fn ry_runtime_checks_follow_the_definition_and_the_promise() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let script = r#"typed <- function(x: integer) -> integer x
+untyped <- eval(call("function", formals(typed), quote(x * 1.5)))
+print(untyped(2L))
+inner <- function(...: double) ..1
+outer <- function(...: integer) inner(...)
+print(tryCatch(outer(2.5), error = conditionMessage))
+caught <- function(x: integer) { try(x, silent = TRUE); x }
+print(tryCatch(caught("a"), error = conditionMessage))
+apply1 <- function(fun, v) fun(v)
+named <- function(x: integer) apply1(function(z) x, 0)
+print(tryCatch(apply1(named, "bad"), error = conditionMessage))
+"#;
+    let (status, stdout, stderr) = run_project("ry", &[("script.R", script)]);
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(
+        stdout.contains("[1] 3"),
+        "a closure built from typed formals is untyped: {stdout}"
+    );
+    assert!(
+        stdout.contains("every `...` argument must be `integer`, but one is `double`"),
+        "a forwarded promise is checked by every typed frame: {stdout}"
+    );
+    assert_eq!(
+        stdout
+            .matches("argument `x` must be `integer`, not `character`")
+            .count(),
+        2,
+        "a caught failure leaves the value checked, and the error names the formal: {stdout}"
+    );
+}
+
+#[test]
 fn run_warns_when_a_comment_and_an_inline_annotation_disagree() {
     let script = "#: fn(x: character) -> character\nf <- function(x: integer) x\nprint(f(2L))\n";
     for runtime in runtimes() {

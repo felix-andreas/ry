@@ -1015,23 +1015,60 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return 2;
     }
+    install_interrupt_handler();
     let mut buffer = vec![0u8; 64 * 1024];
     interp::session::run_console(|prompt| {
         use std::io::Write;
-        drop(std::io::stdout().flush());
-        let prompt = std::ffi::CString::new(prompt).unwrap_or_default();
-        if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
-            return None;
+        if let Err(error) = std::io::stdout().flush() {
+            crate::boundary::write_console(
+                format!("ry: cannot write output: {error}\n").as_bytes(),
+                true,
+            );
         }
-        let end = buffer
-            .iter()
-            .position(|&byte| byte == 0)
-            .unwrap_or(buffer.len());
-        Some(String::from_utf8_lossy(&buffer[..end]).into_owned())
+        // A prompt never holds a NUL, so the empty fallback is unreachable.
+        let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
+        let mut input = Vec::new();
+        // A line longer than the buffer arrives in several chunks; only the last one ends the
+        // line, and the text is decoded once it is whole, so no character is split.
+        loop {
+            if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
+                return (!input.is_empty()).then(|| String::from_utf8_lossy(&input).into_owned());
+            }
+            let end = buffer
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(buffer.len());
+            input.extend_from_slice(&buffer[..end]);
+            // A reader may stop one byte short of the contract's limit, so a chunk is taken as
+            // cut off whenever it comes within two bytes of the buffer's end.
+            if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                return Some(String::from_utf8_lossy(&input).into_owned());
+            }
+            prompt = std::ffi::CString::default();
+        }
     });
     crate::boundary::run_pending_finalizers();
     0
 }
+
+/// While the console reads input its terminal is raw, so Ctrl-C reaches the line editor; while
+/// code runs it arrives as SIGINT and interrupts the evaluation, not the process.
+#[cfg(unix)]
+fn install_interrupt_handler() {
+    extern "C" fn request_interrupt(_signal: c_int) {
+        interp::unwind::INTERRUPT_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // SAFETY: the handler only performs an atomic store, which is async-signal-safe.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = request_interrupt as *const () as usize;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn install_interrupt_handler() {}
 
 unsafe fn installed_evaluator(what: &str) -> ApiResult<&'static dyn Evaluator> {
     evaluator().ok_or_else(|| {

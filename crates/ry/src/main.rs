@@ -37,7 +37,13 @@ fn main() -> ExitCode {
             no_load,
             runtime,
         } => {
-            let working_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let working_directory = match env::current_dir() {
+                Ok(directory) => directory,
+                Err(error) => {
+                    cli::error(&format!("cannot read the working directory: {error}"));
+                    return ExitCode::from(2);
+                }
+            };
             let Some(preflight) =
                 Preflight::discover(&working_directory, PathBuf::from("<console>"))
             else {

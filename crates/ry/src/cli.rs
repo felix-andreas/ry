@@ -665,10 +665,10 @@ pub(crate) fn render_findings<'a>(
 
 /// A related range often sits in another document, so each note carries its own text.
 pub(crate) struct RelatedNote<'a> {
-    path: &'a Path,
-    source: &'a str,
-    range: TextRange,
-    message: &'static str,
+    pub(crate) path: &'a Path,
+    pub(crate) source: &'a str,
+    pub(crate) range: TextRange,
+    pub(crate) message: &'static str,
 }
 
 fn render_human_diagnostic(

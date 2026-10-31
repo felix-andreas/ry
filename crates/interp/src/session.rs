@@ -191,7 +191,7 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
         if !buffer.ends_with('\n') {
             buffer.push('\n');
         }
-        if input_is_unfinished(&buffer) {
+        if syntax::input_is_unfinished(&buffer) {
             continue;
         }
         let text = std::mem::take(&mut buffer);
@@ -212,17 +212,6 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
         }
         crate::heap().release_handles(mark);
     }
-}
-
-/// Whether the parse of `text` fails only because the text ends too early.
-fn input_is_unfinished(text: &str) -> bool {
-    let parse = syntax::parse(text);
-    let end = syntax::TextSize::of(text.trim_end());
-    parse
-        .errors()
-        .iter()
-        .find(|failure| !failure.in_annotation)
-        .is_some_and(|failure| failure.range.start() >= end)
 }
 
 /// Evaluates one top-level expression, prints it if visible, and reports deferred warnings.
@@ -264,7 +253,7 @@ pub unsafe fn report_toplevel(unwind: Unwind) {
             let text = conditions::format_error(call, &failure.message);
             write_console(text.as_bytes(), true);
         }
-        Unwind::Interrupt => {}
+        Unwind::Interrupt => write_console(b"\n", false),
         Unwind::Jump(jump) => match *jump {
             Jump::TopLevel => {}
             Jump::Return { .. } => {

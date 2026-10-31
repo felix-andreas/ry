@@ -12,7 +12,10 @@
 //!
 //! **Where a signature lives.** It is keyed by the definition's formals pairlist (or its body,
 //! for a function without parameters), which every closure made from that definition shares,
-//! including copies made by `environment<-`. The key carries [`gp::TYPED_DEFINITION`], so an
+//! including copies made by `environment<-`. The signature also records the definition's body,
+//! and a closure matches it only when it has that same body too, because code that builds a
+//! closure from another function's formals (`rlang::new_function(formals(f), body)`) defines a
+//! new, untyped function. The key carries [`gp::TYPED_DEFINITION`], so an
 //! untyped call pays one bit test. The registry maps the key to a weak reference whose key is
 //! that object and whose value is the signature, so an entry can never outlive its definition
 //! and be mistaken for another object at a reused address.
@@ -93,6 +96,13 @@ const NULL: Mask = bit(SexpType::Nil);
 const LIST: Mask = bit(SexpType::List);
 const FUNCTION: Mask = bit(SexpType::Closure) | bit(SexpType::Builtin) | bit(SexpType::Special);
 
+/// A signature is a list: the masks by slot, the annotation texts by slot, the formal names by
+/// formal position, and the definition's body.
+const MASKS: usize = 0;
+const TEXTS: usize = 1;
+const NAMES: usize = 2;
+const BODY: usize = 3;
+
 /// Slot 0 of a signature is the return value, slot 1 the rest parameter, and slot `2 + i` the
 /// formal at position `i`.
 const RETURN_SLOT: usize = 0;
@@ -123,6 +133,7 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
                     let is_rest = parameter
                         .children_with_tokens()
                         .any(|element| element.kind() == SyntaxKind::DOTS);
+                    // `...` is matched as a whole, so its type lives in the rest slot.
                     if is_rest {
                         slots[REST_SLOT] = check.clone();
                     }
@@ -140,7 +151,6 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
     if slots.iter().all(|(mask, _)| *mask == 0) {
         return Ok(());
     }
-    // `...` is matched as a whole, never bound to its own formal slot.
     let key = if formals.kind() == SexpType::Pairlist {
         formals
     } else if body.kind() == SexpType::Language {
@@ -152,9 +162,17 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
     };
     let masks: Vec<i32> = slots.iter().map(|(mask, _)| *mask as i32).collect();
     let texts: Vec<&str> = slots.iter().map(|(_, text)| text.as_str()).collect();
+    let mut names = Vec::new();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        names.push(values::symbol_name(formal.tag()).into_owned());
+        formal = formal.cdr();
+    }
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let masks = values::integer_vector(&masks)?;
     let texts = values::string_vector(&texts)?;
-    let signature = values::list_vector(&[masks, texts])?;
+    let names = values::string_vector(&names)?;
+    let signature = values::list_vector(&[masks, texts, names, body])?;
     let heap = crate::heap();
     let weak = heap.alloc_weak_ref(key, signature, nil(), 0, false)?;
     key.set_gp_bits(gp::TYPED_DEFINITION, true);
@@ -174,7 +192,7 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
     let Some(signature) = signature_of(function) else {
         return Ok(None);
     };
-    let masks = signature.element(0);
+    let masks = signature.element(MASKS);
     let heap = crate::heap();
     let mut formal = function.car();
     let mut slot = FIRST_FORMAL_SLOT;
@@ -201,7 +219,7 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
 
 /// Checks a typed closure's value.
 pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<()> {
-    let mask = mask_at(signature.element(0), RETURN_SLOT);
+    let mask = mask_at(signature.element(MASKS), RETURN_SLOT);
     if mask == 0 || admits(mask, value) {
         return Ok(());
     }
@@ -223,22 +241,35 @@ pub unsafe fn leave(depth: usize) {
     while let Some(entry) = pending.last()
         && entry.depth >= depth
     {
-        entry.promise.set_gp_bits(gp::CHECKED_PROMISE, false);
+        let promise = entry.promise;
         pending.pop();
+        // A promise forwarded through `...` can be pending in an outer typed frame too.
+        if !pending.iter().any(|entry| entry.promise == promise) {
+            promise.set_gp_bits(gp::CHECKED_PROMISE, false);
+        }
     }
 }
 
-/// Checks a promise's value as it is forced. Called only for a promise carrying
-/// [`gp::CHECKED_PROMISE`].
+/// Checks the value a promise is about to hold, against every typed frame it was passed to.
+/// Called only for a promise carrying [`gp::CHECKED_PROMISE`], before the value is stored: a
+/// failed check leaves the promise unforced and still checked, as an error while evaluating it
+/// would, so code that catches the error can never read the value unchecked.
 pub unsafe fn check_forced(promise: Sexp, value: Sexp) -> R<()> {
+    let pending = &interp().annotations.pending;
+    // The innermost frame is the most specific, so its failure is the one reported.
+    for entry in pending
+        .iter()
+        .rev()
+        .filter(|entry| entry.promise == promise)
+    {
+        check_value(entry.call, entry.signature, entry.slot, value)?;
+    }
     promise.set_gp_bits(gp::CHECKED_PROMISE, false);
-    // A promise is nearly always forced by the frame that registered it or one just above.
-    let pending = &mut interp().annotations.pending;
-    let Some(index) = pending.iter().rposition(|entry| entry.promise == promise) else {
-        return Ok(());
-    };
-    let entry = pending.remove(index);
-    check_value(entry.call, entry.signature, entry.slot, value)
+    interp()
+        .annotations
+        .pending
+        .retain(|entry| entry.promise != promise);
+    Ok(())
 }
 
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
@@ -252,7 +283,11 @@ unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
         return None;
     }
     let weak = *interp().annotations.signatures.get(&key)?;
-    (weak.weak_key() == key).then(|| weak.weak_value())
+    if weak.weak_key() != key {
+        return None;
+    }
+    let signature = weak.weak_value();
+    (signature.element(BODY) == crate::bytecode::closure_body(function)).then_some(signature)
 }
 
 unsafe fn check_argument(
@@ -283,7 +318,7 @@ unsafe fn check_argument(
 }
 
 unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> R<()> {
-    let mask = mask_at(signature.element(0), slot);
+    let mask = mask_at(signature.element(MASKS), slot);
     if mask == 0 || admits(mask, value) {
         return Ok(());
     }
@@ -292,7 +327,9 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
     let message = if slot == REST_SLOT {
         format!("every `...` argument must be `{expected}`, but one is `{found}`")
     } else {
-        let name = formal_name(call, slot);
+        let name = values::string_at(signature.element(NAMES), slot - FIRST_FORMAL_SLOT)
+            .map(|name| name.into_owned())
+            .unwrap_or_default();
         format!("argument `{name}` must be `{expected}`, not `{found}`")
     };
     Err(failure(call, message))
@@ -300,30 +337,6 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
 
 unsafe fn failure(call: Sexp, message: String) -> crate::unwind::Unwind {
     conditions::signal_error(RError { message, call })
-}
-
-/// The name of the formal at `slot` of the closure the current frame runs.
-unsafe fn formal_name(call: Sexp, slot: usize) -> String {
-    let function = interp()
-        .frames
-        .iter()
-        .rev()
-        .find(|frame| frame.call == call)
-        .map(|frame| frame.function);
-    let Some(function) = function else {
-        return "?".to_owned();
-    };
-    let mut formal = function.car();
-    for _ in FIRST_FORMAL_SLOT..slot {
-        if formal.kind() != SexpType::Pairlist {
-            break;
-        }
-        formal = formal.cdr();
-    }
-    if formal.kind() != SexpType::Pairlist {
-        return "?".to_owned();
-    }
-    values::symbol_name(formal.tag()).into_owned()
 }
 
 unsafe fn mask_at(masks: Sexp, slot: usize) -> Mask {
@@ -334,7 +347,7 @@ unsafe fn mask_at(masks: Sexp, slot: usize) -> Mask {
 }
 
 unsafe fn text_at(signature: Sexp, slot: usize) -> String {
-    values::string_at(signature.element(1), slot)
+    values::string_at(signature.element(TEXTS), slot)
         .map(|text| text.into_owned())
         .unwrap_or_default()
 }

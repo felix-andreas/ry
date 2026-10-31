@@ -242,12 +242,12 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     let result = eval(promise.cdr(), promise.tag());
     promise.set_gp_bits(PROMISE_SEEN, false);
     let value = result?;
-    let heap = crate::heap();
-    heap.set_car(promise, value);
-    heap.set_tag(promise, nil());
     if promise.has_gp(gp::CHECKED_PROMISE) {
         crate::annotations::check_forced(promise, value)?;
     }
+    let heap = crate::heap();
+    heap.set_car(promise, value);
+    heap.set_tag(promise, nil());
     Ok(value)
 }
 
@@ -261,6 +261,7 @@ pub unsafe fn value_of(object: Sexp) -> R<Sexp> {
 }
 
 unsafe fn eval_call(call: Sexp, env: Sexp) -> R<Sexp> {
+    crate::unwind::poll_interrupt()?;
     let head = call.car();
     let function = if head.kind() == SexpType::Symbol {
         find_fun(head, env)?

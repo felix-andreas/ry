@@ -54,6 +54,9 @@ pub struct SyntaxError {
     /// Raised by the `#:` annotation grammar; the formatter keys on this to keep
     /// the block verbatim instead of refusing the file.
     pub in_annotation: bool,
+    /// Caused by the input ending too early: an opener it never closes, or a construct the end
+    /// of the input cuts off. A console reads more input instead of reporting it.
+    pub incomplete: bool,
 }
 
 impl SyntaxError {
@@ -62,8 +65,23 @@ impl SyntaxError {
             message: message.into(),
             range,
             in_annotation: false,
+            incomplete: false,
         }
     }
+}
+
+/// R's console rule: input is unfinished when every syntax error in it says that it ended too
+/// early, so the console reads another line instead of reporting an error. A broken `#:`
+/// comment is only a comment to R, so it never holds input back.
+pub fn input_is_unfinished(text: &str) -> bool {
+    let parse = parse(text);
+    let end = TextSize::of(text.trim_end());
+    let mut errors = parse
+        .errors()
+        .iter()
+        .filter(|error| !error.in_annotation)
+        .peekable();
+    errors.peek().is_some() && errors.all(|error| error.incomplete || error.range.start() >= end)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

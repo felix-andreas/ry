@@ -2,19 +2,19 @@
 //! checks each top-level command. It prints the inline-annotation warnings and enforces strict
 //! mode; everything else stays `ry check`'s job, so plain R runs exactly as it always did.
 
-use crate::cli::{MinSeverity, OutputFormat, render_findings, report, warn_config};
+use crate::cli::{MinSeverity, OutputFormat, RelatedNote, render_findings, report, warn_config};
 use crate::config::Config;
 use crate::diagnostics::{apply_suppressions, document_diagnostics};
 use repl::{Filtered, InputFilter};
 use salsa::Setter;
-use semantics::diagnostics::{Diagnostic, Severity};
+use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
 use semantics::stubs::install_shipped_stubs;
 use semantics::{
     DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypingMode, file_typing_mode,
 };
 use std::path::{Path, PathBuf};
 use std::thread;
-use syntax::{SyntaxNode, TextSize, erase_inline_annotations, is_inline_annotation};
+use syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation};
 
 /// Analysis state for one run or one console session. A console session is checked as one
 /// growing script, so a command sees the definitions earlier commands made.
@@ -94,24 +94,37 @@ impl Preflight {
                 Err(error) => panic!("the preflight thread should spawn: {error}"),
             }
         });
+        // Earlier commands' warnings were printed when they ran, but an error that blocks this
+        // one is printed wherever it is: redefining a name can break a function defined earlier.
         let reported: Vec<Diagnostic> = findings
             .into_iter()
-            .filter(|diagnostic| usize::from(diagnostic.range.start()) >= start)
+            .filter(|diagnostic| {
+                usize::from(diagnostic.range.start()) >= start
+                    || (verdict == Verdict::Refuse && is_strict_error(diagnostic))
+            })
             .collect();
+        let resolve_note = |related: &RelatedLocation| {
+            (related.file == file).then(|| RelatedNote {
+                path: &self.path,
+                source: &source,
+                range: related.range,
+                message: related.message,
+            })
+        };
         render_findings(
             OutputFormat::Human,
             MinSeverity::Warning,
             &self.path,
             &source,
             &reported,
-            &|_| None,
+            &resolve_note,
         );
         match verdict {
             Verdict::Run => self.session = source,
             Verdict::Refuse => {
                 let problems = reported
                     .iter()
-                    .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                    .filter(|diagnostic| is_strict_error(diagnostic))
                     .count();
                 let noun = if problems == 1 { "error" } else { "errors" };
                 crate::cli::error(&format!(
@@ -205,7 +218,7 @@ impl ConsoleFilter {
 impl InputFilter for ConsoleFilter {
     fn filter(&mut self, input: &str) -> Filtered {
         self.held.push_str(input);
-        if is_unfinished(&self.held) {
+        if input_is_unfinished(&self.held) {
             self.held.push('\n');
             return Filtered::Hold;
         }
@@ -220,18 +233,6 @@ impl InputFilter for ConsoleFilter {
     fn interrupt(&mut self) {
         self.held.clear();
     }
-}
-
-/// R's console rule: input is unfinished when its first syntax error is that it ended early.
-/// A broken `#:` comment is only a comment to R, so it never holds input back.
-fn is_unfinished(text: &str) -> bool {
-    let parse = syntax::parse(text);
-    let end = TextSize::of(text.trim_end());
-    parse
-        .errors()
-        .iter()
-        .find(|failure| !failure.in_annotation)
-        .is_some_and(|failure| failure.range.start() >= end)
 }
 
 pub fn erase(input: &str) -> String {

@@ -2123,7 +2123,10 @@ double, so a guard on it is redundant.
 **Why parameters are checked when forced.** Checking on entry would force every annotated
 argument, which changes R semantics (laziness, `missing()`, `substitute()`, a never-used argument
 that would fail). The promise carries `gp::CHECKED_PROMISE`, and `force_promise` runs the check
-after storing the value. A value that is already computed (a constant, a forced promise) is
+before storing the value: a failed check leaves the promise unforced and still checked, so code
+that catches the error cannot read an unchecked value, and the JIT guarantee below holds. A promise
+forwarded through `...` is pending in several typed frames, and forcing it checks every one; the
+bit is cleared only once no frame still holds it. A value that is already computed (a constant, a forced promise) is
 checked on entry, because there is no later moment to hook.
 
 **Why storage masks.** A check is one bit test of the value's `SEXPTYPE` against a `u32` mask
@@ -2135,7 +2138,10 @@ attributes would need a walk of the value, which is not cheap enough to run on e
 **Where the signature lives.** Lowering a `function` registers its masks in a map keyed by the
 formals pairlist (or the body, for a function without parameters), which closures share by pointer,
 so a closure copy (`environment<-`) keeps its checks and `formals()`, `body()` and `deparse()` see no
-change. The key carries `gp::TYPED_DEFINITION`, so an untyped call pays one header bit test. The map
+change. The signature also holds the definition's body (and the formal names, for messages), and a
+closure matches only when its body is that same object: `function` builds closures from whatever
+formals it is handed, so `rlang::new_function(formals(f), body)` would otherwise inherit `f`'s
+checks. The key carries `gp::TYPED_DEFINITION`, so an untyped call pays one header bit test. The map
 holds a weak reference per entry, whose key identity guards against a dead object's address being
 reused; dead entries are swept when the map doubles. A function without parameters whose body is a
 constant or a symbol has no unique key and is not checked.
@@ -2158,6 +2164,8 @@ plain script runs exactly as before; a script with no inline annotation and no s
 analysis.
 
 **The console sees whole commands.** The editor hands the console filter one line at a time, so the
-filter holds an unfinished command (R's rule: the first syntax error is at the end of the input)
-and releases it whole. Otherwise strict mode could refuse the last line of a definition whose
+filter holds an unfinished command and releases it whole. "Unfinished" is
+`syntax::input_is_unfinished`: every syntax error is marked `incomplete` (an opener never closed,
+or raised with only trivia left), which the parser knows and a range check cannot, because an error
+at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
