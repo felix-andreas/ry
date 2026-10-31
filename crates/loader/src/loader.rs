@@ -33,14 +33,28 @@ use std::time::SystemTime;
 pub struct Loader {
     db: RootDatabase,
     packages: Vec<LoadedPackage>,
+    /// Size and modification time of each file as last read, per package root.
+    stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>)>>,
+}
+
+/// A package's sources as the loader reads them.
+#[derive(Debug, Clone, Default)]
+pub struct PackageInputs {
+    pub description: String,
+    pub namespace: String,
+    /// `R/` files in collation order, by path relative to the root. `None` keeps the text the
+    /// loader already has for that path.
+    pub files: Vec<(String, Option<String>)>,
+    /// Of `R/sysdata.rda`.
+    pub sysdata: Option<u64>,
+    /// Of the sources under `src/`.
+    pub compiled: Option<u64>,
 }
 
 struct LoadedPackage {
     root: PathBuf,
     sources: PackageSources,
     files: FxHashMap<String, SourceFile>,
-    /// Size and modification time per file as last read.
-    stamps: FxHashMap<String, (u64, Option<SystemTime>)>,
     /// What the session has loaded, as confirmed by [`Loader::commit`].
     committed: Option<LoadState>,
     /// The state a plan was made for, until the backend confirms it applied.
@@ -94,6 +108,9 @@ pub struct Plan {
     /// `Some` when compiled code must be (re)built and loaded.
     pub dynamic_libraries: Option<Vec<DynamicLibraryDirective>>,
     pub namespace: NamespaceSpec,
+    /// The export directives changed, so the exports need a resync even when nothing else
+    /// does.
+    pub exports_changed: bool,
     pub run_on_load: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
@@ -195,7 +212,20 @@ impl Loader {
     /// one. The plan stays pending until [`Loader::commit`].
     pub fn plan(&mut self, path: &Path, full: bool) -> Result<Plan, LoadError> {
         let root = find_package_root(path)?;
-        let (position, changed) = self.refresh(&root)?;
+        let inputs = self.read(&root)?;
+        self.plan_inputs(&root, inputs, full)
+    }
+
+    /// Plans a load of the package at `root` from sources the caller read.
+    pub fn plan_inputs(
+        &mut self,
+        root: &Path,
+        inputs: PackageInputs,
+        full: bool,
+    ) -> Result<Plan, LoadError> {
+        let root = root.to_path_buf();
+        let (position, changed) =
+            self.sync(&root, inputs.description, inputs.namespace, inputs.files)?;
         self.warm(&changed);
         let package = &self.packages[position];
         let index = package_index(&self.db, package.sources);
@@ -212,8 +242,8 @@ impl Loader {
         let next = LoadState {
             root: root.clone(),
             index: index.clone(),
-            sysdata: file_hash(&root.join("R").join("sysdata.rda"))?,
-            compiled: compiled_fingerprint(&root.join("src"))?,
+            sysdata: inputs.sysdata,
+            compiled: inputs.compiled,
         };
         let previous = if full {
             None
@@ -262,7 +292,13 @@ impl Loader {
 
     /// Adopts a state saved by an earlier process as what is loaded.
     pub fn restore(&mut self, state: LoadState) -> Result<(), LoadError> {
-        let (position, _) = self.refresh(&state.root)?;
+        let inputs = self.read(&state.root)?;
+        let (position, _) = self.sync(
+            &state.root,
+            inputs.description,
+            inputs.namespace,
+            inputs.files,
+        )?;
         self.packages[position].committed = Some(state);
         Ok(())
     }
@@ -298,13 +334,9 @@ impl Loader {
         });
     }
 
-    /// Syncs the analysis inputs with the disk, setting only what changed, and returns the
-    /// package's position. A file whose size and modification time are unchanged is not read.
-    ///
-    /// Files load at high durability and drop to low on their first edit. Salsa skips
-    /// verifying a memo that depends only on inputs of a durability nothing changed at, so a
-    /// reload re-derives the package without revisiting the files nobody touched.
-    fn refresh(&mut self, root: &Path) -> Result<(usize, Vec<SourceFile>), LoadError> {
+    /// Reads the package's sources. A file whose size and modification time are unchanged
+    /// since the last read is not read again.
+    fn read(&mut self, root: &Path) -> Result<PackageInputs, LoadError> {
         let description = read(&root.join("DESCRIPTION"))?;
         let namespace = match fs::read_to_string(root.join("NAMESPACE")) {
             Ok(text) => text,
@@ -312,28 +344,46 @@ impl Loader {
             Err(error) => return Err(LoadError::Io(root.join("NAMESPACE"), error)),
         };
         let paths = collated_r_files(root, &parse_description_collate(&description))?;
-        let known = self
-            .packages
-            .iter()
-            .find(|package| package.root == root)
-            .map(|package| &package.stamps);
-        let mut texts = Vec::with_capacity(paths.len());
+        let known = self.stamps.entry(root.to_path_buf()).or_default();
+        let mut files = Vec::with_capacity(paths.len());
         let mut stamps = FxHashMap::default();
-        for path in &paths {
-            let absolute = root.join(path);
+        for path in paths {
+            let absolute = root.join(&path);
             let stamp = fs::metadata(&absolute)
                 .map(|metadata| (metadata.len(), metadata.modified().ok()))
                 .map_err(|error| LoadError::Io(absolute.clone(), error))?;
-            let unchanged =
-                stamp.1.is_some() && known.is_some_and(|known| known.get(path) == Some(&stamp));
-            texts.push(if unchanged {
+            let unchanged = stamp.1.is_some() && known.get(&path) == Some(&stamp);
+            let text = if unchanged {
                 None
             } else {
                 Some(read(&absolute)?.replace("\r\n", "\n").replace('\r', "\n"))
-            });
+            };
             stamps.insert(path.clone(), stamp);
+            files.push((path, text));
         }
+        *known = stamps;
+        Ok(PackageInputs {
+            description,
+            namespace,
+            files,
+            sysdata: file_hash(&root.join("R").join("sysdata.rda"))?,
+            compiled: compiled_fingerprint(&root.join("src"))?,
+        })
+    }
 
+    /// Sets the analysis inputs to `files`, writing only what changed, and returns the
+    /// package's position and the files whose text is new.
+    ///
+    /// Files load at high durability and drop to low on their first edit. Salsa skips
+    /// verifying a memo that depends only on inputs of a durability nothing changed at, so a
+    /// reload re-derives the package without revisiting the files nobody touched.
+    fn sync(
+        &mut self,
+        root: &Path,
+        description: String,
+        namespace: String,
+        texts: Vec<(String, Option<String>)>,
+    ) -> Result<(usize, Vec<SourceFile>), LoadError> {
         let position = match self
             .packages
             .iter()
@@ -342,12 +392,14 @@ impl Loader {
             Some(position) => position,
             None => {
                 let sources =
-                    PackageSources::new(&self.db, Vec::new(), String::new(), String::new());
+                    PackageSources::builder(Vec::new(), namespace.clone(), description.clone())
+                        .namespace_durability(Durability::HIGH)
+                        .description_durability(Durability::HIGH)
+                        .new(&self.db);
                 self.packages.push(LoadedPackage {
                     root: root.to_path_buf(),
                     sources,
                     files: FxHashMap::default(),
-                    stamps: FxHashMap::default(),
                     committed: None,
                     pending: None,
                 });
@@ -356,9 +408,9 @@ impl Loader {
         };
         let db = &mut self.db;
         let package = &mut self.packages[position];
-        let mut files = Vec::with_capacity(paths.len());
+        let mut files = Vec::with_capacity(texts.len());
         let mut changed = Vec::new();
-        for (path, text) in paths.into_iter().zip(texts) {
+        for (path, text) in texts {
             let file = match (package.files.get(&path), text) {
                 (Some(&file), None) => file,
                 (Some(&file), Some(text)) => {
@@ -383,7 +435,6 @@ impl Loader {
             };
             files.push(PackageFile { path, file });
         }
-        package.stamps = stamps;
         package
             .files
             .retain(|path, _| files.iter().any(|file| &file.path == path));
@@ -462,6 +513,9 @@ pub fn diff<'text>(
         return Plan::unchanged(next);
     }
     let index = &*next.index;
+    // When `Collate` reorders files, statements in different files swap their order, which
+    // only a fresh load replays faithfully.
+    let previous = previous.filter(|previous| same_relative_order(&previous.index, index));
     let full = previous.is_none();
     let empty = PackageIndex::default();
     let old = previous.map_or(&empty, |previous| &*previous.index);
@@ -608,47 +662,147 @@ pub fn diff<'text>(
         }
     }
 
-    // Eager items in dirty files are matched by content within their file, so inserting a
-    // statement does not rerun the statements after it.
-    let mut unmatched_old: FxHashMap<(&str, u64), usize> = FxHashMap::default();
+    // Eager items in a dirty file are matched to the file's old eager items by content, in
+    // order (a longest common subsequence), so inserting a statement does not rerun the ones
+    // after it, while swapping two statements reruns one of them and so restores which
+    // writer comes last.
+    let mut old_eager: FxHashMap<&str, Vec<&IndexedItem>> = FxHashMap::default();
     for (path, item) in &old_items {
         if old.lazy_name(item).is_none() {
-            *unmatched_old.entry((path.as_str(), item.hash)).or_default() += 1;
+            old_eager.entry(path.as_str()).or_default().push(item);
         }
     }
-    let mut run = Vec::new();
-    let mut run_registrations: BTreeSet<&Registration> = BTreeSet::new();
-    for (file, dirty) in index.files.iter().zip(&new_dirty) {
-        for item in &file.items.items {
-            if index.lazy_name(item).is_some() {
-                continue;
-            }
-            let stale = !changed.is_empty() && item.reads.iter().any(|name| changed.contains(name));
-            let fresh = if *dirty {
-                match unmatched_old.get_mut(&(file.path.as_str(), item.hash)) {
-                    Some(count) if *count > 0 => {
-                        *count -= 1;
-                        false
-                    }
-                    _ => true,
-                }
-            } else {
-                // A definition in a clean file that stopped being lazy now runs in order.
-                item.function
+    let mut fresh: FxHashSet<(usize, usize)> = FxHashSet::default();
+    let mut vanished: Vec<&IndexedItem> = Vec::new();
+    for (file_position, (file, dirty)) in index.files.iter().zip(&new_dirty).enumerate() {
+        let eager_positions: Vec<usize> = file
+            .items
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| index.lazy_name(item).is_none())
+            .map(|(position, _)| position)
+            .collect();
+        if !*dirty {
+            // A definition in a clean file that stopped being lazy now runs in order.
+            for &position in &eager_positions {
+                let item = &file.items.items[position];
+                if item
+                    .function
                     .as_ref()
                     .is_some_and(|(name, _)| flipped.contains(name.as_str()))
-            };
-            if full || fresh || stale {
-                changed.extend(item.binds.iter().cloned());
-                run_registrations.extend(&item.registrations);
-                run.push(eager_code(&file.path, item));
+                {
+                    fresh.insert((file_position, position));
+                }
+            }
+            continue;
+        }
+        let previous = old_eager.remove(file.path.as_str()).unwrap_or_default();
+        let current: Vec<u64> = eager_positions
+            .iter()
+            .map(|&position| file.items.items[position].hash)
+            .collect();
+        let earlier: Vec<u64> = previous.iter().map(|item| item.hash).collect();
+        let (kept_new, kept_old) = common_subsequence(&earlier, &current);
+        for (index_in_file, &position) in eager_positions.iter().enumerate() {
+            if !kept_new.contains(&index_in_file) {
+                fresh.insert((file_position, position));
             }
         }
+        vanished.extend(
+            previous
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| !kept_old.contains(position))
+                .map(|(_, item)| *item),
+        );
     }
+    // Old eager items of files that are gone, or are no longer package code.
+    vanished.extend(old_eager.into_values().flatten());
+    // What a vanished statement wrote must be written again by whoever else writes it, or
+    // its value would survive; the same goes for the old version of an edited statement.
+    for item in &vanished {
+        changed.extend(item.binds.iter().cloned());
+    }
+    // A statement reruns when it is new, when it read a binding that changed (it captured the
+    // old value), or when it writes one (the last writer in collation order must win again).
+    // A rerun statement must also see what it saw at load: when it reads a name that it or a
+    // later statement rewrites, as `f <- memoise(f)` does, the earlier writers of that name
+    // rerun first. Otherwise it would read the final value and, here, memoise twice.
+    let eager: Vec<(&str, &IndexedItem, bool)> = index
+        .files
+        .iter()
+        .enumerate()
+        .flat_map(|(file_position, file)| {
+            let fresh = &fresh;
+            file.items
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| index.lazy_name(item).is_none())
+                .map(move |(item_position, item)| {
+                    let is_fresh = fresh.contains(&(file_position, item_position));
+                    (file.path.as_str(), item, is_fresh)
+                })
+        })
+        .collect();
+    let mut writers: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+    for (position, (_, item, _)) in eager.iter().enumerate() {
+        for name in &item.binds {
+            writers.entry(name).or_default().push(position);
+        }
+    }
+    let mut rerun: Vec<bool> = eager.iter().map(|(_, _, fresh)| full || *fresh).collect();
+    loop {
+        let changed_before = changed.len();
+        let mut grew = false;
+        for (position, (_, item, _)) in eager.iter().enumerate() {
+            if !rerun[position]
+                && !changed.is_empty()
+                && item
+                    .reads
+                    .iter()
+                    .chain(&item.binds)
+                    .any(|name| changed.contains(name))
+            {
+                rerun[position] = true;
+                grew = true;
+            }
+            if !rerun[position] {
+                continue;
+            }
+            changed.extend(item.binds.iter().cloned());
+            for name in &item.reads {
+                let Some(positions) = writers.get(name.as_str()) else {
+                    continue;
+                };
+                if positions.last().is_some_and(|last| *last >= position) {
+                    for &earlier in positions.iter().take_while(|earlier| **earlier < position) {
+                        grew |= !rerun[earlier];
+                        rerun[earlier] = true;
+                    }
+                }
+            }
+        }
+        // A statement earlier in the order may read what a later one just changed.
+        if !grew && changed.len() == changed_before {
+            break;
+        }
+    }
+    let run: Vec<Code> = eager
+        .iter()
+        .zip(&rerun)
+        .filter(|(_, rerun)| **rerun)
+        .map(|((path, item, _), _)| eager_code(path, item))
+        .collect();
+    // Another statement may make the same registration, which then stays.
+    let registered: BTreeSet<&Registration> = eager
+        .iter()
+        .flat_map(|(_, item, _)| &item.registrations)
+        .collect();
 
     let mut remove = BTreeSet::new();
-    let mut unregister = BTreeSet::new();
-    for (path, item) in &old_items {
+    for (_, item) in &old_items {
         if old.lazy_name(item).is_some() {
             remove.extend(
                 item.binds
@@ -656,15 +810,10 @@ pub fn diff<'text>(
                     .filter(|name| !index.names.contains_key(*name))
                     .cloned(),
             );
-            continue;
         }
-        let Some(count) = unmatched_old.get_mut(&(path.as_str(), item.hash)) else {
-            continue;
-        };
-        if *count == 0 {
-            continue;
-        }
-        *count -= 1;
+    }
+    let mut unregister = BTreeSet::new();
+    for item in &vanished {
         remove.extend(
             item.binds
                 .iter()
@@ -674,7 +823,7 @@ pub fn diff<'text>(
         unregister.extend(
             item.registrations
                 .iter()
-                .filter(|registration| !run_registrations.contains(registration))
+                .filter(|registration| !registered.contains(registration))
                 .cloned(),
         );
     }
@@ -760,9 +909,67 @@ pub fn diff<'text>(
         dynamic_libraries: (full || compiled_changed)
             .then(|| index.namespace.dynamic_libraries.clone())
             .filter(|libraries| !libraries.is_empty() || !full),
+        exports_changed: full || exports_differ(&index.namespace, &old.namespace),
         namespace: index.namespace.clone(),
         warnings,
     }
+}
+
+/// Whether the files both indexes hold appear in the same order in each.
+fn same_relative_order(old: &PackageIndex, new: &PackageIndex) -> bool {
+    let old_paths: FxHashSet<&str> = old.files.iter().map(|file| file.path.as_str()).collect();
+    let new_paths: FxHashSet<&str> = new.files.iter().map(|file| file.path.as_str()).collect();
+    old.files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| new_paths.contains(path))
+        .eq(new
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .filter(|path| old_paths.contains(path)))
+}
+
+/// The positions in `new` and in `old` of a longest common subsequence of the two.
+fn common_subsequence(old: &[u64], new: &[u64]) -> (FxHashSet<usize>, FxHashSet<usize>) {
+    // Equal sequences, the common case for a file whose functions alone changed, need no table.
+    if old == new {
+        return ((0..new.len()).collect(), (0..old.len()).collect());
+    }
+    let width = new.len() + 1;
+    let mut lengths = vec![0u32; (old.len() + 1) * width];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            lengths[i * width + j] = if old[i] == new[j] {
+                lengths[(i + 1) * width + j + 1] + 1
+            } else {
+                lengths[(i + 1) * width + j].max(lengths[i * width + j + 1])
+            };
+        }
+    }
+    let (mut kept_new, mut kept_old) = (FxHashSet::default(), FxHashSet::default());
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() && j < new.len() {
+        if old[i] == new[j] {
+            kept_old.insert(i);
+            kept_new.insert(j);
+            i += 1;
+            j += 1;
+        } else if lengths[(i + 1) * width + j] >= lengths[i * width + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    (kept_new, kept_old)
+}
+
+fn exports_differ(new: &NamespaceSpec, old: &NamespaceSpec) -> bool {
+    new.exports != old.exports
+        || new.export_patterns != old.export_patterns
+        || new.export_classes != old.export_classes
+        || new.export_class_patterns != old.export_class_patterns
+        || new.export_methods != old.export_methods
 }
 
 impl Plan {
@@ -786,6 +993,7 @@ impl Plan {
             s3_declared: None,
             dynamic_libraries: None,
             namespace: state.index.namespace.clone(),
+            exports_changed: false,
             run_on_load: false,
             warnings: Vec::new(),
         }
@@ -825,6 +1033,7 @@ impl Plan {
             && self.s3_register.is_empty()
             && self.s3_unregister.is_empty()
             && self.dynamic_libraries.is_none()
+            && !self.exports_changed
     }
 }
 

@@ -1,0 +1,68 @@
+#==== directives
+#---- every_directive_a_loader_honors
+#~~~~ NAMESPACE
+import(stats, except = c(filter, lag))
+import(utils)
+importFrom(R6, R6Class)
+importFrom("rlang", `%||%`, abort)
+importClassesFrom(methods, "envRefClass")
+importMethodsFrom(Matrix, show)
+export(hello, "world")
+exportPattern("^[^\\.]")
+exportClasses(Point)
+exportMethods(area)
+S3method(print, money)
+S3method(format, money, money_format)
+S3method(vctrs::vec_ptype2, money.money)
+useDynLib(demo, .registration = TRUE, .fixes = "C_")
+useDynLib(other, fast = slow_routine, plain)
+#~~~~ R/a.R
+hello <- function() 1
+#++++
+package demo 0.1.0
+import stats except filter lag
+import utils
+import from R6: R6Class
+import from rlang: %||% abort
+import classes from methods: envRefClass
+import methods from Matrix: show
+export hello world
+export pattern ^[^\.]
+export classes Point
+export methods area
+S3 method print for money is print.money
+S3 method format for money is money_format
+S3 method vctrs::vec_ptype2 for money.money is vec_ptype2.money.money
+dynamic library demo registration=true fixes="C_" symbols []
+dynamic library other registration=false fixes="" symbols [fast=slow_routine plain=plain]
+== R/a.R
+1:0 lazy hello function at 1:9
+
+#---- a_conditional_directive_is_reported_unsupported
+#~~~~ NAMESPACE
+export(always)
+if (.Platform$OS.type == "windows") export(sometimes)
+#~~~~ R/a.R
+always <- function() 1
+#++++
+package demo 0.1.0
+export always
+unsupported if (.Platform$OS.type == "windows") export(sometimes)
+== R/a.R
+1:0 lazy always function at 1:10
+
+#==== description
+#---- name_version_and_depends_come_from_description
+#~~~~ DESCRIPTION
+Package: carrier
+Version: 2.3.1
+Depends: R (>= 4.1),
+    methods,
+    utils (>= 4.0)
+#~~~~ R/a.R
+f <- function() 1
+#++++
+package carrier 2.3.1
+depends methods utils
+== R/a.R
+1:0 lazy f function at 1:5

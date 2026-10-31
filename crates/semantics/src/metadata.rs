@@ -619,14 +619,42 @@ fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
                 .children_with_tokens()
                 .filter_map(|element| element.into_token())
                 .find(|token| token.kind() == SyntaxKind::STRING)?;
-            let text = token.text();
-            let content = text
-                .trim_start_matches(['"', '\''])
-                .trim_end_matches(['"', '\'']);
-            Some((content.to_owned(), value.text_range()))
+            Some((string_content(token.text()), value.text_range()))
         }
+        // `S3method(pkg::generic, class)` names a generic in another namespace.
+        SyntaxKind::NAMESPACE_EXPR => Some((value.text().to_string(), value.text_range())),
         _ => None,
     }
+}
+
+/// A string literal's value: quotes removed and R's escapes resolved, so `"^[^\\.]"` is the
+/// regex `^[^\.]`. An escape this does not know keeps its backslash.
+pub fn string_content(literal: &str) -> String {
+    let inner = literal
+        .strip_prefix(['"', '\''])
+        .and_then(|inner| inner.strip_suffix(['"', '\'']))
+        .unwrap_or(literal);
+    let mut out = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            out.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some(escaped @ ('\\' | '"' | '\'' | '`' | ' ')) => out.push(escaped),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

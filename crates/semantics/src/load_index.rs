@@ -7,7 +7,7 @@
 
 use crate::metadata::{
     Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
-    parse_namespace_spec,
+    parse_namespace_spec, string_content,
 };
 use crate::{Db, Item, ItemKind, SourceFile, item_naming, item_spans, item_syntax, parse};
 use rowan::{GreenNodeData, Language, NodeOrToken};
@@ -428,9 +428,7 @@ fn string_literal(node: &SyntaxNode) -> Option<String> {
     if token.kind() != SyntaxKind::STRING {
         return None;
     }
-    let text = token.text();
-    let inner = text.get(1..text.len().checked_sub(1)?)?;
-    Some(inner.to_owned())
+    Some(string_content(token.text()))
 }
 
 /// Registrations by a top-level call, bare or assigned (`Gen <- setClass("Gen", ...)`).
