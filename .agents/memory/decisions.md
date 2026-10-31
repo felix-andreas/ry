@@ -1849,9 +1849,10 @@ primitives, and nothing built or installed packages.
   `etc/Makeconf` written for ry, `share/make/shlib.mk`, and a `bin/R` that runs `ry-rcmd`, so
   `configure` scripts asking `R CMD config` get ry's toolchain. A source install compiles `src/`
   as `R CMD INSTALL` does and records `RyBuilt:`; the R-level half (lazy-load database, help,
-  `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript` runs GNU R's
-  `Rscript` for the R snippets configure scripts and `Makevars` evaluate: an explicit build-time
-  delegation that the interpreter replaces, not a fallback on failure.
+  `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript`, and `bin/R`
+  for anything but `R CMD` and `R RHOME`, run GNU R for the R code configure scripts and
+  `Makevars` evaluate (`R -f tools/examples.R`): an explicit build-time delegation that the
+  interpreter replaces, not a fallback on failure.
 - **Rmath, Applic, LINPACK and the Fortran helpers are Rust written from the published
   algorithms** (`rmath.rs`, `applic.rs`, `linpack.rs`, `utils.rs`), never translated from GNU R,
   which is GPL. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random

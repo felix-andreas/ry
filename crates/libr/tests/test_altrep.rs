@@ -182,6 +182,19 @@ fn defaults_fall_back_as_gnu_r_s_do() {
         )
         .expect("region");
     assert_eq!(r.length(region), 0);
+    // A start outside the vector copies nothing, for ALTREP and ordinary vectors alike, instead
+    // of reading before or past the data.
+    for vector in [x, r.integer(7)] {
+        for start in [-2, 9] {
+            let region = r
+                .call(
+                    "altreptest_integer_region",
+                    &[vector, r.integer(start), r.integer(10)],
+                )
+                .expect("region");
+            assert_eq!(r.length(region), 0, "start {start}");
+        }
+    }
     // A class without Sum, Min or Max has no answer.
     let sums = r.call("altreptest_sums", &[x]).expect("sums");
     assert_eq!(r.element(sums, 0), r.nil());

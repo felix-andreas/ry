@@ -84,10 +84,11 @@ pub struct HomeSources<'a> {
     pub libr: &'a Path,
     /// The `ry-rcmd` binary that `bin/R` runs.
     pub rcmd: &'a Path,
-    /// GNU R's `Rscript`, which `bin/Rscript` runs for the R code a `configure` script or
-    /// `Makevars` evaluates (`Rcpp:::CxxFlags()`), until ry's interpreter can run it. `None`
-    /// makes `bin/Rscript` fail with a message that says so.
-    pub gnu_rscript: Option<&'a Path>,
+    /// GNU R's `bin` directory. `bin/Rscript`, and `bin/R` for anything but `R CMD` and
+    /// `R RHOME`, run GNU R there for the R code a `configure` script or `Makevars` evaluates
+    /// (`Rcpp:::CxxFlags()`, `R -f tools/examples.R`), until ry's interpreter can run it. `None`
+    /// makes them fail with a message that says so.
+    pub gnu_r_bin: Option<&'a Path>,
     pub toolchain: Toolchain,
 }
 
@@ -104,25 +105,25 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
     write(&root.join("etc/Makeconf"), &makeconf(root, &sources.toolchain))?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     let rcmd = sources.rcmd.display();
+    // Each front end hands R code to GNU R, without ry's R_HOME, until the interpreter runs it.
+    let delegate = |program: &str| match sources.gnu_r_bin {
+        Some(bin) => format!("unset R_HOME\nexec '{}' \"$@\"\n", bin.join(program).display()),
+        None => format!("echo '{program}: ry cannot run R code without its interpreter' >&2\nexit 1\n"),
+    };
     write_script(
         &root.join("bin/R"),
         &format!(
             "#!/bin/sh\n# ry's R front end: R CMD INSTALL, SHLIB and config, and R RHOME.\n\
-             R_HOME='{}'\nexport R_HOME\nexec '{rcmd}' \"$@\"\n",
-            root.display()
+             case \"$1\" in\nCMD|RHOME)\n    R_HOME='{}'\n    export R_HOME\n    exec '{rcmd}' \"$@\"\n    ;;\n\
+             esac\n{}",
+            root.display(),
+            delegate("R")
         ),
     )?;
-    let rscript = match sources.gnu_rscript {
-        Some(rscript) => format!(
-            "#!/bin/sh\n# R code that configure scripts and Makevars evaluate runs in GNU R until \
-             ry's interpreter can run it.\nunset R_HOME\nexec '{}' \"$@\"\n",
-            rscript.display()
-        ),
-        None => "#!/bin/sh\necho 'Rscript: ry cannot run R code without its interpreter' >&2\n\
-                 exit 1\n"
-            .to_owned(),
-    };
-    write_script(&root.join("bin/Rscript"), &rscript)
+    write_script(
+        &root.join("bin/Rscript"),
+        &format!("#!/bin/sh\n{}", delegate("Rscript")),
+    )
 }
 
 fn write(path: &Path, text: &str) -> Result<()> {

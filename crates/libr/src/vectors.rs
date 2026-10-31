@@ -1776,7 +1776,11 @@ unsafe fn duplicated_flags(
         }
         let earlier = seen.entry(key).or_default();
         let duplicate = if list {
+            // An ALTREP list's `Elt` may allocate each element afresh, so the element compared
+            // against is rooted while the next one is fetched.
+            let mark = runtime().heap.handle_mark();
             let element = sexp_elt(object, index)?;
+            runtime().heap.root(element);
             let mut found = false;
             for &other in earlier.iter() {
                 if identical(element, sexp_elt(object, other)?, 0)? {
@@ -1784,6 +1788,7 @@ unsafe fn duplicated_flags(
                     break;
                 }
             }
+            runtime().heap.release_handles(mark);
             found
         } else {
             !earlier.is_empty()

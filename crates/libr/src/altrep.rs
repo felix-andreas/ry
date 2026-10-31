@@ -461,7 +461,11 @@ pub unsafe fn get_region<T: Element>(
     buffer: *mut T,
 ) -> ApiResult<R_xlen_t> {
     let size = vectors::xlength(object)?;
-    let copied = count.min(size - start).max(0);
+    // A start outside the vector copies nothing rather than reading before or past its data.
+    if start < 0 || start > size || count < 0 {
+        return Ok(0);
+    }
+    let copied = count.min(size - start);
     let source = if object.is_altrep() {
         dataptr_or_null(object)? as *const T
     } else {
@@ -1339,7 +1343,10 @@ unsafe fn sequence_region<T>(
     convert: impl Fn(f64) -> T,
 ) -> ApiResult<R_xlen_t> {
     let (length, first, increment) = sequence_info(object);
-    let copied = count.min(length - start).max(0);
+    if start < 0 || start > length || count < 0 {
+        return Ok(0);
+    }
+    let copied = count.min(length - start);
     let buffer = buffer as *mut T;
     for index in 0..copied {
         *buffer.add(index as usize) = convert(first + increment * (start + index) as f64);
@@ -1517,6 +1524,9 @@ unsafe fn deferred_length(object: Sexp) -> ApiResult<R_xlen_t> {
 }
 
 unsafe fn deferred_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
+    if index < 0 || index >= deferred_length(object)? {
+        return Err(error("attempt to access an element of a deferred string out of bounds"));
+    }
     let nil = runtime().nil();
     let converted = object.cdr();
     if converted != nil {

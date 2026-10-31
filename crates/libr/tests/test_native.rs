@@ -595,3 +595,17 @@ fn edge_cases_gnu_r_accepts() {
         before + 1
     );
 }
+
+/// `R_maphashC` visits every entry it collected even when a callback removes the rest from the
+/// table and forces a collection, so the later callbacks see the keys and values stored.
+#[test]
+fn hash_table_walk_keeps_unvisited_entries_alive() {
+    let r = r();
+    rytest(&r);
+    r.call("rytest_maphash_fill", &[]).expect("fill");
+    r.stress(true);
+    let corrupt = r.call("rytest_maphash", &[]).expect("maphash");
+    r.stress(false);
+    assert_eq!(r.integers(corrupt), vec![0]);
+    assert_eq!(r.runtime_protect_depth(), 0);
+}

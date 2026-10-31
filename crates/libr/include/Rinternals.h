@@ -242,6 +242,7 @@ SEXP SETCADR(SEXP x, SEXP y);
 SEXP SETCADDR(SEXP x, SEXP y);
 SEXP SETCADDDR(SEXP x, SEXP y);
 SEXP SETCAD4R(SEXP e, SEXP y);
+#define CONS(a, b) Rf_cons((a), (b))
 #define LCONS(a, b) Rf_lcons((a), (b))
 SEXP Rf_cons(SEXP, SEXP);
 SEXP Rf_lcons(SEXP, SEXP);
@@ -629,8 +630,10 @@ SEXP R_duplicateAsResizable(SEXP x);
 typedef enum { Bytes, Chars, Width } nchar_type;
 int R_nchar(SEXP string, nchar_type type, Rboolean allowNA, Rboolean keepNA, const char *msg_name);
 
-/* Hash tables. */
+/* Hash tables. A table compares keys as identical() does, or by address. */
 typedef struct { SEXP cell; } R_hashtab_type;
+#define HT_TYPE_IDENTICAL 0
+#define HT_TYPE_ADDRESS 1
 R_hashtab_type R_mkhashtab(int type, int size);
 R_hashtab_type R_asHashtable(SEXP h);
 SEXP R_HashtabSEXP(R_hashtab_type h);

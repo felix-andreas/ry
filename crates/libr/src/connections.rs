@@ -239,7 +239,12 @@ unsafe fn resolve(object: Sexp, not_connection: &str) -> ApiResult<(usize, Rconn
             *object.slice::<i32>().first().ok_or_else(invalid)?
         }
         SexpType::Real if object.length() >= 1 => {
-            *object.slice::<f64>().first().ok_or_else(invalid)? as i32
+            let number = *object.slice::<f64>().first().ok_or_else(invalid)?;
+            // `as` turns NaN into 0, which would name stdin.
+            if number.fract() != 0.0 || !(0.0..=i32::MAX as f64).contains(&number) {
+                return Err(invalid());
+            }
+            number as i32
         }
         _ => return Err(invalid()),
     };

@@ -33,14 +33,14 @@ fn home() -> &'static PathBuf {
             .parent()
             .expect("the profile directory")
             .join("ry-rcmd");
-        let rscript = which("Rscript");
+        let gnu_r_bin = which("Rscript").and_then(|rscript| rscript.parent().map(Path::to_path_buf));
         rcmd::assemble(
             &root,
             &rcmd::HomeSources {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("include"),
                 libr: &deps.join("libR.so"),
                 rcmd: &rcmd,
-                gnu_rscript: rscript.as_deref(),
+                gnu_r_bin: gnu_r_bin.as_deref(),
                 toolchain: rcmd::Toolchain::default(),
             },
         )

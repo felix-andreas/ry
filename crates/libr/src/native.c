@@ -708,7 +708,8 @@ RY_EXPORT fd_set *R_checkActivity(int usec, int ignore_stdin)
         highest = STDIN_FILENO;
     }
     for (RyInputHandler *input = R_InputHandlers; input != NULL; input = input->next) {
-        if (input->active && input->fileDescriptor >= 0) {
+        /* An fd_set holds descriptors below FD_SETSIZE only; a larger one would write past it. */
+        if (input->active && input->fileDescriptor >= 0 && input->fileDescriptor < FD_SETSIZE) {
             FD_SET(input->fileDescriptor, &ready);
             if (input->fileDescriptor > highest)
                 highest = input->fileDescriptor;
@@ -931,7 +932,9 @@ RY_EXPORT void Rf_jump_to_toplevel(void)
     Rf_error("%s", "");
 }
 
-/* Task callbacks run after each top-level task; the interpreter calls ry_run_task_callbacks. */
+/* Task callbacks run after each top-level task, when the interpreter calls
+   eval::run_task_callbacks. A callback may remove callbacks, its own included, while the list
+   runs, so removal during a run only marks the node and the run frees it afterwards. */
 
 typedef Rboolean (*RyTaskCallback)(SEXP, SEXP, Rboolean, Rboolean, void *);
 
@@ -940,10 +943,12 @@ typedef struct RyToplevelCallback {
     void *data;
     void (*finalizer)(void *data);
     char *name;
+    int removed;
     struct RyToplevelCallback *next;
 } RyToplevelCallback;
 
 static RyToplevelCallback *ry_task_callbacks = NULL;
+static int ry_task_callbacks_running = 0;
 
 static void ry_free_task_callback(RyToplevelCallback *callback)
 {
@@ -951,6 +956,29 @@ static void ry_free_task_callback(RyToplevelCallback *callback)
         callback->finalizer(callback->data);
     free(callback->name);
     free(callback);
+}
+
+/* Unlinks and frees `*link`, or only marks it while a run holds pointers to the nodes. */
+static void ry_remove_task_callback(RyToplevelCallback **link)
+{
+    RyToplevelCallback *callback = *link;
+    if (ry_task_callbacks_running) {
+        callback->removed = 1;
+        return;
+    }
+    *link = callback->next;
+    ry_free_task_callback(callback);
+}
+
+static void ry_sweep_task_callbacks(void)
+{
+    RyToplevelCallback **link = &ry_task_callbacks;
+    while (*link != NULL) {
+        if ((*link)->removed)
+            ry_remove_task_callback(link);
+        else
+            link = &(*link)->next;
+    }
 }
 
 RY_EXPORT RyToplevelCallback *Rf_addTaskCallback(RyTaskCallback cb, void *data,
@@ -966,10 +994,10 @@ RY_EXPORT RyToplevelCallback *Rf_addTaskCallback(RyTaskCallback cb, void *data,
     int position = 1;
     RyToplevelCallback **link = &ry_task_callbacks;
     while (*link != NULL) {
+        if (!(*link)->removed)
+            position++;
         link = &(*link)->next;
-        position++;
     }
-    *link = callback;
     if (name != NULL) {
         callback->name = strdup(name);
     } else {
@@ -977,6 +1005,11 @@ RY_EXPORT RyToplevelCallback *Rf_addTaskCallback(RyTaskCallback cb, void *data,
         snprintf(generated, sizeof generated, "%d", position);
         callback->name = strdup(generated);
     }
+    if (callback->name == NULL) {
+        free(callback);
+        Rf_error("cannot allocate a task callback");
+    }
+    *link = callback;
     if (pos != NULL)
         *pos = position;
     return callback;
@@ -984,44 +1017,71 @@ RY_EXPORT RyToplevelCallback *Rf_addTaskCallback(RyTaskCallback cb, void *data,
 
 RY_EXPORT Rboolean Rf_removeTaskCallbackByIndex(int index)
 {
-    RyToplevelCallback **link = &ry_task_callbacks;
-    for (int position = 1; *link != NULL; position++, link = &(*link)->next) {
+    int position = 1;
+    for (RyToplevelCallback **link = &ry_task_callbacks; *link != NULL; link = &(*link)->next) {
+        if ((*link)->removed)
+            continue;
         if (position == index) {
-            RyToplevelCallback *callback = *link;
-            *link = callback->next;
-            ry_free_task_callback(callback);
+            ry_remove_task_callback(link);
             return TRUE;
         }
+        position++;
     }
     return FALSE;
 }
 
 RY_EXPORT Rboolean Rf_removeTaskCallbackByName(const char *name)
 {
+    if (name == NULL)
+        return FALSE;
     for (RyToplevelCallback **link = &ry_task_callbacks; *link != NULL; link = &(*link)->next) {
-        if (strcmp((*link)->name, name) == 0) {
-            RyToplevelCallback *callback = *link;
-            *link = callback->next;
-            ry_free_task_callback(callback);
+        if (!(*link)->removed && strcmp((*link)->name, name) == 0) {
+            ry_remove_task_callback(link);
             return TRUE;
         }
     }
     return FALSE;
 }
 
-/* Runs every task callback after a top-level task; one that returns FALSE is removed. */
-RY_EXPORT void ry_run_task_callbacks(SEXP expr, SEXP value, Rboolean succeeded, Rboolean visible)
+/* Runs every task callback once; one that returns FALSE is removed. A callback that raises an
+   error ends the run with status 1, after the removed nodes are freed. Callbacks added during
+   the run first run after the next task. */
+void ry_run_task_callbacks(SEXP expr, SEXP value, Rboolean succeeded, Rboolean visible,
+                           int *status)
 {
-    RyToplevelCallback **link = &ry_task_callbacks;
-    while (*link != NULL) {
-        RyToplevelCallback *callback = *link;
-        if (!callback->cb(expr, value, succeeded, visible, callback->data)) {
-            *link = callback->next;
-            ry_free_task_callback(callback);
-        } else {
-            link = &callback->next;
-        }
+    *status = 0;
+    if (ry_task_callbacks_running)
+        return;
+    RyToplevelCallback *last = NULL;
+    for (RyToplevelCallback *node = ry_task_callbacks; node != NULL; node = node->next)
+        last = node;
+    if (last == NULL)
+        return;
+    /* `volatile` because the loop variables are read again after a longjmp lands here. */
+    RyToplevelCallback *volatile callback = ry_task_callbacks;
+    RyToplevelCallback *const end = last;
+    RyContext context;
+    ry_context_push(&context);
+    ry_task_callbacks_running = 1;
+    if (setjmp(context.buffer)) {
+        ry_context_land(&context);
+        ry_task_callbacks_running = 0;
+        ry_sweep_task_callbacks();
+        *status = 1;
+        return;
     }
+    for (;;) {
+        RyToplevelCallback *current = callback;
+        if (!current->removed &&
+            !current->cb(expr, value, succeeded, visible, current->data))
+            current->removed = 1;
+        if (current == end)
+            break;
+        callback = current->next;
+    }
+    ry_context_pop(&context);
+    ry_task_callbacks_running = 0;
+    ry_sweep_task_callbacks();
 }
 
 /* R_maphashC's callback is native code; the status is unused because an error jumps instead. */

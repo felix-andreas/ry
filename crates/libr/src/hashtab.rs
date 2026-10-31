@@ -72,9 +72,11 @@ unsafe fn hash_value(
         return Ok(());
     }
     match value.kind() {
-        SexpType::Symbol | SexpType::Environment | SexpType::ExternalPtr | SexpType::Char => {
-            value.hash(hasher)
-        }
+        SexpType::Symbol | SexpType::Environment => value.hash(hasher),
+        // `identical()` compares the address an external pointer holds, not the object.
+        SexpType::ExternalPtr => (value.external_address() as usize).hash(hasher),
+        // Strings compare by their text, whatever encoding the bytes are in.
+        SexpType::Char => crate::strings::utf8_text(value)?.hash(hasher),
         SexpType::Logical | SexpType::Integer => {
             for index in 0..xlength(value)?.min(64) as usize {
                 crate::vectors::int_elt(value, index)?.hash(hasher);
@@ -97,7 +99,7 @@ unsafe fn hash_value(
         }
         SexpType::String => {
             for index in 0..xlength(value)?.min(64) as usize {
-                crate::vectors::sexp_elt(value, index)?.bytes().hash(hasher);
+                crate::strings::utf8_text(crate::vectors::sexp_elt(value, index)?)?.hash(hasher);
             }
         }
         SexpType::List | SexpType::Expression => {
@@ -271,13 +273,16 @@ pub unsafe extern "C" fn R_clrhash(table_value: Hashtab) {
 }
 
 /// The entries as (key, value) pairs, collected first so a callback that changes the table
-/// does not disturb the walk.
+/// does not disturb the walk. Every pair is rooted here, before any callback runs, because a
+/// callback may remove later entries from the table and then allocate.
 unsafe fn entries(cell: Sexp) -> Vec<(Sexp, Sexp)> {
     let buckets = cell.external_protected();
     let mut entries = Vec::new();
     for index in 0..buckets.length() as usize {
         let mut chain = buckets.element(index);
         while chain.kind() == SexpType::Pairlist {
+            runtime().heap.root(chain.tag());
+            runtime().heap.root(chain.car());
             entries.push((chain.tag(), chain.car()));
             chain = chain.cdr();
         }
@@ -292,8 +297,6 @@ pub unsafe extern "C" fn R_maphash(table_value: Hashtab, function: Sexp) -> Sexp
         let cell = table(table_value)?;
         let global = runtime().heap.known().global_env;
         for (key, value) in entries(cell) {
-            runtime().heap.root(key);
-            runtime().heap.root(value);
             crate::eval::apply_closure_or_primitive(function, &[key, value], global)?;
         }
         Ok(runtime().nil())
@@ -320,8 +323,6 @@ pub unsafe extern "C" fn R_maphashC(
     enter(|| {
         let cell = table(table_value)?;
         for (key, value) in entries(cell) {
-            runtime().heap.root(key);
-            runtime().heap.root(value);
             let mut status = 0;
             crate::boundary::with_native_scope(|| {
                 ry_maphash_call(function, key, value, data, &mut status);

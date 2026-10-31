@@ -10,7 +10,10 @@
 //! rather than approximated.
 
 use crate::{
-    boundary::{ApiResult, Unwind, call_native, enter, error, error_in, report, warn},
+    Rboolean,
+    boundary::{
+        ApiResult, Unwind, call_native, enter, error, error_in, report, warn, with_native_scope,
+    },
     dynload::{RoutineKind, find_routine},
     environments::{find_fun, find_var},
     globals::{R_ClassSymbol, R_DotsSymbol, R_NamesSymbol},
@@ -132,6 +135,38 @@ pub fn install_evaluator(evaluator: &'static dyn Evaluator) {
 
 pub fn evaluator() -> Option<&'static dyn Evaluator> {
     EVALUATOR.get()
+}
+
+unsafe extern "C" {
+    fn ry_run_task_callbacks(
+        expression: Sexp,
+        value: Sexp,
+        succeeded: Rboolean,
+        visible: Rboolean,
+        status: *mut c_int,
+    );
+}
+
+/// Runs the task callbacks packages registered with `Rf_addTaskCallback`. The interpreter calls
+/// this after each top-level task, as GNU R's REPL does; an error a callback raises comes back
+/// as `Err`.
+pub unsafe fn run_task_callbacks(
+    expression: Sexp,
+    value: Sexp,
+    succeeded: bool,
+    visible: bool,
+) -> ApiResult<()> {
+    with_native_scope(|| {
+        let mut status = 0;
+        ry_run_task_callbacks(
+            expression,
+            value,
+            succeeded as Rboolean,
+            visible as Rboolean,
+            &mut status,
+        );
+        status
+    })
 }
 
 /// The primitive with this index: the table above, then each subsystem's own table.
@@ -494,10 +529,20 @@ unsafe fn dot_c(
                 CArgument::Vector(copy)
             }
             SexpType::String => {
-                let length = xlength(value)? as usize;
+                // An ALTREP class may duplicate into another ALTREP object, so the copy is
+                // materialized: the routine writes back into ordinary storage.
+                let copy = crate::memory::duplicate(value, false)?;
+                runtime.heap.root(copy);
+                let copy = if copy.is_altrep() {
+                    crate::altrep::materialize(copy)?
+                } else {
+                    copy
+                };
+                runtime.heap.root(copy);
+                let length = xlength(copy)? as usize;
                 let mut strings = Vec::with_capacity(length);
                 for index in 0..length {
-                    let element = value.element(index);
+                    let element = copy.element(index);
                     if !na_ok && element == runtime.heap.known().na_string {
                         return Err(error_in(
                             call,
@@ -506,8 +551,6 @@ unsafe fn dot_c(
                     }
                     strings.push(crate::strings::arena_c_string(element.bytes())? as *mut c_char);
                 }
-                let copy = crate::memory::duplicate(value, false)?;
-                runtime.heap.root(copy);
                 let pointer = if kind == RoutineKind::Fortran {
                     strings.first().copied().unwrap_or(std::ptr::null_mut())
                         as *mut std::ffi::c_void
