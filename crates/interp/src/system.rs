@@ -134,7 +134,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", 2, do_system),
+    internal("system", 3, do_system),
     internal("Cstack_info", 0, |_| unsafe { values::integer_vector(&[7969177, 0, 1, NA_INTEGER]) }),
     internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),

@@ -189,13 +189,14 @@ symbol_table! {
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.
 pub struct Globals {
-    /// The options, as a tagged pairlist, which is how GNU R keeps `.Options`.
-    pub options: Sexp,
     /// `R_MethodsNamespace`, once `methods` is loaded.
     pub methods_namespace: Sexp,
     /// Whether the methods package turned S4 dispatch on, which makes `standardGeneric` and
     /// primitive generics dispatch.
     pub methods_dispatch: bool,
+    /// Whether primitives may dispatch to S4 methods at all. The methods package turns this off
+    /// while it selects an inherited method, so that selection itself never dispatches.
+    pub allow_primitive_methods: bool,
     /// Primitives the methods package turned generic, by primitive index.
     pub primitive_methods: rustc_hash::FxHashMap<u32, crate::dispatch::PrimitiveMethods>,
     /// Environments `attach` put on the search path are ordinary enclosures of the global
@@ -206,9 +207,9 @@ pub struct Globals {
 impl Globals {
     pub(crate) fn placeholder() -> Globals {
         Globals {
-            options: Sexp::dangling(),
             methods_namespace: Sexp::dangling(),
             methods_dispatch: false,
+            allow_primitive_methods: true,
             primitive_methods: rustc_hash::FxHashMap::default(),
             keep: Vec::new(),
         }
@@ -217,12 +218,10 @@ impl Globals {
     pub(crate) unsafe fn install() {
         let nil = crate::heap().nil();
         let globals = &mut interp().globals;
-        globals.options = nil;
         globals.methods_namespace = nil;
     }
 
     pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
-        marker.mark(self.options);
         marker.mark(self.methods_namespace);
         for methods in self.primitive_methods.values() {
             marker.mark(methods.generic);

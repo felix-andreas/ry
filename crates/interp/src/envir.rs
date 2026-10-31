@@ -78,7 +78,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("env.profile", 1, |_| unsafe { Ok(nil()) }),
     internal("emptyenv", 0, |_| unsafe { Ok(empty_env()) }),
     builtin("...length", 0, do_dots_length),
-    builtin("...elt", 1, do_dots_elt),
+    builtin("...elt", 1, do_dots_elt).keep_visibility(),
     builtin("...names", 0, do_dots_names),
     crate::builtins::special("::", 2, |call| unsafe { namespace_value(call, true) }),
     crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
@@ -682,8 +682,10 @@ unsafe fn do_env2list(call: &Call<'_>) -> R<Sexp> {
         let value = value_of(value)?;
         values::set_elt(result, index, value);
     }
-    let names = string_vector(&names)?;
-    values::set_attr(result, symbols().names, names)?;
+    if !names.is_empty() {
+        let names = string_vector(&names)?;
+        values::set_attr(result, symbols().names, names)?;
+    }
     Ok(result)
 }
 
@@ -946,9 +948,23 @@ unsafe fn do_detach(call: &Call<'_>) -> R<Sexp> {
 
 // Options.
 
+/// The options as a tagged pairlist. GNU R keeps them as the base environment's `.Options`
+/// binding, which R code reads directly.
+pub unsafe fn options() -> Sexp {
+    match crate::heap().frame_cell(base_env(), symbols().dot_options) {
+        Some(cell) => cell.cdr(),
+        None => nil(),
+    }
+}
+
+unsafe fn set_options(list: Sexp) -> R<()> {
+    crate::heap().define(base_env(), symbols().dot_options, list)?;
+    Ok(())
+}
+
 /// The value of option `name`, or `NULL`.
 pub unsafe fn get_option(name: &str) -> Sexp {
-    let mut cell = interp().globals.options;
+    let mut cell = options();
     while cell.kind() == SexpType::Pairlist {
         if cell.tag().car().bytes() == name.as_bytes() {
             return cell.car();
@@ -962,15 +978,14 @@ pub unsafe fn get_option(name: &str) -> Sexp {
 pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let symbol = values::install(name)?;
-    let globals = &mut interp().globals;
-    let mut cell = globals.options;
+    let mut cell = options();
     let mut previous = nil();
     while cell.kind() == SexpType::Pairlist {
         if cell.tag() == symbol {
             let old = cell.car();
             if value == nil() {
                 if previous == nil() {
-                    globals.options = cell.cdr();
+                    set_options(cell.cdr())?;
                 } else {
                     heap.set_cdr(previous, cell.cdr());
                 }
@@ -985,7 +1000,7 @@ pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
     if value != nil() {
         let fresh = values::cons_tagged(value, nil(), symbol)?;
         if previous == nil() {
-            interp().globals.options = fresh;
+            set_options(fresh)?;
         } else {
             heap.set_cdr(previous, fresh);
         }
@@ -1001,7 +1016,7 @@ pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
 
 unsafe fn options_list(names: Option<&[String]>) -> R<Sexp> {
     let mut entries: Vec<(String, Sexp)> = Vec::new();
-    let mut cell = interp().globals.options;
+    let mut cell = options();
     while cell.kind() == SexpType::Pairlist {
         entries.push((symbol_name(cell.tag()).into_owned(), cell.car()));
         cell = cell.cdr();
@@ -1521,6 +1536,8 @@ unsafe fn do_dots_elt(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("indexing '...' with non-positive index"));
     }
     let symbol = values::install(&format!("..{index}"))?;
+    // Forcing the element's promise decides the visibility, as evaluating `..n` would.
+    interp().visible = true;
     eval::eval_symbol(symbol, call.env)
 }
 

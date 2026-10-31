@@ -191,7 +191,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("which.max", 1, |call| unsafe { which_extreme(call, true) }),
     internal("which.min", 1, |call| unsafe { which_extreme(call, false) }),
     internal("trunc", -1, |call| unsafe { math1(call, Math::Trunc) }),
-    internal("is.unsorted", 2, do_is_unsorted),
+    internal("is.unsorted", 3, do_is_unsorted),
     internal("compareNumericVersion", 2, do_compare_numeric_version),
     internal("colSums", 4, |call| unsafe { margin_sums(call, false, false) }),
     internal("colMeans", 4, |call| unsafe { margin_sums(call, false, true) }),
@@ -2599,7 +2599,7 @@ unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
 
 unsafe fn do_is_unsorted(call: &Call<'_>) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
-    let strictly = values::as_logical_scalar(call.arg(1)) == 1;
+    let strictly = values::as_logical_scalar(call.arg(2)) == 1;
     let count = length(operand);
     for index in 1..count {
         let ordering = match operand.kind() {

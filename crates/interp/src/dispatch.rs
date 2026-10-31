@@ -700,6 +700,12 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
 
 /// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`).
 pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    if args.first().is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
+        && let Some(op) = crate::builtins::primitive(name)
+        && let Some(value) = s4_dispatch(op, call, args, env)?
+    {
+        return Ok(Some(value));
+    }
     internal_dispatch(name, call, args, env)
 }
 
@@ -913,6 +919,9 @@ pub unsafe fn primitive_methods(op: Sexp) -> Option<(Sexp, Sexp)> {
 /// `R_possible_dispatch`: dispatches primitive `op` through the methods package when it made
 /// the primitive generic. `None` means the primitive's own code runs.
 unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    if !interp().globals.allow_primitive_methods {
+        return Ok(None);
+    }
     let Some(entry) = interp().globals.primitive_methods.get(&op.primitive_index()) else {
         return Ok(None);
     };
@@ -927,9 +936,14 @@ unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option
     if methods != nil() {
         let arguments = eval::args_pairlist(&promised)?;
         let method = crate::methods::quick_method_check(arguments, methods, generic)?;
-        if method.kind() == SexpType::Closure {
-            let value = apply_closure(call, method, &promised, env, None)?;
-            return Ok(Some(value));
+        match method.kind() {
+            SexpType::Closure => {
+                let value = apply_closure(call, method, &promised, env, None)?;
+                return Ok(Some(value));
+            }
+            // The table holds the primitive itself where its own code is the method.
+            SexpType::Builtin | SexpType::Special => return Ok(None),
+            _ => {}
         }
     }
     let value = apply_closure(call, generic, &promised, env, None)?;

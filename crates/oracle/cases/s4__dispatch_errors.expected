@@ -1,0 +1,12 @@
+[stdout]
+| [1] "f"
+| [1] 4
+| [1] "error in evaluating the argument 'x' in selecting a method for function 'f': boom"
+| h(simpleError(msg, call))
+| [1] "error in evaluating the argument 'x' in selecting a method for function 'f': argument \"x\" is missing, with no default"
+[messages]
+- caught: careful
+[warnings]
+[errors]
+- unable to find an inherited method for function ‘f’ for signature ‘"character"’ (in (function (classes, fdef, mtable) )
+[value]

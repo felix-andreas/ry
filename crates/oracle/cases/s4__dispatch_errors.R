@@ -1,0 +1,13 @@
+setGeneric("f", function(x, ...) standardGeneric("f"))
+setMethod("f", "numeric", function(x, ...) x * 2)
+f(2)
+r <- tryCatch(f(stop("boom")), error = function(e) e)
+conditionMessage(r)
+conditionCall(r)
+g <- function(x) f(x)
+tryCatch(g(), error = function(e) conditionMessage(e))
+withCallingHandlers(f(warning("careful")), warning = function(w) {
+  message("caught: ", conditionMessage(w))
+  invokeRestart("muffleWarning")
+})
+f("a")

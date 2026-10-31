@@ -107,6 +107,7 @@ unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) 
 pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String) -> R<()> {
     match value.kind() {
         SexpType::Nil => out("NULL\n"),
+        SexpType::Symbol if value == values::missing_arg() => out("\n"),
         SexpType::Symbol => {
             let name = symbol_name(value);
             out(&format!("{}\n", deparse::quote_name(&name)));
@@ -598,7 +599,12 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
             || (name == symbols.row_names && values::inherits(value, "data.frame"))
             || (matches!(value.kind(), SexpType::Pairlist | SexpType::Language));
         if !skip {
-            let saved = tag.len();
+            let saved = tag.clone();
+            // An attribute's label continues the labels of the attributes it is nested in, but
+            // not the list element tags around them.
+            if !tag.starts_with("attr(") {
+                tag.clear();
+            }
             let label = format!("attr(,\"{}\")", symbol_name(name));
             tag.push_str(&label);
             out(&format!("{tag}\n"));
@@ -611,7 +617,7 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
             } else {
                 print_value(attribute, options, tag)?;
             }
-            tag.truncate(saved);
+            *tag = saved;
         }
         cell = cell.cdr();
     }

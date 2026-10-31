@@ -838,6 +838,13 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>
 /// Whether `symbol` is missing in `env`: unbound to a supplied argument, or bound to a promise of
 /// a symbol that is itself missing in the caller.
 pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
+    symbol_is_missing(symbol, env, true)
+}
+
+/// `missing()` of `symbol` in `env`. `defaults_count` says whether a formal that got its default
+/// counts as missing: it does for the function asking, but not for a caller its argument came
+/// from, so `h(where)` with `where` defaulted passes a non-missing argument to `h`.
+unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<bool> {
     let heap = crate::heap();
     let (symbol, index) = match dot_dot_index(symbol) {
         Some(index) => (symbols().dots, Some(index)),
@@ -862,7 +869,7 @@ pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
         }
         return value_is_missing(item.car());
     }
-    if cell.has_gp(BINDING_MISSING) {
+    if defaults_count && cell.has_gp(BINDING_MISSING) {
         return Ok(true);
     }
     value_is_missing(cell.cdr())
@@ -880,7 +887,7 @@ unsafe fn value_is_missing(value: Sexp) -> R<bool> {
         let code = value.cdr();
         let caller = value.tag();
         if crate::heap().frame_cell(caller, code).is_some() {
-            return is_missing(code, caller);
+            return symbol_is_missing(code, caller, false);
         }
     }
     Ok(false)

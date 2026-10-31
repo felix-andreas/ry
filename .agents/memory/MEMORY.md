@@ -36,6 +36,8 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **`cargo test` writes the fresh `libR.so` to `target/<profile>/deps`**; the copy in `target/<profile>` is only refreshed by `cargo build`, so a harness that loads it tests stale code.
 - **A C function native code calls must be marked `RY_EXPORT` in `native.c`**, because rustc's version script hides C symbols in a cdylib and `build.rs` exports only the marked ones.
 - **Never copy GNU R's GPL code into the repository** (`decisions.md`, "runtime licensing"). Headers and implementation are written independently; vendored test packages carry their own license (brio is MIT).
+- **The methods package's R code relies on native quirks** (`crates/interp/src/methods.rs`): `slot<-` (`R_set_slot`) modifies its argument in place, because the default `initialize` calls it as a plain function on a fresh copy and drops the result; `.findInheritedMethods` turns primitive dispatch off through `.allowPrimitiveMethods(FALSE)` (`allow_primitive_methods`), or selection recurses; a signature argument that fails to evaluate is reported against the call `h(simpleError(msg, call))`, as in GNU R. Dispatch only treats a generic's argument as `"missing"` when its own binding is missing, not when it was passed on from a caller where it is missing.
+- **`missing()` counts a defaulted formal as missing only in its own function**: following an argument back to a caller (`h(where)` with `where` defaulted) yields `FALSE`, as GNU R's `R_isMissing` does (`eval::is_missing`). The methods package's `registerNames` depends on it.
 
 ### Performance traps
 

@@ -886,11 +886,20 @@ pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
         if symbol_name(symbol) == "names" && object.kind() != SexpType::Object {
             return Ok(values::names(object));
         }
-        let class = values::class_attr(object);
-        let class_name = values::first_string(class).map_or_else(|| object.kind().name().to_owned(), |text| text.into_owned());
         if values::has_attributes(object) && heap_has_attr(object, symbol) {
             return Ok(nil());
         }
+        let class = values::class_attr(object);
+        let Some(class_name) = values::first_string(class) else {
+            return Err(crate::unwind::error_in(
+                call,
+                format!(
+                    "cannot get a slot (\"{}\") from an object of type \"{}\"",
+                    symbol_name(symbol),
+                    object.kind().name()
+                ),
+            ));
+        };
         return Err(crate::unwind::error_in(
             call,
             format!(
@@ -949,7 +958,13 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
 
 /// `R_do_slot_assign`.
 pub unsafe fn set_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
-    let object = modifiable(object)?;
+    assign_slot(modifiable(object)?, symbol, value)
+}
+
+/// Sets a slot of `object` itself, even when it is shared. The methods package's `slot<-`
+/// relies on that: its default `initialize` method calls it as a plain function on an object
+/// it has just copied, and discards the result.
+pub unsafe fn assign_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
     if symbol == symbols().dot_data {
         if let Some(function) = interp_methods_function("setDataPart")? {
             let call = values::call(function, &[object, value])?;
@@ -1365,18 +1380,19 @@ struct Flattener {
 impl Flattener {
     unsafe fn add(&mut self, value: Sexp, tag: &str) -> R<()> {
         let value = values::materialize(value)?;
+        // A pairlist combines like the list of its elements.
+        let value = if value.kind() == SexpType::Pairlist {
+            values::pairlist_to_list(value)?
+        } else {
+            value
+        };
         let count = length(value);
         let element_names = values::names(value);
         if !tag.is_empty() || element_names != nil() {
             self.any_names = true;
         }
-        let is_list = matches!(value.kind(), SexpType::List | SexpType::Expression | SexpType::Pairlist | SexpType::Language);
+        let is_list = matches!(value.kind(), SexpType::List | SexpType::Expression | SexpType::Language);
         if is_list && self.recursive && value.kind() != SexpType::Language {
-            let value = if value.kind() == SexpType::Pairlist {
-                values::pairlist_to_list(value)?
-            } else {
-                value
-            };
             for index in 0..count {
                 let name = self.child_name(tag, element_names, index, count);
                 self.add(value.element(index), &name)?;
@@ -1391,11 +1407,6 @@ impl Flattener {
             self.names.push(tag.to_owned());
             return Ok(());
         }
-        let value = if value.kind() == SexpType::Pairlist {
-            values::pairlist_to_list(value)?
-        } else {
-            value
-        };
         for index in 0..count {
             let name = self.child_name(tag, element_names, index, count);
             self.values.push((value, index));

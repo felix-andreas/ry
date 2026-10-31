@@ -41,8 +41,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isSeekable", 1, |_| unsafe { scalar_bool(false) }),
     internal("pushBack", 4, |_| unsafe { Ok(nil()) }).invisible(),
     internal("pushBackLength", 1, |_| unsafe { scalar_integer(0) }),
-    internal("sink", 4, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("sink.number", 1, |_| unsafe { scalar_integer(0) }),
+    internal("sink", 4, do_sink).invisible(),
+    internal("sink.number", 1, do_sink_number),
     internal("readline", 1, |_| unsafe { values::scalar_string("") }),
     internal("scan", 19, |call| unsafe { Err(call.error("scan is not supported")) }),
 ];
@@ -74,6 +74,15 @@ pub struct Connection {
 #[derive(Default)]
 pub struct Table {
     connections: Vec<Option<Connection>>,
+    /// The output diversions `sink` set up, innermost last.
+    sinks: Vec<Sink>,
+}
+
+struct Sink {
+    connection: i32,
+    close_on_exit: bool,
+    /// Whether output also still goes to the console.
+    split: bool,
 }
 
 impl Table {
@@ -278,6 +287,52 @@ unsafe fn do_close(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
+/// `sink(con, closeOnExit, type, split)`: diverts output to connection `con`, or ends the
+/// innermost diversion for `con = -1`. Diverting messages is accepted and ignored.
+unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
+    let index = values::as_integer_scalar(call.arg(0));
+    let close_on_exit = values::as_logical_scalar(call.arg(1)) == 1;
+    let messages = values::as_logical_scalar(call.arg(2)) == 1;
+    let split = values::as_logical_scalar(call.arg(3)) == 1;
+    if messages {
+        return Ok(nil());
+    }
+    let table = &mut interp().connections;
+    if index < 0 {
+        let Some(sink) = table.sinks.pop() else {
+            crate::conditions::warning_call(call.call, "no sink to remove")?;
+            return Ok(nil());
+        };
+        if sink.close_on_exit && sink.connection >= 3 {
+            let connection = table.get(sink.connection)?;
+            if connection.class == Class::Text {
+                finish_text_output(connection)?;
+            } else if connection.open {
+                flush_to_file(connection)?;
+            }
+            table.connections[sink.connection as usize] = None;
+        }
+        return Ok(nil());
+    }
+    let connection = table.get(index)?;
+    if index >= 3 && connection.class != Class::Text && !connection.open {
+        if connection.mode.is_empty() || connection.mode.starts_with('r') {
+            connection.mode = "w".into();
+        }
+        open(connection)?;
+    }
+    table.sinks.push(Sink { connection: index, close_on_exit, split });
+    Ok(nil())
+}
+
+unsafe fn do_sink_number(call: &Call<'_>) -> R<Sexp> {
+    if values::as_logical_scalar(call.arg(0)) == 1 {
+        scalar_integer(interp().connections.sinks.len() as i32)
+    } else {
+        scalar_integer(2)
+    }
+}
+
 unsafe fn do_is_open(call: &Call<'_>) -> R<Sexp> {
     let index = connection_index(call.arg(0))?;
     let connection = interp().connections.get(index)?;
@@ -315,7 +370,33 @@ pub unsafe fn read_all_bytes(file: Sexp) -> R<Vec<u8>> {
 
 /// Appends bytes to a writable connection.
 pub unsafe fn write_bytes(file: Sexp, bytes: &[u8]) -> R<()> {
-    let index = connection_index(file)?;
+    write_to(connection_index(file)?, bytes)
+}
+
+/// Writes standard output, to the console or to where `sink` diverts it.
+pub unsafe fn write_output(bytes: &[u8]) {
+    let Some(sink) = interp().connections.sinks.last() else {
+        crate::write_terminal(bytes, false);
+        return;
+    };
+    let (connection, split) = (sink.connection, sink.split);
+    if split || connection == 1 {
+        crate::write_terminal(bytes, false);
+    }
+    if connection != 1
+        && let Err(unwind) = write_to(connection, bytes)
+    {
+        // Output has no caller to report a failed diversion to, so the console shows it.
+        let message = match unwind {
+            crate::unwind::Unwind::Error(failure) => failure.message,
+            _ => "the sink connection could not be written".to_owned(),
+        };
+        crate::write_terminal(format!("Error writing to the sink connection: {message}\n").as_bytes(), true);
+        crate::write_terminal(bytes, false);
+    }
+}
+
+unsafe fn write_to(index: i32, bytes: &[u8]) -> R<()> {
     match index {
         1 => write_console(bytes, false),
         2 => write_console(bytes, true),

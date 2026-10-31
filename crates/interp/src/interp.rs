@@ -248,7 +248,19 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
 }
 
 /// Writes to the console through the host.
+/// Writes console output: standard output goes where `sink` diverts it, errors and messages to
+/// the terminal.
 pub fn write_console(text: &[u8], is_error: bool) {
+    if is_error {
+        write_terminal(text, true);
+    } else {
+        // SAFETY: the sink table only holds connections of this session.
+        unsafe { connections::write_output(text) }
+    }
+}
+
+/// Writes to the host's console, bypassing any `sink`.
+pub fn write_terminal(text: &[u8], is_error: bool) {
     // SAFETY: the hook is the host's, which accepts any bytes.
     unsafe { (interp().hooks.write_console)(text, is_error) }
 }

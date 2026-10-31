@@ -115,7 +115,7 @@ impl SexpType {
             SexpType::ExternalPtr => "externalptr",
             SexpType::WeakRef => "weakref",
             SexpType::Raw => "raw",
-            SexpType::Object => "object",
+            SexpType::Object => "S4",
             SexpType::Binding => "binding",
             SexpType::Free => "FREESXP",
         }
