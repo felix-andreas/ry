@@ -113,20 +113,15 @@ Human engineers stage work, keep diffs small, and avoid rewrites that look scary
 - **Never choose a watered-down design because the full version is a big change.** Starting over after a failed attempt is cheap; shipping the wrong shape is not.
 - **File size is not a problem.** Do not split, reorganize, or flag a file just because it is large (the LSP server module is fine as one file). Split only when a genuinely new logical component appears.
 
-## Roles
+## How work lands
 
-- **The orchestrating session** plans, delegates, reviews reports, decides, and merges. It does not do the work itself.
-- **One in-session worker subagent** takes small tasks and commits directly to main.
-- **Separate cloud sessions** take large tasks. Each delivers a large pull request (at least about 2,000 changed lines, and always one whole logical step), and a reviewer agent checks it.
-- **One persistent merge subagent** orchestrates merging those pull requests.
+An in-session worker commits directly to main. A separate cloud session delivers its work as one large pull request (at least about 2,000 changed lines, and always one whole logical step), and a reviewer agent checks it. Agents may merge pull requests. Commit and push after each logical step rather than saving everything for one final commit. Commit messages and pull request titles follow Conventional Commits, such as `refactor: drop the legacy resolver` or `docs: rewrite the tour`.
 
-Delegated work runs on Sonnet at high effort by default. A hard problem gets Opus at high effort, and an exceptionally hard one gets Opus at extra-high effort.
-
-Pull requests are for work from other sessions, so the orchestrator and its in-session worker push straight to main. Agents may merge pull requests. Commit and push after each logical step rather than saving everything for one final commit. Commit messages and pull request titles follow Conventional Commits, such as `refactor: drop the legacy resolver` or `docs: rewrite the tour`.
+`.agents/orchestrator.md` is for the orchestrating session only; every other agent ignores it.
 
 ## Ownership
 
-The user has delegated full technical ownership to the agents: code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for a safe, minimal diff. Design decisions that once needed a user check-in are yours to make: decide, implement, and record the decision and its rationale in `.agents/memory/decisions.md` (or in the docs page it belongs to) in the same session.
+The user has delegated full technical ownership to the agents: code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for a safe, minimal diff. Every design decision is yours to make, with no user check-in: decide, implement, and record the decision and its rationale in `.agents/memory/decisions.md` (or in the docs page it belongs to) in the same session.
 
 ## Standing constraints
 

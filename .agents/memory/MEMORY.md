@@ -2,7 +2,7 @@
 
 Cross-session knowledge base for the agents building ry, in three horizons. **Short-term** holds the current focus, so prune an item once it is resolved. **Mid-term** holds active priorities and debt. **Long-term** holds durable, non-obvious traps and their rationale. Every entry is context-free and timeless, and points at code or docs instead of restating them.
 
-The companion files are `backlog.md` (open work, plus a one-line shipped ledger at the bottom), `decisions.md` (settled decisions and why), `test-user-reports.md` (closed simulated-user findings), and `worklog.md` (chronological, appended by a routine). The specs live in the docs site: `reference/type-system.md` is the typing contract, `type-checking/tour.md` introduces it, and `contributing/{architecture,structure,testing,authoring-stubs}.md` cover the internals. Unsettled design work goes to `docs/…/contributing/design/` (out of the sidebar, listed on its index page), never here.
+`.agents/orchestrator.md` is the brief for the orchestrating session only, and every other agent ignores it. The companion files are `backlog.md` (open work, plus a one-line shipped ledger at the bottom), `decisions.md` (settled decisions and why), `test-user-reports.md` (closed simulated-user findings), and `worklog.md` (chronological, appended by a routine). The specs live in the docs site: `reference/type-system.md` is the typing contract, `type-checking/tour.md` introduces it, and `contributing/{architecture,structure,testing,authoring-stubs}.md` cover the internals. Unsettled design work goes to `docs/…/contributing/design/` (out of the sidebar, listed on its index page), never here.
 
 ## Short-term
 
