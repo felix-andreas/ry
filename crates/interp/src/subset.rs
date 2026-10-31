@@ -2,7 +2,7 @@
 //! `unlist`, lengths, names, dims, and attributes.
 
 use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present, special},
+    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special},
     coerce::{self, coerce_vector},
     conditions,
     eval::{self, value_of},
@@ -48,8 +48,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("t.default", 1, do_transpose),
     internal("aperm", 3, do_aperm),
     internal("drop", 1, do_drop),
-    internal("cbind", -1, |call| unsafe { bind(call, false) }),
-    internal("rbind", -1, |call| unsafe { bind(call, true) }),
+    internal_special("cbind", -1, |call| unsafe { bind(call, false) }),
+    internal_special("rbind", -1, |call| unsafe { bind(call, true) }),
     internal("rev", 1, do_rev),
     internal("islistfactor", 2, do_is_list_factor),
     internal("comment", 1, |call| unsafe { Ok(get_attr(call.arg(0), symbols().comment)) }),
@@ -2281,8 +2281,34 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
 
 /// `cbind` and `rbind` for vectors and matrices; data frames dispatch to their R methods.
 unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
-    let deparse_level = values::as_integer_scalar(call.arg(0));
-    let items: Vec<Arg> = call.args[1..].to_vec();
+    // The arguments arrive unevaluated, because `deparse.level` names a vector argument after
+    // the expression that produced it, which only the promise still knows.
+    let Some((level, rest)) = call.args.split_first() else {
+        return Err(call.error("argument \"deparse.level\" is missing"));
+    };
+    let level_value = eval::eval(level.value, call.env)?;
+    let deparse_level = values::as_integer_scalar(level_value);
+    let mut items: Vec<Arg> = Vec::with_capacity(rest.len());
+    let mut expressions: Vec<Sexp> = Vec::with_capacity(rest.len());
+    for arg in rest {
+        if arg.value == symbols().dots {
+            let dots = eval::find_var(symbols().dots, call.env)?;
+            let mut cell = dots;
+            while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
+                let item = cell.car();
+                let mut expression = item;
+                while expression.kind() == SexpType::Promise {
+                    expression = expression.cdr();
+                }
+                items.push(Arg { tag: cell.tag(), value: value_of(item)? });
+                expressions.push(expression);
+                cell = cell.cdr();
+            }
+        } else {
+            items.push(Arg { tag: arg.tag, value: eval::eval(arg.value, call.env)? });
+            expressions.push(arg.value);
+        }
+    }
     // Dispatch: any data frame (or other classed argument with a method) takes over.
     let generic = if by_row { "rbind" } else { "cbind" };
     for arg in &items {
@@ -2292,7 +2318,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 let method_name = format!("{generic}.{}", char_str(classes.element(index)));
                 let symbol = values::install(&method_name)?;
                 if let Some(method) = crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())? {
-                    let mut args = vec![Arg { tag: values::install("deparse.level")?, value: call.arg(0) }];
+                    let mut args = vec![Arg { tag: values::install("deparse.level")?, value: level_value }];
                     args.extend(items.iter().copied());
                     let promised: Vec<Arg> = args.iter().map(|arg| Arg { tag: arg.tag, value: arg.value }).collect();
                     return eval::apply(nil(), method, &promised, call.env);
@@ -2300,7 +2326,8 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             }
         }
     }
-    let items: Vec<Arg> = items.into_iter().filter(|arg| arg.value != nil()).collect();
+    let (items, expressions): (Vec<Arg>, Vec<Sexp>) =
+        items.into_iter().zip(expressions).filter(|(arg, _)| arg.value != nil()).unzip();
     if items.is_empty() {
         return Ok(nil());
     }
@@ -2365,10 +2392,16 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     other_names = dimnames.element(if by_row { 1 } else { 0 });
                 }
             } else {
+                let expression = expressions[position];
                 let name = if arg.tag != nil() {
                     symbol_name(arg.tag).into_owned()
-                } else if deparse_level >= 1 {
-                    String::new()
+                } else if deparse_level == 1 && expression.kind() == SexpType::Symbol {
+                    symbol_name(expression).into_owned()
+                } else if deparse_level == 2 {
+                    crate::deparse::deparse_lines(expression, 500, crate::deparse::options::SIMPLE)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 };

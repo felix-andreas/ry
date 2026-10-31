@@ -33,8 +33,16 @@ impl NativeCall<'_> {
         self.args.get(index).map_or_else(nil, |arg| arg.value)
     }
 
+    /// An error from inside the routine. GNU R reports it against the closure that made the
+    /// foreign call, not the `.Call` itself, because `error()` skips the builtin's context.
     pub fn error(&self, message: impl Into<String>) -> crate::unwind::Unwind {
-        error_in(self.call, message)
+        // SAFETY: the frame stack holds live calls.
+        error_in(unsafe { crate::unwind::current_call() }, message)
+    }
+
+    /// A warning from inside the routine, reported against the calling closure as `error` is.
+    pub unsafe fn warning(&self, message: impl Into<String>) -> R<()> {
+        crate::conditions::warning_call(crate::unwind::current_call(), message)
     }
 }
 
@@ -182,7 +190,7 @@ pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     };
     let native = NativeCall { call, args: &routine_args, env };
     if routine.3 >= 0 && matches!(routine.1, RoutineKind::Call) && routine.3 as usize != routine_args.len() {
-        return Err(native.error(format!(
+        return Err(error_in(call, format!(
             "Incorrect number of arguments ({}), expecting {} for '{}'",
             routine_args.len(),
             routine.3,

@@ -699,7 +699,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     } }),
     builtin("is.array", 1, |call| unsafe { scalar_bool(values::dims(call.arg(0)).is_some()) }),
     builtin("is.atomic", 1, |call| unsafe { {
-        scalar_bool(call.arg(0).kind().is_atomic())
+        // GNU R 4.3, whose R code runs here, still counts NULL as atomic.
+        let kind = call.arg(0).kind();
+        scalar_bool(kind.is_atomic() || kind == SexpType::Nil)
     } }),
     builtin("is.recursive", 1, |call| unsafe { {
         scalar_bool(matches!(
