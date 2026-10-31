@@ -37,6 +37,15 @@ const NOT_IN_LIBR: &[&str] = &[
     "R_ext/stats_stubs.h",
 ];
 
+/// Names `R_ext/Random.h` declares for a package to define: a user-supplied generator.
+const DEFINED_BY_PACKAGES: &[&str] = &[
+    "user_unif_rand",
+    "user_unif_init",
+    "user_unif_nseed",
+    "user_unif_seedloc",
+    "user_norm_rand",
+];
+
 /// Routines R's Lapack.h declares that no LAPACK library exports: the dlamc helpers live in
 /// LAPACK's installation-time sources (only R's bundled LAPACK builds them), and dlasd9 left
 /// LAPACK long ago.
@@ -449,7 +458,11 @@ fn every_declared_name_is_exported_by_libr() {
     let missing: Vec<String> = declared
         .iter()
         // Applic.h and Linpack.h include BLAS.h, so its names reach the scan transitively.
-        .filter(|(name, file)| !exported.contains(*name) && !NOT_IN_LIBR.contains(&file.as_str()))
+        .filter(|(name, file)| {
+            !exported.contains(*name)
+                && !NOT_IN_LIBR.contains(&file.as_str())
+                && !DEFINED_BY_PACKAGES.contains(&name.as_str())
+        })
         .map(|(name, file)| format!("{name} ({file})"))
         .collect();
     assert!(

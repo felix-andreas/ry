@@ -1,0 +1,8891 @@
+//! R's mathematical library, the API `Rmath.h` declares: densities, distribution functions,
+//! quantiles and random variates for R's distributions, and the special functions they rest on.
+//!
+//! Results must agree with GNU R's to the last few bits, because R code compares them exactly
+//! and packages' own tests record them. That pins the algorithms, so every function here follows
+//! the published method GNU R's nmath library uses (Cody's rational approximations for the normal
+//! distribution, Wichura's AS 241 for its quantile, Didonato and Morris's TOMS 708 for the
+//! incomplete beta ratio, Loader's saddle point for binomial and Poisson densities, the Ahrens,
+//! Dieter, Kachitvichyanukul, Schmeiser and Cheng generators for random variates) and the same
+//! order of uniform draws, written independently from the papers. Where a published series
+//! needs constants, they are the mathematically defined values (Chebyshev coefficients, zeta
+//! values, Gauss-Legendre nodes), so they match any faithful implementation of the method.
+//!
+//! The conventions are R's: `lower` selects P[X <= x] over P[X > x], `log` gives and takes
+//! probabilities on the log scale, invalid parameters give `NaN` without a warning (R reports
+//! those from its vectorized wrappers, not from C), and an `NA` argument comes back as that
+//! same `NA` because the arithmetic that propagates it keeps the payload.
+
+// The coefficients are the published ones, written with the digits their sources give (some
+// round to a `std::f64::consts` value, some carry more digits than a double holds) so that
+// they read against the papers.
+#![allow(clippy::excessive_precision, clippy::approx_constant)]
+// Loops written `if !(a > b) { break }` must end when a comparison meets NaN, as the C
+// `do ... while (a > b)` they follow does; `a <= b` would loop forever.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
+use crate::{
+    arith::Rng,
+    boundary::{self, ApiResult, enter, error},
+    runtime,
+};
+use std::ffi::c_int;
+
+const DBL_EPSILON: f64 = f64::EPSILON;
+const DBL_MIN: f64 = f64::MIN_POSITIVE;
+const DBL_MAX: f64 = f64::MAX;
+/// `DBL_MIN_EXP` in C's convention, where the smallest normal number is `2^(DBL_MIN_EXP - 1)`.
+const DBL_MIN_EXP: i32 = -1021;
+const DBL_MANT_DIG: i32 = 53;
+
+const M_PI: f64 = std::f64::consts::PI;
+const M_2PI: f64 = 2.0 * std::f64::consts::PI;
+const M_LN2: f64 = std::f64::consts::LN_2;
+const M_LN10: f64 = std::f64::consts::LN_10;
+const M_1_PI: f64 = std::f64::consts::FRAC_1_PI;
+const M_PI_2: f64 = std::f64::consts::FRAC_PI_2;
+const M_SQRT2: f64 = std::f64::consts::SQRT_2;
+const M_SQRT_PI: f64 = 1.772_453_850_905_516;
+const M_SQRT_2PI: f64 = 2.506_628_274_631_000_7;
+const M_SQRT_32: f64 = 5.656_854_249_492_381;
+const M_1_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+const M_SQRT_2DPI: f64 = 0.797_884_560_802_865_4;
+const M_LN_2PI: f64 = 1.837_877_066_409_345_5;
+const M_LN_SQRT_PI: f64 = 0.572_364_942_924_700_1;
+const M_LN_SQRT_2PI: f64 = 0.918_938_533_204_672_8;
+const M_LN_SQRT_PID2: f64 = 0.225_791_352_644_727_43;
+
+// The C API. Every function is a thin wrapper that converts C's `int` flags; the work happens
+// in the Rust functions below, which the interpreter can call directly.
+
+macro_rules! export {
+    ($($name:ident($($argument:ident: $kind:tt),*) => $target:ident;)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $name($($argument: export!(@type $kind)),*) -> f64 {
+                $target($(export!(@value $kind $argument)),*)
+            }
+        )*
+    };
+    (@type f64) => { f64 };
+    (@type flag) => { c_int };
+    (@value f64 $argument:ident) => { $argument };
+    (@value flag $argument:ident) => { $argument != 0 };
+}
+
+/// Random variates draw from the session's generator, as `unif_rand` does, so the caller
+/// brackets them with `GetRNGstate` and `PutRNGstate` exactly as under GNU R.
+macro_rules! export_random {
+    ($($name:ident($($argument:ident),*) => $target:ident;)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $name($($argument: f64),*) -> f64 {
+                $target(&mut runtime().rng, $($argument),*)
+            }
+        )*
+    };
+}
+
+export! {
+    Rf_dnorm4(x: f64, mu: f64, sigma: f64, log: flag) => dnorm;
+    Rf_pnorm5(x: f64, mu: f64, sigma: f64, lower: flag, log: flag) => pnorm;
+    Rf_qnorm5(p: f64, mu: f64, sigma: f64, lower: flag, log: flag) => qnorm;
+    Rf_dunif(x: f64, a: f64, b: f64, log: flag) => dunif;
+    Rf_punif(x: f64, a: f64, b: f64, lower: flag, log: flag) => punif;
+    Rf_qunif(p: f64, a: f64, b: f64, lower: flag, log: flag) => qunif;
+    Rf_dgamma(x: f64, shape: f64, scale: f64, log: flag) => dgamma;
+    Rf_pgamma(x: f64, shape: f64, scale: f64, lower: flag, log: flag) => pgamma;
+    Rf_qgamma(p: f64, shape: f64, scale: f64, lower: flag, log: flag) => qgamma;
+    Rf_dbeta(x: f64, a: f64, b: f64, log: flag) => dbeta;
+    Rf_pbeta(x: f64, a: f64, b: f64, lower: flag, log: flag) => pbeta;
+    Rf_qbeta(p: f64, a: f64, b: f64, lower: flag, log: flag) => qbeta;
+    Rf_dlnorm(x: f64, meanlog: f64, sdlog: f64, log: flag) => dlnorm;
+    Rf_plnorm(x: f64, meanlog: f64, sdlog: f64, lower: flag, log: flag) => plnorm;
+    Rf_qlnorm(p: f64, meanlog: f64, sdlog: f64, lower: flag, log: flag) => qlnorm;
+    Rf_dchisq(x: f64, df: f64, log: flag) => dchisq;
+    Rf_pchisq(x: f64, df: f64, lower: flag, log: flag) => pchisq;
+    Rf_qchisq(p: f64, df: f64, lower: flag, log: flag) => qchisq;
+    Rf_dnchisq(x: f64, df: f64, ncp: f64, log: flag) => dnchisq;
+    Rf_pnchisq(x: f64, df: f64, ncp: f64, lower: flag, log: flag) => pnchisq;
+    Rf_qnchisq(p: f64, df: f64, ncp: f64, lower: flag, log: flag) => qnchisq;
+    Rf_df(x: f64, m: f64, n: f64, log: flag) => df;
+    Rf_pf(x: f64, m: f64, n: f64, lower: flag, log: flag) => pf;
+    Rf_qf(p: f64, m: f64, n: f64, lower: flag, log: flag) => qf;
+    Rf_dt(x: f64, n: f64, log: flag) => dt;
+    Rf_pt(x: f64, n: f64, lower: flag, log: flag) => pt;
+    Rf_qt(p: f64, n: f64, lower: flag, log: flag) => qt;
+    Rf_dbinom(x: f64, n: f64, p: f64, log: flag) => dbinom;
+    Rf_dbinom_raw(x: f64, n: f64, p: f64, q: f64, log: flag) => dbinom_raw;
+    Rf_pbinom(x: f64, n: f64, p: f64, lower: flag, log: flag) => pbinom;
+    Rf_qbinom(p: f64, n: f64, pr: f64, lower: flag, log: flag) => qbinom;
+    Rf_dcauchy(x: f64, location: f64, scale: f64, log: flag) => dcauchy;
+    Rf_pcauchy(x: f64, location: f64, scale: f64, lower: flag, log: flag) => pcauchy;
+    Rf_qcauchy(p: f64, location: f64, scale: f64, lower: flag, log: flag) => qcauchy;
+    Rf_dexp(x: f64, scale: f64, log: flag) => dexp;
+    Rf_pexp(x: f64, scale: f64, lower: flag, log: flag) => pexp;
+    Rf_qexp(p: f64, scale: f64, lower: flag, log: flag) => qexp;
+    Rf_dgeom(x: f64, p: f64, log: flag) => dgeom;
+    Rf_pgeom(x: f64, p: f64, lower: flag, log: flag) => pgeom;
+    Rf_qgeom(p: f64, prob: f64, lower: flag, log: flag) => qgeom;
+    Rf_dhyper(x: f64, r: f64, b: f64, n: f64, log: flag) => dhyper;
+    Rf_phyper(x: f64, r: f64, b: f64, n: f64, lower: flag, log: flag) => phyper;
+    Rf_qhyper(p: f64, r: f64, b: f64, n: f64, lower: flag, log: flag) => qhyper;
+    Rf_dnbinom(x: f64, size: f64, prob: f64, log: flag) => dnbinom;
+    Rf_pnbinom(x: f64, size: f64, prob: f64, lower: flag, log: flag) => pnbinom;
+    Rf_qnbinom(p: f64, size: f64, prob: f64, lower: flag, log: flag) => qnbinom;
+    Rf_dnbinom_mu(x: f64, size: f64, mu: f64, log: flag) => dnbinom_mu;
+    Rf_pnbinom_mu(x: f64, size: f64, mu: f64, lower: flag, log: flag) => pnbinom_mu;
+    Rf_qnbinom_mu(p: f64, size: f64, mu: f64, lower: flag, log: flag) => qnbinom_mu;
+    Rf_dpois(x: f64, lambda: f64, log: flag) => dpois;
+    Rf_dpois_raw(x: f64, lambda: f64, log: flag) => dpois_raw;
+    Rf_ppois(x: f64, lambda: f64, lower: flag, log: flag) => ppois;
+    Rf_qpois(p: f64, lambda: f64, lower: flag, log: flag) => qpois;
+    Rf_dweibull(x: f64, shape: f64, scale: f64, log: flag) => dweibull;
+    Rf_pweibull(x: f64, shape: f64, scale: f64, lower: flag, log: flag) => pweibull;
+    Rf_qweibull(p: f64, shape: f64, scale: f64, lower: flag, log: flag) => qweibull;
+    Rf_dlogis(x: f64, location: f64, scale: f64, log: flag) => dlogis;
+    Rf_plogis(x: f64, location: f64, scale: f64, lower: flag, log: flag) => plogis;
+    Rf_qlogis(p: f64, location: f64, scale: f64, lower: flag, log: flag) => qlogis;
+    Rf_dnbeta(x: f64, a: f64, b: f64, ncp: f64, log: flag) => dnbeta;
+    Rf_pnbeta(x: f64, a: f64, b: f64, ncp: f64, lower: flag, log: flag) => pnbeta;
+    Rf_qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: flag, log: flag) => qnbeta;
+    Rf_dnf(x: f64, m: f64, n: f64, ncp: f64, log: flag) => dnf;
+    Rf_pnf(x: f64, m: f64, n: f64, ncp: f64, lower: flag, log: flag) => pnf;
+    Rf_qnf(p: f64, m: f64, n: f64, ncp: f64, lower: flag, log: flag) => qnf;
+    Rf_dnt(x: f64, df: f64, ncp: f64, log: flag) => dnt;
+    Rf_pnt(x: f64, df: f64, ncp: f64, lower: flag, log: flag) => pnt;
+    Rf_qnt(p: f64, df: f64, ncp: f64, lower: flag, log: flag) => qnt;
+    Rf_ptukey(q: f64, ranges: f64, means: f64, df: f64, lower: flag, log: flag) => ptukey;
+    Rf_qtukey(p: f64, ranges: f64, means: f64, df: f64, lower: flag, log: flag) => qtukey;
+    Rf_dwilcox(x: f64, m: f64, n: f64, log: flag) => dwilcox;
+    Rf_pwilcox(q: f64, m: f64, n: f64, lower: flag, log: flag) => pwilcox;
+    Rf_qwilcox(p: f64, m: f64, n: f64, lower: flag, log: flag) => qwilcox;
+    Rf_dsignrank(x: f64, n: f64, log: flag) => dsignrank;
+    Rf_psignrank(x: f64, n: f64, lower: flag, log: flag) => psignrank;
+    Rf_qsignrank(p: f64, n: f64, lower: flag, log: flag) => qsignrank;
+    Rf_gammafn(x: f64) => gammafn;
+    Rf_lgammafn(x: f64) => lgammafn;
+    Rf_lgamma1p(a: f64) => lgamma1p;
+    Rf_digamma(x: f64) => digamma;
+    Rf_trigamma(x: f64) => trigamma;
+    Rf_tetragamma(x: f64) => tetragamma;
+    Rf_pentagamma(x: f64) => pentagamma;
+    Rf_psigamma(x: f64, deriv: f64) => psigamma;
+    Rf_beta(a: f64, b: f64) => beta;
+    Rf_lbeta(a: f64, b: f64) => lbeta;
+    Rf_choose(n: f64, k: f64) => choose;
+    Rf_lchoose(n: f64, k: f64) => lchoose;
+    Rf_bessel_i(x: f64, alpha: f64, expo: f64) => bessel_i;
+    Rf_bessel_j(x: f64, alpha: f64) => bessel_j;
+    Rf_bessel_k(x: f64, alpha: f64, expo: f64) => bessel_k;
+    Rf_bessel_y(x: f64, alpha: f64) => bessel_y;
+    Rf_pythag(a: f64, b: f64) => pythag;
+    Rf_fmax2(x: f64, y: f64) => fmax2;
+    Rf_fmin2(x: f64, y: f64) => fmin2;
+    Rf_sign(x: f64) => sign;
+    Rf_fprec(x: f64, digits: f64) => fprec;
+    Rf_fround(x: f64, digits: f64) => fround;
+    Rf_fsign(x: f64, y: f64) => fsign;
+    Rf_ftrunc(x: f64) => ftrunc;
+    Rf_log1pmx(x: f64) => log1pmx;
+    Rf_log1pexp(x: f64) => log1pexp;
+    Rf_log1mexp(x: f64) => log1mexp;
+    Rf_logspace_add(logx: f64, logy: f64) => logspace_add;
+    Rf_logspace_sub(logx: f64, logy: f64) => logspace_sub;
+    Rf_pow1p(x: f64, y: f64) => pow1p;
+    R_pow(x: f64, y: f64) => r_pow;
+    cospi(x: f64) => cospi_;
+    sinpi(x: f64) => sinpi_;
+    tanpi(x: f64) => tanpi_;
+    Rtanpi(x: f64) => tanpi_;
+    Rlog1p(x: f64) => ln_1p;
+}
+
+export_random! {
+    Rf_rnorm(mu, sigma) => rnorm;
+    Rf_runif(a, b) => runif;
+    Rf_rgamma(shape, scale) => rgamma;
+    Rf_rbeta(a, b) => rbeta;
+    Rf_rlnorm(meanlog, sdlog) => rlnorm;
+    Rf_rchisq(df) => rchisq;
+    Rf_rnchisq(df, ncp) => rnchisq;
+    Rf_rf(m, n) => rf;
+    Rf_rt(df) => rt;
+    Rf_rbinom(n, p) => rbinom;
+    Rf_rcauchy(location, scale) => rcauchy;
+    Rf_rexp(scale) => rexp;
+    Rf_rgeom(p) => rgeom;
+    Rf_rhyper(r, b, n) => rhyper;
+    Rf_rnbinom(size, prob) => rnbinom;
+    Rf_rnbinom_mu(size, mu) => rnbinom_mu;
+    Rf_rpois(mu) => rpois;
+    Rf_rweibull(shape, scale) => rweibull;
+    Rf_rlogis(location, scale) => rlogis;
+    Rf_rwilcox(m, n) => rwilcox;
+    Rf_rsignrank(n) => rsignrank;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn R_pow_di(x: f64, n: c_int) -> f64 {
+    r_pow_di(x, n)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_imax2(x: c_int, y: c_int) -> c_int {
+    x.max(y)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_imin2(x: c_int, y: c_int) -> c_int {
+    x.min(y)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_lgammafn_sign(x: f64, sign: *mut c_int) -> f64 {
+    let (value, value_sign) = lgammafn_sign(x);
+    if !sign.is_null() {
+        *sign = value_sign;
+    }
+    value
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_logspace_sum(values: *const f64, count: c_int) -> f64 {
+    if values.is_null() || count <= 0 {
+        return f64::NEG_INFINITY;
+    }
+    logspace_sum(std::slice::from_raw_parts(values, count as usize))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_pnorm_both(
+    x: f64,
+    cumulative: *mut f64,
+    complementary: *mut f64,
+    tail: c_int,
+    log: c_int,
+) {
+    let (lower, upper) = pnorm_both(x, tail, log != 0);
+    if !cumulative.is_null() {
+        *cumulative = lower;
+    }
+    if !complementary.is_null() {
+        *complementary = upper;
+    }
+}
+
+/// Amos's interface to the polygamma functions: `ans[j]` receives
+/// `(-1)^(k+1) / k! * psi^(k)(x)` for `k = n + j`, `j < m`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_dpsifn(
+    x: f64,
+    n: c_int,
+    kode: c_int,
+    m: c_int,
+    ans: *mut f64,
+    nz: *mut c_int,
+    ierr: *mut c_int,
+) {
+    let mut values = vec![0.0; m.max(0) as usize];
+    let status = dpsifn(x, n, kode, &mut values);
+    if !ans.is_null() {
+        std::ptr::copy_nonoverlapping(values.as_ptr(), ans, values.len());
+    }
+    if !nz.is_null() {
+        *nz = 0;
+    }
+    if !ierr.is_null() {
+        *ierr = status;
+    }
+}
+
+/// The `_ex` variants take a work array so that callers can avoid an allocation per call;
+/// ry's implementation needs no workspace, so the array goes unused.
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_bessel_i_ex(x: f64, alpha: f64, expo: f64, _work: *mut f64) -> f64 {
+    bessel_i(x, alpha, expo)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_bessel_j_ex(x: f64, alpha: f64, _work: *mut f64) -> f64 {
+    bessel_j(x, alpha)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_bessel_k_ex(x: f64, alpha: f64, expo: f64, _work: *mut f64) -> f64 {
+    bessel_k(x, alpha, expo)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_bessel_y_ex(x: f64, alpha: f64, _work: *mut f64) -> f64 {
+    bessel_y(x, alpha)
+}
+
+/// Draws one multinomial vector of `n` trials over `count` categories into `result`. An
+/// invalid probability marks the result `NA`, and probabilities that do not sum to one are an
+/// error, both as in GNU R.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_rmultinom(
+    n: c_int,
+    probabilities: *mut f64,
+    count: c_int,
+    result: *mut c_int,
+) {
+    if count < 1 || probabilities.is_null() || result.is_null() {
+        return;
+    }
+    let probabilities = std::slice::from_raw_parts(probabilities, count as usize);
+    let result = std::slice::from_raw_parts_mut(result, count as usize);
+    enter(|| rmultinom(&mut runtime().rng, n, probabilities, result))
+}
+
+/// GNU R frees the tables `dwilcox` and friends cache; ry's tables are rebuilt per call.
+#[unsafe(no_mangle)]
+pub extern "C" fn wilcox_free() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn signrank_free() {}
+
+// Shared conventions: the `R_D_*` and `R_DT_*` vocabulary of densities and probabilities that
+// may be on the log scale and in either tail.
+
+fn d0(log: bool) -> f64 {
+    if log { f64::NEG_INFINITY } else { 0.0 }
+}
+
+fn d1(log: bool) -> f64 {
+    if log { 0.0 } else { 1.0 }
+}
+
+fn dt0(lower: bool, log: bool) -> f64 {
+    if lower { d0(log) } else { d1(log) }
+}
+
+fn dt1(lower: bool, log: bool) -> f64 {
+    if lower { d1(log) } else { d0(log) }
+}
+
+/// `R_D_val`: a probability on the requested scale.
+fn d_val(x: f64, log: bool) -> f64 {
+    if log { x.ln() } else { x }
+}
+
+/// `R_D_exp`: a log probability on the requested scale.
+fn d_exp(x: f64, log: bool) -> f64 {
+    if log { x } else { x.exp() }
+}
+
+/// `R_D_Clog`: one minus a probability, on the requested scale.
+fn d_clog(p: f64, log: bool) -> f64 {
+    if log { (-p).ln_1p() } else { 0.5 - p + 0.5 }
+}
+
+/// `R_DT_val`: a lower-tail probability, converted to the requested tail and scale.
+fn dt_val(x: f64, lower: bool, log: bool) -> f64 {
+    if lower { d_val(x, log) } else { d_clog(x, log) }
+}
+
+/// `R_Log1_Exp`: `log(1 - exp(x))` for `x <= 0`, accurate on both sides of `-log(2)`.
+fn log1_exp(x: f64) -> f64 {
+    if x > -M_LN2 {
+        (-x.exp_m1()).ln()
+    } else {
+        (-x.exp()).ln_1p()
+    }
+}
+
+/// `R_D_LExp`: `log(1 - p)` for `p` on the requested scale.
+fn d_lexp(p: f64, log: bool) -> f64 {
+    if log { log1_exp(p) } else { (-p).ln_1p() }
+}
+
+/// `R_D_log`: the natural log of a probability on the requested scale.
+fn d_log(p: f64, log: bool) -> f64 {
+    if log { p } else { p.ln() }
+}
+
+/// `R_D_Lval`: the lower-tail probability of a non-log probability.
+fn d_lval(p: f64, lower: bool) -> f64 {
+    if lower { p } else { 0.5 - p + 0.5 }
+}
+
+/// `R_D_Cval`: the upper-tail probability of a non-log probability.
+fn d_cval(p: f64, lower: bool) -> f64 {
+    if lower { 0.5 - p + 0.5 } else { p }
+}
+
+/// `R_DT_qIv`: the lower-tail, non-log probability of a quantile function's argument.
+fn dt_qiv(p: f64, lower: bool, log: bool) -> f64 {
+    if log {
+        if lower { p.exp() } else { -p.exp_m1() }
+    } else {
+        d_lval(p, lower)
+    }
+}
+
+/// `R_DT_CIv`: the upper-tail, non-log probability of a quantile function's argument.
+fn dt_civ(p: f64, lower: bool, log: bool) -> f64 {
+    if log {
+        if lower { -p.exp_m1() } else { p.exp() }
+    } else {
+        d_cval(p, lower)
+    }
+}
+
+/// `R_D_qIv`: a probability off the log scale.
+fn d_qiv(p: f64, log: bool) -> f64 {
+    if log { p.exp() } else { p }
+}
+
+/// `R_DT_log`: the log of the lower-tail probability.
+fn dt_log(p: f64, lower: bool, log: bool) -> f64 {
+    if lower { d_log(p, log) } else { d_lexp(p, log) }
+}
+
+/// `R_DT_Clog`: the log of the upper-tail probability.
+fn dt_clog(p: f64, lower: bool, log: bool) -> f64 {
+    if lower { d_lexp(p, log) } else { d_log(p, log) }
+}
+
+/// `R_DT_Log`: the log of the lower-tail probability, given a log probability.
+fn dt_log_of_log(p: f64, lower: bool) -> f64 {
+    if lower { p } else { log1_exp(p) }
+}
+
+/// `R_D_fexp`: `exp(x) / sqrt(f)` on the requested scale.
+fn d_fexp(f: f64, x: f64, log: bool) -> f64 {
+    if log {
+        -0.5 * f.ln() + x
+    } else {
+        x.exp() / f.sqrt()
+    }
+}
+
+/// `R_Q_P01_check`: whether `p` is not a probability on its scale.
+fn q_p01_invalid(p: f64, log: bool) -> bool {
+    (log && p > 0.0) || (!log && !(0.0..=1.0).contains(&p))
+}
+
+/// `R_Q_P01_boundaries`: the quantile at the ends of the probability scale, or `None` when `p`
+/// lies strictly inside it.
+fn q_p01_boundaries(p: f64, lower: bool, log: bool, left: f64, right: f64) -> Option<f64> {
+    if log {
+        if p > 0.0 {
+            return Some(f64::NAN);
+        }
+        if p == 0.0 {
+            return Some(if lower { right } else { left });
+        }
+        if p == f64::NEG_INFINITY {
+            return Some(if lower { left } else { right });
+        }
+    } else {
+        if !(0.0..=1.0).contains(&p) {
+            return Some(f64::NAN);
+        }
+        if p == 0.0 {
+            return Some(if lower { left } else { right });
+        }
+        if p == 1.0 {
+            return Some(if lower { right } else { left });
+        }
+    }
+    None
+}
+
+/// `R_forceint`: round half to even, as C's `nearbyint` does in the default rounding mode.
+fn forceint(x: f64) -> f64 {
+    x.round_ties_even()
+}
+
+/// `R_nonint`: whether `x` is not within rounding of an integer.
+fn nonint(x: f64) -> bool {
+    (x - forceint(x)).abs() > 1e-9 * fmax2(1.0, x.abs())
+}
+
+/// `R_D_negInonint`.
+fn negative_or_nonint(x: f64) -> bool {
+    x < 0.0 || nonint(x)
+}
+
+/// `R_D_nonint_check`: GNU R warns about a non-integer argument of a discrete density and
+/// returns a zero density.
+fn nonint_warning(x: f64) -> bool {
+    if nonint(x) {
+        warning(format!("non-integer x = {x:.6}"));
+        true
+    } else {
+        false
+    }
+}
+
+/// `MATHLIB_WARNING`: nmath's warnings reach R's warning machinery.
+fn warning(message: String) {
+    boundary::warn(message);
+}
+
+/// `ML_WARNING` for the conditions GNU R reports; a domain error stays silent at this level.
+fn precision_warning(function: &str) {
+    warning(format!(
+        "full precision may not have been achieved in '{function}'"
+    ));
+}
+
+fn range_warning(function: &str) {
+    warning(format!("value out of range in '{function}'"));
+}
+
+fn convergence_warning(function: &str) {
+    warning(format!("convergence failed in '{function}'"));
+}
+
+fn underflow_warning(function: &str) {
+    warning(format!("underflow occurred in '{function}'"));
+}
+
+fn finite(x: f64) -> bool {
+    x.is_finite()
+}
+
+// Small utilities.
+
+pub fn fmax2(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    if x < y { y } else { x }
+}
+
+pub fn fmin2(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    if x < y { x } else { y }
+}
+
+pub fn sign(x: f64) -> f64 {
+    if x.is_nan() {
+        x
+    } else if x > 0.0 {
+        1.0
+    } else if x == 0.0 {
+        0.0
+    } else {
+        -1.0
+    }
+}
+
+/// `|x|` with the sign of `y`, where a zero `y` counts as positive.
+pub fn fsign(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    if y >= 0.0 { x.abs() } else { -x.abs() }
+}
+
+pub fn ftrunc(x: f64) -> f64 {
+    x.trunc()
+}
+
+fn ln_1p(x: f64) -> f64 {
+    x.ln_1p()
+}
+
+/// `sqrt(a^2 + b^2)` without overflow.
+pub fn pythag(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return a + b;
+    }
+    if a.is_infinite() || b.is_infinite() {
+        return f64::INFINITY;
+    }
+    a.hypot(b)
+}
+
+/// `signif(x, digits)`: rounds to `digits` significant decimal digits.
+pub fn fprec(x: f64, digits: f64) -> f64 {
+    const MAX_DIGITS: i32 = 22;
+    const MAX10E: i32 = 308;
+    if x.is_nan() || digits.is_nan() {
+        return x + digits;
+    }
+    if !finite(x) {
+        return x;
+    }
+    let digits = if !finite(digits) {
+        if digits > 0.0 {
+            return x;
+        }
+        1.0
+    } else {
+        digits
+    };
+    if x == 0.0 {
+        return x;
+    }
+    let mut dig = digits.round() as i32;
+    if dig > MAX_DIGITS {
+        return x;
+    } else if dig < 1 {
+        dig = 1;
+    }
+    let (sgn, x) = if x < 0.0 { (-1.0, -x) } else { (1.0, x) };
+    let l10 = x.log10();
+    let mut e10 = dig - 1 - l10.floor() as i32;
+    if l10.abs() < (MAX10E - 2) as f64 {
+        let mut p10 = 1.0;
+        if e10 > MAX10E {
+            p10 = r_pow_di(10.0, e10 - MAX10E);
+            e10 = MAX10E;
+        }
+        if e10 > 0 {
+            let pow10 = r_pow_di(10.0, e10);
+            sgn * ((x * pow10 * p10).round_ties_even() / pow10) / p10
+        } else {
+            let pow10 = r_pow_di(10.0, -e10);
+            sgn * ((x / pow10).round_ties_even() * pow10)
+        }
+    } else if l10 < 0.0 {
+        // Below 1e-306 the scale factor 10^e10 overflows; the decimal formatter rounds the
+        // exact binary value to `dig` digits instead, which is the answer GNU R gives.
+        let text = format!("{:.*e}", (dig - 1) as usize, x);
+        sgn * text.parse::<f64>().unwrap_or(x)
+    } else {
+        let do_round = MAX10E as f64 - l10 >= r_pow_di(10.0, -dig);
+        let e2 = dig + if e10 > 0 { 1 } else { 6 };
+        let p10 = r_pow_di(10.0, e2);
+        let big_p10 = r_pow_di(10.0, e10 - e2);
+        let mut x = x * p10 * big_p10;
+        if do_round {
+            x += 0.5;
+        }
+        x = x.floor() / p10;
+        sgn * x / big_p10
+    }
+}
+
+/// `round(x, digits)`: of the two decimal neighbours of `x` with `digits` decimals, the one
+/// closer to `x` as a double, the even one on a tie, so `round(0.15, 1)` is 0.1 because the
+/// double nearest 0.15 lies below it.
+pub fn fround(x: f64, digits: f64) -> f64 {
+    const MAX_DIGITS: f64 = 308.0;
+    if x.is_nan() || digits.is_nan() {
+        return x + digits;
+    }
+    if !finite(x) || digits > MAX_DIGITS + 15.0 || x == 0.0 {
+        return x;
+    }
+    if digits < -MAX_DIGITS {
+        return 0.0;
+    }
+    if digits == 0.0 {
+        return forceint(x);
+    }
+    let dig = (digits + 0.5).floor() as i32;
+    let (sgn, x) = if x < 0.0 { (-1.0, -x) } else { (1.0, x) };
+    let l10x = std::f64::consts::LOG10_2 * (0.5 + logb(x));
+    if l10x + dig as f64 > f64::DIGITS as f64 {
+        return sgn * x;
+    }
+    let (x10, i10, down, up);
+    if dig > 0 {
+        let pow10 = r_pow_di(10.0, dig);
+        x10 = pow10 * x;
+        i10 = x10.floor();
+        down = i10 / pow10;
+        up = x10.ceil() / pow10;
+    } else {
+        let pow10 = r_pow_di(10.0, -dig);
+        x10 = x / pow10;
+        i10 = x10.floor();
+        down = i10 * pow10;
+        up = x10.ceil() * pow10;
+    }
+    let du = up - x;
+    let dd = x - down;
+    sgn * if du < dd || (du == dd && i10 % 2.0 == 1.0) {
+        up
+    } else {
+        down
+    }
+}
+
+/// C's `logb`: the unbiased binary exponent.
+fn logb(x: f64) -> f64 {
+    if x == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if !finite(x) {
+        return x.abs();
+    }
+    let bits = x.abs().to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i64;
+    if exponent == 0 {
+        let mantissa = bits & ((1 << 52) - 1);
+        (63 - mantissa.leading_zeros() as i64 - 1074) as f64
+    } else {
+        (exponent - 1023) as f64
+    }
+}
+
+/// `x^y` with R's conventions for the cases C's `pow` leaves to the platform.
+pub fn r_pow(x: f64, y: f64) -> f64 {
+    if y == 2.0 {
+        return x * x;
+    }
+    if x == 1.0 || y == 0.0 {
+        return 1.0;
+    }
+    if x == 0.0 {
+        return if y > 0.0 {
+            0.0
+        } else if y < 0.0 {
+            f64::INFINITY
+        } else {
+            y
+        };
+    }
+    if finite(x) && finite(y) {
+        return x.powf(y);
+    }
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    if !finite(x) {
+        if x > 0.0 {
+            return if y < 0.0 { 0.0 } else { f64::INFINITY };
+        } else if finite(y) && y == y.floor() {
+            return if y < 0.0 {
+                0.0
+            } else if y % 2.0 != 0.0 {
+                x
+            } else {
+                -x
+            };
+        }
+    }
+    if !finite(y) && x >= 0.0 {
+        return if y > 0.0 {
+            if x >= 1.0 { f64::INFINITY } else { 0.0 }
+        } else if x < 1.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+    }
+    f64::NAN
+}
+
+/// `x^n` by repeated squaring, the order of multiplications GNU R uses.
+pub fn r_pow_di(x: f64, n: c_int) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if n == heap::object::NA_INTEGER {
+        return heap::object::NA_REAL;
+    }
+    let mut result = 1.0;
+    if n != 0 {
+        if !finite(x) {
+            return r_pow(x, n as f64);
+        }
+        let negative = n < 0;
+        let mut n = n.unsigned_abs();
+        let mut x = x;
+        loop {
+            if n & 1 != 0 {
+                result *= x;
+            }
+            n >>= 1;
+            if n != 0 {
+                x *= x;
+            } else {
+                break;
+            }
+        }
+        if negative {
+            result = 1.0 / result;
+        }
+    }
+    result
+}
+
+/// `(1 + x)^y`, accurate for small `x`.
+pub fn pow1p(x: f64, y: f64) -> f64 {
+    if y.is_nan() {
+        return if x == 0.0 { 1.0 } else { y };
+    }
+    if (0.0..=4.0).contains(&y) && y == y.trunc() {
+        match y as i32 {
+            0 => return 1.0,
+            1 => return x + 1.0,
+            2 => return x * (x + 2.0) + 1.0,
+            3 => return x * (x * (x + 3.0) + 3.0) + 1.0,
+            _ => return x * (x * (x * (x + 4.0) + 6.0) + 4.0) + 1.0,
+        }
+    }
+    let xp1 = x + 1.0;
+    let back = xp1 - 1.0;
+    if back == x || x.abs() > 0.5 || x.is_nan() {
+        xp1.powf(y)
+    } else {
+        (y * x.ln_1p()).exp()
+    }
+}
+
+/// `cos(pi * x)`, exact at multiples of one half.
+pub fn cospi_(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if !finite(x) {
+        return f64::NAN;
+    }
+    let x = x.abs() % 2.0;
+    if x % 1.0 == 0.5 {
+        return 0.0;
+    }
+    if x == 1.0 {
+        return -1.0;
+    }
+    if x == 0.0 {
+        return 1.0;
+    }
+    (M_PI * x).cos()
+}
+
+/// `sin(pi * x)`, exact at multiples of one half.
+pub fn sinpi_(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if !finite(x) {
+        return f64::NAN;
+    }
+    let mut x = x % 2.0;
+    if x <= -1.0 {
+        x += 2.0;
+    } else if x > 1.0 {
+        x -= 2.0;
+    }
+    if x == 0.0 || x == 1.0 {
+        return 0.0;
+    }
+    if x == 0.5 {
+        return 1.0;
+    }
+    if x == -0.5 {
+        return -1.0;
+    }
+    (M_PI * x).sin()
+}
+
+/// `tan(pi * x)`, exact at multiples of one quarter.
+pub fn tanpi_(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if !finite(x) {
+        return f64::NAN;
+    }
+    let mut x = x % 1.0;
+    if x <= -0.5 {
+        x += 1.0;
+    } else if x > 0.5 {
+        x -= 1.0;
+    }
+    if x == 0.0 {
+        0.0
+    } else if x == 0.5 {
+        f64::NAN
+    } else if x == 0.25 {
+        1.0
+    } else if x == -0.25 {
+        -1.0
+    } else {
+        (M_PI * x).tan()
+    }
+}
+
+/// `log(1 + exp(x))` without overflow.
+pub fn log1pexp(x: f64) -> f64 {
+    if x <= 18.0 {
+        return x.exp().ln_1p();
+    }
+    if x > 33.3 {
+        return x;
+    }
+    x + (-x).exp()
+}
+
+/// `log(1 - exp(-x))` for `x >= 0`.
+pub fn log1mexp(x: f64) -> f64 {
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x <= M_LN2 {
+        (-(-x).exp_m1()).ln()
+    } else {
+        (-(-x).exp()).ln_1p()
+    }
+}
+
+/// `log(exp(logx) + exp(logy))`.
+pub fn logspace_add(logx: f64, logy: f64) -> f64 {
+    fmax2(logx, logy) + (-(logx - logy).abs()).exp().ln_1p()
+}
+
+/// `log(exp(logx) - exp(logy))`.
+pub fn logspace_sub(logx: f64, logy: f64) -> f64 {
+    logx + log1_exp(logy - logx)
+}
+
+/// `log(sum(exp(logx)))`, scaled by the largest term.
+pub fn logspace_sum(logx: &[f64]) -> f64 {
+    match logx {
+        [] => f64::NEG_INFINITY,
+        [single] => *single,
+        [first, second] => logspace_add(*first, *second),
+        _ => {
+            let maximum =
+                logx.iter().copied().fold(
+                    logx[0],
+                    |maximum, value| {
+                        if maximum < value { value } else { maximum }
+                    },
+                );
+            let sum: f64 = logx.iter().map(|value| (value - maximum).exp()).sum();
+            maximum + sum.ln()
+        }
+    }
+}
+
+/// The continued fraction for `sum_k x^k / (i + k d)`, the tail of `log1pmx` and `lgamma1p`.
+fn logcf(x: f64, i: f64, d: f64, eps: f64) -> f64 {
+    const SCALE: f64 = 1.157_920_892_373_162e77;
+    let mut c1 = 2.0 * d;
+    let mut c2 = i + d;
+    let mut c4 = c2 + d;
+    let mut a1 = c2;
+    let mut b1 = i * (c2 - i * x);
+    let mut b2 = d * d * x;
+    let mut a2 = c4 * c2 - b2;
+    b2 = c4 * b1 - i * b2;
+    while (a2 * b1 - a1 * b2).abs() > (eps * b1 * b2).abs() {
+        let mut c3 = c2 * c2 * x;
+        c2 += d;
+        c4 += d;
+        a1 = c4 * a2 - c3 * a1;
+        b1 = c4 * b2 - c3 * b1;
+        c3 = c1 * c1 * x;
+        c1 += d;
+        c4 += d;
+        a2 = c4 * a1 - c3 * a2;
+        b2 = c4 * b1 - c3 * b2;
+        if b2.abs() > SCALE {
+            a1 /= SCALE;
+            b1 /= SCALE;
+            a2 /= SCALE;
+            b2 /= SCALE;
+        } else if b2.abs() < 1.0 / SCALE {
+            a1 *= SCALE;
+            b1 *= SCALE;
+            a2 *= SCALE;
+            b2 *= SCALE;
+        }
+    }
+    a2 / b2
+}
+
+/// `log(1 + x) - x`, accurate near zero.
+pub fn log1pmx(x: f64) -> f64 {
+    const MIN_LOG1_VALUE: f64 = -0.79149064;
+    if !(MIN_LOG1_VALUE..=1.0).contains(&x) {
+        return x.ln_1p() - x;
+    }
+    let r = x / (2.0 + x);
+    let y = r * r;
+    if x.abs() < 1e-2 {
+        r * ((((2.0 / 9.0 * y + 2.0 / 7.0) * y + 2.0 / 5.0) * y + 2.0 / 3.0) * y - x)
+    } else {
+        r * (2.0 * y * logcf(y, 3.0, 2.0, 1e-14) - x)
+    }
+}
+
+/// `(zeta(i + 2) - 1) / (i + 2)` for `i < 40`: the series of `log(gamma(1 + a))` about zero
+/// (Abramowitz and Stegun 6.1.33).
+const LGAMMA1P_COEFFICIENTS: [f64; 40] = [
+    0.3224670334241132,
+    0.0673523010531981,
+    0.020580808427784546,
+    0.007385551028673986,
+    0.0028905103307415234,
+    0.001192753911703261,
+    0.0005096695247430425,
+    0.00022315475845357939,
+    9.945751278180853e-05,
+    4.492623673813314e-05,
+    2.050721277567069e-05,
+    9.439488275268397e-06,
+    4.374866789907488e-06,
+    2.039215753801366e-06,
+    9.55141213040742e-07,
+    4.492469198764566e-07,
+    2.1207184805554665e-07,
+    1.0043224823968099e-07,
+    4.7698101693639804e-08,
+    2.2711094608943164e-08,
+    1.0838659214896955e-08,
+    5.183475041970047e-09,
+    2.4836745438024785e-09,
+    1.1921401405860912e-09,
+    5.731367241678862e-10,
+    2.7595228851242334e-10,
+    1.330476437424449e-10,
+    6.4229645638381e-11,
+    3.1044247747322276e-11,
+    1.5021384080754142e-11,
+    7.275974480239079e-12,
+    3.527742476575915e-12,
+    1.711991790559618e-12,
+    8.315385841420285e-13,
+    4.04220052528944e-13,
+    1.9664756310966165e-13,
+    9.573630387838556e-14,
+    4.6640760264283744e-14,
+    2.2737369600659724e-14,
+    1.1091399470834522e-14,
+];
+
+/// `log(gamma(1 + a))`, accurate for small `a`.
+pub fn lgamma1p(a: f64) -> f64 {
+    const EULER: f64 = 0.577_215_664_901_532_9;
+    // zeta(42) - 1, the remainder the continued fraction scales.
+    const TAIL: f64 = 2.2737368458246524e-13;
+    if a.abs() >= 0.5 {
+        return lgammafn(a + 1.0);
+    }
+    let count = LGAMMA1P_COEFFICIENTS.len();
+    let mut lgam = TAIL * logcf(-a / 2.0, (count + 2) as f64, 1.0, 1e-14);
+    for coefficient in LGAMMA1P_COEFFICIENTS.iter().rev() {
+        lgam = coefficient - a * lgam;
+    }
+    (a * lgam - EULER) * a - log1pmx(a)
+}
+
+// The gamma function and its relatives.
+
+/// Evaluates `c[0]/2 + sum c[k] T_k(x)` by Clenshaw's recurrence.
+fn chebyshev_eval(x: f64, coefficients: &[f64]) -> f64 {
+    if !(-1.1..=1.1).contains(&x) {
+        return f64::NAN;
+    }
+    let twox = x * 2.0;
+    let (mut b0, mut b1, mut b2) = (0.0, 0.0, 0.0);
+    for coefficient in coefficients.iter().rev() {
+        b2 = b1;
+        b1 = b0;
+        b0 = twox * b1 - b2 + coefficient;
+    }
+    (b0 - b2) * 0.5
+}
+
+/// The Chebyshev series of `gamma(1 + y) - 0.9375` on `0 <= y <= 1`, in `t = 2y - 1`.
+const GAMMA_SERIES: [f64; 22] = [
+    0.00857119559098933,
+    0.004415381324841007,
+    0.05685043681599363,
+    -0.00421983539641856,
+    0.0013268081812124603,
+    -0.00018930245297988805,
+    3.606925327441245e-05,
+    -6.056761904460864e-06,
+    1.0558295463022833e-06,
+    -1.811967365542384e-07,
+    3.117724964715322e-08,
+    -5.354219639019687e-09,
+    9.193275519859589e-10,
+    -1.5779412802883398e-10,
+    2.7079806229349544e-11,
+    -4.64681865382573e-12,
+    7.97335019200742e-13,
+    -1.368078209830916e-13,
+    2.3473194865638007e-14,
+    -4.027432614949067e-15,
+    6.910051747372101e-16,
+    -1.185584500221993e-16,
+];
+
+/// The Chebyshev series of `x * lgammacor(x)` for `x >= 10`, in `t = 2 (10/x)^2 - 1`.
+const LGAMMACOR_SERIES: [f64; 5] = [
+    0.16663894804518634,
+    -1.384948176067564e-05,
+    9.81082564692473e-09,
+    -1.809129475572494e-11,
+    6.221098041892606e-14,
+];
+
+/// The remainder of Stirling's approximation of `log(gamma(x))` for `x >= 10`.
+fn lgammacor(x: f64) -> f64 {
+    const XBIG: f64 = 94906265.62425156;
+    const XMAX: f64 = 3.745194030963158e306;
+    if x < 10.0 {
+        return f64::NAN;
+    }
+    if x >= XMAX {
+        underflow_warning("lgammacor");
+    } else if x < XBIG {
+        let t = 10.0 / x;
+        return chebyshev_eval(t * t * 2.0 - 1.0, &LGAMMACOR_SERIES) / x;
+    }
+    1.0 / (x * 12.0)
+}
+
+pub fn gammafn(x: f64) -> f64 {
+    const XMIN: f64 = -170.5674972726612;
+    const XMAX: f64 = 171.61447887182298;
+    const XSML: f64 = 2.2474362225598545e-308;
+    const DXREL: f64 = 1.490116119384765696e-8;
+    if x.is_nan() {
+        return x;
+    }
+    if x == 0.0 || (x < 0.0 && x == x.round()) {
+        return f64::NAN;
+    }
+    let mut y = x.abs();
+    if y <= 10.0 {
+        let mut n = x as i32;
+        if x < 0.0 {
+            n -= 1;
+        }
+        y = x - n as f64;
+        n -= 1;
+        let mut value = chebyshev_eval(y * 2.0 - 1.0, &GAMMA_SERIES) + 0.9375;
+        if n == 0 {
+            return value;
+        }
+        if n < 0 {
+            if x < -0.5 && (x - (x - 0.5).trunc() / x).abs() < DXREL {
+                precision_warning("gammafn");
+            }
+            if y < XSML {
+                range_warning("gammafn");
+                return if x > 0.0 {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                };
+            }
+            for i in 0..-n {
+                value /= x + i as f64;
+            }
+            value
+        } else {
+            for i in 1..=n {
+                value *= y + i as f64;
+            }
+            value
+        }
+    } else {
+        if x > XMAX {
+            return f64::INFINITY;
+        }
+        if x < XMIN {
+            return 0.0;
+        }
+        let value = if y <= 50.0 && y == y.trunc() {
+            let mut value = 1.0;
+            for i in 2..y as i32 {
+                value *= i as f64;
+            }
+            value
+        } else {
+            ((y - 0.5) * y.ln() - y + M_LN_SQRT_2PI + stirlerr(y)).exp()
+        };
+        if x > 0.0 {
+            return value;
+        }
+        if ((x - (x - 0.5).trunc()) / x).abs() < DXREL {
+            precision_warning("gammafn");
+        }
+        let sinpiy = sinpi_(y);
+        if sinpiy == 0.0 {
+            range_warning("gammafn");
+            return f64::INFINITY;
+        }
+        -M_PI / (y * sinpiy * value)
+    }
+}
+
+pub fn lgammafn(x: f64) -> f64 {
+    lgammafn_sign(x).0
+}
+
+/// `log|gamma(x)|` and the sign of `gamma(x)`.
+pub fn lgammafn_sign(x: f64) -> (f64, c_int) {
+    const XMAX: f64 = 2.5327372760800758e305;
+    const DXREL: f64 = 1.490116119384765625e-8;
+    let mut sign = 1;
+    if x.is_nan() {
+        return (x, sign);
+    }
+    if x < 0.0 && (-x).floor() % 2.0 == 0.0 {
+        sign = -1;
+    }
+    if x <= 0.0 && x == x.trunc() {
+        return (f64::INFINITY, sign);
+    }
+    let y = x.abs();
+    if y < 1e-306 {
+        return (-y.ln(), sign);
+    }
+    if y <= 10.0 {
+        return (gammafn(x).abs().ln(), sign);
+    }
+    if y > XMAX {
+        return (f64::INFINITY, sign);
+    }
+    if x > 0.0 {
+        let value = if x > 1e17 {
+            x * (x.ln() - 1.0)
+        } else if x > 4934720.0 {
+            M_LN_SQRT_2PI + (x - 0.5) * x.ln() - x
+        } else {
+            M_LN_SQRT_2PI + (x - 0.5) * x.ln() - x + lgammacor(x)
+        };
+        return (value, sign);
+    }
+    let sinpiy = sinpi_(y).abs();
+    if sinpiy == 0.0 {
+        return (f64::NAN, sign);
+    }
+    let answer = M_LN_SQRT_PID2 + (x - 0.5) * y.ln() - x - sinpiy.ln() - lgammacor(y);
+    if ((x - (x - 0.5).trunc()) * answer / x).abs() < DXREL {
+        precision_warning("lgamma");
+    }
+    (answer, sign)
+}
+
+/// `stirlerr(n) = log(n!) - log(sqrt(2 pi n) (n/e)^n)` at the half integers up to 15.
+const STIRLERR_HALVES: [f64; 31] = [
+    0.0,
+    0.15342640972002736,
+    0.08106146679532726,
+    0.05481412105191765,
+    0.0413406959554093,
+    0.03316287351993629,
+    0.02767792568499834,
+    0.023746163656297496,
+    0.020790672103765093,
+    0.018488450532673187,
+    0.016644691189821193,
+    0.015134973221917378,
+    0.013876128823070748,
+    0.012810465242920227,
+    0.01189670994589177,
+    0.011104559758206917,
+    0.010411265261972096,
+    0.009799416126158804,
+    0.009255462182712733,
+    0.008768700134139386,
+    0.00833056343336287,
+    0.00793411456431402,
+    0.007573675487951841,
+    0.007244554301320383,
+    0.00694284010720953,
+    0.006665247032707682,
+    0.006408994188004207,
+    0.006171712263039458,
+    0.0059513701127588475,
+    0.0057462165130101155,
+    0.005554733551962801,
+];
+
+/// The error of Stirling's formula for `log(n!)` (Loader 2000).
+fn stirlerr(n: f64) -> f64 {
+    const S0: f64 = 1.0 / 12.0;
+    const S1: f64 = 1.0 / 360.0;
+    const S2: f64 = 1.0 / 1260.0;
+    const S3: f64 = 1.0 / 1680.0;
+    const S4: f64 = 1.0 / 1188.0;
+    if n <= 15.0 {
+        let nn = n + n;
+        if nn == nn.trunc() {
+            return STIRLERR_HALVES[nn as usize];
+        }
+        return lgammafn(n + 1.0) - (n + 0.5) * n.ln() + n - M_LN_SQRT_2PI;
+    }
+    let nn = n * n;
+    if n > 500.0 {
+        return (S0 - S1 / nn) / n;
+    }
+    if n > 80.0 {
+        return (S0 - (S1 - S2 / nn) / nn) / n;
+    }
+    if n > 35.0 {
+        return (S0 - (S1 - (S2 - S3 / nn) / nn) / nn) / n;
+    }
+    (S0 - (S1 - (S2 - (S3 - S4 / nn) / nn) / nn) / nn) / n
+}
+
+/// The deviance term `x log(x/np) + np - x`, by a series when `x` is near `np` (Loader 2000).
+fn bd0(x: f64, np: f64) -> f64 {
+    if !finite(x) || !finite(np) || np == 0.0 {
+        return f64::NAN;
+    }
+    if (x - np).abs() < 0.1 * (x + np) {
+        let mut v = (x - np) / (x + np);
+        let mut s = (x - np) * v;
+        if s.abs() < DBL_MIN {
+            return s;
+        }
+        let mut ej = 2.0 * x * v;
+        v *= v;
+        for j in 1..1000 {
+            ej *= v;
+            let s1 = s + ej / ((j << 1) + 1) as f64;
+            if s1 == s {
+                return s1;
+            }
+            s = s1;
+        }
+    }
+    x * (x / np).ln() + np - x
+}
+
+pub fn lbeta(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return a + b;
+    }
+    let p = a.min(b);
+    let q = a.max(b);
+    if p < 0.0 {
+        return f64::NAN;
+    } else if p == 0.0 {
+        return f64::INFINITY;
+    } else if !finite(q) {
+        return f64::NEG_INFINITY;
+    }
+    if p >= 10.0 {
+        let corr = lgammacor(p) + lgammacor(q) - lgammacor(p + q);
+        q.ln() * -0.5
+            + M_LN_SQRT_2PI
+            + corr
+            + (p - 0.5) * (p / (p + q)).ln()
+            + q * (-p / (p + q)).ln_1p()
+    } else if q >= 10.0 {
+        let corr = lgammacor(q) - lgammacor(p + q);
+        lgammafn(p) + corr + p - p * (p + q).ln() + (q - 0.5) * (-p / (p + q)).ln_1p()
+    } else if p < 1e-306 {
+        lgammafn(p) + (lgammafn(q) - lgammafn(p + q))
+    } else {
+        (gammafn(p) * (gammafn(q) / gammafn(p + q))).ln()
+    }
+}
+
+pub fn beta(a: f64, b: f64) -> f64 {
+    const XMAX: f64 = 171.61447887182298;
+    if a.is_nan() || b.is_nan() {
+        return a + b;
+    }
+    if a < 0.0 || b < 0.0 {
+        return f64::NAN;
+    } else if a == 0.0 || b == 0.0 {
+        return f64::INFINITY;
+    } else if !finite(a) || !finite(b) {
+        return 0.0;
+    }
+    if a + b < XMAX {
+        (1.0 / gammafn(a + b)) * (gammafn(a) * gammafn(b))
+    } else {
+        lbeta(a, b).exp()
+    }
+}
+
+fn lfastchoose(n: f64, k: f64) -> f64 {
+    -(n + 1.0).ln() - lbeta(n - k + 1.0, k + 1.0)
+}
+
+/// `lfastchoose` for `n < k - 1`, where the gamma function changes sign.
+fn lfastchoose2(n: f64, k: f64) -> (f64, c_int) {
+    let (r, sign) = lgammafn_sign(n - k + 1.0);
+    (lgammafn(n + 1.0) - lgammafn(k + 1.0) - r, sign)
+}
+
+fn round_k_warning(k0: f64, k: f64) {
+    if (k - k0).abs() > 1e-7 {
+        warning(format!("'k' ({k0:.2}) must be integer, rounded to {k:.0}"));
+    }
+}
+
+pub fn lchoose(n: f64, k: f64) -> f64 {
+    let k0 = k;
+    let k = forceint(k);
+    if n.is_nan() || k.is_nan() {
+        return n + k;
+    }
+    round_k_warning(k0, k);
+    if k < 2.0 {
+        if k < 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        if k == 0.0 {
+            return 0.0;
+        }
+        return n.abs().ln();
+    }
+    if n < 0.0 {
+        return lchoose(-n + k - 1.0, k);
+    } else if !nonint(n) {
+        let n = forceint(n);
+        if n < k {
+            return f64::NEG_INFINITY;
+        }
+        if n - k < 2.0 {
+            return lchoose(n, n - k);
+        }
+        return lfastchoose(n, k);
+    }
+    if n < k - 1.0 {
+        return lfastchoose2(n, k).0;
+    }
+    lfastchoose(n, k)
+}
+
+pub fn choose(n: f64, k: f64) -> f64 {
+    const K_SMALL_MAX: f64 = 30.0;
+    let k0 = k;
+    let mut k = forceint(k);
+    if n.is_nan() || k.is_nan() {
+        return n + k;
+    }
+    round_k_warning(k0, k);
+    if k < K_SMALL_MAX {
+        if n - k < k && n >= 0.0 && !nonint(n) {
+            k = forceint(n - k);
+        }
+        if k < 0.0 {
+            return 0.0;
+        }
+        if k == 0.0 {
+            return 1.0;
+        }
+        let mut r = n;
+        let mut j = 2.0;
+        while j <= k {
+            r *= (n - j + 1.0) / j;
+            j += 1.0;
+        }
+        return if !nonint(n) { forceint(r) } else { r };
+    }
+    if n < 0.0 {
+        let r = choose(-n + k - 1.0, k);
+        return if k != 2.0 * (k / 2.0).floor() { -r } else { r };
+    } else if !nonint(n) {
+        let n = forceint(n);
+        if n < k {
+            return 0.0;
+        }
+        if n - k < K_SMALL_MAX {
+            return choose(n, n - k);
+        }
+        return forceint(lfastchoose(n, k).exp());
+    }
+    if n < k - 1.0 {
+        let (r, sign) = lfastchoose2(n, k);
+        return sign as f64 * r.exp();
+    }
+    lfastchoose(n, k).exp()
+}
+
+// The polygamma functions.
+
+/// The Bernoulli numbers `B_2, B_4, ..., B_30`.
+const BERNOULLI: [f64; 15] = [
+    1.0 / 6.0,
+    -1.0 / 30.0,
+    1.0 / 42.0,
+    -1.0 / 30.0,
+    5.0 / 66.0,
+    -691.0 / 2730.0,
+    7.0 / 6.0,
+    -3617.0 / 510.0,
+    43867.0 / 798.0,
+    -174611.0 / 330.0,
+    854513.0 / 138.0,
+    -236364091.0 / 2730.0,
+    8553103.0 / 6.0,
+    -23749461029.0 / 870.0,
+    8615841276005.0 / 14322.0,
+];
+
+/// `psi(x)` for `x > 0`: the recurrence `psi(x) = psi(x + 1) - 1/x` up to where the asymptotic
+/// series in the Bernoulli numbers is exact to double precision.
+fn digamma_positive(x: f64) -> f64 {
+    let mut shift = 0.0;
+    let mut z = x;
+    while z < 10.0 {
+        shift += 1.0 / z;
+        z += 1.0;
+    }
+    let inverse_square = 1.0 / (z * z);
+    let mut power = inverse_square;
+    let mut series = 0.0;
+    for (index, bernoulli) in BERNOULLI.iter().take(8).enumerate() {
+        let order = 2.0 * (index + 1) as f64;
+        series += bernoulli / (order * 1.0) * power;
+        power *= inverse_square;
+    }
+    z.ln() - 0.5 / z - series - shift
+}
+
+/// The Hurwitz zeta function `sum_{i >= 0} (x + i)^(-s)` for integer `s >= 2` and `x > 0`, by
+/// Euler-Maclaurin summation after shifting `x` far enough that the correction terms shrink.
+fn hurwitz_zeta(s: f64, x: f64) -> f64 {
+    let threshold = 16.0 + 0.5 * s;
+    let mut sum = 0.0;
+    let mut z = x;
+    while z < threshold {
+        sum += z.powf(-s);
+        z += 1.0;
+    }
+    let mut tail = z.powf(1.0 - s) / (s - 1.0) + 0.5 * z.powf(-s);
+    // term_j = B_2j / (2j)! * s (s+1) ... (s+2j-2) * z^(-s-2j+1)
+    let mut factor = s / z.powf(s + 1.0);
+    let mut factorial = 2.0;
+    for (index, bernoulli) in BERNOULLI.iter().enumerate() {
+        let j = (index + 1) as f64;
+        let term = bernoulli / factorial * factor;
+        tail += term;
+        if term.abs() <= DBL_EPSILON * 0.25 * tail.abs() {
+            break;
+        }
+        factor *= (s + 2.0 * j - 1.0) * (s + 2.0 * j) / (z * z);
+        factorial *= (2.0 * j + 1.0) * (2.0 * j + 2.0);
+    }
+    sum + tail
+}
+
+/// Fills `ans[j]` with `(-1)^(k+1) / k! * psi^(k)(x)` for `k = n + j` and returns Amos's error
+/// code: 1 for invalid arguments, 4 where the reflection for negative `x` does not apply.
+fn dpsifn(x: f64, n: c_int, kode: c_int, ans: &mut [f64]) -> c_int {
+    if n < 0 || !(1..=2).contains(&kode) || ans.is_empty() {
+        return 1;
+    }
+    if x.is_nan() {
+        ans.fill(x);
+        return 0;
+    }
+    if x == f64::INFINITY {
+        for (j, slot) in ans.iter_mut().enumerate() {
+            *slot = if j as c_int + n == 0 {
+                f64::NEG_INFINITY
+            } else {
+                0.0
+            };
+        }
+        return 0;
+    }
+    if x <= 0.0 && x == x.round() {
+        for (j, slot) in ans.iter_mut().enumerate() {
+            *slot = if (j as c_int + n) % 2 == 1 {
+                f64::INFINITY
+            } else {
+                f64::NAN
+            };
+        }
+        return 0;
+    }
+    if x < 0.0 {
+        // psi^(k)(x) = (-1)^k psi^(k)(1 - x) - pi^(k+1) cot^(k)(pi x), the k-th derivative of
+        // the reflection formula psi(1 - x) - psi(x) = pi cot(pi x).
+        // GNU R's reflection stops at the fifth derivative.
+        if n as usize + ans.len() - 1 > 5 {
+            return 4;
+        }
+        let status = dpsifn(1.0 - x, n, 1, ans);
+        if status != 0 {
+            return status;
+        }
+        let cot = cot_derivatives(x * M_PI, (n as usize) + ans.len() - 1);
+        let mut factorial = 1.0;
+        let mut pi_power = M_PI;
+        for k in 1..=n {
+            factorial *= k as f64;
+            pi_power *= M_PI;
+        }
+        for (j, slot) in ans.iter_mut().enumerate() {
+            let k = n as usize + j;
+            if j > 0 {
+                factorial *= k as f64;
+                pi_power *= M_PI;
+            }
+            // ans holds (-1)^(k+1)/k! psi^(k)(1 - x); convert, reflect and convert back.
+            let sign = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
+            let psi_reflected = sign * factorial * *slot;
+            let parity = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
+            let psi = parity * psi_reflected - pi_power * cot[k];
+            *slot = sign * psi / factorial;
+        }
+        return 0;
+    }
+    for (j, slot) in ans.iter_mut().enumerate() {
+        let k = n + j as c_int;
+        *slot = if k == 0 {
+            let value = -digamma_positive(x);
+            if kode == 2 { value + x.ln() } else { value }
+        } else {
+            hurwitz_zeta((k + 1) as f64, x)
+        };
+        if !finite(*slot) {
+            // Amos's overflow error, which GNU R reports as NaN.
+            return 2;
+        }
+    }
+    0
+}
+
+/// The derivatives `d^k/dt^k cot(t)` for `k <= order` at `t`, from the polynomials in
+/// `c = cot(t)` that the rule `d/dt c = -(1 + c^2)` generates.
+fn cot_derivatives(t: f64, order: usize) -> Vec<f64> {
+    let c = t.cos() / t.sin();
+    let mut polynomial = vec![0.0, 1.0];
+    let mut values = Vec::with_capacity(order + 1);
+    for k in 0..=order {
+        values.push(
+            polynomial
+                .iter()
+                .rev()
+                .fold(0.0, |sum, coefficient| sum * c + coefficient),
+        );
+        if k == order {
+            break;
+        }
+        // P'(c) * -(1 + c^2)
+        let mut next = vec![0.0; polynomial.len() + 1];
+        for (power, coefficient) in polynomial.iter().enumerate().skip(1) {
+            let derivative = coefficient * power as f64;
+            next[power - 1] -= derivative;
+            next[power + 1] -= derivative;
+        }
+        polynomial = next;
+    }
+    values
+}
+
+/// The `n`-th derivative of the digamma function.
+pub fn psigamma(x: f64, deriv: f64) -> f64 {
+    const N_MAX: f64 = 100.0;
+    if x.is_nan() {
+        return x;
+    }
+    let deriv = forceint(deriv);
+    let n = deriv as c_int;
+    if deriv > N_MAX {
+        warning(format!("deriv = {n} > {N_MAX} (= n_max)"));
+        return f64::NAN;
+    }
+    let mut answer = [0.0];
+    if dpsifn(x, n, 1, &mut answer) != 0 {
+        return f64::NAN;
+    }
+    let mut answer = -answer[0];
+    for k in 1..=n {
+        answer *= -(k as f64);
+    }
+    answer
+}
+
+fn polygamma(x: f64, n: c_int, scale: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let mut answer = [0.0];
+    if dpsifn(x, n, 1, &mut answer) != 0 {
+        return f64::NAN;
+    }
+    scale * answer[0]
+}
+
+pub fn digamma(x: f64) -> f64 {
+    polygamma(x, 0, -1.0)
+}
+
+pub fn trigamma(x: f64) -> f64 {
+    polygamma(x, 1, 1.0)
+}
+
+pub fn tetragamma(x: f64) -> f64 {
+    polygamma(x, 2, -2.0)
+}
+
+pub fn pentagamma(x: f64) -> f64 {
+    polygamma(x, 3, 6.0)
+}
+
+// The normal distribution.
+
+pub fn dnorm(x: f64, mu: f64, sigma: f64, log: bool) -> f64 {
+    if x.is_nan() || mu.is_nan() || sigma.is_nan() {
+        return x + mu + sigma;
+    }
+    if sigma < 0.0 {
+        return f64::NAN;
+    }
+    if !finite(sigma) {
+        return d0(log);
+    }
+    if !finite(x) && mu == x {
+        return f64::NAN;
+    }
+    if sigma == 0.0 {
+        return if x == mu { f64::INFINITY } else { d0(log) };
+    }
+    let x = (x - mu) / sigma;
+    if !finite(x) {
+        return d0(log);
+    }
+    let x = x.abs();
+    if x >= 2.0 * DBL_MAX.sqrt() {
+        return d0(log);
+    }
+    if log {
+        return -(M_LN_SQRT_2PI + 0.5 * x * x + sigma.ln());
+    }
+    if x < 5.0 {
+        return M_1_SQRT_2PI * (-0.5 * x * x).exp() / sigma;
+    }
+    // Beyond 5 the square loses bits that exp() amplifies, so split x into a part with few
+    // significant bits, whose square is exact, and the rest.
+    if x > (-2.0 * M_LN2 * (DBL_MIN_EXP + 1 - DBL_MANT_DIG) as f64).sqrt() {
+        return 0.0;
+    }
+    let x1 = forceint(x * 65536.0) / 65536.0;
+    let x2 = x - x1;
+    M_1_SQRT_2PI / sigma * ((-0.5 * x1 * x1).exp() * ((-0.5 * x2 - x1) * x2).exp())
+}
+
+pub fn pnorm(x: f64, mu: f64, sigma: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || mu.is_nan() || sigma.is_nan() {
+        return x + mu + sigma;
+    }
+    if !finite(x) && mu == x {
+        return f64::NAN;
+    }
+    if sigma <= 0.0 {
+        if sigma < 0.0 {
+            return f64::NAN;
+        }
+        return if x < mu {
+            dt0(lower, log)
+        } else {
+            dt1(lower, log)
+        };
+    }
+    let p = (x - mu) / sigma;
+    if !finite(p) {
+        return if x < mu {
+            dt0(lower, log)
+        } else {
+            dt1(lower, log)
+        };
+    }
+    let (cumulative, complementary) = pnorm_both(p, if lower { 0 } else { 1 }, log);
+    if lower { cumulative } else { complementary }
+}
+
+/// Both tails of the standard normal distribution by Cody's rational Chebyshev approximations
+/// (Cody 1969, Math. Comp. 23). `tail` 0 computes the lower tail, 1 the upper and 2 both.
+pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
+    const A: [f64; 5] = [
+        2.2352520354606839287,
+        161.02823106855587881,
+        1067.6894854603709582,
+        18154.981253343561249,
+        0.065682337918207449113,
+    ];
+    const B: [f64; 4] = [
+        47.20258190468824187,
+        976.09855173777669322,
+        10260.932208618978205,
+        45507.789335026729956,
+    ];
+    const C: [f64; 9] = [
+        0.39894151208813466764,
+        8.8831497943883759412,
+        93.506656132177855979,
+        597.27027639480026226,
+        2494.5375852903726711,
+        6848.1904505362823326,
+        11602.651437647350124,
+        9842.7148383839780218,
+        1.0765576773720192317e-8,
+    ];
+    const D: [f64; 8] = [
+        22.266688044328115691,
+        235.38790178262499861,
+        1519.377599407554805,
+        6485.558298266760755,
+        18615.571640885098091,
+        34900.952721145977266,
+        38912.003286093271411,
+        19685.429676859990727,
+    ];
+    const P: [f64; 6] = [
+        0.21589853405795699,
+        0.1274011611602473639,
+        0.022235277870649807,
+        0.001421619193227893466,
+        2.9112874951168792e-5,
+        0.02307344176494017303,
+    ];
+    const Q: [f64; 5] = [
+        1.28426009614491121,
+        0.468238212480865118,
+        0.0659881378689285515,
+        0.00378239633202758244,
+        7.29751555083966205e-5,
+    ];
+    if x.is_nan() {
+        return (x, x);
+    }
+    let eps = DBL_EPSILON * 0.5;
+    let lower = tail != 1;
+    let upper = tail != 0;
+    let mut cumulative = f64::NAN;
+    let mut complementary = f64::NAN;
+    let y = x.abs();
+
+    // exp(-at^2/2) * temp, with at^2 split so that the large part of the square is exact.
+    let tails_from = |temp: f64, at: f64, cumulative: &mut f64, complementary: &mut f64| {
+        let xsq = (at * 16.0).trunc() / 16.0;
+        let del = (at - xsq) * (at + xsq);
+        if log {
+            *cumulative = (-xsq * xsq * 0.5) - del * 0.5 + temp.ln();
+            if (lower && x > 0.0) || (upper && x <= 0.0) {
+                *complementary = (-(-xsq * xsq * 0.5).exp() * (-del * 0.5).exp() * temp).ln_1p();
+            }
+        } else {
+            *cumulative = (-xsq * xsq * 0.5).exp() * (-del * 0.5).exp() * temp;
+            *complementary = 1.0 - *cumulative;
+        }
+    };
+    let swap_tail = |cumulative: &mut f64, complementary: &mut f64| {
+        if x > 0.0 {
+            let temp = *cumulative;
+            if lower {
+                *cumulative = *complementary;
+            }
+            *complementary = temp;
+        }
+    };
+
+    if y <= 0.67448975 {
+        let (mut xnum, mut xden) = (0.0, 0.0);
+        if y > eps {
+            let xsq = x * x;
+            xnum = A[4] * xsq;
+            xden = xsq;
+            for i in 0..3 {
+                xnum = (xnum + A[i]) * xsq;
+                xden = (xden + B[i]) * xsq;
+            }
+        }
+        let temp = x * (xnum + A[3]) / (xden + B[3]);
+        if lower {
+            cumulative = 0.5 + temp;
+        }
+        if upper {
+            complementary = 0.5 - temp;
+        }
+        if log {
+            if lower {
+                cumulative = cumulative.ln();
+            }
+            if upper {
+                complementary = complementary.ln();
+            }
+        }
+    } else if y <= M_SQRT_32 {
+        let mut xnum = C[8] * y;
+        let mut xden = y;
+        for i in 0..7 {
+            xnum = (xnum + C[i]) * y;
+            xden = (xden + D[i]) * y;
+        }
+        let temp = (xnum + C[7]) / (xden + D[7]);
+        tails_from(temp, y, &mut cumulative, &mut complementary);
+        swap_tail(&mut cumulative, &mut complementary);
+    } else if (log && y < 1e170)
+        || (lower && -37.5193 < x && x < 8.2924)
+        || (upper && -8.2924 < x && x < 37.5193)
+    {
+        let xsq = 1.0 / (x * x);
+        let mut xnum = P[5] * xsq;
+        let mut xden = xsq;
+        for i in 0..4 {
+            xnum = (xnum + P[i]) * xsq;
+            xden = (xden + Q[i]) * xsq;
+        }
+        let mut temp = xsq * (xnum + P[4]) / (xden + Q[4]);
+        temp = (M_1_SQRT_2PI - temp) / y;
+        tails_from(temp, x, &mut cumulative, &mut complementary);
+        swap_tail(&mut cumulative, &mut complementary);
+    } else if x > 0.0 {
+        cumulative = d1(log);
+        complementary = d0(log);
+    } else {
+        cumulative = d0(log);
+        complementary = d1(log);
+    }
+    (cumulative, complementary)
+}
+
+/// The normal quantile by Wichura's AS 241 (PPND16), with asymptotic expansions of the
+/// Mills ratio where the log probability is so small that AS 241's tail formula loses digits.
+pub fn qnorm(p: f64, mu: f64, sigma: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || mu.is_nan() || sigma.is_nan() {
+        return p + mu + sigma;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, f64::NEG_INFINITY, f64::INFINITY) {
+        return boundary;
+    }
+    if sigma < 0.0 {
+        return f64::NAN;
+    }
+    if sigma == 0.0 {
+        return mu;
+    }
+    let p_ = dt_qiv(p, lower, log);
+    let q = p_ - 0.5;
+    let mut value;
+    if q.abs() <= 0.425 {
+        let r = 0.180625 - q * q;
+        value = q
+            * (((((((r * 2509.0809287301226727 + 33430.575583588128105) * r
+                + 67265.770927008700853)
+                * r
+                + 45921.953931549871457)
+                * r
+                + 13731.693765509461125)
+                * r
+                + 1971.5909503065514427)
+                * r
+                + 133.14166789178437745)
+                * r
+                + 3.387132872796366608)
+            / (((((((r * 5226.495278852854561 + 28729.085735721942674) * r
+                + 39307.89580009271061)
+                * r
+                + 21213.794301586595867)
+                * r
+                + 5394.1960214247511077)
+                * r
+                + 687.1870074920579083)
+                * r
+                + 42.313330701600911252)
+                * r
+                + 1.0);
+    } else {
+        let lp = if log && ((lower && q <= 0.0) || (!lower && q > 0.0)) {
+            p
+        } else {
+            (if q > 0.0 { dt_civ(p, lower, log) } else { p_ }).ln()
+        };
+        let mut r = (-lp).sqrt();
+        if r <= 5.0 {
+            r -= 1.6;
+            value = (((((((r * 7.7454501427834140764e-4 + 0.0227238449892691845833) * r
+                + 0.24178072517745061177)
+                * r
+                + 1.27045825245236838258)
+                * r
+                + 3.64784832476320460504)
+                * r
+                + 5.7694972214606914055)
+                * r
+                + 4.6303378461565452959)
+                * r
+                + 1.42343711074968357734)
+                / (((((((r * 1.05075007164441684324e-9 + 5.475938084995344946e-4) * r
+                    + 0.0151986665636164571966)
+                    * r
+                    + 0.14810397642748007459)
+                    * r
+                    + 0.68976733498510000455)
+                    * r
+                    + 1.6763848301838038494)
+                    * r
+                    + 2.05319162663775882187)
+                    * r
+                    + 1.0);
+        } else if r <= 27.0 {
+            r -= 5.0;
+            value = (((((((r * 2.01033439929228813265e-7 + 2.71155556874348757815e-5) * r
+                + 0.0012426609473880784386)
+                * r
+                + 0.026532189526576123093)
+                * r
+                + 0.29656057182850489123)
+                * r
+                + 1.7848265399172913358)
+                * r
+                + 5.4637849111641143699)
+                * r
+                + 6.6579046435011037772)
+                / (((((((r * 2.04426310338993978564e-15 + 1.4215117583164458887e-7) * r
+                    + 1.8463183175100546818e-5)
+                    * r
+                    + 7.868691311456132591e-4)
+                    * r
+                    + 0.0148753612908506148525)
+                    * r
+                    + 0.13692988092273580531)
+                    * r
+                    + 0.59983220655588793769)
+                    * r
+                    + 1.0);
+        } else if r >= 6.4e8 {
+            value = r * M_SQRT2;
+        } else {
+            // Iterates x^2 = 2s - log(2 pi x^2) + 2 log(1 - 1/x^2 + 3/x^4 ...), the Mills
+            // ratio expansion of the tail with s = -log(p), to more terms the closer p is to 0.
+            let s2 = -2.0 * lp;
+            let mut x2 = s2 - (M_2PI * s2).ln();
+            if r < 36000.0 {
+                x2 = s2 - (M_2PI * x2).ln() - 2.0 / (2.0 + x2);
+                if r < 840.0 {
+                    x2 = s2 - (M_2PI * x2).ln()
+                        + 2.0 * (-(1.0 - 1.0 / (4.0 + x2)) / (2.0 + x2)).ln_1p();
+                    if r < 109.0 {
+                        x2 = s2 - (M_2PI * x2).ln()
+                            + 2.0
+                                * (-(1.0 - (1.0 - 5.0 / (6.0 + x2)) / (4.0 + x2)) / (2.0 + x2))
+                                    .ln_1p();
+                        if r < 55.0 {
+                            x2 = s2 - (M_2PI * x2).ln()
+                                + 2.0
+                                    * (-(1.0
+                                        - (1.0 - (5.0 - 9.0 / (8.0 + x2)) / (6.0 + x2))
+                                            / (4.0 + x2))
+                                        / (2.0 + x2))
+                                        .ln_1p();
+                        }
+                    }
+                }
+            }
+            value = x2.sqrt();
+        }
+        if q < 0.0 {
+            value = -value;
+        }
+    }
+    mu + sigma * value
+}
+
+// The uniform distribution.
+
+pub fn dunif(x: f64, a: f64, b: f64, log: bool) -> f64 {
+    if x.is_nan() || a.is_nan() || b.is_nan() {
+        return x + a + b;
+    }
+    if b <= a {
+        return f64::NAN;
+    }
+    if a <= x && x <= b {
+        if log { -(b - a).ln() } else { 1.0 / (b - a) }
+    } else {
+        d0(log)
+    }
+}
+
+pub fn punif(x: f64, a: f64, b: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || a.is_nan() || b.is_nan() {
+        return x + a + b;
+    }
+    if b < a || !finite(a) || !finite(b) {
+        return f64::NAN;
+    }
+    if x >= b {
+        return dt1(lower, log);
+    }
+    if x <= a {
+        return dt0(lower, log);
+    }
+    if lower {
+        d_val((x - a) / (b - a), log)
+    } else {
+        d_val((b - x) / (b - a), log)
+    }
+}
+
+pub fn qunif(p: f64, a: f64, b: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || a.is_nan() || b.is_nan() {
+        return p + a + b;
+    }
+    if q_p01_invalid(p, log) || !finite(a) || !finite(b) || b < a {
+        return f64::NAN;
+    }
+    if b == a {
+        return a;
+    }
+    a + dt_qiv(p, lower, log) * (b - a)
+}
+
+// The Poisson density, the gamma distribution and its special cases.
+
+pub fn dpois_raw(x: f64, lambda: f64, log: bool) -> f64 {
+    if lambda == 0.0 {
+        return if x == 0.0 { d1(log) } else { d0(log) };
+    }
+    if !finite(lambda) || x < 0.0 {
+        return d0(log);
+    }
+    if x <= lambda * DBL_MIN {
+        return d_exp(-lambda, log);
+    }
+    if lambda < x * DBL_MIN {
+        if !finite(x) {
+            return d0(log);
+        }
+        return d_exp(-lambda + x * lambda.ln() - lgammafn(x + 1.0), log);
+    }
+    d_fexp(M_2PI * x, -stirlerr(x) - bd0(x, lambda), log)
+}
+
+pub fn dpois(x: f64, lambda: f64, log: bool) -> f64 {
+    if x.is_nan() || lambda.is_nan() {
+        return x + lambda;
+    }
+    if lambda < 0.0 {
+        return f64::NAN;
+    }
+    if nonint_warning(x) || x < 0.0 || !finite(x) {
+        return d0(log);
+    }
+    dpois_raw(forceint(x), lambda, log)
+}
+
+pub fn dgamma(x: f64, shape: f64, scale: f64, log: bool) -> f64 {
+    if x.is_nan() || shape.is_nan() || scale.is_nan() {
+        return x + shape + scale;
+    }
+    if shape < 0.0 || scale <= 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return d0(log);
+    }
+    if shape == 0.0 {
+        return if x == 0.0 { f64::INFINITY } else { d0(log) };
+    }
+    if x == 0.0 {
+        if shape < 1.0 {
+            return f64::INFINITY;
+        }
+        if shape > 1.0 {
+            return d0(log);
+        }
+        return if log { -scale.ln() } else { 1.0 / scale };
+    }
+    if shape < 1.0 {
+        let pr = dpois_raw(shape, x / scale, log);
+        return if log {
+            pr + if finite(shape / x) {
+                (shape / x).ln()
+            } else {
+                shape.ln() - x.ln()
+            }
+        } else {
+            pr * shape / x
+        };
+    }
+    let pr = dpois_raw(shape - 1.0, x / scale, log);
+    if log { pr - scale.ln() } else { pr / scale }
+}
+
+/// 2^256, the rescaling step of continued fractions whose convergents grow without bound.
+const SCALE_FACTOR: f64 = 1.157_920_892_373_162e77;
+
+/// The continued fraction of the lower incomplete gamma ratio (Welinder's pgamma).
+fn pd_lower_cf(y: f64, d: f64) -> f64 {
+    const MAX_IT: f64 = 200000.0;
+    let mut f = 0.0;
+    if y == 0.0 {
+        return 0.0;
+    }
+    let mut f0 = y / d;
+    if (y - 1.0).abs() < d.abs() * DBL_EPSILON {
+        return f0;
+    }
+    if f0 > 1.0 {
+        f0 = 1.0;
+    }
+    let mut c2 = y;
+    let mut c4 = d;
+    let (mut a1, mut b1) = (0.0, 1.0);
+    let (mut a2, mut b2) = (y, d);
+    while b2 > SCALE_FACTOR {
+        a1 /= SCALE_FACTOR;
+        b1 /= SCALE_FACTOR;
+        a2 /= SCALE_FACTOR;
+        b2 /= SCALE_FACTOR;
+    }
+    let mut i = 0.0;
+    let mut of = -1.0;
+    while i < MAX_IT {
+        i += 1.0;
+        c2 -= 1.0;
+        let mut c3 = i * c2;
+        c4 += 2.0;
+        a1 = c4 * a2 + c3 * a1;
+        b1 = c4 * b2 + c3 * b1;
+        i += 1.0;
+        c2 -= 1.0;
+        c3 = i * c2;
+        c4 += 2.0;
+        a2 = c4 * a1 + c3 * a2;
+        b2 = c4 * b1 + c3 * b2;
+        if b2 > SCALE_FACTOR {
+            a1 /= SCALE_FACTOR;
+            b1 /= SCALE_FACTOR;
+            a2 /= SCALE_FACTOR;
+            b2 /= SCALE_FACTOR;
+        }
+        if b2 != 0.0 {
+            f = a2 / b2;
+            if (f - of).abs() <= DBL_EPSILON * fmax2(f0, f.abs()) {
+                return f;
+            }
+            of = f;
+        }
+    }
+    warning(format!(
+        " ** NON-convergence in pgamma()'s pd_lower_cf() f= {f}."
+    ));
+    f
+}
+
+fn pd_upper_series(x: f64, y: f64, log: bool) -> f64 {
+    let mut y = y;
+    let mut term = x / y;
+    let mut sum = term;
+    loop {
+        y += 1.0;
+        term *= x / y;
+        sum += term;
+        if !(term > sum * DBL_EPSILON) {
+            break;
+        }
+    }
+    if log { sum.ln() } else { sum }
+}
+
+fn pd_lower_series(lambda: f64, y: f64) -> f64 {
+    let mut y = y;
+    let mut term = 1.0;
+    let mut sum = 0.0;
+    while y >= 1.0 && term > sum * DBL_EPSILON {
+        term *= y / lambda;
+        sum += term;
+        y -= 1.0;
+    }
+    if y != y.floor() {
+        sum += term * pd_lower_cf(y, lambda + 1.0 - y);
+    }
+    sum
+}
+
+/// `dnorm(x) / pnorm(x)` in the tail `lower`, given `lp = log pnorm(x)`.
+fn dpnorm(x: f64, lower: bool, lp: f64) -> f64 {
+    let (x, lower) = if x < 0.0 { (-x, !lower) } else { (x, lower) };
+    if x > 10.0 && !lower {
+        let mut term = 1.0 / x;
+        let mut sum = term;
+        let x2 = x * x;
+        let mut i = 1.0;
+        loop {
+            term *= -i / x2;
+            sum += term;
+            i += 2.0;
+            if !(term.abs() > DBL_EPSILON * sum) {
+                break;
+            }
+        }
+        1.0 / sum
+    } else {
+        dnorm(x, 0.0, 1.0, false) / lp.exp()
+    }
+}
+
+/// Temme's uniform asymptotic expansion of the Poisson distribution function.
+fn ppois_asymp(x: f64, lambda: f64, lower: bool, log: bool) -> f64 {
+    const COEFS_A: [f64; 8] = [
+        -1e99,
+        2.0 / 3.0,
+        -4.0 / 135.0,
+        8.0 / 2835.0,
+        16.0 / 8505.0,
+        -8992.0 / 12629925.0,
+        -334144.0 / 492567075.0,
+        698752.0 / 1477701225.0,
+    ];
+    const COEFS_B: [f64; 8] = [
+        -1e99,
+        1.0 / 12.0,
+        1.0 / 288.0,
+        -139.0 / 51840.0,
+        -571.0 / 2488320.0,
+        163879.0 / 209018880.0,
+        5246819.0 / 75246796800.0,
+        -534703531.0 / 902961561600.0,
+    ];
+    let dfm = lambda - x;
+    let pt_ = -log1pmx(dfm / x);
+    let mut s2pt = (2.0 * x * pt_).sqrt();
+    if dfm < 0.0 {
+        s2pt = -s2pt;
+    }
+    let mut res12 = 0.0;
+    let mut res1_term = x.sqrt();
+    let mut res1_ig = res1_term;
+    let mut res2_term = s2pt;
+    let mut res2_ig = res2_term;
+    for i in 1..8 {
+        res12 += res1_ig * COEFS_A[i];
+        res12 += res2_ig * COEFS_B[i];
+        res1_term *= pt_ / i as f64;
+        res2_term *= 2.0 * pt_ / (2 * i + 1) as f64;
+        res1_ig = res1_ig / x + res1_term;
+        res2_ig = res2_ig / x + res2_term;
+    }
+    let mut elfb = x;
+    let mut elfb_term = 1.0;
+    for coefficient in &COEFS_B[1..] {
+        elfb += elfb_term * coefficient;
+        elfb_term /= x;
+    }
+    if !lower {
+        elfb = -elfb;
+    }
+    let f = res12 / elfb;
+    let np = pnorm(s2pt, 0.0, 1.0, !lower, log);
+    if log {
+        let n_d_over_p = dpnorm(s2pt, !lower, np);
+        np + (f * n_d_over_p).ln_1p()
+    } else {
+        let nd = dnorm(s2pt, 0.0, 1.0, log);
+        np + f * nd
+    }
+}
+
+/// `dpois(x_plus_1 - 1, lambda)`, also for non-integer and small `x_plus_1`.
+fn dpois_wrap(x_plus_1: f64, lambda: f64, log: bool) -> f64 {
+    let cutoff = M_LN2 * f64::MAX_EXP as f64 / DBL_EPSILON;
+    if !finite(lambda) {
+        return d0(log);
+    }
+    if x_plus_1 > 1.0 {
+        return dpois_raw(x_plus_1 - 1.0, lambda, log);
+    }
+    if lambda > (x_plus_1 - 1.0).abs() * cutoff {
+        d_exp(-lambda - lgammafn(x_plus_1), log)
+    } else {
+        let d = dpois_raw(x_plus_1, lambda, log);
+        if log {
+            d + (x_plus_1 / lambda).ln()
+        } else {
+            d * (x_plus_1 / lambda)
+        }
+    }
+}
+
+fn pgamma_smallx(x: f64, alph: f64, lower: bool, log: bool) -> f64 {
+    let mut sum = 0.0;
+    let mut c = alph;
+    let mut n = 0.0;
+    loop {
+        n += 1.0;
+        c *= -x / n;
+        let term = c / (alph + n);
+        sum += term;
+        if !(term.abs() > DBL_EPSILON * sum.abs()) {
+            break;
+        }
+    }
+    if lower {
+        let f1 = if log { sum.ln_1p() } else { 1.0 + sum };
+        let f2 = if alph > 1.0 {
+            let f2 = dpois_raw(alph, x, log);
+            if log { f2 + x } else { f2 * x.exp() }
+        } else {
+            let f2 = alph * x.ln() - lgamma1p(alph);
+            if log { f2 } else { f2.exp() }
+        };
+        if log { f1 + f2 } else { f1 * f2 }
+    } else {
+        let lf2 = alph * x.ln() - lgamma1p(alph);
+        if log {
+            log1_exp(sum.ln_1p() + lf2)
+        } else {
+            let f1m1 = sum;
+            let f2m1 = lf2.exp_m1();
+            -(f1m1 + f2m1 + f1m1 * f2m1)
+        }
+    }
+}
+
+/// The regularized incomplete gamma function by Welinder's algorithm: a power series for
+/// small `x`, continued fractions on either side of the mode, and Temme's expansion near it.
+fn pgamma_raw(x: f64, alph: f64, lower: bool, log: bool) -> f64 {
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    if x >= f64::INFINITY {
+        return dt1(lower, log);
+    }
+    let res = if x < 1.0 {
+        pgamma_smallx(x, alph, lower, log)
+    } else if x <= alph - 1.0 && x < 0.8 * (alph + 50.0) {
+        let sum = pd_upper_series(x, alph, log);
+        let d = dpois_wrap(alph, x, log);
+        if !lower {
+            if log {
+                log1_exp(d + sum)
+            } else {
+                1.0 - d * sum
+            }
+        } else if log {
+            sum + d
+        } else {
+            sum * d
+        }
+    } else if alph - 1.0 < x && alph < 0.8 * (x + 50.0) {
+        let d = dpois_wrap(alph, x, log);
+        let sum = if alph < 1.0 {
+            if x * DBL_EPSILON > 1.0 - alph {
+                d1(log)
+            } else {
+                let f = pd_lower_cf(alph, x - (alph - 1.0)) * x / alph;
+                if log { f.ln() } else { f }
+            }
+        } else {
+            let sum = pd_lower_series(x, alph - 1.0);
+            if log { sum.ln_1p() } else { 1.0 + sum }
+        };
+        if !lower {
+            if log { sum + d } else { sum * d }
+        } else if log {
+            log1_exp(d + sum)
+        } else {
+            1.0 - d * sum
+        }
+    } else {
+        ppois_asymp(alph - 1.0, x, !lower, log)
+    };
+    // Close to the smallest normal number the linear scale has lost digits to underflow.
+    if !log && res < DBL_MIN / DBL_EPSILON {
+        pgamma_raw(x, alph, lower, true).exp()
+    } else {
+        res
+    }
+}
+
+pub fn pgamma(x: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || shape.is_nan() || scale.is_nan() {
+        return x + shape + scale;
+    }
+    if shape < 0.0 || scale <= 0.0 {
+        return f64::NAN;
+    }
+    let x = x / scale;
+    if x.is_nan() {
+        return x;
+    }
+    if shape == 0.0 {
+        return if x <= 0.0 {
+            dt0(lower, log)
+        } else {
+            dt1(lower, log)
+        };
+    }
+    pgamma_raw(x, shape, lower, log)
+}
+
+/// The starting value of `qgamma`: AS 91's chi-squared approximations.
+pub fn qchisq_appr(p: f64, nu: f64, g: f64, lower: bool, log: bool, tol: f64) -> f64 {
+    const C7: f64 = 4.67;
+    const C8: f64 = 6.66;
+    const C9: f64 = 6.73;
+    const C10: f64 = 13.32;
+    if p.is_nan() || nu.is_nan() {
+        return p + nu;
+    }
+    if q_p01_invalid(p, log) || nu <= 0.0 {
+        return f64::NAN;
+    }
+    let alpha = 0.5 * nu;
+    let c = alpha - 1.0;
+    let p1 = dt_log(p, lower, log);
+    if nu < -1.24 * p1 {
+        let lgam1pa = if alpha < 0.5 {
+            lgamma1p(alpha)
+        } else {
+            alpha.ln() + g
+        };
+        ((lgam1pa + p1) / alpha + M_LN2).exp()
+    } else if nu > 0.32 {
+        let x = qnorm(p, 0.0, 1.0, lower, log);
+        let p1 = 2.0 / (9.0 * nu);
+        let mut ch = nu * (x * p1.sqrt() + 1.0 - p1).powf(3.0);
+        if ch > 2.2 * nu + 6.0 {
+            ch = -2.0 * (dt_clog(p, lower, log) - c * (0.5 * ch).ln() + g);
+        }
+        ch
+    } else {
+        let mut ch = 0.4;
+        let a = dt_clog(p, lower, log) + g + c * M_LN2;
+        loop {
+            let q = ch;
+            let p1 = 1.0 / (1.0 + ch * (C7 + ch));
+            let p2 = ch * (C9 + ch * (C8 + ch));
+            let t = -0.5 + (C7 + 2.0 * ch) * p1 - (C9 + ch * (C10 + 3.0 * ch)) / p2;
+            ch -= (1.0 - (a + 0.5 * ch).exp() * p2 * p1) / t;
+            if !((q - ch).abs() > tol * ch.abs()) {
+                break;
+            }
+        }
+        ch
+    }
+}
+
+/// The gamma quantile: AS 91 (Best and Roberts) with its seven-term Taylor iteration, then
+/// Newton steps on the log scale to full precision.
+pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    const EPS1: f64 = 1e-2;
+    const EPS2: f64 = 5e-7;
+    const EPS_N: f64 = 1e-15;
+    const MAXIT: i32 = 1000;
+    const P_MIN: f64 = 1e-100;
+    const P_MAX: f64 = 1.0 - 1e-14;
+    const I420: f64 = 1.0 / 420.0;
+    const I2520: f64 = 1.0 / 2520.0;
+    const I5040: f64 = 1.0 / 5040.0;
+    if p.is_nan() || alpha.is_nan() || scale.is_nan() {
+        return p + alpha + scale;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    if alpha < 0.0 || scale <= 0.0 {
+        return f64::NAN;
+    }
+    if alpha == 0.0 {
+        return 0.0;
+    }
+    let mut max_it_newton = if alpha < 1e-10 { 7 } else { 1 };
+    let mut p_ = dt_qiv(p, lower, log);
+    let g = lgammafn(alpha);
+    let mut ch = qchisq_appr(p, 2.0 * alpha, g, lower, log, EPS1);
+    'iterate: {
+        if !finite(ch) {
+            max_it_newton = 0;
+            break 'iterate;
+        }
+        if ch < EPS2 || !(P_MIN..=P_MAX).contains(&p_) {
+            max_it_newton = 20;
+            break 'iterate;
+        }
+        let c = alpha - 1.0;
+        let s6 = (120.0 + c * (346.0 + 127.0 * c)) * I5040;
+        let ch0 = ch;
+        for _ in 1..=MAXIT {
+            let q = ch;
+            let p1 = 0.5 * ch;
+            let p2 = p_ - pgamma_raw(p1, alpha, true, false);
+            if !finite(p2) || ch <= 0.0 {
+                ch = ch0;
+                max_it_newton = 27;
+                break 'iterate;
+            }
+            let t = p2 * (alpha * M_LN2 + g + p1 - c * ch.ln()).exp();
+            let b = t / ch;
+            let a = 0.5 * t - b * c;
+            let s1 =
+                (210.0 + a * (140.0 + a * (105.0 + a * (84.0 + a * (70.0 + 60.0 * a))))) * I420;
+            let s2 = (420.0 + a * (735.0 + a * (966.0 + a * (1141.0 + 1278.0 * a)))) * I2520;
+            let s3 = (210.0 + a * (462.0 + a * (707.0 + 932.0 * a))) * I2520;
+            let s4 =
+                (252.0 + a * (672.0 + 1182.0 * a) + c * (294.0 + a * (889.0 + 1740.0 * a))) * I5040;
+            let s5 = (84.0 + 2264.0 * a + c * (1175.0 + 606.0 * a)) * I2520;
+            ch += t
+                * (1.0 + 0.5 * t * s1
+                    - b * c * (s1 - b * (s2 - b * (s3 - b * (s4 - b * (s5 - b * s6))))));
+            if (q - ch).abs() < EPS2 * ch {
+                break 'iterate;
+            }
+            if (q - ch).abs() > 0.1 * ch {
+                ch = if ch < q { 0.9 * q } else { 1.1 * q };
+            }
+        }
+    }
+    let mut x = 0.5 * scale * ch;
+    if max_it_newton > 0 {
+        let (p, log) = if log { (p, log) } else { (p.ln(), true) };
+        if x == 0.0 {
+            x = DBL_MIN;
+            p_ = pgamma(x, alpha, scale, lower, log);
+            if (lower && p_ > p * (1.0 + 1e-7)) || (!lower && p_ < p * (1.0 - 1e-7)) {
+                return 0.0;
+            }
+        } else {
+            p_ = pgamma(x, alpha, scale, lower, log);
+        }
+        if p_ == f64::NEG_INFINITY {
+            return 0.0;
+        }
+        for i in 1..=max_it_newton {
+            let p1 = p_ - p;
+            if p1.abs() < (EPS_N * p).abs() {
+                break;
+            }
+            let g = dgamma(x, alpha, scale, log);
+            if g == d0(log) {
+                break;
+            }
+            let t = if log { p1 * (p_ - g).exp() } else { p1 / g };
+            let t = if lower { x - t } else { x + t };
+            p_ = pgamma(t, alpha, scale, lower, log);
+            if (p_ - p).abs() > p1.abs() || (i > 1 && (p_ - p).abs() == p1.abs()) {
+                break;
+            }
+            x = t;
+        }
+    }
+    x
+}
+
+pub fn dchisq(x: f64, df: f64, log: bool) -> f64 {
+    dgamma(x, df / 2.0, 2.0, log)
+}
+
+pub fn pchisq(x: f64, df: f64, lower: bool, log: bool) -> f64 {
+    pgamma(x, df / 2.0, 2.0, lower, log)
+}
+
+pub fn qchisq(p: f64, df: f64, lower: bool, log: bool) -> f64 {
+    qgamma(p, 0.5 * df, 2.0, lower, log)
+}
+
+pub fn dexp(x: f64, scale: f64, log: bool) -> f64 {
+    if x.is_nan() || scale.is_nan() {
+        return x + scale;
+    }
+    if scale <= 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return d0(log);
+    }
+    if log {
+        (-x / scale) - scale.ln()
+    } else {
+        (-x / scale).exp() / scale
+    }
+}
+
+pub fn pexp(x: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || scale.is_nan() {
+        return x + scale;
+    }
+    if scale < 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    let x = -(x / scale);
+    if lower {
+        if log { log1_exp(x) } else { -x.exp_m1() }
+    } else {
+        d_exp(x, log)
+    }
+}
+
+pub fn qexp(p: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || scale.is_nan() {
+        return p + scale;
+    }
+    if scale < 0.0 || q_p01_invalid(p, log) {
+        return f64::NAN;
+    }
+    if p == dt0(lower, log) {
+        return 0.0;
+    }
+    -scale * dt_clog(p, lower, log)
+}
+
+pub fn dweibull(x: f64, shape: f64, scale: f64, log: bool) -> f64 {
+    if x.is_nan() || shape.is_nan() || scale.is_nan() {
+        return x + shape + scale;
+    }
+    if shape <= 0.0 || scale <= 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 || !finite(x) {
+        return d0(log);
+    }
+    if x == 0.0 && shape < 1.0 {
+        return f64::INFINITY;
+    }
+    let tmp1 = (x / scale).powf(shape - 1.0);
+    let tmp2 = tmp1 * (x / scale);
+    if log {
+        -tmp2 + (shape * tmp1 / scale).ln()
+    } else {
+        shape * tmp1 * (-tmp2).exp() / scale
+    }
+}
+
+pub fn pweibull(x: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || shape.is_nan() || scale.is_nan() {
+        return x + shape + scale;
+    }
+    if shape <= 0.0 || scale <= 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    let x = -(x / scale).powf(shape);
+    if lower {
+        if log { log1_exp(x) } else { -x.exp_m1() }
+    } else {
+        d_exp(x, log)
+    }
+}
+
+pub fn qweibull(p: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || shape.is_nan() || scale.is_nan() {
+        return p + shape + scale;
+    }
+    if shape <= 0.0 || scale <= 0.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    scale * (-dt_clog(p, lower, log)).powf(1.0 / shape)
+}
+
+pub fn dlnorm(x: f64, meanlog: f64, sdlog: f64, log: bool) -> f64 {
+    if x.is_nan() || meanlog.is_nan() || sdlog.is_nan() {
+        return x + meanlog + sdlog;
+    }
+    if sdlog < 0.0 {
+        return f64::NAN;
+    }
+    if !finite(x) && x.ln() == meanlog {
+        return f64::NAN;
+    }
+    if sdlog == 0.0 {
+        return if x.ln() == meanlog {
+            f64::INFINITY
+        } else {
+            d0(log)
+        };
+    }
+    if x <= 0.0 {
+        return d0(log);
+    }
+    let y = (x.ln() - meanlog) / sdlog;
+    if log {
+        -(M_LN_SQRT_2PI + 0.5 * y * y + (x * sdlog).ln())
+    } else {
+        M_1_SQRT_2PI * (-0.5 * y * y).exp() / (x * sdlog)
+    }
+}
+
+pub fn plnorm(x: f64, meanlog: f64, sdlog: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || meanlog.is_nan() || sdlog.is_nan() {
+        return x + meanlog + sdlog;
+    }
+    if sdlog < 0.0 {
+        return f64::NAN;
+    }
+    if x > 0.0 {
+        return pnorm(x.ln(), meanlog, sdlog, lower, log);
+    }
+    dt0(lower, log)
+}
+
+pub fn qlnorm(p: f64, meanlog: f64, sdlog: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || meanlog.is_nan() || sdlog.is_nan() {
+        return p + meanlog + sdlog;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    qnorm(p, meanlog, sdlog, lower, log).exp()
+}
+
+pub fn dcauchy(x: f64, location: f64, scale: f64, log: bool) -> f64 {
+    if x.is_nan() || location.is_nan() || scale.is_nan() {
+        return x + location + scale;
+    }
+    if scale <= 0.0 {
+        return f64::NAN;
+    }
+    let y = (x - location) / scale;
+    if log {
+        -(M_PI * scale * (1.0 + y * y)).ln()
+    } else {
+        1.0 / (M_PI * scale * (1.0 + y * y))
+    }
+}
+
+pub fn pcauchy(x: f64, location: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || location.is_nan() || scale.is_nan() {
+        return x + location + scale;
+    }
+    if scale <= 0.0 {
+        return f64::NAN;
+    }
+    let mut x = (x - location) / scale;
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if !finite(x) {
+        return if x < 0.0 {
+            dt0(lower, log)
+        } else {
+            dt1(lower, log)
+        };
+    }
+    if !lower {
+        x = -x;
+    }
+    // atan(1/x) for large |x| avoids the cancellation in 1/2 + atan(x)/pi.
+    if x.abs() > 1.0 {
+        let y = (1.0 / x).atan() / M_PI;
+        if x > 0.0 {
+            d_clog(y, log)
+        } else {
+            d_val(-y, log)
+        }
+    } else {
+        d_val(0.5 + x.atan() / M_PI, log)
+    }
+}
+
+pub fn qcauchy(p: f64, location: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || location.is_nan() || scale.is_nan() {
+        return p + location + scale;
+    }
+    if q_p01_invalid(p, log) {
+        return f64::NAN;
+    }
+    if scale <= 0.0 || !finite(scale) {
+        if scale == 0.0 {
+            return location;
+        }
+        return f64::NAN;
+    }
+    let infinity = |lower: bool| location + if lower { scale } else { -scale } * f64::INFINITY;
+    let mut lower = lower;
+    let mut p = p;
+    if log {
+        if p > -1.0 {
+            if p == 0.0 {
+                return infinity(lower);
+            }
+            lower = !lower;
+            p = -p.exp_m1();
+        } else {
+            p = p.exp();
+        }
+    } else if p > 0.5 {
+        if p == 1.0 {
+            return infinity(lower);
+        }
+        p = 1.0 - p;
+        lower = !lower;
+    }
+    if p == 0.5 {
+        return location;
+    }
+    if p == 0.0 {
+        return location + if lower { scale } else { -scale } * f64::NEG_INFINITY;
+    }
+    location + if lower { -scale } else { scale } / tanpi_(p)
+}
+
+pub fn dlogis(x: f64, location: f64, scale: f64, log: bool) -> f64 {
+    if x.is_nan() || location.is_nan() || scale.is_nan() {
+        return x + location + scale;
+    }
+    if scale <= 0.0 {
+        return f64::NAN;
+    }
+    let x = ((x - location) / scale).abs();
+    let e = (-x).exp();
+    let f = 1.0 + e;
+    if log {
+        -(x + (scale * f * f).ln())
+    } else {
+        e / (scale * f * f)
+    }
+}
+
+pub fn plogis(x: f64, location: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || location.is_nan() || scale.is_nan() {
+        return x + location + scale;
+    }
+    if scale <= 0.0 {
+        return f64::NAN;
+    }
+    let x = (x - location) / scale;
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if !finite(x) {
+        return if x > 0.0 {
+            dt1(lower, log)
+        } else {
+            dt0(lower, log)
+        };
+    }
+    let exponent = if lower { -x } else { x };
+    if log {
+        -log1pexp(exponent)
+    } else {
+        1.0 / (1.0 + exponent.exp())
+    }
+}
+
+pub fn qlogis(p: f64, location: f64, scale: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || location.is_nan() || scale.is_nan() {
+        return p + location + scale;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, f64::NEG_INFINITY, f64::INFINITY) {
+        return boundary;
+    }
+    if scale < 0.0 {
+        return f64::NAN;
+    }
+    if scale == 0.0 {
+        return location;
+    }
+    let p = if log {
+        if lower {
+            p - log1_exp(p)
+        } else {
+            log1_exp(p) - p
+        }
+    } else if lower {
+        (p / (1.0 - p)).ln()
+    } else {
+        ((1.0 - p) / p).ln()
+    };
+    location + scale * p
+}
+
+// The beta distribution. The incomplete beta ratio is Didonato and Morris's ACM TOMS 708
+// (`bratio`), extended to return log probabilities without underflow.
+
+pub fn dbeta(x: f64, a: f64, b: f64, log: bool) -> f64 {
+    if x.is_nan() || a.is_nan() || b.is_nan() {
+        return x + a + b;
+    }
+    if a < 0.0 || b < 0.0 {
+        return f64::NAN;
+    }
+    if !(0.0..=1.0).contains(&x) {
+        return d0(log);
+    }
+    if a == 0.0 || b == 0.0 || !finite(a) || !finite(b) {
+        let mass_at = if a == 0.0 && b == 0.0 {
+            return if x == 0.0 || x == 1.0 {
+                f64::INFINITY
+            } else {
+                d0(log)
+            };
+        } else if a == 0.0 || b / a == f64::INFINITY {
+            0.0
+        } else if b == 0.0 || a / b == f64::INFINITY {
+            1.0
+        } else {
+            0.5
+        };
+        return if x == mass_at { f64::INFINITY } else { d0(log) };
+    }
+    if x == 0.0 {
+        if a > 1.0 {
+            return d0(log);
+        }
+        if a < 1.0 {
+            return f64::INFINITY;
+        }
+        return d_val(b, log);
+    }
+    if x == 1.0 {
+        if b > 1.0 {
+            return d0(log);
+        }
+        if b < 1.0 {
+            return f64::INFINITY;
+        }
+        return d_val(a, log);
+    }
+    let lval = if a <= 2.0 || b <= 2.0 {
+        (a - 1.0) * x.ln() + (b - 1.0) * (-x).ln_1p() - lbeta(a, b)
+    } else {
+        (a + b - 1.0).ln() + dbinom_raw(a - 1.0, a + b - 2.0, x, 1.0 - x, true)
+    };
+    d_exp(lval, log)
+}
+
+/// `pbeta` without the argument checks. The limits of the parameters are point masses, and
+/// GNU R answers them before looking at `x`.
+pub fn pbeta_raw(x: f64, a: f64, b: f64, lower: bool, log: bool) -> f64 {
+    if x >= 1.0 {
+        return dt1(lower, log);
+    }
+    if a == 0.0 || b == 0.0 || !finite(a) || !finite(b) {
+        if a == 0.0 && b == 0.0 {
+            return if log { -M_LN2 } else { 0.5 };
+        }
+        if a == 0.0 || b / a == f64::INFINITY {
+            return dt1(lower, log);
+        }
+        if b == 0.0 || a / b == f64::INFINITY {
+            return dt0(lower, log);
+        }
+        return if x < 0.5 {
+            dt0(lower, log)
+        } else {
+            dt1(lower, log)
+        };
+    }
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    let x1 = 0.5 - x + 0.5;
+    let (w, wc, _) = bratio(a, b, x, x1, log);
+    if lower { w } else { wc }
+}
+
+pub fn pbeta(x: f64, a: f64, b: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || a.is_nan() || b.is_nan() {
+        return x + a + b;
+    }
+    if a < 0.0 || b < 0.0 {
+        return f64::NAN;
+    }
+    pbeta_raw(x, a, b, lower, log)
+}
+
+/// The incomplete beta ratio `I_x(a, b)` and its complement `1 - I_x(a, b)`, with `y = 1 - x`
+/// passed separately for accuracy near one, and TOMS 708's error code.
+fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
+    let mut eps = 2.0 * (0.5 * DBL_EPSILON);
+    let mut w = d0(log);
+    let mut w1 = d0(log);
+    if x.is_nan() || y.is_nan() || a.is_nan() || b.is_nan() {
+        return (w, w1, 9);
+    }
+    if a < 0.0 || b < 0.0 {
+        return (w, w1, 1);
+    }
+    if a == 0.0 && b == 0.0 {
+        return (w, w1, 2);
+    }
+    if !(0.0..=1.0).contains(&x) {
+        return (w, w1, 3);
+    }
+    if !(0.0..=1.0).contains(&y) {
+        return (w, w1, 4);
+    }
+    let z = x + y - 0.5 - 0.5;
+    if z.abs() > eps * 3.0 {
+        return (w, w1, 5);
+    }
+    if x == 0.0 {
+        if a == 0.0 {
+            return (w, w1, 6);
+        }
+        return (d0(log), d1(log), 0);
+    }
+    if y == 0.0 {
+        if b == 0.0 {
+            return (w, w1, 7);
+        }
+        return (d1(log), d0(log), 0);
+    }
+    if a == 0.0 {
+        return (d1(log), d0(log), 0);
+    }
+    if b == 0.0 {
+        return (d0(log), d1(log), 0);
+    }
+
+    eps = eps.max(1e-15);
+    let a_lt_b = a < b;
+    if (if a_lt_b { b } else { a }) < eps * 0.001 {
+        // Both parameters are so small that the ratio no longer depends on x.
+        return if log {
+            if a_lt_b {
+                ((-a / (a + b)).ln_1p(), (a / (a + b)).ln(), 0)
+            } else {
+                ((b / (a + b)).ln(), (-b / (a + b)).ln_1p(), 0)
+            }
+        } else {
+            (b / (a + b), a / (a + b), 0)
+        };
+    }
+
+    let mut ierr = 0;
+    let (mut a0, mut b0, x0, y0);
+    let do_swap;
+    // How w and w1 were computed, which decides how the other one is derived.
+    enum Done {
+        Both,
+        FromW,
+        FromW1,
+        FromW1Log,
+    }
+    let done;
+
+    if a.min(b) <= 1.0 {
+        do_swap = x > 0.5;
+        if do_swap {
+            (a0, x0, b0, y0) = (b, y, a, x);
+        } else {
+            (a0, x0, b0, y0) = (a, x, b, y);
+        }
+        enum Path {
+            WBpser,
+            W1Bpser,
+            Bgrat { w1: f64, did_bup: bool, n: i32 },
+        }
+        let path;
+        if b0 < eps.min(eps * a0) {
+            w = fpser(a0, b0, x0, eps, log);
+            w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+            return finish(w, w1, do_swap, ierr);
+        }
+        if a0 < eps.min(eps * b0) && b0 * x0 <= 1.0 {
+            w1 = apser(a0, b0, x0, eps);
+            return end_from_w1(w1, log, do_swap, ierr);
+        }
+        if a0.max(b0) > 1.0 {
+            if b0 <= 1.0 {
+                path = Path::WBpser;
+            } else if x0 >= 0.29 {
+                path = Path::W1Bpser;
+            } else if x0 < 0.1 && (x0 * b0).powf(a0) <= 0.7 {
+                path = Path::WBpser;
+            } else if b0 > 15.0 {
+                path = Path::Bgrat {
+                    w1: 0.0,
+                    did_bup: false,
+                    n: 0,
+                };
+            } else {
+                let n = 20;
+                path = Path::Bgrat {
+                    w1: bup(b0, a0, y0, x0, n, eps, false),
+                    did_bup: true,
+                    n,
+                };
+            }
+        } else if a0 >= 0.2f64.min(b0) || x0.powf(a0) <= 0.9 {
+            path = Path::WBpser;
+        } else if x0 >= 0.3 {
+            path = Path::W1Bpser;
+        } else {
+            let n = 20;
+            path = Path::Bgrat {
+                w1: bup(b0, a0, y0, x0, n, eps, false),
+                did_bup: true,
+                n,
+            };
+        }
+        match path {
+            Path::WBpser => {
+                w = bpser(a0, b0, x0, eps, log);
+                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                done = Done::Both;
+            }
+            Path::W1Bpser => {
+                w1 = bpser(b0, a0, y0, eps, log);
+                w = if log { log1_exp(w1) } else { 0.5 - w1 + 0.5 };
+                done = Done::Both;
+            }
+            Path::Bgrat {
+                w1: start,
+                did_bup,
+                n,
+            } => {
+                w1 = start;
+                if did_bup {
+                    b0 += n as f64;
+                }
+                let mut ierr1 = 0;
+                bgrat(b0, a0, y0, x0, &mut w1, 15.0 * eps, &mut ierr1, false);
+                if w1 == 0.0 || (0.0 < w1 && w1 < DBL_MIN) {
+                    // Most likely underflow: redo the whole sum on the log scale.
+                    w1 = if did_bup {
+                        bup(b0 - n as f64, a0, y0, x0, n, eps, true)
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    bgrat(b0, a0, y0, x0, &mut w1, 15.0 * eps, &mut ierr1, true);
+                    if ierr1 != 0 {
+                        ierr = 10 + ierr1;
+                    }
+                    done = Done::FromW1Log;
+                } else {
+                    if ierr1 != 0 {
+                        ierr = 10 + ierr1;
+                    }
+                    if w1 < 0.0 {
+                        warning(format!("bratio(a={a}, b={b}, x={x}): bgrat() -> w1 = {w1}"));
+                    }
+                    done = Done::FromW1;
+                }
+            }
+        }
+    } else {
+        let mut lambda = if finite(a + b) {
+            if a > b {
+                (a + b) * y - b
+            } else {
+                a - (a + b) * x
+            }
+        } else {
+            a * y - b * x
+        };
+        do_swap = lambda < 0.0;
+        if do_swap {
+            lambda = -lambda;
+            (a0, x0, b0, y0) = (b, y, a, x);
+        } else {
+            (a0, x0, b0, y0) = (a, x, b, y);
+        }
+        enum Path {
+            WBpser,
+            Bfrac,
+            Bup,
+            Basym,
+        }
+        let path = if b0 < 40.0 {
+            if b0 * x0 <= 0.7 || (log && lambda > 650.0) {
+                Path::WBpser
+            } else {
+                Path::Bup
+            }
+        } else if a0 > b0 {
+            if b0 <= 100.0 || lambda > b0 * 0.03 {
+                Path::Bfrac
+            } else {
+                Path::Basym
+            }
+        } else if a0 <= 100.0 || lambda > a0 * 0.03 {
+            Path::Bfrac
+        } else {
+            Path::Basym
+        };
+        match path {
+            Path::WBpser => {
+                w = bpser(a0, b0, x0, eps, log);
+                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                done = Done::Both;
+            }
+            Path::Bfrac => {
+                w = bfrac(a0, b0, x0, y0, lambda, eps * 15.0, log);
+                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                done = Done::Both;
+            }
+            Path::Basym => {
+                w = basym(a0, b0, lambda, eps * 100.0, log);
+                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                done = Done::Both;
+            }
+            Path::Bup => {
+                let mut n = b0 as i32;
+                b0 -= n as f64;
+                if b0 == 0.0 {
+                    n -= 1;
+                    b0 = 1.0;
+                }
+                w = bup(b0, a0, y0, x0, n, eps, false);
+                if w < DBL_MIN && log {
+                    b0 += n as f64;
+                    w = bpser(a0, b0, x0, eps, log);
+                    w1 = log1_exp(w);
+                    done = Done::Both;
+                } else if x0 <= 0.7 {
+                    w += bpser(a0, b0, x0, eps, false);
+                    done = Done::FromW;
+                } else {
+                    if a0 <= 15.0 {
+                        let n = 20;
+                        w += bup(a0, b0, x0, y0, n, eps, false);
+                        a0 += n as f64;
+                    }
+                    let mut ierr1 = 0;
+                    bgrat(a0, b0, x0, y0, &mut w, 15.0 * eps, &mut ierr1, false);
+                    if ierr1 != 0 {
+                        ierr = 10 + ierr1;
+                    }
+                    done = Done::FromW;
+                }
+            }
+        }
+    }
+
+    match done {
+        Done::Both => {}
+        Done::FromW => {
+            if log {
+                w1 = (-w).ln_1p();
+                w = w.ln();
+            } else {
+                w1 = 0.5 - w + 0.5;
+            }
+        }
+        Done::FromW1 => return end_from_w1(w1, log, do_swap, ierr),
+        Done::FromW1Log => {
+            if log {
+                w = log1_exp(w1);
+            } else {
+                w = -w1.exp_m1();
+                w1 = w1.exp();
+            }
+        }
+    }
+    finish(w, w1, do_swap, ierr)
+}
+
+fn end_from_w1(w1: f64, log: bool, do_swap: bool, ierr: i32) -> (f64, f64, i32) {
+    let (w, w1) = if log {
+        ((-w1).ln_1p(), w1.ln())
+    } else {
+        (0.5 - w1 + 0.5, w1)
+    };
+    finish(w, w1, do_swap, ierr)
+}
+
+fn finish(w: f64, w1: f64, do_swap: bool, ierr: i32) -> (f64, f64, i32) {
+    if do_swap {
+        (w1, w, ierr)
+    } else {
+        (w, w1, ierr)
+    }
+}
+
+/// `I_x(a, b)` for `b < min(eps, eps * a)` and `x <= 1/2`.
+fn fpser(a: f64, b: f64, x: f64, eps: f64, log: bool) -> f64 {
+    let mut answer;
+    if log {
+        answer = a * x.ln();
+    } else if a > eps * 0.001 {
+        let t = a * x.ln();
+        if t < exparg(1) {
+            return 0.0;
+        }
+        answer = t.exp();
+    } else {
+        answer = 1.0;
+    }
+    if log {
+        answer += b.ln() - a.ln();
+    } else {
+        answer *= b / a;
+    }
+    let tol = eps / a;
+    let mut an = a + 1.0;
+    let mut t = x;
+    let mut s = t / an;
+    loop {
+        an += 1.0;
+        t *= x;
+        let c = t / an;
+        s += c;
+        if !(c.abs() > tol) {
+            break;
+        }
+    }
+    if log {
+        answer += (a * s).ln_1p();
+    } else {
+        answer *= a * s + 1.0;
+    }
+    answer
+}
+
+/// `I_{1-x}(b, a)` for `a <= min(eps, eps * b)`, `b x <= 1` and `x <= 1/2`.
+fn apser(a: f64, b: f64, x: f64, eps: f64) -> f64 {
+    const G: f64 = 0.577215664901533;
+    let bx = b * x;
+    let mut t = x - bx;
+    let c = if b * eps <= 0.02 {
+        x.ln() + psi(b) + G + t
+    } else {
+        bx.ln() + G + t
+    };
+    let tol = eps * 5.0 * c.abs();
+    let mut j = 1.0;
+    let mut s = 0.0;
+    loop {
+        j += 1.0;
+        t *= x - bx / j;
+        let aj = t / j;
+        s += aj;
+        if !(aj.abs() > tol) {
+            break;
+        }
+    }
+    -a * (c + s)
+}
+
+/// The power series of `I_x(a, b)` for `b <= 1` or `b x <= 0.7`.
+fn bpser(a: f64, b: f64, x: f64, eps: f64, log: bool) -> f64 {
+    if x == 0.0 {
+        return d0(log);
+    }
+    let mut answer;
+    let a0 = a.min(b);
+    if a0 >= 1.0 {
+        let z = a * x.ln() - betaln(a, b);
+        answer = if log { z - a.ln() } else { z.exp() / a };
+    } else {
+        let mut b0 = a.max(b);
+        if b0 < 8.0 {
+            if b0 <= 1.0 {
+                if log {
+                    answer = a * x.ln();
+                } else {
+                    answer = x.powf(a);
+                    if answer == 0.0 {
+                        return answer;
+                    }
+                }
+                let apb = a + b;
+                let z = if apb > 1.0 {
+                    (gam1(apb - 1.0) + 1.0) / apb
+                } else {
+                    gam1(apb) + 1.0
+                };
+                let c = (gam1(a) + 1.0) * (gam1(b) + 1.0) / z;
+                if log {
+                    answer += (c * (b / apb)).ln();
+                } else {
+                    answer *= c * (b / apb);
+                }
+            } else {
+                let mut u = gamln1(a0);
+                let m = (b0 - 1.0) as i32;
+                if m >= 1 {
+                    let mut c = 1.0;
+                    for _ in 1..=m {
+                        b0 -= 1.0;
+                        c *= b0 / (a0 + b0);
+                    }
+                    u += c.ln();
+                }
+                let z = a * x.ln() - u;
+                b0 -= 1.0;
+                let apb = a0 + b0;
+                let t = if apb > 1.0 {
+                    (gam1(apb - 1.0) + 1.0) / apb
+                } else {
+                    gam1(apb) + 1.0
+                };
+                answer = if log {
+                    z + (a0 / a).ln() + gam1(b0).ln_1p() - t.ln()
+                } else {
+                    z.exp() * (a0 / a) * (gam1(b0) + 1.0) / t
+                };
+            }
+        } else {
+            let u = gamln1(a0) + algdiv(a0, b0);
+            let z = a * x.ln() - u;
+            answer = if log {
+                z + (a0 / a).ln()
+            } else {
+                a0 / a * z.exp()
+            };
+        }
+    }
+    if answer == d0(log) || (!log && a <= eps * 0.1) {
+        return answer;
+    }
+    let tol = eps / a;
+    let mut n = 0.0;
+    let mut sum = 0.0;
+    let mut c = 1.0;
+    let mut w;
+    loop {
+        n += 1.0;
+        c *= (0.5 - b / n + 0.5) * x;
+        w = c / (a + n);
+        sum += w;
+        if !(n < 1e7 && w.abs() > tol) {
+            break;
+        }
+    }
+    if w.abs() > tol
+        && ((log && !(a * sum > -1.0 && (a * sum).ln_1p().abs() < eps * answer.abs()))
+            || (!log && (a * sum + 1.0).abs() != 1.0))
+    {
+        warning(format!(
+            " bpser(a={a}, b={b}, x={x},...) did not converge (n=1e7, |w|/tol={} > 1; A={answer})",
+            w.abs() / tol
+        ));
+    }
+    if log {
+        if a * sum > -1.0 {
+            answer += (a * sum).ln_1p();
+        } else {
+            if answer > f64::NEG_INFINITY {
+                warning(format!(
+                    "pbeta(*, log.p=TRUE) -> bpser(a={a}, b={b}, x={x},...) underflow to -Inf"
+                ));
+            }
+            answer = f64::NEG_INFINITY;
+        }
+    } else if a * sum > -1.0 {
+        answer *= a * sum + 1.0;
+    } else {
+        answer = 0.0;
+    }
+    answer
+}
+
+/// `I_x(a, b) - I_x(a + n, b)` for a positive integer `n`.
+#[allow(clippy::too_many_arguments)]
+fn bup(a: f64, b: f64, x: f64, y: f64, n: i32, eps: f64, log: bool) -> f64 {
+    let apb = a + b;
+    let ap1 = a + 1.0;
+    let (mu, mut d);
+    if n > 1 && a >= 1.0 && apb >= ap1 * 1.1 {
+        let mut m = exparg(1).abs() as i32;
+        let k = exparg(0) as i32;
+        if m > k {
+            m = k;
+        }
+        mu = m;
+        d = (-(mu as f64)).exp();
+    } else {
+        mu = 0;
+        d = 1.0;
+    }
+    let mut answer = if log {
+        brcmp1(mu, a, b, x, y, true) - a.ln()
+    } else {
+        brcmp1(mu, a, b, x, y, false) / a
+    };
+    if n == 1 || (log && answer == f64::NEG_INFINITY) || (!log && answer == 0.0) {
+        return answer;
+    }
+    let nm1 = n - 1;
+    let mut w = d;
+    let mut k = 0;
+    if b > 1.0 {
+        if y > 1e-4 {
+            let r = (b - 1.0) * x / y - a;
+            if r >= 1.0 {
+                k = if r < nm1 as f64 { r as i32 } else { nm1 };
+            }
+        } else {
+            k = nm1;
+        }
+        for i in 0..k {
+            let l = i as f64;
+            d *= (apb + l) / (ap1 + l) * x;
+            w += d;
+        }
+    }
+    for i in k..nm1 {
+        let l = i as f64;
+        d *= (apb + l) / (ap1 + l) * x;
+        w += d;
+        if d <= eps * w {
+            break;
+        }
+    }
+    if log {
+        answer += w.ln();
+    } else {
+        answer *= w;
+    }
+    answer
+}
+
+/// The continued fraction of `I_x(a, b)` for `a, b > 1`, with `lambda = (a + b) y - b`.
+fn bfrac(a: f64, b: f64, x: f64, y: f64, lambda: f64, eps: f64, log: bool) -> f64 {
+    if !finite(lambda) {
+        return f64::NAN;
+    }
+    let brc = brcomp(a, b, x, y, log);
+    if brc.is_nan() {
+        return f64::NAN;
+    }
+    if !log && brc == 0.0 {
+        return 0.0;
+    }
+    let c = lambda + 1.0;
+    let c0 = b / a;
+    let c1 = 1.0 / a + 1.0;
+    let yp1 = y + 1.0;
+    let mut n = 0.0;
+    let mut p = 1.0;
+    let mut s = a + 1.0;
+    let mut an = 0.0;
+    let mut bn = 1.0;
+    let mut anp1 = 1.0;
+    let mut bnp1 = c / c1;
+    let mut r = c1 / c;
+    let mut r0;
+    loop {
+        n += 1.0;
+        let mut t = n / a;
+        let w = n * (b - n) * x;
+        let mut e = a / s;
+        let alpha = p * (p + c0) * e * e * (w * x);
+        e = (t + 1.0) / (c1 + t + t);
+        let beta = n + w / s + e * (c + n * yp1);
+        p = t + 1.0;
+        s += 2.0;
+        t = alpha * an + beta * anp1;
+        an = anp1;
+        anp1 = t;
+        t = alpha * bn + beta * bnp1;
+        bn = bnp1;
+        bnp1 = t;
+        r0 = r;
+        r = anp1 / bnp1;
+        if (r - r0).abs() <= eps * r {
+            break;
+        }
+        an /= bnp1;
+        bn /= bnp1;
+        anp1 = r;
+        bnp1 = 1.0;
+        if n >= 10000.0 {
+            break;
+        }
+    }
+    if n >= 10000.0 && (r - r0).abs() > eps * r {
+        warning(format!(
+            " bfrac(a={a}, b={b}, x={x}, y={y}, lambda={lambda}) did *not* converge (in 10000 steps)"
+        ));
+    }
+    if log { brc + r.ln() } else { brc * r }
+}
+
+/// `x^a y^b / Beta(a, b)`.
+fn brcomp(a: f64, b: f64, x: f64, y: f64, log: bool) -> f64 {
+    const CONST: f64 = 0.398942280401433;
+    if x == 0.0 || y == 0.0 {
+        return d0(log);
+    }
+    let a0 = a.min(b);
+    if a0 < 8.0 {
+        let (lnx, lny) = if x <= 0.375 {
+            (x.ln(), alnrel(-x))
+        } else if y > 0.375 {
+            (x.ln(), y.ln())
+        } else {
+            (alnrel(-y), y.ln())
+        };
+        let mut z = a * lnx + b * lny;
+        if a0 >= 1.0 {
+            z -= betaln(a, b);
+            return d_exp(z, log);
+        }
+        let mut b0 = a.max(b);
+        if b0 >= 8.0 {
+            let u = gamln1(a0) + algdiv(a0, b0);
+            return if log {
+                a0.ln() + (z - u)
+            } else {
+                a0 * (z - u).exp()
+            };
+        }
+        if b0 <= 1.0 {
+            let e_z = d_exp(z, log);
+            if !log && e_z == 0.0 {
+                return 0.0;
+            }
+            let apb = a + b;
+            let z = if apb > 1.0 {
+                (gam1(apb - 1.0) + 1.0) / apb
+            } else {
+                gam1(apb) + 1.0
+            };
+            let c = (gam1(a) + 1.0) * (gam1(b) + 1.0) / z;
+            return if log {
+                e_z + (a0 * c).ln() - (a0 / b0).ln_1p()
+            } else {
+                e_z * (a0 * c) / (a0 / b0 + 1.0)
+            };
+        }
+        let mut u = gamln1(a0);
+        let n = (b0 - 1.0) as i32;
+        if n >= 1 {
+            let mut c = 1.0;
+            for _ in 1..=n {
+                b0 -= 1.0;
+                c *= b0 / (a0 + b0);
+            }
+            u += c.ln();
+        }
+        z -= u;
+        b0 -= 1.0;
+        let apb = a0 + b0;
+        let t = if apb > 1.0 {
+            (gam1(apb - 1.0) + 1.0) / apb
+        } else {
+            gam1(apb) + 1.0
+        };
+        if log {
+            a0.ln() + z + gam1(b0).ln_1p() - t.ln()
+        } else {
+            a0 * z.exp() * (gam1(b0) + 1.0) / t
+        }
+    } else {
+        let (x0, y0, lambda);
+        if a <= b {
+            let h = a / b;
+            x0 = h / (h + 1.0);
+            y0 = 1.0 / (h + 1.0);
+            lambda = a - (a + b) * x;
+        } else {
+            let h = b / a;
+            x0 = 1.0 / (h + 1.0);
+            y0 = h / (h + 1.0);
+            lambda = (a + b) * y - b;
+        }
+        let mut e = -lambda / a;
+        let u = if e.abs() > 0.6 {
+            e - (x / x0).ln()
+        } else {
+            rlog1(e)
+        };
+        e = lambda / b;
+        let v = if e.abs() <= 0.6 {
+            rlog1(e)
+        } else {
+            e - (y / y0).ln()
+        };
+        let z = if log {
+            -(a * u + b * v)
+        } else {
+            (-(a * u + b * v)).exp()
+        };
+        if log {
+            -M_LN_SQRT_2PI + 0.5 * (b * x0).ln() + z - bcorr(a, b)
+        } else {
+            CONST * (b * x0).sqrt() * z * (-bcorr(a, b)).exp()
+        }
+    }
+}
+
+/// `exp(mu) x^a y^b / Beta(a, b)`.
+fn brcmp1(mu: i32, a: f64, b: f64, x: f64, y: f64, log: bool) -> f64 {
+    const CONST: f64 = 0.398942280401433;
+    let a0 = a.min(b);
+    if a0 < 8.0 {
+        let (lnx, lny) = if x <= 0.375 {
+            (x.ln(), alnrel(-x))
+        } else if y > 0.375 {
+            (x.ln(), y.ln())
+        } else {
+            (alnrel(-y), y.ln())
+        };
+        let mut z = a * lnx + b * lny;
+        if a0 >= 1.0 {
+            z -= betaln(a, b);
+            return esum(mu, z, log);
+        }
+        let mut b0 = a.max(b);
+        if b0 >= 8.0 {
+            let u = gamln1(a0) + algdiv(a0, b0);
+            return if log {
+                a0.ln() + esum(mu, z - u, true)
+            } else {
+                a0 * esum(mu, z - u, false)
+            };
+        } else if b0 <= 1.0 {
+            let answer = esum(mu, z, log);
+            if answer == if log { f64::NEG_INFINITY } else { 0.0 } {
+                return answer;
+            }
+            let apb = a + b;
+            let z = if apb > 1.0 {
+                (gam1(apb - 1.0) + 1.0) / apb
+            } else {
+                gam1(apb) + 1.0
+            };
+            let c = if log {
+                gam1(a).ln_1p() + gam1(b).ln_1p() - z.ln()
+            } else {
+                (gam1(a) + 1.0) * (gam1(b) + 1.0) / z
+            };
+            return if log {
+                answer + a0.ln() + c - (a0 / b0).ln_1p()
+            } else {
+                answer * (a0 * c) / (a0 / b0 + 1.0)
+            };
+        }
+        let mut u = gamln1(a0);
+        let n = (b0 - 1.0) as i32;
+        if n >= 1 {
+            let mut c = 1.0;
+            for _ in 1..=n {
+                b0 -= 1.0;
+                c *= b0 / (a0 + b0);
+            }
+            u += c.ln();
+        }
+        z -= u;
+        b0 -= 1.0;
+        let apb = a0 + b0;
+        let t = if apb > 1.0 {
+            (gam1(apb - 1.0) + 1.0) / apb
+        } else {
+            gam1(apb) + 1.0
+        };
+        if log {
+            a0.ln() + esum(mu, z, true) + gam1(b0).ln_1p() - t.ln()
+        } else {
+            a0 * esum(mu, z, false) * (gam1(b0) + 1.0) / t
+        }
+    } else {
+        let (x0, y0, lambda);
+        if a > b {
+            let h = b / a;
+            x0 = 1.0 / (h + 1.0);
+            y0 = h / (h + 1.0);
+            lambda = (a + b) * y - b;
+        } else {
+            let h = a / b;
+            x0 = h / (h + 1.0);
+            y0 = 1.0 / (h + 1.0);
+            lambda = a - (a + b) * x;
+        }
+        let lx0 = -(b / a).ln_1p();
+        let mut e = -lambda / a;
+        let u = if e.abs() > 0.6 {
+            e - (x / x0).ln()
+        } else {
+            rlog1(e)
+        };
+        e = lambda / b;
+        let v = if e.abs() > 0.6 {
+            e - (y / y0).ln()
+        } else {
+            rlog1(e)
+        };
+        let z = esum(mu, -(a * u + b * v), log);
+        if log {
+            CONST.ln() + (b.ln() + lx0) / 2.0 + z - bcorr(a, b)
+        } else {
+            CONST * (b * x0).sqrt() * z * (-bcorr(a, b)).exp()
+        }
+    }
+}
+
+/// The asymptotic expansion of `I_x(a, b)` for large `a` and `b <= 1`, added to `w` (on the
+/// log scale when `log_w`).
+#[allow(clippy::too_many_arguments)]
+fn bgrat(a: f64, b: f64, x: f64, y: f64, w: &mut f64, eps: f64, ierr: &mut i32, log_w: bool) {
+    const N_TERMS: usize = 30;
+    let mut c = [0.0; N_TERMS];
+    let mut d = [0.0; N_TERMS];
+    let bm1 = b - 0.5 - 0.5;
+    let nu = a + bm1 * 0.5;
+    let lnx = if y > 0.375 { x.ln() } else { alnrel(-y) };
+    let z = -nu * lnx;
+    if b * z == 0.0 {
+        warning(format!(
+            "bgrat(a={a}, b={b}, x={x}, y={y}): z={z}, b*z == 0 underflow, hence inaccurate pbeta()"
+        ));
+        *ierr = 1;
+        return;
+    }
+    let log_r = b.ln() + gam1(b).ln_1p() + b * z.ln() + nu * lnx;
+    let log_u = log_r - (algdiv(b, a) + b * nu.ln());
+    let u = log_u.exp();
+    if log_u == f64::NEG_INFINITY {
+        *ierr = 2;
+        return;
+    }
+    let u_0 = u == 0.0;
+    let l = if log_w {
+        if *w == f64::NEG_INFINITY {
+            0.0
+        } else {
+            (*w - log_u).exp()
+        }
+    } else if *w == 0.0 {
+        0.0
+    } else {
+        (w.ln() - log_u).exp()
+    };
+    let q_r = grat_r(b, z, log_r, eps);
+    let v = 0.25 / (nu * nu);
+    let t2 = lnx * 0.25 * lnx;
+    let mut j = q_r;
+    let mut sum = j;
+    let mut t = 1.0;
+    let mut cn = 1.0;
+    let mut n2 = 0.0;
+    for n in 1..=N_TERMS {
+        let bp2n = b + n2;
+        j = (bp2n * (bp2n + 1.0) * j + (z + bp2n + 1.0) * t) * v;
+        n2 += 2.0;
+        t *= t2;
+        cn /= n2 * (n2 + 1.0);
+        let nm1 = n - 1;
+        c[nm1] = cn;
+        let mut s = 0.0;
+        if n > 1 {
+            let mut coef = b - n as f64;
+            for i in 1..=nm1 {
+                s += coef * c[i - 1] * d[nm1 - i];
+                coef += b;
+            }
+        }
+        d[nm1] = bm1 * cn + s / n as f64;
+        let dj = d[nm1] * j;
+        sum += dj;
+        if sum <= 0.0 {
+            *ierr = 3;
+            return;
+        }
+        if dj.abs() <= eps * (sum + l) {
+            *ierr = 0;
+            break;
+        } else if n == N_TERMS {
+            *ierr = 4;
+            warning(format!(
+                "bgrat(a={a}, b={b}, x={x}) *no* convergence: NOTIFY R-core!\n dj={dj}, rel.err={}",
+                dj.abs() / (sum + l)
+            ));
+        }
+    }
+    if log_w {
+        *w = logspace_add(*w, log_u + sum.ln());
+    } else {
+        *w += if u_0 {
+            (log_u + sum.ln()).exp()
+        } else {
+            u * sum
+        };
+    }
+}
+
+/// `Q(a, x) / r` with `r = exp(-x) x^a / gamma(a)` and `a <= 1`.
+fn grat_r(a: f64, x: f64, log_r: f64, eps: f64) -> f64 {
+    if a * x == 0.0 {
+        if x <= a {
+            return (-log_r).exp();
+        }
+        return 0.0;
+    }
+    if a == 0.5 {
+        if x < 0.25 {
+            let p = erf_toms(x.sqrt());
+            return (0.5 - p + 0.5) * (-log_r).exp();
+        }
+        let sx = x.sqrt();
+        return erfc1(1, sx) / sx * M_SQRT_PI;
+    }
+    if x < 1.1 {
+        let mut an = 3.0;
+        let mut c = x;
+        let mut sum = x / (a + 3.0);
+        let tol = eps * 0.1 / (a + 1.0);
+        loop {
+            an += 1.0;
+            c *= -(x / an);
+            let t = c / (a + an);
+            sum += t;
+            if !(t.abs() > tol) {
+                break;
+            }
+        }
+        let j = a * x * ((sum / 6.0 - 0.5 / (a + 2.0)) * x + 1.0 / (a + 1.0));
+        let z = a * x.ln();
+        let h = gam1(a);
+        let g = h + 1.0;
+        if (x >= 0.25 && a < x / 2.59) || z > -0.13394 {
+            let l = rexpm1(z);
+            let q = ((l + 0.5 + 0.5) * j - l) * g - h;
+            if q <= 0.0 { 0.0 } else { q * (-log_r).exp() }
+        } else {
+            let p = z.exp() * g * (0.5 - j + 0.5);
+            (0.5 - p + 0.5) * (-log_r).exp()
+        }
+    } else {
+        let mut a2n_1 = 1.0;
+        let mut a2n = 1.0;
+        let mut b2n_1 = x;
+        let mut b2n = x + (1.0 - a);
+        let mut c = 1.0;
+        loop {
+            a2n_1 = x * a2n + c * a2n_1;
+            b2n_1 = x * b2n + c * b2n_1;
+            let am0 = a2n_1 / b2n_1;
+            c += 1.0;
+            let c_a = c - a;
+            a2n = a2n_1 + c_a * a2n;
+            b2n = b2n_1 + c_a * b2n;
+            let an0 = a2n / b2n;
+            if !((an0 - am0).abs() >= eps * an0) {
+                return an0;
+            }
+        }
+    }
+}
+
+/// The asymptotic expansion of `I_x(a, b)` for large `a` and `b`, with
+/// `lambda = (a + b) y - b >= 0`.
+fn basym(a: f64, b: f64, lambda: f64, eps: f64, log: bool) -> f64 {
+    const NUM_IT: usize = 20;
+    const E0: f64 = 1.12837916709551;
+    const E1: f64 = 0.353553390593274;
+    const LN_E0: f64 = 0.120782237635245;
+    let mut a0 = [0.0; NUM_IT + 1];
+    let mut b0 = [0.0; NUM_IT + 1];
+    let mut c = [0.0; NUM_IT + 1];
+    let mut d = [0.0; NUM_IT + 1];
+    let f = a * rlog1(-lambda / a) + b * rlog1(lambda / b);
+    let t = if log {
+        -f
+    } else {
+        let t = (-f).exp();
+        if t == 0.0 {
+            return 0.0;
+        }
+        t
+    };
+    let z0 = f.sqrt();
+    let z = z0 / E1 * 0.5;
+    let z2 = f + f;
+    let (h, r0, r1, w0);
+    if a < b {
+        h = a / b;
+        r0 = 1.0 / (h + 1.0);
+        r1 = (b - a) / b;
+        w0 = 1.0 / (a * (h + 1.0)).sqrt();
+    } else {
+        h = b / a;
+        r0 = 1.0 / (h + 1.0);
+        r1 = (b - a) / a;
+        w0 = 1.0 / (b * (h + 1.0)).sqrt();
+    }
+    a0[0] = r1 * 0.66666666666666663;
+    c[0] = a0[0] * -0.5;
+    d[0] = -c[0];
+    let mut j0 = 0.5 / E0 * erfc1(1, z0);
+    let mut j1 = E1;
+    let mut sum = j0 + d[0] * w0 * j1;
+    let mut s = 1.0;
+    let h2 = h * h;
+    let mut hn = 1.0;
+    let mut w = w0;
+    let mut znm1 = z;
+    let mut zn = z2;
+    let mut n = 2;
+    while n <= NUM_IT {
+        hn *= h2;
+        a0[n - 1] = r0 * 2.0 * (h * hn + 1.0) / (n as f64 + 2.0);
+        let np1 = n + 1;
+        s += hn;
+        a0[np1 - 1] = r1 * 2.0 * s / (n as f64 + 3.0);
+        for i in n..=np1 {
+            let r = (i as f64 + 1.0) * -0.5;
+            b0[0] = r * a0[0];
+            for m in 2..=i {
+                let mut bsum = 0.0;
+                for j in 1..m {
+                    let mmj = m - j;
+                    bsum += (j as f64 * r - mmj as f64) * a0[j - 1] * b0[mmj - 1];
+                }
+                b0[m - 1] = r * a0[m - 1] + bsum / m as f64;
+            }
+            c[i - 1] = b0[i - 1] / (i as f64 + 1.0);
+            let mut dsum = 0.0;
+            for j in 1..i {
+                dsum += d[i - j - 1] * c[j - 1];
+            }
+            d[i - 1] = -(dsum + c[i - 1]);
+        }
+        j0 = E1 * znm1 + (n as f64 - 1.0) * j0;
+        j1 = E1 * zn + n as f64 * j1;
+        znm1 *= z2;
+        zn *= z2;
+        w *= w0;
+        let t0 = d[n - 1] * w * j0;
+        w *= w0;
+        let t1 = d[np1 - 1] * w * j1;
+        sum += t0 + t1;
+        if t0.abs() + t1.abs() <= eps * sum {
+            break;
+        }
+        n += 2;
+    }
+    if log {
+        LN_E0 + t - bcorr(a, b) + sum.ln()
+    } else {
+        let u = (-bcorr(a, b)).exp();
+        E0 * t * u * sum
+    }
+}
+
+/// TOMS 708's bounds on `exp`: the largest `w` with finite `exp(w)` for `l == 0`, otherwise
+/// the most negative `w` with nonzero `exp(w)`, each with a little room to spare.
+fn exparg(l: i32) -> f64 {
+    const LNB: f64 = 0.69314718055995;
+    let m = if l == 0 {
+        f64::MAX_EXP
+    } else {
+        f64::MIN_EXP - 1
+    };
+    m as f64 * LNB * 0.99999
+}
+
+/// `exp(mu + x)`.
+fn esum(mu: i32, x: f64, log: bool) -> f64 {
+    if log {
+        return x + mu as f64;
+    }
+    let w;
+    if x > 0.0 {
+        if mu > 0 {
+            return (mu as f64).exp() * x.exp();
+        }
+        w = mu as f64 + x;
+        if w < 0.0 {
+            return (mu as f64).exp() * x.exp();
+        }
+    } else {
+        if mu < 0 {
+            return (mu as f64).exp() * x.exp();
+        }
+        w = mu as f64 + x;
+        if w > 0.0 {
+            return (mu as f64).exp() * x.exp();
+        }
+    }
+    w.exp()
+}
+
+/// `exp(x) - 1`.
+fn rexpm1(x: f64) -> f64 {
+    const P1: f64 = 9.14041914819518e-10;
+    const P2: f64 = 0.0238082361044469;
+    const Q1: f64 = -0.499999999085958;
+    const Q2: f64 = 0.107141568980644;
+    const Q3: f64 = -0.0119041179760821;
+    const Q4: f64 = 5.95130811860248e-4;
+    if x.abs() <= 0.15 {
+        x * (((P2 * x + P1) * x + 1.0) / ((((Q4 * x + Q3) * x + Q2) * x + Q1) * x + 1.0))
+    } else {
+        let w = x.exp();
+        if x > 0.0 {
+            w * (0.5 - 1.0 / w + 0.5)
+        } else {
+            w - 0.5 - 0.5
+        }
+    }
+}
+
+/// `log(1 + a)`.
+fn alnrel(a: f64) -> f64 {
+    const P1: f64 = -1.29418923021993;
+    const P2: f64 = 0.405303492862024;
+    const P3: f64 = -0.0178874546012214;
+    const Q1: f64 = -1.62752256355323;
+    const Q2: f64 = 0.747811014037616;
+    const Q3: f64 = -0.0845104217945565;
+    if a.abs() > 0.375 {
+        return (1.0 + a).ln();
+    }
+    let t = a / (a + 2.0);
+    let t2 = t * t;
+    let w = (((P3 * t2 + P2) * t2 + P1) * t2 + 1.0) / (((Q3 * t2 + Q2) * t2 + Q1) * t2 + 1.0);
+    t * 2.0 * w
+}
+
+/// `x - log(1 + x)`.
+fn rlog1(x: f64) -> f64 {
+    const A: f64 = 0.0566749439387324;
+    const B: f64 = 0.0456512608815524;
+    const P0: f64 = 0.333333333333333;
+    const P1: f64 = -0.224696413112536;
+    const P2: f64 = 0.00620886815375787;
+    const Q1: f64 = -1.27408923933623;
+    const Q2: f64 = 0.354508718369557;
+    if !(-0.39..=0.57).contains(&x) {
+        let w = x + 0.5 + 0.5;
+        return x - w.ln();
+    }
+    let (h, w1) = if x < -0.18 {
+        let h = (x + 0.3) / 0.7;
+        (h, A - h * 0.3)
+    } else if x > 0.18 {
+        let h = x * 0.75 - 0.25;
+        (h, B + h / 3.0)
+    } else {
+        (x, 0.0)
+    };
+    let r = h / (h + 2.0);
+    let t = r * r;
+    let w = ((P2 * t + P1) * t + P0) / ((Q2 * t + Q1) * t + 1.0);
+    t * 2.0 * (1.0 / (1.0 - r) - r * w) + w1
+}
+
+const ERF_A: [f64; 5] = [
+    7.7105849500132e-5,
+    -0.00133733772997339,
+    0.0323076579225834,
+    0.0479137145607681,
+    0.128379167095513,
+];
+const ERF_B: [f64; 3] = [0.00301048631703895, 0.0538971687740286, 0.375795757275549];
+const ERF_P: [f64; 8] = [
+    -1.36864857382717e-7,
+    0.564195517478974,
+    7.21175825088309,
+    43.1622272220567,
+    152.98928504694,
+    339.320816734344,
+    451.918953711873,
+    300.459261020162,
+];
+const ERF_Q: [f64; 8] = [
+    1.0,
+    12.7827273196294,
+    77.0001529352295,
+    277.585444743988,
+    638.980264465631,
+    931.35409485061,
+    790.950925327898,
+    300.459260956983,
+];
+const ERF_R: [f64; 5] = [
+    2.10144126479064,
+    26.2370141675169,
+    21.3688200555087,
+    4.6580782871847,
+    0.282094791773523,
+];
+const ERF_S: [f64; 4] = [
+    94.153775055546,
+    187.11481179959,
+    99.0191814623914,
+    18.0124575948747,
+];
+const ERF_C: f64 = 0.564189583547756;
+
+fn erf_middle(ax: f64) -> f64 {
+    let p = &ERF_P;
+    let q = &ERF_Q;
+    let top = ((((((p[0] * ax + p[1]) * ax + p[2]) * ax + p[3]) * ax + p[4]) * ax + p[5]) * ax
+        + p[6])
+        * ax
+        + p[7];
+    let bot = ((((((q[0] * ax + q[1]) * ax + q[2]) * ax + q[3]) * ax + q[4]) * ax + q[5]) * ax
+        + q[6])
+        * ax
+        + q[7];
+    top / bot
+}
+
+/// The error function, TOMS 708's rational approximations.
+fn erf_toms(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax <= 0.5 {
+        let t = x * x;
+        let top = (((ERF_A[0] * t + ERF_A[1]) * t + ERF_A[2]) * t + ERF_A[3]) * t + ERF_A[4] + 1.0;
+        let bot = ((ERF_B[0] * t + ERF_B[1]) * t + ERF_B[2]) * t + 1.0;
+        return x * (top / bot);
+    }
+    if ax <= 4.0 {
+        let r = 0.5 - (-x * x).exp() * erf_middle(ax) + 0.5;
+        return if x < 0.0 { -r } else { r };
+    }
+    if ax >= 5.8 {
+        return if x > 0.0 { 1.0 } else { -1.0 };
+    }
+    let x2 = x * x;
+    let mut t = 1.0 / x2;
+    let top = (((ERF_R[0] * t + ERF_R[1]) * t + ERF_R[2]) * t + ERF_R[3]) * t + ERF_R[4];
+    let bot = (((ERF_S[0] * t + ERF_S[1]) * t + ERF_S[2]) * t + ERF_S[3]) * t + 1.0;
+    t = (ERF_C - top / (x2 * bot)) / ax;
+    let r = 0.5 - (-x2).exp() * t + 0.5;
+    if x < 0.0 { -r } else { r }
+}
+
+/// `erfc(x)` for `ind == 0`, otherwise `exp(x^2) erfc(x)`.
+fn erfc1(ind: i32, x: f64) -> f64 {
+    let ax = x.abs();
+    if ax <= 0.5 {
+        let t = x * x;
+        let top = (((ERF_A[0] * t + ERF_A[1]) * t + ERF_A[2]) * t + ERF_A[3]) * t + ERF_A[4] + 1.0;
+        let bot = ((ERF_B[0] * t + ERF_B[1]) * t + ERF_B[2]) * t + 1.0;
+        let mut value = 0.5 - x * (top / bot) + 0.5;
+        if ind != 0 {
+            value *= t.exp();
+        }
+        return value;
+    }
+    let mut value;
+    if ax <= 4.0 {
+        value = erf_middle(ax);
+    } else {
+        if x <= -5.6 {
+            return if ind != 0 { (x * x).exp() * 2.0 } else { 2.0 };
+        }
+        if ind == 0 && (x > 100.0 || x * x > -exparg(1)) {
+            return 0.0;
+        }
+        let t = 1.0 / (x * x);
+        let top = (((ERF_R[0] * t + ERF_R[1]) * t + ERF_R[2]) * t + ERF_R[3]) * t + ERF_R[4];
+        let bot = (((ERF_S[0] * t + ERF_S[1]) * t + ERF_S[2]) * t + ERF_S[3]) * t + 1.0;
+        value = (ERF_C - t * top / bot) / ax;
+    }
+    if ind != 0 {
+        if x < 0.0 {
+            value = (x * x).exp() * 2.0 - value;
+        }
+    } else {
+        let w = x * x;
+        let t = w;
+        let e = w - t;
+        value *= (0.5 - e + 0.5) * (-t).exp();
+        if x < 0.0 {
+            value = 2.0 - value;
+        }
+    }
+    value
+}
+
+/// `1/gamma(a + 1) - 1` for `-0.5 <= a <= 1.5`.
+fn gam1(a: f64) -> f64 {
+    let d = a - 0.5;
+    let t = if d > 0.0 { d - 0.5 } else { a };
+    if t < 0.0 {
+        const R: [f64; 9] = [
+            -0.422784335098468,
+            -0.771330383816272,
+            -0.244757765222226,
+            0.118378989872749,
+            9.30357293360349e-4,
+            -0.0118290993445146,
+            0.00223047661158249,
+            2.66505979058923e-4,
+            -1.32674909766242e-4,
+        ];
+        const S1: f64 = 0.273076135303957;
+        const S2: f64 = 0.0559398236957378;
+        let top = (((((((R[8] * t + R[7]) * t + R[6]) * t + R[5]) * t + R[4]) * t + R[3]) * t
+            + R[2])
+            * t
+            + R[1])
+            * t
+            + R[0];
+        let bot = (S2 * t + S1) * t + 1.0;
+        let w = top / bot;
+        if d > 0.0 {
+            t * w / a
+        } else {
+            a * (w + 0.5 + 0.5)
+        }
+    } else if t == 0.0 {
+        0.0
+    } else {
+        const P: [f64; 7] = [
+            0.577215664901533,
+            -0.409078193005776,
+            -0.230975380857675,
+            0.0597275330452234,
+            0.0076696818164949,
+            -0.00514889771323592,
+            5.89597428611429e-4,
+        ];
+        const Q: [f64; 5] = [
+            1.0,
+            0.427569613095214,
+            0.158451672430138,
+            0.0261132021441447,
+            0.00423244297896961,
+        ];
+        let top = (((((P[6] * t + P[5]) * t + P[4]) * t + P[3]) * t + P[2]) * t + P[1]) * t + P[0];
+        let bot = (((Q[4] * t + Q[3]) * t + Q[2]) * t + Q[1]) * t + 1.0;
+        let w = top / bot;
+        if d > 0.0 {
+            t / a * (w - 0.5 - 0.5)
+        } else {
+            a * w
+        }
+    }
+}
+
+/// `log(gamma(1 + a))` for `-0.2 <= a <= 1.25`.
+fn gamln1(a: f64) -> f64 {
+    if a < 0.6 {
+        const P: [f64; 7] = [
+            0.577215664901533,
+            0.844203922187225,
+            -0.168860593646662,
+            -0.780427615533591,
+            -0.402055799310489,
+            -0.0673562214325671,
+            -0.00271935708322958,
+        ];
+        const Q: [f64; 6] = [
+            2.88743195473681,
+            3.12755088914843,
+            1.56875193295039,
+            0.361951990101499,
+            0.0325038868253937,
+            6.67465618796164e-4,
+        ];
+        let w = ((((((P[6] * a + P[5]) * a + P[4]) * a + P[3]) * a + P[2]) * a + P[1]) * a + P[0])
+            / ((((((Q[5] * a + Q[4]) * a + Q[3]) * a + Q[2]) * a + Q[1]) * a + Q[0]) * a + 1.0);
+        -a * w
+    } else {
+        const R: [f64; 6] = [
+            0.422784335098467,
+            0.848044614534529,
+            0.565221050691933,
+            0.156513060486551,
+            0.017050248402265,
+            4.97958207639485e-4,
+        ];
+        const S: [f64; 5] = [
+            1.24313399877507,
+            0.548042109832463,
+            0.10155218743983,
+            0.00713309612391,
+            1.16165475989616e-4,
+        ];
+        let x = a - 0.5 - 0.5;
+        let w = (((((R[5] * x + R[4]) * x + R[3]) * x + R[2]) * x + R[1]) * x + R[0])
+            / (((((S[4] * x + S[3]) * x + S[2]) * x + S[1]) * x + S[0]) * x + 1.0);
+        x * w
+    }
+}
+
+/// The digamma function, Cody, Strecok and Thacher's rational approximations as TOMS 708
+/// uses them; zero signals an argument it cannot handle.
+fn psi(x: f64) -> f64 {
+    const PIOV4: f64 = 0.785398163397448;
+    const DX0: f64 = 1.461632144968362341262659542325721325;
+    const P1: [f64; 7] = [
+        0.0089538502298197,
+        4.77762828042627,
+        142.441585084029,
+        1186.45200713425,
+        3633.51846806499,
+        4138.10161269013,
+        1305.60269827897,
+    ];
+    const Q1: [f64; 6] = [
+        44.8452573429826,
+        520.752771467162,
+        2210.0079924783,
+        3641.27349079381,
+        1908.310765963,
+        6.91091682714533e-6,
+    ];
+    const P2: [f64; 4] = [
+        -2.12940445131011,
+        -7.01677227766759,
+        -4.48616543918019,
+        -0.648157123766197,
+    ];
+    const Q2: [f64; 4] = [
+        32.2703493791143,
+        89.2920700481861,
+        54.6117738103215,
+        7.77788548522962,
+    ];
+    let xmax1 = (i32::MAX as f64).min(1.0 / DBL_EPSILON);
+    let xsmall = 1e-9;
+    let mut x = x;
+    let mut aug = 0.0;
+    if x < 0.5 {
+        if x.abs() <= xsmall {
+            if x == 0.0 {
+                return 0.0;
+            }
+            aug = -1.0 / x;
+        } else {
+            let mut w = -x;
+            let mut sgn = PIOV4;
+            if w <= 0.0 {
+                w = -w;
+                sgn = -sgn;
+            }
+            if w >= xmax1 {
+                return 0.0;
+            }
+            let mut nq = w as i32;
+            w -= nq as f64;
+            nq = (w * 4.0) as i32;
+            w = (w - nq as f64 * 0.25) * 4.0;
+            let mut n = nq / 2;
+            if n + n != nq {
+                w = 1.0 - w;
+            }
+            let z = PIOV4 * w;
+            let mut m = n / 2;
+            if m + m != n {
+                sgn = -sgn;
+            }
+            n = (nq + 1) / 2;
+            m = n / 2;
+            m += m;
+            if m == n {
+                if z == 0.0 {
+                    return 0.0;
+                }
+                aug = sgn * (z.cos() / z.sin() * 4.0);
+            } else {
+                aug = sgn * (z.sin() / z.cos() * 4.0);
+            }
+        }
+        x = 1.0 - x;
+    }
+    if x <= 3.0 {
+        let mut den = x;
+        let mut upper = P1[0] * x;
+        for i in 1..=5 {
+            den = (den + Q1[i - 1]) * x;
+            upper = (upper + P1[i]) * x;
+        }
+        den = (upper + P1[6]) / (den + Q1[5]);
+        let xmx0 = x - DX0;
+        return den * xmx0 + aug;
+    }
+    if x < xmax1 {
+        let w = 1.0 / (x * x);
+        let mut den = w;
+        let mut upper = P2[0] * w;
+        for i in 1..=3 {
+            den = (den + Q2[i - 1]) * w;
+            upper = (upper + P2[i]) * w;
+        }
+        aug += upper / (den + Q2[3]) - 0.5 / x;
+    }
+    aug + x.ln()
+}
+
+/// `log(Beta(a0, b0))`.
+fn betaln(a0: f64, b0: f64) -> f64 {
+    const E: f64 = 0.918938533204673;
+    let mut a = a0.min(b0);
+    let mut b = a0.max(b0);
+    if a >= 8.0 {
+        let w = bcorr(a, b);
+        let h = a / b;
+        let c = h / (h + 1.0);
+        let u = -(a - 0.5) * c.ln();
+        let v = b * alnrel(h);
+        return if u > v {
+            b.ln() * -0.5 + E + w - v - u
+        } else {
+            b.ln() * -0.5 + E + w - u - v
+        };
+    }
+    if a < 1.0 {
+        return if b < 8.0 {
+            gamln(a) + (gamln(b) - gamln(a + b))
+        } else {
+            gamln(a) + algdiv(a, b)
+        };
+    }
+    let w;
+    if a < 2.0 {
+        if b <= 2.0 {
+            return gamln(a) + gamln(b) - gsumln(a, b);
+        }
+        if b >= 8.0 {
+            return gamln(a) + algdiv(a, b);
+        }
+        w = 0.0;
+    } else if b <= 1e3 {
+        let n = (a - 1.0) as i32;
+        let mut product = 1.0;
+        for _ in 1..=n {
+            a -= 1.0;
+            let h = a / b;
+            product *= h / (h + 1.0);
+        }
+        w = product.ln();
+        if b >= 8.0 {
+            return w + gamln(a) + algdiv(a, b);
+        }
+    } else {
+        let n = (a - 1.0) as i32;
+        let mut product = 1.0;
+        for _ in 1..=n {
+            a -= 1.0;
+            product *= a / (a / b + 1.0);
+        }
+        return product.ln() - n as f64 * b.ln() + (gamln(a) + algdiv(a, b));
+    }
+    let n = (b - 1.0) as i32;
+    let mut z = 1.0;
+    for _ in 1..=n {
+        b -= 1.0;
+        z *= b / (a + b);
+    }
+    w + z.ln() + (gamln(a) + (gamln(b) - gsumln(a, b)))
+}
+
+/// `log(gamma(a + b))` for `1 <= a, b <= 2`.
+fn gsumln(a: f64, b: f64) -> f64 {
+    let x = a + b - 2.0;
+    if x <= 0.25 {
+        gamln1(x + 1.0)
+    } else if x <= 1.25 {
+        gamln1(x) + alnrel(x)
+    } else {
+        gamln1(x - 1.0) + (x * (x + 1.0)).ln()
+    }
+}
+
+const DEL_C: [f64; 6] = [
+    0.0833333333333333,
+    -0.00277777777760991,
+    7.9365066682539e-4,
+    -5.9520293135187e-4,
+    8.37308034031215e-4,
+    -0.00165322962780713,
+];
+
+/// `del(a0) + del(b0) - del(a0 + b0)` where `del` is Stirling's remainder, for `a0, b0 >= 8`.
+fn bcorr(a0: f64, b0: f64) -> f64 {
+    let c = &DEL_C;
+    let a = a0.min(b0);
+    let b = a0.max(b0);
+    let h = a / b;
+    let cc = h / (h + 1.0);
+    let x = 1.0 / (h + 1.0);
+    let x2 = x * x;
+    let s3 = x + x2 + 1.0;
+    let s5 = x + x2 * s3 + 1.0;
+    let s7 = x + x2 * s5 + 1.0;
+    let s9 = x + x2 * s7 + 1.0;
+    let s11 = x + x2 * s9 + 1.0;
+    let mut t = 1.0 / b;
+    t *= t;
+    let mut w = ((((c[5] * s11 * t + c[4] * s9) * t + c[3] * s7) * t + c[2] * s5) * t + c[1] * s3)
+        * t
+        + c[0];
+    w *= cc / b;
+    t = 1.0 / a;
+    t *= t;
+    (((((c[5] * t + c[4]) * t + c[3]) * t + c[2]) * t + c[1]) * t + c[0]) / a + w
+}
+
+/// `log(gamma(b) / gamma(a + b))` for `b >= 8`.
+fn algdiv(a: f64, b: f64) -> f64 {
+    let co = &DEL_C;
+    let (h, c, x, d);
+    if a > b {
+        h = b / a;
+        c = 1.0 / (h + 1.0);
+        x = h / (h + 1.0);
+        d = a + (b - 0.5);
+    } else {
+        h = a / b;
+        c = h / (h + 1.0);
+        x = 1.0 / (h + 1.0);
+        d = b + (a - 0.5);
+    }
+    let x2 = x * x;
+    let s3 = x + x2 + 1.0;
+    let s5 = x + x2 * s3 + 1.0;
+    let s7 = x + x2 * s5 + 1.0;
+    let s9 = x + x2 * s7 + 1.0;
+    let s11 = x + x2 * s9 + 1.0;
+    let t = 1.0 / (b * b);
+    let mut w =
+        ((((co[5] * s11 * t + co[4] * s9) * t + co[3] * s7) * t + co[2] * s5) * t + co[1] * s3) * t
+            + co[0];
+    w *= c / b;
+    let u = d * alnrel(a / b);
+    let v = a * (b.ln() - 1.0);
+    if u > v { w - v - u } else { w - u - v }
+}
+
+/// `log(gamma(a))` for positive `a`.
+fn gamln(a: f64) -> f64 {
+    const D: f64 = 0.418938533204673;
+    let c = &DEL_C;
+    if a <= 0.8 {
+        gamln1(a) - a.ln()
+    } else if a <= 2.25 {
+        gamln1(a - 0.5 - 0.5)
+    } else if a < 10.0 {
+        let n = (a - 1.25) as i32;
+        let mut t = a;
+        let mut w = 1.0;
+        for _ in 1..=n {
+            t -= 1.0;
+            w *= t;
+        }
+        gamln1(t - 1.0) + w.ln()
+    } else {
+        let t = 1.0 / (a * a);
+        let w = (((((c[5] * t + c[4]) * t + c[3]) * t + c[2]) * t + c[1]) * t + c[0]) / a;
+        D + w + (a - 0.5) * (a.ln() - 1.0)
+    }
+}
+
+/// The beta quantile. AS 109's starting value, then Newton steps on `log x` against the
+/// smaller tail's log probability, safeguarded by bisection, so the answer is the root of
+/// `pbeta` to the last bits wherever `pbeta` itself is accurate.
+pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
+    if alpha.is_nan() || p.is_nan() || q.is_nan() {
+        return alpha + p + q;
+    }
+    if p < 0.0 || q < 0.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(alpha, lower, log, 0.0, 1.0) {
+        return boundary;
+    }
+    if p == 0.0 || q == 0.0 || !finite(p) || !finite(q) {
+        if p == 0.0 && q == 0.0 {
+            return if alpha < d_val(0.5, log) {
+                if lower { 0.0 } else { 1.0 }
+            } else if alpha > d_val(0.5, log) {
+                if lower { 1.0 } else { 0.0 }
+            } else {
+                0.5
+            };
+        }
+        if p == 0.0 || p / q == f64::INFINITY {
+            return 0.0;
+        }
+        if q == 0.0 || q / p == f64::INFINITY {
+            return 1.0;
+        }
+        return 0.5;
+    }
+    // The log probability of each tail, and which end of [0, 1] the quantile lies nearer:
+    // solving for the distance to that end keeps its relative precision.
+    let log_lower = if log {
+        if lower { alpha } else { log1_exp(alpha) }
+    } else if lower {
+        alpha.ln()
+    } else {
+        (-alpha).ln_1p()
+    };
+    let log_upper = if log {
+        if lower { log1_exp(alpha) } else { alpha }
+    } else if lower {
+        (-alpha).ln_1p()
+    } else {
+        alpha.ln()
+    };
+    // Solve for t, the distance from the quantile to the nearer end of [0, 1], so that a
+    // quantile near either end keeps its relative precision. When the quantile lies above
+    // 1/2, t = 1 - x follows Beta(q, p). The equation is on the log scale of whichever tail
+    // probability is smaller, the one the arguments represent accurately.
+    let log_half = pbeta(0.5, p, q, true, true);
+    if log_lower == log_half {
+        return 0.5;
+    }
+    let near_zero = log_lower < log_half;
+    let (a, b) = if near_zero { (p, q) } else { (q, p) };
+    let use_lower = log_lower <= log_upper;
+    let (target, t_lower) = match (near_zero, use_lower) {
+        (true, true) => (log_lower, true),
+        (true, false) => (log_upper, false),
+        (false, true) => (log_lower, false),
+        (false, false) => (log_upper, true),
+    };
+    let t_lower_log = if near_zero { log_lower } else { log_upper };
+    // h(t) increases with t: the lower tail's log probability, or minus the upper tail's.
+    let direction = if t_lower { 1.0 } else { -1.0 };
+    // Newton's method on log(t), stepping as t * exp(du) so tiny quantiles keep their relative
+    // precision, inside a bracket that falls back to bisection when a step leaves it.
+    let mut t = qbeta_start(t_lower_log, a, b);
+    if !(t > 0.0 && t < 0.5) {
+        t = 0.25;
+    }
+    let lbeta_ab = lbeta(a, b);
+    if !lbeta_ab.is_finite() || !(a + b).is_finite() {
+        // The parameters are beyond what the density can be evaluated at, as in GNU R.
+        return f64::NAN;
+    }
+    let mut lo = 0.0_f64;
+    let mut hi = 0.5_f64;
+    for _ in 0..1000 {
+        let value = pbeta(t, a, b, t_lower, true);
+        let difference = direction * (value - target);
+        if difference == 0.0 || value.is_nan() {
+            break;
+        }
+        if difference > 0.0 {
+            hi = t;
+        } else {
+            lo = t;
+        }
+        // d/du log P(e^u) = t f(t) / P(t), and the same with Q for the upper tail.
+        let log_density = (a - 1.0) * t.ln() + (b - 1.0) * (-t).ln_1p() - lbeta_ab;
+        let step = -difference / (t.ln() + log_density - value).exp();
+        let mut next = t * step.exp();
+        if !(next > lo && next < hi) {
+            next = if lo == 0.0 {
+                hi * 1e-3
+            } else if hi / lo > 4.0 {
+                (lo * hi).sqrt()
+            } else {
+                0.5 * (lo + hi)
+            };
+        } else if step.abs() < 1e-15 {
+            t = next;
+            break;
+        }
+        if next == t {
+            break;
+        }
+        t = next;
+    }
+    if near_zero { t } else { 0.5 - t + 0.5 }
+}
+
+/// AS 109's approximation of the lower-tail beta quantile at log probability `log_p`.
+fn qbeta_start(log_p: f64, a: f64, b: f64) -> f64 {
+    let p_ = log_p.exp();
+    let logbeta = lbeta(a, b);
+    // Hastings's approximation of the normal quantile of the upper tail 1 - p.
+    let r = (-2.0 * log_p).sqrt();
+    let y = r - (2.30753 + 0.27061 * r) / (1.0 + (0.99229 + 0.04481 * r) * r);
+    if a > 1.0 && b > 1.0 {
+        let r = (y * y - 3.0) / 6.0;
+        let s = 1.0 / (a + a - 1.0);
+        let t = 1.0 / (b + b - 1.0);
+        let h = 2.0 / (s + t);
+        let w = y * (h + r).sqrt() / h - (t - s) * (r + 5.0 / 6.0 - 2.0 / (3.0 * h));
+        a / (a + b * (w + w).exp())
+    } else {
+        let r = b + b;
+        let mut t = 1.0 / (9.0 * b);
+        t = r * (1.0 - t + y * t.sqrt()).powi(3);
+        if t <= 0.0 {
+            1.0 - ((-p_).ln_1p() + b.ln() + logbeta).exp() / b
+        } else {
+            t = (4.0 * a + r - 2.0) / t;
+            if t <= 1.0 {
+                ((log_p + a.ln() + logbeta) / a).exp()
+            } else {
+                1.0 - 2.0 / (t + 1.0)
+            }
+        }
+    }
+}
+
+// The binomial, negative binomial, geometric and hypergeometric distributions.
+
+/// The binomial density by Loader's saddle point, with `q = 1 - p` passed separately.
+pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, log: bool) -> f64 {
+    if p == 0.0 {
+        return if x == 0.0 { d1(log) } else { d0(log) };
+    }
+    if q == 0.0 {
+        return if x == n { d1(log) } else { d0(log) };
+    }
+    if x == 0.0 {
+        if n == 0.0 {
+            return d1(log);
+        }
+        let lc = if p < 0.1 {
+            -bd0(n, n * q) - n * p
+        } else {
+            n * q.ln()
+        };
+        return d_exp(lc, log);
+    }
+    if x == n {
+        let lc = if q < 0.1 {
+            -bd0(n, n * p) - n * q
+        } else {
+            n * p.ln()
+        };
+        return d_exp(lc, log);
+    }
+    if x < 0.0 || x > n {
+        return d0(log);
+    }
+    let lc = stirlerr(n) - stirlerr(x) - stirlerr(n - x) - bd0(x, n * p) - bd0(n - x, n * q);
+    let lf = M_LN_2PI + x.ln() + (-x / n).ln_1p();
+    d_exp(lc - 0.5 * lf, log)
+}
+
+pub fn dbinom(x: f64, n: f64, p: f64, log: bool) -> f64 {
+    if x.is_nan() || n.is_nan() || p.is_nan() {
+        return x + n + p;
+    }
+    if !(0.0..=1.0).contains(&p) || negative_or_nonint(n) {
+        return f64::NAN;
+    }
+    if nonint_warning(x) || x < 0.0 || !finite(x) {
+        return d0(log);
+    }
+    dbinom_raw(forceint(x), forceint(n), p, 1.0 - p, log)
+}
+
+pub fn pbinom(x: f64, n: f64, p: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || n.is_nan() || p.is_nan() {
+        return x + n + p;
+    }
+    if !finite(n) || !finite(p) {
+        return f64::NAN;
+    }
+    if nonint(n) {
+        warning(format!("non-integer n = {n:.6}"));
+        return f64::NAN;
+    }
+    let n = forceint(n);
+    if n < 0.0 || !(0.0..=1.0).contains(&p) {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return dt0(lower, log);
+    }
+    let x = (x + 1e-7).floor();
+    if n <= x {
+        return dt1(lower, log);
+    }
+    pbeta(p, x + 1.0, n - x, !lower, log)
+}
+
+/// The search shared by the discrete quantile functions: from the Cornish-Fisher start `y`,
+/// step by `increment` until the distribution function crosses `p`. `z` holds the
+/// distribution function at `y`.
+fn discrete_search(
+    mut y: f64,
+    z: &mut f64,
+    p: f64,
+    increment: f64,
+    lower: bool,
+    maximum: f64,
+    distribution: &dyn Fn(f64) -> f64,
+) -> f64 {
+    let left = if lower { *z >= p } else { *z < p };
+    if left {
+        loop {
+            let mut new_z = -1.0;
+            if y > 0.0 {
+                new_z = distribution(y - increment);
+            } else if y < 0.0 {
+                y = 0.0;
+            }
+            if y == 0.0 || new_z.is_nan() || if lower { new_z < p } else { new_z >= p } {
+                return y;
+            }
+            y = fmax2(0.0, y - increment);
+            *z = new_z;
+        }
+    } else {
+        loop {
+            y = fmin2(y + increment, maximum);
+            *z = distribution(y);
+            if y == maximum || z.is_nan() || if lower { *z >= p } else { *z < p } {
+                return y;
+            }
+        }
+    }
+}
+
+/// The body of `qbinom`, `qpois` and `qnbinom`: a Cornish-Fisher expansion about the normal
+/// quantile, then a search, with large steps first when the start is far from zero.
+#[allow(clippy::too_many_arguments)]
+fn discrete_quantile(
+    p: f64,
+    mu: f64,
+    sigma: f64,
+    gamma: f64,
+    lower: bool,
+    log: bool,
+    maximum: f64,
+    distribution: &dyn Fn(f64, bool, bool) -> f64,
+) -> f64 {
+    let z = qnorm(p, 0.0, 1.0, lower, log);
+    let mut y = forceint(mu + sigma * (z + gamma * (z * z - 1.0) / 6.0));
+    if y < 0.0 {
+        y = 0.0;
+    }
+    if y > maximum {
+        y = maximum;
+    }
+    let mut z = distribution(y, lower, log);
+    let mut p = p;
+    // Fuzz towards the inside so the left-continuous answer survives rounding.
+    if log {
+        let e = 2.0 * DBL_EPSILON;
+        if lower && p > -DBL_MAX {
+            p *= 1.0 + e;
+        } else {
+            p *= 1.0 - e;
+        }
+    } else {
+        let e = 8.0 * DBL_EPSILON;
+        if lower {
+            p *= 1.0 - e;
+        } else if 1.0 - p > 4.0 * e {
+            p *= 1.0 + e;
+        }
+    }
+    let at = |y: f64| distribution(y, lower, log);
+    if y < 4096.0 {
+        return discrete_search(y, &mut z, p, 1.0, lower, maximum, &at);
+    }
+    let mut increment = (y / 64.0).floor();
+    loop {
+        let old_increment = increment;
+        y = discrete_search(y, &mut z, p, increment, lower, maximum, &at);
+        increment = fmax2(1.0, (increment / 8.0).floor());
+        if !(old_increment > 1.0 && increment > y * 1e-15) {
+            break;
+        }
+    }
+    y
+}
+
+pub fn qbinom(p: f64, n: f64, pr: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || n.is_nan() || pr.is_nan() {
+        return p + n + pr;
+    }
+    if !finite(n) || !finite(pr) || (!finite(p) && !log) {
+        return f64::NAN;
+    }
+    if n != (n + 0.5).floor() || !(0.0..=1.0).contains(&pr) || n < 0.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, n) {
+        return boundary;
+    }
+    if pr == 0.0 || n == 0.0 {
+        return 0.0;
+    }
+    let q = 1.0 - pr;
+    if q == 0.0 {
+        return n;
+    }
+    let mu = n * pr;
+    let sigma = (n * pr * q).sqrt();
+    let gamma = (q - pr) / sigma;
+    discrete_quantile(p, mu, sigma, gamma, lower, log, n, &|y, lower, log| {
+        pbinom(y, n, pr, lower, log)
+    })
+}
+
+pub fn dnbinom(x: f64, size: f64, prob: f64, log: bool) -> f64 {
+    if x.is_nan() || size.is_nan() || prob.is_nan() {
+        return x + size + prob;
+    }
+    if prob <= 0.0 || prob > 1.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    if nonint_warning(x) || x < 0.0 || !finite(x) {
+        return d0(log);
+    }
+    if x == 0.0 && size == 0.0 {
+        return d1(log);
+    }
+    let x = forceint(x);
+    let size = if finite(size) { size } else { DBL_MAX };
+    if x != 0.0 && x < 1e-10 * size {
+        // log(choose(size + x - 1, x)) is about x log(size) - lgamma(x + 1) here, which
+        // dbinom_raw would lose to cancellation (Abramowitz and Stegun 6.1.47).
+        return d_exp(
+            size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x)
+                + (x * (x - 1.0) / (2.0 * size)).ln_1p(),
+            log,
+        );
+    }
+    let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, log);
+    let p = size / (size + x);
+    if log { p.ln() + ans } else { p * ans }
+}
+
+pub fn dnbinom_mu(x: f64, size: f64, mu: f64, log: bool) -> f64 {
+    if x.is_nan() || size.is_nan() || mu.is_nan() {
+        return x + size + mu;
+    }
+    if mu < 0.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    if nonint_warning(x) || x < 0.0 || !finite(x) {
+        return d0(log);
+    }
+    if x == 0.0 && size == 0.0 {
+        return d1(log);
+    }
+    let x = forceint(x);
+    if !finite(size) {
+        return dpois_raw(x, mu, log);
+    }
+    if x == 0.0 {
+        return d_exp(
+            size * if size < mu {
+                (size / (size + mu)).ln()
+            } else {
+                (-mu / (size + mu)).ln_1p()
+            },
+            log,
+        );
+    }
+    if x < 1e-10 * size {
+        let p = if size < mu {
+            (size / (1.0 + size / mu)).ln()
+        } else {
+            (mu / (1.0 + mu / size)).ln()
+        };
+        return d_exp(
+            x * p - mu - lgammafn(x + 1.0) + (x * (x - 1.0) / (2.0 * size)).ln_1p(),
+            log,
+        );
+    }
+    let p = size / (size + x);
+    let ans = dbinom_raw(size, x + size, size / (size + mu), mu / (size + mu), log);
+    if log { p.ln() + ans } else { p * ans }
+}
+
+pub fn pnbinom(x: f64, size: f64, prob: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || size.is_nan() || prob.is_nan() {
+        return x + size + prob;
+    }
+    if !finite(size) || !finite(prob) || size < 0.0 || prob <= 0.0 || prob > 1.0 {
+        return f64::NAN;
+    }
+    if size == 0.0 {
+        return if x >= 0.0 {
+            dt1(lower, log)
+        } else {
+            dt0(lower, log)
+        };
+    }
+    if x < 0.0 {
+        return dt0(lower, log);
+    }
+    if !finite(x) {
+        return dt1(lower, log);
+    }
+    let x = (x + 1e-7).floor();
+    pbeta(prob, size, x + 1.0, lower, log)
+}
+
+pub fn pnbinom_mu(x: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || size.is_nan() || mu.is_nan() {
+        return x + size + mu;
+    }
+    if !finite(mu) || size < 0.0 || mu < 0.0 {
+        return f64::NAN;
+    }
+    if size == 0.0 {
+        return if x >= 0.0 {
+            dt1(lower, log)
+        } else {
+            dt0(lower, log)
+        };
+    }
+    if x < 0.0 {
+        return dt0(lower, log);
+    }
+    if !finite(x) {
+        return dt1(lower, log);
+    }
+    if !finite(size) {
+        return ppois(x, mu, lower, log);
+    }
+    let x = (x + 1e-7).floor();
+    let (w, wc, ierr) = bratio(size, x + 1.0, size / (size + mu), mu / (size + mu), log);
+    if ierr != 0 {
+        warning(format!("pnbinom_mu() -> bratio() gave error code {ierr}"));
+    }
+    if lower { w } else { wc }
+}
+
+pub fn qnbinom(p: f64, size: f64, prob: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || size.is_nan() || prob.is_nan() {
+        return p + size + prob;
+    }
+    if prob == 0.0 && size == 0.0 {
+        return 0.0;
+    }
+    if prob <= 0.0 || prob > 1.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    if prob == 1.0 || size == 0.0 {
+        return 0.0;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    let q = 1.0 / prob;
+    let pp = (1.0 - prob) * q;
+    let mu = size * pp;
+    let sigma = (size * pp * q).sqrt();
+    let gamma = (q + pp) / sigma;
+    discrete_quantile(
+        p,
+        mu,
+        sigma,
+        gamma,
+        lower,
+        log,
+        f64::INFINITY,
+        &|y, lower, log| pnbinom(y, size, prob, lower, log),
+    )
+}
+
+pub fn qnbinom_mu(p: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || size.is_nan() || mu.is_nan() {
+        return p + size + mu;
+    }
+    if mu == 0.0 || size == 0.0 {
+        return 0.0;
+    }
+    if mu < 0.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    if !finite(size) {
+        return qpois(p, mu, lower, log);
+    }
+    let q = 1.0 + mu / size;
+    let pp = mu / size;
+    let sigma = (size * pp * q).sqrt();
+    let gamma = (q + pp) / sigma;
+    discrete_quantile(
+        p,
+        mu,
+        sigma,
+        gamma,
+        lower,
+        log,
+        f64::INFINITY,
+        &|y, lower, log| pnbinom_mu(y, size, mu, lower, log),
+    )
+}
+
+pub fn dgeom(x: f64, p: f64, log: bool) -> f64 {
+    if x.is_nan() || p.is_nan() {
+        return x + p;
+    }
+    if p <= 0.0 || p > 1.0 {
+        return f64::NAN;
+    }
+    if nonint_warning(x) || x < 0.0 || !finite(x) || p == 0.0 {
+        return d0(log);
+    }
+    let x = forceint(x);
+    let prob = dbinom_raw(0.0, x, p, 1.0 - p, log);
+    if log { p.ln() + prob } else { p * prob }
+}
+
+pub fn pgeom(x: f64, p: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || p.is_nan() {
+        return x + p;
+    }
+    if p <= 0.0 || p > 1.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return dt0(lower, log);
+    }
+    if !finite(x) {
+        return dt1(lower, log);
+    }
+    let x = (x + 1e-7).floor();
+    if p == 1.0 {
+        let x: f64 = if lower { 1.0 } else { 0.0 };
+        return if log { x.ln() } else { x };
+    }
+    let x = (-p).ln_1p() * (x + 1.0);
+    if log {
+        dt_clog(x, lower, log)
+    } else if lower {
+        -x.exp_m1()
+    } else {
+        x.exp()
+    }
+}
+
+pub fn qgeom(p: f64, prob: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || prob.is_nan() {
+        return p + prob;
+    }
+    if prob <= 0.0 || prob > 1.0 || q_p01_invalid(p, log) {
+        return f64::NAN;
+    }
+    if prob == 1.0 {
+        return 0.0;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    fmax2(
+        0.0,
+        (dt_clog(p, lower, log) / (-prob).ln_1p() - 1.0 - 1e-12).ceil(),
+    )
+}
+
+pub fn dhyper(x: f64, r: f64, b: f64, n: f64, log: bool) -> f64 {
+    if x.is_nan() || r.is_nan() || b.is_nan() || n.is_nan() {
+        return x + r + b + n;
+    }
+    if negative_or_nonint(r) || negative_or_nonint(b) || negative_or_nonint(n) || n > r + b {
+        return f64::NAN;
+    }
+    if x < 0.0 || nonint_warning(x) {
+        return d0(log);
+    }
+    let (x, r, b, n) = (forceint(x), forceint(r), forceint(b), forceint(n));
+    if n < x || r < x || n - x > b {
+        return d0(log);
+    }
+    if n == 0.0 {
+        return if x == 0.0 { d1(log) } else { d0(log) };
+    }
+    let p = n / (r + b);
+    let q = (r + b - n) / (r + b);
+    let p1 = dbinom_raw(x, r, p, q, log);
+    let p2 = dbinom_raw(n - x, b, p, q, log);
+    let p3 = dbinom_raw(n, r + b, p, q, log);
+    if log { p1 + p2 - p3 } else { p1 * p2 / p3 }
+}
+
+/// `phyper(x) / dhyper(x)` in the lower tail, for `x (NR + NB) <= n NR`.
+fn pdhyper(x: f64, nr: f64, nb: f64, n: f64, log: bool) -> f64 {
+    let mut x = x;
+    let mut sum = 0.0;
+    let mut term = 1.0;
+    while x > 0.0 && term >= DBL_EPSILON * sum {
+        term *= x * (nb - n + x) / (n + 1.0 - x) / (nr + 1.0 - x);
+        sum += term;
+        x -= 1.0;
+    }
+    if log { sum.ln_1p() } else { 1.0 + sum }
+}
+
+pub fn phyper(x: f64, nr: f64, nb: f64, n: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || nr.is_nan() || nb.is_nan() || n.is_nan() {
+        return x + nr + nb + n;
+    }
+    let mut x = (x + 1e-7).floor();
+    let mut nr = forceint(nr);
+    let mut nb = forceint(nb);
+    let n = forceint(n);
+    let mut lower = lower;
+    if nr < 0.0 || nb < 0.0 || !finite(nr + nb) || n < 0.0 || n > nr + nb {
+        return f64::NAN;
+    }
+    if x * (nr + nb) > n * nr {
+        std::mem::swap(&mut nr, &mut nb);
+        x = n - x - 1.0;
+        lower = !lower;
+    }
+    if x < 0.0 || x < n - nb {
+        return dt0(lower, log);
+    }
+    if x >= nr || x >= n {
+        return dt1(lower, log);
+    }
+    let d = dhyper(x, nr, nb, n, log);
+    if (!log && d == 0.0) || (log && d == f64::NEG_INFINITY) {
+        return dt0(lower, log);
+    }
+    let pd = pdhyper(x, nr, nb, n, log);
+    if log {
+        dt_log_of_log(d + pd, lower)
+    } else {
+        d_lval(d * pd, lower)
+    }
+}
+
+pub fn qhyper(p: f64, nr: f64, nb: f64, n: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || nr.is_nan() || nb.is_nan() || n.is_nan() {
+        return p + nr + nb + n;
+    }
+    if !finite(p) || !finite(nr) || !finite(nb) || !finite(n) {
+        return f64::NAN;
+    }
+    let mut nr = forceint(nr);
+    let mut nb = forceint(nb);
+    let total = nr + nb;
+    let n = forceint(n);
+    if nr < 0.0 || nb < 0.0 || n < 0.0 || n > total {
+        return f64::NAN;
+    }
+    let xstart = fmax2(0.0, n - nb);
+    let xend = fmin2(n, nr);
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, xstart, xend) {
+        return boundary;
+    }
+    let mut xr = xstart;
+    let mut xb = n - xr;
+    let small_n = total < 1000.0;
+    let mut term = lfastchoose(nr, xr) + lfastchoose(nb, xb) - lfastchoose(total, n);
+    if small_n {
+        term = term.exp();
+    }
+    nr -= xr;
+    nb -= xb;
+    let mut p = p;
+    if !lower || log {
+        p = dt_qiv(p, lower, log);
+    }
+    p *= 1.0 - 1000.0 * DBL_EPSILON;
+    let mut sum = if small_n { term } else { term.exp() };
+    while sum < p && xr < xend {
+        xr += 1.0;
+        nb += 1.0;
+        if small_n {
+            term *= (nr / xr) * (xb / nb);
+        } else {
+            term += (nr / xr).ln() + (xb / nb).ln();
+        }
+        sum += if small_n { term } else { term.exp() };
+        xb -= 1.0;
+        nr -= 1.0;
+    }
+    xr
+}
+
+pub fn ppois(x: f64, lambda: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || lambda.is_nan() {
+        return x + lambda;
+    }
+    if lambda < 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return dt0(lower, log);
+    }
+    if lambda == 0.0 || !finite(x) {
+        return dt1(lower, log);
+    }
+    let x = (x + 1e-7).floor();
+    pgamma(lambda, x + 1.0, 1.0, !lower, log)
+}
+
+pub fn qpois(p: f64, lambda: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || lambda.is_nan() {
+        return p + lambda;
+    }
+    if !finite(lambda) || lambda < 0.0 {
+        return f64::NAN;
+    }
+    if lambda == 0.0 {
+        return 0.0;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    let mu = lambda;
+    let sigma = lambda.sqrt();
+    let gamma = 1.0 / sigma;
+    discrete_quantile(
+        p,
+        mu,
+        sigma,
+        gamma,
+        lower,
+        log,
+        f64::INFINITY,
+        &|y, lower, log| ppois(y, lambda, lower, log),
+    )
+}
+
+// Student's t and Fisher's F.
+
+pub fn dt(x: f64, n: f64, log: bool) -> f64 {
+    if x.is_nan() || n.is_nan() {
+        return x + n;
+    }
+    if n <= 0.0 {
+        return f64::NAN;
+    }
+    if !finite(x) {
+        return d0(log);
+    }
+    if !finite(n) {
+        return dnorm(x, 0.0, 1.0, log);
+    }
+    let t = -bd0(n / 2.0, (n + 1.0) / 2.0) + stirlerr((n + 1.0) / 2.0) - stirlerr(n / 2.0);
+    let x2n = x * x / n;
+    let large = x2n > 1.0 / DBL_EPSILON;
+    let mut ax = 0.0;
+    let (l_x2n, u);
+    if large {
+        ax = x.abs();
+        l_x2n = ax.ln() - n.ln() / 2.0;
+        u = n * l_x2n;
+    } else if x2n > 0.2 {
+        l_x2n = (1.0 + x2n).ln() / 2.0;
+        u = n * l_x2n;
+    } else {
+        l_x2n = x2n.ln_1p() / 2.0;
+        u = -bd0(n / 2.0, (n + x * x) / 2.0) + x * x / 2.0;
+    }
+    if log {
+        return t - u - (M_LN_SQRT_2PI + l_x2n);
+    }
+    let i_sqrt = if large { n.sqrt() / ax } else { (-l_x2n).exp() };
+    (t - u).exp() * M_1_SQRT_2PI * i_sqrt
+}
+
+pub fn pt(x: f64, n: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || n.is_nan() {
+        return x + n;
+    }
+    if n <= 0.0 {
+        return f64::NAN;
+    }
+    if !finite(x) {
+        return if x < 0.0 {
+            dt0(lower, log)
+        } else {
+            dt1(lower, log)
+        };
+    }
+    if !finite(n) {
+        return pnorm(x, 0.0, 1.0, lower, log);
+    }
+    let nx = 1.0 + (x / n) * x;
+    let val = if nx > 1e100 {
+        let lval = -0.5 * n * (2.0 * x.abs().ln() - n.ln()) - lbeta(0.5 * n, 0.5) - (0.5 * n).ln();
+        if log { lval } else { lval.exp() }
+    } else if n > x * x {
+        pbeta(x * x / (n + x * x), 0.5, n / 2.0, false, log)
+    } else {
+        pbeta(1.0 / nx, n / 2.0, 0.5, true, log)
+    };
+    let lower = if x <= 0.0 { !lower } else { lower };
+    if log {
+        if lower {
+            (-0.5 * val.exp()).ln_1p()
+        } else {
+            val - M_LN2
+        }
+    } else {
+        d_cval(val / 2.0, lower)
+    }
+}
+
+/// Student's t quantile by Hill's algorithm 396 with a two-term Taylor refinement (Hill 1981),
+/// bisection below one degree of freedom.
+pub fn qt(p: f64, ndf: f64, lower: bool, log: bool) -> f64 {
+    const EPS: f64 = 1e-12;
+    if p.is_nan() || ndf.is_nan() {
+        return p + ndf;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, f64::NEG_INFINITY, f64::INFINITY) {
+        return boundary;
+    }
+    if ndf <= 0.0 {
+        return f64::NAN;
+    }
+    if ndf < 1.0 {
+        const ACCU: f64 = 1e-13;
+        const EPS_BRACKET: f64 = 1e-11;
+        let p = dt_qiv(p, lower, log);
+        if p > 1.0 - DBL_EPSILON {
+            return f64::INFINITY;
+        }
+        let mut pp = fmin2(1.0 - DBL_EPSILON, p * (1.0 + EPS_BRACKET));
+        let mut ux = 1.0;
+        while ux < DBL_MAX && pt(ux, ndf, true, false) < pp {
+            ux *= 2.0;
+        }
+        pp = p * (1.0 - EPS_BRACKET);
+        let mut lx = -1.0;
+        while lx > -DBL_MAX && pt(lx, ndf, true, false) > pp {
+            lx *= 2.0;
+        }
+        let mut iteration = 0;
+        loop {
+            let nx = 0.5 * (lx + ux);
+            if pt(nx, ndf, true, false) > p {
+                ux = nx;
+            } else {
+                lx = nx;
+            }
+            iteration += 1;
+            if !((ux - lx) / nx.abs() > ACCU && iteration < 1000) {
+                break;
+            }
+        }
+        if iteration >= 1000 {
+            precision_warning("qt");
+        }
+        return 0.5 * (lx + ux);
+    }
+    if ndf > 1e20 {
+        return qnorm(p, 0.0, 1.0, lower, log);
+    }
+    let mut big_p = d_qiv(p, log);
+    let neg = (!lower || big_p < 0.5) && (lower || big_p > 0.5);
+    let is_neg_lower = lower == neg;
+    if neg {
+        big_p = 2.0
+            * if log {
+                if lower { big_p } else { -p.exp_m1() }
+            } else {
+                d_lval(p, lower)
+            };
+    } else {
+        big_p = 2.0
+            * if log {
+                if lower { -p.exp_m1() } else { big_p }
+            } else {
+                d_cval(p, lower)
+            };
+    }
+    let mut q;
+    if (ndf - 2.0).abs() < EPS {
+        if big_p > DBL_MIN {
+            if 3.0 * big_p < DBL_EPSILON {
+                q = 1.0 / big_p.sqrt();
+            } else if big_p > 0.9 {
+                q = (1.0 - big_p) * (2.0 / (big_p * (2.0 - big_p))).sqrt();
+            } else {
+                q = (2.0 / (big_p * (2.0 - big_p)) - 2.0).sqrt();
+            }
+        } else if log {
+            q = if is_neg_lower {
+                (-p / 2.0).exp() / M_SQRT2
+            } else {
+                1.0 / (-p.exp_m1()).sqrt()
+            };
+        } else {
+            q = f64::INFINITY;
+        }
+    } else if ndf < 1.0 + EPS {
+        if big_p == 1.0 {
+            q = 0.0;
+        } else if big_p > 0.0 {
+            q = 1.0 / tanpi_(big_p / 2.0);
+        } else if log {
+            q = if is_neg_lower {
+                M_1_PI * (-p).exp()
+            } else {
+                -1.0 / (M_PI * p.exp_m1())
+            };
+        } else {
+            q = f64::INFINITY;
+        }
+    } else {
+        let mut x = 0.0;
+        let mut y;
+        let mut log_p2 = 0.0;
+        let a = 1.0 / (ndf - 0.5);
+        let b = 48.0 / (a * a);
+        let mut c = ((20700.0 * a / b - 98.0) * a - 16.0) * a + 96.36;
+        let d = ((94.5 / (b + c) - 3.0) / b + 1.0) * (a * M_PI_2).sqrt() * ndf;
+        let p_ok1 = big_p > DBL_MIN || !log;
+        let mut p_ok = p_ok1;
+        y = 0.0;
+        if p_ok1 {
+            y = (d * big_p).powf(2.0 / ndf);
+            p_ok = y >= DBL_EPSILON;
+        }
+        if !p_ok {
+            log_p2 = if is_neg_lower {
+                d_log(p, log)
+            } else {
+                d_lexp(p, log)
+            };
+            x = (d.ln() + M_LN2 + log_p2) / ndf;
+            y = (2.0 * x).exp();
+        }
+        if (ndf < 2.1 && big_p > 0.5) || y > 0.05 + a {
+            x = if p_ok {
+                qnorm(0.5 * big_p, 0.0, 1.0, true, false)
+            } else {
+                qnorm(log_p2, 0.0, 1.0, lower, true)
+            };
+            y = x * x;
+            if ndf < 5.0 {
+                c += 0.3 * (ndf - 4.5) * (x + 0.6);
+            }
+            c += (((0.05 * d * x - 5.0) * x - 7.0) * x - 2.0) * x + b;
+            y = (((((0.4 * y + 6.3) * y + 36.0) * y + 94.5) / c - y - 3.0) / b + 1.0) * x;
+            y = (a * y * y).exp_m1();
+            q = (ndf * y).sqrt();
+        } else if !p_ok && x < -M_LN2 * DBL_MANT_DIG as f64 {
+            q = ndf.sqrt() * (-x).exp();
+        } else {
+            y = ((1.0 / (((ndf + 6.0) / (ndf * y) - 0.089 * d - 0.822) * (ndf + 2.0) * 3.0)
+                + 0.5 / (ndf + 4.0))
+                * y
+                - 1.0)
+                * (ndf + 1.0)
+                / (ndf + 2.0)
+                + 1.0 / y;
+            q = (ndf * y).sqrt();
+        }
+        if p_ok1 {
+            let mut iteration = 0;
+            loop {
+                if iteration >= 10 {
+                    break;
+                }
+                iteration += 1;
+                let y = dt(q, ndf, false);
+                if y <= 0.0 {
+                    break;
+                }
+                let x = (pt(q, ndf, false, false) - big_p / 2.0) / y;
+                if !finite(x) || x.abs() <= 1e-14 * q.abs() {
+                    break;
+                }
+                q += x * (1.0 + x * q * (ndf + 1.0) / (2.0 * (q * q + ndf)));
+            }
+        }
+    }
+    if neg {
+        q = -q;
+    }
+    q
+}
+
+pub fn df(x: f64, m: f64, n: f64, log: bool) -> f64 {
+    if x.is_nan() || m.is_nan() || n.is_nan() {
+        return x + m + n;
+    }
+    if m <= 0.0 || n <= 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return d0(log);
+    }
+    if x == 0.0 {
+        return if m > 2.0 {
+            d0(log)
+        } else if m == 2.0 {
+            d1(log)
+        } else {
+            f64::INFINITY
+        };
+    }
+    if !finite(m) && !finite(n) {
+        return if x == 1.0 { f64::INFINITY } else { d0(log) };
+    }
+    if !finite(n) {
+        return dgamma(x, m / 2.0, 2.0 / m, log);
+    }
+    if m > 1e14 {
+        let dens = dgamma(1.0 / x, n / 2.0, 2.0 / n, log);
+        return if log {
+            dens - 2.0 * x.ln()
+        } else {
+            dens / (x * x)
+        };
+    }
+    let mut f = 1.0 / (n + x * m);
+    let q = n * f;
+    let p = x * m * f;
+    let dens;
+    if m >= 2.0 {
+        f = m * q / 2.0;
+        dens = dbinom_raw((m - 2.0) / 2.0, (m + n - 2.0) / 2.0, p, q, log);
+    } else {
+        f = m * m * q / (2.0 * p * (m + n));
+        dens = dbinom_raw(m / 2.0, (m + n) / 2.0, p, q, log);
+    }
+    if log { f.ln() + dens } else { f * dens }
+}
+
+pub fn pf(x: f64, df1: f64, df2: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || df1.is_nan() || df2.is_nan() {
+        return x + df2 + df1;
+    }
+    if df1 <= 0.0 || df2 <= 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    if x >= f64::INFINITY {
+        return dt1(lower, log);
+    }
+    if df2 == f64::INFINITY {
+        if df1 == f64::INFINITY {
+            if x < 1.0 {
+                return dt0(lower, log);
+            }
+            if x == 1.0 {
+                return if log { -M_LN2 } else { 0.5 };
+            }
+            return dt1(lower, log);
+        }
+        return pchisq(x * df1, df1, lower, log);
+    }
+    if df1 == f64::INFINITY {
+        return pchisq(df2 / x, df2, !lower, log);
+    }
+    let value = if df1 * x > df2 {
+        pbeta(df2 / (df2 + df1 * x), df2 / 2.0, df1 / 2.0, !lower, log)
+    } else {
+        pbeta(df1 * x / (df2 + df1 * x), df1 / 2.0, df2 / 2.0, lower, log)
+    };
+    if value.is_nan() { f64::NAN } else { value }
+}
+
+pub fn qf(p: f64, df1: f64, df2: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || df1.is_nan() || df2.is_nan() {
+        return p + df1 + df2;
+    }
+    if df1 <= 0.0 || df2 <= 0.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    if df1 <= df2 && df2 > 4e5 {
+        if !finite(df1) {
+            return 1.0;
+        }
+        return qchisq(p, df1, lower, log) / df1;
+    }
+    if df1 > 4e5 {
+        return df2 / qchisq(p, df2, !lower, log);
+    }
+    let value = (1.0 / qbeta(p, df2 / 2.0, df1 / 2.0, !lower, log) - 1.0) * (df2 / df1);
+    if value.is_nan() { f64::NAN } else { value }
+}
+
+// Non-central distributions.
+
+/// `log(DBL_MIN)` in base 2 terms: below it, `exp` underflows.
+const DBL_MIN_LOG: f64 = M_LN2 * DBL_MIN_EXP as f64;
+
+pub fn dnchisq(x: f64, df: f64, ncp: f64, log: bool) -> f64 {
+    const EPS: f64 = 5e-15;
+    if x.is_nan() || df.is_nan() || ncp.is_nan() {
+        return x + df + ncp;
+    }
+    if !finite(df) || !finite(ncp) || ncp < 0.0 || df < 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return d0(log);
+    }
+    if x == 0.0 && df < 2.0 {
+        return f64::INFINITY;
+    }
+    if ncp == 0.0 {
+        return if df > 0.0 {
+            dchisq(x, df, log)
+        } else {
+            d0(log)
+        };
+    }
+    if x == f64::INFINITY {
+        return d0(log);
+    }
+    let ncp2 = 0.5 * ncp;
+    // Sum the Poisson mixture outwards from its largest term.
+    let mut imax = ((-(2.0 + df) + ((2.0 - df) * (2.0 - df) + 4.0 * ncp * x).sqrt()) / 4.0).ceil();
+    if imax < 0.0 {
+        imax = 0.0;
+    }
+    let (dfmid, mid);
+    if finite(imax) {
+        dfmid = df + 2.0 * imax;
+        mid = dpois_raw(imax, ncp2, false) * dchisq(x, dfmid, false);
+    } else {
+        dfmid = 0.0;
+        mid = 0.0;
+    }
+    if mid == 0.0 {
+        if log || ncp > 1000.0 {
+            let nl = df + ncp;
+            let ic = nl / (nl + ncp);
+            return dchisq(x * ic, nl * ic, log);
+        }
+        return d0(log);
+    }
+    let mut sum = mid;
+    let mut term = mid;
+    let mut df_ = dfmid;
+    let mut i = imax;
+    let x2 = x * ncp2;
+    loop {
+        i += 1.0;
+        let q = x2 / i / df_;
+        df_ += 2.0;
+        term *= q;
+        sum += term;
+        if !(q >= 1.0 || term * q > (1.0 - q) * EPS || term > 1e-10 * sum) {
+            break;
+        }
+    }
+    term = mid;
+    df_ = dfmid;
+    i = imax;
+    while i != 0.0 {
+        df_ -= 2.0;
+        let q = i * df_ / x2;
+        i -= 1.0;
+        term *= q;
+        sum += term;
+        if q < 1.0 && term * q <= (1.0 - q) * EPS {
+            break;
+        }
+    }
+    d_val(sum, log)
+}
+
+/// The non-central chi-squared distribution function: a Poisson mixture of central ones for
+/// `ncp < 80`, Ding's series otherwise.
+#[allow(clippy::too_many_arguments)]
+fn pnchisq_raw(
+    x: f64,
+    f: f64,
+    theta: f64,
+    errmax: f64,
+    reltol: f64,
+    itrmax: i32,
+    lower: bool,
+    log: bool,
+) -> f64 {
+    if x <= 0.0 {
+        if x == 0.0 && f == 0.0 {
+            let minus_lambda = -0.5 * theta;
+            return if lower {
+                d_exp(minus_lambda, log)
+            } else if log {
+                log1_exp(minus_lambda)
+            } else {
+                -minus_lambda.exp_m1()
+            };
+        }
+        return if lower { d0(log) } else { d1(log) };
+    }
+    if !finite(x) {
+        return if lower { d1(log) } else { d0(log) };
+    }
+    if theta < 80.0 {
+        if lower && f > 0.0 && x.ln() < M_LN2 + 2.0 / f * (lgammafn(f / 2.0 + 1.0) + DBL_MIN_LOG) {
+            // Every term would underflow, so sum on the log scale.
+            let lambda = 0.5 * theta;
+            let mut sum = f64::NEG_INFINITY;
+            let mut sum2 = f64::NEG_INFINITY;
+            let mut pr = -lambda;
+            let mut i = 0;
+            while i < 110 {
+                sum2 = logspace_add(sum2, pr);
+                sum = logspace_add(sum, pr + pchisq(x, f + 2.0 * i as f64, lower, true));
+                if sum2 >= -1e-15 {
+                    break;
+                }
+                i += 1;
+                pr += lambda.ln() - (i as f64).ln();
+            }
+            let answer = sum - sum2;
+            return if log { answer } else { answer.exp() };
+        }
+        let lambda = 0.5 * theta;
+        let mut sum = 0.0;
+        let mut sum2 = 0.0;
+        let mut pr = (-lambda).exp();
+        let mut i = 0;
+        // GNU R stops once the Poisson weights sum to 1 - 1e-15, even where later terms
+        // would still add to a tiny upper tail.
+        while i < 110 {
+            sum2 += pr;
+            sum += pr * pchisq(x, f + 2.0 * i as f64, lower, false);
+            if sum2 >= 1.0 - 1e-15 {
+                break;
+            }
+            i += 1;
+            pr *= lambda / i as f64;
+        }
+        let answer = sum / sum2;
+        return if log { answer.ln() } else { answer };
+    }
+
+    let lam = 0.5 * theta;
+    let mut lam_sml = -lam < DBL_MIN_LOG;
+    let mut lu = -1.0;
+    let mut l_lam = -1.0;
+    let mut u;
+    if lam_sml {
+        u = 0.0;
+        lu = -lam;
+        l_lam = lam.ln();
+    } else {
+        u = (-lam).exp();
+    }
+    let mut v = u;
+    let x2 = 0.5 * x;
+    let f2 = 0.5 * f;
+    let mut f_x_2n = f - x;
+    let mut t;
+    let mut lt;
+    if f2 * DBL_EPSILON > 0.125 && (x2 - f2).abs() < DBL_EPSILON.sqrt() * f2 {
+        t = x2 - f2;
+        lt = (1.0 - t) * (2.0 - t / (f2 + 1.0)) - M_LN_SQRT_2PI - 0.5 * (f2 + 1.0).ln();
+    } else {
+        lt = f2 * x2.ln() - x2 - lgammafn(f2 + 1.0);
+    }
+    let mut t_sml = lt < DBL_MIN_LOG;
+    let mut l_x = -1.0;
+    let mut answer;
+    let mut term;
+    if t_sml {
+        if x > f + theta + 5.0 * (2.0 * (f + 2.0 * theta)).sqrt() {
+            return dt1(lower, log);
+        }
+        l_x = x.ln();
+        answer = 0.0;
+        term = 0.0;
+        t = 0.0;
+    } else {
+        t = lt.exp();
+        answer = v * t;
+        term = answer;
+    }
+    let mut n = 1;
+    let mut f_2n = f + 2.0;
+    f_x_2n += 2.0;
+    while n <= itrmax {
+        if f_x_2n > 0.0 {
+            let bound = t * x / f_x_2n;
+            if bound <= errmax && term <= reltol * answer {
+                break;
+            }
+        }
+        if lam_sml {
+            lu += l_lam - (n as f64).ln();
+            if lu >= DBL_MIN_LOG {
+                u = lu.exp();
+                v = u;
+                lam_sml = false;
+            }
+        } else {
+            u *= lam / n as f64;
+            v += u;
+        }
+        if t_sml {
+            lt += l_x - f_2n.ln();
+            if lt >= DBL_MIN_LOG {
+                t = lt.exp();
+                t_sml = false;
+            }
+        } else {
+            t *= x / f_2n;
+        }
+        if !lam_sml && !t_sml {
+            term = v * t;
+            answer += term;
+        }
+        n += 1;
+        f_2n += 2.0;
+        f_x_2n += 2.0;
+    }
+    if n > itrmax {
+        warning(format!(
+            "pnchisq(x={x}, f={f}, theta={theta}, ..): not converged in {itrmax} iter."
+        ));
+    }
+    dt_val(answer, lower, log)
+}
+
+pub fn pnchisq(x: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || df.is_nan() || ncp.is_nan() {
+        return x + df + ncp;
+    }
+    if !finite(df) || !finite(ncp) || df < 0.0 || ncp < 0.0 {
+        return f64::NAN;
+    }
+    let mut answer = pnchisq_raw(x, df, ncp, 1e-12, 8.0 * DBL_EPSILON, 1000000, lower, log);
+    if x <= 0.0 || x == f64::INFINITY {
+        return answer;
+    }
+    if ncp >= 80.0 {
+        if lower {
+            answer = fmin2(answer, d1(log));
+        } else {
+            if answer < if log { -10.0 * M_LN10 } else { 1e-10 } {
+                precision_warning("pnchisq");
+            }
+            if !log && answer < 0.0 {
+                answer = 0.0;
+            }
+        }
+    }
+    if !log || answer < -1e-8 {
+        return answer;
+    }
+    // A log probability this close to zero is better computed from the other tail.
+    let other = pnchisq_raw(x, df, ncp, 1e-12, 8.0 * DBL_EPSILON, 1000000, !lower, false);
+    (-other).ln_1p()
+}
+
+pub fn qnchisq(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    const ACCU: f64 = 1e-13;
+    const RACC: f64 = 4.0 * DBL_EPSILON;
+    const EPS: f64 = 1e-11;
+    const REPS: f64 = 1e-10;
+    if p.is_nan() || df.is_nan() || ncp.is_nan() {
+        return p + df + ncp;
+    }
+    if !finite(df) || df < 0.0 || ncp < 0.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    let mut pp = d_qiv(p, log);
+    if pp > 1.0 - DBL_EPSILON {
+        return if lower { f64::INFINITY } else { 0.0 };
+    }
+    // Pearson's approximation for the starting bracket.
+    let mut ux = {
+        let b = (ncp * ncp) / (df + 3.0 * ncp);
+        let c = (df + 3.0 * ncp) / (df + 2.0 * ncp);
+        let ff = (df + 2.0 * ncp) / (c * c);
+        let ux = b + c * qchisq(p, ff, lower, log);
+        if ux < 0.0 { 1.0 } else { ux }
+    };
+    let ux0 = ux;
+    let mut lower = lower;
+    let p = if !lower && ncp >= 80.0 {
+        if pp < 1e-10 {
+            precision_warning("qnchisq");
+        }
+        lower = true;
+        if log { -p.exp_m1() } else { 0.5 - p + 0.5 }
+    } else {
+        pp
+    };
+    pp = fmin2(1.0 - DBL_EPSILON, p * (1.0 + EPS));
+    let mut lx;
+    if lower {
+        while ux < DBL_MAX && pnchisq_raw(ux, df, ncp, EPS, REPS, 10000, true, false) < pp {
+            ux *= 2.0;
+        }
+        pp = p * (1.0 - EPS);
+        lx = fmin2(ux0, DBL_MAX);
+        while lx > DBL_MIN && pnchisq_raw(lx, df, ncp, EPS, REPS, 10000, true, false) > pp {
+            lx *= 0.5;
+        }
+    } else {
+        while ux < DBL_MAX && pnchisq_raw(ux, df, ncp, EPS, REPS, 10000, false, false) > pp {
+            ux *= 2.0;
+        }
+        pp = p * (1.0 - EPS);
+        lx = fmin2(ux0, DBL_MAX);
+        while lx > DBL_MIN && pnchisq_raw(lx, df, ncp, EPS, REPS, 10000, false, false) < pp {
+            lx *= 0.5;
+        }
+    }
+    loop {
+        let nx = 0.5 * (lx + ux);
+        let value = pnchisq_raw(nx, df, ncp, ACCU, RACC, 100000, lower, false);
+        if lower == (value > p) {
+            ux = nx;
+        } else {
+            lx = nx;
+        }
+        if !((ux - lx) / nx > ACCU) {
+            break;
+        }
+    }
+    0.5 * (ux + lx)
+}
+
+pub fn dnbeta(x: f64, a: f64, b: f64, ncp: f64, log: bool) -> f64 {
+    const EPS: f64 = 1e-15;
+    if x.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
+        return x + a + b + ncp;
+    }
+    if ncp < 0.0 || a <= 0.0 || b <= 0.0 || !finite(a) || !finite(b) || !finite(ncp) {
+        return f64::NAN;
+    }
+    if !(0.0..=1.0).contains(&x) {
+        return d0(log);
+    }
+    if ncp == 0.0 {
+        return dbeta(x, a, b, log);
+    }
+    let ncp2 = 0.5 * ncp;
+    let dx2 = ncp2 * x;
+    let d = (dx2 - a - 1.0) / 2.0;
+    let big_d = d * d + dx2 * (a + b) - a;
+    let k_max = if big_d <= 0.0 {
+        0.0
+    } else {
+        let big_d = (d + big_d.sqrt()).ceil();
+        if big_d > 0.0 { big_d.trunc() } else { 0.0 }
+    };
+    let term = dbeta(x, a + k_max, b, true);
+    let mut p_k = dpois_raw(k_max, ncp2, true);
+    if x == 0.0 || !finite(term) || !finite(p_k) {
+        return d_exp(p_k + term, log);
+    }
+    p_k += term;
+    let mut sum = 1.0;
+    let mut term = 1.0;
+    let mut k = k_max;
+    while k > 0.0 && term > sum * EPS {
+        k -= 1.0;
+        let q = (k + 1.0) * (k + a) / (k + a + b) / dx2;
+        term *= q;
+        sum += term;
+    }
+    term = 1.0;
+    k = k_max;
+    loop {
+        let q = dx2 * (k + a + b) / (k + a) / (k + 1.0);
+        k += 1.0;
+        term *= q;
+        sum += term;
+        if !(term > sum * EPS) {
+            break;
+        }
+    }
+    d_exp(p_k + sum.ln(), log)
+}
+
+/// The non-central beta distribution function by AS 226 with Frick's AS R84 correction.
+fn pnbeta_raw(x: f64, o_x: f64, a: f64, b: f64, ncp: f64) -> f64 {
+    const ERRMAX: f64 = 1.0e-9;
+    const ITRMAX: f64 = 10000.0;
+    if ncp < 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 || o_x > 1.0 || (x == 0.0 && o_x == 1.0) {
+        return 0.0;
+    }
+    if x > 1.0 || o_x < 0.0 || (x == 1.0 && o_x == 0.0) {
+        return 1.0;
+    }
+    let c = ncp / 2.0;
+    let x0 = fmax2(c - 7.0 * c.sqrt(), 0.0).floor();
+    let a0 = a + x0;
+    let lbeta = lgammafn(a0) + lgammafn(b) - lgammafn(a0 + b);
+    let (mut temp, _, _) = bratio(a0, b, x, o_x, false);
+    let mut gx =
+        (a0 * x.ln() + b * if x < 0.5 { (-x).ln_1p() } else { o_x.ln() } - lbeta - a0.ln()).exp();
+    let mut q = if a0 > a {
+        (-c + x0 * c.ln() - lgammafn(x0 + 1.0)).exp()
+    } else {
+        (-c).exp()
+    };
+    let mut sumq = 1.0 - q;
+    let mut answer = q * temp;
+    let mut j = x0.floor();
+    let mut errbd;
+    loop {
+        j += 1.0;
+        temp -= gx;
+        gx *= x * (a + b + j - 1.0) / (a + j);
+        q *= c / j;
+        sumq -= q;
+        answer += temp * q;
+        errbd = (temp - gx) * sumq;
+        if !(errbd > ERRMAX && j < ITRMAX + x0) {
+            break;
+        }
+    }
+    if errbd > ERRMAX {
+        precision_warning("pnbeta");
+    }
+    if j >= ITRMAX + x0 {
+        convergence_warning("pnbeta");
+    }
+    answer
+}
+
+fn pnbeta2(x: f64, o_x: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    let mut answer = pnbeta_raw(x, o_x, a, b, ncp);
+    if answer.is_nan() {
+        return answer;
+    }
+    if lower {
+        if log { answer.ln() } else { answer }
+    } else {
+        if answer > 1.0 - 1e-10 {
+            precision_warning("pnbeta");
+        }
+        if answer > 1.0 {
+            answer = 1.0;
+        }
+        if log { (-answer).ln_1p() } else { 1.0 - answer }
+    }
+}
+
+pub fn pnbeta(x: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
+        return x + a + b + ncp;
+    }
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    if x >= 1.0 {
+        return dt1(lower, log);
+    }
+    pnbeta2(x, 1.0 - x, a, b, ncp, lower, log)
+}
+
+pub fn qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    const ACCU: f64 = 1e-15;
+    const EPS: f64 = 1e-14;
+    if p.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
+        return p + a + b + ncp;
+    }
+    if ncp < 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, 1.0) {
+        return boundary;
+    }
+    let p = dt_qiv(p, lower, log);
+    if p > 1.0 - DBL_EPSILON {
+        return 1.0;
+    }
+    let mut pp = fmin2(1.0 - DBL_EPSILON, p * (1.0 + EPS));
+    let mut ux = 0.5;
+    while ux < 1.0 - DBL_EPSILON && pnbeta(ux, a, b, ncp, true, false) < pp {
+        ux = 0.5 * (1.0 + ux);
+    }
+    pp = p * (1.0 - EPS);
+    let mut lx = 0.5;
+    while lx > DBL_MIN && pnbeta(lx, a, b, ncp, true, false) > pp {
+        lx *= 0.5;
+    }
+    loop {
+        let nx = 0.5 * (lx + ux);
+        if pnbeta(nx, a, b, ncp, true, false) > p {
+            ux = nx;
+        } else {
+            lx = nx;
+        }
+        if !((ux - lx) / nx > ACCU) {
+            break;
+        }
+    }
+    0.5 * (ux + lx)
+}
+
+pub fn dnf(x: f64, df1: f64, df2: f64, ncp: f64, log: bool) -> f64 {
+    if x.is_nan() || df1.is_nan() || df2.is_nan() || ncp.is_nan() {
+        return x + df2 + df1 + ncp;
+    }
+    if df1 <= 0.0 || df2 <= 0.0 || ncp < 0.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return d0(log);
+    }
+    if !finite(ncp) {
+        return f64::NAN;
+    }
+    if !finite(df1) && !finite(df2) {
+        return if x == 1.0 { f64::INFINITY } else { d0(log) };
+    }
+    if !finite(df2) {
+        return df1 * dnchisq(x * df1, df1, ncp, log);
+    }
+    if df1 > 1e14 && ncp < 1e7 {
+        let f = 1.0 + ncp / df1;
+        let z = dgamma(1.0 / x / f, df2 / 2.0, 2.0 / df2, log);
+        return if log {
+            z - 2.0 * x.ln() - f.ln()
+        } else {
+            z / (x * x) / f
+        };
+    }
+    let y = (df1 / df2) * x;
+    let z = dnbeta(y / (1.0 + y), df1 / 2.0, df2 / 2.0, ncp, log);
+    if log {
+        z + df1.ln() - df2.ln() - 2.0 * y.ln_1p()
+    } else {
+        z * (df1 / df2) / (1.0 + y) / (1.0 + y)
+    }
+}
+
+pub fn pnf(x: f64, df1: f64, df2: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || df1.is_nan() || df2.is_nan() || ncp.is_nan() {
+        return x + df2 + df1 + ncp;
+    }
+    if df1 <= 0.0 || df2 <= 0.0 || ncp < 0.0 || !finite(ncp) || (!finite(df1) && !finite(df2)) {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return dt0(lower, log);
+    }
+    if x >= f64::INFINITY {
+        return dt1(lower, log);
+    }
+    if df2 > 1e8 {
+        return pnchisq(x * df1, df1, ncp, lower, log);
+    }
+    let y = (df1 / df2) * x;
+    pnbeta2(
+        y / (1.0 + y),
+        1.0 / (1.0 + y),
+        df1 / 2.0,
+        df2 / 2.0,
+        ncp,
+        lower,
+        log,
+    )
+}
+
+pub fn qnf(p: f64, df1: f64, df2: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    if p.is_nan() || df1.is_nan() || df2.is_nan() || ncp.is_nan() {
+        return p + df1 + df2 + ncp;
+    }
+    if df1 <= 0.0 || df2 <= 0.0 || ncp < 0.0 || !finite(ncp) || (!finite(df1) && !finite(df2)) {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    if df2 > 1e8 {
+        return qnchisq(p, df1, ncp, lower, log) / df1;
+    }
+    let y = qnbeta(p, df1 / 2.0, df2 / 2.0, ncp, lower, log);
+    y / (1.0 - y) * (df2 / df1)
+}
+
+pub fn dnt(x: f64, df: f64, ncp: f64, log: bool) -> f64 {
+    if x.is_nan() || df.is_nan() {
+        return x + df;
+    }
+    if df <= 0.0 {
+        return f64::NAN;
+    }
+    if ncp == 0.0 {
+        return dt(x, df, log);
+    }
+    if !finite(x) {
+        return d0(log);
+    }
+    if !finite(df) || df > 1e8 {
+        return dnorm(x, ncp, 1.0, log);
+    }
+    let u = if x.abs() > (df * DBL_EPSILON).sqrt() {
+        df.ln() - x.abs().ln()
+            + (pnt(x * ((df + 2.0) / df).sqrt(), df + 2.0, ncp, true, false)
+                - pnt(x, df, ncp, true, false))
+            .abs()
+            .ln()
+    } else {
+        lgammafn((df + 1.0) / 2.0)
+            - lgammafn(df / 2.0)
+            - (M_LN_SQRT_PI + 0.5 * (df.ln() + ncp * ncp))
+    };
+    if log { u } else { u.exp() }
+}
+
+/// The non-central t distribution function by Lenth's AS 243.
+pub fn pnt(t: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    const ITRMAX: i32 = 1000;
+    const ERRMAX: f64 = 1e-12;
+    if df <= 0.0 {
+        return f64::NAN;
+    }
+    if ncp == 0.0 {
+        return pt(t, df, lower, log);
+    }
+    if !finite(t) {
+        return if t < 0.0 {
+            dt0(lower, log)
+        } else {
+            dt1(lower, log)
+        };
+    }
+    let (negdel, tt, del);
+    if t >= 0.0 {
+        negdel = false;
+        tt = t;
+        del = ncp;
+    } else {
+        if ncp > 40.0 && (!log || !lower) {
+            return dt0(lower, log);
+        }
+        negdel = true;
+        tt = -t;
+        del = -ncp;
+    }
+    if df > 4e5 || del * del > 2.0 * M_LN2 * -(DBL_MIN_EXP as f64) {
+        // Abramowitz and Stegun 26.7.10.
+        let s = 1.0 / (4.0 * df);
+        return pnorm(
+            tt * (1.0 - s),
+            del,
+            (1.0 + tt * tt * 2.0 * s).sqrt(),
+            lower != negdel,
+            log,
+        );
+    }
+    let mut x = t * t;
+    let mut rxb = df / (x + df);
+    x /= x + df;
+    let mut tnc;
+    'series: {
+        if x > 0.0 {
+            let lambda = del * del;
+            let mut p = 0.5 * (-0.5 * lambda).exp();
+            if p == 0.0 {
+                underflow_warning("pnt");
+                range_warning("pnt");
+                return dt0(lower, log);
+            }
+            let mut q = M_SQRT_2DPI * p * del;
+            let mut s = 0.5 - p;
+            if s < 1e-7 {
+                s = -0.5 * (-0.5 * lambda).exp_m1();
+            }
+            let mut a = 0.5;
+            let b = 0.5 * df;
+            rxb = rxb.powf(b);
+            let albeta = M_LN_SQRT_PI + lgammafn(b) - lgammafn(0.5 + b);
+            let mut xodd = pbeta(x, a, b, true, false);
+            let mut godd = 2.0 * rxb * (a * x.ln() - albeta).exp();
+            tnc = b * x;
+            let mut xeven = if tnc < DBL_EPSILON { tnc } else { 1.0 - rxb };
+            let mut geven = tnc * rxb;
+            tnc = p * xodd + q * xeven;
+            for it in 1..=ITRMAX {
+                a += 1.0;
+                xodd -= godd;
+                xeven -= geven;
+                godd *= x * (a + b - 1.0) / a;
+                geven *= x * (a + b - 0.5) / (a + 0.5);
+                p *= lambda / (2 * it) as f64;
+                q *= lambda / (2 * it + 1) as f64;
+                tnc += p * xodd + q * xeven;
+                s -= p;
+                if s < -1e-10 {
+                    precision_warning("pnt");
+                    break 'series;
+                }
+                if s <= 0.0 && it > 1 {
+                    break 'series;
+                }
+                let errbd = 2.0 * s * (xodd - godd);
+                if errbd.abs() < ERRMAX {
+                    break 'series;
+                }
+            }
+            convergence_warning("pnt");
+        } else {
+            tnc = 0.0;
+        }
+    }
+    tnc += pnorm(-del, 0.0, 1.0, true, false);
+    let lower = lower != negdel;
+    if tnc > 1.0 - 1e-10 && lower {
+        precision_warning("pnt{final}");
+    }
+    dt_val(fmin2(tnc, 1.0), lower, log)
+}
+
+pub fn qnt(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
+    const ACCU: f64 = 1e-13;
+    const EPS: f64 = 1e-11;
+    if p.is_nan() || df.is_nan() || ncp.is_nan() {
+        return p + df + ncp;
+    }
+    if df <= 0.0 {
+        return f64::NAN;
+    }
+    if ncp == 0.0 && df >= 1.0 {
+        return qt(p, df, lower, log);
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, f64::NEG_INFINITY, f64::INFINITY) {
+        return boundary;
+    }
+    if !finite(df) {
+        return qnorm(p, ncp, 1.0, lower, log);
+    }
+    let p = dt_qiv(p, lower, log);
+    if p > 1.0 - DBL_EPSILON {
+        return f64::INFINITY;
+    }
+    let mut pp = fmin2(1.0 - DBL_EPSILON, p * (1.0 + EPS));
+    let mut ux = fmax2(1.0, ncp);
+    while ux < DBL_MAX && pnt(ux, df, ncp, true, false) < pp {
+        ux *= 2.0;
+    }
+    pp = p * (1.0 - EPS);
+    let mut lx = fmin2(-1.0, -ncp);
+    while lx > -DBL_MAX && pnt(lx, df, ncp, true, false) > pp {
+        lx *= 2.0;
+    }
+    loop {
+        let nx = 0.5 * (lx + ux);
+        if pnt(nx, df, ncp, true, false) > p {
+            ux = nx;
+        } else {
+            lx = nx;
+        }
+        if !((ux - lx) > fmax2(lx.abs(), ux.abs()) * ACCU) {
+            break;
+        }
+    }
+    0.5 * (lx + ux)
+}
+
+// The studentized range (Copenhaver and Holland 1988).
+
+/// The probability that the range of `cc` standard normal samples is below `w`, raised to
+/// the power `rr`, by 12-point Gauss-Legendre quadrature.
+fn wprob(w: f64, rr: f64, cc: f64) -> f64 {
+    const NLEG: usize = 12;
+    const IHALF: usize = 6;
+    const C1: f64 = -30.0;
+    const C2: f64 = -50.0;
+    const C3: f64 = 60.0;
+    const BB: f64 = 8.0;
+    const WLAR: f64 = 3.0;
+    const WINCR1: f64 = 2.0;
+    const WINCR2: f64 = 3.0;
+    const XLEG: [f64; IHALF] = [
+        0.9815606342467192,
+        0.9041172563704749,
+        0.7699026741943047,
+        0.5873179542866175,
+        0.3678314989981802,
+        0.1252334085114689,
+    ];
+    const ALEG: [f64; IHALF] = [
+        0.04717533638651183,
+        0.10693932599531843,
+        0.16007832854334622,
+        0.20316742672306592,
+        0.2334925365383548,
+        0.24914704581340277,
+    ];
+    let qsqz = w * 0.5;
+    if qsqz >= BB {
+        return 1.0;
+    }
+    let mut pr_w = 2.0 * pnorm(qsqz, 0.0, 1.0, true, false) - 1.0;
+    if pr_w >= (C2 / cc).exp() {
+        pr_w = pr_w.powf(cc);
+    } else {
+        pr_w = 0.0;
+    }
+    let wincr = if w > WLAR { WINCR1 } else { WINCR2 };
+    let mut blb = qsqz;
+    let binc = (BB - qsqz) / wincr;
+    let mut bub = blb + binc;
+    let mut einsum = 0.0;
+    let cc1 = cc - 1.0;
+    let mut wi = 1.0;
+    while wi <= wincr {
+        let mut elsum = 0.0;
+        let a = 0.5 * (bub + blb);
+        let b = 0.5 * (bub - blb);
+        for jj in 1..=NLEG {
+            let (j, xx) = if IHALF < jj {
+                let j = NLEG - jj + 1;
+                (j, XLEG[j - 1])
+            } else {
+                (jj, -XLEG[jj - 1])
+            };
+            let c = b * xx;
+            let ac = a + c;
+            let qexpo = ac * ac;
+            if qexpo > C3 {
+                break;
+            }
+            let pplus = 2.0 * pnorm(ac, 0.0, 1.0, true, false);
+            let pminus = 2.0 * pnorm(ac, w, 1.0, true, false);
+            let mut rinsum = pplus * 0.5 - pminus * 0.5;
+            if rinsum >= (C1 / cc1).exp() {
+                rinsum = (ALEG[j - 1] * (-(0.5 * qexpo)).exp()) * rinsum.powf(cc1);
+                elsum += rinsum;
+            }
+        }
+        elsum *= ((2.0 * b) * cc) / M_SQRT_2PI;
+        einsum += elsum;
+        blb = bub;
+        bub += binc;
+        wi += 1.0;
+    }
+    pr_w += einsum;
+    if pr_w <= (C1 / rr).exp() {
+        return 0.0;
+    }
+    pr_w = pr_w.powf(rr);
+    if pr_w >= 1.0 { 1.0 } else { pr_w }
+}
+
+pub fn ptukey(q: f64, rr: f64, cc: f64, df: f64, lower: bool, log: bool) -> f64 {
+    const NLEGQ: usize = 16;
+    const IHALFQ: usize = 8;
+    const EPS1: f64 = -30.0;
+    const EPS2: f64 = 1.0e-14;
+    const DHAF: f64 = 100.0;
+    const DQUAR: f64 = 800.0;
+    const DEIGH: f64 = 5000.0;
+    const DLARG: f64 = 25000.0;
+    const XLEGQ: [f64; IHALFQ] = [
+        0.9894009349916499,
+        0.9445750230732326,
+        0.8656312023878318,
+        0.755404408355003,
+        0.6178762444026438,
+        0.45801677765722737,
+        0.2816035507792589,
+        0.09501250983763744,
+    ];
+    const ALEGQ: [f64; IHALFQ] = [
+        0.027152459411754096,
+        0.062253523938647894,
+        0.09515851168249279,
+        0.12462897125553388,
+        0.14959598881657674,
+        0.16915651939500254,
+        0.18260341504492358,
+        0.1894506104550685,
+    ];
+    if q.is_nan() || rr.is_nan() || cc.is_nan() || df.is_nan() {
+        return f64::NAN;
+    }
+    if q <= 0.0 {
+        return dt0(lower, log);
+    }
+    if df < 2.0 || rr < 1.0 || cc < 2.0 {
+        return f64::NAN;
+    }
+    if !finite(q) {
+        return dt1(lower, log);
+    }
+    if df > DLARG {
+        return dt_val(wprob(q, rr, cc), lower, log);
+    }
+    let f2 = df * 0.5;
+    let mut f2lf = ((f2 * df.ln()) - (df * M_LN2)) - lgammafn(f2);
+    let f21 = f2 - 1.0;
+    let ff4 = df * 0.25;
+    let ulen: f64 = if df <= DHAF {
+        1.0
+    } else if df <= DQUAR {
+        0.5
+    } else if df <= DEIGH {
+        0.25
+    } else {
+        0.125
+    };
+    f2lf += ulen.ln();
+    let mut answer = 0.0;
+    let mut otsum = 0.0;
+    for i in 1..=50 {
+        otsum = 0.0;
+        let twa1 = (2 * i - 1) as f64 * ulen;
+        for jj in 1..=NLEGQ {
+            let (j, t1) = if IHALFQ < jj {
+                let j = jj - IHALFQ - 1;
+                (
+                    j,
+                    (f2lf + (f21 * (twa1 + (XLEGQ[j] * ulen)).ln()))
+                        - (((XLEGQ[j] * ulen) + twa1) * ff4),
+                )
+            } else {
+                let j = jj - 1;
+                (
+                    j,
+                    (f2lf + (f21 * (twa1 - (XLEGQ[j] * ulen)).ln()))
+                        + (((XLEGQ[j] * ulen) - twa1) * ff4),
+                )
+            };
+            if t1 >= EPS1 {
+                let qsqz = if IHALFQ < jj {
+                    q * (((XLEGQ[j] * ulen) + twa1) * 0.5).sqrt()
+                } else {
+                    q * (((-(XLEGQ[j] * ulen)) + twa1) * 0.5).sqrt()
+                };
+                let wprb = wprob(qsqz, rr, cc);
+                otsum += (wprb * ALEGQ[j]) * t1.exp();
+            }
+        }
+        if i as f64 * ulen >= 1.0 && otsum <= EPS2 {
+            break;
+        }
+        answer += otsum;
+    }
+    if otsum > EPS2 {
+        precision_warning("ptukey");
+    }
+    if answer > 1.0 {
+        answer = 1.0;
+    }
+    dt_val(answer, lower, log)
+}
+
+/// Odeh and Evans's starting value for `qtukey`.
+fn qinv(p: f64, c: f64, v: f64) -> f64 {
+    const P0: f64 = 0.322232421088;
+    const Q0: f64 = 0.993484626060e-01;
+    const P1: f64 = -1.0;
+    const Q1: f64 = 0.588581570495;
+    const P2: f64 = -0.342242088547;
+    const Q2: f64 = 0.531103462366;
+    const P3: f64 = -0.204231210125;
+    const Q3: f64 = 0.103537752850;
+    const P4: f64 = -0.453642210148e-04;
+    const Q4: f64 = 0.38560700634e-02;
+    const C1: f64 = 0.8832;
+    const C2: f64 = 0.2368;
+    const C3: f64 = 1.214;
+    const C4: f64 = 1.208;
+    const C5: f64 = 1.4142;
+    const VMAX: f64 = 120.0;
+    let ps = 0.5 - 0.5 * p;
+    let yi = (1.0 / (ps * ps)).ln().sqrt();
+    let mut t = yi
+        + ((((yi * P4 + P3) * yi + P2) * yi + P1) * yi + P0)
+            / ((((yi * Q4 + Q3) * yi + Q2) * yi + Q1) * yi + Q0);
+    if v < VMAX {
+        t += (t * t * t + t) / v / 4.0;
+    }
+    let mut q = C1 - C2 * t;
+    if v < VMAX {
+        q += -C3 / v + C4 * t / v;
+    }
+    t * (q * (c - 1.0).ln() + C5)
+}
+
+pub fn qtukey(p: f64, rr: f64, cc: f64, df: f64, lower: bool, log: bool) -> f64 {
+    const EPS: f64 = 0.0001;
+    const MAXITER: i32 = 50;
+    if p.is_nan() || rr.is_nan() || cc.is_nan() || df.is_nan() {
+        return p + rr + cc + df;
+    }
+    if df < 2.0 || rr < 1.0 || cc < 2.0 {
+        return f64::NAN;
+    }
+    if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
+        return boundary;
+    }
+    let p = dt_qiv(p, lower, log);
+    let mut x0 = qinv(p, cc, df);
+    let mut valx0 = ptukey(x0, rr, cc, df, true, false) - p;
+    let mut x1 = if valx0 > 0.0 {
+        fmax2(0.0, x0 - 1.0)
+    } else {
+        x0 + 1.0
+    };
+    let mut valx1 = ptukey(x1, rr, cc, df, true, false) - p;
+    let mut answer = 0.0;
+    for _ in 1..MAXITER {
+        answer = x1 - ((valx1 * (x1 - x0)) / (valx1 - valx0));
+        valx0 = valx1;
+        x0 = x1;
+        if answer < 0.0 {
+            answer = 0.0;
+        }
+        valx1 = ptukey(answer, rr, cc, df, true, false) - p;
+        x1 = answer;
+        if (x1 - x0).abs() < EPS {
+            return answer;
+        }
+    }
+    convergence_warning("qtukey");
+    answer
+}
+
+// The Wilcoxon rank sum and signed rank statistics, by counting.
+
+/// The number of ways the Mann-Whitney statistic of samples of sizes `m` and `n` takes each
+/// value from 0 to `m n`: the coefficients of the Gaussian binomial `[m + n choose m]_q`,
+/// built by Pascal's rule `[N, k] = [N-1, k-1] + q^k [N-1, k]`, which only adds counts.
+fn wilcox_counts(m: usize, n: usize) -> Vec<f64> {
+    let small = m.min(n);
+    let mut polynomials: Vec<Vec<f64>> = vec![Vec::new(); small + 1];
+    polynomials[0] = vec![1.0];
+    for total in 1..=m + n {
+        for k in (1..=small.min(total)).rev() {
+            let mut next = vec![0.0; k * (total - k) + 1];
+            for (power, count) in polynomials[k - 1].iter().enumerate() {
+                next[power] += count;
+            }
+            for (power, count) in polynomials[k].iter().enumerate() {
+                next[power + k] += count;
+            }
+            polynomials[k] = next;
+        }
+    }
+    polynomials.swap_remove(small)
+}
+
+fn wilcox_valid(m: f64, n: f64) -> Option<(usize, usize)> {
+    let m = forceint(m);
+    let n = forceint(n);
+    if m <= 0.0 || n <= 0.0 {
+        return None;
+    }
+    Some((m as usize, n as usize))
+}
+
+pub fn dwilcox(x: f64, m: f64, n: f64, log: bool) -> f64 {
+    if x.is_nan() || m.is_nan() || n.is_nan() {
+        return x + m + n;
+    }
+    let Some((mm, nn)) = wilcox_valid(m, n) else {
+        return f64::NAN;
+    };
+    let (m, n) = (forceint(m), forceint(n));
+    if (x - forceint(x)).abs() > 1e-7 {
+        return d0(log);
+    }
+    let x = forceint(x);
+    if x < 0.0 || x > m * n {
+        return d0(log);
+    }
+    let count = wilcox_counts(mm, nn)[x as usize];
+    if log {
+        count.ln() - lchoose(m + n, n)
+    } else {
+        count / choose(m + n, n)
+    }
+}
+
+pub fn pwilcox(q: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
+    if q.is_nan() || m.is_nan() || n.is_nan() {
+        return q + m + n;
+    }
+    if !finite(m) || !finite(n) {
+        return f64::NAN;
+    }
+    let Some((mm, nn)) = wilcox_valid(m, n) else {
+        return f64::NAN;
+    };
+    let (m, n) = (forceint(m), forceint(n));
+    let q = (q + 1e-7).floor();
+    if q < 0.0 {
+        return dt0(lower, log);
+    }
+    if q >= m * n {
+        return dt1(lower, log);
+    }
+    let counts = wilcox_counts(mm, nn);
+    let c = choose(m + n, n);
+    let mut p = 0.0;
+    let mut lower = lower;
+    if q <= m * n / 2.0 {
+        for count in &counts[..=q as usize] {
+            p += count / c;
+        }
+    } else {
+        let q = m * n - q;
+        for count in &counts[..q as usize] {
+            p += count / c;
+        }
+        lower = !lower;
+    }
+    dt_val(p, lower, log)
+}
+
+pub fn qwilcox(x: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || m.is_nan() || n.is_nan() {
+        return x + m + n;
+    }
+    if !finite(x) || !finite(m) || !finite(n) || q_p01_invalid(x, log) {
+        return f64::NAN;
+    }
+    let Some((mm, nn)) = wilcox_valid(m, n) else {
+        return f64::NAN;
+    };
+    let (m, n) = (forceint(m), forceint(n));
+    if x == dt0(lower, log) {
+        return 0.0;
+    }
+    if x == dt1(lower, log) {
+        return m * n;
+    }
+    let mut x = if log || !lower {
+        dt_qiv(x, lower, log)
+    } else {
+        x
+    };
+    let counts = wilcox_counts(mm, nn);
+    let c = choose(m + n, n);
+    let mut p = 0.0;
+    let mut q = 0usize;
+    if x <= 0.5 {
+        x -= 10.0 * DBL_EPSILON;
+        while q + 1 < counts.len() {
+            p += counts[q] / c;
+            if p >= x {
+                break;
+            }
+            q += 1;
+        }
+        q as f64
+    } else {
+        x = 1.0 - x + 10.0 * DBL_EPSILON;
+        while q + 1 < counts.len() {
+            p += counts[q] / c;
+            if p > x {
+                break;
+            }
+            q += 1;
+        }
+        m * n - q as f64
+    }
+}
+
+/// The number of subsets of `1..=n` with each sum from 0 to `n (n + 1) / 2`.
+fn signrank_counts(n: usize) -> Vec<f64> {
+    let total = n * (n + 1) / 2;
+    let mut counts = vec![0.0; total + 1];
+    counts[0] = 1.0;
+    let mut reach = 0;
+    for j in 1..=n {
+        reach += j;
+        for i in (j..=reach).rev() {
+            counts[i] += counts[i - j];
+        }
+    }
+    counts
+}
+
+pub fn dsignrank(x: f64, n: f64, log: bool) -> f64 {
+    if x.is_nan() || n.is_nan() {
+        return x + n;
+    }
+    let n = forceint(n);
+    if n <= 0.0 {
+        return f64::NAN;
+    }
+    if (x - forceint(x)).abs() > 1e-7 {
+        return d0(log);
+    }
+    let x = forceint(x);
+    if x < 0.0 || x > n * (n + 1.0) / 2.0 {
+        return d0(log);
+    }
+    let count = signrank_counts(n as usize)[x as usize];
+    d_exp(count.ln() - n * M_LN2, log)
+}
+
+pub fn psignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || n.is_nan() {
+        return x + n;
+    }
+    if !finite(n) {
+        return f64::NAN;
+    }
+    let n = forceint(n);
+    if n <= 0.0 {
+        return f64::NAN;
+    }
+    let x = forceint(x + 1e-7);
+    if x < 0.0 {
+        return dt0(lower, log);
+    }
+    if x >= n * (n + 1.0) / 2.0 {
+        return dt1(lower, log);
+    }
+    let counts = signrank_counts(n as usize);
+    let f = (-n * M_LN2).exp();
+    let mut p = 0.0;
+    let mut lower = lower;
+    if x <= n * (n + 1.0) / 4.0 {
+        for count in &counts[..=x as usize] {
+            p += count * f;
+        }
+    } else {
+        let x = n * (n + 1.0) / 2.0 - x;
+        for count in &counts[..x as usize] {
+            p += count * f;
+        }
+        lower = !lower;
+    }
+    dt_val(p, lower, log)
+}
+
+pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
+    if x.is_nan() || n.is_nan() {
+        return x + n;
+    }
+    if !finite(x) || !finite(n) || q_p01_invalid(x, log) {
+        return f64::NAN;
+    }
+    let n = forceint(n);
+    if n <= 0.0 {
+        return f64::NAN;
+    }
+    if x == dt0(lower, log) {
+        return 0.0;
+    }
+    if x == dt1(lower, log) {
+        return n * (n + 1.0) / 2.0;
+    }
+    let mut x = if log || !lower {
+        dt_qiv(x, lower, log)
+    } else {
+        x
+    };
+    let counts = signrank_counts(n as usize);
+    let f = (-n * M_LN2).exp();
+    let mut p = 0.0;
+    let mut q = 0usize;
+    if x <= 0.5 {
+        x -= 10.0 * DBL_EPSILON;
+        while q + 1 < counts.len() {
+            p += counts[q] * f;
+            if p >= x {
+                break;
+            }
+            q += 1;
+        }
+        q as f64
+    } else {
+        x = 1.0 - x + 10.0 * DBL_EPSILON;
+        while q + 1 < counts.len() {
+            p += counts[q] * f;
+            if p > x {
+                break;
+            }
+            q += 1;
+        }
+        n * (n + 1.0) / 2.0 - q as f64
+    }
+}
+
+// Bessel functions. I and K come together from Temme's series (x < 2) or Steed's continued
+// fraction (x >= 2) for K at an order in [-1/2, 1/2], the continued fraction for I'/I, and
+// the Wronskian; J and Y likewise (Temme 1975, Barnett and Thompson 1986). The scaled forms
+// exp(-x) I and exp(x) K come out directly, so large arguments do not overflow on the way.
+
+/// The Taylor coefficients of `1 / gamma(1 + x)` at zero.
+const RECIPROCAL_GAMMA: [f64; 27] = [
+    1.0,
+    0.5772156649015329,
+    -0.6558780715202539,
+    -0.04200263503409524,
+    0.16653861138229148,
+    -0.04219773455554433,
+    -0.009621971527876973,
+    0.0072189432466631,
+    -0.0011651675918590652,
+    -0.00021524167411495098,
+    0.0001280502823881162,
+    -2.013485478078824e-05,
+    -1.2504934821426706e-06,
+    1.133027231981696e-06,
+    -2.056338416977607e-07,
+    6.116095104481416e-09,
+    5.002007644469223e-09,
+    -1.18127457048702e-09,
+    1.0434267116911005e-10,
+    7.782263439905071e-12,
+    -3.696805618642206e-12,
+    5.100370287454476e-13,
+    -2.0583260535665066e-14,
+    -5.348122539423018e-15,
+    1.2267786282382608e-15,
+    -1.1812593016974588e-16,
+    1.1866922547516004e-18,
+];
+
+/// Temme's auxiliary functions for `|mu| <= 1/2`: `(1/gamma(1-mu) - 1/gamma(1+mu)) / (2 mu)`,
+/// `(1/gamma(1-mu) + 1/gamma(1+mu)) / 2`, `1/gamma(1+mu)` and `1/gamma(1-mu)`.
+fn temme_gammas(mu: f64) -> (f64, f64, f64, f64) {
+    let mut odd = 0.0;
+    let mut even = 0.0;
+    let mut power = 1.0;
+    for (k, coefficient) in RECIPROCAL_GAMMA.iter().enumerate() {
+        if k % 2 == 0 {
+            even += coefficient * power;
+        } else {
+            odd += coefficient * power;
+        }
+        if k % 2 == 1 {
+            power *= mu * mu;
+        }
+    }
+    // 1/gamma(1+mu) = even + mu * odd, 1/gamma(1-mu) = even - mu * odd.
+    let plus = even + mu * odd;
+    let minus = even - mu * odd;
+    (-odd, even, plus, minus)
+}
+
+const BESSEL_EPS: f64 = 1e-16;
+const BESSEL_FPMIN: f64 = 1e-300;
+const BESSEL_MAXIT: usize = 10_000_000;
+/// Downward recurrences rescale past this magnitude so that a high order does not overflow.
+const BESSEL_BIG: f64 = 1e250;
+
+/// `exp(-x) I_nu(x)` and `exp(x) K_nu(x)` for `x > 0` and `nu >= 0`, by the asymptotic
+/// expansion where `x` is large against `nu^2` and by Temme's method elsewhere.
+fn bessel_ik_scaled(x: f64, nu: f64) -> (f64, f64) {
+    if x >= 50.0 && x >= 2.0 * nu * nu {
+        return bessel_ik_asymptotic(x, nu);
+    }
+    bessel_ik_temme(x, nu)
+}
+
+/// `exp(-x) I_nu(x) ~ (2 pi x)^(-1/2) sum (-1)^k a_k / x^k` and
+/// `exp(x) K_nu(x) ~ (pi / (2 x))^(1/2) sum a_k / x^k`, with
+/// `a_k = prod_{j <= k} (4 nu^2 - (2j - 1)^2) / (k! 8^k)`.
+fn bessel_ik_asymptotic(x: f64, nu: f64) -> (f64, f64) {
+    let mu = 4.0 * nu * nu;
+    let z8 = 8.0 * x;
+    let mut term: f64 = 1.0;
+    let mut i_sum = 1.0;
+    let mut k_sum = 1.0;
+    let mut k = 1.0;
+    loop {
+        let next = term * (mu - (2.0 * k - 1.0) * (2.0 * k - 1.0)) / (k * z8);
+        if next.abs() > term.abs() || next == 0.0 {
+            break;
+        }
+        term = next;
+        k_sum += term;
+        i_sum += if (k as i64) % 2 == 1 { -term } else { term };
+        if term.abs() < DBL_EPSILON * 1e-3 {
+            break;
+        }
+        k += 1.0;
+    }
+    (
+        i_sum / (2.0 * M_PI * x).sqrt(),
+        k_sum * (M_PI / (2.0 * x)).sqrt(),
+    )
+}
+
+fn bessel_ik_temme(x: f64, nu: f64) -> (f64, f64) {
+    let nl = (nu + 0.5) as usize;
+    let xmu = nu - nl as f64;
+    let xmu2 = xmu * xmu;
+    let xi = 1.0 / x;
+    let xi2 = 2.0 * xi;
+    let mut h = nu * xi;
+    if h < BESSEL_FPMIN {
+        h = BESSEL_FPMIN;
+    }
+    let mut b = xi2 * nu;
+    let mut d = 0.0;
+    let mut c = h;
+    for _ in 0..BESSEL_MAXIT {
+        b += xi2;
+        d = 1.0 / (b + d);
+        c = b + 1.0 / c;
+        let del = c * d;
+        h *= del;
+        // At tiny x the terms overflow; callers then use only the parts that do not need
+        // the ratio.
+        if !((del - 1.0).abs() >= BESSEL_EPS) {
+            break;
+        }
+    }
+    let mut ril = BESSEL_FPMIN;
+    let mut ripl = h * ril;
+    let mut ril1 = ril;
+    let mut fact = nu * xi;
+    for _ in 0..nl {
+        let ritemp = fact * ril + ripl;
+        fact -= xi;
+        ripl = fact * ritemp + ril;
+        ril = ritemp;
+        if ril.abs() > BESSEL_BIG {
+            ril /= BESSEL_BIG;
+            ripl /= BESSEL_BIG;
+            ril1 /= BESSEL_BIG;
+        }
+    }
+    let f = ripl / ril;
+    let (rkmu, rk1);
+    if x < 2.0 {
+        let x2 = 0.5 * x;
+        let pimu = M_PI * xmu;
+        let fact = if pimu.abs() < BESSEL_EPS {
+            1.0
+        } else {
+            pimu / pimu.sin()
+        };
+        let d = -x2.ln();
+        let e = xmu * d;
+        let fact2 = if e.abs() < BESSEL_EPS {
+            1.0
+        } else {
+            e.sinh() / e
+        };
+        let (gam1, gam2, gampl, gammi) = temme_gammas(xmu);
+        let mut ff = fact * (gam1 * e.cosh() + gam2 * fact2 * d);
+        let mut sum = ff;
+        let e = e.exp();
+        let mut p = 0.5 * e / gampl;
+        let mut q = 0.5 / (e * gammi);
+        let mut c = 1.0;
+        let d = x2 * x2;
+        let mut sum1 = p;
+        let mut i = 1.0;
+        loop {
+            ff = (i * ff + p + q) / (i * i - xmu2);
+            c *= d / i;
+            p /= i - xmu;
+            q /= i + xmu;
+            let del = c * ff;
+            sum += del;
+            sum1 += c * (p - i * ff);
+            if del.abs() < sum.abs() * BESSEL_EPS || i > 1000.0 {
+                break;
+            }
+            i += 1.0;
+        }
+        let scale = x.exp();
+        rkmu = sum * scale;
+        rk1 = sum1 * xi2 * scale;
+    } else {
+        let mut b = 2.0 * (1.0 + x);
+        let mut d = 1.0 / b;
+        let mut h = d;
+        let mut delh = d;
+        let mut q1 = 0.0;
+        let mut q2 = 1.0;
+        let a1 = 0.25 - xmu2;
+        let mut q = a1;
+        let mut c = a1;
+        let mut a = -a1;
+        let mut s = 1.0 + q * delh;
+        for i in 2..BESSEL_MAXIT {
+            a -= 2.0 * (i - 1) as f64;
+            c = -a * c / i as f64;
+            let qnew = (q1 - b * q2) / a;
+            q1 = q2;
+            q2 = qnew;
+            q += c * qnew;
+            b += 2.0;
+            d = 1.0 / (b + a * d);
+            delh *= b * d - 1.0;
+            h += delh;
+            let dels = q * delh;
+            s += dels;
+            if (dels / s).abs() < BESSEL_EPS {
+                break;
+            }
+        }
+        h *= a1;
+        rkmu = (M_PI / (2.0 * x)).sqrt() / s;
+        rk1 = rkmu * (xmu + x + 0.5 - h) * xi;
+    }
+    let rkmup = xmu * xi * rkmu - rk1;
+    let rimu = xi / (f * rkmu - rkmup);
+    let rinu = (rimu * ril1) / ril;
+    let mut rkmu = rkmu;
+    let mut rk1 = rk1;
+    for i in 1..=nl {
+        let rktemp = (xmu + i as f64) * xi2 * rk1 + rkmu;
+        rkmu = rk1;
+        rk1 = rktemp;
+    }
+    (rinu, rkmu)
+}
+
+/// `J_nu(x)` and `Y_nu(x)` for `x > 0` and `nu >= 0`.
+fn bessel_jy(x: f64, nu: f64) -> (f64, f64) {
+    let nl = if x < 2.0 {
+        (nu + 0.5) as usize
+    } else {
+        (nu - x + 1.5).max(0.0) as usize
+    };
+    let xmu = nu - nl as f64;
+    let xmu2 = xmu * xmu;
+    let xi = 1.0 / x;
+    let xi2 = 2.0 * xi;
+    let w = xi2 / M_PI;
+    let mut isign = 1.0;
+    let mut h = nu * xi;
+    if h < BESSEL_FPMIN {
+        h = BESSEL_FPMIN;
+    }
+    let mut b = xi2 * nu;
+    let mut d = 0.0;
+    let mut c = h;
+    for _ in 0..BESSEL_MAXIT {
+        b += xi2;
+        d = b - d;
+        if d.abs() < BESSEL_FPMIN {
+            d = BESSEL_FPMIN;
+        }
+        c = b - 1.0 / c;
+        if c.abs() < BESSEL_FPMIN {
+            c = BESSEL_FPMIN;
+        }
+        d = 1.0 / d;
+        let del = c * d;
+        h *= del;
+        if d < 0.0 {
+            isign = -isign;
+        }
+        if !((del - 1.0).abs() >= BESSEL_EPS) {
+            break;
+        }
+    }
+    let mut rjl = isign * BESSEL_FPMIN;
+    let mut rjpl = h * rjl;
+    let mut rjl1 = rjl;
+    let mut fact = nu * xi;
+    for _ in 0..nl {
+        let rjtemp = fact * rjl + rjpl;
+        fact -= xi;
+        rjpl = fact * rjtemp - rjl;
+        rjl = rjtemp;
+        if rjl.abs() > BESSEL_BIG {
+            rjl /= BESSEL_BIG;
+            rjpl /= BESSEL_BIG;
+            rjl1 /= BESSEL_BIG;
+        }
+    }
+    if rjl == 0.0 {
+        rjl = BESSEL_EPS;
+    }
+    let f = rjpl / rjl;
+    let (rjmu, mut rymu, mut ry1);
+    if x < 2.0 {
+        let x2 = 0.5 * x;
+        let pimu = M_PI * xmu;
+        let fact = if pimu.abs() < BESSEL_EPS {
+            1.0
+        } else {
+            pimu / pimu.sin()
+        };
+        let d = -x2.ln();
+        let e = xmu * d;
+        let fact2 = if e.abs() < BESSEL_EPS {
+            1.0
+        } else {
+            e.sinh() / e
+        };
+        let (gam1, gam2, gampl, gammi) = temme_gammas(xmu);
+        let mut ff = 2.0 / M_PI * fact * (gam1 * e.cosh() + gam2 * fact2 * d);
+        let e = e.exp();
+        let mut p = e / (gampl * M_PI);
+        let mut q = 1.0 / (e * M_PI * gammi);
+        let pimu2 = 0.5 * pimu;
+        let fact3 = if pimu2.abs() < BESSEL_EPS {
+            1.0
+        } else {
+            pimu2.sin() / pimu2
+        };
+        let r = M_PI * pimu2 * fact3 * fact3;
+        let mut c = 1.0;
+        let d = -x2 * x2;
+        let mut sum = ff + r * q;
+        let mut sum1 = p;
+        let mut i = 1.0;
+        loop {
+            ff = (i * ff + p + q) / (i * i - xmu2);
+            c *= d / i;
+            p /= i - xmu;
+            q /= i + xmu;
+            let del = c * (ff + r * q);
+            sum += del;
+            let del1 = c * p - i * del;
+            sum1 += del1;
+            if del.abs() < (1.0 + sum.abs()) * BESSEL_EPS || i > 1000.0 {
+                break;
+            }
+            i += 1.0;
+        }
+        rymu = -sum;
+        ry1 = -sum1 * xi2;
+        let rymup = xmu * xi * rymu - ry1;
+        rjmu = w / (rymup - f * rymu);
+    } else {
+        let mut a = 0.25 - xmu2;
+        let mut p = -0.5 * xi;
+        let mut q = 1.0;
+        let br = 2.0 * x;
+        let mut bi = 2.0;
+        let mut fact = a * xi / (p * p + q * q);
+        let mut cr = br + q * fact;
+        let mut ci = bi + p * fact;
+        let mut den = br * br + bi * bi;
+        let mut dr = br / den;
+        let mut di = -bi / den;
+        let mut dlr = cr * dr - ci * di;
+        let mut dli = cr * di + ci * dr;
+        let mut temp = p * dlr - q * dli;
+        q = p * dli + q * dlr;
+        p = temp;
+        for i in 2..BESSEL_MAXIT {
+            a += 2.0 * (i - 1) as f64;
+            bi += 2.0;
+            dr = a * dr + br;
+            di = a * di + bi;
+            if dr.abs() + di.abs() < BESSEL_FPMIN {
+                dr = BESSEL_FPMIN;
+            }
+            fact = a / (cr * cr + ci * ci);
+            cr = br + cr * fact;
+            ci = bi - ci * fact;
+            if cr.abs() + ci.abs() < BESSEL_FPMIN {
+                cr = BESSEL_FPMIN;
+            }
+            den = dr * dr + di * di;
+            dr /= den;
+            di /= -den;
+            dlr = cr * dr - ci * di;
+            dli = cr * di + ci * dr;
+            temp = p * dlr - q * dli;
+            q = p * dli + q * dlr;
+            p = temp;
+            if (dlr - 1.0).abs() + dli.abs() < BESSEL_EPS {
+                break;
+            }
+        }
+        let gam = (p - f) / q;
+        let magnitude = (w / ((p - f) * gam + q)).sqrt();
+        rjmu = if rjl < 0.0 { -magnitude } else { magnitude };
+        rymu = rjmu * gam;
+        let rymup = rymu * (p + q / gam);
+        ry1 = xmu * xi * rymu - rymup;
+    }
+    let fact = rjmu / rjl;
+    let rj = rjl1 * fact;
+    for i in 1..=nl {
+        let rytemp = (xmu + i as f64) * xi2 * ry1 - rymu;
+        rymu = ry1;
+        ry1 = rytemp;
+        if !rymu.is_finite() {
+            break;
+        }
+    }
+    (rj, rymu)
+}
+
+/// GNU R stops at orders this large, where its recurrences would need too much memory.
+const BESSEL_NU_MAX: f64 = 1e7;
+/// Above this argument, unscaled `I` is reported as infinite, as GNU R does.
+const BESSEL_EXPARG: f64 = 709.0;
+
+pub fn bessel_i(x: f64, alpha: f64, expo: f64) -> f64 {
+    if x.is_nan() || alpha.is_nan() {
+        return x + alpha;
+    }
+    if x < 0.0 {
+        range_warning("bessel_i");
+        return f64::NAN;
+    }
+    let scaled = expo as i32 == 2;
+    if alpha < 0.0 {
+        let na = alpha.floor();
+        // Abramowitz and Stegun 9.6.2 and 9.6.6.
+        return bessel_i(x, -alpha, expo)
+            + if alpha == na {
+                0.0
+            } else {
+                bessel_k(x, -alpha, expo) * if scaled { 2.0 * (-2.0 * x).exp() } else { 2.0 } / M_PI
+                    * sinpi_(-alpha)
+            };
+    }
+    if x == 0.0 {
+        return if alpha == 0.0 { 1.0 } else { 0.0 };
+    }
+    if !scaled && x > BESSEL_EXPARG {
+        return f64::INFINITY;
+    }
+    if x == f64::INFINITY {
+        return if scaled { 0.0 } else { f64::INFINITY };
+    }
+    if x <= 15.0 || x * x <= 50.0 * (alpha + 1.0) {
+        let i = bessel_i_series(x, alpha);
+        return if scaled { i * (-x).exp() } else { i };
+    }
+    let (i, _) = bessel_ik_scaled(x, alpha);
+    if scaled { i } else { i * x.exp() }
+}
+
+/// `I_nu(x)` by its power series, whose terms are all positive. The Wronskian route loses
+/// digits to cancellation at small `x`.
+fn bessel_i_series(x: f64, nu: f64) -> f64 {
+    let half = 0.5 * x;
+    let mut prefactor = 0.0;
+    if nu + 1.0 < 170.0 {
+        prefactor = half.powf(nu) / gammafn(nu + 1.0);
+    }
+    if !(prefactor.is_finite() && prefactor >= DBL_MIN) {
+        prefactor = (nu * half.ln() - lgammafn(nu + 1.0)).exp();
+    }
+    let quarter_square = half * half;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut k = 1.0;
+    loop {
+        term *= quarter_square / (k * (nu + k));
+        sum += term;
+        if !(term >= DBL_EPSILON * 0.25 * sum) {
+            break;
+        }
+        k += 1.0;
+    }
+    prefactor * sum
+}
+
+pub fn bessel_k(x: f64, alpha: f64, expo: f64) -> f64 {
+    if x.is_nan() || alpha.is_nan() {
+        return x + alpha;
+    }
+    if x < 0.0 {
+        range_warning("bessel_k");
+        return f64::NAN;
+    }
+    let alpha = alpha.abs();
+    let scaled = expo as i32 == 2;
+    if x == 0.0 {
+        return f64::INFINITY;
+    }
+    if x == f64::INFINITY {
+        return 0.0;
+    }
+    let (_, k) = bessel_ik_scaled(x, alpha);
+    if scaled { k } else { k * (-x).exp() }
+}
+
+pub fn bessel_j(x: f64, alpha: f64) -> f64 {
+    if x.is_nan() || alpha.is_nan() {
+        return x + alpha;
+    }
+    if x < 0.0 {
+        range_warning("bessel_j");
+        return f64::NAN;
+    }
+    let na = alpha.floor();
+    if alpha < 0.0 {
+        // Abramowitz and Stegun 9.1.2.
+        return (if alpha - na == 0.5 {
+            0.0
+        } else {
+            bessel_j(x, -alpha) * cospi_(alpha)
+        }) + if alpha == na {
+            0.0
+        } else {
+            bessel_y(x, -alpha) * sinpi_(alpha)
+        };
+    }
+    if alpha > BESSEL_NU_MAX {
+        warning(format!(
+            "besselJ(x, nu): nu={alpha} too large for bessel_j() algorithm"
+        ));
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return if alpha == 0.0 { 1.0 } else { 0.0 };
+    }
+    if x == f64::INFINITY {
+        return 0.0;
+    }
+    bessel_jy_any(x, alpha).0
+}
+
+/// `J_nu(x)` and `Y_nu(x)`. Below `x = 20` the continued fractions of `bessel_jy` serve,
+/// with the power series for `J` where it has no cancellation. From 20 on, Hankel's
+/// expansion gives the two orders nearest zero exactly, and the three-term recurrence carries
+/// them up: upwards for `Y` always, and for `J` while the order stays below `x`, where the
+/// recurrence neither grows nor damps errors. Above `x`, `J` recurs downwards from Lentz's
+/// continued fraction for `J_nu / J_(nu-1)` and is normalized where the two ranges meet.
+fn bessel_jy_any(x: f64, nu: f64) -> (f64, f64) {
+    if x < 20.0 {
+        let (j, y) = bessel_jy(x, nu);
+        if x * x < 2.0 * (nu + 1.0) {
+            return (bessel_j_series(x, nu), y);
+        }
+        return (j, y);
+    }
+    let n = nu.floor() as usize;
+    let mu = nu - n as f64;
+    let (j0, y0) = bessel_jy_hankel(x, mu);
+    let (j1, y1) = bessel_jy_hankel(x, mu + 1.0);
+    let upward = |mut previous: f64, mut current: f64, steps: usize| {
+        if steps == 0 {
+            return (previous, current);
+        }
+        for k in 1..steps {
+            let next = 2.0 * (mu + k as f64) / x * current - previous;
+            previous = current;
+            current = next;
+            if !current.is_finite() {
+                break;
+            }
+        }
+        (previous, current)
+    };
+    let y = if n == 0 { y0 } else { upward(y0, y1, n).1 };
+    if nu <= x {
+        let j = if n == 0 { j0 } else { upward(j0, j1, n).1 };
+        return (j, y);
+    }
+    // The meeting point m: the largest order mu + m not above x.
+    let m = (x - mu).floor() as usize;
+    let (jm, jm1) = if m == 0 {
+        (j0, j1)
+    } else {
+        upward(j0, j1, m + 1)
+    };
+    // J_nu / J_(nu-1) = 1 / (2 nu/x - 1 / (2 (nu+1)/x - ...)) by modified Lentz.
+    let mut f = 2.0 * nu / x;
+    if f == 0.0 {
+        f = BESSEL_FPMIN;
+    }
+    let mut c = f;
+    let mut d = 0.0;
+    let mut k = nu + 1.0;
+    for _ in 0..BESSEL_MAXIT {
+        let b = 2.0 * k / x;
+        d = b - d;
+        if d.abs() < BESSEL_FPMIN {
+            d = BESSEL_FPMIN;
+        }
+        c = b - 1.0 / c;
+        if c.abs() < BESSEL_FPMIN {
+            c = BESSEL_FPMIN;
+        }
+        d = 1.0 / d;
+        let delta = c * d;
+        f *= delta;
+        if (delta - 1.0).abs() < BESSEL_EPS {
+            break;
+        }
+        k += 1.0;
+    }
+    let ratio = 1.0 / f;
+    // Unnormalized J from order nu down to mu + m, rescaled so it cannot overflow; `top` is
+    // the (rescaled) value at order nu.
+    let mut top = 1.0;
+    let mut upper = 1.0;
+    let mut lower = 1.0 / ratio;
+    let mut order = nu - 1.0;
+    while order > mu + m as f64 + 0.5 {
+        let next = 2.0 * order / x * lower - upper;
+        upper = lower;
+        lower = next;
+        order -= 1.0;
+        if lower.abs() > BESSEL_BIG {
+            lower /= BESSEL_BIG;
+            upper /= BESSEL_BIG;
+            top /= BESSEL_BIG;
+        }
+    }
+    // The least-squares fit of the computed pair to the true one, scaled so no square
+    // overflows.
+    let scale = lower.abs().max(upper.abs());
+    let (lower, upper) = (lower / scale, upper / scale);
+    let fact = (jm * lower + jm1 * upper) / (lower * lower + upper * upper);
+    (top / scale * fact, y)
+}
+
+/// `J_nu(x)` by its power series, for `x^2 / 4` small against `nu + 1`, where the terms
+/// shrink from the first.
+fn bessel_j_series(x: f64, nu: f64) -> f64 {
+    let half = 0.5 * x;
+    let mut prefactor = 0.0;
+    if nu + 1.0 < 170.0 {
+        prefactor = half.powf(nu) / gammafn(nu + 1.0);
+    }
+    if !(prefactor.is_finite() && prefactor >= DBL_MIN) {
+        prefactor = (nu * half.ln() - lgammafn(nu + 1.0)).exp();
+    }
+    let quarter_square = half * half;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut k = 1.0;
+    loop {
+        term *= -quarter_square / (k * (nu + k));
+        sum += term;
+        if !(term.abs() >= DBL_EPSILON * 0.25 * sum.abs()) {
+            break;
+        }
+        k += 1.0;
+    }
+    prefactor * sum
+}
+
+/// Hankel's asymptotic expansion of `J_nu(x)` and `Y_nu(x)` for `x` large against `nu^2`.
+fn bessel_jy_hankel(x: f64, nu: f64) -> (f64, f64) {
+    let mu = 4.0 * nu * nu;
+    let z8 = 8.0 * x;
+    let mut p = 1.0;
+    let mut q = 0.0;
+    let mut term: f64 = 1.0;
+    let mut k = 1.0;
+    loop {
+        let next = term * (mu - (2.0 * k - 1.0) * (2.0 * k - 1.0)) / (k * z8);
+        if next.abs() > term.abs() || next == 0.0 {
+            break;
+        }
+        term = next;
+        // t_k contributes to Q for odd k and to P for even k, with alternating signs.
+        match (k as i64) % 4 {
+            1 => q += term,
+            2 => p -= term,
+            3 => q -= term,
+            _ => p += term,
+        }
+        if term.abs() < DBL_EPSILON * 1e-3 {
+            break;
+        }
+        k += 1.0;
+    }
+    // chi = x - (nu/2 + 1/4) pi, expanded so that only x needs argument reduction.
+    let phase = nu / 2.0 + 0.25;
+    let (cos_phase, sin_phase) = (cospi_(phase), sinpi_(phase));
+    let (sin_x, cos_x) = x.sin_cos();
+    let cos_chi = cos_x * cos_phase + sin_x * sin_phase;
+    let sin_chi = sin_x * cos_phase - cos_x * sin_phase;
+    let amplitude = (2.0 / (M_PI * x)).sqrt();
+    (
+        amplitude * (p * cos_chi - q * sin_chi),
+        amplitude * (p * sin_chi + q * cos_chi),
+    )
+}
+
+pub fn bessel_y(x: f64, alpha: f64) -> f64 {
+    if x.is_nan() || alpha.is_nan() {
+        return x + alpha;
+    }
+    if x < 0.0 {
+        range_warning("bessel_y");
+        return f64::NAN;
+    }
+    let na = alpha.floor();
+    if alpha < 0.0 {
+        // Abramowitz and Stegun 9.1.2.
+        return (if alpha - na == 0.5 {
+            0.0
+        } else {
+            bessel_y(x, -alpha) * cospi_(alpha)
+        }) - if alpha == na {
+            0.0
+        } else {
+            bessel_j(x, -alpha) * sinpi_(alpha)
+        };
+    }
+    if alpha > BESSEL_NU_MAX {
+        warning(format!(
+            "besselY(x, nu): nu={alpha} too large for bessel_y() algorithm"
+        ));
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x == f64::INFINITY {
+        return 0.0;
+    }
+    bessel_jy_any(x, alpha).1
+}
+
+// Random variates. Each generator consumes uniforms in the order of the published algorithm
+// GNU R implements, so a seed gives GNU R's stream.
+
+pub fn rnorm(rng: &mut Rng, mu: f64, sigma: f64) -> f64 {
+    if mu.is_nan() || !finite(sigma) || sigma < 0.0 {
+        return f64::NAN;
+    }
+    if sigma == 0.0 || !finite(mu) {
+        mu
+    } else {
+        mu + sigma * rng.norm_rand()
+    }
+}
+
+pub fn runif(rng: &mut Rng, a: f64, b: f64) -> f64 {
+    if !finite(a) || !finite(b) || b < a {
+        return f64::NAN;
+    }
+    if a == b {
+        return a;
+    }
+    let mut u;
+    loop {
+        u = rng.unif_rand();
+        if u > 0.0 && u < 1.0 {
+            break;
+        }
+    }
+    a + (b - a) * u
+}
+
+pub fn rlnorm(rng: &mut Rng, meanlog: f64, sdlog: f64) -> f64 {
+    if meanlog.is_nan() || !finite(sdlog) || sdlog < 0.0 {
+        return f64::NAN;
+    }
+    rnorm(rng, meanlog, sdlog).exp()
+}
+
+pub fn rexp(rng: &mut Rng, scale: f64) -> f64 {
+    if !finite(scale) || scale <= 0.0 {
+        if scale == 0.0 {
+            return 0.0;
+        }
+        return f64::NAN;
+    }
+    scale * rng.exp_rand()
+}
+
+/// Gamma variates: Ahrens and Dieter's GS (1974) for `a < 1` and GD (1982) otherwise.
+pub fn rgamma(rng: &mut Rng, a: f64, scale: f64) -> f64 {
+    const SQRT32: f64 = 5.656854;
+    const EXP_M1: f64 = 0.36787944117144233;
+    const Q1: f64 = 0.04166669;
+    const Q2: f64 = 0.02083148;
+    const Q3: f64 = 0.00801191;
+    const Q4: f64 = 0.00144121;
+    const Q5: f64 = -7.388e-5;
+    const Q6: f64 = 2.4511e-4;
+    const Q7: f64 = 2.424e-4;
+    const A1: f64 = 0.3333333;
+    const A2: f64 = -0.250003;
+    const A3: f64 = 0.2000062;
+    const A4: f64 = -0.1662921;
+    const A5: f64 = 0.1423657;
+    const A6: f64 = -0.1367177;
+    const A7: f64 = 0.1233795;
+    if a.is_nan() || scale.is_nan() {
+        return f64::NAN;
+    }
+    if a <= 0.0 || scale <= 0.0 {
+        if scale == 0.0 || a == 0.0 {
+            return 0.0;
+        }
+        return f64::NAN;
+    }
+    if !finite(a) || !finite(scale) {
+        return f64::INFINITY;
+    }
+    if a < 1.0 {
+        let e = 1.0 + EXP_M1 * a;
+        loop {
+            let p = e * rng.unif_rand();
+            if p >= 1.0 {
+                let x = -((e - p) / a).ln();
+                if rng.exp_rand() >= (1.0 - a) * x.ln() {
+                    return scale * x;
+                }
+            } else {
+                let x = (p.ln() / a).exp();
+                if rng.exp_rand() >= x {
+                    return scale * x;
+                }
+            }
+        }
+    }
+    let s2 = a - 0.5;
+    let s = s2.sqrt();
+    let d = SQRT32 - s * 12.0;
+    let mut t = rng.norm_rand();
+    let x = s + 0.5 * t;
+    let ret_val = x * x;
+    if t >= 0.0 {
+        return scale * ret_val;
+    }
+    let mut u = rng.unif_rand();
+    if d * u <= t * t * t {
+        return scale * ret_val;
+    }
+    let r = 1.0 / a;
+    let q0 = ((((((Q7 * r + Q6) * r + Q5) * r + Q4) * r + Q3) * r + Q2) * r + Q1) * r;
+    let (b, si, c);
+    if a <= 3.686 {
+        b = 0.463 + s + 0.178 * s2;
+        si = 1.235;
+        c = 0.195 / s - 0.079 + 0.16 * s;
+    } else if a <= 13.022 {
+        b = 1.654 + 0.0076 * s2;
+        si = 1.68 / s + 0.275;
+        c = 0.062 / s + 0.024;
+    } else {
+        b = 1.77;
+        si = 0.75;
+        c = 0.1515 / s;
+    }
+    let quotient = |t: f64| {
+        let v = t / (s + s);
+        if v.abs() <= 0.25 {
+            q0 + 0.5
+                * t
+                * t
+                * ((((((A7 * v + A6) * v + A5) * v + A4) * v + A3) * v + A2) * v + A1)
+                * v
+        } else {
+            q0 - s * t + 0.25 * t * t + (s2 + s2) * (1.0 + v).ln()
+        }
+    };
+    if x > 0.0 && (1.0 - u).ln() <= quotient(t) {
+        return scale * ret_val;
+    }
+    loop {
+        let e = rng.exp_rand();
+        u = rng.unif_rand();
+        u = u + u - 1.0;
+        t = if u < 0.0 { b - si * e } else { b + si * e };
+        if t >= -0.71874483771719 {
+            let q = quotient(t);
+            if q > 0.0 {
+                let w = q.exp_m1();
+                if c * u.abs() <= w * (e - 0.5 * t * t).exp() {
+                    break;
+                }
+            }
+        }
+    }
+    let x = s + 0.5 * t;
+    scale * x * x
+}
+
+pub fn rchisq(rng: &mut Rng, df: f64) -> f64 {
+    if !finite(df) || df < 0.0 {
+        return f64::NAN;
+    }
+    rgamma(rng, df / 2.0, 2.0)
+}
+
+pub fn rnchisq(rng: &mut Rng, df: f64, lambda: f64) -> f64 {
+    if !finite(df) || !finite(lambda) || df < 0.0 || lambda < 0.0 {
+        return f64::NAN;
+    }
+    if lambda == 0.0 {
+        return if df == 0.0 {
+            0.0
+        } else {
+            rgamma(rng, df / 2.0, 2.0)
+        };
+    }
+    let mut r = rpois(rng, lambda / 2.0);
+    if r > 0.0 {
+        r = rchisq(rng, 2.0 * r);
+    }
+    if df > 0.0 {
+        r += rgamma(rng, df / 2.0, 2.0);
+    }
+    r
+}
+
+/// Beta variates by Cheng's algorithms BB (both parameters above one) and BC (1978).
+pub fn rbeta(rng: &mut Rng, aa: f64, bb: f64) -> f64 {
+    const EXPMAX: f64 = f64::MAX_EXP as f64 * M_LN2;
+    if aa.is_nan() || bb.is_nan() || aa < 0.0 || bb < 0.0 {
+        return f64::NAN;
+    }
+    if !finite(aa) && !finite(bb) {
+        return 0.5;
+    }
+    if aa == 0.0 && bb == 0.0 {
+        return if rng.unif_rand() < 0.5 { 0.0 } else { 1.0 };
+    }
+    if !finite(aa) || bb == 0.0 {
+        return 1.0;
+    }
+    if !finite(bb) || aa == 0.0 {
+        return 0.0;
+    }
+    let a = fmin2(aa, bb);
+    let b = fmax2(aa, bb);
+    let alpha = a + b;
+    let v_w = |u1: f64, beta: f64, scale: f64| {
+        let v = beta * (u1 / (1.0 - u1)).ln();
+        let w = if v <= EXPMAX {
+            let w = scale * v.exp();
+            if w.is_infinite() { DBL_MAX } else { w }
+        } else {
+            DBL_MAX
+        };
+        (v, w)
+    };
+    if a <= 1.0 {
+        let beta = 1.0 / a;
+        let delta = 1.0 + b - a;
+        let k1 = delta * (0.0138889 + 0.0416667 * a) / (b * beta - 0.777778);
+        let k2 = 0.25 + (0.5 + 0.25 / delta) * a;
+        let w;
+        loop {
+            let u1 = rng.unif_rand();
+            let u2 = rng.unif_rand();
+            let z;
+            if u1 < 0.5 {
+                let y = u1 * u2;
+                z = u1 * y;
+                if 0.25 * u2 + z - y >= k1 {
+                    continue;
+                }
+            } else {
+                z = u1 * u1 * u2;
+                if z <= 0.25 {
+                    w = v_w(u1, beta, b).1;
+                    break;
+                }
+                if z >= k2 {
+                    continue;
+                }
+            }
+            let (v, candidate) = v_w(u1, beta, b);
+            if alpha * ((alpha / (a + candidate)).ln() + v) - 1.3862944 >= z.ln() {
+                w = candidate;
+                break;
+            }
+        }
+        if aa == a { a / (a + w) } else { w / (a + w) }
+    } else {
+        let beta = ((alpha - 2.0) / (2.0 * a * b - alpha)).sqrt();
+        let gamma = a + 1.0 / beta;
+        let mut w;
+        loop {
+            let u1 = rng.unif_rand();
+            let u2 = rng.unif_rand();
+            let (v, candidate) = v_w(u1, beta, a);
+            w = candidate;
+            let z = u1 * u1 * u2;
+            let r = gamma * v - 1.3862944;
+            let s = a + r - w;
+            if s + 2.609438 >= 5.0 * z {
+                break;
+            }
+            let t = z.ln();
+            if s > t {
+                break;
+            }
+            if r + alpha * (alpha / (b + w)).ln() >= t {
+                break;
+            }
+        }
+        if aa != a { b / (b + w) } else { w / (b + w) }
+    }
+}
+
+pub fn rf(rng: &mut Rng, m: f64, n: f64) -> f64 {
+    if m.is_nan() || n.is_nan() || m <= 0.0 || n <= 0.0 {
+        return f64::NAN;
+    }
+    let numerator = if finite(m) { rchisq(rng, m) / m } else { 1.0 };
+    let denominator = if finite(n) { rchisq(rng, n) / n } else { 1.0 };
+    numerator / denominator
+}
+
+pub fn rt(rng: &mut Rng, df: f64) -> f64 {
+    if df.is_nan() || df <= 0.0 {
+        return f64::NAN;
+    }
+    if !finite(df) {
+        return rng.norm_rand();
+    }
+    let numerator = rng.norm_rand();
+    numerator / (rchisq(rng, df) / df).sqrt()
+}
+
+pub fn rcauchy(rng: &mut Rng, location: f64, scale: f64) -> f64 {
+    if location.is_nan() || !finite(scale) || scale < 0.0 {
+        return f64::NAN;
+    }
+    if scale == 0.0 || !finite(location) {
+        location
+    } else {
+        location + scale * (M_PI * rng.unif_rand()).tan()
+    }
+}
+
+pub fn rweibull(rng: &mut Rng, shape: f64, scale: f64) -> f64 {
+    if !finite(shape) || !finite(scale) || shape <= 0.0 || scale <= 0.0 {
+        if scale == 0.0 {
+            return 0.0;
+        }
+        return f64::NAN;
+    }
+    scale * (-(rng.unif_rand()).ln()).powf(1.0 / shape)
+}
+
+pub fn rlogis(rng: &mut Rng, location: f64, scale: f64) -> f64 {
+    if location.is_nan() || !finite(scale) {
+        return f64::NAN;
+    }
+    if scale == 0.0 || !finite(location) {
+        return location;
+    }
+    let u = rng.unif_rand();
+    location + scale * (u / (1.0 - u)).ln()
+}
+
+/// Poisson variates: Ahrens and Dieter's PD (1982) for `mu >= 10`, table lookup inversion
+/// below.
+pub fn rpois(rng: &mut Rng, mu: f64) -> f64 {
+    const A0: f64 = -0.5;
+    const A1: f64 = 0.3333333;
+    const A2: f64 = -0.2500068;
+    const A3: f64 = 0.2000118;
+    const A4: f64 = -0.1661269;
+    const A5: f64 = 0.1421878;
+    const A6: f64 = -0.1384794;
+    const A7: f64 = 0.1250060;
+    const ONE_7: f64 = 0.1428571428571428571;
+    const ONE_12: f64 = 0.0833333333333333333;
+    const ONE_24: f64 = 0.0416666666666666667;
+    const FACT: [f64; 10] = [
+        1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0, 362880.0,
+    ];
+    if !finite(mu) || mu < 0.0 {
+        return f64::NAN;
+    }
+    if mu <= 0.0 {
+        return 0.0;
+    }
+    if mu < 10.0 {
+        // Inversion against the cumulative probabilities, extended as far as needed.
+        let m = (mu as i32).max(1) as usize;
+        let p0 = (-mu).exp();
+        let mut pp = [0.0; 36];
+        let mut l = 0;
+        let mut p = p0;
+        let mut q = p0;
+        loop {
+            let u = rng.unif_rand();
+            if u <= p0 {
+                return 0.0;
+            }
+            if l > 0 {
+                let j = if u > 0.458 { l.min(m) } else { 1 };
+                for (k, cumulative) in pp.iter().enumerate().take(l + 1).skip(j) {
+                    if u <= *cumulative {
+                        return k as f64;
+                    }
+                }
+                if l == 35 {
+                    continue;
+                }
+            }
+            l += 1;
+            for (k, cumulative) in pp.iter_mut().enumerate().skip(l) {
+                p *= mu / k as f64;
+                q += p;
+                *cumulative = q;
+                if u <= q {
+                    return k as f64;
+                }
+            }
+            l = 35;
+        }
+    }
+    let s = mu.sqrt();
+    let d = 6.0 * mu * mu;
+    let big_l = (mu - 1.1484).floor();
+    let mut pois = -1.0;
+    let g = mu + s * rng.norm_rand();
+    let mut u = 0.0;
+    let mut fk = 0.0;
+    let mut difmuk = 0.0;
+    if g >= 0.0 {
+        pois = g.floor();
+        if pois >= big_l {
+            return pois;
+        }
+        fk = pois;
+        difmuk = mu - fk;
+        u = rng.unif_rand();
+        if d * u >= difmuk * difmuk * difmuk {
+            return pois;
+        }
+    }
+    let omega = M_1_SQRT_2PI / s;
+    let b1 = ONE_24 / mu;
+    let b2 = 0.3 * b1 * b1;
+    let c3 = ONE_7 * b1 * b2;
+    let c2 = b2 - 15.0 * c3;
+    let c1 = b1 - 6.0 * b2 + 45.0 * c3;
+    let c0 = 1.0 - b1 + 3.0 * b2 - 15.0 * c3;
+    let c = 0.1069 / mu;
+    // Ahrens and Dieter's procedure F: the Poisson and the discrete normal densities at pois.
+    let procedure_f = |pois: f64, fk: f64, difmuk: f64| {
+        let (px, py);
+        if pois < 10.0 {
+            px = -mu;
+            py = mu.powf(pois) / FACT[pois as usize];
+        } else {
+            let mut del = ONE_12 / fk;
+            del *= 1.0 - 4.8 * del * del;
+            let v = difmuk / fk;
+            if v.abs() <= 0.25 {
+                px = fk
+                    * v
+                    * v
+                    * (((((((A7 * v + A6) * v + A5) * v + A4) * v + A3) * v + A2) * v + A1) * v
+                        + A0)
+                    - del;
+            } else {
+                px = fk * (1.0 + v).ln() - difmuk - del;
+            }
+            py = M_1_SQRT_2PI / fk.sqrt();
+        }
+        let x = (0.5 - difmuk) / s;
+        let xx = x * x;
+        let fx = -0.5 * xx;
+        let fy = omega * (((c3 * xx + c2) * xx + c1) * xx + c0);
+        (px, py, fx, fy)
+    };
+    if g >= 0.0 {
+        let (px, py, fx, fy) = procedure_f(pois, fk, difmuk);
+        if fy - u * fy <= py * (px - fx).exp() {
+            return pois;
+        }
+    }
+    loop {
+        let e = rng.exp_rand();
+        u = 2.0 * rng.unif_rand() - 1.0;
+        let t = 1.8 + fsign(e, u);
+        if t > -0.6744 {
+            pois = (mu + s * t).floor();
+            fk = pois;
+            difmuk = mu - fk;
+            let (px, py, fx, fy) = procedure_f(pois, fk, difmuk);
+            if c * u.abs() <= py * (px + e).exp() - fy * (fx + e).exp() {
+                return pois;
+            }
+        }
+    }
+}
+
+/// Binomial variates by Kachitvichyanukul and Schmeiser's BTPE (1988), inversion when the
+/// mean is below 30.
+pub fn rbinom(rng: &mut Rng, nin: f64, pp: f64) -> f64 {
+    if !finite(nin) {
+        return f64::NAN;
+    }
+    let r = forceint(nin);
+    if r != nin || !finite(pp) || r < 0.0 || !(0.0..=1.0).contains(&pp) {
+        return f64::NAN;
+    }
+    if r == 0.0 || pp == 0.0 {
+        return 0.0;
+    }
+    if pp == 1.0 {
+        return r;
+    }
+    if r >= i32::MAX as f64 {
+        return qbinom(rng.unif_rand(), r, pp, false, false);
+    }
+    let n = r as i32;
+    let p = fmin2(pp, 1.0 - pp);
+    let q = 1.0 - p;
+    let np = n as f64 * p;
+    let r = p / q;
+    let g = r * (n as f64 + 1.0);
+    let ix: i32;
+    if np < 30.0 {
+        let qn = r_pow_di(q, n);
+        'outer: loop {
+            let mut ix_ = 0;
+            let mut f = qn;
+            let mut u = rng.unif_rand();
+            loop {
+                if u < f {
+                    ix = ix_;
+                    break 'outer;
+                }
+                if ix_ > 110 {
+                    break;
+                }
+                u -= f;
+                ix_ += 1;
+                f *= g / ix_ as f64 - r;
+            }
+        }
+    } else {
+        let fm = np + p;
+        let m = fm as i32;
+        let npq = np * q;
+        let p1 = ((2.195 * npq.sqrt() - 4.6 * q) as i32) as f64 + 0.5;
+        let xm = m as f64 + 0.5;
+        let xl = xm - p1;
+        let xr = xm + p1;
+        let c = 0.134 + 20.5 / (15.3 + m as f64);
+        let mut al = (fm - xl) / (fm - xl * p);
+        let xll = al * (1.0 + 0.5 * al);
+        al = (xr - fm) / (xr * q);
+        let xlr = al * (1.0 + 0.5 * al);
+        let p2 = p1 * (1.0 + c + c);
+        let p3 = p2 + c / xll;
+        let p4 = p3 + c / xlr;
+        loop {
+            let u = rng.unif_rand() * p4;
+            let mut v = rng.unif_rand();
+            let candidate: i32;
+            if u <= p1 {
+                ix = (xm - p1 * v + u) as i32;
+                break;
+            }
+            if u <= p2 {
+                let x = xl + (u - p1) / c;
+                v = v * c + 1.0 - (xm - x).abs() / p1;
+                if v > 1.0 || v <= 0.0 {
+                    continue;
+                }
+                candidate = x as i32;
+            } else if u > p3 {
+                candidate = (xr - v.ln() / xlr) as i32;
+                if candidate > n {
+                    continue;
+                }
+                v *= (u - p3) * xlr;
+            } else {
+                candidate = (xl + v.ln() / xll) as i32;
+                if candidate < 0 {
+                    continue;
+                }
+                v *= (u - p2) * xll;
+            }
+            let k = (candidate - m).abs();
+            if k <= 20 || k as f64 >= npq / 2.0 - 1.0 {
+                // Explicit evaluation of the density ratio.
+                let mut f = 1.0;
+                if m < candidate {
+                    for i in m + 1..=candidate {
+                        f *= g / i as f64 - r;
+                    }
+                } else if m > candidate {
+                    for i in candidate + 1..=m {
+                        f /= g / i as f64 - r;
+                    }
+                }
+                if v <= f {
+                    ix = candidate;
+                    break;
+                }
+            } else {
+                // Squeeze with bounds on log f(x), then Stirling's formula.
+                let k = k as f64;
+                let amaxp = (k / npq) * ((k * (k / 3.0 + 0.625) + 0.1666666666666) / npq + 0.5);
+                let ynorm = -k * k / (2.0 * npq);
+                let alv = v.ln();
+                if alv < ynorm - amaxp {
+                    ix = candidate;
+                    break;
+                }
+                if alv <= ynorm + amaxp {
+                    let x1 = candidate as f64 + 1.0;
+                    let f1 = fm + 1.0;
+                    let z = n as f64 + 1.0 - fm;
+                    let w = n as f64 - candidate as f64 + 1.0;
+                    let z2 = z * z;
+                    let x2 = x1 * x1;
+                    let f2 = f1 * f1;
+                    let w2 = w * w;
+                    let correction = |a: f64, a2: f64| {
+                        (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / a2) / a2) / a2) / a2)
+                            / a
+                            / 166320.0
+                    };
+                    if alv
+                        <= xm * (f1 / x1).ln()
+                            + (n as f64 - m as f64 + 0.5) * (z / w).ln()
+                            + (candidate - m) as f64 * (w * p / (x1 * q)).ln()
+                            + correction(f1, f2)
+                            + correction(z, z2)
+                            + correction(x1, x2)
+                            + correction(w, w2)
+                    {
+                        ix = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let ix = if pp > 0.5 { n - ix } else { ix };
+    ix as f64
+}
+
+pub fn rgeom(rng: &mut Rng, p: f64) -> f64 {
+    if !finite(p) || p <= 0.0 || p > 1.0 {
+        return f64::NAN;
+    }
+    let mean = rng.exp_rand() * ((1.0 - p) / p);
+    rpois(rng, mean)
+}
+
+pub fn rnbinom(rng: &mut Rng, size: f64, prob: f64) -> f64 {
+    if !finite(prob) || size.is_nan() || size <= 0.0 || prob <= 0.0 || prob > 1.0 {
+        return f64::NAN;
+    }
+    let size = if finite(size) { size } else { DBL_MAX / 2.0 };
+    if prob == 1.0 {
+        return 0.0;
+    }
+    let mean = rgamma(rng, size, (1.0 - prob) / prob);
+    rpois(rng, mean)
+}
+
+pub fn rnbinom_mu(rng: &mut Rng, size: f64, mu: f64) -> f64 {
+    if !finite(mu) || size.is_nan() || size <= 0.0 || mu < 0.0 {
+        return f64::NAN;
+    }
+    let size = if finite(size) { size } else { DBL_MAX / 2.0 };
+    if mu == 0.0 {
+        return 0.0;
+    }
+    let mean = rgamma(rng, size, mu / size);
+    rpois(rng, mean)
+}
+
+/// `log(i!)`, exactly tabulated to 7 and by Stirling's series beyond.
+fn afc(i: i32) -> f64 {
+    const AL: [f64; 8] = [
+        0.0,
+        0.0,
+        0.69314718055994530941723212145817,
+        1.79175946922805500081247735838070,
+        3.17805383034794561964694160129705,
+        4.78749174278204599424770093452324,
+        6.57925121201010099506017829290394,
+        8.52516136106541430016553103634712,
+    ];
+    if i < 0 {
+        warning(format!("rhyper.c: afc(i), i={i} < 0 -- SHOULD NOT HAPPEN!"));
+        return -1.0;
+    }
+    if i <= 7 {
+        return AL[i as usize];
+    }
+    let di = i as f64;
+    let i2 = di * di;
+    (di + 0.5) * di.ln() - di + M_LN_SQRT_2PI + (0.0833333333333333 - 0.00277777777777778 / i2) / di
+}
+
+/// Hypergeometric variates by Kachitvichyanukul and Schmeiser's HIN (inversion) and H2PE
+/// (1985): the number of red balls among `kk` drawn from `nn1` red and `nn2` blue.
+pub fn rhyper(rng: &mut Rng, nn1in: f64, nn2in: f64, kkin: f64) -> f64 {
+    const DELTAL: f64 = 0.0078;
+    const DELTAU: f64 = 0.0034;
+    const SCALE: f64 = 1e25;
+    const CON: f64 = 57.5646273248511421;
+    if !finite(nn1in) || !finite(nn2in) || !finite(kkin) {
+        return f64::NAN;
+    }
+    let nn1in = forceint(nn1in);
+    let nn2in = forceint(nn2in);
+    let kkin = forceint(kkin);
+    if nn1in < 0.0 || nn2in < 0.0 || kkin < 0.0 || kkin > nn1in + nn2in {
+        return f64::NAN;
+    }
+    if nn1in >= i32::MAX as f64 || nn2in >= i32::MAX as f64 || kkin >= i32::MAX as f64 {
+        if kkin == 1.0 {
+            return rbinom(rng, kkin, nn1in / (nn1in + nn2in));
+        }
+        return qhyper(rng.unif_rand(), nn1in, nn2in, kkin, false, false);
+    }
+    let nn1 = nn1in as i32;
+    let nn2 = nn2in as i32;
+    let kk = kkin as i32;
+    let total = nn1 as f64 + nn2 as f64;
+    let (n1, n2) = if nn1 <= nn2 { (nn1, nn2) } else { (nn2, nn1) };
+    let k = if kk as f64 + kk as f64 >= total {
+        (total - kk as f64) as i32
+    } else {
+        kk
+    };
+    let m = ((k as f64 + 1.0) * (n1 as f64 + 1.0) / (total + 2.0)) as i32;
+    let minjx = 0.max(k - n2);
+    let maxjx = n1.min(k);
+    let ix: i32;
+    if minjx == maxjx {
+        ix = maxjx;
+    } else if m - minjx < 10 {
+        let lw = if k < n2 {
+            afc(n2) + afc(n1 + n2 - k) - afc(n2 - k) - afc(n1 + n2)
+        } else {
+            afc(n1) + afc(k) - afc(k - n2) - afc(n1 + n2)
+        };
+        let w = (lw + CON).exp();
+        'restart: loop {
+            let mut candidate = minjx;
+            let mut u = rng.unif_rand() * SCALE;
+            let mut p = w;
+            while u > p {
+                u -= p;
+                p *= (n1 as f64 - candidate as f64) * (k - candidate) as f64;
+                candidate += 1;
+                p = p / candidate as f64 / (n2 - k + candidate) as f64;
+                if candidate > maxjx {
+                    continue 'restart;
+                }
+            }
+            ix = candidate;
+            break;
+        }
+    } else {
+        let s =
+            ((total - k as f64) * k as f64 * n1 as f64 * n2 as f64 / (total - 1.0) / total / total)
+                .sqrt();
+        let d = ((1.5 * s) as i32) as f64 + 0.5;
+        let xl = m as f64 - d + 0.5;
+        let xr = m as f64 + d + 0.5;
+        let a = afc(m) + afc(n1 - m) + afc(k - m) + afc(n2 - k + m);
+        let kl = (a
+            - afc(xl as i32)
+            - afc((n1 as f64 - xl) as i32)
+            - afc((k as f64 - xl) as i32)
+            - afc((n2 as f64 - k as f64 + xl) as i32))
+        .exp();
+        let kr = (a
+            - afc((xr - 1.0) as i32)
+            - afc((n1 as f64 - xr + 1.0) as i32)
+            - afc((k as f64 - xr + 1.0) as i32)
+            - afc((n2 as f64 - k as f64 + xr - 1.0) as i32))
+        .exp();
+        let lamdl =
+            -(xl * (n2 as f64 - k as f64 + xl) / (n1 as f64 - xl + 1.0) / (k as f64 - xl + 1.0))
+                .ln();
+        let lamdr =
+            -((n1 as f64 - xr + 1.0) * (k as f64 - xr + 1.0) / xr / (n2 as f64 - k as f64 + xr))
+                .ln();
+        let p1 = d + d;
+        let p2 = p1 + kl / lamdl;
+        let p3 = p2 + kr / lamdr;
+        let mut n_uv = 0;
+        loop {
+            let u = rng.unif_rand() * p3;
+            let mut v = rng.unif_rand();
+            n_uv += 1;
+            if n_uv >= 10000 {
+                warning(format!(
+                    "rhyper(*, n1={nn1}, n2={nn2}, k={kk}): branch III: giving up after {n_uv} rejections"
+                ));
+                return f64::NAN;
+            }
+            let candidate: i32;
+            if u < p1 {
+                candidate = (xl + u) as i32;
+            } else if u <= p2 {
+                candidate = (xl + v.ln() / lamdl) as i32;
+                if candidate < minjx {
+                    continue;
+                }
+                v *= (u - p1) * lamdl;
+            } else {
+                candidate = (xr - v.ln() / lamdr) as i32;
+                if candidate > maxjx {
+                    continue;
+                }
+                v *= (u - p2) * lamdr;
+            }
+            let accept;
+            if m < 100 || candidate <= 50 {
+                let mut f = 1.0;
+                if m < candidate {
+                    for i in m + 1..=candidate {
+                        f = f * (n1 - i + 1) as f64 * (k - i + 1) as f64
+                            / (n2 - k + i) as f64
+                            / i as f64;
+                    }
+                } else if m > candidate {
+                    for i in candidate + 1..=m {
+                        f = f * i as f64 * (n2 - k + i) as f64
+                            / (n1 - i + 1) as f64
+                            / (k - i + 1) as f64;
+                    }
+                }
+                accept = v <= f;
+            } else {
+                let y = candidate as f64;
+                let y1 = y + 1.0;
+                let ym = y - m as f64;
+                let yn = n1 as f64 - y + 1.0;
+                let yk = k as f64 - y + 1.0;
+                let nk = n2 as f64 - k as f64 + y1;
+                let r = -ym / y1;
+                let s = ym / yn;
+                let t = ym / yk;
+                let e = -ym / nk;
+                let g = yn * yk / (y1 * nk) - 1.0;
+                let dg = if g < 0.0 { 1.0 + g } else { 1.0 };
+                let gu = g * (1.0 + g * (-0.5 + g / 3.0));
+                let gl = gu - 0.25 * (g * g * g * g) / dg;
+                let xm = m as f64 + 0.5;
+                let xn = n1 as f64 - m as f64 + 0.5;
+                let xk = k as f64 - m as f64 + 0.5;
+                let nm = n2 as f64 - k as f64 + xm;
+                let ub = y * gu - m as f64 * gl
+                    + DELTAU
+                    + xm * r * (1.0 + r * (-0.5 + r / 3.0))
+                    + xn * s * (1.0 + s * (-0.5 + s / 3.0))
+                    + xk * t * (1.0 + t * (-0.5 + t / 3.0))
+                    + nm * e * (1.0 + e * (-0.5 + e / 3.0));
+                let alv = v.ln();
+                if alv > ub {
+                    accept = false;
+                } else {
+                    let mut dr = xm * (r * r * r * r);
+                    if r < 0.0 {
+                        dr /= 1.0 + r;
+                    }
+                    let mut ds = xn * (s * s * s * s);
+                    if s < 0.0 {
+                        ds /= 1.0 + s;
+                    }
+                    let mut dt = xk * (t * t * t * t);
+                    if t < 0.0 {
+                        dt /= 1.0 + t;
+                    }
+                    let mut de = nm * (e * e * e * e);
+                    if e < 0.0 {
+                        de /= 1.0 + e;
+                    }
+                    if alv < ub - 0.25 * (dr + ds + dt + de) + (y + m as f64) * (gl - gu) - DELTAL {
+                        accept = true;
+                    } else {
+                        accept = alv
+                            <= a - afc(candidate)
+                                - afc(n1 - candidate)
+                                - afc(k - candidate)
+                                - afc(n2 - k + candidate);
+                    }
+                }
+            }
+            if accept {
+                ix = candidate;
+                break;
+            }
+        }
+    }
+    let ix = if kk as f64 + kk as f64 >= total {
+        if nn1 > nn2 { kk - nn2 + ix } else { nn1 - ix }
+    } else if nn1 > nn2 {
+        kk - ix
+    } else {
+        ix
+    };
+    ix as f64
+}
+
+pub fn rsignrank(rng: &mut Rng, n: f64) -> f64 {
+    if n.is_nan() {
+        return n;
+    }
+    let n = forceint(n);
+    if n < 0.0 {
+        return f64::NAN;
+    }
+    if n == 0.0 {
+        return 0.0;
+    }
+    let mut r = 0.0;
+    for i in 1..=n as i32 {
+        r += i as f64 * (rng.unif_rand() + 0.5).floor();
+    }
+    r
+}
+
+pub fn rwilcox(rng: &mut Rng, m: f64, n: f64) -> f64 {
+    if m.is_nan() || n.is_nan() {
+        return m + n;
+    }
+    let m = forceint(m);
+    let n = forceint(n);
+    if m < 0.0 || n < 0.0 {
+        return f64::NAN;
+    }
+    if m == 0.0 || n == 0.0 {
+        return 0.0;
+    }
+    let mut k = (m + n) as usize;
+    let mut x: Vec<i32> = (0..k as i32).collect();
+    let mut r = 0.0;
+    for _ in 0..n as usize {
+        let j = rng.unif_index(k as f64) as usize;
+        r += x[j] as f64;
+        k -= 1;
+        x[j] = x[k];
+    }
+    r - n * (n - 1.0) / 2.0
+}
+
+/// One multinomial draw: successive binomials on the remaining probability mass.
+pub fn rmultinom(
+    rng: &mut Rng,
+    n: c_int,
+    probabilities: &[f64],
+    result: &mut [c_int],
+) -> ApiResult<()> {
+    let count = probabilities.len().min(result.len());
+    if count == 0 {
+        return Ok(());
+    }
+    if n == heap::object::NA_INTEGER || n < 0 {
+        result[0] = heap::object::NA_INTEGER;
+        return Ok(());
+    }
+    let mut total = 0.0;
+    for (k, &probability) in probabilities.iter().take(count).enumerate() {
+        if !finite(probability) || !(0.0..=1.0).contains(&probability) {
+            result[k] = heap::object::NA_INTEGER;
+            return Ok(());
+        }
+        total += probability;
+        result[k] = 0;
+    }
+    if (total - 1.0).abs() > 1e-7 {
+        return Err(error(format!(
+            "rbinom: probability sum should be 1, but is {}",
+            format_g(total)
+        )));
+    }
+    if n == 0 || (count == 1 && total == 0.0) {
+        return Ok(());
+    }
+    let mut left = n;
+    for k in 0..count - 1 {
+        if probabilities[k] != 0.0 {
+            let p = probabilities[k] / total;
+            result[k] = if p < 1.0 {
+                rbinom(rng, left as f64, p) as c_int
+            } else {
+                left
+            };
+            left -= result[k];
+        } else {
+            result[k] = 0;
+        }
+        if left <= 0 {
+            return Ok(());
+        }
+        total -= probabilities[k];
+    }
+    result[count - 1] = left;
+    Ok(())
+}
+
+/// C's `%g` for the few messages that print a number that way.
+fn format_g(value: f64) -> String {
+    if value == 0.0 || (1e-4..1e6).contains(&value.abs()) {
+        let text = format!("{value:.6}");
+        let text = text.trim_end_matches('0').trim_end_matches('.');
+        let digits = text.chars().filter(char::is_ascii_digit).count();
+        if digits <= 6 {
+            return text.to_owned();
+        }
+        let precision = 6usize.saturating_sub(value.abs().log10().floor() as usize + 1);
+        let text = format!("{value:.precision$}");
+        return text.trim_end_matches('0').trim_end_matches('.').to_owned();
+    }
+    format!("{value:e}")
+}

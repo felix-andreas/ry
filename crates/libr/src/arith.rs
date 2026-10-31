@@ -97,6 +97,69 @@ impl Rng {
         y as f64 * 2.3283064365386963e-10
     }
 
+    /// A standard normal deviate by inversion, GNU R's default: two uniforms make one with
+    /// more than 32 random bits, since a single 32-bit uniform leaves gaps in the far tails.
+    pub fn norm_rand(&mut self) -> f64 {
+        const BIG: f64 = 134217728.0;
+        let mut u = self.unif_rand();
+        u = (BIG * u).trunc() + self.unif_rand();
+        crate::rmath::qnorm(u / BIG, 0.0, 1.0, true, false)
+    }
+
+    /// A standard exponential deviate by Ahrens and Dieter's algorithm SA (1972).
+    pub fn exp_rand(&mut self) -> f64 {
+        // q[k] = sum_{i=1}^{k+1} log(2)^i / i!, truncated to sixteen digits as the paper
+        // tabulates them.
+        #[allow(clippy::excessive_precision)]
+        const Q: [f64; 16] = [
+            std::f64::consts::LN_2,
+            0.9333736875190459,
+            0.9888777961838675,
+            0.9984959252914960040,
+            0.9998292811061389,
+            0.9999833164100727,
+            0.9999985691438767,
+            0.9999998906925558,
+            0.9999999924734159,
+            0.9999999995283275,
+            0.9999999999728814,
+            0.9999999999985598,
+            0.9999999999999289,
+            0.9999999999999968,
+            0.9999999999999999,
+            1.0000000000000000,
+        ];
+        let mut a = 0.0;
+        let mut u = self.unif_rand();
+        while u <= 0.0 || u >= 1.0 {
+            u = self.unif_rand();
+        }
+        loop {
+            u += u;
+            if u > 1.0 {
+                break;
+            }
+            a += Q[0];
+        }
+        u -= 1.0;
+        if u <= Q[0] {
+            return a + u;
+        }
+        let mut i = 0;
+        let mut umin = self.unif_rand();
+        loop {
+            let ustar = self.unif_rand();
+            if umin > ustar {
+                umin = ustar;
+            }
+            i += 1;
+            if u <= Q[i] {
+                break;
+            }
+        }
+        a + umin * Q[0]
+    }
+
     /// `R_unif_index` under rejection sampling: uniform on `0..n` without the bias of
     /// `floor(n * unif_rand())`.
     pub fn unif_index(&mut self, n: f64) -> f64 {
@@ -192,6 +255,28 @@ pub unsafe extern "C" fn PutRNGstate() {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unif_rand() -> f64 {
     runtime().rng.unif_rand()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_rand() -> f64 {
+    runtime().rng.norm_rand()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn exp_rand() -> f64 {
+    runtime().rng.exp_rand()
+}
+
+/// `Sampletype`'s `REJECTION`, the only discrete-uniform method ry implements.
+#[unsafe(no_mangle)]
+pub extern "C" fn R_sample_kind() -> c_int {
+    1
+}
+
+/// `Binomtype`'s `BUGGY_BTPE`: `rbinom` reproduces the stream of GNU R before the BTPE fix.
+#[unsafe(no_mangle)]
+pub extern "C" fn R_binom_kind() -> c_int {
+    0
 }
 
 #[unsafe(no_mangle)]

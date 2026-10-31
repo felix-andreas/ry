@@ -89,3 +89,11 @@ path = "tests/test_corpus_calls.rs"
 [[test]]
 name = "test_numerics"
 path = "tests/test_numerics.rs"
+
+[[test]]
+name = "test_rmath"
+path = "tests/test_rmath.rs"
+
+[[test]]
+name = "test_fuzz_rmath"
+path = "tests/test_fuzz_rmath.rs"

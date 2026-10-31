@@ -34,6 +34,7 @@ pub mod legacy;
 pub mod linpack;
 pub mod lists;
 pub mod memory;
+pub mod rmath;
 pub mod serialize;
 pub mod strings;
 pub mod utils;
