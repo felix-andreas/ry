@@ -1766,26 +1766,34 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the runtime
 
-What step 2 of `contributing/design/r-runtime.md` left for later steps, most pressing first.
+What steps 2 and 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
 
-- **`Rf_eval` evaluates only constants, symbols, promises and calls to nine primitives.** Closures,
-  `R_ParseVector` and `Rf_PrintValue` wait for the interpreter (step 3).
-- **The rest of the measured API surface.** Of the 409 measured API and experimental names, 310 are
-  exported. The missing ones include Rmath (`Rf_sign`, the distribution functions), the S4 slot
-  functions, connections, `.C` and `.Fortran`, BLAS and LAPACK, and the graphics engine.
-- **`R_GetCCallable` cannot load the providing namespace**, so a callable registered by a package
-  that is not loaded yet is an error instead of a namespace load.
-- **ALTREP `Duplicate`, `Inspect` and `Extract_subset` are stored but never called**; duplication
-  materializes a regular vector.
-- **R-level finalizers** (`R_RegisterFinalizer` with a closure) cannot run until closures can, and a
-  finalized weak reference stays in the weak list with a `NULL` key.
+- **Evaluation needs the interpreter.** `Rf_eval`, `R_ParseVector`, `Rf_PrintValue`, R-level
+  finalizers, S4 class lookup and namespace loading all go through `libr::eval::Evaluator`; until
+  the interpreter installs one, only the built-in evaluator of native calls and nine primitives
+  runs. Packages whose `R_init_*` evaluates R code (S7, yaml, nanoarrow) cannot load before then.
+- **Base packages' own libraries** (utils, tools, methods, grDevices, stats) import GNU R
+  internals (`R_print`, `getPRIMNAME`, `R_ParseContextLast`, `Rf_utf8towcs`, ...). ry implements
+  those packages' internals in Rust instead, so their `.so` files are not a target; decide per
+  name when the interpreter reaches them.
+- **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
+  compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
+  exists. `bin/Rscript` in ry's R home delegates to GNU R until then.
+- **Graphics devices.** The engine is exported and errors when used (`graphics.rs`).
+- **Connections gaps:** bzip2 and xz file connections, sockets, and `pipe()` are not implemented.
+- **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
+  interpreter's `.Internal(inspect)` and subsetting.
+- **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
+- **R-level finalizers** cannot run until closures can, and a finalized weak reference stays in the
+  weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
   push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
   `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
 - **The handle scope retains a native loop's dropped temporaries until the call returns.** If a real
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
-- **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
-  only loader, so macOS and Windows need their own paths.
+- **Platforms.** The C symbol export relies on lld merging two version scripts, `dlopen` is the
+  only loader, and the `rcmd` toolchain assumes gcc and gfortran on Linux, so macOS and Windows
+  need their own paths.
 
 ## Explicitly out of scope for now
 
