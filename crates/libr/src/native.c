@@ -587,3 +587,43 @@ RY_EXPORT SEXP R_tryCatchError(SEXP (*body)(void *), void *bdata,
     UNPROTECT(1);
     return result;
 }
+
+/* ALTREP methods with SEXP results (crates/libr/src/altrep.rs). A method may return C NULL,
+   which means "use the default", so the result is passed back as a raw pointer. */
+
+#define RY_ALTREP_TRAMPOLINE(name, parameters, call)                                         \
+    int name parameters                                                                      \
+    {                                                                                        \
+        RyContext context;                                                                   \
+        ry_context_push(&context);                                                           \
+        if (setjmp(context.buffer)) {                                                        \
+            ry_context_land(&context);                                                       \
+            return 1;                                                                        \
+        }                                                                                    \
+        *result = call;                                                                      \
+        ry_context_pop(&context);                                                            \
+        return 0;                                                                            \
+    }
+
+RY_ALTREP_TRAMPOLINE(ry_altrep_with_flag,
+                     (SEXP (*method)(SEXP, Rboolean), SEXP x, int flag, SEXP *result),
+                     method(x, flag ? TRUE : FALSE))
+RY_ALTREP_TRAMPOLINE(ry_altrep_coerce, (SEXP (*method)(SEXP, int), SEXP x, int type, SEXP *result),
+                     method(x, type))
+RY_ALTREP_TRAMPOLINE(ry_altrep_state, (SEXP (*method)(SEXP), SEXP x, SEXP *result), method(x))
+RY_ALTREP_TRAMPOLINE(ry_altrep_unserialize,
+                     (SEXP (*method)(SEXP, SEXP), SEXP class, SEXP state, SEXP *result),
+                     method(class, state))
+RY_ALTREP_TRAMPOLINE(ry_altrep_unserialize_ex,
+                     (SEXP (*method)(SEXP, SEXP, SEXP, int, int), SEXP class, SEXP state,
+                      SEXP attributes, int object, int levels, SEXP *result),
+                     method(class, state, attributes, object, levels))
+RY_ALTREP_TRAMPOLINE(ry_altrep_extract_subset,
+                     (SEXP (*method)(SEXP, SEXP, SEXP), SEXP x, SEXP indices, SEXP call,
+                      SEXP *result),
+                     method(x, indices, call))
+RY_ALTREP_TRAMPOLINE(ry_altrep_inspect,
+                     (Rboolean (*method)(SEXP, int, int, int, void (*)(SEXP, int, int, int)),
+                      SEXP x, int pre, int deep, int pvec, void (*subtree)(SEXP, int, int, int),
+                      int *result),
+                     method(x, pre, deep, pvec, subtree))
