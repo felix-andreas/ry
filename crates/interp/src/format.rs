@@ -726,6 +726,19 @@ unsafe fn do_format_info(call: &Call<'_>) -> R<Sexp> {
                 if format.exponent == 0 { 0 } else { format.exponent as i32 - 1 },
             ])
         }
+        // The real and the imaginary part's width, digits and exponent width.
+        SexpType::Complex => {
+            let (real, imaginary) = format_complex_common(values::complexes(vector), settings);
+            let exponent = |format: &RealFormat| if format.exponent == 0 { 0 } else { format.exponent as i32 - 1 };
+            values::integer_vector(&[
+                real.width as i32,
+                real.decimals as i32,
+                exponent(&real),
+                imaginary.width as i32,
+                imaginary.decimals as i32,
+                exponent(&imaginary),
+            ])
+        }
         _ => {
             let items = format_vector(vector, settings, false, "NA")?;
             let width = items.iter().map(|item| display_width(item)).max().unwrap_or(0);
