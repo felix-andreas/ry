@@ -1,0 +1,24 @@
+[stdout]
+| [1] "a" "b"
+| $a
+| [1] 1
+| 
+| $b
+| [1] 2
+| 
+| [1] FALSE
+| [1] 6
+| [1] TRUE
+| [1] "R_GlobalEnv"
+| [1] ""
+| [1] "stats"
+| [1] "b"
+| [1] 2
+| [1] "object 'b' not found"
+| [1] "cannot change value of locked binding for 'b'"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "cannot change value of locked binding for 'b'"

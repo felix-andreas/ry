@@ -1,0 +1,27 @@
+[stdout]
+| [1] "greet"
+| Hello, Ada 
+| [1] FALSE
+| [1] TRUE
+| [1] 37
+| Hello, Bo 
+| [1] TRUE
+| <Person Ada>
+| <Person Bo>
+| [1] "invalid slot type"
+| Class "Person" [in ".GlobalEnv"]
+| 
+| Slots:
+|                           
+| Name:       name       age
+| Class: character   numeric
+| 
+| Known Subclasses: "Student"
+| [1] "invalid class “Person” object: age must be >= 0"
+| [1] 15
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 15

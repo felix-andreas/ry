@@ -31,3 +31,5 @@ roughly.toml
 # Fetched parser corpus (populate with scripts/fetch-corpus.rs; pinned inventory
 # lives in scripts/corpus-manifest.txt).
 /corpus/
+.corpus
+.bench

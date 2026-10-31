@@ -1,0 +1,15 @@
+[stdout]
+| [1] "a box"
+| [1] "reversed box"
+| [1] 3 1 2
+| [1] 1
+| [1] FALSE
+|    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+|       1       2       3      22       4     100 
+| [1] "no applicable method for 't.test2' applied to an object of class \"c('double', 'numeric')\""
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "no applicable method for 't.test2' applied to an object of class \"c('double', 'numeric')\""
