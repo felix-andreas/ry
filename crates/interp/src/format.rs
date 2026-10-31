@@ -239,31 +239,29 @@ pub fn format_logical(value: i32) -> &'static str {
 }
 
 /// A complex number's parts formatted together.
-pub fn format_complex_with(value: Rcomplex, real: RealFormat, imaginary: RealFormat) -> String {
+pub fn format_complex_with(value: Rcomplex, real: RealFormat, imaginary: RealFormat, digits: usize) -> String {
     if is_na_real(value.r) || is_na_real(value.i) {
         return "NA".into();
     }
-    let real_text = format_real_with(value.r, real, "NA");
-    let sign = if value.i < 0.0 || (value.i == 0.0 && value.i.is_sign_negative()) {
-        '-'
-    } else {
-        '+'
-    };
-    let imaginary_text = format_real_with(value.i.abs(), imaginary, "NA");
+    // GNU R rounds only to decide which parts print as zero and which sign the imaginary part
+    // shows; a nonzero part prints from its unrounded value.
+    let rounded = round_complex(value, digits);
+    let real_part = if rounded.r == 0.0 { 0.0 } else { value.r };
+    let imaginary_part = if rounded.i == 0.0 { 0.0 } else { value.i };
+    let real_text = format_real_with(real_part, real, "NA");
+    let sign = if imaginary_part < 0.0 { '-' } else { '+' };
+    let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
     format!("{real_text}{sign}{imaginary_text}i")
 }
 
 pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFormat, RealFormat) {
-    let reals: Vec<f64> = values
+    let rounded: Vec<Rcomplex> = values
         .iter()
         .filter(|value| !is_na_real(value.r) && !is_na_real(value.i))
-        .map(|value| value.r)
+        .map(|&value| round_complex(value, settings.digits))
         .collect();
-    let imaginaries: Vec<f64> = values
-        .iter()
-        .filter(|value| !is_na_real(value.r) && !is_na_real(value.i))
-        .map(|value| value.i.abs())
-        .collect();
+    let reals: Vec<f64> = rounded.iter().map(|value| value.r).collect();
+    let imaginaries: Vec<f64> = rounded.iter().map(|value| value.i.abs()).collect();
     (
         format_real_common(&reals, settings),
         format_real_common(&imaginaries, settings),
@@ -278,7 +276,34 @@ pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
         nsmall: 0,
     };
     let (real, imaginary) = format_complex_common(&[value], settings);
-    format_complex_with(value, real, imaginary)
+    format_complex_with(value, real, imaginary, digits)
+}
+
+/// `value` rounded to `digits` significant digits relative to its larger part, as GNU R's
+/// `z_prec_r` rounds before printing: a part far smaller than the other one prints as zero.
+fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
+    let magnitude = [value.r.abs(), value.i.abs()]
+        .into_iter()
+        .filter(|part| part.is_finite())
+        .fold(0.0, f64::max);
+    if magnitude == 0.0 || digits > 22 {
+        return value;
+    }
+    let decimals = digits.max(1) as i32 - magnitude.log10().floor() as i32 - 1;
+    let round = |part: f64, decimals: i32| {
+        if !part.is_finite() {
+            return part;
+        }
+        if decimals > 306 {
+            let scale = 1.0e4;
+            return crate::arith::round_digits(part * scale, decimals - 4) / scale;
+        }
+        crate::arith::round_digits(part, decimals)
+    };
+    Rcomplex {
+        r: round(value.r, decimals),
+        i: round(value.i, decimals),
+    }
 }
 
 /// The display width of text in a terminal.
@@ -398,7 +423,7 @@ pub unsafe fn format_vector(
                     if is_na_real(value.r) || is_na_real(value.i) {
                         na_string.to_owned()
                     } else {
-                        format_complex_with(value, real, imaginary)
+                        format_complex_with(value, real, imaginary, settings.digits)
                     }
                 })
                 .collect();
