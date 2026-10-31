@@ -1,0 +1,16 @@
+[stdout]
+| [1] "x must be positive"
+| [1] "2 > 3 is not TRUE"
+| [1] "'arg' should be one of “a”, “b”"
+| [1] "non-numeric argument to binary operator"
+| [1] "could not find function \"undefined_fn\""
+| [1] "object 'undefined_var' not found"
+| [1] "subscript out of bounds"
+| [1] "$ operator is invalid for atomic vectors"
+| [1] "non-numeric argument to mathematical function"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "non-numeric argument to mathematical function"

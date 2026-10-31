@@ -244,3 +244,15 @@ release-kind $version:
     	[0-9]*.[0-9]*.[0-9]*) echo release ;;
     	*) echo pre-release ;;
     esac
+
+# Install the benchmark dependency closure into .corpus/library (needs GNU R and network access).
+corpus:
+    Rscript tools/corpus/install.R
+
+# The differential oracle: `just oracle verify`, `record`, `compare` or `show FILE`.
+oracle *args:
+    cargo run -q -p oracle -- {{ args }}
+
+# Generate the synthetic benchmark code bases, e.g. `just bench-gen --out .bench --lines 10000`.
+bench-gen *args:
+    python3 -I tools/bench/generate.py {{ args }}

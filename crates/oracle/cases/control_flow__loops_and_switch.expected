@@ -1,0 +1,26 @@
+[stdout]
+| i = 1 
+| i = 2 
+| i = 3 
+| [1] 3
+| [1] 3
+| [1] 0
+| [1] "B"
+| [1] "other"
+| [1] "A or B"
+| [1] "y"
+| [1] TRUE
+| [1] "pos"
+| [1] "non-pos"
+| [1] "a"
+| [1] "b"
+| [1] "numeric"   "character" "logical"  
+| [1] 120
+| [1] 2 4 6
+| [1]  2  8 14 20
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(2, 8, 14, 20)

@@ -1,0 +1,27 @@
+[stdout]
+| [1]  1 99  3
+| List of 1
+|  $ a:List of 2
+|   ..$ b: num 2
+|   ..$ c: num 3
+| [1] "z"
+| [1] 1 2 3 0 0
+| [1] a B
+| Levels: a B
+| [1] 1
+| attr(,"k")
+| [1] "v"
+|      [,1] [,2]
+| [1,]    1    6
+| [2,]    0    1
+| [1] TRUE
+| [1] 3
+| [1]  3 18
+| [1] TRUE
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

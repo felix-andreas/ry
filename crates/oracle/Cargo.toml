@@ -1,0 +1,19 @@
+[package]
+name = "oracle"
+edition = "2024"
+version.workspace = true
+publish = false
+
+[lib]
+path = "src/oracle.rs"
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
