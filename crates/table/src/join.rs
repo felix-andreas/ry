@@ -18,19 +18,19 @@
 //! [`MAX_CODES`] values, rolling to the nearest value, and rolling over `NA`s give `None`, and
 //! the join runs as a Polars plan.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use polars::prelude::{Column, DataFrame, DataType, IdxCa, PlSmallStr};
-use polars_arrow::array::PrimitiveArray;
+use polars::prelude::{Column, DataFrame, DataType, PlSmallStr};
 use polars_arrow::bitmap::Bitmap;
-use polars_arrow::datatypes::ArrowDataType;
-use polars_buffer::Buffer;
 use polars_core::runtime::THREAD_POOL;
 use rayon::prelude::*;
 
 use crate::convert::factor_levels;
-use crate::kernel::{CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, pack_map};
+use crate::kernel::{
+    CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column, pack_map,
+};
 use crate::query::{I_PREFIX, Join, Mult, Roll};
 use crate::{Result, Table};
 
@@ -520,53 +520,88 @@ fn rolling(
             None => return Ok(None),
         }
     };
-    let roll_values = |column: &Column| -> Option<Buffer<f64>> {
-        if column.null_count() > 0 {
-            return None;
-        }
-        match Vector::of(column)? {
-            Vector::Integer { values, .. } => Some(Buffer::from(
-                values
-                    .iter()
-                    .map(|value| f64::from(*value))
-                    .collect::<Vec<_>>(),
-            )),
-            Vector::Double { values, .. } if !values.iter().any(|value| value.is_nan()) => {
-                Some(values)
-            }
-            _ => None,
-        }
-    };
     let (Ok(x_column), Ok(i_column)) = (x.column(x_roll), i.column(i_roll)) else {
         return Ok(None);
     };
-    if x_column.dtype() != i_column.dtype() {
+    if x_column.dtype() != i_column.dtype()
+        || x_column.null_count() > 0
+        || i_column.null_count() > 0
+    {
         return Ok(None);
     }
-    let (Some(x_values), Some(i_values)) = (roll_values(x_column), roll_values(i_column)) else {
+    let x_rows = match (Vector::of(x_column), Vector::of(i_column)) {
+        (
+            Some(Vector::Integer { values: x_values, .. }),
+            Some(Vector::Integer { values: i_values, .. }),
+        ) => roll(&keys, &x_values, &i_values, direction, limit),
+        (
+            Some(Vector::Double { values: x_values, .. }),
+            Some(Vector::Double { values: i_values, .. }),
+        ) if !x_values.iter().chain(i_values.iter()).any(|value| value.is_nan()) => {
+            roll(&keys, &x_values, &i_values, direction, limit)
+        }
+        _ => None,
+    };
+    let Some(x_rows) = x_rows else {
         return Ok(None);
     };
-    // Each group of `x` must be one run of rows with strictly increasing rolling values, which a
-    // table keyed on the join columns is.
+    let i_rows = fill(i_height, |start, out| {
+        for (offset, slot) in out.iter_mut().enumerate() {
+            slot.write((start + offset) as u32);
+        }
+    });
+    Ok(Some(Matches { i_rows, x_rows }))
+}
+
+/// Matches each row of `i` to a row of `x` by binary search within its group, or gives `None` when
+/// `x` is not one run of rows per group with strictly increasing rolling values, which a table
+/// keyed on the join columns is.
+fn roll<T>(
+    keys: &Keys,
+    x_values: &[T],
+    i_values: &[T],
+    direction: Direction,
+    limit: Option<f64>,
+) -> Option<Vec<u32>>
+where
+    T: Copy + PartialOrd + Into<f64> + Send + Sync,
+{
+    let x_height = x_values.len();
+    let chunk = PARALLEL_ROWS.max(x_height.div_ceil(THREAD_POOL.current_num_threads().max(1) * 4));
+    // Each chunk checks the rows it holds against their predecessors, so chunk borders are checked
+    // too, and lists where a new group starts.
+    let starts: Option<Vec<Vec<u32>>> = THREAD_POOL.install(|| {
+        (0..x_height.div_ceil(chunk))
+            .into_par_iter()
+            .map(|index| {
+                let mut starts = Vec::new();
+                for row in (index * chunk).max(1)..((index + 1) * chunk).min(x_height) {
+                    if keys.x[row] != keys.x[row - 1] {
+                        starts.push(row as u32);
+                    } else if x_values[row] <= x_values[row - 1] {
+                        return None;
+                    }
+                }
+                Some(starts)
+            })
+            .collect()
+    });
     let mut runs: Vec<Option<Range<u32>>> = vec![None; keys.radix as usize];
-    let mut start = 0usize;
-    for row in 1..=x_height {
-        let ends = row == x_height || keys.x[row] != keys.x[start];
-        if !ends {
-            if x_values[row] <= x_values[row - 1] {
-                return Ok(None);
-            }
+    let mut start = 0u32;
+    let ends = starts?.into_iter().flatten().chain(std::iter::once(x_height as u32));
+    for end in ends {
+        if end == 0 {
             continue;
         }
-        let slot = &mut runs[keys.x[start] as usize];
+        let slot = runs.get_mut(*keys.x.get(start as usize)? as usize)?;
         if slot.is_some() {
-            return Ok(None);
+            return None;
         }
-        *slot = Some(start as u32..row as u32);
-        start = row;
+        *slot = Some(start..end);
+        start = end;
     }
     let within = |distance: f64| limit.is_none_or(|limit| distance <= limit.abs());
-    let x_rows = fill(i_height, |start, out| {
+    Some(fill(i_values.len(), |start, out| {
         for (offset, slot) in out.iter_mut().enumerate() {
             let i_row = start + offset;
             let value = i_values[i_row];
@@ -574,29 +609,24 @@ fn rolling(
                 let values = &x_values[run.start as usize..run.end as usize];
                 let after = values.partition_point(|x_value| *x_value <= value);
                 match direction {
-                    Direction::Backward => after
-                        .checked_sub(1)
-                        .filter(|position| within(value - values[*position])),
+                    Direction::Backward => after.checked_sub(1).filter(|position| {
+                        within(value.into() - values[*position].into())
+                    }),
                     Direction::Forward => {
                         let at = if after > 0 && values[after - 1] == value {
                             after - 1
                         } else {
                             after
                         };
-                        (at < values.len() && within(values[at] - value)).then_some(at)
+                        (at < values.len() && within(values[at].into() - value.into()))
+                            .then_some(at)
                     }
                 }
                 .map(|position| run.start + position as u32)
             });
             slot.write(matched.unwrap_or(NO_ROW));
         }
-    });
-    let i_rows = fill(i_height, |start, out| {
-        for (offset, slot) in out.iter_mut().enumerate() {
-            slot.write((start + offset) as u32);
-        }
-    });
-    Ok(Some(Matches { i_rows, x_rows }))
+    }))
 }
 
 /// The joined frame in data.table's layout: `x`'s columns, with each join column carrying `i`'s
@@ -608,20 +638,17 @@ fn assemble(
     matches: &Matches,
 ) -> Result<DataFrame> {
     let height = matches.i_rows.len();
-    let i_index = IdxCa::from_vec(PlSmallStr::EMPTY, matches.i_rows.clone());
     let unmatched = pack_map(height, &matches.x_rows, |row| row != NO_ROW);
-    let x_index = if unmatched.unset_bits() == 0 {
-        IdxCa::from_vec(PlSmallStr::EMPTY, matches.x_rows.clone())
+    let (x_rows, keep) = if unmatched.unset_bits() == 0 {
+        (Cow::Borrowed(&matches.x_rows), None)
     } else {
-        let rows: Vec<u32> = matches
-            .x_rows
-            .iter()
-            .map(|row| if *row == NO_ROW { 0 } else { *row })
-            .collect();
-        IdxCa::with_chunk(
-            PlSmallStr::EMPTY,
-            PrimitiveArray::new(ArrowDataType::UInt32, Buffer::from(rows), Some(unmatched)),
-        )
+        let rows = fill(height, |start, out| {
+            let end = start + out.len();
+            for (slot, row) in out.iter_mut().zip(&matches.x_rows[start..end]) {
+                slot.write(if *row == NO_ROW { 0 } else { *row });
+            }
+        });
+        (Cow::Owned(rows), Some(unmatched))
     };
     let mut sources: Vec<(&Column, bool, PlSmallStr)> = Vec::with_capacity(x.width() + i.width());
     for column in x.columns() {
@@ -641,14 +668,16 @@ fn assemble(
         };
         sources.push((column, true, name));
     }
-    let columns: Vec<Column> = THREAD_POOL.install(|| {
-        sources
-            .par_iter()
-            .map(|(column, from_i, name)| {
-                let index = if *from_i { &i_index } else { &x_index };
-                Ok(column.take(index)?.with_name(name.clone()))
-            })
-            .collect::<Result<_>>()
-    })?;
+    // Each gather is parallel over rows, so the columns go one at a time.
+    let columns = sources
+        .into_iter()
+        .map(|(column, from_i, name)| {
+            if from_i {
+                gather_column(column, &matches.i_rows, None, name)
+            } else {
+                gather_column(column, &x_rows, keep.as_ref(), name)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(DataFrame::new(height, columns)?)
 }

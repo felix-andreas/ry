@@ -401,6 +401,15 @@ impl Table {
         }
     }
 
+    /// Wraps a frame whose columns already hold R dtypes, such as one gathered from other tables'
+    /// columns, without [`Table::new`]'s scan of every integer column for `i32::MIN`.
+    pub(crate) fn from_normalized(frame: DataFrame) -> Table {
+        Table {
+            frame,
+            key: Vec::new(),
+        }
+    }
+
     pub(crate) fn with_key(mut self, key: Vec<PlSmallStr>) -> Table {
         self.key = key;
         self

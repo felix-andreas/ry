@@ -19,13 +19,15 @@
 //! `length` and `.N`, with arithmetic on top of them), plus the `x[order(v), head(v, k), by]`
 //! top-k shape. Anything else returns `None`, and the query runs as a Polars plan.
 
-use polars::prelude::{Column, DataFrame, IdxCa, PlSmallStr};
+use polars::prelude::{Column, DataFrame, PlSmallStr};
 use polars_arrow::bitmap::Bitmap;
 use polars_buffer::Buffer;
 use polars_core::runtime::THREAD_POOL;
 use rayon::prelude::*;
 
-use crate::kernel::{CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, fill};
+use crate::kernel::{
+    CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, fill, gather_column,
+};
 use crate::query::{Aggregate, Expr, Query, Rows, Select, SortKey};
 use crate::{ColumnType, Result, Schema, Table};
 
@@ -666,22 +668,12 @@ fn key_columns(
     by: &[(PlSmallStr, Expr)],
     first_rows: &[u32],
 ) -> Result<Vec<Column>> {
-    let indices = IdxCa::from_vec(PlSmallStr::EMPTY, first_rows.to_vec());
     let mut columns = Vec::with_capacity(by.len());
     for (name, expr) in by {
         let Expr::Column(source) = expr else {
             continue;
         };
-        let column = frame.column(source)?;
-        let taken = match Vector::of(column) {
-            Some(vector) => vector.gather(first_rows).into_column(name.clone()),
-            None => {
-                let mut taken = column.take(&indices)?;
-                taken.rename(name.clone());
-                taken
-            }
-        };
-        columns.push(taken);
+        columns.push(gather_column(frame.column(source)?, first_rows, None, name.clone())?);
     }
     Ok(columns)
 }
@@ -1373,11 +1365,12 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
     match state {
         State::IntegerSum { sums, missing } => {
             let validity = validity(&|slot| missing[slot]);
+            // R's integer sum is an integer when every total fits and a double otherwise. An `NA`
+            // total stops R's sum before it can overflow, so it fits whatever was added.
             let fits = order.iter().all(|slot| {
-                let sum = sums[*slot as usize];
-                sum > i64::from(i32::MIN) && sum <= i64::from(i32::MAX)
+                let (sum, missing) = (sums[*slot as usize], missing[*slot as usize]);
+                missing || (sum > i64::from(i32::MIN) && sum <= i64::from(i32::MAX))
             });
-            // R's integer sum is an integer when every total fits and a double otherwise.
             if fits {
                 Vector::Integer {
                     values: Buffer::from(gather_slots(order, |slot| sums[slot] as i32)),

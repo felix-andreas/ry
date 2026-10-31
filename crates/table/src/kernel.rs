@@ -14,7 +14,8 @@ use std::mem::MaybeUninit;
 
 use polars::prelude::{
     BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
-    Float64Type, Int32Chunked, Int32Type, IntoColumn, PlSmallStr,
+    Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr, UInt8Chunked,
+    UInt16Chunked, UInt32Chunked,
 };
 use polars_arrow::array::{BooleanArray, PrimitiveArray};
 use polars_arrow::bitmap::{Bitmap, MutableBitmap};
@@ -450,7 +451,7 @@ impl Codes {
         })
     }
 
-    fn gather(&self, rows: &[u32]) -> Codes {
+    pub(crate) fn gather(&self, rows: &[u32]) -> Codes {
         Codes {
             values: match &self.values {
                 CodeValues::U8(values) => CodeValues::U8(gather_values(values, rows)),
@@ -1348,6 +1349,64 @@ pub(crate) fn and(left: Option<&Bitmap>, right: Option<&Bitmap>) -> Option<Bitma
         (Some(bits), None) | (None, Some(bits)) => Some(bits.clone()),
         (Some(left), Some(right)) => Some(left & right),
     }
+}
+
+/// The column's values at `rows`, in that order, as a column named `name`. A row whose bit in `keep`
+/// is unset becomes `NA`, and its entry in `rows` may be any row. Logical, integer, double and factor
+/// columns gather in parallel chunks; other columns go through Polars' `take`.
+pub(crate) fn gather_column(
+    column: &Column,
+    rows: &[u32],
+    keep: Option<&Bitmap>,
+    name: PlSmallStr,
+) -> Result<Column> {
+    if column.is_empty() {
+        return Ok(Column::full_null(name, rows.len(), column.dtype()));
+    }
+    if let Some(vector) = Vector::of(column) {
+        let gathered = vector.gather(rows);
+        let validity = and(gathered.validity(), keep);
+        let gathered = match gathered {
+            Vector::Logical { values, .. } => Vector::Logical { values, validity },
+            Vector::Integer { values, .. } => Vector::Integer { values, validity },
+            Vector::Double { values, .. } => Vector::Double { values, validity },
+        };
+        return Ok(gathered.into_column(name));
+    }
+    if matches!(column.dtype(), DataType::Enum(..))
+        && let Some(codes) = Codes::of(column)
+    {
+        let gathered = codes.gather(rows);
+        let validity = and(gathered.validity.as_ref(), keep);
+        let physical = match gathered.values {
+            CodeValues::U8(values) => UInt8Chunked::with_chunk(
+                name,
+                PrimitiveArray::new(ArrowDataType::UInt8, values, validity),
+            )
+            .into_series(),
+            CodeValues::U16(values) => UInt16Chunked::with_chunk(
+                name,
+                PrimitiveArray::new(ArrowDataType::UInt16, values, validity),
+            )
+            .into_series(),
+            CodeValues::U32(values) => UInt32Chunked::with_chunk(
+                name,
+                PrimitiveArray::new(ArrowDataType::UInt32, values, validity),
+            )
+            .into_series(),
+        };
+        // SAFETY: the codes come from a column of this dtype, so each is one of its levels.
+        return Ok(unsafe { physical.from_physical_unchecked(column.dtype()) }?.into_column());
+    }
+    let index = IdxCa::with_chunk(
+        PlSmallStr::EMPTY,
+        PrimitiveArray::new(
+            ArrowDataType::UInt32,
+            Buffer::from(rows.to_vec()),
+            keep.cloned(),
+        ),
+    );
+    Ok(column.take(&index)?.with_name(name))
 }
 
 pub(crate) fn gather_values<T: Copy + Send + Sync>(values: &[T], rows: &[u32]) -> Buffer<T> {

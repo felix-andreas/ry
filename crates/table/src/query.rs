@@ -228,7 +228,7 @@ fn run(table: &mut Table, query: Query, kernels: bool) -> Result<Output> {
     if kernels && let Rows::Join(join) = &query.rows {
         let on = join_columns(join, table.key())?;
         if let Some(frame) = join::join(table, join, &on)? {
-            let mut joined = Table::new(frame)?;
+            let mut joined = Table::from_normalized(frame);
             let query = Query {
                 rows: Rows::All,
                 ..query

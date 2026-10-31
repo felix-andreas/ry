@@ -1261,6 +1261,47 @@ fn an_integer_sum_that_overflows_becomes_double() {
     );
 }
 
+/// R's integer `sum` returns `NA` as soon as it meets one without `na.rm`, so a group holding an `NA`
+/// never overflows, and only the groups that really overflow make the result a double.
+#[test]
+fn an_na_group_sum_neither_overflows_nor_loses_its_na() {
+    use table::query::execute_with_plans_only;
+    let plus_one = || Query {
+        select: Select::Columns(vec![named(
+            "s",
+            binary(
+                BinaryOp::Add,
+                aggregate(Aggregate::Sum, column("v")),
+                Expr::Integer(1),
+            ),
+        )]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    let cases = [
+        (
+            vec![1, 1, 2, 3],
+            vec![2_000_000_000, 2_000_000_000, 1, NA_INTEGER],
+            doubles(&[4e9 + 1.0, 2.0, NA_REAL]),
+        ),
+        (
+            vec![1, 1, 2],
+            vec![2_000_000_000, NA_INTEGER, 1],
+            ints(&[NA_INTEGER, 2]),
+        ),
+    ];
+    for (g, v, expected) in cases {
+        let x = frame(vec![("g", ints(&g)), ("v", ints(&v))]);
+        let mut kernel = run_table(&mut x.fork(), plus_one());
+        assert_eq!(read(&mut kernel, "s"), expected.clone(), "kernel");
+        let mut planned = match execute_with_plans_only(&mut x.fork(), plus_one()) {
+            Ok(Output::Table(result)) => result,
+            other => panic!("expected a table, got {other:?}"),
+        };
+        assert_eq!(read(&mut planned, "s"), expected, "plan");
+    }
+}
+
 fn factor(codes: &[i32], levels: &[&str]) -> RVector {
     RVector::Factor {
         codes: codes.to_vec(),
@@ -1517,17 +1558,29 @@ fn random_lookup(rng: &mut SplitMix64, rows: usize) -> Table {
 
 /// Prices keyed on `(g, t)`, with `t` strictly increasing within each `g`, and trades to roll
 /// onto them.
+/// Prices keyed on `(g, t)` and trades to roll onto them. The time is an integer or a double, and
+/// sometimes repeats within a group, which the rolling kernel leaves to the plan.
 fn random_series(rng: &mut SplitMix64, rows: usize) -> (Table, Table) {
     let groups = 1 + rng.below(6) as i32;
+    let repeats = rng.chance(1, 4);
+    let doubled = rng.chance(1, 3);
+    let column_of = |values: Vec<i32>| {
+        if doubled {
+            doubles(&values.iter().map(|value| f64::from(*value) / 2.0).collect::<Vec<_>>())
+        } else {
+            ints(&values)
+        }
+    };
     let mut g = Vec::with_capacity(rows);
     let mut t = Vec::with_capacity(rows);
     let mut price = Vec::with_capacity(rows);
     for row in 0..rows {
         g.push(1 + rng.below(groups as usize) as i32);
-        t.push(row as i32 * 3 + rng.below(3) as i32);
+        let step = if repeats { row / 2 } else { row };
+        t.push(step as i32 * 3 + rng.below(3) as i32);
         price.push(rng.below(500) as f64 / 4.0);
     }
-    let mut prices = frame(vec![("g", ints(&g)), ("t", ints(&t)), ("price", doubles(&price))]);
+    let mut prices = frame(vec![("g", ints(&g)), ("t", column_of(t)), ("price", doubles(&price))]);
     prices
         .set_key(&["g", "t"])
         .unwrap_or_else(|error| panic!("cannot key the prices: {error}"));
@@ -1536,7 +1589,7 @@ fn random_series(rng: &mut SplitMix64, rows: usize) -> (Table, Table) {
     let trade_g: Vec<i32> = (0..trades_rows).map(|_| rng.below(groups as usize + 1) as i32).collect();
     let trade_t: Vec<i32> = (0..trades_rows).map(|_| rng.below(span as usize) as i32 - 10).collect();
     let qty: Vec<i32> = (0..trades_rows).map(|_| rng.below(100) as i32).collect();
-    let trades = frame(vec![("g", ints(&trade_g)), ("t", ints(&trade_t)), ("qty", ints(&qty))]);
+    let trades = frame(vec![("g", ints(&trade_g)), ("t", column_of(trade_t)), ("qty", ints(&qty))]);
     (prices, trades)
 }
 
