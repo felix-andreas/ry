@@ -6,11 +6,11 @@
 use crate::Db;
 use crate::types::{
     Atomic, Constraint, FunctionType, Name, Parameter, RecordField, RestParameter, Ty, TyKind,
-    TypeScheme, any, null, scalar, union_of, unknown,
+    TypeScheme, any, null, scalar, substitute_rigid, union_of, unknown,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem::take;
-use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Annotation<'db> {
@@ -236,7 +236,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
             .unwrap_or_else(|| unknown(db));
         lowering.definition_type = false;
         annotation.declared = Some(TypeScheme::monomorphic(ty));
-        return lowering.finish(annotation, site.text_range());
+        return lowering.finish(annotation, inline_range(site));
     }
     let mut forall = Vec::new();
     if let Some(list) = site
@@ -291,7 +291,21 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
             }),
         ),
     });
-    lowering.finish(annotation, site.text_range())
+    lowering.finish(annotation, inline_range(site))
+}
+
+/// The written inline annotations of a site, from the first to the last, so a finding
+/// about the whole annotation never covers the value or the body.
+fn inline_range(site: &SyntaxNode) -> TextRange {
+    let mut parts = site
+        .descendants()
+        .filter(is_inline_annotation)
+        .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
+        .map(|node| node.text_range());
+    let Some(first) = parts.next() else {
+        return site.text_range();
+    };
+    parts.fold(first, |covered, part| covered.cover(part))
 }
 
 /// One formal of a `function(...)` literal, as the parser wrote it.
@@ -355,11 +369,25 @@ pub fn merge_annotations<'db>(
         return Some(comment);
     };
     // A binding's `: TYPE` replaces the whole declared type; only a signature merges by slot.
-    let (TyKind::Function(comment_function), TyKind::Function(inline_function), Some(signature)) = (
+    let (TyKind::Function(_), TyKind::Function(inline_function), Some(signature)) = (
         comment_scheme.body.kind(db),
         inline_scheme.body.kind(db),
         signature.filter(|site| site.kind() == SyntaxKind::FUNCTION_DEF),
     ) else {
+        return Some(inline);
+    };
+    // Type parameters pair by position, so the comment's types are read in the inline
+    // names before slots mix.
+    let renaming: FxHashMap<Name<'db>, Ty<'db>> = comment_scheme
+        .binders
+        .iter()
+        .zip(&inline_scheme.binders)
+        .map(|((comment_name, _), (inline_name, _))| {
+            (*comment_name, Ty::new(db, TyKind::Rigid(*inline_name)))
+        })
+        .collect();
+    let renamed = substitute_rigid(db, comment_scheme.body, &renaming);
+    let TyKind::Function(comment_function) = renamed.kind(db) else {
         return Some(inline);
     };
     let formals = formals(signature);
@@ -424,12 +452,15 @@ pub fn merge_annotations<'db>(
     } else {
         inline_function.ret
     };
-    let mut binders = comment_scheme.binders.clone();
-    for binder in &inline_scheme.binders {
-        if !binders.iter().any(|(name, _)| *name == binder.0) {
-            binders.push(*binder);
-        }
-    }
+    // An inline binder wins over the comment binder in its position, constraint included.
+    let mut binders = inline_scheme.binders.clone();
+    binders.extend(
+        comment_scheme
+            .binders
+            .iter()
+            .skip(inline_scheme.binders.len())
+            .copied(),
+    );
     Some(Annotation {
         declared: Some(TypeScheme {
             binders,

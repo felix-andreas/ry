@@ -782,8 +782,8 @@ annotation it means: `function(x: integer) -> integer` is `fn(x: integer) -> int
 Docs: `reference/type-system.md#inline-annotation-syntax`.
 
 **Why this shape.** The record above gives the product reasons. The binding form is recognized only where a statement starts
-(top level, directly inside `{}`), by a shallow token scan for a `<-` or `=` at bracket depth 0 on the
-line, so `x:y`, `x:y < -1` and every argument stay ranges. Rejected: `declare(type(...))` calls (valid
+(top level, directly inside `{}`), by a shallow token scan for a `<-` or `=` outside every bracket, where only `(`, `[` and `{` carry
+the scan past a line break (`<` and `>` are also comparisons), so `x:y`, `x:y < -1` and every argument stay ranges. Rejected: `declare(type(...))` calls (valid
 R, but a runtime call per binding and no natural place for parameter or return types), `let x: T`
 (new keyword), `x <- value :: T` (`::` is R's namespace operator), and `function(x): T` (`->`
 mirrors the existing `fn(...) -> T`).
@@ -805,8 +805,9 @@ binding also has a `: TYPE`, the function's own signature types it and the bindi
 against the result (`check_item_with_annotation` skips the declared-function path when the value
 carries its own annotation).
 
-**Both spellings on one statement** merge per slot (value, parameter, rest, return) with the inline
-type winning, except that a `#:` coercion form (`@trust`, `@if-unknown`, `@new`) governs the value
+**Both spellings on one statement** merge per slot (value, parameter, rest, return), and type
+parameters pair by position (the comment's are renamed to the inline names first), with the inline
+side winning, except that a `#:` coercion form (`@trust`, `@if-unknown`, `@new`) governs the value
 (`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
 file-absolute ranges, comparing types after alias expansion and union-member sorting, so the warning
 can point at both written types. Positional comment parameter types pair with formals the way
@@ -819,7 +820,8 @@ sites type nothing and each warns (`inline-annotation`), and hosts warn once per
 **Strict mode reports untyped parameters**, by a `noImplicitAny`-style rule: an unannotated parameter
 whose type is `Unknown`, or a fresh unconstrained variable of its own function's level that no other
 parameter and not the return mentions. The level check keeps a closure parameter tied to an
-enclosing function clean. Unification with `Unknown` never binds a variable, so a rule on `Unknown`
+enclosing function clean, and a lambda passed as an argument is skipped, because the call types its
+parameters only after the lambda is inferred. Unification with `Unknown` never binds a variable, so a rule on `Unknown`
 alone would never fire. Returns and bindings get no finding of their own: every undetermined one
 traces to an origin, a type error, or a project binding reported at its definition, and a separate
 finding would break "one undetermined value, one finding".

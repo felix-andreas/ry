@@ -6,7 +6,7 @@ use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
 use crate::hir::{
     Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
-    UnaryOperator, integer_literal_position, is_whole_number_double,
+    Parameter as Formal, UnaryOperator, integer_literal_position, is_whole_number_double,
 };
 use crate::infer::{
     Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
@@ -1244,7 +1244,7 @@ impl<'db> Checker<'db, '_> {
                     .pop()
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty);
-                let signature: Vec<(&crate::hir::Parameter, Option<Ty<'db>>)> = parameters
+                let signature: Vec<(&Formal, Option<Ty<'db>>)> = parameters
                     .iter()
                     .filter(|parameter| parameter.name != "...")
                     .zip(&named)
@@ -1404,7 +1404,7 @@ impl<'db> Checker<'db, '_> {
     fn record_untyped_parameters(
         &mut self,
         function: ExprId,
-        parameters: &[(&crate::hir::Parameter, Option<Ty<'db>>)],
+        parameters: &[(&Formal, Option<Ty<'db>>)],
         ret: Ty<'db>,
     ) {
         let db = self.db;
@@ -1435,12 +1435,27 @@ impl<'db> Checker<'db, '_> {
                 }
                 _ => false,
             };
+            if !untyped {
+                continue;
+            }
+            // A lambda passed as an argument gets its parameters' types from the call, which
+            // unifies only after the lambda is inferred, so it is not judged here.
+            let is_argument = self.module.expressions.iter().any(|expression| {
+                matches!(
+                    &expression.kind,
+                    ExpressionKind::Call { arguments, .. } | ExpressionKind::Index { arguments, .. }
+                        if arguments.iter().any(|argument| argument.value == Some(function))
+                )
+            });
+            if is_argument {
+                return;
+            }
             let origin = StrictOrigin {
                 expression: function,
                 range: parameter.range,
                 kind: StrictOriginKind::UntypedParameter(parameter.name.clone()),
             };
-            if untyped && !self.strict_origins.contains(&origin) {
+            if !self.strict_origins.contains(&origin) {
                 self.strict_origins.push(origin);
             }
         }
@@ -3053,7 +3068,7 @@ impl<'db> Checker<'db, '_> {
 
         let mut missing_tested = FxHashSet::default();
         self.collect_missing_tested(*body, &mut missing_tested);
-        let is_optional = |parameter: &crate::hir::Parameter| {
+        let is_optional = |parameter: &Formal| {
             parameter.default.is_some() || missing_tested.contains(&parameter.name)
         };
 
@@ -3174,7 +3189,7 @@ impl<'db> Checker<'db, '_> {
 
         let pending_mark = self.pending_enclosing_writes.len();
         let mark = self.environment.mark();
-        let untyped_candidates: Vec<(&crate::hir::Parameter, Option<Ty<'db>>)> = parameters
+        let untyped_candidates: Vec<(&Formal, Option<Ty<'db>>)> = parameters
             .iter()
             .zip(&formal_types)
             .filter(|(parameter, _)| parameter.name != "...")

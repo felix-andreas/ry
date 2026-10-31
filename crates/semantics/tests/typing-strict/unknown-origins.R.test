@@ -63,7 +63,7 @@ get_value <- function(node) node$value
 #++++
 == R/main.R
 get_value: <T> fn(node: T) -> Unknown
-22..26 error[strict] strict mode: parameter `node` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `node: TYPE`
+22..26 error[strict] strict mode: parameter `node` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `node: TYPE`
 28..38 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- double_bracket_on_unannotated_param_is_a_strict_origin
@@ -72,7 +72,7 @@ first <- function(x) x[[1L]]
 #++++
 == R/main.R
 first: <T> fn(x: T) -> Unknown
-18..19 error[strict] strict mode: parameter `x` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+18..19 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 21..28 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- bracket_on_unannotated_param_is_a_strict_origin
@@ -81,7 +81,7 @@ slice <- function(x) x[1L]
 #++++
 == R/main.R
 slice: <T> fn(x: T) -> Unknown
-18..19 error[strict] strict mode: parameter `x` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+18..19 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 21..26 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- combine_of_unannotated_param_is_a_strict_origin
@@ -90,7 +90,7 @@ grow <- function(x) c(x, 1L)
 #++++
 == R/main.R
 grow: <T> fn(x: T) -> Unknown
-17..18 error[strict] strict mode: parameter `x` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+17..18 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 20..28 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #==== per_file_directive

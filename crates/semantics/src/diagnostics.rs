@@ -11,7 +11,7 @@ use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, TypeScheme, map_child_types,
-    union_of,
+    substitute_rigid, union_of,
 };
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
@@ -128,16 +128,16 @@ fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     }
     let mut diagnostics = Vec::new();
     if !inline_annotations_enabled(db) {
-        for node in sites
-            .iter()
-            .flat_map(|site| site.descendants())
+        for node in parsed
+            .syntax_node()
+            .descendants()
             .filter(syntax::is_inline_annotation)
         {
             diagnostics.push(Diagnostic::new(
                 node.text_range(),
                 Severity::Warning,
                 "inline-annotation",
-                "inline type annotations are turned off in `ry.toml`, so this one is not checked. R itself cannot run this code: delete the annotation, or set `[check] inline-annotations = true`".to_owned(),
+                "inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on".to_owned(),
             ));
         }
         return diagnostics;
@@ -683,6 +683,66 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
         let signature = (site.kind() == SyntaxKind::FUNCTION_DEF).then_some(&site);
         let comment_slots = comment_slots(db, &comment, signature);
         let lowered_comment = lower_annotation(db, &comment);
+        // Type parameters compare by position, so `<T>` and `<U>` over the same signature
+        // agree; each binder's constraint is compared on its own.
+        let comment_binders = lowered_comment
+            .declared
+            .as_ref()
+            .map(|declared| declared.binders.clone())
+            .unwrap_or_default();
+        let inline_binders = lower_inline_annotation(db, &site)
+            .declared
+            .map(|declared| declared.binders)
+            .unwrap_or_default();
+        let comment_names = positional_binders(db, &comment_binders);
+        let inline_names = positional_binders(db, &inline_binders);
+        let binder_nodes = |node: &SyntaxNode| -> Vec<TextRange> {
+            node.descendants()
+                .filter(|binder| binder.kind() == SyntaxKind::TYPE_BINDER)
+                .map(|binder| binder.text_range())
+                .collect()
+        };
+        let comment_binder_ranges = binder_nodes(&comment);
+        let inline_binder_ranges = (site.kind() == SyntaxKind::FUNCTION_DEF)
+            .then(|| {
+                site.children()
+                    .find(|child| child.kind() == SyntaxKind::TYPE_BINDER_LIST)
+                    .map(|list| binder_nodes(&list))
+            })
+            .flatten()
+            .unwrap_or_default();
+        for (index, ((_, inline_constraint), (_, comment_constraint))) in
+            inline_binders.iter().zip(&comment_binders).enumerate()
+        {
+            let (Some(&inline_range), Some(&comment_range)) = (
+                inline_binder_ranges.get(index),
+                comment_binder_ranges.get(index),
+            ) else {
+                continue;
+            };
+            if inline_constraint == comment_constraint {
+                continue;
+            }
+            let describe = |constraint: &Constraint| match constraint.spelling() {
+                Some(spelling) => format!("`{spelling}`"),
+                None => "no constraint".to_owned(),
+            };
+            diagnostics.push(Diagnostic {
+                range: inline_range,
+                severity: Severity::Warning,
+                code: "annotation-mismatch",
+                message: format!(
+                    "the inline annotation gives this type parameter {}, but the `#:` comment gives it {}. ry uses the inline one; make the two agree, or delete one",
+                    describe(inline_constraint),
+                    describe(comment_constraint)
+                ),
+                related: vec![RelatedLocation {
+                    file,
+                    range: comment_range,
+                    message: "the `#:` comment's type parameter is here",
+                }],
+            });
+        }
         let governing = if lowered_comment.trusted {
             Some("@trust")
         } else if lowered_comment.if_unknown {
@@ -696,12 +756,17 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             let Some(written) = comment_slots.iter().find(|slot| slot.slot == inline.slot) else {
                 continue;
             };
-            if same_type(db, inline.ty, written.ty, &definitions) {
+            if same_type(
+                db,
+                substitute_rigid(db, inline.ty, &inline_names),
+                substitute_rigid(db, written.ty, &comment_names),
+                &definitions,
+            ) {
                 continue;
             }
-            let mut renderer = TypeRenderer::default();
-            let inline_type = renderer.render(db, inline.ty);
-            let comment_type = renderer.render(db, written.ty);
+            // Each side renders on its own, so its type parameters keep their written names.
+            let inline_type = TypeRenderer::default().render(db, inline.ty);
+            let comment_type = TypeRenderer::default().render(db, written.ty);
             let disagreement = match &inline.slot {
                 Slot::Value => format!(
                     "this binding's inline annotation says `{inline_type}`, but its `#:` comment says `{comment_type}`"
@@ -735,6 +800,24 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
         }
     }
     diagnostics
+}
+
+/// Renames type parameters by position, so two signatures that differ only in what
+/// they call their type parameters compare equal.
+fn positional_binders<'db>(
+    db: &'db dyn Db,
+    binders: &[(Name<'db>, Constraint)],
+) -> FxHashMap<Name<'db>, Ty<'db>> {
+    binders
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| {
+            (
+                *name,
+                Ty::new(db, TyKind::Rigid(Name::new(db, format!("#{index}")))),
+            )
+        })
+        .collect()
 }
 
 /// Equal once aliases are expanded and union members are put in one order.
@@ -1569,7 +1652,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         "strict mode: could not determine the full type of `{name}`, because it is defined recursively. Add a type annotation"
                     ),
                     StrictOriginKind::UntypedParameter(name) => format!(
-                        "strict mode: parameter `{}` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `{}: TYPE`",
+                        "strict mode: parameter `{}` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `{}: TYPE`",
                         display_name(name),
                         display_name(name)
                     ),

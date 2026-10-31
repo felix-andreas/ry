@@ -79,3 +79,13 @@ f <- function() {
   total: double <- 0
   total
 }
+
+#---- list_return_type_before_a_body_on_the_next_line
+g <- function(x) -> list
+{
+  list(x)
+}
+#++++
+g <- function(x) -> list {
+  list(x)
+}

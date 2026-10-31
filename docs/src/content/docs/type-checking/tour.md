@@ -339,7 +339,7 @@ describe <- function(x) cat("a value\n")
 ```
 
 ```text
-x strict mode: parameter `x` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 ```
 
 `Any` is also compatible with everything, but a value declared `Any`, such as the result of a

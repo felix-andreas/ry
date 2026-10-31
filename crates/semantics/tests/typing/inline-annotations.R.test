@@ -302,3 +302,21 @@ count: list[integer <- 1L
 #++++
 Unknown
 11..12 error[syntax-error] unclosed `[`; expected `]` to close it
+
+#==== inline_binders
+#---- inline_binder_constraint_wins
+#: <T> fn(x: T) -> T
+g <- function<T: numeric>(x: T) -> T x
+g("a")
+#++++
+g: <T: numeric> fn(x: T) -> T
+T
+35..45 warning[annotation-mismatch] the inline annotation gives this type parameter `numeric`, but the `#:` comment gives it no constraint. ry uses the inline one; make the two agree, or delete one
+  = 4..5 the `#:` comment's type parameter is here
+62..65 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- differently_named_binders_agree
+#: <T> fn(x: T) -> T
+h <- function<U>(x: U) -> U x
+#++++
+h: <T> fn(x: T) -> T

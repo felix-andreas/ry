@@ -3,7 +3,7 @@
 describe <- function(x) cat("value\n")
 #++++
 describe: <T> fn(x: T) -> NULL
-21..22 error[strict] strict mode: parameter `x` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+21..22 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 
 #---- an_annotated_parameter_is_typed
 describe <- function(x: Any) cat("value\n")
@@ -32,7 +32,7 @@ increment: <T: numeric> fn(x: T) -> T
 add <- function(x: integer, unused) x
 #++++
 add: fn(x: integer, unused: Unknown) -> integer
-28..34 error[strict] strict mode: parameter `unused` has no type. Nothing in the body constrains it, so any value is accepted unchecked. Annotate it, as in `unused: TYPE`
+28..34 error[strict] strict mode: parameter `unused` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `unused: TYPE`
 
 #---- rest_parameters_are_not_reported
 join <- function(...) paste0(...)
@@ -48,3 +48,10 @@ apply_to: <T, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
 doubled <- lapply(1:3, function(x) x * 2L)
 #++++
 doubled: list[integer]
+
+#---- a_lambda_passed_to_a_callback_parameter_is_not_judged
+apply_one <- function(f: fn(integer) -> NULL) f(1L)
+apply_one(function(x) NULL)
+#++++
+apply_one: fn(f: fn(integer) -> NULL) -> NULL
+NULL

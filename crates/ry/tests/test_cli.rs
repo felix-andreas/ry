@@ -1320,7 +1320,7 @@ fn check_warns_while_inline_annotations_are_off_and_ignores_them() {
         run.stderr.contains(&heading(
             "inline-annotation",
             '!',
-            "inline type annotations are turned off in `ry.toml`, so this one is not checked"
+            "inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked"
         )),
         "{}",
         run.stderr

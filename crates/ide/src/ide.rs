@@ -1505,10 +1505,16 @@ fn is_type_directive(directive: &SyntaxNode) -> bool {
 }
 
 /// The type parameters a region's types may name: a `#:` block's own binders, or the
-/// `<...>` of the function an inline annotation belongs to.
+/// `<...>` of the function an inline parameter or return type belongs to.
 fn binder_names(region: &SyntaxNode) -> Vec<String> {
+    // A binding's type sees no enclosing function's binders, as in the checker.
     let binders = if region.kind() == ANNOTATION {
         Some(region.clone())
+    } else if region
+        .parent()
+        .is_some_and(|parent| parent.kind() == BINARY_EXPR)
+    {
+        None
     } else {
         region
             .ancestors()

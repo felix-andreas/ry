@@ -654,10 +654,17 @@ impl Parser<'_> {
                 "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
                     self.ann_list_brackets(end);
                 }
-                "list" if self.ann_next_significant(end) == Some(L_BRACE) => {
+                // Inline, a body may follow a return type, so `list {` and `fn (` with a
+                // space start the body; only the hugging spelling is the type.
+                "list"
+                    if self.ann_next_significant(end) == Some(L_BRACE)
+                        && (!self.inline_type || self.next_token_is(L_BRACE)) =>
+                {
                     self.ann_list_braces(end);
                 }
-                "fn" if self.ann_next_significant(end) == Some(L_PAREN) => {
+                "fn" if self.ann_next_significant(end) == Some(L_PAREN)
+                    && (!self.inline_type || self.next_token_is(L_PAREN)) =>
+                {
                     self.ann_function_type(end);
                 }
                 _ => {
@@ -709,6 +716,11 @@ impl Parser<'_> {
             }
             self.finish();
         }
+    }
+
+    /// The token right after the current one, with no trivia between.
+    fn next_token_is(&self, kind: SyntaxKind) -> bool {
+        self.tokens.get(self.pos + 1).map(|token| token.kind) == Some(kind)
     }
 
     fn ann_next_significant(&self, end: usize) -> Option<SyntaxKind> {
@@ -1110,14 +1122,20 @@ impl Parser<'_> {
             return None;
         }
         pos += 1;
+        // `<` and `>` are also R's comparisons, so only a real bracket lets the type run
+        // past a line break: `x:y < z` on one line and `a > b <- 1` on the next stay two
+        // statements.
         let mut depth = 0u32;
+        let mut angles = 0u32;
         loop {
             match kind_at(pos)? {
                 WHITESPACE | COMMENT => {}
                 NEWLINE if depth > 0 => {}
-                L_PAREN | L_BRACKET | L_BRACE | LESS => depth += 1,
-                R_PAREN | R_BRACKET | R_BRACE | GREATER => depth = depth.checked_sub(1)?,
-                LESS_MINUS | EQ if depth == 0 => return Some(pos),
+                L_PAREN | L_BRACKET | L_BRACE => depth += 1,
+                R_PAREN | R_BRACKET | R_BRACE => depth = depth.checked_sub(1)?,
+                LESS => angles += 1,
+                GREATER => angles = angles.checked_sub(1)?,
+                LESS_MINUS | EQ if depth == 0 && angles == 0 => return Some(pos),
                 IDENT | NULL_KW | PIPE | COMMA | COLON | MINUS_GREATER | DOTS => {}
                 _ => return None,
             }

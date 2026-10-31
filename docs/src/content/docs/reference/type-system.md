@@ -135,9 +135,9 @@ literal. A binding's type is recognized only where a statement starts, at the to
 directly inside `{ }`. Elsewhere, such as in a braceless `if` branch, `y: integer <- 1L` is R's
 reading of `y:integer` as an assignment target, which is reported as a syntax error.
 
-A return type is read as far as the type grammar reaches, and the body starts after it. One
-consequence is that `-> list {x}` reads `list{x}` as a record or tuple type: write the type without
-a space before `{` only when you mean the type.
+A return type is read as far as the type grammar reaches, and the body starts after it. A list or
+function type must hug its bracket, as the formatter writes it: `-> list{name: character}` is a
+record type, while in `-> list {` and `-> fn (` the bracket starts the body.
 
 A mistake in an inline type's grammar is a `syntax-error`, because the statement cannot be read
 until it is fixed. A type that parses but means nothing, such as an unknown type name or a record
@@ -167,7 +167,9 @@ where a slot is the binding's value, one parameter, the rest parameter, or the r
 A slot typed both ways with different types is reported as `annotation-mismatch`, a warning at the
 inline type that points at the comment's type, so the reader always learns which one ry uses.
 Types are compared as types: an alias agrees with its expansion, and `integer | character` agrees
-with `character | integer`. A positional parameter type in a compact `#:` annotation is compared with
+with `character | integer`. Type parameters pair by position, so `<T>` in the comment and `<U>` in
+the code agree, and a binder whose constraint differs is reported the same way, with the inline
+constraint winning. A positional parameter type in a compact `#:` annotation is compared with
 the formal it pairs with.
 
 ```r
@@ -183,7 +185,7 @@ apply_discount <- function(price: integer, rate) price * (1 - rate)
 ### Turning inline annotations off
 
 `[check] inline-annotations = false` in `ry.toml` turns inline annotations off, for code that must
-also run under R. An annotation that is off types nothing, and each one is reported as an
+also run under R. An annotation that is off types nothing, and each one is reported once as an
 `inline-annotation` warning, because R cannot run that code. ry also warns once per run, and the
 language server once per load, for as long as the setting stays off. A `#:` block on the same
 statement then applies alone.
@@ -2375,16 +2377,21 @@ describe <- function(x) cat("a value\n")
 ```
 
 ```text
-x strict mode: parameter `x` has no type. Nothing in the body constrains it, so any value is
-  accepted unchecked. Annotate it, as in `x: TYPE`
+x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any
+  value is accepted unchecked. Annotate it, as in `x: TYPE`
 ```
 
 A type variable that the signature mentions twice is genuine polymorphism, so `function(x) x`
 (`<T> fn(x: T) -> T`) and `function(flag, a, b) if (flag) a else b` are not reported. Neither is a
 constrained variable such as `<T: numeric>`, a variable tied to an enclosing function, such as the
-inner `x` in `function(f) function(x) f(x)`, or a parameter typed by the call it is passed to, such as
-`x` in `lapply(1:3, function(x) x * 2L)`. A `...` formal is never reported. Annotate a parameter that
-really accepts anything as `Any`, which strict mode treats as a deliberate choice.
+inner `x` in `function(f) function(x) f(x)`. A lambda passed as an argument is not judged at all,
+because the call gives its parameters their types only after the lambda is inferred. A `...` formal is
+never reported, and a default does not count as a type, because an unannotated parameter takes its
+type from its uses. Annotate a parameter that really accepts anything as `Any`, which strict mode
+treats as a deliberate choice.
+
+The parameter finding is about the declaration, so it can stand beside an origin in the body that it
+feeds, as in `function(node) node$value`, where annotating `node` would fix both.
 
 Returns and bindings are not reported separately. An undetermined return or binding always traces
 back to one of the origins below, a type error, or a reference to a project binding whose own
