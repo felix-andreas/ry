@@ -11,7 +11,7 @@
 use crate::{ColumnType, Error, Result, Schema, Table};
 use polars::prelude::{
     AsOfOptions, AsofStrategy, DataFrame, DataType, ExplodeOptions, Expr as PolarsExpr, IntoLazy,
-    JoinType, NamedFrom, LazyFrame, MaintainOrderJoin, PlSmallStr, Scalar, Series,
+    JoinType, LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
     SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
 };
 
@@ -103,7 +103,11 @@ pub enum Expr {
     Na(ColumnType),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
-    Aggregate { function: Aggregate, arg: Box<Expr>, na_rm: bool },
+    Aggregate {
+        function: Aggregate,
+        arg: Box<Expr>,
+        na_rm: bool,
+    },
     /// `.N`, the number of rows in the group.
     Count,
     /// `head(x, n)`, which keeps the group's first `n` values rather than collapsing them.
@@ -164,7 +168,11 @@ pub mod build {
     }
 
     pub fn aggregate(function: Aggregate, arg: Expr) -> Expr {
-        Expr::Aggregate { function, arg: Box::new(arg), na_rm: false }
+        Expr::Aggregate {
+            function,
+            arg: Box::new(arg),
+            na_rm: false,
+        }
     }
 
     pub fn binary(op: BinaryOp, left: Expr, right: Expr) -> Expr {
@@ -187,16 +195,25 @@ pub enum Output {
 pub fn execute(table: &mut Table, query: Query) -> Result<Output> {
     let schema = table.schema();
     if let Select::Assign(assignments) = &query.select {
-        return assign(table, &schema, &query.rows, &query.by, assignments).map(|()| Output::Updated);
+        return assign(table, &schema, &query.rows, &query.by, assignments)
+            .map(|()| Output::Updated);
     }
     let value = matches!(query.select, Select::Value(_)) && query.by.is_empty();
     let keyed = query.keyed;
-    let key: Vec<PlSmallStr> = if keyed { query.by.iter().map(|(name, _)| name.clone()).collect() } else { Vec::new() };
-    let keeps_rows = matches!(query.select, Select::All) && matches!(query.rows, Rows::All | Rows::Filter(_) | Rows::Positions(_));
+    let key: Vec<PlSmallStr> = if keyed {
+        query.by.iter().map(|(name, _)| name.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    let keeps_rows = matches!(query.select, Select::All)
+        && matches!(query.rows, Rows::All | Rows::Filter(_) | Rows::Positions(_));
     let plan = plan(table, query)?;
     let frame = plan.collect()?;
     if value {
-        let column = frame.columns().first().ok_or_else(|| Error::Query("the query selected nothing".to_string()))?;
+        let column = frame
+            .columns()
+            .first()
+            .ok_or_else(|| Error::Query("the query selected nothing".to_string()))?;
         return Ok(Output::Vector(column.as_materialized_series().clone()));
     }
     let mut result = Table::new(frame)?;
@@ -218,8 +235,15 @@ pub fn plan(table: &mut Table, query: Query) -> Result<LazyFrame> {
     let nulls = NullCounts::of(&frame);
     let (plan, schema) = rows(frame.lazy(), &schema, &key, &nulls, &query.rows)?;
     // A join changes which columns may hold nulls, so its output is treated as nullable.
-    let nulls = if matches!(query.rows, Rows::Join(_)) { NullCounts::default() } else { nulls };
-    let lower = Lowering { schema: &schema, nulls: &nulls };
+    let nulls = if matches!(query.rows, Rows::Join(_)) {
+        NullCounts::default()
+    } else {
+        nulls
+    };
+    let lower = Lowering {
+        schema: &schema,
+        nulls: &nulls,
+    };
     match query.select {
         Select::All => {
             if !query.by.is_empty() {
@@ -227,8 +251,16 @@ pub fn plan(table: &mut Table, query: Query) -> Result<LazyFrame> {
             }
             Ok(plan)
         }
-        Select::Value(expr) if query.by.is_empty() => Ok(plan.select([lower.expr(&expr)?.alias("V1")])),
-        Select::Value(expr) => grouped(plan, &lower, &query.by, query.keyed, &[(PlSmallStr::from_static("V1"), expr)]),
+        Select::Value(expr) if query.by.is_empty() => {
+            Ok(plan.select([lower.expr(&expr)?.alias("V1")]))
+        }
+        Select::Value(expr) => grouped(
+            plan,
+            &lower,
+            &query.by,
+            query.keyed,
+            &[(PlSmallStr::from_static("V1"), expr)],
+        ),
         Select::Columns(columns) if query.by.is_empty() => {
             let mut exprs = Vec::with_capacity(columns.len());
             for (name, expr) in &columns {
@@ -237,7 +269,9 @@ pub fn plan(table: &mut Table, query: Query) -> Result<LazyFrame> {
             Ok(plan.select(exprs))
         }
         Select::Columns(columns) => grouped(plan, &lower, &query.by, query.keyed, &columns),
-        Select::Assign(_) => Err(Error::Query("a `:=` query updates the table and has no plan of its own".to_string())),
+        Select::Assign(_) => Err(Error::Query(
+            "a `:=` query updates the table and has no plan of its own".to_string(),
+        )),
     }
 }
 
@@ -259,7 +293,9 @@ pub fn result_type(schema: &Schema, query: &Query) -> Result<ResultType> {
         }
         Rows::All | Rows::Positions(_) => schema.clone(),
     };
-    let typer = Typer { schema: &rows_schema };
+    let typer = Typer {
+        schema: &rows_schema,
+    };
     let mut columns = Vec::new();
     for (name, expr) in &query.by {
         columns.push((name.clone(), typer.expr(expr)?));
@@ -303,7 +339,13 @@ pub enum ResultType {
 }
 
 /// Applies `i` to the plan and returns the schema of the rows it selects.
-fn rows(plan: LazyFrame, schema: &Schema, key: &[PlSmallStr], nulls: &NullCounts, rows: &Rows) -> Result<(LazyFrame, Schema)> {
+fn rows(
+    plan: LazyFrame,
+    schema: &Schema,
+    key: &[PlSmallStr],
+    nulls: &NullCounts,
+    rows: &Rows,
+) -> Result<(LazyFrame, Schema)> {
     let lower = Lowering { schema, nulls };
     Ok(match rows {
         Rows::All => (plan, schema.clone()),
@@ -342,9 +384,14 @@ fn join_columns(join: &Join, key: &[PlSmallStr]) -> Result<Vec<(PlSmallStr, PlSm
         return Ok(join.on.clone());
     }
     if key.is_empty() {
-        return Err(Error::Query("a join needs `on =` or a keyed table".to_string()));
+        return Err(Error::Query(
+            "a join needs `on =` or a keyed table".to_string(),
+        ));
     }
-    Ok(key.iter().map(|column| (column.clone(), column.clone())).collect())
+    Ok(key
+        .iter()
+        .map(|column| (column.clone(), column.clone()))
+        .collect())
 }
 
 /// The prefix data.table gives a column of `i` whose name `x` already uses.
@@ -353,7 +400,12 @@ const I_PREFIX: &str = "i.";
 /// collide with a real column name.
 const CLASH_SUFFIX: &str = "\u{1}x";
 
-fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, PlSmallStr)]) -> Result<LazyFrame> {
+fn join_plan(
+    x: LazyFrame,
+    x_schema: &Schema,
+    join: &Join,
+    on: &[(PlSmallStr, PlSmallStr)],
+) -> Result<LazyFrame> {
     let i_table = Table::new(join.other.clone())?;
     let i_schema = i_table.schema();
     let mut x = x;
@@ -363,12 +415,17 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
     // strings, since their codes index different level sets.
     let mut restore = Vec::new();
     for (x_column, i_column) in on {
-        let x_type = x_schema.column(x_column).ok_or_else(|| Error::NoColumn(x_column.to_string()))?;
-        let i_type = i_schema.column(i_column).ok_or_else(|| Error::NoColumn(i_column.to_string()))?;
+        let x_type = x_schema
+            .column(x_column)
+            .ok_or_else(|| Error::NoColumn(x_column.to_string()))?;
+        let i_type = i_schema
+            .column(i_column)
+            .ok_or_else(|| Error::NoColumn(i_column.to_string()))?;
         let common = match (x_type, i_type) {
             (ColumnType::Factor, ColumnType::Factor | ColumnType::Character)
             | (ColumnType::Character, ColumnType::Factor) => DataType::String,
-            (ColumnType::Integer, ColumnType::Double) | (ColumnType::Double, ColumnType::Integer) => DataType::Float64,
+            (ColumnType::Integer, ColumnType::Double)
+            | (ColumnType::Double, ColumnType::Integer) => DataType::Float64,
             (x_type, i_type) if x_type == i_type => continue,
             (x_type, i_type) => {
                 return Err(Error::Query(format!(
@@ -391,7 +448,11 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
             .with(x)
             .left_on(left_on)
             .right_on(right_on)
-            .how(if join.drop_unmatched { JoinType::Inner } else { JoinType::Left })
+            .how(if join.drop_unmatched {
+                JoinType::Inner
+            } else {
+                JoinType::Left
+            })
             .maintain_order(MaintainOrderJoin::Left)
             .suffix(CLASH_SUFFIX)
             .finish(),
@@ -402,14 +463,18 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
                 Roll::Nearest => (AsofStrategy::Nearest, None),
                 Roll::None => unreachable!("handled above"),
             };
-            let (x_roll, i_roll) = on.last().ok_or_else(|| Error::Query("a rolling join needs a join column".to_string()))?;
+            let (x_roll, i_roll) = on
+                .last()
+                .ok_or_else(|| Error::Query("a rolling join needs a join column".to_string()))?;
             let groups = &on[..on.len() - 1];
             let options = AsOfOptions {
                 strategy,
                 tolerance: tolerance.map(|limit| Scalar::from(limit.abs())),
                 tolerance_str: None,
-                left_by: (!groups.is_empty()).then(|| groups.iter().map(|(_, column)| column.clone()).collect()),
-                right_by: (!groups.is_empty()).then(|| groups.iter().map(|(column, _)| column.clone()).collect()),
+                left_by: (!groups.is_empty())
+                    .then(|| groups.iter().map(|(_, column)| column.clone()).collect()),
+                right_by: (!groups.is_empty())
+                    .then(|| groups.iter().map(|(column, _)| column.clone()).collect()),
                 allow_eq: true,
                 check_sortedness: false,
             };
@@ -417,12 +482,22 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
             // `i` is sorted first and restored to its own order afterwards. `x` is sorted the same
             // way, which is free when it is keyed on these columns.
             const ROW: &str = "\u{1}row";
-            let mut sort_i: Vec<PolarsExpr> = groups.iter().map(|(_, column)| col(column.clone())).collect();
+            let mut sort_i: Vec<PolarsExpr> = groups
+                .iter()
+                .map(|(_, column)| col(column.clone()))
+                .collect();
             sort_i.push(col(i_roll.clone()));
-            let mut sort_x: Vec<PolarsExpr> = groups.iter().map(|(column, _)| col(column.clone())).collect();
+            let mut sort_x: Vec<PolarsExpr> = groups
+                .iter()
+                .map(|(column, _)| col(column.clone()))
+                .collect();
             sort_x.push(col(x_roll.clone()));
-            let options_sort = SortMultipleOptions::default().with_maintain_order(true).with_nulls_last(true);
-            let i = i.with_row_index(ROW, None).sort_by_exprs(sort_i, options_sort.clone());
+            let options_sort = SortMultipleOptions::default()
+                .with_maintain_order(true)
+                .with_nulls_last(true);
+            let i = i
+                .with_row_index(ROW, None)
+                .sort_by_exprs(sort_i, options_sort.clone());
             let x = x.sort_by_exprs(sort_x, options_sort);
             let mut matched = i
                 .join_builder()
@@ -441,7 +516,11 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
                     .find(|(column, _)| !on.iter().any(|(x_column, _)| x_column == column))
                     .map(|(column, _)| column.clone());
                 if let Some(column) = unmatched {
-                    let name = if i_schema.column(&column).is_some() { format!("{column}{CLASH_SUFFIX}").into() } else { column };
+                    let name = if i_schema.column(&column).is_some() {
+                        format!("{column}{CLASH_SUFFIX}").into()
+                    } else {
+                        column
+                    };
                     matched = matched.filter(col(name).is_not_null());
                 }
             }
@@ -479,23 +558,38 @@ fn join_plan(x: LazyFrame, x_schema: &Schema, join: &Join, on: &[(PlSmallStr, Pl
 
 fn column_dtype(i: &LazyFrame, column: &str) -> Result<DataType> {
     let schema = i.clone().collect_schema()?;
-    Ok(schema.get(column).ok_or_else(|| Error::NoColumn(column.to_string()))?.clone())
+    Ok(schema
+        .get(column)
+        .ok_or_else(|| Error::NoColumn(column.to_string()))?
+        .clone())
 }
 
 fn join_schema(x: &Schema, join: &Join) -> Result<Schema> {
     let i = Table::new(join.other.clone())?.schema();
     let mut columns = x.columns.clone();
     for (column, kind) in &i.columns {
-        if join.on.iter().any(|(_, i_column)| i_column == column) || (join.on.is_empty() && x.column(column).is_some()) {
+        if join.on.iter().any(|(_, i_column)| i_column == column)
+            || (join.on.is_empty() && x.column(column).is_some())
+        {
             continue;
         }
-        let name = if x.column(column).is_some() { format!("{I_PREFIX}{column}").into() } else { column.clone() };
+        let name = if x.column(column).is_some() {
+            format!("{I_PREFIX}{column}").into()
+        } else {
+            column.clone()
+        };
         columns.push((name, *kind));
     }
     Ok(Schema { columns })
 }
 
-fn grouped(plan: LazyFrame, lower: &Lowering, by: &[(PlSmallStr, Expr)], keyed: bool, columns: &[(PlSmallStr, Expr)]) -> Result<LazyFrame> {
+fn grouped(
+    plan: LazyFrame,
+    lower: &Lowering,
+    by: &[(PlSmallStr, Expr)],
+    keyed: bool,
+    columns: &[(PlSmallStr, Expr)],
+) -> Result<LazyFrame> {
     let mut groups = Vec::with_capacity(by.len());
     for (name, expr) in by {
         groups.push(lower.expr(expr)?.alias(name.clone()));
@@ -511,12 +605,20 @@ fn grouped(plan: LazyFrame, lower: &Lowering, by: &[(PlSmallStr, Expr)], keyed: 
     // data.table keeps groups in order of first appearance for `by` and sorts them for `keyby`.
     let mut result = if keyed {
         let names: Vec<PlSmallStr> = by.iter().map(|(name, _)| name.clone()).collect();
-        plan.group_by(groups).agg(aggregations).sort(names, SortMultipleOptions::default().with_nulls_last(false))
+        plan.group_by(groups)
+            .agg(aggregations)
+            .sort(names, SortMultipleOptions::default().with_nulls_last(false))
     } else {
         plan.group_by_stable(groups).agg(aggregations)
     };
     if !expands.is_empty() {
-        result = result.explode(by_name(expands, true, false), ExplodeOptions { empty_as_null: false, keep_nulls: true });
+        result = result.explode(
+            by_name(expands, true, false),
+            ExplodeOptions {
+                empty_as_null: false,
+                keep_nulls: true,
+            },
+        );
     }
     Ok(result)
 }
@@ -526,7 +628,11 @@ fn grouped(plan: LazyFrame, lower: &Lowering, by: &[(PlSmallStr, Expr)], keyed: 
 fn collapses(expr: &Expr) -> bool {
     match expr {
         Expr::Aggregate { .. } | Expr::Count | Expr::Correlation(..) => true,
-        Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Character(_) | Expr::Na(_) => true,
+        Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Na(_) => true,
         Expr::Column(_) | Expr::Head(..) => false,
         Expr::Unary(_, arg) => collapses(arg),
         Expr::Binary(_, left, right) => collapses(left) && collapses(right),
@@ -545,7 +651,10 @@ fn assign(
 ) -> Result<()> {
     let frame = table.frame()?.clone();
     let nulls = NullCounts::of(&frame);
-    let lower = Lowering { schema, nulls: &nulls };
+    let lower = Lowering {
+        schema,
+        nulls: &nulls,
+    };
     let typer = Typer { schema };
     let filter = match rows {
         Rows::All => None,
@@ -553,7 +662,11 @@ fn assign(
             expect_logical(typer.expr(filter)?, "a row filter")?;
             Some(lower.expr(filter)?)
         }
-        _ => return Err(Error::Query("`:=` takes a logical row filter or no `i`".to_string())),
+        _ => {
+            return Err(Error::Query(
+                "`:=` takes a logical row filter or no `i`".to_string(),
+            ));
+        }
     };
     let mut groups = Vec::with_capacity(by.len());
     for (name, expr) in by {
@@ -573,7 +686,11 @@ fn assign(
         }
         value = value.cast(dtype(target));
         if let Some(filter) = &filter {
-            let otherwise = if schema.column(name).is_some() { col(name.clone()).cast(dtype(target)) } else { lit(polars::prelude::Null {}).cast(dtype(target)) };
+            let otherwise = if schema.column(name).is_some() {
+                col(name.clone()).cast(dtype(target))
+            } else {
+                lit(polars::prelude::Null {}).cast(dtype(target))
+            };
             value = when(filter.clone()).then(value).otherwise(otherwise);
         }
         computed.push(value.alias(name.clone()));
@@ -581,7 +698,13 @@ fn assign(
     if filter.is_some() && !groups.is_empty() {
         // Groups must be formed among the selected rows only, which a window over the whole frame
         // would not do, so compute on the filtered rows and scatter the results back.
-        return assign_filtered_groups(table, &lower, filter.unwrap_or_else(|| unreachable!()), &groups, assignments);
+        return assign_filtered_groups(
+            table,
+            &lower,
+            filter.unwrap_or_else(|| unreachable!()),
+            &groups,
+            assignments,
+        );
     }
     if !computed.is_empty() {
         let result = frame.lazy().select(computed).collect()?;
@@ -615,13 +738,20 @@ fn assign_filtered_groups(
             values.push(lower.expr(expr)?.over(groups)?.alias(name.clone()));
         }
     }
-    let selected = frame.clone().lazy().with_row_index(ROW, None).filter(filter).select(values);
+    let selected = frame
+        .clone()
+        .lazy()
+        .with_row_index(ROW, None)
+        .filter(filter)
+        .select(values);
     let mut keep = Vec::new();
     for (name, expr) in assignments {
         if expr.is_some() {
             let value = if lower.schema.column(name).is_some() {
                 let computed = col(format!("{name}{CLASH_SUFFIX}"));
-                when(col(ROW_MATCHED).is_not_null()).then(computed).otherwise(col(name.clone()))
+                when(col(ROW_MATCHED).is_not_null())
+                    .then(computed)
+                    .otherwise(col(name.clone()))
             } else {
                 col(name.clone())
             };
@@ -658,19 +788,36 @@ struct NullCounts(Vec<(PlSmallStr, usize)>);
 
 impl NullCounts {
     fn of(frame: &DataFrame) -> NullCounts {
-        NullCounts(frame.columns().iter().map(|column| (column.name().clone(), column.null_count())).collect())
+        NullCounts(
+            frame
+                .columns()
+                .iter()
+                .map(|column| (column.name().clone(), column.null_count()))
+                .collect(),
+        )
     }
 
     /// Whether `expr` may produce a null. Unknown columns, such as a join's output, may.
     fn may_be_null(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::Column(name) => self.0.iter().find(|(column, _)| column == name).is_none_or(|(_, count)| *count > 0),
+            Expr::Column(name) => self
+                .0
+                .iter()
+                .find(|(column, _)| column == name)
+                .is_none_or(|(_, count)| *count > 0),
             Expr::Na(_) => true,
-            Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Character(_) | Expr::Count => false,
+            Expr::Integer(_)
+            | Expr::Double(_)
+            | Expr::Logical(_)
+            | Expr::Character(_)
+            | Expr::Count => false,
             Expr::Unary(UnaryOp::IsNa, _) => false,
             Expr::Unary(_, arg) | Expr::Head(arg, _) => self.may_be_null(arg),
             // Integer arithmetic overflows to NA, so it may always produce one.
-            Expr::Binary(..) | Expr::Aggregate { .. } | Expr::Correlation(..) | Expr::IfElse(..) => true,
+            Expr::Binary(..)
+            | Expr::Aggregate { .. }
+            | Expr::Correlation(..)
+            | Expr::IfElse(..) => true,
         }
     }
 }
@@ -683,7 +830,10 @@ impl Typer<'_> {
     /// The R type of an expression's elements, checking every column reference.
     fn expr(&self, expr: &Expr) -> Result<ColumnType> {
         Ok(match expr {
-            Expr::Column(name) => self.schema.column(name).ok_or_else(|| Error::NoColumn(name.to_string()))?,
+            Expr::Column(name) => self
+                .schema
+                .column(name)
+                .ok_or_else(|| Error::NoColumn(name.to_string()))?,
             Expr::Integer(_) | Expr::Count => ColumnType::Integer,
             Expr::Double(_) => ColumnType::Double,
             Expr::Logical(_) => ColumnType::Logical,
@@ -697,16 +847,21 @@ impl Typer<'_> {
             Expr::Binary(op, left, right) => {
                 let (left, right) = (self.expr(left)?, self.expr(right)?);
                 match op {
-                    BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::IntegerDivide | BinaryOp::Modulo => {
-                        arithmetic(left, right)?
-                    }
+                    BinaryOp::Add
+                    | BinaryOp::Subtract
+                    | BinaryOp::Multiply
+                    | BinaryOp::IntegerDivide
+                    | BinaryOp::Modulo => arithmetic(left, right)?,
                     BinaryOp::Divide | BinaryOp::Power => {
                         arithmetic(left, right)?;
                         ColumnType::Double
                     }
-                    BinaryOp::Equal | BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
-                        ColumnType::Logical
-                    }
+                    BinaryOp::Equal
+                    | BinaryOp::NotEqual
+                    | BinaryOp::Less
+                    | BinaryOp::LessEqual
+                    | BinaryOp::Greater
+                    | BinaryOp::GreaterEqual => ColumnType::Logical,
                     BinaryOp::And | BinaryOp::Or => ColumnType::Logical,
                 }
             }
@@ -739,9 +894,10 @@ impl Typer<'_> {
 /// double. Characters and factors are refused, as R refuses them.
 fn arithmetic(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
     match (left, right) {
-        (ColumnType::Character | ColumnType::Factor, _) | (_, ColumnType::Character | ColumnType::Factor) => {
-            Err(Error::Query("arithmetic needs numeric or logical columns".to_string()))
-        }
+        (ColumnType::Character | ColumnType::Factor, _)
+        | (_, ColumnType::Character | ColumnType::Factor) => Err(Error::Query(
+            "arithmetic needs numeric or logical columns".to_string(),
+        )),
         (ColumnType::Double, _) | (_, ColumnType::Double) => Ok(ColumnType::Double),
         _ => Ok(ColumnType::Integer),
     }
@@ -794,7 +950,9 @@ struct Lowering<'a> {
 
 impl Lowering<'_> {
     fn typer(&self) -> Typer<'_> {
-        Typer { schema: self.schema }
+        Typer {
+            schema: self.schema,
+        }
     }
 
     fn expr(&self, expr: &Expr) -> Result<PolarsExpr> {
@@ -814,14 +972,22 @@ impl Lowering<'_> {
             Expr::Unary(UnaryOp::IsNa, arg) => {
                 let lowered = self.expr(arg)?;
                 // R's `is.na` is also true for `NaN`.
-                if typer.expr(arg)? == ColumnType::Double { lowered.clone().is_null().or(lowered.is_nan()) } else { lowered.is_null() }
+                if typer.expr(arg)? == ColumnType::Double {
+                    lowered.clone().is_null().or(lowered.is_nan())
+                } else {
+                    lowered.is_null()
+                }
             }
             Expr::Unary(UnaryOp::Negate, arg) => {
                 let kind = typer.expr(expr)?;
                 lit(0).cast(dtype(kind)) - self.numeric(arg, kind)?
             }
             Expr::Binary(op, left, right) => self.binary(*op, left, right, typer.expr(expr)?)?,
-            Expr::Aggregate { function, arg, na_rm } => {
+            Expr::Aggregate {
+                function,
+                arg,
+                na_rm,
+            } => {
                 let kind = typer.expr(arg)?;
                 let value = self.expr(arg)?;
                 let aggregated = match function {
@@ -841,7 +1007,11 @@ impl Lowering<'_> {
                     Aggregate::Var => value.cast(DataType::Float64).var(1),
                     Aggregate::Length => len().cast(DataType::Int32),
                 };
-                let propagates = !na_rm && !matches!(function, Aggregate::First | Aggregate::Last | Aggregate::Length);
+                let propagates = !na_rm
+                    && !matches!(
+                        function,
+                        Aggregate::First | Aggregate::Last | Aggregate::Length
+                    );
                 if propagates && self.nulls.may_be_null(arg) {
                     when(self.expr(arg)?.null_count().gt(lit(0)))
                         .then(lit(polars::prelude::Null {}).cast(dtype(typer.expr(expr)?)))
@@ -851,10 +1021,22 @@ impl Lowering<'_> {
                 }
             }
             Expr::Head(arg, count) => self.expr(arg)?.head(Some(*count)),
-            Expr::Correlation(left, right) => pearson_corr(self.numeric(left, ColumnType::Double)?, self.numeric(right, ColumnType::Double)?),
+            Expr::Correlation(left, right) => {
+                // R's `cor` is `NA` where a standard deviation is zero or an input is `NaN`, where
+                // Polars computes `NaN`.
+                let correlation = pearson_corr(
+                    self.numeric(left, ColumnType::Double)?,
+                    self.numeric(right, ColumnType::Double)?,
+                );
+                when(correlation.clone().is_nan())
+                    .then(lit(NULL).cast(DataType::Float64))
+                    .otherwise(correlation)
+            }
             Expr::IfElse(test, yes, no) => {
                 let kind = typer.expr(expr)?;
-                when(self.expr(test)?).then(self.expr(yes)?.cast(dtype(kind))).otherwise(self.expr(no)?.cast(dtype(kind)))
+                when(self.expr(test)?)
+                    .then(self.expr(yes)?.cast(dtype(kind)))
+                    .otherwise(self.expr(no)?.cast(dtype(kind)))
             }
         })
     }
@@ -863,14 +1045,27 @@ impl Lowering<'_> {
         Ok(self.expr(expr)?.cast(dtype(kind)))
     }
 
-    fn binary(&self, op: BinaryOp, left: &Expr, right: &Expr, kind: ColumnType) -> Result<PolarsExpr> {
+    fn binary(
+        &self,
+        op: BinaryOp,
+        left: &Expr,
+        right: &Expr,
+        kind: ColumnType,
+    ) -> Result<PolarsExpr> {
         let typer = self.typer();
         let operand = supertype(typer.expr(left)?, typer.expr(right)?);
         Ok(match op {
-            BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply if kind == ColumnType::Integer => {
+            BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply
+                if kind == ColumnType::Integer =>
+            {
                 // R's integer arithmetic gives `NA` on overflow where Polars would wrap, so it is
                 // computed in 64 bits and checked.
-                let (l, r) = (self.numeric(left, ColumnType::Integer)?.cast(DataType::Int64), self.numeric(right, ColumnType::Integer)?.cast(DataType::Int64));
+                let (l, r) = (
+                    self.numeric(left, ColumnType::Integer)?
+                        .cast(DataType::Int64),
+                    self.numeric(right, ColumnType::Integer)?
+                        .cast(DataType::Int64),
+                );
                 checked_int32(match op {
                     BinaryOp::Add => l + r,
                     BinaryOp::Subtract => l - r,
@@ -880,27 +1075,46 @@ impl Lowering<'_> {
             BinaryOp::Add => self.numeric(left, kind)? + self.numeric(right, kind)?,
             BinaryOp::Subtract => self.numeric(left, kind)? - self.numeric(right, kind)?,
             BinaryOp::Multiply => self.numeric(left, kind)? * self.numeric(right, kind)?,
-            BinaryOp::Divide => self.numeric(left, ColumnType::Double)? / self.numeric(right, ColumnType::Double)?,
-            BinaryOp::Power => self.numeric(left, ColumnType::Double)?.pow(self.numeric(right, ColumnType::Double)?),
+            BinaryOp::Divide => {
+                self.numeric(left, ColumnType::Double)? / self.numeric(right, ColumnType::Double)?
+            }
+            BinaryOp::Power => self
+                .numeric(left, ColumnType::Double)?
+                .pow(self.numeric(right, ColumnType::Double)?),
             BinaryOp::IntegerDivide if kind == ColumnType::Integer => {
                 let (l, r) = (self.numeric(left, kind)?, self.numeric(right, kind)?);
                 // R gives `NA` for an integer division by zero.
-                when(r.clone().eq(lit(0))).then(lit(polars::prelude::Null {}).cast(DataType::Int32)).otherwise(l.floor_div(r))
+                when(r.clone().eq(lit(0)))
+                    .then(lit(polars::prelude::Null {}).cast(DataType::Int32))
+                    .otherwise(l.floor_div(r))
             }
-            BinaryOp::IntegerDivide => self.numeric(left, kind)?.floor_div(self.numeric(right, kind)?),
+            BinaryOp::IntegerDivide => self
+                .numeric(left, kind)?
+                .floor_div(self.numeric(right, kind)?),
             BinaryOp::Modulo => {
                 // R's `%%` takes the sign of the divisor: x - floor(x / y) * y.
-                let (l, r) = (self.numeric(left, ColumnType::Double)?, self.numeric(right, ColumnType::Double)?);
+                let (l, r) = (
+                    self.numeric(left, ColumnType::Double)?,
+                    self.numeric(right, ColumnType::Double)?,
+                );
                 let value = l.clone() - l.floor_div(r.clone()) * r;
                 value.cast(dtype(kind))
             }
-            BinaryOp::Equal | BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
+            BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::Less
+            | BinaryOp::LessEqual
+            | BinaryOp::Greater
+            | BinaryOp::GreaterEqual => {
                 let target = match operand {
                     // A factor compares by its labels, as R compares it.
                     ColumnType::Factor | ColumnType::Character => DataType::String,
                     other => dtype(other),
                 };
-                let (l, r) = (self.expr(left)?.cast(target.clone()), self.expr(right)?.cast(target));
+                let (l, r) = (
+                    self.expr(left)?.cast(target.clone()),
+                    self.expr(right)?.cast(target),
+                );
                 match op {
                     BinaryOp::Equal => l.eq(r),
                     BinaryOp::NotEqual => l.neq(r),
@@ -919,6 +1133,11 @@ impl Lowering<'_> {
 /// An `Int64` result narrowed to `Int32`, with `NA` where it does not fit, as R's integer
 /// arithmetic overflows.
 fn checked_int32(value: PolarsExpr) -> PolarsExpr {
-    let fits = value.clone().gt_eq(lit(-(i32::MAX as i64))).and(value.clone().lt_eq(lit(i32::MAX as i64)));
-    when(fits).then(value.cast(DataType::Int32)).otherwise(lit(polars::prelude::Null {}).cast(DataType::Int32))
+    let fits = value
+        .clone()
+        .gt_eq(lit(-(i32::MAX as i64)))
+        .and(value.clone().lt_eq(lit(i32::MAX as i64)));
+    when(fits)
+        .then(value.cast(DataType::Int32))
+        .otherwise(lit(polars::prelude::Null {}).cast(DataType::Int32))
 }

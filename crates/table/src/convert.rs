@@ -35,7 +35,10 @@ pub enum RVector {
     Double(Vec<f64>),
     Character(Vec<Option<String>>),
     /// One-based codes into `levels`, with [`NA_INTEGER`] for `NA`, which is R's layout.
-    Factor { codes: Vec<i32>, levels: Vec<String> },
+    Factor {
+        codes: Vec<i32>,
+        levels: Vec<String>,
+    },
 }
 
 impl RVector {
@@ -67,11 +70,14 @@ pub fn to_series(name: PlSmallStr, vector: RVector) -> Result<Series> {
         }
         RVector::Logical(values) => BooleanChunked::from_iter_options(
             name,
-            values.iter().map(|value| (*value != NA_INTEGER).then_some(*value != 0)),
+            values
+                .iter()
+                .map(|value| (*value != NA_INTEGER).then_some(*value != 0)),
         )
         .into_series(),
         RVector::Character(values) => {
-            StringChunked::from_iter_options(name, values.iter().map(|value| value.as_deref())).into_series()
+            StringChunked::from_iter_options(name, values.iter().map(|value| value.as_deref()))
+                .into_series()
         }
         RVector::Factor { codes, levels } => {
             let dtype = enum_dtype(&levels)?;
@@ -82,12 +88,16 @@ pub fn to_series(name: PlSmallStr, vector: RVector) -> Result<Series> {
                     code => Some(
                         levels
                             .get((code - 1) as usize)
-                            .ok_or_else(|| Error::Query(format!("factor code {code} has no level")))?
+                            .ok_or_else(|| {
+                                Error::Query(format!("factor code {code} has no level"))
+                            })?
                             .as_str(),
                     ),
                 });
             }
-            StringChunked::from_iter_options(name, strings.into_iter()).into_series().cast(&dtype)?
+            StringChunked::from_iter_options(name, strings.into_iter())
+                .into_series()
+                .cast(&dtype)?
         }
     })
 }
@@ -102,7 +112,11 @@ pub fn to_r(series: &Series) -> Result<RVector> {
                 match array.validity() {
                     None => values.extend_from_slice(array.values()),
                     Some(valid) => values.extend(
-                        array.values().iter().zip(valid.iter()).map(|(value, ok)| if ok { *value } else { NA_INTEGER }),
+                        array
+                            .values()
+                            .iter()
+                            .zip(valid.iter())
+                            .map(|(value, ok)| if ok { *value } else { NA_INTEGER }),
                     ),
                 }
             }
@@ -115,26 +129,49 @@ pub fn to_r(series: &Series) -> Result<RVector> {
                 match array.validity() {
                     None => values.extend_from_slice(array.values()),
                     Some(valid) => values.extend(
-                        array.values().iter().zip(valid.iter()).map(|(value, ok)| if ok { *value } else { NA_REAL }),
+                        array
+                            .values()
+                            .iter()
+                            .zip(valid.iter())
+                            .map(|(value, ok)| if ok { *value } else { NA_REAL }),
                     ),
                 }
             }
             RVector::Double(values)
         }
         DataType::Boolean => RVector::Logical(
-            series.bool()?.iter().map(|value| value.map_or(NA_INTEGER, i32::from)).collect(),
+            series
+                .bool()?
+                .iter()
+                .map(|value| value.map_or(NA_INTEGER, i32::from))
+                .collect(),
         ),
-        DataType::String => {
-            RVector::Character(series.str()?.iter().map(|value| value.map(str::to_string)).collect())
-        }
+        DataType::String => RVector::Character(
+            series
+                .str()?
+                .iter()
+                .map(|value| value.map(str::to_string))
+                .collect(),
+        ),
         DataType::Enum(categories, _) => {
-            let levels = categories.categories().values_iter().map(str::to_string).collect();
+            let levels = categories
+                .categories()
+                .values_iter()
+                .map(str::to_string)
+                .collect();
             let physical = series.to_physical_repr().cast(&DataType::Int32)?;
-            let codes = physical.i32()?.iter().map(|code| code.map_or(NA_INTEGER, |code| code + 1)).collect();
+            let codes = physical
+                .i32()?
+                .iter()
+                .map(|code| code.map_or(NA_INTEGER, |code| code + 1))
+                .collect();
             RVector::Factor { codes, levels }
         }
         other => {
-            return Err(Error::UnsupportedType { name: series.name().to_string(), found: other.to_string() });
+            return Err(Error::UnsupportedType {
+                name: series.name().to_string(),
+                found: other.to_string(),
+            });
         }
     })
 }
@@ -142,15 +179,22 @@ pub fn to_r(series: &Series) -> Result<RVector> {
 /// The `Enum` dtype whose categories are `levels`, in order, which is how a factor's level order
 /// survives in Arrow.
 pub fn enum_dtype(levels: &[String]) -> Result<DataType> {
-    Ok(DataType::from_frozen_categories(FrozenCategories::new(levels.iter().map(String::as_str))?))
+    Ok(DataType::from_frozen_categories(FrozenCategories::new(
+        levels.iter().map(String::as_str),
+    )?))
 }
 
 /// A string column as a factor with R's default levels, its distinct values sorted, as
 /// `factor(x)` makes them.
 pub fn string_to_factor(series: &Series) -> Result<Series> {
     let strings = series.cast(&DataType::String)?;
-    let mut levels: Vec<String> =
-        strings.str()?.unique()?.iter().flatten().map(str::to_string).collect();
+    let mut levels: Vec<String> = strings
+        .str()?
+        .unique()?
+        .iter()
+        .flatten()
+        .map(str::to_string)
+        .collect();
     levels.sort_unstable();
     Ok(strings.cast(&enum_dtype(&levels)?)?)
 }

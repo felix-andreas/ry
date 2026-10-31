@@ -38,7 +38,7 @@ rm(groupby)
 right_keys <- function(rows, space) {
   hit <- sample(space, rows * 0.9, replace = rows * 0.9 > space)
   miss <- space + sample(space, rows - length(hit), replace = TRUE)
-  sample(c(hit, miss))
+  as.integer(sample(c(hit, miss)))
 }
 n_small <- max(n / 1e6, 10)
 n_medium <- n / 1e3

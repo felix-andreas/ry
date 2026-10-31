@@ -26,10 +26,15 @@ pub struct Exported {
 /// one contiguous array; a column produced by a query is usually a single chunk already.
 pub fn export_column(table: &mut Table, name: &str) -> Result<Exported> {
     let frame = table.frame()?;
-    let column = frame.column(name).map_err(|_| Error::NoColumn(name.to_string()))?;
+    let column = frame
+        .column(name)
+        .map_err(|_| Error::NoColumn(name.to_string()))?;
     let series = column.as_materialized_series().rechunk();
     let field = series.field().to_arrow(CompatLevel::newest());
-    Ok(Exported { array: export_array_to_c(series.to_arrow(0, CompatLevel::newest())), schema: export_field_to_c(&field) })
+    Ok(Exported {
+        array: export_array_to_c(series.to_arrow(0, CompatLevel::newest())),
+        schema: export_field_to_c(&field),
+    })
 }
 
 /// Exports the whole frame as a struct array with one child per column.
@@ -46,7 +51,10 @@ pub fn export_table(table: &mut Table) -> Result<Exported> {
     let dtype = ArrowDataType::Struct(fields);
     let array = StructArray::try_new(dtype.clone(), height, arrays, None)?;
     let field = Field::new(PlSmallStr::from_static("frame"), dtype, false);
-    Ok(Exported { array: export_array_to_c(array.boxed()), schema: export_field_to_c(&field) })
+    Ok(Exported {
+        array: export_array_to_c(array.boxed()),
+        schema: export_field_to_c(&field),
+    })
 }
 
 /// Imports one array as a column named after its schema field, taking ownership of the array.
@@ -72,9 +80,13 @@ pub unsafe fn import_table(array: ArrowArray, schema: &ArrowSchema) -> Result<Ta
     let array = array
         .as_any()
         .downcast_ref::<StructArray>()
-        .ok_or_else(|| Error::Query("an imported frame must be an Arrow struct array".to_string()))?;
+        .ok_or_else(|| {
+            Error::Query("an imported frame must be an Arrow struct array".to_string())
+        })?;
     let ArrowDataType::Struct(fields) = array.dtype() else {
-        return Err(Error::Query("an imported frame must be an Arrow struct array".to_string()));
+        return Err(Error::Query(
+            "an imported frame must be an Arrow struct array".to_string(),
+        ));
     };
     let mut columns = Vec::with_capacity(fields.len());
     for (field, values) in fields.iter().zip(array.values()) {

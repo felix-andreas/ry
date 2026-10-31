@@ -29,11 +29,19 @@ pub enum Error {
     #[error("the frame has no column `{0}`")]
     NoColumn(String),
     #[error("column `{name}` has {found} rows, but the frame has {expected}")]
-    Length { name: String, expected: usize, found: usize },
+    Length {
+        name: String,
+        expected: usize,
+        found: usize,
+    },
     #[error("column `{name}` is {found}, which has no R vector type")]
     UnsupportedType { name: String, found: String },
     #[error("column `{name}` is {found}, but the schema declares {expected}")]
-    SchemaMismatch { name: String, expected: ColumnType, found: ColumnType },
+    SchemaMismatch {
+        name: String,
+        expected: ColumnType,
+        found: ColumnType,
+    },
     #[error("the schema declares {expected} columns, but the frame has {found}")]
     SchemaWidth { expected: usize, found: usize },
     #[error("cannot parse the frame type `{0}`")]
@@ -115,12 +123,18 @@ pub struct Schema {
 impl Schema {
     pub fn new<N: Into<PlSmallStr>>(columns: impl IntoIterator<Item = (N, ColumnType)>) -> Schema {
         Schema {
-            columns: columns.into_iter().map(|(name, kind)| (name.into(), kind)).collect(),
+            columns: columns
+                .into_iter()
+                .map(|(name, kind)| (name.into(), kind))
+                .collect(),
         }
     }
 
     pub fn column(&self, name: &str) -> Option<ColumnType> {
-        self.columns.iter().find(|(column, _)| column == name).map(|(_, kind)| *kind)
+        self.columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, kind)| *kind)
     }
 
     /// Parses the checker's notation, such as `frame{id: integer[], ticker: character[]}`.
@@ -132,7 +146,11 @@ impl Schema {
             .and_then(|rest| rest.strip_suffix('}'))
             .ok_or_else(syntax)?;
         let mut columns = Vec::new();
-        for field in body.split(',').map(str::trim).filter(|field| !field.is_empty()) {
+        for field in body
+            .split(',')
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+        {
             let (name, kind) = field.split_once(':').ok_or_else(syntax)?;
             let kind = ColumnType::parse(kind.trim()).ok_or_else(syntax)?;
             columns.push((PlSmallStr::from(name.trim()), kind));
@@ -145,14 +163,21 @@ impl Schema {
     pub fn check(&self, table: &Table) -> Result<()> {
         let actual = table.schema();
         if actual.columns.len() != self.columns.len() {
-            return Err(Error::SchemaWidth { expected: self.columns.len(), found: actual.columns.len() });
+            return Err(Error::SchemaWidth {
+                expected: self.columns.len(),
+                found: actual.columns.len(),
+            });
         }
         for ((name, expected), (found_name, found)) in self.columns.iter().zip(&actual.columns) {
             if name != found_name {
                 return Err(Error::NoColumn(name.to_string()));
             }
             if expected != found {
-                return Err(Error::SchemaMismatch { name: name.to_string(), expected: *expected, found: *found });
+                return Err(Error::SchemaMismatch {
+                    name: name.to_string(),
+                    expected: *expected,
+                    found: *found,
+                });
             }
         }
         Ok(())
@@ -219,7 +244,11 @@ impl Table {
         for column in frame.into_columns() {
             columns.push(normalize(column)?);
         }
-        Ok(Table { frame: DataFrame::new_infer_height(columns)?, key: Vec::new(), mirrors: Vec::new() })
+        Ok(Table {
+            frame: DataFrame::new_infer_height(columns)?,
+            key: Vec::new(),
+            mirrors: Vec::new(),
+        })
     }
 
     /// Builds a table from R vectors, as `frame(id = 1:3, ...)` does. Vectors move into Arrow
@@ -229,11 +258,19 @@ impl Table {
         let mut converted = Vec::with_capacity(columns.len());
         for (name, vector) in columns {
             if vector.len() != height {
-                return Err(Error::Length { name: name.to_string(), expected: height, found: vector.len() });
+                return Err(Error::Length {
+                    name: name.to_string(),
+                    expected: height,
+                    found: vector.len(),
+                });
             }
             converted.push(convert::to_series(name, vector)?.into_column());
         }
-        Ok(Table { frame: DataFrame::new(height, converted)?, key: Vec::new(), mirrors: Vec::new() })
+        Ok(Table {
+            frame: DataFrame::new(height, converted)?,
+            key: Vec::new(),
+            mirrors: Vec::new(),
+        })
     }
 
     pub fn height(&self) -> usize {
@@ -280,12 +317,16 @@ impl Table {
     }
 
     pub fn residency(&self, name: &str) -> Result<Residency> {
-        self.frame.column(name).map_err(|_| Error::NoColumn(name.to_string()))?;
-        Ok(match self.mirrors.iter().find(|mirror| mirror.name == name) {
-            None => Residency::Arrow,
-            Some(mirror) if mirror.writable => Residency::R,
-            Some(_) => Residency::Shared,
-        })
+        self.frame
+            .column(name)
+            .map_err(|_| Error::NoColumn(name.to_string()))?;
+        Ok(
+            match self.mirrors.iter().find(|mirror| mirror.name == name) {
+                None => Residency::Arrow,
+                Some(mirror) if mirror.writable => Residency::R,
+                Some(_) => Residency::Shared,
+            },
+        )
     }
 
     /// The column as an R vector, for readers. The conversion runs at most once per version of
@@ -295,9 +336,16 @@ impl Table {
         if let Some(mirror) = self.mirrors.iter().find(|mirror| mirror.name == name) {
             return Ok(mirror.vector.clone());
         }
-        let column = self.frame.column(name).map_err(|_| Error::NoColumn(name.to_string()))?;
+        let column = self
+            .frame
+            .column(name)
+            .map_err(|_| Error::NoColumn(name.to_string()))?;
         let vector = Arc::new(convert::to_r(column.as_materialized_series())?);
-        self.mirrors.push(Mirror { name: name.into(), vector: vector.clone(), writable: false });
+        self.mirrors.push(Mirror {
+            name: name.into(),
+            vector: vector.clone(),
+            writable: false,
+        });
         Ok(vector)
     }
 
@@ -319,7 +367,11 @@ impl Table {
     /// place because the layouts agree. This is what makes `INTEGER_RO` on a table column free.
     pub fn column_slice_i32(&self, name: &str) -> Option<&[i32]> {
         let column = self.frame.column(name).ok()?;
-        if self.mirrors.iter().any(|mirror| mirror.name == name && mirror.writable) {
+        if self
+            .mirrors
+            .iter()
+            .any(|mirror| mirror.name == name && mirror.writable)
+        {
             return None;
         }
         let chunked = column.as_materialized_series().i32().ok()?;
@@ -333,7 +385,11 @@ impl Table {
     /// same value; only a null needs R's `NA_real_` bit pattern.
     pub fn column_slice_f64(&self, name: &str) -> Option<&[f64]> {
         let column = self.frame.column(name).ok()?;
-        if self.mirrors.iter().any(|mirror| mirror.name == name && mirror.writable) {
+        if self
+            .mirrors
+            .iter()
+            .any(|mirror| mirror.name == name && mirror.writable)
+        {
             return None;
         }
         let chunked = column.as_materialized_series().f64().ok()?;
@@ -360,7 +416,12 @@ impl Table {
         Ok(Table {
             frame: self.frame.clone(),
             key: self.key.clone(),
-            mirrors: self.mirrors.iter().filter(|mirror| !mirror.writable).cloned().collect(),
+            mirrors: self
+                .mirrors
+                .iter()
+                .filter(|mirror| !mirror.writable)
+                .cloned()
+                .collect(),
         })
     }
 
@@ -381,7 +442,9 @@ impl Table {
     }
 
     pub fn drop_column(&mut self, name: &str) -> Result<()> {
-        self.frame.drop_in_place(name).map_err(|_| Error::NoColumn(name.to_string()))?;
+        self.frame
+            .drop_in_place(name)
+            .map_err(|_| Error::NoColumn(name.to_string()))?;
         self.forget(name);
         Ok(())
     }
@@ -390,7 +453,14 @@ impl Table {
     pub fn set_key(&mut self, columns: &[&str]) -> Result<()> {
         self.sync()?;
         let frame = std::mem::take(&mut self.frame);
-        self.frame = frame.sort(columns.iter().copied().map(PlSmallStr::from).collect::<Vec<_>>(), Default::default())?;
+        self.frame = frame.sort(
+            columns
+                .iter()
+                .copied()
+                .map(PlSmallStr::from)
+                .collect::<Vec<_>>(),
+            Default::default(),
+        )?;
         self.mirrors.clear();
         self.key = columns.iter().copied().map(PlSmallStr::from).collect();
         Ok(())
@@ -412,19 +482,30 @@ impl Table {
 /// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for.
 fn normalize(column: Column) -> Result<Column> {
     let target = match column.dtype() {
-        DataType::Boolean | DataType::Int32 | DataType::Float64 | DataType::String | DataType::Enum(..) => {
+        DataType::Boolean
+        | DataType::Int32
+        | DataType::Float64
+        | DataType::String
+        | DataType::Enum(..) => {
             return Ok(column);
         }
         DataType::Int8 | DataType::Int16 | DataType::UInt8 | DataType::UInt16 => DataType::Int32,
-        DataType::Int64 | DataType::UInt32 | DataType::UInt64 | DataType::Float32 => DataType::Float64,
+        DataType::Int64 | DataType::UInt32 | DataType::UInt64 | DataType::Float32 => {
+            DataType::Float64
+        }
         DataType::Categorical(..) => {
             return Ok(convert::string_to_factor(column.as_materialized_series())?.into_column());
         }
         DataType::Null => {
-            return Ok(Series::new(column.name().clone(), vec![None::<bool>; column.len()]).into_column());
+            return Ok(
+                Series::new(column.name().clone(), vec![None::<bool>; column.len()]).into_column(),
+            );
         }
         other => {
-            return Err(Error::UnsupportedType { name: column.name().to_string(), found: other.to_string() });
+            return Err(Error::UnsupportedType {
+                name: column.name().to_string(),
+                found: other.to_string(),
+            });
         }
     };
     Ok(column.cast(&target)?)
