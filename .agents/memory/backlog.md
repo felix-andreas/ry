@@ -185,7 +185,7 @@ type-level function the annotation language does not have.
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  tour and `domain-modeling.md` now say so conditionally ("put `@new` in one constructor"). An
+  `type-checking/custom-types.md` says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
 - A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
   writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
@@ -925,10 +925,9 @@ pages named in the next item.
 
 ## Open: nothing verifies the rendered samples in the docs
 
-About two dozen blocks show real tool output. They live across `features`, `getting-started`,
-`reference/cli`, `reference/configuration`, `reference/diagnostic-codes`,
-`type-checking/tutorial`, `type-checking/concepts`, `type-checking/domain-modeling`, `index.astro`
-and the README's generated `.github/diagnostic.svg`. Nothing checks them, so they drift silently and
+Many blocks show real tool output. They live across `getting-started`, `guides/`, `type-checking/`,
+`reference/cli`, `reference/configuration`, `reference/diagnostic-codes`, `index.astro` and the
+README's generated `.github/diagnostic.svg`. Nothing checks them, so they drift silently and
 the drift is only ever found when someone re-captures by hand.
 
 Two things this proves rather than predicts.
@@ -1146,20 +1145,7 @@ produce good messages. One tester confirmed the `expect_error` decision was righ
 
 ## Open: what the documentation reviews left
 
-Four independent reviews read the docs cold: a first-hour newcomer, an information architect, an
-accuracy auditor who executed every claim against the binary, and a positioning analyst who also
-measured the competition. The four `docs-review-*.md` files from that round hold the full reports
-and their paste-ready rewrites.
-
-Most of what they found is fixed. The structural rewrite landed, so the type-checking guide is a
-tutorial of eight numbered steps from a zero-config first run to strict mode, each with a runnable
-example whose output came from the binary, ending where the reference begins. The stubs page is no
-longer an internal RFC. The diagnostics reference covers all fourteen codes in tables built by
-running the tool, and a CI workflow page and a limitations page landed with it. `why-ry.md` answers
-why a type checker for R, and `guides/adopting.md` is the adoption how-to. Re-verified against the
-tree: the rest-parameter spelling, the stale symbol names, the internal gate vocabulary, the bless
-environment variable, the `stub` diagnostic code, the `SCREAMING_SNAKE_CASE` exemption and the
-duplicate-`@type` error in a script are all correct now.
+The structural rewrite of the site has landed. The remaining documentation gaps are the ones below.
 
 ### The comparison page does not exist
 
