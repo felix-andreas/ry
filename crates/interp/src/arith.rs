@@ -573,13 +573,14 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
     Ok(())
 }
 
-unsafe fn recycled_length(left: usize, right: usize) -> R<usize> {
+unsafe fn recycled_length(call: Sexp, left: usize, right: usize) -> R<usize> {
     if left == 0 || right == 0 {
         return Ok(0);
     }
     let longer = left.max(right);
     if longer % left.min(right) != 0 {
-        conditions::warning(
+        conditions::warning_call(
+            call,
             "longer object length is not a multiple of shorter object length",
         )?;
     }
@@ -603,7 +604,7 @@ pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> 
     }
     let left_length = length(left);
     let right_length = length(right);
-    let count = recycled_length(left_length, right_length)?;
+    let count = recycled_length(call, left_length, right_length)?;
     let result = if left_kind == SexpType::Complex || right_kind == SexpType::Complex {
         complex_arithmetic(op, left, right, count)?
     } else if left_kind == SexpType::Real
@@ -612,7 +613,7 @@ pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> 
     {
         real_arithmetic(op, left, right, count)?
     } else {
-        integer_arithmetic(op, left, right, count)?
+        integer_arithmetic(call, op, left, right, count)?
     };
     binary_attributes(left, right, result, call)?;
     Ok(result)
@@ -696,7 +697,7 @@ pub fn real_modulo(a: f64, b: f64) -> f64 {
     }
 }
 
-unsafe fn integer_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
+unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
     let result = alloc(SexpType::Integer, count)?;
     let a = values::ints(left);
     let b = values::ints(right);
@@ -742,7 +743,7 @@ unsafe fn integer_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R
         };
     }
     if overflow {
-        conditions::warning("NAs produced by integer overflow")?;
+        conditions::warning_call(call, "NAs produced by integer overflow")?;
     }
     Ok(result)
 }
@@ -857,7 +858,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     }
     let left_length = length(left);
     let right_length = length(right);
-    let count = recycled_length(left_length, right_length)?;
+    let count = recycled_length(call.call, left_length, right_length)?;
     let result = alloc(SexpType::Logical, count)?;
     let kind = coerce::higher_type(
         if left == nil() { SexpType::Logical } else { left.kind() },
@@ -966,7 +967,7 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     if left.kind() == SexpType::Raw && right.kind() == SexpType::Raw {
         let left_length = length(left);
         let right_length = length(right);
-        let count = recycled_length(left_length, right_length)?;
+        let count = recycled_length(call.call, left_length, right_length)?;
         let result = alloc(SexpType::Raw, count)?;
         for index in 0..count {
             let a = values::raws(left)[index % left_length];
@@ -989,7 +990,7 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     }
     let left_length = length(left);
     let right_length = length(right);
-    let count = recycled_length(left_length, right_length)?;
+    let count = recycled_length(call.call, left_length, right_length)?;
     let result = alloc(SexpType::Logical, count)?;
     for index in 0..count {
         let a = logical_at(left, index % left_length);
@@ -2388,7 +2389,7 @@ unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     }
     let left_length = length(left);
     let right_length = length(right);
-    let count = recycled_length(left_length, right_length)?;
+    let count = recycled_length(call.call, left_length, right_length)?;
     let result = alloc(SexpType::Real, count)?;
     for index in 0..count {
         let a = real_at(left, index % left_length);
@@ -2609,11 +2610,17 @@ unsafe fn matrix_product(call: &Call<'_>, transpose_left: bool, transpose_right:
     {
         return Err(call.error("requires numeric/complex matrix/vector arguments"));
     }
+    // `crossprod` and `tcrossprod` read a plain vector as a column vector; `%*%` picks the
+    // orientation that conforms.
+    let crossed = transpose_left || transpose_right;
     let shape = |value: Sexp, other: Option<usize>| -> (usize, usize) {
         match values::dims(value) {
             Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
             _ => {
                 let count = length(value);
+                if crossed {
+                    return (count, 1);
+                }
                 match other {
                     Some(rows) if rows == count => (count, 1),
                     Some(1) => (1, count),
@@ -2624,6 +2631,7 @@ unsafe fn matrix_product(call: &Call<'_>, transpose_left: bool, transpose_right:
     };
     let (mut left_rows, mut left_cols) = match values::dims(left) {
         Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
+        _ if crossed => (length(left), 1),
         _ => {
             let count = length(left);
             let right_rows = values::dims(right).filter(|dims| dims.len() == 2).map(|dims| dims[0]);
@@ -2642,7 +2650,7 @@ unsafe fn matrix_product(call: &Call<'_>, transpose_left: bool, transpose_right:
     if transpose_right {
         std::mem::swap(&mut right_rows, &mut right_cols);
     }
-    if values::dims(right).is_none() && !transpose_right {
+    if values::dims(right).is_none() && !crossed {
         if right_rows != left_cols && length(right) == left_cols {
             right_rows = left_cols;
             right_cols = 1;

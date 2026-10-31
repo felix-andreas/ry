@@ -1275,19 +1275,9 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         } else {
             nil()
         };
-        let value = arguments.element(index);
-        let value = match value.kind() {
-            SexpType::Symbol | SexpType::Language | SexpType::Promise => {
-                // `do.call` passes language arguments as themselves, quoted.
-                if value.kind() == SexpType::Promise {
-                    value
-                } else {
-                    values::call(symbols().quote, &[value])?
-                }
-            }
-            _ => value,
-        };
-        items.push((tag, value));
+        // Language arguments are evaluated by the call, as in GNU R; `quote = TRUE` quotes them
+        // in the R wrapper.
+        items.push((tag, arguments.element(index)));
     }
     let new_call = values::pairlist(&items, SexpType::Language)?;
     eval::eval(new_call, env)

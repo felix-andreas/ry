@@ -716,11 +716,13 @@ impl Deparser {
         let nice = self.opts & options::NICE_NAMES != 0 && names != nil();
         let keep_integer = self.opts & options::KEEP_INTEGER != 0;
         let keep_na = self.opts & options::KEEP_NA != 0;
-        // An increasing integer run deparses as `from:to`.
+        // A run of consecutive integers, increasing or decreasing, deparses as `from:to`.
         if kind == SexpType::Integer && count > 1 && !nice {
             let data = values::ints(vector);
+            let step = data[1] as i64 - data[0] as i64;
             let is_run = data[0] != NA_INTEGER
-                && data.windows(2).all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + 1);
+                && (step == 1 || step == -1)
+                && data.windows(2).all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + step);
             if is_run {
                 self.print(&format!("{}:{}", data[0], data[count - 1]));
                 return;

@@ -1964,15 +1964,12 @@ unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
         if names != nil() {
             items.push(("names".into(), names));
         }
-    } else if object.kind() != SexpType::Environment {
-        let names = get_attr(object, symbols().names);
-        if names != nil() {
-            items.push(("names".into(), names));
-        }
     }
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
-        if cell.tag() != symbols().names {
+        if cell.tag() == symbols().names && object.kind() != SexpType::Environment {
+            items.push(("names".into(), get_attr(object, symbols().names)));
+        } else if cell.tag() != symbols().names {
             let value = if cell.tag() == symbols().row_names {
                 expand_row_names(cell.car())?
             } else {

@@ -660,6 +660,7 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
 // The builtins.
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    internal("asCharacterFactor", 1, |call| unsafe { as_character_factor(call.arg(0)) }),
     builtin("as.character", -1, |call| unsafe { as_type(call, SexpType::String) }).generic(Generic::Internal),
     builtin("as.integer", -1, |call| unsafe { as_type(call, SexpType::Integer) }).generic(Generic::Internal),
     builtin("as.double", -1, |call| unsafe { as_type(call, SexpType::Real) }).generic(Generic::Internal),
@@ -944,4 +945,27 @@ pub unsafe fn na_of(kind: SexpType) -> R<Sexp> {
 
 pub unsafe fn heap_unused() {
     let _ = crate::heap();
+}
+
+/// The labels of a factor's codes, `NA` for a missing or out-of-range code.
+pub unsafe fn as_character_factor(factor: Sexp) -> R<Sexp> {
+    if !values::inherits(factor, "factor") || factor.kind() != SexpType::Integer {
+        return Err(error("attempting to coerce non-factor"));
+    }
+    let levels = values::get_attr(factor, values::symbols().levels);
+    if levels.kind() != SexpType::String {
+        return Err(error("malformed factor"));
+    }
+    let codes = values::ints(factor);
+    let level_count = values::length(levels);
+    let result = values::alloc(SexpType::String, codes.len())?;
+    for (index, &code) in codes.iter().enumerate() {
+        let label = if code >= 1 && (code as usize) <= level_count {
+            levels.element(code as usize - 1)
+        } else {
+            values::na_string()
+        };
+        values::set_elt(result, index, label);
+    }
+    Ok(result)
 }
