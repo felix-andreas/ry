@@ -743,10 +743,19 @@ pub unsafe fn unserialize(
     source: &mut dyn Source,
     hook: Option<PersistHook<'_>>,
 ) -> ApiResult<(Sexp, StreamHeader)> {
+    read_stream(source, hook, None)
+}
+
+/// `unserialize`, failing unless the stream is in the `expected` format, when one is given.
+unsafe fn read_stream(
+    source: &mut dyn Source,
+    hook: Option<PersistHook<'_>>,
+    expected: Option<Format>,
+) -> ApiResult<(Sexp, StreamHeader)> {
     let mark = runtime().heap.handle_mark();
     let mut reader = Reader::new(source, hook);
     let result = reader
-        .read_header(None)
+        .read_header(expected)
         .and_then(|header| Ok((reader.read_item()?, header)));
     runtime().heap.release_handles(mark);
     let (object, header) = result?;
@@ -2320,18 +2329,10 @@ pub unsafe extern "C" fn R_Unserialize(stream: *mut R_inpstream_st) -> Sexp {
             None => None,
         };
         let mut source = NativeSource { stream };
-        let mark = runtime().heap.handle_mark();
-        let mut reader = Reader::new(&mut source, hook);
-        let result = reader.read_header(expected).and_then(|header| {
-            let object = reader.read_item()?;
-            Ok((object, header))
-        });
-        runtime().heap.release_handles(mark);
-        let (object, header) = result?;
-        runtime().heap.root(object);
+        let (object, header) = read_stream(&mut source, hook, expected)?;
         let stream = &mut *stream;
-        if let Some(format) = (stream.r#type == 0).then_some(header.format) {
-            stream.r#type = format as c_int;
+        if stream.r#type == 0 {
+            stream.r#type = header.format as c_int;
         }
         if let Some(name) = header.native_encoding {
             let bytes = name.as_bytes();
