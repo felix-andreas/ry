@@ -1825,8 +1825,9 @@ strict-mode origin. The recognized masks are:
 
 A name inside a mask that does resolve, such as a local variable or a function like `sum`, keeps its
 ordinary resolution and typing, because data.table itself falls back to the lexical scope for names
-that are not columns. Base indexing such as `m[i, j]` carries no data.table marker, so it keeps full
-lexical checking. A function written inside a masked argument is masked too, because it is created
+that are not columns. Inside any single `[`, a `..name` read is data.table's way to name the
+variable `name` from the enclosing scope, so it resolves to `name`. Base indexing such as `m[i, j]`
+carries no data.table marker, so it keeps full lexical checking. A function written inside a masked argument is masked too, because it is created
 inside the data's frame.
 
 ### data.table result classes
@@ -1894,9 +1895,11 @@ unresolved
 ```
 
 This is an `unresolved` warning rather than a type error, because R looks a non-column up in the
-enclosing scope, so only a name nothing defines is certainly wrong. `.N` and `.GRP` are `integer`,
-`.I` is `integer[]`, and `.SD` is the source frame without its group columns. A called name, such as
-`sum` in `sum(amount)`, is looked up as a function and never reads a column.
+enclosing scope, so only a name nothing defines is certainly wrong. `.N`, `.GRP`, and `.NGRP` are
+`integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns. A called
+name, such as `sum` in `sum(amount)`, is looked up as a function and never reads a column. A
+`..name` read is the variable `name` from the enclosing scope, never a column, and a bare `..name`
+as `j` selects the columns it names, which makes the result a `frame` with unknown columns.
 
 The result of the query follows from its arguments:
 
@@ -1935,8 +1938,8 @@ sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 
 #### Column updates
 
-`f[, y := v]` is copy-on-write: the statement rebinds `f` in the current scope with `y` added, or with
-`y`'s type replaced. An alias taken earlier keeps the old type, and `y := NULL` removes the column:
+`f[, y := v]` is copy-on-write: the statement rebinds `f` with `y` added, or with `y`'s type replaced.
+An alias taken earlier keeps the old type, and `y := NULL` removes the column:
 
 ```r
 sales <- frame(team = c("a", "b"), amount = c(1, 2))
@@ -1947,16 +1950,38 @@ before$tax                      # error: the frame `before` has no column `tax`.
 
 The left side may also be a string, `c("a", "b")` paired with a `list()` of values, or the functional
 form `` `:=`(a = v, b = w) ``. Any other left side, such as `(columns) := v`, makes the columns
-unknown, silently. Inside a function, `:=` binds a local copy, so the caller's frame keeps its type.
-`f$y <- v` and `f[["y"]] <- v` update a column in the same way.
+unknown, silently. `f$y <- v` and `f[["y"]] <- v` update a column in the same way.
+
+With a row index, as in `f[id > 1, price := 0L]`, only some rows change, so the value is coerced to
+the existing column and `price` keeps its type. A column the statement creates takes the value's type.
+
+The rebinding applies only to a name the current scope already binds: any top-level name, or a
+function's own local or parameter. A `:=` on any other name, such as a global updated inside a
+function, creates no local binding, so the name keeps resolving to its original definition for
+goto-definition, references, and rename. That is what data.table code, which updates a shared table
+by reference, needs. When that name is a global frame, later reads in the same function still see
+the updated columns, while other top-level code keeps the frame's declared type:
+
+```r
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+with_tax <- function() {
+  sales[, tax := amount * 0.2]
+  sales$tax                       # double[]
+}
+unchanged <- sales                # frame{team: character[], amount: double[]}
+```
 
 #### Joins
 
 `x[y, on = keys]` joins two frames. The keys may be written `"id"`, `"a==b"`, `"a,b"`, `c("id")`,
 `c(a = "b")`, `.(id)`, or `.(a = b)`, and each one must be a column of the frame it names. The result
 has `x`'s columns, each key taking `y`'s key type, followed by `y`'s other columns; a column both
-frames have is renamed `i.name`, as data.table names it. `roll =` does not change the type. A join
-whose `i` is not a frame, or whose `on` is some other form, is `Unknown`.
+frames have is renamed `i.name`, as data.table names it. Inside the join, `j` can also read either
+side by prefix: `x.price` is `x`'s `price` and `i.price` is the joined frame's, which works for a key
+and for a column whose name does not clash. A prefixed name the side does not have is reported like
+any other missing column, and a prefixed name in a query that is no join ry can see is a silent
+`Unknown`. `roll =` does not change the type. A join whose `i` is not a frame, or whose `on` is some
+other form, is `Unknown`.
 
 #### Columns
 

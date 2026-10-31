@@ -1848,6 +1848,15 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   interpreter passes an unshared `&mut Table` (reference count one) and the update happens in place,
   or it calls `Table::fork` first, which copies only the column list, because Arrow buffers are
   immutable and shared. data.table's own `:=` on a `data.table` keeps its by-reference semantics.
+- **`:=` writes only a slot the current scope already owns** (`naming.rs`, the `Index` arm).
+  Naming runs before types, so it cannot tell a frame from a `data.table`. Minting a local binding
+  for every `NameRef[, y := v]` made a global `data.table` updated inside a function resolve to the
+  `:=` statement, which broke goto-definition, references and rename. So a top-level name, a local
+  or a parameter is rewritten in place, and any other subject binds nothing. For a global frame the
+  checker still records the update as a refinement of the non-local name (`non_local_slots`, the
+  mechanism guard narrowing uses), so later reads in that function see the new columns.
+- **A subset `:=` (`f[i, y := v]`) keeps an existing column's type**, because data.table coerces
+  the value to the column. A column it creates takes the value's type.
 - **Queries go through a small IR** (`crates/table/src/query.rs`), not straight from R syntax to
   Polars, so the interpreter, the checker's result types (`result_type`) and the tests share one
   description of `tbl[i, j, by]`. Lowering gives operations R semantics on top of Polars: integer

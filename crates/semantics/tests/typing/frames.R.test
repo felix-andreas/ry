@@ -170,7 +170,7 @@ prices <- frame(id = 1:3, price = c(1, 2, 3))
 total <- prices[, .(total = sum(pirce))]
 #++++
 prices: frame{id: integer[], price: double[]}
-total: frame{total: integer[]}
+total: frame{total: Unknown}
 78..83 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
 
 #---- a_closure_parameter_in_j_stays_lexical
@@ -179,6 +179,27 @@ scaled <- prices[, .(scaled = vapply(price, function(value) value * 2, numeric(1
 #++++
 prices: frame{id: integer[], price: double[]}
 scaled: frame{scaled: double[]}
+
+#---- a_dot_dot_name_reads_the_enclosing_variable
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+columns <- "price"
+rate <- 2
+picked <- prices[, ..columns]
+scaled <- prices[, .(scaled = price * ..rate)]
+#++++
+prices: frame{id: integer[], price: double[]}
+columns: character
+rate: double
+picked: frame
+scaled: frame{scaled: double[]}
+
+#==== frame_specials
+#---- ngrp_is_an_integer
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+counted <- sales[, .(groups = .NGRP, n = .N, group = .GRP), by = team]
+#++++
+sales: frame{team: character[], amount: double[]}
+counted: frame{team: character[], groups: integer[], n: integer[], group: integer[]}
 
 #==== frame_by
 #---- a_bare_name_groups_first
@@ -341,10 +362,31 @@ total_tax <- function() {
 #++++
 total_tax: fn() -> double[]
 
-#---- walrus_inside_a_function_binds_a_local_copy
+#---- walrus_updates_a_parameter
+#: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+total_tax <- function(prices) {
+  prices[, tax := price * 0.2]
+  prices$tax
+}
+#++++
+total_tax: fn(prices: frame{id: integer[], price: double[]}) -> double[]
+
+#---- walrus_on_an_enclosing_frame_updates_it_without_a_local_binding
 prices <- frame(id = 1:3, price = c(1, 2, 3))
 with_tax <- function() {
   prices[, tax := price * 0.2]
+  prices
+}
+unchanged <- prices
+#++++
+prices: frame{id: integer[], price: double[]}
+with_tax: fn() -> frame{id: integer[], price: double[], tax: double[]}
+unchanged: frame{id: integer[], price: double[]}
+
+#---- an_assigned_walrus_makes_a_local_copy
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+with_tax <- function() {
+  prices <- prices[, tax := price * 0.2]
   prices$tax
 }
 unchanged <- prices
@@ -352,6 +394,24 @@ unchanged <- prices
 prices: frame{id: integer[], price: double[]}
 with_tax: fn() -> double[]
 unchanged: frame{id: integer[], price: double[]}
+
+#---- a_subset_walrus_keeps_the_existing_column_type
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[id > 1L, price := 0L]
+kept <- prices$price
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: double[]}
+kept: double[]
+
+#---- a_subset_walrus_adds_a_new_column_with_the_value_type
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices[id > 1L, flag := TRUE]
+added <- prices$flag
+#++++
+prices: frame{id: integer[], price: double[]}
+frame{id: integer[], price: double[], flag: logical[]}
+added: logical[]
 
 #---- walrus_with_a_misspelled_right_side_is_reported
 prices <- frame(id = 1:3, price = c(1, 2, 3))
@@ -453,6 +513,32 @@ named <- prices[labels, on = "id", .(label, price)]
 prices: frame{id: integer[], price: double[]}
 labels: frame{id: integer[], label: character[]}
 named: frame{label: character[], price: double[]}
+
+#---- prefixed_columns_read_either_side_of_a_join
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+quotes <- frame(id = 1:3, price = c("a", "b", "c"), venue = c("x", "y", "z"))
+picked <- prices[quotes, on = "id", .(a = i.price, b = x.price, c = i.venue, d = i.id, e = x.id)]
+#++++
+prices: frame{id: integer[], price: double[]}
+quotes: frame{id: integer[], price: character[], venue: character[]}
+picked: frame{a: character[], b: double[], c: character[], d: integer[], e: integer[]}
+
+#---- a_prefixed_column_missing_from_its_side_is_reported
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+quotes <- frame(id = 1:3, venue = c("x", "y", "z"))
+picked <- prices[quotes, on = "id", .(a = i.vneue)]
+#++++
+prices: frame{id: integer[], price: double[]}
+quotes: frame{id: integer[], venue: character[]}
+picked: frame{a: Unknown}
+140..147 warning[unresolved] the frame `prices` has no column `i.vneue`, and nothing else defines that name. Did you mean `i.venue`?
+
+#---- a_prefixed_name_outside_a_join_is_unknown
+prices <- frame(id = 1:3, price = c(1, 2, 3))
+picked <- prices[, .(a = i.price, b = x.price)]
+#++++
+prices: frame{id: integer[], price: double[]}
+picked: frame{a: Unknown, b: Unknown}
 
 #==== frame_columns
 #---- dollar_reads_a_column
