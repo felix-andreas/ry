@@ -497,6 +497,69 @@ LibExtern SEXP R_dot_packageName;
 LibExtern SEXP R_dot_target;
 LibExtern SEXP R_dot_Generic;
 
+/* Serialization streams. R_Serialize writes an object through a stream's byte callbacks and
+ * R_Unserialize reads one back; the persistence hooks let the caller replace environments,
+ * external pointers and weak references by names on the way out and restore them on the way
+ * in. The two structs are part of the ABI: packages allocate them and fill their fields. */
+typedef void *R_pstream_data_t;
+
+typedef enum {
+    R_pstream_any_format,
+    R_pstream_ascii_format,
+    R_pstream_binary_format,
+    R_pstream_xdr_format,
+    R_pstream_asciihex_format
+} R_pstream_format_t;
+
+typedef struct R_outpstream_st *R_outpstream_t;
+struct R_outpstream_st {
+    R_pstream_data_t data;
+    R_pstream_format_t type;
+    int version;
+    void (*OutChar)(R_outpstream_t stream, int c);
+    void (*OutBytes)(R_outpstream_t stream, void *buf, int length);
+    SEXP (*OutPersistHookFunc)(SEXP object, SEXP data);
+    SEXP OutPersistHookData;
+};
+
+/* The longest encoding name an input stream records. */
+#define R_CODESET_MAX 63
+
+typedef struct R_inpstream_st *R_inpstream_t;
+struct R_inpstream_st {
+    R_pstream_data_t data;
+    R_pstream_format_t type;
+    int (*InChar)(R_inpstream_t stream);
+    void (*InBytes)(R_inpstream_t stream, void *buf, int length);
+    SEXP (*InPersistHookFunc)(SEXP name, SEXP data);
+    SEXP InPersistHookData;
+    char native_encoding[R_CODESET_MAX + 1];
+    void *nat2nat_obj;
+    void *nat2utf8_obj;
+};
+
+void R_InitOutPStream(R_outpstream_t stream, R_pstream_data_t data, R_pstream_format_t type,
+                      int version, void (*outchar)(R_outpstream_t, int),
+                      void (*outbytes)(R_outpstream_t, void *, int),
+                      SEXP (*phook)(SEXP, SEXP), SEXP pdata);
+void R_InitInPStream(R_inpstream_t stream, R_pstream_data_t data, R_pstream_format_t type,
+                     int (*inchar)(R_inpstream_t), void (*inbytes)(R_inpstream_t, void *, int),
+                     SEXP (*phook)(SEXP, SEXP), SEXP pdata);
+#ifdef __cplusplus
+void R_InitFileOutPStream(R_outpstream_t stream, std::FILE *fp, R_pstream_format_t type,
+                          int version, SEXP (*phook)(SEXP, SEXP), SEXP pdata);
+void R_InitFileInPStream(R_inpstream_t stream, std::FILE *fp, R_pstream_format_t type,
+                         SEXP (*phook)(SEXP, SEXP), SEXP pdata);
+#else
+void R_InitFileOutPStream(R_outpstream_t stream, FILE *fp, R_pstream_format_t type,
+                          int version, SEXP (*phook)(SEXP, SEXP), SEXP pdata);
+void R_InitFileInPStream(R_inpstream_t stream, FILE *fp, R_pstream_format_t type,
+                         SEXP (*phook)(SEXP, SEXP), SEXP pdata);
+#endif
+void R_Serialize(SEXP s, R_outpstream_t stream);
+SEXP R_Unserialize(R_inpstream_t stream);
+/* End of serialization streams. */
+
 #ifndef R_NO_REMAP
 #define alloc3DArray Rf_alloc3DArray
 #define allocArray Rf_allocArray

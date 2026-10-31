@@ -17,9 +17,13 @@ path = "src/libr.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+bzip2-rs = "0.1.2"
+flate2 = "1.1.9"
 heap = { path = "../heap" }
 libc = "0.2"
+lzma-rs = "0.3.0"
 rustc-hash.workspace = true
+stacker.workspace = true
 
 [build-dependencies]
 cc = "1.2"
@@ -39,3 +43,7 @@ path = "tests/test_gnu_r_binaries.rs"
 [[test]]
 name = "test_fuzz_native"
 path = "tests/test_fuzz_native.rs"
+
+[[test]]
+name = "test_serialize"
+path = "tests/test_serialize.rs"
