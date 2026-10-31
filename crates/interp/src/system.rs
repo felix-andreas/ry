@@ -155,7 +155,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
-    internal("balancePOSIXlt", 2, |call| unsafe { Ok(call.arg(0)) }),
+    internal("balancePOSIXlt", 3, |call| unsafe { Ok(call.arg(0)) }),
     internal("format.Date", 2, |call| unsafe { Err(call.error("format.Date is not supported")) }),
     internal("tzone_name", 0, |_| unsafe { scalar_string("UTC") }),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }),
@@ -163,7 +163,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("gettext", 3, |call| unsafe { Ok(call.arg(1)) }),
     internal("ngettext", 4, do_ngettext),
     internal("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
-    internal("crc64", 1, |call| unsafe { scalar_string(&format!("{:016x}", crc64(values::first_string(call.arg(0)).unwrap_or_default().as_bytes()))) }),
+    internal("crc64", 1, |call| unsafe { scalar_string(&crc64_hex(values::first_string(call.arg(0)).unwrap_or_default().as_bytes())) }),
     internal("mkjunction", 2, |_| unsafe { scalar_bool(false) }),
     internal("Sys.setenv", 2, do_sys_setenv),
     internal("pkgload", -1, |_| unsafe { Ok(nil()) }),
@@ -933,7 +933,7 @@ unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.subsec_nanos() as u64)
-            ^ (COUNTER * 0x9e3779b97f4a7c15);
+            ^ COUNTER.wrapping_mul(0x9e3779b97f4a7c15);
         paths.push(format!("{directory}/{pattern}{unique:x}{extension}"));
     }
     string_vector(&paths)
@@ -1180,6 +1180,12 @@ unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_ngettext(call: &Call<'_>) -> R<Sexp> {
     let count = values::as_integer_scalar(call.arg(0));
     Ok(if count == 1 { call.arg(1) } else { call.arg(2) })
+}
+
+/// The CRC-64 (ECMA-182, reflected) of `bytes` in lower-case hexadecimal without leading
+/// zeros, as `crc64()` reports it.
+pub fn crc64_hex(bytes: &[u8]) -> String {
+    format!("{:x}", crc64(bytes))
 }
 
 fn crc64(bytes: &[u8]) -> u64 {

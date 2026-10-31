@@ -203,7 +203,7 @@ unsafe fn concise_traceback(call: Sexp) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    if names.len() == 1 && interp().frames.last().is_some_and(|frame| frame.call == call) {
+    if names.len() == 1 && interp().frames.first().is_some_and(|frame| frame.call == call) {
         return None;
     }
     let mut text = names.join(" -> ");
@@ -291,6 +291,11 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
     Ok(())
 }
 
+/// The first line of a call's deparse, which is all of a long call a warning shows.
+unsafe fn first_deparse_line(call: Sexp) -> String {
+    deparse::deparse_lines(call, 60, deparse::options::SIMPLE).into_iter().next().unwrap_or_default()
+}
+
 /// Prints the deferred warnings the way the top level does after a call, and clears them.
 pub unsafe fn print_warnings() {
     let warnings = std::mem::take(&mut interp().warnings);
@@ -304,7 +309,7 @@ pub unsafe fn print_warnings() {
         if *call == nil() {
             text.push_str(message);
         } else {
-            let call_text = deparse::deparse_one_line(*call);
+            let call_text = first_deparse_line(*call);
             let separator = if call_text.len() + message.len() + 6 > 75 {
                 " :\n  "
             } else {
@@ -324,7 +329,7 @@ pub unsafe fn print_warnings() {
                 if *call == nil() {
                     text.push_str(&format!("{}: {message}\n", index + 1));
                 } else {
-                    let call_text = deparse::deparse_one_line(*call);
+                    let call_text = first_deparse_line(*call);
                     let separator = if call_text.len() + message.len() + 10 > 75 {
                         " :\n  "
                     } else {

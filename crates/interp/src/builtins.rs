@@ -183,6 +183,7 @@ pub(crate) unsafe fn install_all() {
         crate::bytecode::BUILTINS,
         crate::session::BUILTINS,
         crate::native::BUILTINS,
+        crate::utils::BUILTINS,
     ] {
         register(table);
     }

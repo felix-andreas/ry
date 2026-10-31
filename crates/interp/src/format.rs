@@ -462,11 +462,12 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     settings.nsmall = nsmall;
     if scientific != nil() {
         if scientific.kind() == SexpType::Logical {
-            settings.scipen = if values::as_logical_scalar(scientific) == 1 {
-                -100
-            } else {
-                100
-            };
+            // `NA`, the default of `format.default`, keeps `options(scipen)`.
+            match values::as_logical_scalar(scientific) {
+                1 => settings.scipen = -100,
+                0 => settings.scipen = 100,
+                _ => {}
+            }
         } else {
             settings.scipen = values::as_integer_scalar(scientific);
         }

@@ -39,12 +39,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("flush", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("isIncomplete", 1, |_| unsafe { scalar_bool(false) }),
     internal("isSeekable", 1, |_| unsafe { scalar_bool(false) }),
-    internal("pushBack", 4, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("pushBackLength", 1, |_| unsafe { scalar_integer(0) }),
+    internal("pushBack", 4, do_push_back).invisible(),
+    internal("pushBackLength", 1, do_push_back_length),
+    internal("clearPushBack", 1, do_clear_push_back).invisible(),
     internal("sink", 4, do_sink).invisible(),
     internal("sink.number", 1, do_sink_number),
     internal("readline", 1, |_| unsafe { values::scalar_string("") }),
-    internal("scan", 19, |call| unsafe { Err(call.error("scan is not supported")) }),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,6 +63,8 @@ pub struct Connection {
     /// Unread input, for reading connections.
     input: Vec<u8>,
     position: usize,
+    /// How many bytes at `position` were pushed back, which `pushBackLength` counts in lines.
+    pushed: usize,
     /// Pending output, written to the file on close.
     output: Vec<u8>,
     /// For an output text connection: the variable it appends to, and where.
@@ -96,6 +98,7 @@ impl Table {
                     open: true,
                     input: Vec::new(),
                     position: 0,
+                    pushed: 0,
                     output: Vec::new(),
                     text_target: None,
                     text_lines: Vec::new(),
@@ -211,6 +214,7 @@ unsafe fn open_connection(call: &Call<'_>, class: Class) -> R<Sexp> {
         open: false,
         input: Vec::new(),
         position: 0,
+        pushed: 0,
         output: Vec::new(),
         text_target: None,
         text_lines: Vec::new(),
@@ -232,6 +236,7 @@ fn open(connection: &mut Connection) -> R<()> {
     if mode.starts_with('r') {
         connection.input = read_file_bytes(&connection.description, true)?;
         connection.position = 0;
+        connection.pushed = 0;
     } else if mode.starts_with('a') {
         connection.output = std::fs::read(expand_path(&connection.description)).unwrap_or_default();
     } else {
@@ -366,6 +371,66 @@ pub unsafe fn read_all_bytes(file: Sexp) -> R<Vec<u8>> {
     let rest = connection.input[connection.position..].to_vec();
     connection.position = connection.input.len();
     Ok(rest)
+}
+
+/// Runs `read` over the unread input of `file`, which advances the position it is given. A
+/// closed connection is opened for the call and closed again after it, as GNU R does when
+/// reading from one.
+pub unsafe fn with_input<T>(file: Sexp, read: impl FnOnce(&[u8], &mut usize) -> T) -> R<T> {
+    let index = connection_index(file)?;
+    let connection = interp().connections.get(index)?;
+    let was_open = connection.open;
+    if !was_open {
+        open(connection)?;
+    }
+    let mut position = connection.position;
+    let result = read(&connection.input, &mut position);
+    connection.pushed = connection.pushed.saturating_sub(position - connection.position);
+    connection.position = position;
+    if !was_open && connection.class != Class::Text {
+        connection.open = false;
+    }
+    Ok(result)
+}
+
+/// `pushBack(data, connection, newLine, type)`: text read before the rest of the input.
+unsafe fn do_push_back(call: &Call<'_>) -> R<Sexp> {
+    let data = call.arg(0);
+    let index = connection_index(call.arg(1))?;
+    let new_line = values::as_logical_scalar(call.arg(2)) == 1;
+    let mut text = Vec::new();
+    for line in values::strings(data) {
+        text.extend_from_slice(line.as_deref().unwrap_or("NA").as_bytes());
+        if new_line {
+            text.push(b'\n');
+        }
+    }
+    let connection = interp().connections.get(index)?;
+    if !connection.mode.starts_with('r') && connection.class != Class::Text {
+        return Err(error("can only push back on open readable connections"));
+    }
+    let position = connection.position;
+    connection.pushed += text.len();
+    connection.input.splice(position..position, text);
+    Ok(nil())
+}
+
+unsafe fn do_push_back_length(call: &Call<'_>) -> R<Sexp> {
+    let index = connection_index(call.arg(0))?;
+    let connection = interp().connections.get(index)?;
+    let end = (connection.position + connection.pushed).min(connection.input.len());
+    let pushed = &connection.input[connection.position..end];
+    scalar_integer(pushed.iter().filter(|byte| **byte == b'\n').count() as i32)
+}
+
+unsafe fn do_clear_push_back(call: &Call<'_>) -> R<Sexp> {
+    let index = connection_index(call.arg(0))?;
+    let connection = interp().connections.get(index)?;
+    let position = connection.position;
+    let end = (position + connection.pushed).min(connection.input.len());
+    connection.input.drain(position..end);
+    connection.pushed = 0;
+    Ok(nil())
 }
 
 /// Appends bytes to a writable connection.
@@ -616,7 +681,10 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             piece_index += 1;
         }
     }
-    if fill_width > 0 && !output.ends_with('\n') && !output.is_empty() {
+    // A separator holding a newline makes the separators terminators, so the output always
+    // ends with one, even when there was nothing to print.
+    let newline_separator = (0..separator_count).any(|index| separator_at(index).contains('\n'));
+    if newline_separator || (fill_width > 0 && !output.ends_with('\n') && !output.is_empty()) {
         output.push('\n');
     }
     write_bytes(file, output.as_bytes())?;
@@ -663,6 +731,7 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
         open: true,
         input: Vec::new(),
         position: 0,
+        pushed: 0,
         output: Vec::new(),
         text_target: None,
         text_lines: Vec::new(),
