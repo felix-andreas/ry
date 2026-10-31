@@ -150,7 +150,7 @@ pub enum OperandExpectation {
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemCheck<'db> {
-    pub expression_types: FxHashMap<ExprId, Ty<'db>>,
+    pub expression_types: ExpressionTypes<'db>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -162,6 +162,18 @@ pub struct ItemCheck<'db> {
     /// Settled scheme of every name the top-level frame binds, so a statement item's
     /// conditional write serves cross-item reads; a definition resolves via `scheme`.
     pub top_level_bindings: Vec<(Symbol, TypeScheme<'db>)>,
+}
+
+/// Settled type of every expression the checker recorded, indexed by expression id.
+/// Ids are dense within an item, so a slot per expression costs one word where a hash
+/// entry costs several.
+#[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
+pub struct ExpressionTypes<'db>(Box<[Option<Ty<'db>>]>);
+
+impl<'db> ExpressionTypes<'db> {
+    pub fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
+        self.0.get(id.0 as usize)?.as_ref()
+    }
 }
 
 /// Where an undetermined type was first introduced; propagation is never re-reported.
@@ -383,11 +395,13 @@ pub fn check_item_with_annotation<'db>(
             }
         }
     }
-    let expression_types = context
-        .recorded
-        .iter()
-        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
-        .collect();
+    let mut expression_types = vec![None; module.expressions.len()];
+    for (&id, &ty) in &context.recorded {
+        if let Some(slot) = expression_types.get_mut(id.0 as usize) {
+            *slot = Some(context.table.resolve(context.db, ty));
+        }
+    }
+    let expression_types = ExpressionTypes(expression_types.into_boxed_slice());
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.

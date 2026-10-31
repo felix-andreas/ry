@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing_subscriber::prelude::*;
 
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
