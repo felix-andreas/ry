@@ -51,6 +51,7 @@ pub mod stats_deriv;
 pub mod stats_lbfgsb;
 pub mod stats_models;
 pub mod stats_optimize;
+pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;

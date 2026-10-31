@@ -10,7 +10,7 @@
 use crate::{
     builtin_libraries::{NativeCall, NativeFn, c_result},
     coerce::coerce_vector,
-    stats_cluster, stats_deriv, stats_models, stats_optimize,
+    stats_cluster, stats_deriv, stats_models, stats_optimize, stats_tests,
     unwind::R,
     values::{self, length, symbols},
 };
@@ -76,6 +76,18 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("hcass2", stats_cluster::hcass2),
     ("numeric_deriv", stats_models::numeric_deriv),
     ("nls_iter", stats_models::nls_iter),
+    ("HoltWinters", holt_winters),
+    ("eureka", eureka),
+    ("Burg", burg),
+    ("SWilk", stats_tests::swilk),
+    ("pKolmogorov2x", stats_tests::p_kolmogorov_2x),
+    ("pKS2", stats_tests::p_ks2),
+    ("psmirnov_exact", stats_tests::psmirnov_exact),
+    ("pAnsari", stats_tests::p_ansari),
+    ("qAnsari", stats_tests::q_ansari),
+    ("pKendall", stats_tests::p_kendall),
+    ("pRho", stats_tests::p_rho),
+    ("d2x2xk", stats_tests::d2x2xk),
 ];
 
 /// The arguments of a `.C` or `.Fortran` call, coerced as the routine's declared types, ready
@@ -2218,4 +2230,157 @@ unsafe fn isoreg(call: &NativeCall<'_>) -> R<Sexp> {
         ("yf", values::real_vector(&fitted)?),
         ("iKnots", values::integer_vector(&knots)?),
     ])
+}
+
+/// `.C(HoltWinters, x, xl, alpha, beta, gamma, start.time, seasonal, period, dotrend,
+/// doseasonal, a, b, s, SSE, level, trend, seasonal)`: exponential smoothing with optional
+/// trend and additive (`seasonal` 1) or multiplicative seasonality, accumulating the sum of
+/// squared one-step prediction errors.
+unsafe fn holt_winters(call: &NativeCall<'_>) -> R<Sexp> {
+    let arguments = c_arguments(call)?;
+    let x = values::reals(arguments[0]).to_vec();
+    let length_x = values::as_integer_scalar(arguments[1]).max(0) as usize;
+    let alpha = values::as_real_scalar(arguments[2]);
+    let beta = values::as_real_scalar(arguments[3]);
+    let gamma = values::as_real_scalar(arguments[4]);
+    let start = values::as_integer_scalar(arguments[5]).max(1) as usize;
+    let additive = values::as_integer_scalar(arguments[6]) == 1;
+    let period = values::as_integer_scalar(arguments[7]).max(0) as usize;
+    let do_trend = values::as_integer_scalar(arguments[8]) == 1;
+    let do_seasonal = values::as_integer_scalar(arguments[9]) == 1;
+    let a = values::as_real_scalar(arguments[10]);
+    let b = values::as_real_scalar(arguments[11]);
+    let s = values::reals(arguments[12]).to_vec();
+    let mut sse = 0.0;
+    let level = values::reals_mut(arguments[14]);
+    let trend = values::reals_mut(arguments[15]);
+    let season = values::reals_mut(arguments[16]);
+    level[0] = a;
+    if do_trend {
+        trend[0] = b;
+    }
+    if do_seasonal {
+        season[..period].copy_from_slice(&s[..period]);
+    }
+    for i in start - 1..length_x {
+        let i0 = i + 2 - start;
+        let s0 = i0 + period - 1;
+        let mut forecast = level[i0 - 1] + if do_trend { trend[i0 - 1] } else { 0.0 };
+        let seasonal_term = if do_seasonal { season[s0 - period] } else if additive { 0.0 } else { 1.0 };
+        if additive {
+            forecast += seasonal_term;
+        } else {
+            forecast *= seasonal_term;
+        }
+        let residual = x[i] - forecast;
+        sse += residual * residual;
+        let deseasonalized = if additive { x[i] - seasonal_term } else { x[i] / seasonal_term };
+        level[i0] = alpha * deseasonalized + (1.0 - alpha) * (level[i0 - 1] + trend[i0 - 1]);
+        if do_trend {
+            trend[i0] = beta * (level[i0] - level[i0 - 1]) + (1.0 - beta) * trend[i0 - 1];
+        }
+        if do_seasonal {
+            let observed = if additive { x[i] - level[i0] } else { x[i] / level[i0] };
+            season[s0] = gamma * observed + (1.0 - gamma) * seasonal_term;
+        }
+    }
+    values::reals_mut(arguments[13])[0] = sse;
+    c_return(call, &arguments)
+}
+
+/// `.Fortran(eureka, lr, r, g, f, var, a)`: Levinson's recursion for the Toeplitz system of
+/// the autocovariances `r`, giving the autoregression coefficients of every order up to `lr`
+/// (row `l` of `f`) and their innovations variances.
+unsafe fn eureka(call: &NativeCall<'_>) -> R<Sexp> {
+    let arguments = c_arguments(call)?;
+    let order = values::as_integer_scalar(arguments[0]).max(0) as usize;
+    let r = values::reals(arguments[1]).to_vec();
+    let g = values::reals(arguments[2]).to_vec();
+    let mut f = vec![0.0; order * order];
+    let mut variances = vec![0.0; order];
+    let mut a = vec![0.0; order + 1];
+    // 1-based like the recursion's statement: `f[(l, j)]` is f(l, j), `a[j]` is a(j).
+    let at = |l: usize, j: usize| (l - 1) + (j - 1) * order;
+    if order >= 1 {
+        let mut v = r[0];
+        let mut d = r[1];
+        a[1] = 1.0;
+        f[at(1, 1)] = g[1] / v;
+        let mut q = f[at(1, 1)] * r[1];
+        variances[0] = (1.0 - f[at(1, 1)] * f[at(1, 1)]) * r[0];
+        for l in 2..=order {
+            a[l] = -d / v;
+            if l > 2 {
+                let l1 = (l - 2) / 2;
+                let l2 = l1 + 1;
+                for j in 2..=l2 {
+                    let hold = a[j];
+                    let k = l - j + 1;
+                    a[j] += a[l] * a[k];
+                    a[k] += a[l] * hold;
+                }
+                if 2 * l1 != l - 2 {
+                    a[l2 + 1] *= 1.0 + a[l];
+                }
+            }
+            v += a[l] * d;
+            f[at(l, l)] = (g[l] - q) / v;
+            for j in 1..l {
+                f[at(l, j)] = f[at(l - 1, j)] + f[at(l, l)] * a[l - j + 1];
+            }
+            variances[l - 1] = variances[l - 2] * (1.0 - f[at(l, l)] * f[at(l, l)]);
+            if l == order {
+                break;
+            }
+            d = 0.0;
+            q = 0.0;
+            for i in 1..=l {
+                let k = l - i + 2;
+                d += a[i] * r[k - 1];
+                q += f[at(l, i)] * r[k - 1];
+            }
+        }
+    }
+    values::reals_mut(arguments[3]).copy_from_slice(&f);
+    values::reals_mut(arguments[4]).copy_from_slice(&variances);
+    values::reals_mut(arguments[5]).copy_from_slice(&a[1..]);
+    c_return(call, &arguments)
+}
+
+/// `Burg(x, order.max)`: Burg's estimates of the autoregressions of every order up to
+/// `order.max`, as `list(coefficients, innovations variance by the recursion, and by the
+/// mean squared forward and backward errors)`.
+unsafe fn burg(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = real_values(call.arg(0))?;
+    let order = values::as_integer_scalar(call.arg(1)).max(0) as usize;
+    let n = x.len();
+    let mut coefficients = vec![0.0; order * order];
+    let mut variance1 = vec![0.0; order + 1];
+    let mut variance2 = vec![0.0; order + 1];
+    let mut forward: Vec<f64> = x.iter().rev().copied().collect();
+    let mut backward = forward.clone();
+    let sum: f64 = x.iter().map(|value| value * value).sum();
+    variance1[0] = sum / n as f64;
+    variance2[0] = sum / n as f64;
+    for p in 1..=order {
+        let (mut numerator, mut denominator) = (0.0, 0.0);
+        for t in p..n {
+            numerator += backward[t] * forward[t - 1];
+            denominator += backward[t] * backward[t] + forward[t - 1] * forward[t - 1];
+        }
+        let reflection = 2.0 * numerator / denominator;
+        coefficients[order * (p - 1) + (p - 1)] = reflection;
+        for j in 1..p {
+            coefficients[p - 1 + order * (j - 1)] = coefficients[p - 2 + order * (j - 1)] - reflection * coefficients[p - 2 + order * (p - j - 1)];
+        }
+        let previous = forward.clone();
+        for t in p..n {
+            forward[t] = previous[t - 1] - reflection * backward[t];
+            backward[t] -= reflection * previous[t - 1];
+        }
+        variance1[p] = variance1[p - 1] * (1.0 - reflection * reflection);
+        let total: f64 = (p..n).map(|t| backward[t] * backward[t] + forward[t] * forward[t]).sum();
+        variance2[p] = total / (2.0 * (n - p) as f64);
+    }
+    values::list_vector(&[values::real_vector(&coefficients)?, values::real_vector(&variance1)?, values::real_vector(&variance2)?])
 }
