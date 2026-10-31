@@ -182,9 +182,6 @@ fn format_g(value: f64) -> String {
 
 // Nash's optimizers, as optim() runs them.
 
-const STEP_REDUCTION: f64 = 0.2;
-const ACCEPTANCE_TOLERANCE: f64 = 0.0001;
-const RELATIVE_TEST: f64 = 10.0;
 /// What Nelder-Mead and simulated annealing substitute for a non-finite function value.
 const BIG: f64 = 1.0e+35;
 
@@ -210,163 +207,221 @@ pub unsafe extern "C" fn vmmin(
 ) {
     enter(|| {
         let objective = Objective::new(fminfn, fmingr, ex)?;
-        let b = vector(b, n0);
+        let parameters = vector(b, n0);
         if maxit <= 0 {
             *fail = 0;
-            *fmin = objective.value(b)?;
+            *fmin = objective.value(parameters)?;
             *fncount = 0;
             *grcount = 0;
             return Ok(());
         }
-        if report <= 0 && trace != 0 {
+        if report <= 0 {
             return Err(error("REPORT must be > 0 (method = \"BFGS\")"));
         }
-        let free: Vec<usize> = (0..b.len())
+        let free: Vec<usize> = (0..parameters.len())
             .filter(|&index| mask.is_null() || *mask.add(index) != 0)
             .collect();
-        let n = free.len();
-        let mut g = vec![0.0; b.len()];
-        let mut t = vec![0.0; n];
-        let mut x = vec![0.0; n];
-        let mut c = vec![0.0; n];
-        let mut hessian = vec![vec![0.0; n]; n];
-        let mut f = objective.value(b)?;
-        if !f.is_finite() {
+        let count = free.len();
+        let mut value = objective.value(parameters)?;
+        if !value.is_finite() {
             return Err(error("initial value in 'vmmin' is not finite"));
         }
         if trace != 0 {
-            print(&format!("initial  value {f:.6} \n"));
+            print(&format!("initial  value {value:.6} \n"));
         }
-        *fmin = f;
-        let mut function_count = 1;
-        let mut gradient_count = 1;
-        objective.gradient(b, &mut g)?;
-        let mut iteration = 1;
-        let mut last_reset = gradient_count;
-        let mut count;
+        let mut best = value;
+        let mut evaluations: c_int = 1;
+        let mut gradients: c_int = 1;
+        let mut gradient = vec![0.0; parameters.len()];
+        objective.gradient(parameters, &mut gradient)?;
+        let mut iteration: c_int = 1;
+        let mut last_reset = gradients;
+        // The approximate inverse Hessian, symmetric, so only its lower triangle is kept.
+        let mut metric = vec![0.0; count * count];
+        let mut origin = vec![0.0; count];
+        let mut gradient_change = vec![0.0; count];
+        let mut direction = vec![0.0; count];
         loop {
-            if last_reset == gradient_count {
-                for (i, row) in hessian.iter_mut().enumerate() {
-                    row[..i].fill(0.0);
-                    row[i] = 1.0;
+            if last_reset == gradients {
+                for row in 0..count {
+                    for column in 0..=row {
+                        metric[row * count + column] = if row == column { 1.0 } else { 0.0 };
+                    }
                 }
             }
-            for i in 0..n {
-                x[i] = b[free[i]];
-                c[i] = g[free[i]];
+            for (position, &index) in free.iter().enumerate() {
+                origin[position] = parameters[index];
+                gradient_change[position] = gradient[index];
             }
-            let mut gradient_projection = 0.0;
-            for i in 0..n {
-                let mut s = 0.0;
-                for j in 0..=i {
-                    s -= hessian[i][j] * g[free[j]];
+            let mut slope = 0.0;
+            for row in 0..count {
+                let mut sum = 0.0;
+                for column in 0..=row {
+                    sum -= metric[row * count + column] * gradient[free[column]];
                 }
-                for j in i + 1..n {
-                    s -= hessian[j][i] * g[free[j]];
+                for column in row + 1..count {
+                    sum -= metric[column * count + row] * gradient[free[column]];
                 }
-                t[i] = s;
-                gradient_projection += s * g[free[i]];
+                direction[row] = sum;
+                slope += sum * gradient[free[row]];
             }
-            if gradient_projection < 0.0 {
+            let stalled;
+            if slope < 0.0 {
                 let mut step = 1.0;
-                let mut accepted = false;
-                loop {
-                    count = 0;
-                    for i in 0..n {
-                        b[free[i]] = x[i] + step * t[i];
-                        if RELATIVE_TEST + x[i] == RELATIVE_TEST + b[free[i]] {
-                            count += 1;
-                        }
-                    }
-                    if count < n {
-                        f = objective.value(b)?;
-                        function_count += 1;
-                        accepted = f.is_finite()
-                            && f <= *fmin + gradient_projection * step * ACCEPTANCE_TOLERANCE;
-                        if !accepted {
-                            step *= STEP_REDUCTION;
-                        }
-                    }
-                    if count == n || accepted {
-                        break;
-                    }
+                let mut moved = acceptable_point(
+                    &objective,
+                    parameters,
+                    &free,
+                    &origin,
+                    &direction,
+                    Descent { best, slope },
+                    &mut step,
+                    &mut value,
+                    &mut evaluations,
+                    false,
+                )?;
+                let improving =
+                    value > abstol && (value - best).abs() > reltol * (best.abs() + reltol);
+                if !improving {
+                    moved = false;
+                    best = value;
                 }
-                let enough = f > abstol && (f - *fmin).abs() > reltol * ((*fmin).abs() + reltol);
-                if !enough {
-                    count = n;
-                    *fmin = f;
-                }
-                if count < n {
-                    *fmin = f;
-                    objective.gradient(b, &mut g)?;
-                    gradient_count += 1;
+                if moved {
+                    best = value;
+                    objective.gradient(parameters, &mut gradient)?;
+                    gradients += 1;
                     iteration += 1;
-                    let mut d1 = 0.0;
-                    for i in 0..n {
-                        t[i] *= step;
-                        c[i] = g[free[i]] - c[i];
-                        d1 += t[i] * c[i];
+                    let mut curvature = 0.0;
+                    for position in 0..count {
+                        direction[position] *= step;
+                        gradient_change[position] =
+                            gradient[free[position]] - gradient_change[position];
+                        curvature += direction[position] * gradient_change[position];
                     }
-                    if d1 > 0.0 {
-                        let mut d2 = 0.0;
-                        for i in 0..n {
-                            let mut s = 0.0;
-                            for j in 0..=i {
-                                s += hessian[i][j] * c[j];
+                    if curvature > 0.0 {
+                        // `origin` is free again, so it holds the metric times the gradient change.
+                        let mut weight = 0.0;
+                        for row in 0..count {
+                            let mut sum = 0.0;
+                            for column in 0..=row {
+                                sum += metric[row * count + column] * gradient_change[column];
                             }
-                            for j in i + 1..n {
-                                s += hessian[j][i] * c[j];
+                            for column in row + 1..count {
+                                sum += metric[column * count + row] * gradient_change[column];
                             }
-                            x[i] = s;
-                            d2 += s * c[i];
+                            origin[row] = sum;
+                            weight += sum * gradient_change[row];
                         }
-                        d2 = 1.0 + d2 / d1;
-                        for i in 0..n {
-                            for j in 0..=i {
-                                hessian[i][j] +=
-                                    (d2 * t[i] * t[j] - x[i] * t[j] - t[i] * x[j]) / d1;
+                        weight = 1.0 + weight / curvature;
+                        for row in 0..count {
+                            for column in 0..=row {
+                                metric[row * count + column] +=
+                                    (weight * direction[row] * direction[column]
+                                        - origin[row] * direction[column]
+                                        - direction[row] * origin[column])
+                                        / curvature;
                             }
                         }
                     } else {
-                        last_reset = gradient_count;
+                        last_reset = gradients;
                     }
-                } else if last_reset < gradient_count {
-                    count = 0;
-                    last_reset = gradient_count;
-                }
-            } else {
-                count = 0;
-                if last_reset == gradient_count {
-                    count = n;
+                    stalled = false;
+                } else if last_reset < gradients {
+                    stalled = false;
+                    last_reset = gradients;
                 } else {
-                    last_reset = gradient_count;
+                    stalled = true;
                 }
+            } else if last_reset == gradients {
+                stalled = true;
+            } else {
+                stalled = false;
+                last_reset = gradients;
             }
-            if trace != 0 && report > 0 && iteration % report == 0 {
-                print(&format!("iter{iteration:4} value {f:.6}\n"));
+            if trace != 0 && iteration % report == 0 {
+                print(&format!("iter{iteration:>4} value {value:.6}\n"));
             }
             if iteration >= maxit {
                 break;
             }
-            if gradient_count - last_reset > 2 * n as c_int {
-                last_reset = gradient_count;
+            // The metric also restarts from the identity after 2n updates, as steepest
+            // descent does in a conjugate gradients method, so that stale curvature from
+            // far away cannot steer the search for long.
+            if gradients - last_reset > 2 * count as c_int {
+                last_reset = gradients;
             }
-            if count == n && last_reset == gradient_count {
+            if stalled && last_reset == gradients {
                 break;
             }
         }
         if trace != 0 {
+            print(&format!("final  value {best:.6} \n"));
             if iteration < maxit {
-                print(&format!("final  value {:.6} \nconverged\n", *fmin));
+                print("converged\n");
             } else {
                 print(&format!("stopped after {iteration} iterations\n"));
             }
         }
-        *fail = (iteration >= maxit) as c_int;
-        *fncount = function_count;
-        *grcount = gradient_count;
+        *fail = c_int::from(iteration >= maxit);
+        *fmin = best;
+        *fncount = evaluations;
+        *grcount = gradients;
         Ok(())
     })
+}
+
+/// The descent a step is judged against: the best value so far and the directional
+/// derivative there.
+#[derive(Clone, Copy)]
+struct Descent {
+    best: f64,
+    slope: f64,
+}
+
+/// Nash's acceptable point search: shortens the step along `direction` from `origin` by a fifth
+/// until the value falls by at least a ten-thousandth of the decrease the slope predicts.
+/// Returns false when the step became too short to move any free parameter, measured against
+/// 10 rather than against each parameter, so tiny parameters do not keep the search alive.
+/// `value` keeps the last value evaluated, which callers read even when no new point was
+/// tried.
+#[allow(clippy::too_many_arguments)]
+unsafe fn acceptable_point(
+    objective: &Objective,
+    parameters: &mut [f64],
+    free: &[usize],
+    origin: &[f64],
+    direction: &[f64],
+    descent: Descent,
+    step: &mut f64,
+    value: &mut f64,
+    evaluations: &mut c_int,
+    mark_rejections: bool,
+) -> ApiResult<bool> {
+    const SHRINK: f64 = 0.2;
+    const SUFFICIENT_DECREASE: f64 = 0.0001;
+    const MOVEMENT_REFERENCE: f64 = 10.0;
+    loop {
+        let mut unchanged = 0;
+        for (position, &index) in free.iter().enumerate() {
+            parameters[index] = origin[position] + *step * direction[position];
+            if MOVEMENT_REFERENCE + origin[position] == MOVEMENT_REFERENCE + parameters[index] {
+                unchanged += 1;
+            }
+        }
+        if unchanged == free.len() {
+            return Ok(false);
+        }
+        *value = objective.value(parameters)?;
+        *evaluations += 1;
+        if value.is_finite() && *value <= descent.best + descent.slope * *step * SUFFICIENT_DECREASE
+        {
+            return Ok(true);
+        }
+        *step *= SHRINK;
+        if mark_rejections {
+            print("*");
+        }
+    }
 }
 
 /// Nelder-Mead simplex minimization, Nash's Algorithm 19, with reflection `alpha`,
@@ -391,47 +446,45 @@ pub unsafe extern "C" fn nmmin(
 ) {
     enter(|| {
         let objective = Objective::new(fminfn, None, ex)?;
-        // C callers may pass the same array for `bvec` and `x_out`, so `x_out` is written through
-        // its pointer once `bvec` is no longer used rather than held as a second `&mut` slice.
-        let bvec = vector(bvec, n);
-        let n = bvec.len();
-        *fail = 0;
+        let size = n.max(0) as usize;
+        let mut trial = read_vector(bvec, size);
         if maxit <= 0 {
-            *fmin = objective.value(bvec)?;
+            *fmin = objective.value(&mut trial)?;
             *fncount = 0;
+            *fail = 0;
             return Ok(());
         }
+        let finite_or_big = |value: f64| if value.is_finite() { value } else { BIG };
         if trace != 0 {
             print("  Nelder-Mead direct search function minimizer\n");
         }
-        let n1 = n + 1;
-        let centroid = n + 1;
-        // Column j of `simplex` is vertex j: rows 0..n hold the point, row n its value.
-        let mut simplex = vec![vec![0.0; n + 2]; n + 1];
-        let mut f = objective.value(bvec)?;
-        if !f.is_finite() {
+        let start = objective.value(&mut trial)?;
+        if !start.is_finite() {
             return Err(error("function cannot be evaluated at initial parameters"));
         }
         if trace != 0 {
-            print(&format!("function value for initial parameters = {f:.6}\n"));
+            print(&format!(
+                "function value for initial parameters = {start:.6}\n"
+            ));
         }
-        let mut function_count: c_int = 1;
-        let tolerance = intol * (f.abs() + intol);
+        let mut evaluations: c_int = 1;
+        let tolerance = intol * (start.abs() + intol);
         if trace != 0 {
             print(&format!(
                 "  Scaled convergence tolerance is {}\n",
                 format_g(tolerance)
             ));
         }
-        simplex[n][0] = f;
-        for i in 0..n {
-            simplex[i][0] = bvec[i];
-        }
-        let mut lowest = 1usize;
-        let mut size = 0.0;
-        let mut step = 0.0f64;
-        for &value in bvec.iter() {
-            step = step.max(0.1 * value.abs());
+        // Vertex `v` occupies `simplex[v * size..(v + 1) * size]`; vertex 0 is the start.
+        let vertices = size + 1;
+        let mut simplex: Vec<f64> = (0..vertices).flat_map(|_| trial.iter().copied()).collect();
+        let mut values = vec![0.0; vertices];
+        values[0] = start;
+        let mut step = 0.0;
+        for &parameter in &trial {
+            if 0.1 * parameter.abs() > step {
+                step = 0.1 * parameter.abs();
+            }
         }
         if step == 0.0 {
             step = 0.1;
@@ -439,49 +492,47 @@ pub unsafe extern "C" fn nmmin(
         if trace != 0 {
             print(&format!("Stepsize computed as {step:.6}\n"));
         }
-        let mut action = "BUILD          ";
-        for j in 2..=n1 {
-            for i in 0..n {
-                simplex[i][j - 1] = bvec[i];
+        // Each vertex moves one coordinate away from the start. A coordinate so large that the
+        // step vanishes in it gets ten times the step until it moves.
+        let mut extent = 0.0;
+        for vertex in 1..vertices {
+            let coordinate = vertex - 1;
+            let mut offset = step;
+            while simplex[vertex * size + coordinate] == trial[coordinate] {
+                simplex[vertex * size + coordinate] = trial[coordinate] + offset;
+                offset *= 10.0;
             }
-            let mut trial = step;
-            while simplex[j - 2][j - 1] == bvec[j - 2] {
-                simplex[j - 2][j - 1] = bvec[j - 2] + trial;
-                trial *= 10.0;
-            }
-            size += trial;
+            extent += offset;
         }
-        let mut old_size = size;
-        let mut recompute = true;
+        let mut previous_extent = extent;
+        let mut stale_values = true;
+        let mut lowest = 0;
+        let mut action = "BUILD";
+        let mut code = 0;
+        let mut centroid = vec![0.0; size];
         loop {
-            if recompute {
-                for j in 0..n1 {
-                    if j + 1 != lowest {
-                        for i in 0..n {
-                            bvec[i] = simplex[i][j];
-                        }
-                        f = objective.value(bvec)?;
-                        if !f.is_finite() {
-                            f = BIG;
-                        }
-                        function_count += 1;
-                        simplex[n][j] = f;
+            if stale_values {
+                for vertex in 0..vertices {
+                    if vertex != lowest {
+                        trial.copy_from_slice(&simplex[vertex * size..(vertex + 1) * size]);
+                        values[vertex] = finite_or_big(objective.value(&mut trial)?);
+                        evaluations += 1;
                     }
                 }
-                recompute = false;
+                stale_values = false;
             }
-            let mut low_value = simplex[n][lowest - 1];
+            let mut low_value = values[lowest];
             let mut high_value = low_value;
             let mut highest = lowest;
-            for j in 1..=n1 {
-                if j != lowest {
-                    let value = simplex[n][j - 1];
+            for vertex in 0..vertices {
+                if vertex != lowest {
+                    let value = values[vertex];
                     if value < low_value {
-                        lowest = j;
+                        lowest = vertex;
                         low_value = value;
                     }
                     if value > high_value {
-                        highest = j;
+                        highest = vertex;
                         high_value = value;
                     }
                 }
@@ -491,119 +542,127 @@ pub unsafe extern "C" fn nmmin(
             }
             if trace != 0 {
                 print(&format!(
-                    "{action}{function_count:5} {high_value:.6} {low_value:.6}\n"
+                    "{action:<15}{evaluations:>5} {high_value:.6} {low_value:.6}\n"
                 ));
             }
-            for i in 0..n {
-                let mut sum = -simplex[i][highest - 1];
-                for j in 0..n1 {
-                    sum += simplex[i][j];
+            let high = highest * size;
+            for coordinate in 0..size {
+                let mut sum = -simplex[high + coordinate];
+                for vertex in 0..vertices {
+                    sum += simplex[vertex * size + coordinate];
                 }
-                simplex[i][centroid] = sum / n as f64;
+                centroid[coordinate] = sum / size as f64;
             }
-            for i in 0..n {
-                bvec[i] = (1.0 + alpha) * simplex[i][centroid] - alpha * simplex[i][highest - 1];
+            for coordinate in 0..size {
+                trial[coordinate] =
+                    (1.0 + alpha) * centroid[coordinate] - alpha * simplex[high + coordinate];
             }
-            f = objective.value(bvec)?;
-            if !f.is_finite() {
-                f = BIG;
-            }
-            function_count += 1;
-            action = "REFLECTION     ";
-            let reflected = f;
+            let reflected = finite_or_big(objective.value(&mut trial)?);
+            evaluations += 1;
+            action = "REFLECTION";
             if reflected < low_value {
-                simplex[n][centroid] = f;
-                for i in 0..n {
-                    let expanded = gamm * bvec[i] + (1.0 - gamm) * simplex[i][centroid];
-                    simplex[i][centroid] = bvec[i];
-                    bvec[i] = expanded;
+                // `centroid` takes the reflected point while `trial` moves on to the expansion.
+                for coordinate in 0..size {
+                    let expanded = gamm * trial[coordinate] + (1.0 - gamm) * centroid[coordinate];
+                    centroid[coordinate] = trial[coordinate];
+                    trial[coordinate] = expanded;
                 }
-                f = objective.value(bvec)?;
-                if !f.is_finite() {
-                    f = BIG;
-                }
-                function_count += 1;
-                if f < reflected {
-                    for i in 0..n {
-                        simplex[i][highest - 1] = bvec[i];
-                    }
-                    simplex[n][highest - 1] = f;
-                    action = "EXTENSION      ";
+                let expanded = finite_or_big(objective.value(&mut trial)?);
+                evaluations += 1;
+                if expanded < reflected {
+                    simplex[high..high + size].copy_from_slice(&trial);
+                    values[highest] = expanded;
+                    action = "EXTENSION";
                 } else {
-                    for i in 0..n {
-                        simplex[i][highest - 1] = simplex[i][centroid];
-                    }
-                    simplex[n][highest - 1] = reflected;
+                    simplex[high..high + size].copy_from_slice(&centroid);
+                    values[highest] = reflected;
                 }
             } else {
-                action = "HI-REDUCTION   ";
+                action = "HI-REDUCTION";
                 if reflected < high_value {
-                    for i in 0..n {
-                        simplex[i][highest - 1] = bvec[i];
-                    }
-                    simplex[n][highest - 1] = reflected;
-                    action = "LO-REDUCTION   ";
+                    simplex[high..high + size].copy_from_slice(&trial);
+                    values[highest] = reflected;
+                    action = "LO-REDUCTION";
                 }
-                for i in 0..n {
-                    bvec[i] = (1.0 - bet) * simplex[i][highest - 1] + bet * simplex[i][centroid];
+                for coordinate in 0..size {
+                    trial[coordinate] =
+                        (1.0 - bet) * simplex[high + coordinate] + bet * centroid[coordinate];
                 }
-                f = objective.value(bvec)?;
-                if !f.is_finite() {
-                    f = BIG;
-                }
-                function_count += 1;
-                if f < simplex[n][highest - 1] {
-                    for i in 0..n {
-                        simplex[i][highest - 1] = bvec[i];
-                    }
-                    simplex[n][highest - 1] = f;
+                let contracted = finite_or_big(objective.value(&mut trial)?);
+                evaluations += 1;
+                if contracted < values[highest] {
+                    simplex[high..high + size].copy_from_slice(&trial);
+                    values[highest] = contracted;
                 } else if reflected >= high_value {
-                    action = "SHRINK         ";
-                    recompute = true;
-                    size = 0.0;
-                    for j in 0..n1 {
-                        if j + 1 != lowest {
-                            for i in 0..n {
-                                simplex[i][j] = bet * (simplex[i][j] - simplex[i][lowest - 1])
-                                    + simplex[i][lowest - 1];
-                                size += (simplex[i][j] - simplex[i][lowest - 1]).abs();
+                    action = "SHRINK";
+                    stale_values = true;
+                    extent = 0.0;
+                    let low = lowest * size;
+                    for vertex in 0..vertices {
+                        if vertex != lowest {
+                            for coordinate in 0..size {
+                                let anchor = simplex[low + coordinate];
+                                let moved =
+                                    bet * (simplex[vertex * size + coordinate] - anchor) + anchor;
+                                simplex[vertex * size + coordinate] = moved;
+                                extent += (moved - anchor).abs();
                             }
                         }
                     }
-                    if size < old_size {
-                        old_size = size;
+                    if extent < previous_extent {
+                        previous_extent = extent;
                     } else {
                         if trace != 0 {
                             print("Polytope size measure not decreased in shrink\n");
                         }
-                        *fail = 10;
+                        code = 10;
                         break;
                     }
                 }
             }
-            if function_count > maxit {
+            if evaluations > maxit {
                 break;
             }
         }
         if trace != 0 {
-            print(&format!(
-                "Exiting from Nelder Mead minimizer\n    {function_count} function evaluations used\n"
-            ));
+            print("Exiting from Nelder Mead minimizer\n");
+            print(&format!("    {evaluations} function evaluations used\n"));
         }
-        *fmin = simplex[n][lowest - 1];
-        for i in 0..n {
-            x_out.add(i).write(simplex[i][lowest - 1]);
+        if code == 0 && evaluations > maxit {
+            code = 1;
         }
-        if function_count > maxit {
-            *fail = 1;
-        }
-        *fncount = function_count;
+        // `bvec` and `x_out` may be the same array, so both go through their raw pointers, the
+        // answer last.
+        write_vector(bvec, &trial);
+        write_vector(x_out, &simplex[lowest * size..(lowest + 1) * size]);
+        *fmin = values[lowest];
+        *fncount = evaluations;
+        *fail = code;
         Ok(())
     })
 }
 
+/// A copy of the caller's `length` doubles at `pointer`, taken so that no Rust reference into
+/// a caller array outlives the copy: callers may pass the same array for input and output.
+unsafe fn read_vector(pointer: *const f64, length: usize) -> Vec<f64> {
+    if pointer.is_null() {
+        return vec![0.0; length];
+    }
+    (0..length).map(|index| *pointer.add(index)).collect()
+}
+
+unsafe fn write_vector(pointer: *mut f64, values: &[f64]) {
+    if pointer.is_null() {
+        return;
+    }
+    for (index, &value) in values.iter().enumerate() {
+        pointer.add(index).write(value);
+    }
+}
+
 /// Conjugate gradients minimization, Nash's Algorithm 22: `type_` 1 is Fletcher-Reeves, 2
-/// Polak-Ribiere and 3 Beale-Sorenson.
+/// Polak-Ribiere and 3 Beale-Sorenson. GNU R accepts `abstol` here but never stops on it, so
+/// neither does this.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cgmin(
     n: c_int,
@@ -613,7 +672,7 @@ pub unsafe extern "C" fn cgmin(
     fminfn: Option<OptimFn>,
     fmingr: Option<OptimGr>,
     fail: *mut c_int,
-    abstol: f64,
+    _abstol: f64,
     intol: f64,
     ex: *mut c_void,
     type_: c_int,
@@ -624,18 +683,10 @@ pub unsafe extern "C" fn cgmin(
 ) {
     enter(|| {
         let objective = Objective::new(fminfn, fmingr, ex)?;
-        // `x` is a private copy written back through `x_out` at each exit, because C callers may
-        // pass the same array for `bvec` and `x_out`.
-        let bvec = vector(bvec, n);
-        let n = bvec.len();
-        let mut x = vec![0.0; n];
-        let store = |x: &[f64]| {
-            for (i, value) in x.iter().enumerate() {
-                x_out.add(i).write(*value);
-            }
-        };
+        let size = n.max(0) as usize;
+        let mut point = read_vector(bvec, size);
         if maxit <= 0 {
-            *fmin = objective.value(bvec)?;
+            *fmin = objective.value(&mut point)?;
             *fncount = 0;
             *grcount = 0;
             *fail = 0;
@@ -645,121 +696,124 @@ pub unsafe extern "C" fn cgmin(
             1 => "Fletcher Reeves",
             2 => "Polak Ribiere",
             3 => "Beale Sorenson",
-            _ => return Err(error("unknown 'type' in \"CG\" method of 'optim'")),
+            _ => return Err(error("unknown type in \"CG\" method of 'optim'")),
         };
         if trace != 0 {
-            print(&format!(
-                "  Conjugate gradients function minimizer\nMethod: {method}\n"
-            ));
+            print("  Conjugate gradients function minimizer\n");
+            print(&format!("Method: {method}\n"));
         }
-        let mut c = vec![0.0; n];
-        let mut g = vec![0.0; n];
-        let mut t = vec![0.0; n];
-        const SET_STEP: f64 = 1.7;
-        *fail = 0;
-        let cycle_limit = n;
-        let tolerance = intol * n as f64 * intol.sqrt();
+        let tolerance = intol * size as f64 * intol.sqrt();
         if trace != 0 {
             print(&format!(
                 "tolerance used in gradient test={}\n",
                 format_g(tolerance)
             ));
         }
-        let mut f = objective.value(bvec)?;
-        if !f.is_finite() {
+        let mut value = objective.value(&mut point)?;
+        if !value.is_finite() {
             return Err(error("Function cannot be evaluated at initial parameters"));
         }
-        *fmin = f;
-        let mut function_count: c_int = 1;
-        let mut gradient_count: c_int = 0;
+        let mut best = value;
+        let mut evaluations: c_int = 1;
+        let mut gradients: c_int = 0;
+        let free: Vec<usize> = (0..size).collect();
+        let mut origin = vec![0.0; size];
+        let mut gradient = vec![0.0; size];
+        let mut previous_gradient = vec![0.0; size];
+        let mut direction = vec![0.0; size];
+        let mut step = 1.0;
         loop {
-            t.fill(0.0);
-            c.fill(0.0);
+            // Each restart begins with steepest descent.
+            direction.fill(0.0);
+            previous_gradient.fill(0.0);
             let mut cycle = 0;
-            let mut old_step = 1.0;
-            let mut count;
-            let mut g1;
+            let mut initial_step = 1.0;
+            let mut stalled = false;
+            let mut gradient_measure;
             loop {
                 cycle += 1;
-                gradient_count += 1;
-                if gradient_count > maxit {
-                    *fncount = function_count;
-                    *grcount = gradient_count;
-                    *fail = 1;
-                    if gradient_count > 1 {
-                        store(&x);
+                if trace != 0 {
+                    print(&format!("{gradients} {evaluations} {best:.6}\n"));
+                    let mut line = String::from("parameters ");
+                    for parameter in &point {
+                        line.push_str(&format!("{parameter:>10.5} "));
                     }
+                    line.push('\n');
+                    print(&line);
+                }
+                gradients += 1;
+                if gradients > maxit {
+                    write_vector(bvec, &point);
+                    write_vector(x_out, &origin);
+                    *fmin = best;
+                    *fncount = evaluations;
+                    *grcount = gradients;
+                    *fail = 1;
                     return Ok(());
                 }
-                objective.gradient(bvec, &mut g)?;
-                g1 = 0.0;
-                let mut g2 = 0.0;
-                for i in 0..n {
-                    x[i] = bvec[i];
+                objective.gradient(&mut point, &mut gradient)?;
+                gradient_measure = 0.0;
+                let mut previous_measure = 0.0;
+                for index in 0..size {
+                    origin[index] = point[index];
+                    let current = gradient[index];
+                    let previous = previous_gradient[index];
                     match type_ {
                         1 => {
-                            g1 += g[i] * g[i];
-                            g2 += c[i] * c[i];
+                            gradient_measure += current * current;
+                            previous_measure += previous * previous;
                         }
                         2 => {
-                            g1 += g[i] * (g[i] - c[i]);
-                            g2 += c[i] * c[i];
+                            gradient_measure += current * (current - previous);
+                            previous_measure += previous * previous;
                         }
                         _ => {
-                            g1 += g[i] * (g[i] - c[i]);
-                            g2 += t[i] * (g[i] - c[i]);
+                            gradient_measure += current * (current - previous);
+                            previous_measure += direction[index] * (current - previous);
                         }
                     }
-                    c[i] = g[i];
+                    previous_gradient[index] = current;
                 }
-                count = 0;
-                let mut step = old_step;
-                if g1 > tolerance {
-                    let g3 = if g2 > 0.0 { g1 / g2 } else { 1.0 };
-                    let mut gradient_projection = 0.0;
-                    for i in 0..n {
-                        t[i] = t[i] * g3 - g[i];
-                        gradient_projection += t[i] * g[i];
+                if gradient_measure > tolerance {
+                    let conjugacy = if previous_measure > 0.0 {
+                        gradient_measure / previous_measure
+                    } else {
+                        1.0
+                    };
+                    let mut slope = 0.0;
+                    for index in 0..size {
+                        direction[index] = direction[index] * conjugacy - gradient[index];
+                        slope += direction[index] * gradient[index];
                     }
-                    let mut accepted = false;
-                    loop {
-                        count = 0;
-                        for i in 0..n {
-                            bvec[i] = x[i] + step * t[i];
-                            if RELATIVE_TEST + x[i] == RELATIVE_TEST + bvec[i] {
-                                count += 1;
+                    step = initial_step;
+                    let moved = acceptable_point(
+                        &objective,
+                        &mut point,
+                        &free,
+                        &origin,
+                        &direction,
+                        Descent { best, slope },
+                        &mut step,
+                        &mut value,
+                        &mut evaluations,
+                        trace != 0,
+                    )?;
+                    stalled = !moved;
+                    if moved {
+                        best = value;
+                        // GNU R fits Nash's parabola after `best` already holds the accepted
+                        // value, which reduces the interpolation to trying half the accepted
+                        // step. Matching that keeps counts and traces identical to GNU R.
+                        let curvature = 2.0 * (value - best - slope * step);
+                        if curvature > 0.0 {
+                            let interpolated = -(slope * step * step / curvature);
+                            for index in 0..size {
+                                point[index] = origin[index] + interpolated * direction[index];
                             }
-                        }
-                        if count < n {
-                            f = objective.value(bvec)?;
-                            function_count += 1;
-                            accepted = f.is_finite()
-                                && f <= *fmin + gradient_projection * step * ACCEPTANCE_TOLERANCE;
-                            if !accepted {
-                                step *= STEP_REDUCTION;
-                                if trace != 0 {
-                                    print("*");
-                                }
-                            } else {
-                                *fmin = f;
-                            }
-                        }
-                        if count == n || accepted {
-                            break;
-                        }
-                    }
-                    if count < n {
-                        let mut new_step = 2.0 * (f - *fmin - gradient_projection * step);
-                        if new_step > 0.0 {
-                            new_step = -(gradient_projection * step * step / new_step);
-                            for i in 0..n {
-                                bvec[i] = x[i] + new_step * t[i];
-                            }
-                            *fmin = f;
-                            f = objective.value(bvec)?;
-                            function_count += 1;
-                            if f < *fmin {
-                                *fmin = f;
+                            value = objective.value(&mut point)?;
+                            evaluations += 1;
+                            if value < best {
+                                best = value;
                                 if trace != 0 {
                                     print(" i< ");
                                 }
@@ -767,30 +821,33 @@ pub unsafe extern "C" fn cgmin(
                                 if trace != 0 {
                                     print(" i> ");
                                 }
-                                for i in 0..n {
-                                    bvec[i] = x[i] + step * t[i];
+                                for index in 0..size {
+                                    point[index] = origin[index] + step * direction[index];
                                 }
                             }
                         }
                     }
                 }
-                old_step = (SET_STEP * step).min(1.0);
-                if !(count != n && g1 > tolerance && cycle != cycle_limit) {
+                initial_step = (1.7 * step).min(1.0);
+                if stalled || gradient_measure <= tolerance || cycle == size {
                     break;
                 }
             }
-            if !(cycle != 1 || (count != n && g1 > tolerance && *fmin > abstol)) {
+            if cycle == 1 && (stalled || gradient_measure <= tolerance) {
                 break;
             }
         }
         if trace != 0 {
-            print(&format!(
-                "Exiting from conjugate gradients minimizer\n    {function_count} function evaluations used\n    {gradient_count} gradient evaluations used\n"
-            ));
+            print("Exiting from conjugate gradients minimizer\n");
+            print(&format!("    {evaluations} function evaluations used\n"));
+            print(&format!("    {gradients} gradient evaluations used\n"));
         }
-        *fncount = function_count;
-        *grcount = gradient_count;
-        store(&x);
+        write_vector(bvec, &point);
+        write_vector(x_out, &point);
+        *fmin = best;
+        *fncount = evaluations;
+        *grcount = gradients;
+        *fail = 0;
         Ok(())
     })
 }
@@ -812,74 +869,76 @@ pub unsafe extern "C" fn samin(
     ex: *mut c_void,
 ) {
     enter(|| {
-        const E1: f64 = 1.7182818;
         let objective = Objective::new(fminfn, None, ex)?;
         if trace < 0 {
             return Err(error("trace, REPORT must be >= 0 (method = \"SANN\")"));
         }
-        let pb = vector(pb, n);
-        if pb.is_empty() {
-            *yb = objective.value(pb)?;
+        let best_point = vector(pb, n);
+        if best_point.is_empty() {
+            *yb = objective.value(best_point)?;
             return Ok(());
         }
         if ry_norm_rand_available() == 0 {
-            return Err(error("samin needs norm_rand, which this build of ry lacks"));
+            return Err(error(
+                "simulated annealing needs norm_rand, which this build of libR lacks",
+            ));
         }
         read_seed()?;
-        *yb = objective.value(pb)?;
-        if !(*yb).is_finite() {
-            *yb = BIG;
-        }
-        let mut p = pb.to_vec();
-        let mut trial = vec![0.0; pb.len()];
-        let mut y = *yb;
+        let finite_or_big = |value: f64| if value.is_finite() { value } else { BIG };
+        let mut best = finite_or_big(objective.value(best_point)?);
+        let mut current_point = best_point.to_vec();
+        let mut current = best;
+        let mut candidate = vec![0.0; current_point.len()];
         if trace != 0 {
-            print(&format!(
-                "sann objective function values\ninitial       value {:.6}\n",
-                *yb
-            ));
+            print("sann objective function values\n");
+            print(&format!("initial       value {best:.6}\n"));
         }
         let scale = 1.0 / ti;
-        let mut iterations: c_int = 1;
-        let mut reports: c_int = 1;
-        while iterations < maxit {
-            let temperature = ti / (iterations as f64 + E1).ln();
-            let mut k = 1;
-            while k <= tmax && iterations < maxit {
-                for (candidate, &current) in trial.iter_mut().zip(&p) {
-                    *candidate = current + scale * temperature * ry_norm_rand();
+        let mut evaluation: c_int = 1;
+        let mut temperature_index: c_int = 1;
+        while evaluation < maxit {
+            let temperature = ti / (f64::from(evaluation) + COOLING_OFFSET).ln();
+            let mut held: c_int = 1;
+            while held <= tmax && evaluation < maxit {
+                let spread = scale * temperature;
+                for (next, &position) in candidate.iter_mut().zip(&current_point) {
+                    *next = position + spread * ry_norm_rand();
                 }
-                let mut value = objective.value(&mut trial)?;
-                if !value.is_finite() {
-                    value = BIG;
-                }
-                let change = value - y;
-                if change <= 0.0 || runtime().rng.unif_rand() < (-change / temperature).exp() {
-                    p.copy_from_slice(&trial);
-                    y = value;
-                    if y <= *yb {
-                        pb.copy_from_slice(&p);
-                        *yb = y;
+                let value = finite_or_big(objective.value(&mut candidate)?);
+                let rise = value - current;
+                if rise <= 0.0 || runtime().rng.unif_rand() < (-rise / temperature).exp() {
+                    current_point.copy_from_slice(&candidate);
+                    current = value;
+                    if current <= best {
+                        best_point.copy_from_slice(&current_point);
+                        best = current;
                     }
                 }
-                iterations += 1;
-                k += 1;
+                evaluation += 1;
+                held += 1;
             }
-            if trace != 0 && reports % trace == 0 {
-                print(&format!("iter {:8} value {:.6}\n", iterations - 1, *yb));
+            if trace != 0 && temperature_index % trace == 0 {
+                print(&format!("iter {:>8} value {best:.6}\n", evaluation - 1));
             }
-            reports += 1;
+            temperature_index += 1;
         }
         if trace != 0 {
+            print(&format!("final         value {best:.6}\n"));
             print(&format!(
-                "final         value {:.6}\nsann stopped after {} iterations\n",
-                *yb,
-                iterations - 1
+                "sann stopped after {} iterations\n",
+                evaluation - 1
             ));
         }
+        *yb = best;
         write_seed()
     })
 }
+
+/// Belisle's schedule divides the starting temperature by `log(k + e - 1)` at the `k`th
+/// evaluation that opens a temperature. GNU R writes `e - 1` to eight digits, which makes every
+/// step about 1e-8 longer than the exact constant would; the shortened value reproduces GNU R's
+/// stream under a given seed.
+const COOLING_OFFSET: f64 = 1.7182818;
 
 // QUADPACK's adaptive quadrature, with R's vectorized integrand: each rule hands all its
 // abscissae to the integrand in one call.
@@ -1837,68 +1896,65 @@ pub unsafe extern "C" fn R_max_col(
     ties_meth: *mut c_int,
 ) {
     enter(|| {
-        const RELATIVE_TOLERANCE: f64 = 1e-5;
-        let (rows, columns) = ((*nr).max(0) as usize, (*nc).max(0) as usize);
-        let cells = std::slice::from_raw_parts(matrix, rows * columns);
-        let maxes = std::slice::from_raw_parts_mut(maxes, rows);
+        let rows = (*nr).max(0) as usize;
+        let columns = (*nc).max(0) as usize;
         let method = *ties_meth;
-        if !(1..=3).contains(&method) {
-            return Err(error("invalid 'ties_meth' {should not happen}"));
-        }
         let random = method == 1;
-        let mut used_random = false;
+        if random {
+            read_seed()?;
+        }
+        let entry = |row: usize, column: usize| *matrix.add(row + column * rows);
         for row in 0..rows {
-            let value = |column: usize| cells[row + column * rows];
-            let mut largest = 0.0f64;
             let mut missing = false;
+            let mut largest = 0.0f64;
             for column in 0..columns {
-                let entry = value(column);
-                if entry.is_nan() {
+                let value = entry(row, column);
+                if value.is_nan() {
                     missing = true;
                     break;
                 }
-                if random && entry.is_finite() {
-                    largest = largest.max(entry.abs());
+                if value.is_finite() {
+                    largest = largest.max(value.abs());
                 }
             }
             if missing || columns == 0 {
-                maxes[row] = NA_INTEGER;
+                *maxes.add(row) = NA_INTEGER;
                 continue;
             }
-            let mut best = 0;
-            let mut current = value(0);
+            let mut chosen = 0;
+            let mut maximum = entry(row, 0);
             if random {
-                let tolerance = RELATIVE_TOLERANCE * largest;
+                // Entries are treated as probabilities: values this close to the maximum tie.
+                let tolerance = 1e-5 * largest;
                 let mut ties = 1;
                 for column in 1..columns {
-                    let entry = value(column);
-                    if entry > current + tolerance {
-                        current = entry;
-                        best = column;
+                    let value = entry(row, column);
+                    if value > maximum + tolerance {
+                        maximum = value;
+                        chosen = column;
                         ties = 1;
-                    } else if entry >= current - tolerance {
+                    } else if value >= maximum - tolerance {
+                        // Reservoir sampling: each of the tied columns ends up chosen with
+                        // equal probability.
                         ties += 1;
-                        if !used_random {
-                            read_seed()?;
-                            used_random = true;
-                        }
-                        if ties as f64 * runtime().rng.unif_rand() < 1.0 {
-                            best = column;
+                        if f64::from(ties) * runtime().rng.unif_rand() < 1.0 {
+                            chosen = column;
                         }
                     }
                 }
             } else {
+                let last = method == 3;
                 for column in 1..columns {
-                    let entry = value(column);
-                    if current < entry || (method == 3 && current <= entry) {
-                        current = entry;
-                        best = column;
+                    let value = entry(row, column);
+                    if value > maximum || (last && value == maximum) {
+                        maximum = value;
+                        chosen = column;
                     }
                 }
             }
-            maxes[row] = best as c_int + 1;
+            *maxes.add(row) = chosen as c_int + 1;
         }
-        if used_random {
+        if random {
             write_seed()?;
         }
         Ok(())
@@ -1919,28 +1975,34 @@ pub unsafe extern "C" fn R_pretty(
     eps_correction: c_int,
     return_bounds: c_int,
 ) -> f64 {
-    const ROUNDING_EPSILON: f64 = 1e-10;
-    const MAX_FACTOR: f64 = 1.25;
-    let h = *high_u_fact;
-    let h5 = *high_u_fact.add(1);
-    let f_min = *high_u_fact.add(2);
-    let (low, high) = (*lo, *up);
-    let dx = high - low;
+    // Unit counts within this fraction of an integer count as that integer.
+    const SNAP: f64 = 1e-10;
+    // The largest cell kept is the largest double over this factor, so that rounding the
+    // cell up to the next nice unit cannot overflow.
+    const HEADROOM: f64 = 1.25;
+    let high_bias = *high_u_fact;
+    let five_bias = *high_u_fact.add(1);
+    let smallest_factor = *high_u_fact.add(2);
+    let divisions = *ndiv;
+    let range = *up - *lo;
+    // A range that ends at zero is padded away from zero only, as GNU R does.
+    let starts_at_zero = *lo == 0.0 && *up != 0.0;
+    let ends_at_zero = *up == 0.0 && *lo != 0.0;
     let mut cell;
     let small;
-    if dx == 0.0 && high == 0.0 {
+    if range == 0.0 && *up == 0.0 {
         cell = 1.0;
         small = true;
     } else {
-        cell = low.abs().max(high.abs());
-        let mut u = 1.0
-            + if h5 >= 1.5 * h + 0.5 {
-                1.0 / (1.0 + h)
-            } else {
-                1.5 / (1.0 + h5)
-            };
-        u *= (*ndiv).max(1) as f64 * f64::EPSILON;
-        small = dx < cell * u * 3.0;
+        cell = lo.read().abs().max(up.read().abs());
+        // A range this narrow next to the magnitudes is rounding noise, not data.
+        let bias = if five_bias >= 1.5 * high_bias + 0.5 {
+            1.0 / (1.0 + high_bias)
+        } else {
+            1.5 / (1.0 + five_bias)
+        };
+        let noise = (1.0 + bias) * f64::from(divisions.max(1)) * f64::EPSILON;
+        small = range < cell * noise * 3.0;
     }
     if small {
         if cell > 10.0 {
@@ -1948,15 +2010,24 @@ pub unsafe extern "C" fn R_pretty(
         }
         cell *= shrink_sml;
         if min_n > 1 {
-            cell /= min_n as f64;
+            cell /= f64::from(min_n);
         }
     } else {
-        cell = dx;
-        if *ndiv > 1 {
-            cell /= *ndiv as f64;
+        cell = range;
+        if range.is_infinite() {
+            if divisions > 1 {
+                // The range overflows, its parts do not.
+                cell = *up / f64::from(divisions) - *lo / f64::from(divisions);
+            } else {
+                warn(format!(
+                    "R_pretty(): infinite range; *ndiv={divisions}, should have ndiv >= 2"
+                ));
+            }
+        } else if divisions > 1 {
+            cell /= f64::from(divisions);
         }
     }
-    let mut smallest_cell = f_min * f64::MIN_POSITIVE;
+    let mut smallest_cell = smallest_factor * f64::MIN_POSITIVE;
     if smallest_cell == 0.0 {
         smallest_cell = f64::MIN_POSITIVE;
     }
@@ -1967,72 +2038,82 @@ pub unsafe extern "C" fn R_pretty(
             format_g(smallest_cell)
         ));
         cell = smallest_cell;
-    } else if cell > f64::MAX / MAX_FACTOR {
+    } else if cell > f64::MAX / HEADROOM {
         warn(format!(
             "R_pretty(): very large range 'cell'={}, corrected to {}",
             format_g(cell),
-            format_g(f64::MAX / MAX_FACTOR)
+            format_g(f64::MAX / HEADROOM)
         ));
-        cell = f64::MAX / MAX_FACTOR;
+        cell = f64::MAX / HEADROOM;
     }
     let base = 10f64.powf(cell.log10().floor());
     let mut unit = base;
     let two = 2.0 * base;
-    if two - cell < h * (cell - unit) {
+    if two - cell < high_bias * (cell - unit) {
         unit = two;
         let five = 5.0 * base;
-        if five - cell < h5 * (cell - unit) {
+        if five - cell < five_bias * (cell - unit) {
             unit = five;
             let ten = 10.0 * base;
-            if ten - cell < h * (cell - unit) {
+            if ten - cell < high_bias * (cell - unit) {
                 unit = ten;
             }
         }
     }
-    let mut ns = (low / unit + ROUNDING_EPSILON).floor();
-    let mut nu = (high / unit - ROUNDING_EPSILON).ceil();
+    let mut start = (*lo / unit + SNAP).floor();
+    let mut end = (*up / unit - SNAP).ceil();
     if eps_correction != 0 && (eps_correction > 1 || !small) {
-        *lo = if low != 0.0 {
-            low * (1.0 - f64::EPSILON)
+        *lo = if *lo != 0.0 {
+            *lo * (1.0 - f64::EPSILON)
         } else {
             -f64::MIN_POSITIVE
         };
-        *up = if high != 0.0 {
-            high * (1.0 + f64::EPSILON)
+        *up = if *up != 0.0 {
+            *up * (1.0 + f64::EPSILON)
         } else {
             f64::MIN_POSITIVE
         };
     }
-    while ns * unit > *lo + ROUNDING_EPSILON * unit {
-        ns -= 1.0;
+    while start * unit > *lo + SNAP * unit {
+        start -= 1.0;
     }
-    while nu * unit < *up - ROUNDING_EPSILON * unit {
-        nu += 1.0;
+    while end * unit < *up - SNAP * unit {
+        end += 1.0;
     }
-    let mut k = (0.5 + nu - ns) as c_int;
-    if k < min_n {
-        k = min_n - k;
-        if ns >= 0.0 {
-            nu += (k / 2) as f64;
-            ns -= (k / 2 + k % 2) as f64;
+    // Near the ends of the double range a covering count can overflow; step back inside.
+    while !(start * unit).is_finite() {
+        start += 1.0;
+    }
+    while !(end * unit).is_finite() {
+        end -= 1.0;
+    }
+    let mut cells = (0.5 + end - start) as c_int;
+    if cells < min_n {
+        let missing = min_n - cells;
+        if starts_at_zero {
+            end += f64::from(missing);
+        } else if ends_at_zero {
+            start -= f64::from(missing);
+        } else if start >= 0.0 {
+            end += f64::from(missing / 2);
+            start -= f64::from(missing / 2 + missing % 2);
         } else {
-            ns -= (k / 2) as f64;
-            nu += (k / 2 + k % 2) as f64;
+            start -= f64::from(missing / 2);
+            end += f64::from(missing / 2 + missing % 2);
         }
-        *ndiv = min_n;
-    } else {
-        *ndiv = k;
+        cells = min_n;
     }
+    *ndiv = cells;
     if return_bounds != 0 {
-        if ns * unit < *lo {
-            *lo = ns * unit;
+        if start * unit < *lo {
+            *lo = start * unit;
         }
-        if nu * unit > *up {
-            *up = nu * unit;
+        if end * unit > *up {
+            *up = end * unit;
         }
     } else {
-        *lo = ns;
-        *up = nu;
+        *lo = start;
+        *up = end;
     }
     unit
 }

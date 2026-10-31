@@ -24,6 +24,11 @@ struct Case {
 
 struct PrettyCall {
     input: (f64, f64, c_int),
+    min_n: c_int,
+    shrink: f64,
+    factors: [f64; 3],
+    eps_correction: c_int,
+    return_bounds: c_int,
     output: (f64, f64, c_int),
 }
 
@@ -58,7 +63,12 @@ fn parse_expectations(text: &str) -> (Vec<Case>, Vec<PrettyCall>) {
                 let integer = |index: usize| fields[index].parse::<c_int>().expect("an integer");
                 pretty.push(PrettyCall {
                     input: (number(0), number(1), integer(2)),
-                    output: (number(3), number(4), integer(5)),
+                    min_n: integer(3),
+                    shrink: number(4),
+                    factors: [number(5), number(6), number(7)],
+                    eps_correction: integer(8),
+                    return_bounds: integer(9),
+                    output: (number(10), number(11), integer(12)),
                 });
             }
             other => panic!("unknown line kind {other:?}"),
@@ -72,7 +82,7 @@ fn parse_expectations(text: &str) -> (Vec<Case>, Vec<PrettyCall>) {
 /// iterations (and the system BLAS GNU R uses for `dnrm2` and friends rounds differently).
 fn tolerance(case: &str) -> f64 {
     match case {
-        "lbfgsb" | "optif9" | "nmmin" | "cgmin" | "vmmin" | "samin" | "quadrature" => 1e-6,
+        "lbfgsb" | "optif9" | "quadrature" => 1e-6,
         _ => 1e-10,
     }
 }
@@ -220,7 +230,7 @@ fn r_pretty_agrees_with_gnu_r() {
             .get::<PrettyFn>(b"R_pretty\0")
             .expect("R_pretty")
     };
-    let factors = [1.5, 0.5 + 1.5 * 1.5, 2f64.powi(-20)];
+    let mut problems = Vec::new();
     for call in calls {
         let (mut low, mut high, mut cells) = call.input;
         unsafe {
@@ -228,20 +238,30 @@ fn r_pretty_agrees_with_gnu_r() {
                 &mut low,
                 &mut high,
                 &mut cells,
-                cells / 3,
-                0.75,
-                factors.as_ptr(),
-                0,
-                1,
+                call.min_n,
+                call.shrink,
+                call.factors.as_ptr(),
+                call.eps_correction,
+                call.return_bounds,
             );
         }
-        assert_eq!(
-            (low, high, cells),
-            call.output,
-            "R_pretty({:?}) disagrees with GNU R",
-            call.input
-        );
+        // GNU R returns -0 for some unit counts, which equals 0 here.
+        if (low, high, cells) != call.output {
+            problems.push(format!(
+                "R_pretty({:?}, min_n {}, shrink {}, factors {:?}, eps {}, bounds {}): \
+                 ry {:?}, GNU R {:?}",
+                call.input,
+                call.min_n,
+                call.shrink,
+                call.factors,
+                call.eps_correction,
+                call.return_bounds,
+                (low, high, cells),
+                call.output
+            ));
+        }
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 /// The recorded expectations are what GNU R answers today.

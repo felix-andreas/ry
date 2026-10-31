@@ -580,6 +580,168 @@ static void case_samin(void)
     put(fmin);
 }
 
+/* Every optimizer stopped at a range of iteration limits, so the exact path is compared, not
+ * only the converged answer. CG and Nelder-Mead report both the point they leave in their
+ * input vector and the one they return. */
+static void case_optim_limits(void)
+{
+    double fmin;
+    int fail, fncount, grcount;
+    for (int maxit = 0; maxit <= 120; maxit += 8) {
+        for (int type = 1; type <= 3; type++) {
+            double b[2] = {-1.2, 1}, x[2] = {0, 0};
+            cgmin(2, b, x, &fmin, rosenbrock, rosenbrock_gradient, &fail, R_NegInf,
+                  1.490116e-08, NULL, type, 0, &fncount, &grcount, maxit);
+            put_all(b, 2);
+            put_all(x, 2);
+            put(fmin);
+            put_int(fail);
+            put_int(fncount);
+            put_int(grcount);
+            double q[5] = {0, 0, 0, 0, 0}, y[5] = {0, 0, 0, 0, 0};
+            cgmin(5, q, y, &fmin, quartic, quartic_gradient, &fail, 1e-3, 1e-6, NULL, type, 0,
+                  &fncount, &grcount, maxit);
+            put_all(q, 5);
+            put_all(y, 5);
+            put(fmin);
+            put_int(fail);
+            put_int(fncount);
+            put_int(grcount);
+        }
+        double v[2] = {-1.2, 1};
+        int mask[2] = {1, 1};
+        vmmin(2, v, &fmin, rosenbrock, rosenbrock_gradient, maxit, 0, mask, R_NegInf,
+              1.490116e-08, 10, NULL, &fncount, &grcount, &fail);
+        put_all(v, 2);
+        put(fmin);
+        put_int(fncount);
+        put_int(grcount);
+        put_int(fail);
+        double w[5] = {0, 0, 0, 0, 0};
+        int partial[5] = {1, 0, 1, 1, 1};
+        vmmin(5, w, &fmin, quartic, quartic_gradient, maxit, 0, partial, 1e-2, 1e-6, 10, NULL,
+              &fncount, &grcount, &fail);
+        put_all(w, 5);
+        put(fmin);
+        put_int(fncount);
+        put_int(grcount);
+        put_int(fail);
+        double nb[2] = {-1.2, 1}, nx[2] = {0, 0};
+        nmmin(2, nb, nx, &fmin, rosenbrock, &fail, R_NegInf, 1.490116e-08, NULL, 1.0, 0.5, 2.0,
+              0, &fncount, maxit * 3);
+        put_all(nb, 2);
+        put_all(nx, 2);
+        put(fmin);
+        put_int(fail);
+        put_int(fncount);
+        double nq[5] = {0, 0, 0, 0, 0}, ny[5] = {0, 0, 0, 0, 0};
+        nmmin(5, nq, ny, &fmin, quartic, &fail, 1e-3, 1e-6, NULL, 1.3, 0.4, 2.5, 0, &fncount,
+              maxit * 4);
+        put_all(nq, 5);
+        put_all(ny, 5);
+        put(fmin);
+        put_int(fail);
+        put_int(fncount);
+    }
+    /* A start at the minimum, where Nelder-Mead must invent its own step size. */
+    double z[3] = {1, 2, 3}, zx[3];
+    nmmin(3, z, zx, &fmin, quartic, &fail, R_NegInf, 1.490116e-08, NULL, 1.0, 0.5, 2.0, 0,
+          &fncount, 200);
+    put_all(zx, 3);
+    put(fmin);
+    put_int(fail);
+    put_int(fncount);
+}
+
+/* The progress text every optimizer prints with tracing on. */
+static void case_optim_traces(void)
+{
+    double fmin;
+    int fail, fncount, grcount;
+    double nb[2] = {-1.2, 1}, nx[2];
+    nmmin(2, nb, nx, &fmin, rosenbrock, &fail, R_NegInf, 1.490116e-08, NULL, 1.0, 0.5, 2.0, 1,
+          &fncount, 60);
+    put(fmin);
+    double z[2] = {0, 0}, zx[2];
+    nmmin(2, z, zx, &fmin, quartic, &fail, R_NegInf, 1.490116e-08, NULL, 1.0, 0.5, 2.0, 1,
+          &fncount, 0);
+    put(fmin);
+    for (int type = 1; type <= 3; type++) {
+        double b[3] = {0, 0, 0}, x[3];
+        cgmin(3, b, x, &fmin, quartic, quartic_gradient, &fail, R_NegInf, 1.490116e-08, NULL,
+              type, 1, &fncount, &grcount, 12);
+        put(fmin);
+    }
+    double c[2] = {-1.2, 1}, cx[2];
+    cgmin(2, c, cx, &fmin, rosenbrock, rosenbrock_gradient, &fail, R_NegInf, 1.490116e-08, NULL,
+          1, 1, &fncount, &grcount, 400);
+    put(fmin);
+    int mask[2] = {1, 1};
+    for (int report = 1; report <= 7; report += 6) {
+        double v[2] = {-1.2, 1};
+        vmmin(2, v, &fmin, rosenbrock, rosenbrock_gradient, 40, 1, mask, R_NegInf,
+              1.490116e-08, report, NULL, &fncount, &grcount, &fail);
+        put(fmin);
+    }
+    double v[2] = {1, 1};
+    vmmin(2, v, &fmin, rosenbrock, rosenbrock_gradient, 40, 1, mask, R_NegInf, 1.490116e-08, 1,
+          NULL, &fncount, &grcount, &fail);
+    put(fmin);
+}
+
+static void case_samin_traced(void)
+{
+    SEXP fake_state[16];
+    for (int i = 0; i < 16; i++)
+        fake_state[i] = R_NilValue;
+    double b[2] = {-1.2, 1}, fmin;
+    samin(2, b, &fmin, rosenbrock, 250, 7, 25, 5, fake_state);
+    put_all(b, 2);
+    put(fmin);
+    double q[4] = {0, 0, 0, 0};
+    samin(4, q, &fmin, quartic, 400, 3, 0.5, 40, fake_state);
+    put_all(q, 4);
+    put(fmin);
+    double r[1] = {3};
+    samin(1, r, &fmin, quartic, 0, 10, 10, 1, fake_state);
+    put_all(r, 1);
+    put(fmin);
+}
+
+/* Ties, infinities and missing values, under every tie method. */
+static void case_max_col_ties(void)
+{
+    double m[] = {
+        /* column 1 */ 1, R_PosInf, NA_REAL, 4, -1, 0, 1e-7, 5, R_NegInf, R_NaN,
+        /* column 2 */ 3, R_PosInf, 2, 4, -1, 0, 0, 5, R_NegInf, 1,
+        /* column 3 */ 3, 1, 2, 4.00001, -1, 0, 0, 5 + 1e-6, R_NegInf, 1,
+        /* column 4 */ 2, R_NegInf, 2, 4, -1, -0.0, 1e-7, 5, R_NegInf, 1,
+    };
+    int nr = 10, nc = 4, maxes[10];
+    for (int method = 1; method <= 3; method++) {
+        GetRNGstate();
+        R_max_col(m, &nr, &nc, maxes, &method);
+        PutRNGstate();
+        put_ints(maxes, 10);
+    }
+    /* Random ties over a larger matrix, drawn twice to show the stream advances. */
+    double big[400];
+    fill(big, 400, 5, 4);
+    int bnr = 40, bnc = 10, bmaxes[40], random = 1;
+    for (int pass = 0; pass < 2; pass++) {
+        GetRNGstate();
+        R_max_col(big, &bnr, &bnc, bmaxes, &random);
+        PutRNGstate();
+        put_ints(bmaxes, 40);
+    }
+    /* One column: every method answers 1 without drawing. */
+    int one = 1;
+    for (int method = 1; method <= 3; method++) {
+        R_max_col(m, &nr, &one, maxes, &method);
+        put_ints(maxes, 10);
+    }
+}
+
 static void uncmin_value(int n, double *x, double *f, void *state)
 {
     *f = quartic(n, x, state);
@@ -767,6 +929,10 @@ static const struct {
     {"cgmin", case_cgmin},
     {"lbfgsb", case_lbfgsb},
     {"samin", case_samin},
+    {"samin_traced", case_samin_traced},
+    {"optim_limits", case_optim_limits},
+    {"optim_traces", case_optim_traces},
+    {"max_col_ties", case_max_col_ties},
     {"optif9", case_optif9},
     {"quadrature", case_quadrature},
     {"strings", case_strings},
