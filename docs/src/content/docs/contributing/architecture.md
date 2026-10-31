@@ -36,8 +36,8 @@ illegal dependency unrepresentable.
 - **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
   `repl` included, needs R to build.
 - **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
-  `run`, and `debug` commands. It owns configuration, conversion between position encodings, assembling and publishing
-  diagnostics, and suppression comments.
+  `run`, and `debug` commands. It owns configuration, conversion between position encodings,
+  assembling and publishing diagnostics, and suppression comments.
 
 ## The semantics database
 
@@ -50,8 +50,8 @@ The database has four inputs:
 
 - `SourceFile` carries one file's text and document kind.
 - `ProjectFiles` is a singleton listing the project's files: package documents first, in the
-  `DESCRIPTION` `Collate` order when one is declared and by path otherwise, then the rest by path. The last-writer-wins symbol index and the CLI both rely on that
-  order.
+  `DESCRIPTION` `Collate` order when one is declared and by path otherwise, then the rest by path.
+  The last-writer-wins symbol index and the CLI both rely on that order.
 - `PackageMetadata` is a singleton carrying the imports from `NAMESPACE` and the dependency universe
   from `DESCRIPTION`.
 - `StubSources` is a set-once singleton carrying the `.Rtypes` corpus.
@@ -75,9 +75,9 @@ equal, and salsa's early cutoff prunes all the work downstream of them.
 
 ### From item to scheme
 
-Each item goes through four stages. Its green subtree lowers to HIR, with spans relative to the item.
-Naming then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
-Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
+An item's green subtree lowers to HIR, with spans relative to the item. Naming then runs the
+variable model, in which a variable is a mutable slot with reaching-write flow. Finally, the
+inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.
 
 **An inference variable must never leave the item that created it.** A variable is an index into one
@@ -182,10 +182,7 @@ and all the documents, and the database handle deliberately never leaves it.
 
 ## Correctness and performance instruments
 
-The fixture suites, described on the [testing page](/contributing/testing), are the correctness
-contract. Two more instruments guard what fixtures cannot see. `crates/semantics/tests/test_incremental.rs`
-pins the incrementality contracts by counting how often each query executes after an edit. The
-performance and memory witness, `crates/semantics/tests/test_perf.rs`, asserts measured budgets for
-wall time, resident memory, the linearity of resolve steps, and keystroke latency against a corpus of
-real files, so a regression in any of them fails a test instead of being noticed later. The corpus is
-fetched on demand, so the witness runs locally rather than in CI.
+The fixture suites are the correctness contract. `crates/semantics/tests/test_incremental.rs` pins
+the incrementality contracts by counting query executions after an edit, and
+`crates/semantics/tests/test_perf.rs` asserts wall-time, memory, and keystroke-latency budgets
+against a corpus of real files. [Testing](/contributing/testing) documents all of them.

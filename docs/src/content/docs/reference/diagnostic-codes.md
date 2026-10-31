@@ -15,8 +15,8 @@ unresolved
 
 Every finding starts with its code, here `unresolved`. The code stays the same when the wording of
 a message changes, so it is what you name in a suppression, in `ry.toml`, and in the JSON output.
-`!` marks a warning and `x` an error (`⚠` and `×` in a terminal). The carets underline exactly what the finding is about, such
-as one name, not the whole statement.
+`!` marks a warning and `x` an error (`⚠` and `×` in a terminal). The carets underline exactly
+what the finding is about, such as one name, not the whole statement.
 
 ## Suppressing a finding
 
@@ -83,7 +83,8 @@ so `c(1, 2, )` fails when it runs.
 declaration is never dropped in silence.
 
 **`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`. The language server
-marks the line in `ry.toml`, while `ry check` stops with exit status 2 instead of reporting it.
+marks the line in `ry.toml`, and `ry check` prints the finding and exits with status 2 without
+checking any R.
 
 ## Opt-in
 
