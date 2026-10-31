@@ -1,0 +1,142 @@
+#==== records_and_tags
+#---- hover_on_a_record_field_access
+point <- (x = 1, y = "a")
+point$y$0
+#++++
+hover 26..33: character
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: record{x: double, y: character}\n"
+completion (1): y
+hint @5: record{x: double, y: character}
+
+#---- hover_on_a_tag_literal
+some <- :So$0me(5L)
+#++++
+hover 8..17: :Some(integer)
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `some`
+  edit 0..0 -> "#: :Some(integer)\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: :Some(integer)\n"
+completion: none
+hint @4: :Some(integer)
+
+#---- hover_on_a_pattern_binding
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(va$0lue) => value
+    :None => 0L
+  }
+}
+#++++
+hover 87..92: value: integer
+hover-definition: local 87..92
+definition 87..92
+references: 87..92*, 97..102
+rename: 2 edit(s)
+signature: none
+completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+
+#---- hover_on_a_pattern_binding_use
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(value) => val$0ue + 1L
+    :None => 0L
+  }
+}
+#++++
+hover 97..102: value: integer
+hover-definition: local 87..92
+definition 87..92
+references: 87..92*, 97..102
+rename: 2 edit(s)
+signature: none
+completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+
+#---- completion_after_dollar_offers_record_fields
+f <- function() {
+  point <- (x = 1, y = "a")
+  point$$0
+}
+#++++
+hover 48..54: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 18..18 -> "  #: record{x: double, y: character}\n"
+completion (2): x, y
+hint @25: record{x: double, y: character}
+
+#---- completion_after_dollar_with_a_prefix
+f <- function() {
+  point <- (width = 1, height = 2)
+  point$wi$0
+}
+#++++
+hover 55..63: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 18..18 -> "  #: record{height: double, width: double}\n"
+completion (1): width
+hint @25: record{height: double, width: double}
+
+#---- completion_after_colon_in_an_arm_offers_tags
+#: fn(o: :Some(integer) | :None | :Pending) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    :$0
+  }
+}
+#++++
+hover 110..111: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (3): None, Pending, Some
+
+#---- completion_after_colon_with_a_prefix
+#: fn(o: :Some(integer) | :None | :Pending) -> integer
+f <- function(o) {
+  match (o) {
+    :P$0
+  }
+}
+#++++
+hover 92..94: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): Pending
+
+#---- record_pattern_field_binding
+#: fn(r: record{x: double, y: character}) -> character
+f <- function(r) {
+  match (r) {
+    (x = a, y = la$0bel) => label
+  }
+}
+#++++
+hover 104..109: label: character
+hover-definition: local 104..109
+definition 104..109
+references: 104..109*, 114..119
+rename: 2 edit(s)
+signature: none
+completion (16): label, La.svd, La_library, La_version, labels, labels.default, lag, lag.plot

@@ -7100,6 +7100,45 @@ fn validated_namespace_name(
     }
 }
 
+/// Every top-level alternative of a pattern, looking through `|`.
+fn collect_alternatives(module: &Module, pattern: PatId, alternatives: &mut Vec<PatId>) {
+    match &module.pattern(pattern).kind {
+        PatternKind::Or(inner) => {
+            for &alternative in inner.iter() {
+                collect_alternatives(module, alternative, alternatives);
+            }
+        }
+        _ => alternatives.push(pattern),
+    }
+}
+
+/// A literal pattern matches a length-one value of its own kind, with numbers matching
+/// numbers; `NA` matches a missing value of any atomic type, and `NULL` only `NULL`.
+fn literal_overlaps<'db>(
+    db: &'db dyn Db,
+    literal: &LiteralKind,
+    literal_ty: Ty<'db>,
+    subject: Ty<'db>,
+) -> bool {
+    let atomic = match subject.kind(db) {
+        TyKind::Scalar(atomic) => *atomic,
+        TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
+            TyKind::Scalar(atomic) => *atomic,
+            _ => return true,
+        },
+        TyKind::Null => return matches!(literal, LiteralKind::Null),
+        _ => return false,
+    };
+    if matches!(literal, LiteralKind::Na(_)) {
+        return true;
+    }
+    let TyKind::Scalar(literal_atomic) = literal_ty.kind(db) else {
+        return false;
+    };
+    let numeric = |atomic: Atomic| matches!(atomic, Atomic::Integer | Atomic::Double);
+    *literal_atomic == atomic || (numeric(*literal_atomic) && numeric(atomic))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7814,43 +7853,4 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
     }
-}
-
-/// Every top-level alternative of a pattern, looking through `|`.
-fn collect_alternatives(module: &Module, pattern: PatId, alternatives: &mut Vec<PatId>) {
-    match &module.pattern(pattern).kind {
-        PatternKind::Or(inner) => {
-            for &alternative in inner.iter() {
-                collect_alternatives(module, alternative, alternatives);
-            }
-        }
-        _ => alternatives.push(pattern),
-    }
-}
-
-/// A literal pattern matches a length-one value of its own kind, with numbers matching
-/// numbers; `NA` matches a missing value of any atomic type, and `NULL` only `NULL`.
-fn literal_overlaps<'db>(
-    db: &'db dyn Db,
-    literal: &LiteralKind,
-    literal_ty: Ty<'db>,
-    subject: Ty<'db>,
-) -> bool {
-    let atomic = match subject.kind(db) {
-        TyKind::Scalar(atomic) => *atomic,
-        TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
-            TyKind::Scalar(atomic) => *atomic,
-            _ => return true,
-        },
-        TyKind::Null => return matches!(literal, LiteralKind::Null),
-        _ => return false,
-    };
-    if matches!(literal, LiteralKind::Na(_)) {
-        return true;
-    }
-    let TyKind::Scalar(literal_atomic) = literal_ty.kind(db) else {
-        return false;
-    };
-    let numeric = |atomic: Atomic| matches!(atomic, Atomic::Integer | Atomic::Double);
-    *literal_atomic == atomic || (numeric(*literal_atomic) && numeric(atomic))
 }
