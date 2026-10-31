@@ -51,8 +51,10 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - **Merge with the squash method.** The repository allows only squash merges.
 - **Model and effort for delegated work:** Sonnet at high effort by default, Opus at high effort for a hard problem, and Opus at extra-high effort for an exceptionally hard one.
 - **Reread this file every two hours** through a scheduled check-in.
+- **Run a docs pass from time to time,** at least every few check-ins and after each feature PR lands, applying the docs directive in `AGENTS.md`.
 
 ## In flight
 
 - Research session session_0111kWqBCyqwWYwvbAi7TQGr: R runtime and C API architecture, delivering `r-runtime.md`.
 - Typing session session_0111kWqDjwjNJcGFMYNSyybM: inline annotation syntax, the comment/inline disagreement warning, and strict mode. It delivers one large PR.
+- Docs session (session id pending): restructuring the introduction and type-checking sections.

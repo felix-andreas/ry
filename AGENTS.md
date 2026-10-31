@@ -164,6 +164,7 @@ Memory lives in git on purpose. It travels with every `git clone` to any machine
 
 The docs site holds the specs for users and contributors. They are contracts, so keeping them accurate is mandatory.
 
+- (user directive) The docs are written for humans, so they get straight to the point in plain, concise language and cut everything irrelevant. Each page puts the most important information first (the motivation, what makes ry worth using) and gives details after. This matters most for the introduction and the type-checking section, which stay short: anything longer belongs in the reference section, or in contributing if it only matters for development. Agents own the docs and radically cut outdated or irrelevant material instead of preserving it.
 - `type-checking/tour.md` introduces every feature in one short example each, `type-checking/` also holds the stubs and limitations pages, and `reference/type-system.md` is the semantics contract.
 - The contributing pages are `contributing/architecture.md`, `contributing/structure.md`, `contributing/testing.md`, and `contributing/authoring-stubs.md`.
 - `contributing/design/` holds unsettled drafts. They are explicitly not contracts, which makes them the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the folder's index page lists them.
