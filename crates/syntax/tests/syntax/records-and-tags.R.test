@@ -306,6 +306,49 @@ SOURCE_FILE@0..136
     NEWLINE@134..135 "\n"
     R_BRACE@135..136 "}"
 
+#---- one_field_record_pattern_with_rest
+match (p) {
+  (x = a, ..) => a
+}
+#++++
+SOURCE_FILE@0..32
+  MATCH_EXPR@0..32
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..9
+      L_PAREN@6..7 "("
+      NAME@7..8
+        IDENT@7..8 "p"
+      R_PAREN@8..9 ")"
+    WHITESPACE@9..10 " "
+    L_BRACE@10..11 "{"
+    NEWLINE@11..12 "\n"
+    WHITESPACE@12..14 "  "
+    MATCH_ARM@14..30
+      PATTERN_LIST@14..25
+        L_PAREN@14..15 "("
+        PATTERN_FIELD@15..20
+          NAME@15..16
+            IDENT@15..16 "x"
+          WHITESPACE@16..17 " "
+          EQ@17..18 "="
+          WHITESPACE@18..19 " "
+          PATTERN_BIND@19..20
+            NAME@19..20
+              IDENT@19..20 "a"
+        COMMA@20..21 ","
+        WHITESPACE@21..22 " "
+        PATTERN_REST@22..24
+          IDENT@22..24 ".."
+        R_PAREN@24..25 ")"
+      WHITESPACE@25..26 " "
+      FAT_ARROW@26..28 "=>"
+      WHITESPACE@28..29 " "
+      NAME@29..30
+        IDENT@29..30 "a"
+    NEWLINE@30..31 "\n"
+    R_BRACE@31..32 "}"
+
 #---- base_match_call_stays_r
 match(x, table)
 match(x)
