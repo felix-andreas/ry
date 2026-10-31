@@ -10,14 +10,14 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.35.2",
-    "@astrojs/starlight-tailwind": "^4.0.1",
+    "@astrojs/starlight": "^0.42.8",
+    "@astrojs/starlight-tailwind": "^5.0.0",
     "@fontsource/geist-mono": "^5.2.6",
     "@fontsource/geist-sans": "^5.2.5",
     "@tailwindcss/vite": "^4.0.7",
-    "astro": "^5.6.1",
-    "sharp": "^0.34.2",
-    "starlight-theme-black": "0.6.0",
+    "astro": "^7.3.2",
+    "sharp": "^0.35.5",
+    "starlight-theme-black": "^0.7.1",
     "tailwindcss": "^4.0.7"
   }
 }

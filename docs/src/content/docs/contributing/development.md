@@ -87,7 +87,7 @@ absolute numbers matter; a debug build still gives honest ratios.
 
 ## Working on this site
 
-Run `just docs` for a live preview, and `cd docs && bun run build` for a full build.
+Run `just docs` for a live preview, and `cd docs && bun run build` for a full build. The docs build needs Node 22.23.4 or newer (Astro 7 refuses older versions).
 
 The formatter reference at `docs/src/content/docs/reference/formatting-rules.md` is generated, so
 do not edit it by hand. Edit `crates/format/tests/formatter.template.md` instead, and regenerate the
