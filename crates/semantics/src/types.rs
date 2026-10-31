@@ -31,6 +31,10 @@ pub enum TyKind<'db> {
     Tuple(Vec<Ty<'db>>),
     /// `list{a: A, b: B}`; fields keep declaration order.
     Record(Vec<RecordField<'db>>),
+    /// ry's built-in table, `frame{a: A[], b: B[]}`: a record of column vectors.
+    /// `None` is a frame whose columns are not known (`frame`), which every
+    /// column reference treats as silent.
+    Frame(Option<Vec<RecordField<'db>>>),
     Function(FunctionType<'db>),
     /// Normalized; build only through `union_of`, never directly.
     Union(Vec<Ty<'db>>),
@@ -185,6 +189,16 @@ pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
     Ty::new(db, TyKind::Scalar(atomic))
 }
 
+/// A frame column is a vector: a scalar broadens to its vector type, and names drop,
+/// because a column's elements are positional rows.
+pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+    match ty.kind(db) {
+        TyKind::Scalar(_) => Ty::new(db, TyKind::Vector(ty)),
+        TyKind::NamedVector(element) => Ty::new(db, TyKind::Vector(*element)),
+        _ => ty,
+    }
+}
+
 pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>) -> Ty<'db> {
     let mut flat: Vec<Ty<'db>> = Vec::new();
     let mut saw_null = false;
@@ -269,6 +283,19 @@ pub fn map_child_types<'db>(
                     .collect(),
             ),
         ),
+        TyKind::Frame(None) => ty,
+        TyKind::Frame(Some(columns)) => Ty::new(
+            db,
+            TyKind::Frame(Some(
+                columns
+                    .iter()
+                    .map(|column| RecordField {
+                        ty: map(column.ty),
+                        ..column.clone()
+                    })
+                    .collect(),
+            )),
+        ),
         TyKind::Function(function) => Ty::new(
             db,
             TyKind::Function(FunctionType {
@@ -315,7 +342,10 @@ pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl F
         | TyKind::List(inner)
         | TyKind::NamedList(inner) => visit(*inner),
         TyKind::Tuple(items) | TyKind::Union(items) => items.iter().copied().for_each(visit),
-        TyKind::Record(fields) => fields.iter().for_each(|field| visit(field.ty)),
+        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => {
+            fields.iter().for_each(|field| visit(field.ty))
+        }
+        TyKind::Frame(None) => {}
         TyKind::Function(function) => {
             function.positional.iter().copied().for_each(&mut *visit);
             function

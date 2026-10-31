@@ -1748,7 +1748,9 @@ fn string_subscript_completion(
             }
             _ => None,
         })?;
-    let TyKind::Record(fields) = check.expression_types.get(&target)?.kind(db) else {
+    let (TyKind::Record(fields) | TyKind::Frame(Some(fields))) =
+        check.expression_types.get(&target)?.kind(db)
+    else {
         return None;
     };
 
@@ -1963,7 +1965,9 @@ fn dollar_completions(
                 _ => None,
             })
             .min_by_key(|(range, _)| range.len())?;
-        let TyKind::Record(fields) = check.expression_types.get(&target)?.kind(db) else {
+        let (TyKind::Record(fields) | TyKind::Frame(Some(fields))) =
+            check.expression_types.get(&target)?.kind(db)
+        else {
             return None;
         };
         let mut renderer = TypeRenderer::default();
@@ -2344,9 +2348,10 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
         TyKind::Tuple(items) => items
             .iter()
             .all(|&item| is_hintable(db, item, variables_allowed)),
-        TyKind::Record(fields) => fields
+        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
             .iter()
             .all(|field| is_hintable(db, field.ty, variables_allowed)),
+        TyKind::Frame(None) => true,
         TyKind::Union(members) => members
             .iter()
             .all(|&member| is_hintable(db, member, variables_allowed)),

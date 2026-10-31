@@ -365,6 +365,22 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
+            // A frame whose columns are unknown makes no claim to check.
+            (TyKind::Frame(None), TyKind::Frame(_)) | (TyKind::Frame(_), TyKind::Frame(None)) => {
+                Ok(())
+            }
+            (TyKind::Frame(Some(left)), TyKind::Frame(Some(right))) => {
+                if left.len() != right.len() {
+                    return Err(UnifyError::Mismatch(a, b));
+                }
+                for column in left {
+                    let Some(other) = right.iter().find(|other| other.name == column.name) else {
+                        return Err(UnifyError::Mismatch(a, b));
+                    };
+                    self.unify(db, column.ty, other.ty)?;
+                }
+                Ok(())
+            }
             (TyKind::Function(left), TyKind::Function(right)) => {
                 if left.positional.len() != right.positional.len()
                     || left.named.len() != right.named.len()
@@ -641,6 +657,45 @@ impl<'db> InferenceTable<'db> {
                             self.compatible_probe(db, actual_field.ty, expected_field.ty, depth + 1)
                         })
                 })
+            }
+            (TyKind::Frame(None), TyKind::Frame(_)) | (TyKind::Frame(_), TyKind::Frame(None)) => {
+                true
+            }
+            (TyKind::Frame(Some(actual_columns)), TyKind::Frame(Some(expected_columns)))
+                if actual_columns.len() == expected_columns.len() =>
+            {
+                expected_columns.iter().all(|expected_column| {
+                    actual_columns
+                        .iter()
+                        .find(|column| column.name == expected_column.name)
+                        .is_some_and(|actual_column| {
+                            self.compatible_probe(
+                                db,
+                                actual_column.ty,
+                                expected_column.ty,
+                                depth + 1,
+                            )
+                        })
+                })
+            }
+            // A frame's run-time class is `c("frame", "data.frame")`, and it is a list of
+            // its columns.
+            (TyKind::Frame(_), TyKind::Named(name, arguments))
+                if arguments.is_empty() && name.text(db) == "data.frame" =>
+            {
+                true
+            }
+            (TyKind::Frame(None), TyKind::List(_) | TyKind::NamedList(_)) => true,
+            (TyKind::Frame(Some(columns)), TyKind::List(element) | TyKind::NamedList(element))
+                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
+            {
+                let joined = union_of(db, columns.iter().map(|column| column.ty));
+                self.unify(db, *element, joined).is_ok()
+            }
+            (TyKind::Frame(Some(columns)), TyKind::List(element) | TyKind::NamedList(element)) => {
+                columns
+                    .iter()
+                    .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1))
             }
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
             // to the first item and reject the rest.
