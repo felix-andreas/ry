@@ -237,15 +237,11 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
         "graphics" => &[crate::graphics::GRAPHICS_ROUTINES],
         _ => &[],
     };
-    let found = tables
+    tables
         .iter()
         .flat_map(|table| table.iter())
         .find(|(routine, _)| *routine == name)
-        .map(|(_, function)| *function);
-    match package {
-        "graphics" | "grDevices" => Some(found.unwrap_or(crate::graphics::no_devices)),
-        _ => found,
-    }
+        .map(|(_, function)| *function)
 }
 
 fn find(name: &str, package: Option<&str>) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
