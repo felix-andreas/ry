@@ -17,6 +17,7 @@ path = "src/libr.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+flate2 = "1.1"
 heap = { path = "../heap" }
 libc = "0.2"
 rustc-hash.workspace = true
@@ -39,3 +40,11 @@ path = "tests/test_gnu_r_binaries.rs"
 [[test]]
 name = "test_fuzz_native"
 path = "tests/test_fuzz_native.rs"
+
+[[test]]
+name = "test_connections"
+path = "tests/test_connections.rs"
+
+[[test]]
+name = "test_connections_gnu_binary"
+path = "tests/test_connections_gnu_binary.rs"
