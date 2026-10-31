@@ -34,6 +34,7 @@ pub mod dispatch;
 pub mod envir;
 pub mod eval;
 pub mod format;
+pub mod linalg;
 pub mod lower;
 pub mod methods;
 pub mod native;

@@ -1876,3 +1876,11 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 - **Deferred:** updating other development packages' import copies of a changed binding, loading a
   rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and
   evaluating `if` in `NAMESPACE` (ignored with a warning). `backlog.md` lists them.
+
+# Decision record: base R's linear algebra
+
+- **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.
+- **Target shape.** `crates/interp/src/linalg.rs` calls the system's BLAS and LAPACK, opened at runtime with `dlopen` (the workspace builds without them; an operation that needs a missing library is an R error), with GNU R's arguments, workspace queries and gfortran's hidden character lengths. On the same libraries the results are GNU R's bit for bit, which `crates/interp/tests/test_linalg.rs` pins.
+- **`dqrdc2` is Rust, written from its description** (R's LINPACK variant, which no system library ships), as are the `dqrsl` family and `dtrco`. They still call BLAS level 1 (`dnrm2`, `ddot`, `daxpy`, `dscal`, `dasum`) because those decide the bits: reference `dnrm2` is a scaled algorithm, not a plain square root of a sum.
+- **One table of base's native routines**, `native::BASE_ROUTINES`. `getRegisteredRoutines` derives from it, and every `.Call`, `.C` and `.Fortran` (the interpreter's and libr's) asks `native::call_base_routine` first, so `qr()` works with or without libR. A routine is base's when its `NativeSymbolInfo`'s `dll` is named `base`, or when it is named by a string with no `PACKAGE` or `PACKAGE = "base"`.
+- **GNU R's quirks are kept on purpose**: `%*%` uses BLAS unless an operand may hold a NaN or an infinity, then a plain loop (which also stands in when BLAS is missing, since reference BLAS sums in the same order); `La_solve`'s condition check norms the already factored copy when `a` was not double; `La_dgecon` estimates with `n` as the leading dimension, which ry refuses for `m < n` instead of reading past the matrix.

@@ -12,8 +12,11 @@ use crate::{
     vectors::xlength,
 };
 use heap::object::{Sexp, SexpType};
-use interp::builtins::{Arg, BuiltinDef, Call, builtin, internal};
-use interp::builtin_libraries;
+use interp::{
+    builtin_libraries,
+    builtins::{Arg, BuiltinDef, Call, builtin, internal},
+    native::Interface,
+};
 use std::ffi::{c_char, c_int, c_void};
 
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
@@ -383,6 +386,11 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
         RoutineKind::External => ".External",
         _ => ".Call",
     };
+    if kind == RoutineKind::Call
+        && let Some(result) = interp::native::call_base_routine(call, Interface::Call)?
+    {
+        return Ok(result);
+    }
     if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
         return Ok(value);
     }
@@ -435,6 +443,10 @@ unsafe extern "C" {
 /// `.C` and `.Fortran`: each argument is copied into native memory, the routine receives
 /// pointers, and the copies come back as a list.
 unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
+    let interface = if kind == RoutineKind::Fortran { Interface::Fortran } else { Interface::C };
+    if let Some(result) = interp::native::call_base_routine(call, interface)? {
+        return Ok(result);
+    }
     if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
         return Ok(value);
     }
@@ -661,7 +673,8 @@ unsafe fn do_is_loaded(call: &Call<'_>) -> ApiResult<Sexp> {
     let package = package.filter(|package| !package.is_empty());
     let found = [RoutineKind::Call, RoutineKind::External, RoutineKind::C, RoutineKind::Fortran]
         .into_iter()
-        .any(|kind| find_routine(&name, package.as_deref(), kind).is_ok());
+        .any(|kind| find_routine(&name, package.as_deref(), kind).is_ok())
+        || (package.as_deref().is_none_or(|package| package == "base") && interp::native::is_base_routine(&name));
     interp::values::scalar_bool(found)
 }
 

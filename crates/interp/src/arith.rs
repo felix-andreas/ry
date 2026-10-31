@@ -190,9 +190,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("which", 1, do_which),
     internal("which.max", 1, |call| unsafe { which_extreme(call, true) }),
     internal("which.min", 1, |call| unsafe { which_extreme(call, false) }),
-    internal("crossprod", 2, |call| unsafe { matrix_product(call, true, false) }),
-    internal("tcrossprod", 2, |call| unsafe { matrix_product(call, false, true) }),
-    builtin("%*%", 2, |call| unsafe { matrix_product(call, false, false) }),
     internal("trunc", -1, |call| unsafe { math1(call, Math::Trunc) }),
     internal("is.unsorted", 2, do_is_unsorted),
     internal("compareNumericVersion", 2, do_compare_numeric_version),
@@ -2597,101 +2594,6 @@ unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             }
             Ok(result)
         }
-    }
-}
-
-/// `%*%`, `crossprod` and `tcrossprod` on numeric matrices and vectors.
-unsafe fn matrix_product(call: &Call<'_>, transpose_left: bool, transpose_right: bool) -> R<Sexp> {
-    let left = values::materialize(call.arg(0))?;
-    let right_arg = call.arg(1);
-    let right = if right_arg == nil() { left } else { values::materialize(right_arg)? };
-    if !matches!(left.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
-        || !matches!(right.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
-    {
-        return Err(call.error("requires numeric/complex matrix/vector arguments"));
-    }
-    // `crossprod` and `tcrossprod` read a plain vector as a column vector; `%*%` picks the
-    // orientation that conforms.
-    let crossed = transpose_left || transpose_right;
-    let shape = |value: Sexp, other: Option<usize>| -> (usize, usize) {
-        match values::dims(value) {
-            Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
-            _ => {
-                let count = length(value);
-                if crossed {
-                    return (count, 1);
-                }
-                match other {
-                    Some(rows) if rows == count => (count, 1),
-                    Some(1) => (1, count),
-                    _ => (count, 1),
-                }
-            }
-        }
-    };
-    let (mut left_rows, mut left_cols) = match values::dims(left) {
-        Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
-        _ if crossed => (length(left), 1),
-        _ => {
-            let count = length(left);
-            let right_rows = values::dims(right).filter(|dims| dims.len() == 2).map(|dims| dims[0]);
-            match right_rows {
-                Some(rows) if rows == count && !transpose_left => (1, count),
-                Some(1) => (count, 1),
-                _ if transpose_left => (count, 1),
-                _ => (1, count),
-            }
-        }
-    };
-    if transpose_left {
-        std::mem::swap(&mut left_rows, &mut left_cols);
-    }
-    let (mut right_rows, mut right_cols) = shape(right, Some(left_cols));
-    if transpose_right {
-        std::mem::swap(&mut right_rows, &mut right_cols);
-    }
-    if values::dims(right).is_none() && !crossed {
-        if right_rows != left_cols && length(right) == left_cols {
-            right_rows = left_cols;
-            right_cols = 1;
-        }
-    }
-    if left_cols != right_rows {
-        return Err(call.error("non-conformable arguments"));
-    }
-    let left_value = |row: usize, col: usize| {
-        if transpose_left { real_at(left, col + row * left_cols) } else { real_at(left, row + col * left_rows) }
-    };
-    let right_value = |row: usize, col: usize| {
-        if transpose_right { real_at(right, col + row * right_cols) } else { real_at(right, row + col * right_rows) }
-    };
-    let result = alloc(SexpType::Real, left_rows * right_cols)?;
-    for row in 0..left_rows {
-        for col in 0..right_cols {
-            let mut total = 0.0;
-            for inner in 0..left_cols {
-                total += left_value(row, inner) * right_value(inner, col);
-            }
-            values::reals_mut(result)[row + col * left_rows] = total;
-        }
-    }
-    let dim = values::integer_vector(&[left_rows as i32, right_cols as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
-    let row_names = dimnames_part(left, if transpose_left { 1 } else { 0 });
-    let col_names = dimnames_part(right, if transpose_right { 0 } else { 1 });
-    if row_names != nil() || col_names != nil() {
-        let dimnames = values::list_vector(&[row_names, col_names])?;
-        values::set_attr(result, symbols().dimnames, dimnames)?;
-    }
-    Ok(result)
-}
-
-unsafe fn dimnames_part(value: Sexp, index: usize) -> Sexp {
-    let dimnames = get_attr(value, symbols().dimnames);
-    if dimnames.kind() == SexpType::List && length(dimnames) > index {
-        dimnames.element(index)
-    } else {
-        nil()
     }
 }
 

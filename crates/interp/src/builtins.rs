@@ -166,6 +166,7 @@ pub(crate) unsafe fn install_all() {
         crate::conditions::BUILTINS,
         crate::dispatch::BUILTINS,
         crate::arith::BUILTINS,
+        crate::linalg::BUILTINS,
         crate::coerce::BUILTINS,
         crate::subset::BUILTINS,
         crate::strings::BUILTINS,
