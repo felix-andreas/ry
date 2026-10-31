@@ -757,13 +757,22 @@ the shifting problem.
 
 Annotations are one internal concept, and the surface spelling is pluggable: both spellings lower
 through `annotations.rs` into one `Annotation`. `#:` is structured trivia, and a `#:` file must
-always remain valid ordinary R. The inline spelling below is the superset dialect this seam kept
-open, chosen by the mandate in `AGENTS.md`.
+always remain valid ordinary R. The inline spelling is the superset dialect this seam kept open,
+chosen by the mandate in `AGENTS.md` (the next two records).
 
-## Inline annotations are a superset syntax that erases to R
+## The inline annotation syntax is a superset of R
 
-**Previous state.** Types existed only in `#:` comments. The mandate asks for an inline syntax beside
-them, on by default, that a future ry runtime executes, with a warning when the two disagree.
+The previous position was that a superset dialect "stays a product decision" (the entry above),
+with `declare()` as the valid-R route. The mandate in `AGENTS.md` makes that decision: the inline
+syntax is on by default and ry warns when it is turned off, which only makes sense for a syntax that
+GNU R cannot parse. So the inline form is the superset that `contributing/design/inline-type-syntax.md`
+costed (generic binder, parameter, return and binding positions), typed files keep the `.R`
+extension because ry executes them directly, and `declare(type(...))` stays a recognized spelling for
+code that must remain valid R. The cost is that other R tools fail on a typed file, so code that must
+run on GNU R goes through a strip step that moves inline types into `#:` comments. The reasoning is in
+`contributing/design/r-runtime.md`, section 8.
+
+## How inline annotations are built
 
 **Syntax.** `name: TYPE <- value` (or `= value`) for a binding, `name: TYPE` (and `...: TYPE`) in a
 parameter list, `-> TYPE` between the parameter list and the body, and `function<T: numeric>(...)`
@@ -772,10 +781,7 @@ by the same parser functions, so there is one type grammar. A function header re
 annotation it means: `function(x: integer) -> integer` is `fn(x: integer) -> integer` with formals.
 Docs: `reference/type-system.md#inline-annotation-syntax`.
 
-**Why this shape.** R rejects `name:` in a formal list, `->` and `<` right after `)` or `function`,
-so those forms cannot change the meaning of any R program. A binding's `name: TYPE <- value` is the
-one exception: R reads it as assignment to `name:TYPE` through `` `:<-` ``, which base R does not
-define, so no working program has it. The binding form is recognized only where a statement starts
+**Why this shape.** The record above gives the product reasons. The binding form is recognized only where a statement starts
 (top level, directly inside `{}`), by a shallow token scan for a `<-` or `=` at bracket depth 0 on the
 line, so `x:y`, `x:y < -1` and every argument stay ranges. Rejected: `declare(type(...))` calls (valid
 R, but a runtime call per binding and no natural place for parameter or return types), `let x: T`
@@ -824,18 +830,6 @@ a defaultless formal the body tests with `missing()` stays optional.
 
 **Known gap.** A generic lambda passed as an argument keeps its binders rigid, so
 `lapply(xs, function<T>(v: T) -> T v)` is reported. `backlog.md` tracks it.
-
-## The inline annotation syntax is a superset of R
-
-The previous position was that a superset dialect "stays a product decision" (the entry above),
-with `declare()` as the valid-R route. The mandate in `AGENTS.md` makes that decision: the inline
-syntax is on by default and ry warns when it is turned off, which only makes sense for a syntax that
-GNU R cannot parse. So the inline form is the superset that `contributing/design/inline-type-syntax.md`
-costed (generic binder, parameter, return and binding positions), typed files keep the `.R`
-extension because ry executes them directly, and `declare(type(...))` stays a recognized spelling for
-code that must remain valid R. The cost is that other R tools fail on a typed file, so code that must
-run on GNU R goes through a strip step that moves inline types into `#:` comments. The reasoning is in
-`contributing/design/r-runtime.md`, section 8.
 
 ## Testing doctrine for `syntax`
 
