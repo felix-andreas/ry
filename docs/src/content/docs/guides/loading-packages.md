@@ -5,8 +5,8 @@ description: Load the R package you are working on from source, lazily, and relo
 
 ry loads the package you are developing straight from its sources, as `devtools::load_all()` does,
 but it parses a function only when you first call it, and after an edit it replaces exactly the
-definitions you changed. On a 14,000-line package that makes a cold load 7 times faster than
-`load_all()` and a reload after an edit about 50 times faster (see [Speed](#speed)).
+definitions you changed. On a 14,000-line package that makes a cold load almost 10 times faster
+than `load_all()` and a reload after an edit about 60 times faster (see [Speed](#speed)).
 
 ```sh
 ry repl            # inside a package: load it, and reload edits before each command
@@ -75,8 +75,9 @@ A reload works out which top-level items changed and touches only those:
 - A changed function is rebound, a new one is bound, and a deleted one is removed. A function that
   only moved, because you edited something above it, is rebound to keep its source reference right.
 - A top-level statement runs again when you changed it, or when it read something that changed while
-  it ran. `cached <- helper()` reruns after you edit `helper`, while a function that calls `helper()`
-  does not need to, because it looks `helper` up when it runs.
+  it ran, including anything the functions it called use. `cached <- helper()` reruns after you edit
+  `helper`, or a function `helper` calls, while a function that calls `helper()` does not need to,
+  because it looks `helper` up when it runs.
 - When two statements write the same name, the last one in collation order wins again, and a
   statement like `f <- memoise(f)` sees `f` as it was at load time rather than wrapping it twice.
 - A `NAMESPACE` change rebuilds the imports or resyncs the exports, `.onLoad` runs again when you
@@ -90,19 +91,20 @@ classes, and some R6 and S4 classes. `tools/loader-bench` regenerates them.
 
 | Package | Loader | Cold load | Reload after a body edit | Reload after adding a function | Reload with no change |
 | --- | --- | --- | --- | --- | --- |
-| 80 files, 14,000 lines | `devtools::load_all()` | 759 ms | 406 ms | 268 ms | 270 ms |
-| | `loadfast::load_fast()` | 292 ms | 11 ms | 8 ms | 3 ms |
-| | ry | 109 ms | 8 ms | 7 ms | 2 ms |
-| 500 files, 326,000 lines | `devtools::load_all()` | 7,166 ms | 7,795 ms | 5,467 ms | 4,991 ms |
-| | `loadfast::load_fast()` | 2,956 ms | 81 ms | 83 ms | 28 ms |
-| | ry | 778 ms | 46 ms | 43 ms | 6 ms |
+| 80 files, 14,000 lines | `devtools::load_all()` | 868 ms | 435 ms | 312 ms | 263 ms |
+| | `loadfast::load_fast()` | 282 ms | 10 ms | 8 ms | 3 ms |
+| | ry | 90 ms | 7 ms | 5 ms | 2 ms |
+| 500 files, 326,000 lines | `devtools::load_all()` | 7,385 ms | 6,581 ms | 5,308 ms | 5,111 ms |
+| | `loadfast::load_fast()` | 3,064 ms | 81 ms | 82 ms | 25 ms |
+| | ry | 867 ms | 59 ms | 39 ms | 6 ms |
 
 Keeping source references, as an interactive session does by default, adds 10 to 20% to a cold
 load.
 
 ## Limits
 
-- `system.file()` does not map a source package's `inst/` directory, which `load_all()` does.
+- `system.file()` does not map a source package's `inst/` directory, and datasets in `data/` are not
+  loaded; `load_all()` does both.
 - `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that

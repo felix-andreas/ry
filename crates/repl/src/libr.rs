@@ -33,6 +33,8 @@ pub struct RApi {
     parse_eval_string: unsafe extern "C" fn(*const c_char, *mut c_void) -> *mut c_void,
     global_env: *mut *mut c_void,
     interrupts_pending: *mut c_int,
+    /// R's innermost evaluation context; see [`at_top_level`].
+    global_context: *mut *mut c_void,
     /// Registers `.Call` routines that live in this process.
     embedding_dll_info: unsafe extern "C" fn() -> *mut c_void,
     register_routines: unsafe extern "C" fn(
@@ -139,6 +141,24 @@ const SA_NOSAVE: c_int = 3;
 /// and the address is set once before the handler is installed.
 pub static INTERRUPTS_PENDING: AtomicPtr<c_int> = AtomicPtr::new(ptr::null_mut());
 
+/// The address of `R_GlobalContext`, set once at initialization.
+static GLOBAL_CONTEXT: AtomicPtr<*mut c_void> = AtomicPtr::new(ptr::null_mut());
+
+/// Whether R is reading input at its top-level prompt rather than for `readline()`, `menu()` or
+/// the browser. At top level the innermost context is R's top-level context, the only one
+/// without a parent, and `nextcontext` is the first field of R's context struct.
+pub fn at_top_level() -> bool {
+    let address = GLOBAL_CONTEXT.load(Ordering::SeqCst);
+    if address.is_null() {
+        return false;
+    }
+    // SAFETY: the address is R's `R_GlobalContext`, read on R's thread while R waits for input.
+    unsafe {
+        let context = *address as *const *const c_void;
+        !context.is_null() && (*context).is_null()
+    }
+}
+
 /// R's Windows front-end break flag (`UserBreak`).
 #[cfg(windows)]
 pub static USER_BREAK: AtomicPtr<c_int> = AtomicPtr::new(ptr::null_mut());
@@ -195,6 +215,7 @@ pub fn load() -> Result<RApi, ReplError> {
         consolefile: symbol(library, &library_path, "R_Consolefile")?,
         outputfile: symbol(library, &library_path, "R_Outputfile")?,
         interrupts_pending: symbol(library, &library_path, "R_interrupts_pending")?,
+        global_context: symbol(library, &library_path, "R_GlobalContext")?,
         embedding_dll_info: symbol(library, &library_path, "R_getEmbeddingDllInfo")?,
         register_routines: symbol(library, &library_path, "R_registerRoutines")?,
         call: call_api(library, &library_path)?,
@@ -250,6 +271,7 @@ pub fn load() -> Result<RApi, ReplError> {
         parse_eval_string: symbol(library, &library_path, "R_ParseEvalString")?,
         global_env: symbol(library, &library_path, "R_GlobalEnv")?,
         interrupts_pending: symbol(library, &library_path, "R_interrupts_pending")?,
+        global_context: symbol(library, &library_path, "R_GlobalContext")?,
         embedding_dll_info: symbol(library, &library_path, "R_getEmbeddingDllInfo")?,
         register_routines: symbol(library, &library_path, "R_registerRoutines")?,
         call: call_api(library, &library_path)?,
@@ -331,6 +353,7 @@ impl RApi {
             *self.write_console_hook = None;
             *self.write_console_ex_hook = Some(write_console_ex);
             INTERRUPTS_PENDING.store(self.interrupts_pending, Ordering::SeqCst);
+            GLOBAL_CONTEXT.store(self.global_context, Ordering::SeqCst);
             (self.setup_mainloop)();
         }
         Ok(())
@@ -397,6 +420,7 @@ impl RApi {
             *self.character_mode = UI_MODE_LINK_DLL;
             INTERRUPTS_PENDING.store(self.interrupts_pending, Ordering::SeqCst);
             USER_BREAK.store(self.user_break, Ordering::SeqCst);
+            GLOBAL_CONTEXT.store(self.global_context, Ordering::SeqCst);
             (self.setup_mainloop)();
         }
         Ok(())

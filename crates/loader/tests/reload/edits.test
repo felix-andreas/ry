@@ -260,3 +260,17 @@ compute <- memoise::memoise(compute, cache = cachem::cache_mem())
 source R/a.R
 run R/a.R:1 compute <- function(x) x
 run R/a.R:2 compute <- memoise::memoise(compute, cache = cachem::cache_mem())
+
+#---- a_statement_that_called_through_a_changed_function_reruns
+#~~~~ before R/a.R
+deepest <- function() 1
+middle <- function() deepest()
+cached <- middle()
+#~~~~ after R/a.R
+deepest <- function() 2
+middle <- function() deepest()
+cached <- middle()
+#++++
+source R/a.R
+bind deepest from R/a.R:1:11
+run R/a.R:3 cached <- middle()

@@ -9,7 +9,7 @@
 #   LOADER=ry PKG=/tmp/medium ry run bench.R
 #
 # The large package of the loading-packages docs page is `generate.py large 500 46 <dir>`.
-# The script edits R/file0001.R and restores it on exit.
+# The script edits R/file0001.R and restores it at the end.
 options(keep.source = FALSE)  # what Rscript runs pkgload and loadfast with
 loader <- Sys.getenv("LOADER")
 root <- normalizePath(Sys.getenv("PKG"))
@@ -21,7 +21,6 @@ load <- switch(loader,
 time <- function() system.time(load())[["elapsed"]] * 1000
 file <- file.path(root, "R", "file0001.R")
 original <- readLines(file)
-on.exit(writeLines(original, file))
 cold <- time(); options(ry.load.verbose = Sys.getenv("VERBOSE") == "1")
 first_call <- system.time(f1_3(1:5))[["elapsed"]] * 1000
 writeLines(sub("x \\* ([0-9])", "x * 10 + \\1", original), file)
@@ -31,5 +30,6 @@ writeLines(c(readLines(file), "brand_new <- function() 1"), file)
 new_function <- time()
 stopifnot(identical(brand_new(), 1))
 unchanged <- time()
+writeLines(original, file)
 cat(sprintf("%-9s cold %7.0f ms | body edit %6.0f ms | new function %6.0f ms | no change %6.0f ms\n",
             loader, cold, body_edit, new_function, unchanged))

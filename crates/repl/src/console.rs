@@ -101,7 +101,6 @@ pub fn run(api: RApi, options: RunOptions) -> Result<(), ReplError> {
             batch: options.batch,
             completer,
             hooks: options.hooks,
-            primary_prompt: None,
         });
     });
     install_sigint_handler();
@@ -159,9 +158,6 @@ struct Console {
     batch: bool,
     completer: Option<SharedSessionCompleter>,
     hooks: Option<Box<dyn ConsoleHooks>>,
-    /// The prompt of R's first read, which is its top-level prompt; `readline()` and the
-    /// browser prompt differently, and their input must reach them untouched.
-    primary_prompt: Option<String>,
 }
 
 /// R's parser rejects a raw `\r`, but scripts and the editor buffer carry CRLF on
@@ -212,10 +208,8 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
             }
             // R hands its hook a valid NUL-terminated prompt (or null).
             let prompt_text = unsafe { libr::prompt_text(prompt) };
-            let at_top_level = console
-                .primary_prompt
-                .get_or_insert_with(|| prompt_text.clone())
-                == &prompt_text;
+            // Input for `readline()`, `menu()` or the browser must reach them untouched.
+            let at_top_level = libr::at_top_level();
             match console.editor.read_line(&RPrompt { text: prompt_text }) {
                 Ok(Signal::Success(line)) => {
                     let line = normalize_line_endings(&line);

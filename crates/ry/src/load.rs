@@ -49,14 +49,14 @@ pub fn process_runtime() -> String {
         .and_then(|path| path.to_str().map(str::to_owned))
         .unwrap_or_else(|| "ry".to_owned());
     runtime(&format!(
-        r#".ry_executable <- Sys.getenv("RY_EXECUTABLE", {executable})
+        r#".ry_executable <- function() Sys.getenv("RY_EXECUTABLE", {executable})
 .ry_state_file <- function(root) {{
   file.path(tempdir(), paste0("ry-load-", gsub("[^A-Za-z0-9]", "_", root), ".json"))
 }}
 .ry_request <- function(root, plan_file, full) {{
   arguments <- c("load", "--emit-plan", shQuote(plan_file), "--state",
                  shQuote(.ry_state_file(root)), if (full) "--full", shQuote(root))
-  status <- system2(.ry_executable, arguments)
+  status <- system2(.ry_executable(), arguments)
   if (!identical(status, 0L)) stop("`ry load` failed with status ", status, call. = FALSE)
 }}
 .ry_commit <- function(root) {{
@@ -121,8 +121,11 @@ fn r_string(text: &str) -> String {
 pub fn load_statement(root: &Path, catch: bool) -> String {
     let call = format!("load_all({})", r_string(&root.to_string_lossy()));
     if catch {
+        // Startup code runs outside R's top-level loop, so nothing may escape it: an interrupt
+        // there would jump to a context that no longer exists and end R.
         format!(
-            "tryCatch({call}, error = function(error) message(\"ry: \", conditionMessage(error)))"
+            "tryCatch({call}, error = function(error) message(\"ry: \", conditionMessage(error)), \
+             interrupt = function(interrupt) message(\"ry: loading interrupted\"))"
         )
     } else {
         call
@@ -219,11 +222,17 @@ pub struct ReloadWatcher;
 
 impl ConsoleHooks for ReloadWatcher {
     fn before_command(&mut self) -> Option<String> {
-        let session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-        let stale = session
-            .fingerprints
-            .iter()
-            .any(|(root, (_, loaded))| loaded.is_some() && source_fingerprint(root) != *loaded);
+        let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut stale = false;
+        for (root, (_, loaded)) in session.fingerprints.iter_mut() {
+            let current = source_fingerprint(root);
+            if loaded.is_some() && current != *loaded {
+                // A reload that fails is not retried before every command, only after the
+                // next change on disk.
+                *loaded = current;
+                stale = true;
+            }
+        }
         stale.then(|| ".ry_autoreload()".to_owned())
     }
 }

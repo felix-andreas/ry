@@ -45,6 +45,9 @@ pub struct ItemLoad {
     pub hash: u64,
     /// `Some(name)` for `name <- function(...) ...`, the shape a loader may bind lazily.
     pub function: Option<String>,
+    /// For a function definition, every name its body mentions: a superset of what calling
+    /// it reads, found without name resolution.
+    pub mentions: Vec<String>,
     pub registrations: Vec<Registration>,
 }
 
@@ -77,14 +80,22 @@ pub fn item_load<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLoad {
         return ItemLoad {
             hash: 0,
             function: None,
+            mentions: Vec::new(),
             registrations: Vec::new(),
         };
     };
     let node = syntax.syntax_node();
     let (text, _) = erase_for_r(&node, &[]);
+    let definition = function_definition(&node);
+    let mentions = definition.as_ref().map_or_else(Vec::new, |(_, value)| {
+        let mut names = BTreeSet::new();
+        collect_identifiers(value.green().as_ref(), &mut names);
+        names.into_iter().collect()
+    });
     ItemLoad {
         hash: fnv1a(text.as_bytes()),
-        function: function_definition(&node).map(|(name, _)| name),
+        function: definition.map(|(name, _)| name),
+        mentions,
         registrations: registrations(&node),
     }
 }
@@ -253,6 +264,9 @@ pub struct IndexedItem {
     /// Names it reads while running (see [`item_immediate_reads`]). A function definition
     /// reads nothing until it is called.
     pub reads: Vec<String>,
+    /// For a function definition, the names its body mentions, which is what a call to it
+    /// may read.
+    pub mentions: Vec<String>,
     pub registrations: Vec<Registration>,
 }
 
@@ -335,6 +349,7 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                 function,
                 binds,
                 reads,
+                mentions: load.mentions.clone(),
                 registrations: load.registrations.clone(),
             }
         })
@@ -578,6 +593,25 @@ impl Eraser {
             }
         }
         self.record(end);
+    }
+}
+
+fn collect_identifiers(green: &GreenNodeData, names: &mut BTreeSet<String>) {
+    for child in green.children() {
+        match child {
+            NodeOrToken::Node(child) => collect_identifiers(child, names),
+            NodeOrToken::Token(token)
+                if RLanguage::kind_from_raw(token.kind()) == SyntaxKind::IDENT =>
+            {
+                let text = token.text();
+                let name = text
+                    .strip_prefix('`')
+                    .and_then(|text| text.strip_suffix('`'))
+                    .unwrap_or(text);
+                names.insert(name.to_owned());
+            }
+            NodeOrToken::Token(_) => {}
+        }
     }
 }
 

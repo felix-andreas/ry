@@ -423,7 +423,9 @@ impl Loader {
                 (None, text) => {
                     let text = match text {
                         Some(text) => text,
-                        None => read(&root.join(&path))?,
+                        None => read(&root.join(&path))?
+                            .replace("\r\n", "\n")
+                            .replace('\r', "\n"),
                     };
                     let file = SourceFile::builder(text, DocumentKind::Package)
                         .durability(Durability::HIGH)
@@ -724,6 +726,18 @@ pub fn diff<'text>(
     for item in &vanished {
         changed.extend(item.binds.iter().cloned());
     }
+    // A statement that called a function holds what the call returned, so a change anywhere
+    // below that call counts too: a lazy function whose body mentions a changed name counts as
+    // changed, transitively, and so does any function a statement reads.
+    // A full load reruns everything, so it needs no call graph.
+    let functions: FxHashMap<&str, &IndexedItem> = if full {
+        FxHashMap::default()
+    } else {
+        index
+            .items()
+            .filter_map(|(_, item)| Some((index.lazy_name(item)?, item)))
+            .collect()
+    };
     // A statement reruns when it is new, when it read a binding that changed (it captured the
     // old value), or when it writes one (the last writer in collation order must win again).
     // A rerun statement must also see what it saw at load: when it reads a name that it or a
@@ -754,6 +768,18 @@ pub fn diff<'text>(
     }
     let mut rerun: Vec<bool> = eager.iter().map(|(_, _, fresh)| full || *fresh).collect();
     loop {
+        if !full && !changed.is_empty() {
+            let roots: Vec<&str> = eager
+                .iter()
+                .flat_map(|(_, item, _)| item.reads.iter().map(String::as_str))
+                .collect();
+            let reaching: Vec<String> = reaching_changed(&roots, &functions, &changed)
+                .into_iter()
+                .filter(|name| !changed.contains(*name))
+                .map(str::to_owned)
+                .collect();
+            changed.extend(reaching);
+        }
         let changed_before = changed.len();
         let mut grew = false;
         for (position, (_, item, _)) in eager.iter().enumerate() {
@@ -772,8 +798,8 @@ pub fn diff<'text>(
                 continue;
             }
             changed.extend(item.binds.iter().cloned());
-            for name in &item.reads {
-                let Some(positions) = writers.get(name.as_str()) else {
+            for name in reached_through_calls(&item.reads, &functions) {
+                let Some(positions) = writers.get(name) else {
                     continue;
                 };
                 if positions.last().is_some_and(|last| *last >= position) {
@@ -915,6 +941,66 @@ pub fn diff<'text>(
     }
 }
 
+/// The names among `roots` whose call may read a changed binding, through any chain of lazy
+/// functions. A forward walk collects the call graph the roots reach, then a backward walk from
+/// the changed names marks everything that reaches one; both visit each function once.
+fn reaching_changed<'a>(
+    roots: &[&'a str],
+    functions: &FxHashMap<&'a str, &'a IndexedItem>,
+    changed: &FxHashSet<String>,
+) -> FxHashSet<&'a str> {
+    let mut callers: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
+    let mut seen: FxHashSet<&'a str> = roots.iter().copied().collect();
+    let mut queue: Vec<&'a str> = roots.to_vec();
+    while let Some(name) = queue.pop() {
+        let Some(item) = functions.get(name) else {
+            continue;
+        };
+        for mention in &item.mentions {
+            let mention = mention.as_str();
+            callers.entry(mention).or_default().push(name);
+            if seen.insert(mention) {
+                queue.push(mention);
+            }
+        }
+    }
+    let mut reaching: FxHashSet<&'a str> = seen
+        .iter()
+        .copied()
+        .filter(|name| changed.contains(*name))
+        .collect();
+    let mut queue: Vec<&'a str> = reaching.iter().copied().collect();
+    while let Some(name) = queue.pop() {
+        for &caller in callers.get(name).into_iter().flatten() {
+            if reaching.insert(caller) {
+                queue.push(caller);
+            }
+        }
+    }
+    reaching
+}
+
+/// `reads` plus every name the lazy functions among them mention, transitively: what running
+/// a statement that calls them may read.
+fn reached_through_calls<'a>(
+    reads: &'a [String],
+    functions: &FxHashMap<&'a str, &'a IndexedItem>,
+) -> FxHashSet<&'a str> {
+    let mut seen: FxHashSet<&'a str> = reads.iter().map(String::as_str).collect();
+    let mut queue: Vec<&'a str> = seen.iter().copied().collect();
+    while let Some(name) = queue.pop() {
+        for mention in functions
+            .get(name)
+            .map_or(&[][..], |item| item.mentions.as_slice())
+        {
+            if seen.insert(mention) {
+                queue.push(mention);
+            }
+        }
+    }
+    seen
+}
+
 /// Whether the files both indexes hold appear in the same order in each.
 fn same_relative_order(old: &PackageIndex, new: &PackageIndex) -> bool {
     let old_paths: FxHashSet<&str> = old.files.iter().map(|file| file.path.as_str()).collect();
@@ -1007,6 +1093,8 @@ impl Plan {
             || !self.run.is_empty()
             || self.imports.is_some()
             || self.sysdata != SysdataChange::Keep
+            || self.dynamic_libraries.is_some()
+            || self.run_on_load
         {
             return None;
         }
@@ -1049,36 +1137,50 @@ fn file_hash(path: &Path) -> Result<Option<u64>, LoadError> {
     }
 }
 
-/// Names, sizes and modification times, which change whenever a rebuild is due without
-/// reading every object file.
+/// Names, sizes and modification times of the sources under `src/`, its subdirectories
+/// included, which change whenever a rebuild is due without reading every file.
 fn compiled_fingerprint(directory: &Path) -> Result<Option<u64>, LoadError> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(LoadError::Io(directory.to_path_buf(), error)),
-    };
+    if !directory.is_dir() {
+        return Ok(None);
+    }
     let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| LoadError::Io(directory.to_path_buf(), error))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        // Build products change on every build; only sources decide whether one is due.
-        if name.ends_with(".o")
-            || name.ends_with(".so")
-            || name.ends_with(".dll")
-            || name.ends_with(".dylib")
-        {
-            continue;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let entries =
+            fs::read_dir(&current).map_err(|error| LoadError::Io(current.clone(), error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| LoadError::Io(current.clone(), error))?;
+            let path = entry.path();
+            let metadata = entry
+                .metadata()
+                .map_err(|error| LoadError::Io(path.clone(), error))?;
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if is_build_product(&path) {
+                continue;
+            }
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            let relative = path
+                .strip_prefix(directory)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            records.push(format!("{relative}\0{}\0{modified}", metadata.len()));
         }
-        let metadata = entry
-            .metadata()
-            .map_err(|error| LoadError::Io(entry.path(), error))?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |duration| duration.as_nanos());
-        records.push(format!("{name}\0{}\0{modified}", metadata.len()));
     }
     records.sort();
     Ok(Some(fnv1a(records.join("\n").as_bytes())))
+}
+
+/// Build products change on every build, so only sources decide whether one is due.
+pub fn is_build_product(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "o" | "so" | "dll" | "dylib"))
 }

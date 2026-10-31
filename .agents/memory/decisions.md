@@ -1722,9 +1722,14 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   `dirs::cache_dir()/ry`, because R's JIT otherwise compiles each runtime function on first call and
   that alone cost more than a reload (about 200 ms per session). The cache stores the whole
   environment, because `environment<-` strips bytecode from a closure.
+- **A statement's dependencies include calls.** Function items record the identifiers their body
+  mentions (a syntactic superset, cheap without name resolution), and the diff closes the changed
+  set over that call graph inside the rerun fixpoint, and applies the earlier-writer rule to
+  everything a statement's calls reach.
 - **The REPL reloads by feeding `.ry_autoreload()` as its own top-level command** before the user's
-  command, when a stat fingerprint of the loaded packages changed and the prompt is R's top-level
-  one (the first prompt seen). This is the one place the console feeds input after startup; it is a
+  command, when a stat fingerprint of the loaded packages changed and R is at its top-level context
+  (`R_GlobalContext` has no parent; comparing prompt text broke on `options(prompt =)` and fed
+  `readline()`). A failed reload is retried only after the next change on disk. This is the one place the console feeds input after startup; it is a
   user-visible command like typing `load_all()`, and it keeps `.Last.value`.
 - **Deferred:** updating other development packages' import copies of a changed binding, loading a
   rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and

@@ -254,6 +254,33 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
 }
 
 #[test]
+fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
+    if !r_available() {
+        return;
+    }
+    let package = std::env::temp_dir().join(format!("ry-repl-prompt-{}", std::process::id()));
+    fs::create_dir_all(package.join("R")).expect("create package");
+    fs::write(
+        package.join("DESCRIPTION"),
+        "Package: promptpkg\nVersion: 1.0\n",
+    )
+    .expect("write");
+    fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
+    let mut session = ReplSession::start_in(Some(&package));
+    session.expect("Loaded promptpkg");
+    session.send("options(prompt = \"R> \")\r");
+    session.settle(Duration::from_millis(300));
+    fs::write(package.join("R/a.R"), "level <- function() \"level two\"\n").expect("write");
+    session.send("answer <- readline(\"answer: \")\r");
+    session.expect("answer: ");
+    session.send("typed\r");
+    session.send("cat(\"got\", answer, level(), \"\\n\")\r");
+    session.expect("got typed level two");
+    session.quit();
+    fs::remove_dir_all(&package).ok();
+}
+
+#[test]
 fn evaluates_and_autoprints() {
     let Some(mut session) = start_session() else {
         return;

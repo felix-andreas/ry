@@ -34,7 +34,12 @@ roughly in order of how often a real package hits them:
   new name.
 - **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
   would fix it.
-- **`R/unix/` and `R/windows/` subdirectories are not loaded.**
+- **`R/unix/` and `R/windows/` subdirectories are not loaded**, nor are `data/` datasets (LazyData).
+- **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every
+  reload that re-registers it and never removed.
+- **A declared `S3method` whose function does not exist** registers a promise that fails at
+  dispatch; R refuses the load instead.
+- **Sources must be UTF-8**; a package with `Encoding: latin1` fails to load.
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 - **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all

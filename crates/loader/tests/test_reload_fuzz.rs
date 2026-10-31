@@ -292,14 +292,17 @@ fn run(
     let position = order.positions[&(path.to_owned(), item.span.char_start)];
     let mut seen = Vec::new();
     for name in &item.reads {
-        let visible = index.is_lazy(name)
-            || order
-                .writers
-                .get(name)
-                .is_some_and(|writers| writers.first().is_some_and(|first| *first < position));
-        let value = match model.bindings.get(name) {
-            Some(value) if visible => value.clone(),
-            _ => "missing".to_owned(),
+        let value = if visible(index, order, position, name) {
+            deep_value(
+                model,
+                index,
+                order,
+                position,
+                name,
+                &mut FxHashSet::default(),
+            )
+        } else {
+            "missing".to_owned()
         };
         seen.push(format!("{name}={value}"));
     }
@@ -314,6 +317,53 @@ fn run(
     model
         .registrations
         .extend(item.registrations.iter().cloned());
+}
+
+fn visible(index: &PackageIndex, order: &EagerOrder, position: usize, name: &str) -> bool {
+    index.is_lazy(name)
+        || order
+            .writers
+            .get(name)
+            .is_some_and(|writers| writers.first().is_some_and(|first| *first < position))
+}
+
+/// A name's value, and for a lazy function also everything its body mentions, transitively:
+/// calling it during a statement reads all of that.
+fn deep_value(
+    model: &Model,
+    index: &PackageIndex,
+    order: &EagerOrder,
+    position: usize,
+    name: &str,
+    seen: &mut FxHashSet<String>,
+) -> String {
+    if !seen.insert(name.to_owned()) {
+        return "cycle".to_owned();
+    }
+    let value = model
+        .bindings
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| "missing".to_owned());
+    if !index.is_lazy(name) {
+        return value;
+    }
+    let mentions: Vec<String> = index
+        .items()
+        .find(|(_, item)| index.lazy_name(item) == Some(name))
+        .map(|(_, item)| item.mentions.clone())
+        .unwrap_or_default();
+    let inner: Vec<String> = mentions
+        .iter()
+        .filter(|mention| {
+            model.bindings.contains_key(*mention) && visible(index, order, position, mention)
+        })
+        .map(|mention| {
+            let value = deep_value(model, index, order, position, mention, seen);
+            format!("{mention}={value}")
+        })
+        .collect();
+    format!("{value} calling [{}]", inner.join(", "))
 }
 
 fn apply(model: &mut Model, plan: &Plan, index: &PackageIndex, texts: &FxHashMap<String, String>) {

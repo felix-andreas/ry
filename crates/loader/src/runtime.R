@@ -38,7 +38,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   if (length(plan$warnings)) {
     for (warning_text in plan$warnings) warning(warning_text, call. = FALSE)
   }
-  if (!plan$full && plan$noop && current) {
+  # Switching `export_all` changes what is exported even when no file changed.
+  resync <- !identical(state$export_all, export_all)
+  if (!plan$full && plan$noop && current && !resync) {
     .ry_commit(root)
     if (!quiet && report_noop) {
       message(sprintf("%s is up to date.", plan$package))
@@ -49,11 +51,16 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     state <- .ry_new_package(plan, root)
   }
   state$export_all <- export_all
+  # A statement that fails leaves the namespace partly updated, so the attached package
+  # environment follows it either way rather than mixing two versions.
+  applied <- FALSE
+  on.exit(if (!applied && !is.null(state$package_env)) .ry_sync_package_env(state), add = TRUE)
   .ry_apply(plan, state)
+  applied <- TRUE
   if (plan$full && isTRUE(attach)) {
     .ry_attach(plan, state)
   } else if (!is.null(state$package_env)) {
-    .ry_sync_package_env(state, plan$touched)
+    .ry_sync_package_env(state, if (resync) NULL else plan$touched)
   }
   .ry_phase("attach")
   .ry_commit(root)
@@ -391,7 +398,15 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 
 .ry_unregister_s3 <- function(ns, method) {
   generic <- sub("^.*::", "", method$generic)
-  table <- tryCatch(.ry_s3_table(generic, ns), error = function(error) NULL)
+  lookup <- ns
+  if (grepl("::", method$generic, fixed = TRUE)) {
+    package <- sub("::.*$", "", method$generic)
+    if (!isNamespaceLoaded(package)) {
+      return(invisible())
+    }
+    lookup <- asNamespace(package)
+  }
+  table <- tryCatch(.ry_s3_table(generic, lookup, quiet = TRUE), error = function(error) NULL)
   entry <- paste(generic, method$class, sep = ".")
   if (!is.null(table) && exists(entry, envir = table, inherits = FALSE)) {
     rm(list = entry, envir = table)
@@ -400,12 +415,13 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 
 # Where R's own registerS3methods() puts a method: the table of the environment that defines
 # the generic, or base's for group generics and primitives.
-.ry_s3_table <- function(generic, lookup) {
+.ry_s3_table <- function(generic, lookup, quiet = FALSE) {
   defining <- if (generic %in% c("Math", "Ops", "Summary", "Complex", "matrixOps")) {
     .BaseNamespaceEnv
   } else {
     function_object <- get0(generic, envir = lookup)
     if (is.null(function_object)) {
+      if (quiet) return(NULL)
       warning(sprintf("S3 method for `%s` not registered: no such generic is visible", generic),
               call. = FALSE)
       return(NULL)
@@ -542,7 +558,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     if (length(plan$unregister)) {
       count(length(plan$unregister), "registration undone", "registrations undone")
     },
-    if (!is.null(plan$imports)) "imports rebuilt"
+    if (!is.null(plan$imports)) "imports rebuilt",
+    if (length(plan$s3_register) || length(plan$s3_unregister)) {
+      count(length(plan$s3_register) + length(plan$s3_unregister), "S3 method re-registered",
+            "S3 methods re-registered")
+    }
   )
   if (!length(parts)) parts <- "exports refreshed"
   sprintf("Reloaded %s: %s, %s.", plan$package, paste(parts, collapse = ", "), timing)
