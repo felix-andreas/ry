@@ -1594,3 +1594,100 @@ Base R's R-level sources (the open question in `contributing/design/r-runtime.md
 GPL-2-or-later. The default is to load them at runtime from the user's own GNU R installation
 rather than vendor them, the way the `repl` crate already loads R at runtime. Relicensing the
 project is the owner's call and is not assumed.
+
+# Decision record: the runtime's object model, collector and native boundary
+
+This settles step 2 of `contributing/design/r-runtime.md`. The code is `crates/heap` (object
+model and collector) and `crates/libr` (the C API, built as `libR.so`, with its C half in
+`src/native.c` and its headers in `include/`).
+
+**Two crates, split by who may see the layout.** `heap` owns the object layout, allocation, the
+collector, interning and environment frames, and knows nothing about C. `libr` owns the runtime
+state, the native boundary and every exported name. The interpreter and the JIT will depend on
+`heap` and link into `libr`, because a package binary built by GNU R records `libR.so` as a needed
+library: whatever answers that name must contain the whole runtime. `libr`'s cdylib has the soname
+`libR.so`, so the dynamic linker satisfies a GNU-R-built package from ry's already loaded library
+instead of searching for GNU R's.
+
+**One header, three payload shapes, one handle type.** Every object starts with a 16-byte header:
+type code, collector bits, object and ALTREP flags, GNU R's 16 general-purpose bits at GNU R's
+positions (packages test `LEVELS(x) & 8` for UTF-8), a 16-bit saturating reference count, and the
+attribute pairlist. Vectors store length, capacity and then their elements, so `INTEGER()` is an
+interior pointer at offset 32 and every element type is aligned. Pairlists, calls, closures,
+promises, symbols, binding cells and ALTREP instances are triples. Atomic vectors start zeroed (GNU
+R leaves them uninitialized), because Rust code reading uninitialized memory is undefined behavior
+and calloc'd pages cost nothing.
+
+**Binding cells are heap objects.** A frame maps symbols to cells (`SexpType::Binding`, internal
+code 26, which GNU R leaves unused and native code never receives). A cell's address is stable for
+as long as anything references it, so compiled code can watch one and still hold it safely after
+`rm()`. The base environment and base namespace keep their cells on the symbols, as GNU R keeps
+base bindings in `SYMVALUE`, so a base lookup is one load. Small frames scan; above eight bindings a
+frame keeps a hash index.
+
+**The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
+so outside a collection "marked" means "old". A minor collection marks only from the roots, the
+remembered set and the escaped set, and sweeps only the young list (every object allocated since
+the last collection), so its cost is proportional to young data, not the heap. A major collection
+clears the marks first and sweeps every page. Small objects live in 64 KiB pages of 17 size
+classes, the 40-byte class being a triple; larger objects are allocated one by one. Freed slots are
+poisoned as `FREESXP`, so a stale handle reads as freed. The write barrier records an old parent
+that receives a young child. A vector whose writable element pointer escaped (`STRING_PTR`,
+`DATAPTR` on a list) bypasses the barrier from then on, so it joins the escaped set and every minor
+collection rescans it. Weak references follow ephemeron rules, and the `CHARSXP` intern table is
+weak, with minor collections checking only the young strings. GNU R ages objects through several
+generations; one promotion after one survival is simpler and costs some premature tenuring, which
+profiling can revisit without changing the API.
+
+**Roots.** The `PROTECT` stack, the precious multiset, the handle stack, registered globals, every
+interned symbol, the weak-reference list, and any `RootSource` an interpreter or JIT registers. A
+function that allocates while it holds a handle that nothing else roots must root it first: the
+fuzz battery's first run found exactly that in `scalar_string`.
+
+**The handle scope roots what the API hands out, not every allocation.** While a native call is on
+the stack, every handle an API function returns to native code is pushed to the handle stack, and
+the native call's return truncates it. Rooting results rather than allocations matters for
+`Rf_eval` called from native code: the evaluator's own temporaries stay collectable, and only the
+value native code receives is kept. The cost is that a native loop that allocates and drops many
+temporaries keeps them until it returns, which GNU R would have collected.
+
+**Each native call owns a `PROTECT` region.** `UNPROTECT` below the region's base is an error, in GNU
+R's words, rather than silently unprotecting the caller's objects, which GNU R allows. An imbalance
+on return is a warning in GNU R's words, and the region is cut back, so a leak never accumulates.
+
+**The boundary rule.** Inside Rust every non-local exit is an `Err(Unwind)`. Native code ry calls
+runs in a C trampoline with a jump target (`ry_call_native` and the per-signature ALTREP, finalizer
+and init trampolines). An API function runs its body under `enter`, which catches the `Err` and any
+panic, drops everything, and only then calls `ry_jump`. The frames the jump skips are `enter`'s and
+the exported function's, and they hold nothing with a destructor at that point, which is the
+condition (plain old frames) under which skipping a Rust frame with `longjmp` is defined. Callbacks
+that native code passes to the API (`R_UnwindProtect`, `R_ToplevelExec`, `R_ExecWithCleanup`,
+`R_tryCatch`, `R_mapAttrib`) run from C, so a jump out of them never skips a Rust frame, and a C++
+exception thrown by an `R_UnwindProtect` cleanup unwinds only C frames compiled with
+`-fexceptions`. A jump restores the `PROTECT` depth and the `R_alloc` watermark of its context, as
+GNU R does.
+
+**Exporting C symbols from a Rust cdylib.** rustc's version script exports only Rust-defined
+symbols, so `build.rs` writes a second one from the `RY_EXPORT` markers in `native.c`, which lld
+merges. The variadic functions (`Rf_error`, `Rprintf` and their family) must be C, because stable
+Rust cannot define C variadic functions. GNU ld rejects a second version script, which matters once
+a platform without lld is targeted.
+
+**Finalizers run at safe points, not inside a collection.** A collection happens deep inside an
+allocation, where native code must not run, so ready finalizers queue and run when a native call
+returns, on `R_gc`, and on `R_RunPendingFinalizers`, each as if at top level.
+
+**Evaluation is a deliberately small subset until the interpreter exists.** `Rf_eval` evaluates
+constants, symbols, promises, and calls to a handful of primitives (`.Call`, `.External`, `stop`,
+`warning`, `dyn.load`, `list`, `identity`, `invisible`, `quote`), which is what native code needs to
+drive native code. Calling a closure is an error that says so.
+
+**ry presents itself as R 4.6.2 with revision 89194**, the lowest revision that keeps data.table on
+its modern branches, and its native encoding is UTF-8.
+
+**Considered and rejected.** Source compatibility alone saves nothing, because the opaque `SEXP`
+already forces every accessor to be a real function. A moving nursery cannot coexist with raw
+pointers held by native code. Rooting every allocation made inside a native call (instead of every
+handed-out result) would make `Rf_eval` loops from native code retain all interpreter garbage.
+Defining the C wrappers for every API function in C (instead of `enter`) would duplicate every
+signature in two languages for no safety gain.

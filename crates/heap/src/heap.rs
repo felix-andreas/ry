@@ -438,8 +438,21 @@ impl Heap {
         second: Sexp,
         third: Sexp,
     ) -> HeapResult<Sexp> {
+        self.alloc_triple_keeping(kind, first, second, third, None)
+    }
+
+    /// `alloc_triple` that also keeps `extra` alive across the allocation.
+    unsafe fn alloc_triple_keeping(
+        &mut self,
+        kind: SexpType,
+        first: Sexp,
+        second: Sexp,
+        third: Sexp,
+        extra: Option<Sexp>,
+    ) -> HeapResult<Sexp> {
         let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
-        let object = self.allocate(kind, size, &[first, second, third])?;
+        let keep = [first, second, third, extra.unwrap_or(first)];
+        let object = self.allocate(kind, size, &keep)?;
         object.set_car_unbarriered(first);
         object.set_cdr_unbarriered(second);
         object.set_tag_unbarriered(third);
@@ -681,7 +694,8 @@ impl Heap {
         if env.has_gp(gp::FRAME_LOCKED) || env == self.known.empty_env {
             return Err(HeapError::LockedEnvironment);
         }
-        let cell = self.alloc_triple(SexpType::Binding, symbol, value, self.known.nil)?;
+        let cell =
+            self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
         if self.is_symbol_frame(env) {
             self.store(symbol, symbol.cdr(), cell);
             symbol.set_cdr_unbarriered(cell);

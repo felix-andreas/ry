@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, ry, and repl crates
+description: What each source file holds in the syntax, semantics, ide, format, ry, repl, heap, and libr crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -104,3 +104,46 @@ with no R installed.
 - **`repl.rs`**: the session, with evaluation, the read-eval-print loop, and the exit codes.
 - **`libr.rs`**: the binding to R's shared library, resolved at runtime with no build-time link.
 - **`console.rs`**: the terminal front end.
+
+## `heap`
+
+The crate root is `src/heap.rs`. It holds R's object model and the garbage collector, and knows
+nothing about C.
+
+- **`heap.rs`**: `Heap`, with allocation, the barriered stores, environment bindings, the roots
+  (the `PROTECT` stack, the precious multiset, the handle stack, globals and `RootSource`), and the
+  collector itself: marking, ephemeron processing for weak references, and the young and full sweeps.
+- **`object.rs`**: `Sexp`, the type codes, the header and payload layouts, and the raw accessors.
+- **`strings.rs`**: the weak `CHARSXP` intern table and the encodings.
+- **`env.rs`**: environment frames, which map symbols to binding cells.
+- **`arena.rs`**: the `R_alloc` arena and its `vmaxget` watermarks.
+
+## `libr`
+
+The crate root is `src/libr.rs`, and the crate builds `libR.so` as well as an rlib. It holds the
+runtime state and R's C API. Each exported function runs its body through `boundary::enter`.
+
+- **`libr.rs`**: the process-wide `Runtime` and its start-up.
+- **`boundary.rs`**: the native boundary: `Unwind`, `enter` and `raise`, the trampolines that call
+  native code, the handle scope, finalizer runs, and the Rust half of `native.c`.
+- **`native.c`**: the C half: the context stack, the trampolines, `ry_jump`, the variadic functions,
+  and the non-local exits native code sets up (`R_UnwindProtect`, `R_ToplevelExec`,
+  `R_ExecWithCleanup`, `R_tryCatch`). `build.rs` exports what it marks `RY_EXPORT`.
+- **`memory.rs`**: allocation, duplication, `PROTECT`, the precious list and multisets, `R_alloc`
+  and the `R_Calloc` family.
+- **`vectors.rs`**: vector access, the type predicates, coercion and number formatting, `identical`
+  and `match`.
+- **`lists.rs`**: pairlists, calls, closures and promises.
+- **`attributes.rs`**: attributes, classes and the header bits.
+- **`strings.rs`**: `CHARSXP`s, encodings, symbols and `Riconv`.
+- **`environments.rs`**: environments, variable lookup, bindings, namespaces and options.
+- **`eval.rs`**: `Rf_eval` over its small primitive table, conditions and the deparser for messages.
+- **`dynload.rs`**: loading package libraries, routine registration and C callables.
+- **`extptr.rs`**: external pointers, weak references and finalizers.
+- **`altrep.rs`**: ALTREP classes and dispatch.
+- **`arith.rs`**: NA tests, sorting, and the random number generator.
+- **`globals.rs`**: GNU R's data symbols.
+- **`embed.rs`**: ry's own `ry_` entry points for an embedding host, declared in
+  `include/ry_embed.h`.
+- **`include/`**: the header set, written independently and source-compatible with R 4.6 for the
+  names `libR` implements.

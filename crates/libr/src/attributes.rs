@@ -134,6 +134,7 @@ pub unsafe fn set_attrib(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<Sex
 /// Replaces or appends an attribute without any checks.
 pub unsafe fn install_attribute(object: Sexp, name: Sexp, value: Sexp) -> ApiResult<()> {
     let runtime = runtime();
+    runtime.heap.root(object);
     let mut cell = object.attrib();
     let mut last = None;
     while cell.kind() == SexpType::Pairlist {

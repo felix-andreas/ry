@@ -98,6 +98,11 @@ api! {
     VECTOR_ELT: fn(Sexp, isize) -> Sexp;
     R_CHAR: fn(Sexp) -> *const c_char;
     SET_TAG: fn(Sexp, Sexp);
+    SET_VECTOR_ELT: fn(Sexp, isize, Sexp) -> Sexp;
+    Rf_duplicate: fn(Sexp) -> Sexp;
+    Rf_setAttrib: fn(Sexp, Sexp, Sexp) -> Sexp;
+    Rf_coerceVector: fn(Sexp, u32) -> Sexp;
+    R_compute_identical: fn(Sexp, Sexp, c_int) -> c_int;
 }
 
 pub struct Session {
@@ -263,6 +268,18 @@ impl R<'_> {
         let mut failed = 0;
         let global = self.data("R_GlobalEnv");
         let value = unsafe { (self.api().R_tryEvalSilent)(call, global, &mut failed) };
+        if failed != 0 {
+            let message = unsafe { CStr::from_ptr((self.api().R_curErrorBuf)()) };
+            return Err(message.to_string_lossy().into_owned());
+        }
+        Ok(self.keep(value))
+    }
+
+    /// Evaluates an expression in the global environment.
+    pub fn eval_expression(&self, expression: Sexp) -> Result<Sexp, String> {
+        let mut failed = 0;
+        let global = self.data("R_GlobalEnv");
+        let value = unsafe { (self.api().R_tryEvalSilent)(expression, global, &mut failed) };
         if failed != 0 {
             let message = unsafe { CStr::from_ptr((self.api().R_curErrorBuf)()) };
             return Err(message.to_string_lossy().into_owned());

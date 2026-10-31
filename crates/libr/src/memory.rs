@@ -58,6 +58,7 @@ pub unsafe fn scalar<T: Copy>(kind: SexpType, value: T) -> ApiResult<Sexp> {
 
 pub unsafe fn scalar_string(charsxp: Sexp) -> ApiResult<Sexp> {
     let runtime = runtime();
+    runtime.heap.root(charsxp);
     let object = runtime.heap.alloc_vector(SexpType::String, 1)?;
     runtime.heap.root(object);
     runtime.heap.set_element(object, 0, charsxp);
