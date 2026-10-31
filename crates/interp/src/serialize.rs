@@ -4,7 +4,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, builtin, internal},
-    eval, heap, interp,
+    eval,
     unwind::{R, error},
     values::{self, alloc, length, nil, symbols},
 };
@@ -21,8 +21,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("unserializeFromConn", 2, do_unserialize_from_conn),
     internal("serializeToConn", 5, do_serialize_to_conn).invisible(),
     internal("unserialize", 2, do_unserialize),
-    internal("serialize", 6, do_serialize),
-    internal("serializeb", 6, do_serialize),
+    internal("serialize", 5, do_serialize),
+    internal("serializeb", 5, do_serialize),
     internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
     internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("loadFromConn2", 3, |call| unsafe { Err(call.error("load() is not supported yet")) }),
@@ -462,8 +462,8 @@ impl Reader<'_> {
 
     /// A GNU R byte-code object. Only its source expression (the first constant) is kept.
     unsafe fn bytecode(&mut self, reps: Sexp) -> R<Sexp> {
-        let code = self.item()?;
-        let _ = code;
+        // The code vector: ry recompiles from the source expression instead.
+        self.item()?;
         let count = self.integer()? as usize;
         let constants = alloc(SexpType::List, count)?;
         for index in 0..count {
@@ -1022,8 +1022,4 @@ unsafe fn do_serialize(call: &Call<'_>) -> R<Sexp> {
     }
     crate::connections::write_bytes(connection, &bytes)?;
     Ok(nil())
-}
-
-pub fn unused() {
-    let _ = interp;
 }

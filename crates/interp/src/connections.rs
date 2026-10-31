@@ -160,7 +160,6 @@ unsafe fn connection_object(index: i32) -> R<Sexp> {
     Ok(object)
 }
 
-use crate::heap;
 
 /// The connection number of a connection object.
 pub unsafe fn connection_index(object: Sexp) -> R<i32> {

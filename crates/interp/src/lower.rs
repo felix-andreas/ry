@@ -496,13 +496,11 @@ pub fn string_literal(text: &str) -> R<String> {
 fn raw_string(text: &str) -> String {
     // r"---( ... )---": the prefix up to the opening bracket, mirrored at the end.
     let after_r = &text[1..];
-    let quote = after_r.chars().next().unwrap_or('"');
     let rest = &after_r[1..];
     let dashes = rest.chars().take_while(|&character| character == '-').count();
     let open = rest[dashes..].chars().next().unwrap_or('(');
     let body_start = 1 + 1 + dashes + open.len_utf8();
     let body_end = text.len() - (1 + dashes + 1);
-    let _ = quote;
     text.get(body_start..body_end).unwrap_or("").to_owned()
 }
 

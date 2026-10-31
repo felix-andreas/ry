@@ -9,7 +9,7 @@ use crate::{
     unwind::R,
     values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real};
+use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("deparse", 5, do_deparse),
@@ -244,6 +244,13 @@ impl Deparser {
             self.depth -= 1;
             return;
         }
+        if object.has_gp(gp::S4_OBJECT)
+            && let Some(parts) = s4_parts(object)
+        {
+            self.s4(parts);
+            self.depth -= 1;
+            return;
+        }
         let attributes = self.opts & options::SHOW_ATTRIBUTES != 0 && has_shown_attributes(object);
         if attributes {
             self.print("structure(");
@@ -296,6 +303,24 @@ impl Deparser {
             kind if kind.is_atomic() => self.vector(object),
             _ => self.print("<unknown>"),
         }
+    }
+
+    /// An S4 object as the `new()` call that recreates it: its slots by name, then the data
+    /// part of a class that extends a basic type without a `.Data` slot.
+    unsafe fn s4(&mut self, parts: S4Parts) {
+        self.print("new(");
+        self.print(&format::encode_string(&parts.class, Some('"')));
+        for (name, value) in parts.slots {
+            self.print(", ");
+            self.print(&quote_name(&name));
+            self.print(" = ");
+            self.deparse(value);
+        }
+        if let Some(data) = parts.data {
+            self.print(", ");
+            self.deparse(data);
+        }
+        self.print(")");
     }
 
     unsafe fn closure(&mut self, function: Sexp) {
@@ -369,6 +394,21 @@ impl Deparser {
     }
 
     unsafe fn language(&mut self, call: Sexp) {
+        // `quote()` wraps the outermost call once, and a formula evaluates to itself, so it needs
+        // no wrapping at all.
+        if self.opts & options::QUOTE_EXPRESSIONS != 0 {
+            self.opts &= !options::QUOTE_EXPRESSIONS;
+            let formula = call.car() == symbols().tilde;
+            if !formula {
+                self.print("quote(");
+            }
+            self.language(call);
+            if !formula {
+                self.print(")");
+            }
+            self.opts |= options::QUOTE_EXPRESSIONS;
+            return;
+        }
         let head = call.car();
         let arguments = call.cdr();
         let argument_count = values::pairlist_length(arguments);
@@ -557,14 +597,6 @@ impl Deparser {
                 if broken {
                     self.indent -= 1;
                 }
-                return;
-            }
-            if self.opts & options::QUOTE_EXPRESSIONS != 0 {
-                self.print("quote(");
-                self.opts &= !options::QUOTE_EXPRESSIONS;
-                self.plain_call(&quote_name(&name_text), arguments);
-                self.opts |= options::QUOTE_EXPRESSIONS;
-                self.print(")");
                 return;
             }
             self.plain_call(&quote_name(&name_text), arguments);
@@ -895,6 +927,58 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
 }
 
 /// Whether deparsing `object` needs `structure(...)` around it.
+struct S4Parts {
+    class: String,
+    slots: Vec<(String, Sexp)>,
+    data: Option<Sexp>,
+}
+
+/// The class, slots and data part of an S4 object, read through the methods package, which
+/// owns class definitions. Without it, or for an object whose class it does not know, the
+/// object deparses as its plain value.
+unsafe fn s4_parts(object: Sexp) -> Option<S4Parts> {
+    let symbols = symbols();
+    let class = get_attr(object, symbols.class);
+    if class.kind() != SexpType::String || length(class) != 1 {
+        return None;
+    }
+    let class_name = values::string_at(class, 0)?.into_owned();
+    let methods_function = |name: &str| -> R<Sexp> {
+        values::call(symbols.double_colon, &[values::install("methods")?, values::install(name)?])
+    };
+    let quoted = values::call(symbols.quote, &[object]).ok()?;
+    let slot_names_call = values::call(methods_function("slotNames").ok()?, &[quoted]).ok()?;
+    let slot_names = crate::eval::eval(slot_names_call, values::base_namespace()).ok()?;
+    if slot_names.kind() != SexpType::String {
+        return None;
+    }
+    crate::heap().root(slot_names);
+    let mut slots = Vec::new();
+    let mut has_data_slot = false;
+    for index in 0..length(slot_names) {
+        let name = values::string_at(slot_names, index)?.into_owned();
+        has_data_slot |= name == ".Data";
+        let name_value = values::scalar_string(&name).ok()?;
+        let slot_call = values::call(methods_function("slot").ok()?, &[quoted, name_value]).ok()?;
+        let value = crate::eval::eval(slot_call, values::base_namespace()).ok()?;
+        crate::heap().root(value);
+        slots.push((name, value));
+    }
+    let data = if has_data_slot || object.kind() == SexpType::Object {
+        None
+    } else {
+        let data = values::shallow_duplicate(object).ok()?;
+        values::remove_attr(data, symbols.class);
+        for (name, _) in &slots {
+            values::remove_attr(data, values::install(name).ok()?);
+        }
+        data.set_gp_bits(gp::S4_OBJECT, false);
+        crate::heap().root(data);
+        Some(data)
+    };
+    Some(S4Parts { class: class_name, slots, data })
+}
+
 unsafe fn has_shown_attributes(object: Sexp) -> bool {
     if matches!(object.kind(), SexpType::Language | SexpType::Symbol | SexpType::Environment | SexpType::Closure) {
         return false;

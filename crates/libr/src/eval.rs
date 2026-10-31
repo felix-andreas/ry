@@ -435,7 +435,7 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".External.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
     builtin(".Fortran", -1, |call| unsafe { dot_c(call, RoutineKind::Fortran) }),
-    internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }),
+    internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
     internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
     internal("getRegisteredRoutines", 1, |call| unsafe { registered_routines(call.arg(0)) }),

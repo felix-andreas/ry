@@ -6,7 +6,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    deparse, eval, heap, interp,
+    deparse, eval, interp,
     unwind::{Jump, R, RError, Unwind, error, jump, resolve_call},
     values::{
         self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
@@ -411,7 +411,6 @@ unsafe fn do_reset_cond_hands(_call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
     let condition = call.arg(0);
-    let message = call.arg(1);
     let condition_call = call.arg(2);
     let classes = condition_classes(condition);
     let class_slices: Vec<&[u8]> = classes.iter().map(Vec::as_slice).collect();
@@ -430,7 +429,6 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
         }
     }
     interp().handlers = saved;
-    let _ = message;
     Ok(nil())
 }
 

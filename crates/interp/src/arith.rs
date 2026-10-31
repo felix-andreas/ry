@@ -1440,9 +1440,7 @@ pub fn signif_digits(x: f64, digits: i32) -> f64 {
         return x;
     }
     let digits = digits.max(1);
-    let magnitude = x.abs().log10().floor() as i32;
     let text = format!("{:.*e}", (digits - 1) as usize, x);
-    let _ = magnitude;
     text.parse().unwrap_or(x)
 }
 
@@ -1674,7 +1672,9 @@ impl CompensatedSum {
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
-    let (items, na_rm) = summary_args(call)?;
+    let (mut items, na_rm) = summary_args(call)?;
+    // NULL contributes no values, and the typed loops below read vectors' payloads directly.
+    items.retain(|item| *item != nil());
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil()) || (item.kind() == SexpType::String && matches!(function, Summary::Sum | Summary::Product)) {
             return Err(call.error(format!(

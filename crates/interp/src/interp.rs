@@ -64,7 +64,7 @@ pub mod values;
 use crate::{
     builtins::{BuiltinDef, Kind},
     conditions::{HandlerStack, RestartStack},
-    unwind::{R, Unwind},
+    unwind::R,
 };
 use heap::{Heap, Marker, RootSource, object::Sexp};
 use rustc_hash::FxHashMap;

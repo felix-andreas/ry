@@ -115,7 +115,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
         SexpType::Special | SexpType::Builtin => {
             print_primitive(value)?;
         }
-        SexpType::Closure => print_closure(value, options)?,
+        SexpType::Closure => print_closure(value)?,
         SexpType::Environment => out(&format!("{}\n", environment_label(value)?)),
         SexpType::Promise => out("<promise>\n"),
         SexpType::Language => {
@@ -214,8 +214,7 @@ unsafe fn print_primitive(value: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn print_closure(function: Sexp, options: &PrintOptions) -> R<()> {
-    let _ = options;
+unsafe fn print_closure(function: Sexp) -> R<()> {
     let lines = deparse::deparse_lines(function, 60, deparse::options::SIMPLE);
     for line in lines {
         out(&format!("{line}\n"));
@@ -716,7 +715,7 @@ unsafe fn do_print_function(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     let options = PrintOptions::defaults(call.env);
     match function.kind() {
-        SexpType::Closure => print_closure(function, &options)?,
+        SexpType::Closure => print_closure(function)?,
         SexpType::Builtin | SexpType::Special => print_primitive(function)?,
         _ => print_value(function, &options, &mut String::new())?,
     }

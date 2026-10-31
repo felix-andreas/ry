@@ -91,12 +91,6 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     }
 }
 
-/// Records that `symbol` was bound in `env`. The heap's binding epoch already tracks what the
-/// inline caches depend on, so nothing else is needed.
-pub unsafe fn note_binding(symbol: Sexp, env: Sexp) {
-    let _ = (symbol, env);
-}
-
 /// A closure's body as source: the expression of compiled code.
 pub unsafe fn closure_body(function: Sexp) -> Sexp {
     let body = function.cdr();
@@ -193,6 +187,8 @@ enum Op {
     ForInit,
     /// `loop src symbol target`: binds the next element, or jumps to `target` when done.
     ForStep,
+    /// `src`: the loop over the sequence in `src` is done.
+    ForEnd,
     Invisible,
     Visible,
     /// `dst src call is_and target`: the left operand of `&&` or `||`; jumps to `target` with
@@ -204,7 +200,7 @@ enum Op {
     Closure,
 }
 
-const OPS: [Op; 20] = [
+const OPS: [Op; 21] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -220,6 +216,7 @@ const OPS: [Op; 20] = [
     Op::Return,
     Op::ForInit,
     Op::ForStep,
+    Op::ForEnd,
     Op::Invisible,
     Op::Visible,
     Op::LogicLeft,
@@ -350,6 +347,32 @@ unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>> {
         formal = formal.cdr();
     }
     if collect_bindings(body, &mut symbols_found) { Some(symbols_found) } else { None }
+}
+
+/// Whether evaluating `expression` may modify a variable of the frame in place: it contains a
+/// replacement assignment such as `x[1] <- 9`, or code that evaluates other code in the frame.
+unsafe fn may_modify_in_place(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol {
+        let name = symbol_name(head);
+        if matches!(&*name, "<-" | "=" | "<<-") && expression.cdr().car().kind() == SexpType::Language {
+            return true;
+        }
+        if matches!(&*name, "eval" | "evalq" | "local" | "with" | "within" | "source" | "sys.function" | "do.call") {
+            return true;
+        }
+    }
+    let mut cell = expression;
+    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
+        if may_modify_in_place(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
 }
 
 /// Adds the symbols `expression` assigns locally; `false` when it reflects on its frame.
@@ -658,6 +681,9 @@ impl Compiler {
                     .find(|(_, symbol)| *symbol == operator)
                     .map(|(arith, _)| *arith)
                     .ok_or_else(|| error("unknown operator"))?;
+                if args.len() == 2 && may_modify_in_place(args[1].1) {
+                    return self.fallback(call, dst);
+                }
                 let mark = self.next_register;
                 let left = self.allocate();
                 let right = self.allocate();
@@ -690,6 +716,7 @@ impl Compiler {
         self.emit(Op::Jump, &[step]);
         self.patch(exit);
         self.close_loop(loop_index);
+        self.emit(Op::ForEnd, &[sequence]);
         self.release_to(sequence);
         self.loop_value(dst);
         Ok(())
@@ -739,7 +766,10 @@ impl Compiler {
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache]);
         let args = values::pairlist_items(call.cdr());
-        let simple = args.iter().all(|(_, value)| *value != symbols().dots);
+        // A register holds an argument's value without counting as a reference, so a later
+        // argument that modifies a variable in place would change an earlier argument's value.
+        let simple = args.iter().all(|(_, value)| *value != symbols().dots)
+            && !args.iter().skip(1).any(|(_, value)| may_modify_in_place(*value));
         if simple {
             let generic = self.emit_patchable(Op::BranchUnlessBuiltin, &[function, 0]);
             let base = self.next_register;
@@ -787,6 +817,7 @@ fn operand_count(op: Op) -> usize {
         Op::Return => 1,
         Op::ForInit => 3,
         Op::ForStep => 4,
+        Op::ForEnd => 1,
         Op::Invisible | Op::Visible => 0,
         Op::LogicLeft => 5,
         Op::LogicRight => 5,
@@ -922,7 +953,9 @@ unsafe fn step(
             let mut cell = call.cdr();
             for index in 0..count {
                 let value = register(first + index);
-                if value == missing_arg() && !definition.keep_missing {
+                // Only an empty argument is an error: a promise may well evaluate to the empty
+                // symbol, as `X[[i]]` does for a formal without a default.
+                if cell.car() == missing_arg() && !definition.keep_missing {
                     return Err(error_in(call, format!("argument {} is empty", index + 1)));
                 }
                 args.push(Arg { tag: cell.tag(), value });
@@ -1001,6 +1034,9 @@ unsafe fn step(
                 kind if kind.is_vector() => sequence.length() as usize,
                 _ => return Err(error_in(call, "invalid for() loop sequence")),
             };
+            // The body must see the sequence as shared, so that modifying the variable it came
+            // from copies it instead of changing the elements still to come.
+            sequence.increment_refcount();
             set(operand(1), sequence);
             for_states[operand(0)] = ForState { index: 0, count, cell: Some(sequence) };
         }
@@ -1024,6 +1060,7 @@ unsafe fn step(
             let variable = constants.element(operand(2));
             eval::define(variable, element, env)?;
         }
+        Op::ForEnd => register(operand(0)).decrement_refcount(),
         Op::Invisible => interp().visible = false,
         Op::Visible => interp().visible = true,
         Op::LogicLeft => {

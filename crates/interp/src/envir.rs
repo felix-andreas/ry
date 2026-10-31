@@ -981,6 +981,8 @@ pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
     while cell.kind() == SexpType::Pairlist {
         if cell.tag() == symbol {
             let old = cell.car();
+            // Once replaced, the old value is reachable only from the caller.
+            heap.root(old);
             if value == nil() {
                 if previous == nil() {
                     set_options(cell.cdr())?;

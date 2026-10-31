@@ -5,7 +5,6 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    interp,
     unwind::{R, error},
     values::{self, alloc, length, nil, symbols},
 };
@@ -484,6 +483,9 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
             settings.scipen = values::as_integer_scalar(scientific);
         }
     }
+    if vector.kind() == SexpType::Environment {
+        return values::scalar_string(&crate::print::environment_label(vector)?);
+    }
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let min_width = if width == nil() {
@@ -675,13 +677,14 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
     }
     let width = call.arg(1);
     let quote = values::first_string(call.arg(2)).and_then(|text| text.chars().next());
-    let na_encode = values::as_logical_scalar(call.arg(3)) != 0;
-    let justify_mode = values::as_integer_scalar(call.arg(4));
+    let justify_mode = values::as_integer_scalar(call.arg(3));
+    let na_encode = values::as_logical_scalar(call.arg(4)) != 0;
     let count = length(vector);
     let encoded: Vec<Option<String>> = (0..count)
         .map(|index| match values::string_at(vector, index) {
             Some(text) => Some(encode_string(&text, quote)),
-            None => na_encode.then(|| "NA".to_owned()),
+            // GNU R marks an unquoted NA as `<NA>`, so that it cannot be mistaken for the string "NA".
+            None => na_encode.then(|| if quote.is_some() { "NA" } else { "<NA>" }.to_owned()),
         })
         .collect();
     let target = if width == nil() {
@@ -769,7 +772,3 @@ pub unsafe fn width_option() -> usize {
     }
 }
 
-pub fn unused() -> R<()> {
-    let _ = interp;
-    Ok(())
-}

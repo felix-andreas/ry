@@ -8,7 +8,7 @@ use crate::{
     builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, special},
     eval::{self, apply_closure, call_builtin, forced_promise, value_of},
     interp,
-    unwind::{R, error, error_in},
+    unwind::{R, error},
     values::{
         self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
         symbol_name, symbols, unbound,
@@ -767,7 +767,7 @@ unsafe fn group_dispatch(
             found.push(None);
         }
     }
-    let (chosen, position) = match (found.first(), found.get(1)) {
+    let (_, position) = match (found.first(), found.get(1)) {
         (Some(Some(left)), Some(Some(right))) => {
             if left.method != right.method {
                 let left_name = symbol_name(left.method_name).into_owned();
@@ -788,7 +788,6 @@ unsafe fn group_dispatch(
         (_, Some(Some(_))) => (1, 1),
         _ => return Ok(None),
     };
-    let _ = chosen;
     let Some(found_method) = found.into_iter().nth(position).flatten() else {
         return Ok(None);
     };
@@ -968,8 +967,7 @@ pub unsafe fn deferred_default_marker() -> R<Sexp> {
     values::install("__Deferred_Default_Marker__")
 }
 
-unsafe fn do_is_methods_dispatch_on(call: &Call<'_>) -> R<Sexp> {
-    let _ = call;
+unsafe fn do_is_methods_dispatch_on(_call: &Call<'_>) -> R<Sexp> {
     values::scalar_bool(interp().globals.methods_dispatch)
 }
 

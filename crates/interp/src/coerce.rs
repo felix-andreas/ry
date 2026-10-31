@@ -2,7 +2,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, Generic, builtin, internal},
-    conditions, deparse, heap,
+    conditions, deparse,
     unwind::{R, error},
     values::{
         self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
@@ -236,16 +236,15 @@ unsafe fn coerce_symbol(symbol: Sexp, kind: SexpType) -> R<Sexp> {
 }
 
 unsafe fn coerce_pairlist(list: Sexp, kind: SexpType, warnings: &mut CoercionWarnings) -> R<Sexp> {
+    // A call or pairlist is a single expression, as in GNU R.
+    if kind == SexpType::Expression {
+        let result = alloc(kind, 1)?;
+        values::set_elt(result, 0, list);
+        return Ok(result);
+    }
     match kind {
-        SexpType::List | SexpType::Expression => {
+        SexpType::List => {
             let result = values::pairlist_to_list(list)?;
-            if kind == SexpType::Expression {
-                let expression = alloc(SexpType::Expression, length(result))?;
-                for index in 0..length(result) {
-                    values::set_elt(expression, index, result.element(index));
-                }
-                return Ok(expression);
-            }
             if list.kind() != SexpType::Language {
                 let attributes = list.attrib();
                 let mut cell = attributes;
@@ -943,10 +942,6 @@ pub unsafe fn na_of(kind: SexpType) -> R<Sexp> {
         _ => {}
     }
     Ok(result)
-}
-
-pub unsafe fn heap_unused() {
-    let _ = crate::heap();
 }
 
 /// The labels of a factor's codes, `NA` for a missing or out-of-range code.

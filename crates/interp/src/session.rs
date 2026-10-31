@@ -6,7 +6,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    conditions, eval, heap, interp, print, scope,
+    conditions, eval, interp, print, scope,
     unwind::{Jump, R, Unwind, error},
     values::{self, base_env, base_namespace, global_env, length, nil},
     write_console,
