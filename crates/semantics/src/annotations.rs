@@ -4,9 +4,11 @@
 //! way a type was written.
 
 use crate::Db;
+use crate::diagnostics::TypeRenderer;
 use crate::types::{
-    Atomic, Constraint, FunctionType, Name, Parameter, RecordField, RestParameter, Ty, TyKind,
-    TypeScheme, any, column_type, null, scalar, substitute_rigid, union_of, unknown,
+    Atomic, Constraint, FunctionType, Name, NativeField, Parameter, RecordField, RestParameter, Ty,
+    TyKind, TypeScheme, any, column_type, conflicting_tags, native_record, null, scalar,
+    substitute_rigid, union_of, unknown,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem::take;
@@ -854,7 +856,24 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::TYPE_LIST
             | SyntaxKind::TYPE_PAREN
             | SyntaxKind::TYPE_BINDER_LIST
+            | SyntaxKind::TYPE_TAG
+            | SyntaxKind::TYPE_OTHER_TAGS
     )
+}
+
+/// `record{...}` and `tuple{...}` share the brace grammar of `list{...}` too.
+fn native_head(node: &SyntaxNode) -> Option<NativeHead> {
+    match name_text(node).as_deref() {
+        Some("record") => Some(NativeHead::Record),
+        Some("tuple") => Some(NativeHead::Tuple),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeHead {
+    Record,
+    Tuple,
 }
 
 /// `frame{...}` shares the brace grammar of `list{...}`; the head word tells them apart.
@@ -1103,7 +1122,71 @@ impl<'db> Lowering<'db> {
                     .filter(|c| is_type_kind(c.kind()))
                     .map(|member| self.lower_type(&member))
                     .collect();
-                union_of(self.db, members)
+                let union = union_of(self.db, members);
+                if let Some((first, second)) = conflicting_tags(self.db, union) {
+                    let mut renderer = TypeRenderer::default();
+                    let first = renderer.render(self.db, first);
+                    let second = renderer.render(self.db, second);
+                    self.errors.push((
+                        format!(
+                            "`{first}` and `{second}` give one tag two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart"
+                        ),
+                        node.text_range(),
+                    ));
+                    return unknown(self.db);
+                }
+                union
+            }
+            SyntaxKind::TYPE_OTHER_TAGS => Ty::new(self.db, TyKind::OtherTags),
+            SyntaxKind::TYPE_TAG => {
+                let name = Name::new(self.db, name_text(node).unwrap_or_default());
+                let payload = match node
+                    .children()
+                    .find(|c| c.kind() == SyntaxKind::TYPE_TAG_PAYLOAD)
+                {
+                    Some(payload) => {
+                        let named = payload.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD);
+                        let positional = payload.children().any(|c| is_type_kind(c.kind()));
+                        match (named, positional) {
+                            (true, true) => {
+                                self.errors.push((
+                                    "a tag's payload is all named or all positional: write every item as `name: TYPE`, or none of them".to_owned(),
+                                    payload.text_range(),
+                                ));
+                                return unknown(self.db);
+                            }
+                            (true, false) => Some(self.lower_native_fields(&payload, "this tag's payload")),
+                            (false, true) => Some(self.lower_native_items(&payload)),
+                            (false, false) => None,
+                        }
+                    }
+                    None => None,
+                };
+                Ty::new(self.db, TyKind::Tag(name, payload))
+            }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD if native_head(node).is_some() => {
+                let named = node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD);
+                let positional = node.children().any(|c| is_type_kind(c.kind()));
+                match native_head(node) {
+                    Some(NativeHead::Record) if positional => {
+                        self.errors.push((
+                            "a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items".to_owned(),
+                            node.text_range(),
+                        ));
+                        unknown(self.db)
+                    }
+                    Some(NativeHead::Tuple) if named => {
+                        self.errors.push((
+                            "a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields".to_owned(),
+                            node.text_range(),
+                        ));
+                        unknown(self.db)
+                    }
+                    Some(NativeHead::Record) => {
+                        self.lower_native_fields(node, "this `record{...}` type")
+                    }
+                    _ => self.lower_native_items(node),
+                }
             }
             SyntaxKind::TYPE_VECTOR | SyntaxKind::TYPE_LIST => {
                 let element = self
@@ -1239,6 +1322,40 @@ impl<'db> Lowering<'db> {
             SyntaxKind::TYPE_FUNCTION => self.lower_function_type(node),
             _ => unknown(self.db),
         }
+    }
+
+    fn lower_native_items(&mut self, node: &SyntaxNode) -> Ty<'db> {
+        let items = node
+            .children()
+            .filter(|c| is_type_kind(c.kind()))
+            .map(|item| self.lower_type(&item))
+            .collect();
+        Ty::new(self.db, TyKind::NativeTuple(items))
+    }
+
+    fn lower_native_fields(&mut self, node: &SyntaxNode, container: &str) -> Ty<'db> {
+        let mut seen = FxHashSet::default();
+        let mut fields = Vec::new();
+        for field in node.children().filter(|c| c.kind() == SyntaxKind::TYPE_FIELD) {
+            let Some(name) = name_text(&field) else {
+                continue;
+            };
+            if !seen.insert(name.clone()) {
+                self.errors.push((
+                    format!("the field `{name}` appears twice in {container}"),
+                    field.text_range(),
+                ));
+                continue;
+            }
+            let ty = self
+                .lower_child_type(&field)
+                .unwrap_or_else(|| unknown(self.db));
+            fields.push(NativeField {
+                name: Name::new(self.db, name),
+                ty,
+            });
+        }
+        native_record(self.db, fields)
     }
 
     fn lower_type_ref(&mut self, node: &SyntaxNode) -> Ty<'db> {

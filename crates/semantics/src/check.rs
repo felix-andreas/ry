@@ -6003,6 +6003,10 @@ impl<'db> Checker<'db, '_> {
             | TyKind::NamedList(_)
             | TyKind::Tuple(_)
             | TyKind::Record(_)
+            | TyKind::NativeTuple(_)
+            | TyKind::NativeRecord(_)
+            | TyKind::Tag(..)
+            | TyKind::OtherTags
             | TyKind::Frame(_)
             | TyKind::Function(_) => Err(TypeError {
                 range,
@@ -6452,6 +6456,10 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         | TyKind::NamedList(_)
         | TyKind::Tuple(_)
         | TyKind::Record(_)
+        | TyKind::NativeTuple(_)
+        | TyKind::NativeRecord(_)
+        | TyKind::Tag(..)
+        | TyKind::OtherTags
         | TyKind::Frame(_)
         | TyKind::Function(_) => false,
     }

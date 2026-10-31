@@ -2340,7 +2340,16 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
     match ty.kind(db) {
         TyKind::Unknown => false,
         TyKind::Var(_) | TyKind::Rigid(_) => variables_allowed,
-        TyKind::Any | TyKind::Null | TyKind::Scalar(_) => true,
+        TyKind::Any | TyKind::Null | TyKind::Scalar(_) | TyKind::OtherTags => true,
+        TyKind::NativeTuple(items) => items
+            .iter()
+            .all(|&item| is_hintable(db, item, variables_allowed)),
+        TyKind::NativeRecord(fields) => fields
+            .iter()
+            .all(|field| is_hintable(db, field.ty, variables_allowed)),
+        TyKind::Tag(_, payload) => {
+            payload.is_none_or(|payload| is_hintable(db, payload, variables_allowed))
+        }
         TyKind::Vector(element)
         | TyKind::NamedVector(element)
         | TyKind::List(element)

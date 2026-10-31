@@ -31,6 +31,17 @@ pub enum TyKind<'db> {
     Tuple(Vec<Ty<'db>>),
     /// `list{a: A, b: B}`; fields keep declaration order.
     Record(Vec<RecordField<'db>>),
+    /// `tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
+    NativeTuple(Vec<Ty<'db>>),
+    /// `record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
+    /// fields are kept sorted by name and every field is required.
+    NativeRecord(Vec<NativeField<'db>>),
+    /// `:Name` or `:Name(...)`. The payload is always a `NativeTuple` (positional) or a
+    /// `NativeRecord` (named), so a payload types and compares exactly like that literal.
+    Tag(Name<'db>, Option<Ty<'db>>),
+    /// `..`, the member that makes a tag union open: it stands for every tag the union does
+    /// not list. Only `union_of` places it, always last.
+    OtherTags,
     /// ry's built-in table, `frame{a: A[], b: B[]}`: a record of column vectors.
     /// `None` is a frame whose columns are not known (`frame`), which every
     /// column reference treats as silent.
@@ -64,6 +75,12 @@ pub struct RecordField<'db> {
     pub name: Name<'db>,
     pub ty: Ty<'db>,
     pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct NativeField<'db> {
+    pub name: Name<'db>,
+    pub ty: Ty<'db>,
 }
 
 /// Unlike a record field, carries the default's type: R evaluates the default
@@ -189,6 +206,57 @@ pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
     Ty::new(db, TyKind::Scalar(atomic))
 }
 
+/// Sorts by name in byte order, the one order a record's fields are stored and printed in.
+pub fn native_record<'db>(db: &'db dyn Db, mut fields: Vec<NativeField<'db>>) -> Ty<'db> {
+    fields.sort_by(|left, right| left.name.text(db).cmp(right.name.text(db)));
+    Ty::new(db, TyKind::NativeRecord(fields))
+}
+
+/// The payload's shape: its item count, or its field names. Two tags with one name and one
+/// shape are the same member of a union, and two with one name and different shapes conflict.
+#[derive(PartialEq, Eq)]
+pub enum PayloadShape<'db> {
+    Bare,
+    Positional(usize),
+    Named(Vec<Name<'db>>),
+    /// A payload that is not a native tuple or record, which only a broken annotation makes.
+    Other(Ty<'db>),
+}
+
+pub fn payload_shape<'db>(db: &'db dyn Db, payload: Option<Ty<'db>>) -> PayloadShape<'db> {
+    let Some(payload) = payload else {
+        return PayloadShape::Bare;
+    };
+    match payload.kind(db) {
+        TyKind::NativeTuple(items) => PayloadShape::Positional(items.len()),
+        TyKind::NativeRecord(fields) => {
+            PayloadShape::Named(fields.iter().map(|field| field.name).collect())
+        }
+        _ => PayloadShape::Other(payload),
+    }
+}
+
+/// Two same-name tags of a union whose payload shapes differ, which `union_of` keeps apart
+/// and the checker reports where they meet.
+pub fn conflicting_tags<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(Ty<'db>, Ty<'db>)> {
+    let TyKind::Union(members) = ty.kind(db) else {
+        return None;
+    };
+    for (index, &first) in members.iter().enumerate() {
+        let TyKind::Tag(name, _) = first.kind(db) else {
+            continue;
+        };
+        for &second in &members[index + 1..] {
+            if let TyKind::Tag(other, _) = second.kind(db)
+                && other == name
+            {
+                return Some((first, second));
+            }
+        }
+    }
+    None
+}
+
 /// A frame column is a vector: a scalar broadens to its vector type, and names drop,
 /// because a column's elements are positional rows.
 pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
@@ -202,6 +270,7 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
 pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>) -> Ty<'db> {
     let mut flat: Vec<Ty<'db>> = Vec::new();
     let mut saw_null = false;
+    let mut saw_other_tags = false;
     let mut stack: Vec<Ty<'db>> = members.into_iter().collect();
     stack.reverse();
     while let Some(member) = stack.pop() {
@@ -214,6 +283,22 @@ pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>
             TyKind::Any => return any(db),
             TyKind::Unknown => return unknown(db),
             TyKind::Null => saw_null = true,
+            TyKind::OtherTags => saw_other_tags = true,
+            // A tag name has one payload shape per union, so a second tag of that name and
+            // shape joins into the first, position by position.
+            TyKind::Tag(name, payload) => {
+                let shape = payload_shape(db, *payload);
+                let same = flat.iter().position(|&existing| match existing.kind(db) {
+                    TyKind::Tag(existing_name, existing_payload) => {
+                        existing_name == name && payload_shape(db, *existing_payload) == shape
+                    }
+                    _ => false,
+                });
+                match same {
+                    Some(index) => flat[index] = merge_tags(db, flat[index], member),
+                    None => flat.push(member),
+                }
+            }
             _ => {
                 if !flat.contains(&member) {
                     flat.push(member);
@@ -224,11 +309,51 @@ pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>
     if saw_null {
         flat.push(null(db));
     }
+    if saw_other_tags {
+        flat.push(Ty::new(db, TyKind::OtherTags));
+    }
     match flat.len() {
         0 => null(db),
         1 => flat[0],
         _ => Ty::new(db, TyKind::Union(flat)),
     }
+}
+
+/// Joins two same-name, same-shape tags into one whose payload unions each position.
+fn merge_tags<'db>(db: &'db dyn Db, first: Ty<'db>, second: Ty<'db>) -> Ty<'db> {
+    if first == second {
+        return first;
+    }
+    let (TyKind::Tag(name, Some(first_payload)), TyKind::Tag(_, Some(second_payload))) =
+        (first.kind(db), second.kind(db))
+    else {
+        return first;
+    };
+    let payload = match (first_payload.kind(db), second_payload.kind(db)) {
+        (TyKind::NativeTuple(left), TyKind::NativeTuple(right)) => Ty::new(
+            db,
+            TyKind::NativeTuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(&left, &right)| union_of(db, [left, right]))
+                    .collect(),
+            ),
+        ),
+        (TyKind::NativeRecord(left), TyKind::NativeRecord(right)) => Ty::new(
+            db,
+            TyKind::NativeRecord(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| NativeField {
+                        name: left.name,
+                        ty: union_of(db, [left.ty, right.ty]),
+                    })
+                    .collect(),
+            ),
+        ),
+        _ => return first,
+    };
+    Ty::new(db, TyKind::Tag(*name, Some(payload)))
 }
 
 /// Node count of `ty` as a tree (each path counted separately), saturating at
@@ -261,6 +386,7 @@ pub fn map_child_types<'db>(
         | TyKind::Unknown
         | TyKind::Null
         | TyKind::Scalar(_)
+        | TyKind::OtherTags
         | TyKind::Var(_)
         | TyKind::Rigid(_) => ty,
         TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(map(*inner))),
@@ -283,6 +409,23 @@ pub fn map_child_types<'db>(
                     .collect(),
             ),
         ),
+        TyKind::NativeTuple(items) => Ty::new(
+            db,
+            TyKind::NativeTuple(items.iter().map(|&item| map(item)).collect()),
+        ),
+        TyKind::NativeRecord(fields) => Ty::new(
+            db,
+            TyKind::NativeRecord(
+                fields
+                    .iter()
+                    .map(|field| NativeField {
+                        name: field.name,
+                        ty: map(field.ty),
+                    })
+                    .collect(),
+            ),
+        ),
+        TyKind::Tag(name, payload) => Ty::new(db, TyKind::Tag(*name, payload.map(&mut *map))),
         TyKind::Frame(None) => ty,
         TyKind::Frame(Some(columns)) => Ty::new(
             db,
@@ -335,13 +478,18 @@ pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl F
         | TyKind::Unknown
         | TyKind::Null
         | TyKind::Scalar(_)
+        | TyKind::OtherTags
         | TyKind::Var(_)
         | TyKind::Rigid(_) => {}
         TyKind::Vector(inner)
         | TyKind::NamedVector(inner)
         | TyKind::List(inner)
         | TyKind::NamedList(inner) => visit(*inner),
-        TyKind::Tuple(items) | TyKind::Union(items) => items.iter().copied().for_each(visit),
+        TyKind::Tuple(items) | TyKind::NativeTuple(items) | TyKind::Union(items) => {
+            items.iter().copied().for_each(visit)
+        }
+        TyKind::NativeRecord(fields) => fields.iter().for_each(|field| visit(field.ty)),
+        TyKind::Tag(_, payload) => payload.iter().copied().for_each(visit),
         TyKind::Record(fields) | TyKind::Frame(Some(fields)) => {
             fields.iter().for_each(|field| visit(field.ty))
         }
@@ -524,6 +672,54 @@ mod tests {
             panic!("expected a union")
         };
         assert_eq!(members, &vec![chr, null(&db)]);
+    }
+
+    fn tag<'db>(db: &'db RootDatabase, name: &str, items: Option<Vec<Ty<'db>>>) -> Ty<'db> {
+        let payload = items.map(|items| Ty::new(db, TyKind::NativeTuple(items)));
+        Ty::new(db, TyKind::Tag(Name::new(db, name.to_owned()), payload))
+    }
+
+    #[test]
+    fn same_shape_tags_merge_their_payloads() {
+        let db = RootDatabase::default();
+        let int = scalar(&db, Atomic::Integer);
+        let chr = scalar(&db, Atomic::Character);
+        let merged = union_of(
+            &db,
+            [tag(&db, "Some", Some(vec![int])), tag(&db, "Some", Some(vec![chr]))],
+        );
+        assert_eq!(
+            merged,
+            tag(&db, "Some", Some(vec![union_of(&db, [int, chr])])),
+            "one member per tag name and shape"
+        );
+        assert_eq!(conflicting_tags(&db, merged), None);
+    }
+
+    #[test]
+    fn different_shape_tags_stay_apart_and_conflict() {
+        let db = RootDatabase::default();
+        let int = scalar(&db, Atomic::Integer);
+        let one = tag(&db, "Some", Some(vec![int]));
+        let two = tag(&db, "Some", Some(vec![int, int]));
+        let union = union_of(&db, [one, two]);
+        let TyKind::Union(members) = union.kind(&db) else {
+            panic!("expected a union")
+        };
+        assert_eq!(members, &vec![one, two]);
+        assert_eq!(conflicting_tags(&db, union), Some((one, two)));
+    }
+
+    #[test]
+    fn other_tags_go_last() {
+        let db = RootDatabase::default();
+        let other = Ty::new(&db, TyKind::OtherTags);
+        let none = tag(&db, "None", None);
+        let union = union_of(&db, [other, null(&db), none]);
+        let TyKind::Union(members) = union.kind(&db) else {
+            panic!("expected a union")
+        };
+        assert_eq!(members, &vec![none, null(&db), other]);
     }
 
     #[test]

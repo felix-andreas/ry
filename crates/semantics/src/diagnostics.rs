@@ -10,7 +10,7 @@ use crate::metadata::{declared_dependency, imported_by_name, imports_every_name,
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, RecordField, Ty, TyKind, TypeScheme,
+    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind, TypeScheme,
     map_child_types, substitute_rigid, union_of,
 };
 use crate::{
@@ -2046,11 +2046,26 @@ impl<'db> TypeRenderer<'db> {
             TyKind::NamedVector(element) => format!("{}[named]", self.render(db, *element)),
             TyKind::List(element) => format!("list[{}]", self.render(db, *element)),
             TyKind::NamedList(element) => format!("list[named: {}]", self.render(db, *element)),
-            TyKind::Tuple(items) => {
-                let items: Vec<String> = items.iter().map(|&item| self.render(db, item)).collect();
-                format!("list{{{}}}", items.join(", "))
-            }
+            TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),
             TyKind::Record(fields) => format!("list{{{}}}", self.render_fields(db, fields)),
+            TyKind::NativeTuple(items) => format!("tuple{{{}}}", self.render_items(db, items)),
+            TyKind::NativeRecord(fields) => {
+                format!("record{{{}}}", self.render_native_fields(db, fields))
+            }
+            TyKind::Tag(name, payload) => {
+                let name = name.text(db);
+                match payload.map(|payload| payload.kind(db)) {
+                    None => format!(":{name}"),
+                    Some(TyKind::NativeTuple(items)) => {
+                        format!(":{name}({})", self.render_items(db, items))
+                    }
+                    Some(TyKind::NativeRecord(fields)) => {
+                        format!(":{name}({})", self.render_native_fields(db, fields))
+                    }
+                    Some(_) => format!(":{name}(Unknown)"),
+                }
+            }
+            TyKind::OtherTags => "..".to_owned(),
             TyKind::Frame(Some(columns)) => {
                 format!("frame{{{}}}", self.render_fields(db, columns))
             }
@@ -2111,6 +2126,26 @@ impl<'db> TypeRenderer<'db> {
             })
             .collect();
         Some(format!("<{}>", binders.join(", ")))
+    }
+
+    fn render_items(&mut self, db: &'db dyn Db, items: &[Ty<'db>]) -> String {
+        let items: Vec<String> = items.iter().map(|&item| self.render(db, item)).collect();
+        items.join(", ")
+    }
+
+    fn render_native_fields(&mut self, db: &'db dyn Db, fields: &[NativeField<'db>]) -> String {
+        let fields: Vec<String> = fields
+            .iter()
+            .map(|field| {
+                let name = field.name.text(db);
+                if is_syntactic_name(name) {
+                    format!("{name}: {}", self.render(db, field.ty))
+                } else {
+                    format!("`{name}`: {}", self.render(db, field.ty))
+                }
+            })
+            .collect();
+        fields.join(", ")
     }
 
     fn render_fields(&mut self, db: &'db dyn Db, fields: &[RecordField<'db>]) -> String {
