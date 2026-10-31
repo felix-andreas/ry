@@ -491,9 +491,7 @@ impl Context<'_> {
                 for parameter in parameters {
                     let slot =
                         self.mint_binding(&parameter.name, parameter.range, BindingKind::Parameter);
-                    self.current_scope()
-                        .slots
-                        .insert(parameter.name, slot);
+                    self.current_scope().slots.insert(parameter.name, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.premint_frame_assignments(*body);

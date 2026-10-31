@@ -751,12 +751,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         return BTreeSet::new();
     };
     let mut reads: BTreeSet<Symbol> = naming.non_locals.values().copied().collect();
-    reads.extend(
-        naming
-            .namespace_reads
-            .values()
-            .filter_map(|read| read.name),
-    );
+    reads.extend(naming.namespace_reads.values().filter_map(|read| read.name));
     reads
 }
 

@@ -87,6 +87,22 @@ reassign, unlike `TRUE` and `FALSE`.
 **`trailing-comma`** (error): a comma after a call's last argument. R reads it as an empty argument,
 so `c(1, 2, )` fails when it runs.
 
+**`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
+`setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still
+runs, but ry checks [records and tagged unions](/type-checking/records-and-tags) statically and
+cannot see inside these classes, so it recommends those instead:
+
+```text
+! `setClass` defines an S4 class. ry recommends a record or a tagged union instead
+```
+
+With `[check] object-systems = false`, each definition is an error instead, whatever the `[lint]`
+level says:
+
+```text
+x S4 classes are turned off in this project (`[check] object-systems = false`), so `setClass` cannot define an S4 class. Use a record or a tagged union instead
+```
+
 **`stub`** (error): a line in your `stubs/*.Rtypes` files that ry could not load, so a broken
 declaration is never dropped in silence.
 
