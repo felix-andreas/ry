@@ -73,9 +73,11 @@ x
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/c.R
 integer
 
@@ -92,13 +94,17 @@ x
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/b.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 0..1 the later binding is here.
 == R/c.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 == R/d.R
 integer
 
@@ -117,15 +123,19 @@ x
 == R/a.R
 x: integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 2..3 the later binding is here.
 == R/b.R
 integer
 x: integer
 2..3 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 0..1 the earlier binding is here.
 2..3 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
+  = 2..3 the later binding is here.
 == R/c.R
 integer
 x: integer
 2..3 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
+  = 2..3 the earlier binding is here.
 == R/d.R
 integer
 

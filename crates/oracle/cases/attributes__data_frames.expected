@@ -1,0 +1,41 @@
+[stdout]
+|   id g   v
+| 1  1 a 2.5
+| 2  2 b  NA
+| 3  3 a 7.0
+| 4  4 b 1.0
+| 'data.frame':	4 obs. of  3 variables:
+|  $ id: int  1 2 3 4
+|  $ g : chr  "a" "b" "a" "b"
+|  $ v : num  2.5 NA 7 1
+| [1] 4
+| [1] 3
+|   id g   v
+| 1  1 a 2.5
+| 3  3 a 7.0
+| [1] "id" "g"  "v"  "w" 
+|   g   v
+| 1 a 9.5
+| 2 b 1.0
+|   g id   v  w label
+| 1 a  1 2.5  5 Alpha
+| 2 a  3 7.0 14 Alpha
+| 3 b  2  NA NA  Beta
+| 4 b  4 1.0  2  Beta
+| [1] 4 3 2 1
+|    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+|    1.00    1.75    2.50    3.50    4.75    7.00       1 
+|          id           g           v           w 
+|   "integer" "character"   "numeric"   "numeric" 
+|    a    b 
+| 4.75 1.00 
+|   g n
+| a a 2
+| b b 2
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(g = c("a", "b"), n = c(2L, 2L)), row.names = c("a", 
+| "b"), class = "data.frame")

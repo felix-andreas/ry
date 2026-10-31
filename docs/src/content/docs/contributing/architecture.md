@@ -23,8 +23,10 @@ illegal dependency unrepresentable.
     changes.
 
   A `#:` annotation is lexed as structured trivia and parsed into first-class nodes with real spans,
-  so type syntax is grammar rather than comment text scraped after the fact. The crate depends on
-  nothing semantic.
+  so type syntax is grammar rather than comment text scraped after the fact. Inline annotations run
+  the same type grammar on R's token stream, in `TYPE_ASCRIPTION`, `RETURN_TYPE`, and a function's
+  `TYPE_BINDER_LIST` nodes, and `erase_inline_annotations` gives the plain R program an annotated one
+  means. The crate depends on nothing semantic.
 - **`semantics`** holds the salsa database and every analysis query: the per-item item tree and HIR,
   naming, interned types, Hindley-Milner inference, the stub corpus, the lints, and the point where
   diagnostics leave the analysis. It depends on `syntax` and salsa.
@@ -44,8 +46,8 @@ illegal dependency unrepresentable.
   [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/), and nothing else in the
   workspace uses it yet.
 - **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
-  `run`, and `debug` commands. It owns configuration, conversion between position encodings, assembling and publishing
-  diagnostics, and suppression comments.
+  `run`, and `debug` commands. It owns configuration, conversion between position encodings,
+  assembling and publishing diagnostics, and suppression comments.
 
 ## The semantics database
 
@@ -54,15 +56,18 @@ of a file, such as a function definition, a value binding, or a bare call.
 
 ### Inputs
 
-The database has four inputs:
+The database has five inputs:
 
 - `SourceFile` carries one file's text and document kind.
 - `ProjectFiles` is a singleton listing the project's files: package documents first, in the
-  `DESCRIPTION` `Collate` order when one is declared and by path otherwise, then the rest by path. The last-writer-wins symbol index and the CLI both rely on that
-  order.
+  `DESCRIPTION` `Collate` order when one is declared and by path otherwise, then the rest by path.
+  The last-writer-wins symbol index and the CLI both rely on that order.
 - `PackageMetadata` is a singleton carrying the imports from `NAMESPACE` and the dependency universe
   from `DESCRIPTION`.
 - `StubSources` is a set-once singleton carrying the `.Rtypes` corpus.
+- `AnalysisSettings` is a singleton carrying the configuration that changes what analysis means
+  rather than which findings a host publishes, today only `[check] inline-annotations`. It is read
+  only where an inline annotation exists, so toggling it re-checks only the items that have one.
 
 ### Parsing, and why it is not where incrementality happens
 
@@ -83,8 +88,11 @@ equal, and salsa's early cutoff prunes all the work downstream of them.
 
 ### From item to scheme
 
-Each item goes through four stages. Its green subtree lowers to HIR, with spans relative to the item.
-Naming then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
+An item's green subtree lowers to HIR, with spans relative to the item. Its annotations lower
+separately: a `#:` block and an inline annotation go through the same type lowering into the same
+`Annotation`, and a statement annotated both ways gets one merged annotation
+(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Naming
+then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.
 
@@ -147,8 +155,9 @@ decision log records that design.
 
 Diagnostics come in two layers over one source of truth:
 
-- `parse_stage_diagnostics(file)` holds the syntax errors, the typing-directive errors, and the
-  refusals of malformed `#:` blocks. All of them are pure functions of the parse.
+- `parse_stage_diagnostics(file)` holds the syntax errors, the typing-directive errors, the
+  refusals of malformed `#:` blocks and inline annotations, and, while inline annotations are turned
+  off, a warning at each one. All of them are pure functions of the parse and `AnalysisSettings`.
 - `file_diagnostics(file)` adds the naming findings (unresolved and unused names) and the type
   errors. The strict-mode origins are rendered separately by `strict_diagnostics(file)`, so a host
   publishes them only under `[check] strict` or a per-file directive.
@@ -190,10 +199,7 @@ and all the documents, and the database handle deliberately never leaves it.
 
 ## Correctness and performance instruments
 
-The fixture suites, described on the [testing page](/contributing/testing), are the correctness
-contract. Two more instruments guard what fixtures cannot see. `crates/semantics/tests/test_incremental.rs`
-pins the incrementality contracts by counting how often each query executes after an edit. The
-performance and memory witness, `crates/semantics/tests/test_perf.rs`, asserts measured budgets for
-wall time, resident memory, the linearity of resolve steps, and keystroke latency against a corpus of
-real files, so a regression in any of them fails a test instead of being noticed later. The corpus is
-fetched on demand, so the witness runs locally rather than in CI.
+The fixture suites are the correctness contract. `crates/semantics/tests/test_incremental.rs` pins
+the incrementality contracts by counting query executions after an edit, and
+`crates/semantics/tests/test_perf.rs` asserts wall-time, memory, and keystroke-latency budgets
+against a corpus of real files. [Testing](/contributing/testing) documents all of them.

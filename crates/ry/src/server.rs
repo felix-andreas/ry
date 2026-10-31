@@ -3,7 +3,8 @@
 
 use crate::cli::{project_order, project_stub_paths, shares_a_namespace};
 use crate::config::{
-    CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures, suggested_table,
+    CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
+    INLINE_ANNOTATIONS_OFF, suggested_table,
 };
 use crate::diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics};
 use crate::namespace::namespace_import_problems;
@@ -30,7 +31,7 @@ use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
     shipped_stub_sources, stub_source_problems,
 };
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{ControlFlow, Range};
@@ -39,7 +40,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{env, fs, panic, process, thread};
-use syntax::{SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_syntactic_name};
+use syntax::{
+    SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_inline_annotation,
+    is_syntactic_name,
+};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
@@ -379,6 +383,7 @@ impl Worker {
             attached_by_file: HashMap::new(),
         };
         worker.install_stubs();
+        AnalysisSettings::new(&worker.db, worker.config.check.inline_annotations);
         let metadata = worker.current_metadata();
         worker.collate_order = metadata.collate;
         // No file has been scanned yet, so nothing is attached.
@@ -998,8 +1003,15 @@ impl Worker {
                 match Config::discover(&self.workspace_root) {
                     Ok(config) => {
                         config_changed |= config != self.config;
+                        let inline_annotations = config.check.inline_annotations;
                         self.config = config;
-                        self.report_unknown_config_keys();
+                        let settings = AnalysisSettings::get(&self.db);
+                        if *settings.inline_annotations(&self.db) != inline_annotations {
+                            settings
+                                .set_inline_annotations(&mut self.db)
+                                .to(inline_annotations);
+                        }
+                        self.report_config_warnings();
                         self.publish_config_diagnostics(None);
                     }
                     Err(error) => {
@@ -1056,7 +1068,7 @@ impl Worker {
                 .and_then(|path| Config::from_path(path).err());
             self.publish_config_diagnostics(location.as_ref());
         }
-        self.report_unknown_config_keys();
+        self.report_config_warnings();
         self.register_file_watchers();
     }
 
@@ -1313,44 +1325,49 @@ impl Worker {
         }
     }
 
-    fn report_unknown_config_keys(&self) {
-        if self.config.unknown_keys.is_empty() {
-            return;
+    fn report_config_warnings(&self) {
+        if !self.config.unknown_keys.is_empty() {
+            let keys = self
+                .config
+                .unknown_keys
+                .iter()
+                .map(|key| match suggested_table(key) {
+                    Some(table) => format!("`{key}` (it belongs under `[{table}]`)"),
+                    None => format!("`{key}`"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Name the file actually loaded: it may be the former `roughly.toml`.
+            let file = self
+                .config
+                .source_directory
+                .as_deref()
+                .map(|directory| {
+                    CONFIG_FILE_NAMES
+                        .into_iter()
+                        .find(|name| directory.join(name).is_file())
+                        .unwrap_or(CONFIG_FILE_NAME)
+                })
+                .unwrap_or(CONFIG_FILE_NAME);
+            let pronoun = if self.config.unknown_keys.len() == 1 {
+                "it"
+            } else {
+                "them"
+            };
+            self.show_message(
+                lsp_types::MessageType::WARNING,
+                format!(
+                    "{file} sets {keys}, which this version of ry does not know, so it is \
+                     ignoring {pronoun}. Check the spelling, or update ry."
+                ),
+            );
         }
-        let keys = self
-            .config
-            .unknown_keys
-            .iter()
-            .map(|key| match suggested_table(key) {
-                Some(table) => format!("`{key}` (it belongs under `[{table}]`)"),
-                None => format!("`{key}`"),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        // Name the file actually loaded: it may be the former `roughly.toml`.
-        let file = self
-            .config
-            .source_directory
-            .as_deref()
-            .map(|directory| {
-                CONFIG_FILE_NAMES
-                    .into_iter()
-                    .find(|name| directory.join(name).is_file())
-                    .unwrap_or(CONFIG_FILE_NAME)
-            })
-            .unwrap_or(CONFIG_FILE_NAME);
-        let pronoun = if self.config.unknown_keys.len() == 1 {
-            "it"
-        } else {
-            "them"
-        };
-        self.show_message(
-            lsp_types::MessageType::WARNING,
-            format!(
-                "{file} sets {keys}, which this version of ry does not know, so it is \
-                 ignoring {pronoun}. Check the spelling, or update ry."
-            ),
-        );
+        if !self.config.check.inline_annotations {
+            self.show_message(
+                lsp_types::MessageType::WARNING,
+                format!("ry: {INLINE_ANNOTATIONS_OFF}."),
+            );
+        }
     }
 }
 
@@ -2336,7 +2353,7 @@ fn annotation_semantic_tokens(
     for annotation in parse
         .syntax_node()
         .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
+        .filter(|node| node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(node))
     {
         for element in annotation.descendants_with_tokens() {
             let SyntaxElement::Token(token) = element else {

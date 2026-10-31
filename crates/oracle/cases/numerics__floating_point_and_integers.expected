@@ -1,0 +1,36 @@
+[stdout]
+| [1] FALSE
+| [1] TRUE
+| [1] Inf
+| [1] -Inf
+| [1] NaN
+| [1] FALSE
+| [1] Inf
+| [1] NA
+| [1] NA
+| [1] 8
+| [1] 2147483647
+| [1] "NAs introduced by coercion to integer range"
+| [1] 2
+| [1] 4
+| [1] -2
+| [1] 1200
+| [1] 120000
+| [1] "0.667"
+| [1] 3.141592654
+| [1] 1e-05
+| [1] 1e+05
+| [1] 1e+05
+| [1] 123456789012
+| [1] 0.1234568
+| [1] 1.5  NA 3.0
+| [1] 2.718282
+| [1] 3628800
+| [1] 10
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

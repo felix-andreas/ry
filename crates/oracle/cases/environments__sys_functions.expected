@@ -1,0 +1,13 @@
+[stdout]
+| f()
+| [1] "function"
+| [1] "outer()"
+| [1] 15
+| [1] 16
+| f()
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| f()

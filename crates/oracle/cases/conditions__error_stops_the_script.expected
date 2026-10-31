@@ -1,0 +1,7 @@
+[stdout]
+| before
+[messages]
+[warnings]
+[errors]
+- bad input: 3 (in f(3))
+[value]

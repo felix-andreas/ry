@@ -309,7 +309,9 @@ origin <- list(v = 1)
 #++++
 origin: list{v: double}
 3..32 error[annotation] the type name `Point` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 37..59 another declaration of this name is here.
 37..59 error[annotation] the type name `Point` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..32 another declaration of this name is here.
 
 #==== form
 #---- param_after_return_is_refused

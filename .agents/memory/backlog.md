@@ -185,7 +185,7 @@ type-level function the annotation language does not have.
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  tour and `domain-modeling.md` now say so conditionally ("put `@new` in one constructor"). An
+  `type-checking/custom-types.md` says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
 - A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
   writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
@@ -201,6 +201,18 @@ type-level function the annotation language does not have.
 - A missing-argument error does not name the parameter, although the sibling wrong-name error lists
   all of them.
 - A near-miss suggestion has a length floor that misses a short field name, such as `person$nam`.
+- A generic lambda passed as an argument keeps its binders rigid, so
+  `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
+  on a function that is not bound should instantiate its binders like a call does.
+- A call that fails against a generic signature types its statement as the leaked rigid name, so
+  `twice("a")` against `<T: numeric> fn(x: T) -> T` renders `T` in the typing fixtures. It should
+  be `Unknown`.
+- The add-annotation code action writes a `#:` comment even in a project that uses inline
+  annotations. It could offer the inline form where inline annotations are on.
+- `contributing/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
+  spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
+  into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
+  for the strip step.
 
 ### What the round said overall
 
@@ -913,10 +925,9 @@ pages named in the next item.
 
 ## Open: nothing verifies the rendered samples in the docs
 
-About two dozen blocks show real tool output. They live across `features`, `getting-started`,
-`reference/cli`, `reference/configuration`, `reference/diagnostic-codes`,
-`type-checking/tutorial`, `type-checking/concepts`, `type-checking/domain-modeling`, `index.astro`
-and the README's generated `.github/diagnostic.svg`. Nothing checks them, so they drift silently and
+Many blocks show real tool output. They live across `getting-started`, `guides/`, `type-checking/`,
+`reference/cli`, `reference/configuration`, `reference/diagnostic-codes`, `index.astro` and the
+README's generated `.github/diagnostic.svg`. Nothing checks them, so they drift silently and
 the drift is only ever found when someone re-captures by hand.
 
 Two things this proves rather than predicts.
@@ -1134,20 +1145,7 @@ produce good messages. One tester confirmed the `expect_error` decision was righ
 
 ## Open: what the documentation reviews left
 
-Four independent reviews read the docs cold: a first-hour newcomer, an information architect, an
-accuracy auditor who executed every claim against the binary, and a positioning analyst who also
-measured the competition. The four `docs-review-*.md` files from that round hold the full reports
-and their paste-ready rewrites.
-
-Most of what they found is fixed. The structural rewrite landed, so the type-checking guide is a
-tutorial of eight numbered steps from a zero-config first run to strict mode, each with a runnable
-example whose output came from the binary, ending where the reference begins. The stubs page is no
-longer an internal RFC. The diagnostics reference covers all fourteen codes in tables built by
-running the tool, and a CI workflow page and a limitations page landed with it. `why-ry.md` answers
-why a type checker for R, and `guides/adopting.md` is the adoption how-to. Re-verified against the
-tree: the rest-parameter spelling, the stale symbol names, the internal gate vocabulary, the bless
-environment variable, the `stub` diagnostic code, the `SCREAMING_SNAKE_CASE` exemption and the
-duplicate-`@type` error in a script are all correct now.
+The structural rewrite of the site has landed. The remaining documentation gaps are the ones below.
 
 ### The comparison page does not exist
 
@@ -1778,6 +1776,7 @@ What step 2 of `contributing/design/r-runtime.md` left for later steps, most pre
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
+- **Inline type annotations, the comment-agreement warning, and strict mode's untyped parameters.** `name: TYPE <- value`, typed parameters, `-> TYPE` and `function<T>`, sharing the `#:` grammar and lowering, with `annotation-mismatch`, `[check] inline-annotations`, and erasure to plain R. `decisions.md` has the record.
 
 - **`declares_arithmetic` is computed from the project as well as the stubs.** It consulted the stub
   library alone, while operator dispatch resolves a method through the global scope, which includes

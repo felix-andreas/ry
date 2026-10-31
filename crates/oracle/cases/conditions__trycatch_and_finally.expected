@@ -1,0 +1,17 @@
+[stdout]
+| cleanup
+| [1] "caught: careful"
+| [1] "boom"
+| [1] "simpleWarning" "warning"       "condition"    
+| [1] "try-error"
+| Error in try(stop("oops"), silent = TRUE) : oops
+| [1] TRUE
+| exit 1
+| exit 2
+| [1] "f()"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "f()"

@@ -1,0 +1,24 @@
+[stdout]
+| [1] 2 4 4 6 6 8
+| [1] 2 4 6 8 6 8
+| [1] 10 40 30 80
+| [1] "a" "b" "a" "b" "a" "b"
+| [1] "a" "a" "b" "b" "a"
+| [1]  1  2  3  4  5 NA NA  8
+| [1]  1 10  3
+|      [,1] [,2] [,3]
+| [1,]   11   13   15
+| [2,]   22   24   26
+| [1] "id1x" "id2y" "id3x"
+| [1]  1 11  3
+|      [,1] [,2]
+| [1,] "1"  "a" 
+| [2,] "2"  "b" 
+| [3,] "3"  "c" 
+[messages]
+[warnings]
+- longer object length is not a multiple of shorter object length (in 1:6 + 1:4)
+[errors]
+[value]
+character
+| structure(c("1", "2", "3", "a", "b", "c"), dim = 3:2)

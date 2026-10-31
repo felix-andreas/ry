@@ -1,0 +1,29 @@
+[stdout]
+| [1] NA
+| [1] NA
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] NA
+| [1] 1
+| logical(0)
+| [1] NA
+| [1] 4
+| [1] 1.5
+| [1] FALSE  TRUE  TRUE FALSE
+| [1] FALSE FALSE  TRUE FALSE
+| [1] NA
+| [1] 1 4
+| [1] NA
+| [1] NA
+| [1] TRUE
+| [1] NA
+| [1] 2 5
+| [1] "missing value where TRUE/FALSE needed"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "missing value where TRUE/FALSE needed"

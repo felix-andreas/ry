@@ -1,0 +1,11 @@
+[stdout]
+| a + b * c
+| g(x = 1 + 2, y = "z")
+| [1] "alpha"    "beta + 1" "\"s\""   
+| [1] 2
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 2

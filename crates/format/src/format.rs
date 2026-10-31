@@ -268,6 +268,7 @@ impl Formatter<'_> {
                 // Nothing may follow an annotation on its line either.
                 self.comment_end = Some(self.out.len());
             }
+            TYPE_ASCRIPTION | RETURN_TYPE | TYPE_BINDER_LIST => self.inline_annotation(node),
             _ => {
                 for element in child_elements(node) {
                     self.element(&element, level, false);
@@ -732,13 +733,52 @@ impl Formatter<'_> {
         }
     }
 
+    /// An inline annotation renders on one line with the spacing a `#:` type gets, so a
+    /// type reads the same written either way. One holding a comment is copied as
+    /// written: joining it onto one line would comment out the code after it.
+    fn inline_annotation(&mut self, node: &SyntaxNode) {
+        if node
+            .descendants_with_tokens()
+            .any(|element| element.kind() == COMMENT)
+        {
+            self.out.push_str(&self.source[node.text_range()]);
+            return;
+        }
+        let mut previous: Option<AnnotationToken> = None;
+        for token in node
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| !token.kind().is_trivia())
+        {
+            let Some(kind) = annotation_token_kind(token.kind()) else {
+                self.out.push_str(token.text());
+                previous = None;
+                continue;
+            };
+            if let Some(previous) = &previous
+                && annotation_space_between(previous, kind)
+            {
+                self.out.push(' ');
+            }
+            self.out.push_str(token.text());
+            previous = Some(AnnotationToken {
+                kind,
+                text: token.text().to_owned(),
+                end: token.text_range().end(),
+            });
+        }
+    }
+
     fn function_definition(&mut self, node: &SyntaxNode, level: usize) {
         let elements = child_elements(node);
         let is_multiline = self.spans_lines(node);
-        let body = elements
-            .iter()
-            .rev()
-            .find(|element| element.as_node().is_some() && element.kind() != PARAMETER_LIST);
+        let body = elements.iter().rev().find(|element| {
+            element.as_node().is_some()
+                && !matches!(
+                    element.kind(),
+                    PARAMETER_LIST | RETURN_TYPE | TYPE_BINDER_LIST
+                )
+        });
         let is_same_line = elements.first().zip(body).is_none_or(|(head, body)| {
             self.line(head.text_range().start()) == self.line(body.text_range().start())
         });
@@ -751,6 +791,10 @@ impl Formatter<'_> {
                     if after_comment {
                         self.newline(level);
                     }
+                    self.element(element, level, false);
+                }
+                RETURN_TYPE => {
+                    self.space_or_newline(after_comment, level);
                     self.element(element, level, false);
                 }
                 _ if Some(element) == body => {
