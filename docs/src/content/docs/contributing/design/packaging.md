@@ -8,11 +8,11 @@ generated: { by: ry-research-agent/1, at: 2026-10-31T17:00:00Z }
 sources:
   - id: rv
     resource: https://github.com/A2-ai/rv
-    title: "rv repository (v0.23.3): README.md, src/sync/link.rs, src/r_finder.rs, src/renv.rs"
+    title: "rv repository (v0.23.3): README.md, src/r_finder.rs"
     last_modified: 2026-10-21T13:09:02-04:00
   - id: rig
     resource: https://github.com/r-lib/rig
-    title: "rig repository (0.11.2-dev): README.md, website/proj-guide.qmd, website/admin-vs-user-mode.qmd"
+    title: "rig repository (0.11.2-dev): README.md, website/proj-guide.qmd, website/admin-vs-user-mode.qmd, src/repos/cranlike_metadata.rs"
     last_modified: 2026-10-29T09:04:04+01:00
   - id: rpx
     resource: https://github.com/rrepo-org/rpx
@@ -35,27 +35,30 @@ sources:
 This page covers the part of packaging that the [runtime](/contributing/design/r-runtime/) depends
 on: how a package gets installed so that ry's runtime can load it, how ry chooses between GNU R and
 its own runtime and between R versions while the runtime is incomplete, and what the lazy loader and
-the corpus setup need from an installed library. A package manager of ry's own (`ry add`, `ry sync`,
-a lockfile format) is a product question the runtime does not need answered, so it stays open.
-Nothing here is implemented; the measurements are real.
+the corpus need from an installed library. The corpus is the benchmark's 232-package dependency
+closure installed into a GNU R library, and the differential oracle is the harness that runs the same
+code under GNU R and under ry and compares the results (both from build step 1 of the runtime
+design). A package manager of ry's own (`ry add`, `ry sync`, a lockfile format) is a product question
+the runtime does not need answered, so it stays open. Nothing here is implemented; the measurements
+are real.
 
 ## The decisions
 
 - **An installed package is the same directory for GNU R 4.6 and for ry's runtime.** ry's `libR` is
   ABI-compatible and presents as R 4.6, so a binary built for GNU R 4.6 installs unchanged and loads
   under both. Existing libraries, renv's project libraries included, work as they are.
-- **ry's per-package data lives beside the library, never inside a package.** The item index and the
-  bytecode the loader needs go into a cache keyed by the installed package's content, filled the first
-  time ry's runtime loads the package. GNU R keeps loading exactly the files that were installed.
+- **ry's per-package data lives in ry's own cache, never inside a package.** The object index and the
+  bytecode the loader needs are built the first time ry's runtime loads the package, keyed by the
+  installed package's identity. GNU R keeps loading exactly the files that were installed.
 - **Binaries are the default install path, and source builds use `R CMD INSTALL` semantics under
   ry.** Compiling the benchmark closure from source took MEASURE_SRC, against 30 s for binaries, so
   the runtime is only usable if prebuilt binaries work.
 - **Package management runs as R code at first.** `install.packages`, renv and pak are R code, and
   ry's runtime runs them like any other package, which keeps every existing workflow working. ry adds
   no installer of its own for the runtime's sake.
-- **The runtime is chosen explicitly,** by `[r] runtime = "gnu" | "ry"` in `ry.toml`, `--runtime`, or
-  `RY_RUNTIME`. GNU R is the default until ry's runtime passes the benchmark, then ry. There is no
-  silent fallback, and an R version other than 4.6 always means GNU R.
+- **The runtime is chosen by configuration, never by failure:** `[r] runtime = "gnu" | "ry"` in
+  `ry.toml`, `--runtime`, or `RY_RUNTIME`. GNU R is the default until ry's runtime passes the
+  benchmark, then ry. An explicitly requested R version other than 4.6 means GNU R.
 - **The corpus is pinned with renv**, which the benchmark already depends on, against a dated P3M
   snapshot, and installed under GNU R in build step 1.
 
@@ -71,69 +74,98 @@ does:
 - **The shared library** resolves its R API symbols against `libR`, which is what the ABI-compatible
   `libR` exists for ([runtime design](/contributing/design/r-runtime/), section 2).
 - **The lazy-load database** is read with ry's own RDS reader. The `.rdx` index is a plain RDS file
-  whose `variables` element names every object in the namespace (`cli`'s names 638), so ry can list a
-  namespace without evaluating anything. GNU R bytecode inside the database is ignored and the
-  closures are recompiled, as the runtime design already plans.
-- **The R version a binary was built for** must be 4.6.x. The minor version is R's binary
-  compatibility boundary, and the installed `DESCRIPTION` records it (`Built: R 4.6.0;
-  x86_64-pc-linux-gnu; ...`), so ry checks that field when it loads a package and refuses one built
-  for another minor version with a message that names both versions.
+  whose `variables` element names every object in the namespace, internal ones included (`cli`'s
+  names 638), so ry can list a namespace without evaluating anything. GNU R bytecode inside the
+  database is ignored and the closures are recompiled, as the runtime design already plans. Lazy data
+  (`data/Rdata.rdx`) uses the same format.
+- **The R version a binary was built for** is recorded in the installed `DESCRIPTION` (`Built: R
+  4.6.0; x86_64-pc-linux-gnu; ...`). Packages are conventionally reinstalled across R minor versions,
+  but GNU R only refuses packages built before R 3.0.0 and loads, for example, a 4.5 build under 4.6.
+  ry behaves the same way, so an existing library works under ry exactly as it does under GNU R 4.6.
 
-On Linux, binaries come from P3M, which serves distribution-specific builds and `manylinux_2_28`
-builds that run on any glibc 2.28 system.[^p3m] The `manylinux` builds suit ry, whose release binary
-already targets an old glibc baseline. P3M picks a binary by the request's `User-Agent` and serves
-source otherwise, so ry's runtime must send the `User-Agent` R 4.6 sends.
+On Linux, binaries come from P3M, which serves distribution-specific builds and, according to rig's
+documentation, `manylinux_2_28` builds that run on any glibc 2.28 system.[^p3m][^rig] The `manylinux`
+builds suit ry, whose release binary already targets an old glibc baseline. P3M picks a binary by the
+request's `User-Agent` and serves source otherwise. `install.packages` builds that header from
+`R.version`, so a runtime that presents as R 4.6 gets R 4.6 binaries with no extra mechanism.
 
 ### Source packages
 
 ry's runtime builds a source package with `R CMD INSTALL` semantics: `configure`, `Makevars`, and the
 compiler flags that `R CMD config` reports. The headers are ry's own R 4.6-compatible set, and
-`R CMD config` reports ry's `libR`, so a package compiled under ry links against ry. Because the ABI is
-the same, the result is again a valid GNU R 4.6 binary, and whichever runtime built a package, both
-can load it.
+`R CMD config` reports ry's `libR`, so a package compiled under ry links against ry. ry's headers are
+intended to be ABI-identical to GNU R's, inline functions and macros included, so the result is
+intended to load under GNU R too. Until the oracle has shown that, a package built under ry is marked
+with an extra `DESCRIPTION` field (`RyBuilt:` with ry's version), and the corpus is built only by GNU
+R, so a difference the oracle finds is never a build difference.
 
 ### ry's per-package cache
 
-The runtime needs more per package than GNU R installs: the item index the lazy loader reads and the
-bytecode it compiles. That data goes into ry's own cache directory, keyed by a hash of the installed
-package directory and of ry's runtime version, and it is built on the first load under ry's runtime.
-It stays out of the package directory for two reasons. The differential oracle depends on both
+The runtime needs more per package than GNU R installs. For an installed package, which ships no R
+sources, the object index is the `.rdx` variable list with each closure's location in the `.rdb`, and
+the bytecode is compiled from those closures. Both go into ry's own cache directory and are built on
+the first load under ry's runtime. The cache key is the identity of the installation, not a hash of
+the whole directory, because hashing every file on every load would cost what the cache saves: it is
+a hash of the installed `DESCRIPTION` (whose `Built:` timestamp changes on every reinstall), the
+`.rdx` file, and ry's runtime version. All three are small files.
+
+The data stays out of the package directory for two reasons. The differential oracle depends on both
 runtimes loading byte-identical packages. And a library is often shared (a site library, renv's
-global cache), so writing into it is not ry's to do. Because the key is the content, two projects
-that use the same installed package share one entry, and a package that `install.packages` replaces
-simply misses the cache.
+global cache), so writing into it is not ry's to do. Two projects that use the same installation
+share one entry, and a package that `install.packages` replaces simply misses the cache. Until the
+cache exists (build step 5), ry's runtime loads an installed package the way GNU R does, from its
+`.rdb` through promises.
 
 ## Choosing the runtime and the R version
 
-Two settings decide what `ry run`, `ry repl` and their worker processes start: the R version and the
-runtime. Each comes from, in order, a command-line flag (`--r 4.5`, `--runtime ry`), the environment
-(`RY_R`, `RY_RUNTIME`), the `[r]` table of `ry.toml`, and, for the version only, the project's own
-metadata: the R version recorded in `renv.lock`, and `Depends: R (>= ...)` as a lower bound.
+Two settings decide what `ry run`, `ry repl` and their worker processes start: the runtime and the R
+version. Each comes from, in order, a command-line flag (`--runtime ry`, `--r 4.5`), the environment
+(`RY_RUNTIME`, `RY_R`), or the `[r]` table of `ry.toml`:
 
 ```toml
 [r]
-version = "4.6"
 runtime = "gnu"
+version = "4.6"
 ```
 
-- **GNU R** is found where rv looks for it: `PATH`, rig's install roots, `/opt/R`, the macOS
-  framework and the Windows registry.[^rv] ry does not install R itself in this design, because rig
-  already does that well and ry can read its layout.[^rig] Without any setting, ry keeps today's
-  behavior: `R_HOME`, then `R RHOME`.
-- **ry's runtime** implements one R version, the one it presents (4.6). A request it cannot satisfy,
-  such as `version = "4.4"`, selects GNU R and says why once. The runtime still needs a GNU R 4.6
-  installation on disk, because it loads base R's R sources from one instead of vendoring them (the
-  runtime licensing decision in `.agents/memory/decisions.md`).
+A version written as a minor (`"4.5"`) matches any 4.5.x, and a full version (`"4.5.2"`) matches only
+that patch. The runtime is chosen like this:
 
-The default runtime is GNU R until ry's runtime meets the exit criterion of build step 4 (all 232
-closure packages pass their own tests, and the three benchmark code bases match GNU R's output), and
-then it flips to ry. ry never falls back from one runtime to the other on its own: a process runs on
-one runtime, a silent switch would hide exactly the failures the transition has to surface, and
-`runtime = "gnu"` is a one-line escape hatch.
+- **With an explicit runtime,** that runtime runs. `runtime = "ry"` together with a version other than
+  4.6 is an error, because ry's runtime implements exactly one R version, the one it presents.
+- **With no explicit runtime,** the default applies, except that an explicit version other than 4.6
+  selects GNU R, because only GNU R can provide it. The default is GNU R until ry's runtime meets the
+  exit criterion of build step 4 (all 232 closure packages pass their own tests, and the three
+  benchmark code bases match GNU R's output), and ry after that.
+- **Project metadata is advisory.** The R version recorded in `renv.lock` and `Depends: R (>= ...)`
+  never select a runtime or a version. ry warns when the running R's minor version differs from
+  `renv.lock`'s, as renv does, and reports an unmet `Depends` as R does when the package loads.
+  Otherwise nearly every existing renv project, which records an older R, would stay on GNU R after
+  the default flips.
 
-Worker processes follow their parent. `parallel` starts workers with `file.path(R.home("bin"),
-"Rscript")` and `callr` with `R.home()`'s `bin/R`, so ry's runtime ships an `R_HOME` whose `bin/R` and
-`bin/Rscript` start ry, and a worker runs on the runtime of the session that started it.
+ry never switches runtime because something failed. A process runs on one runtime, a switch on
+failure would hide exactly the failures the transition has to surface, and `runtime = "gnu"` is a
+one-line escape hatch.
+
+GNU R is located in this order. `R_HOME`, when set, wins, as it does today. With a requested version,
+ry searches where rv does (rig's install roots and quick links, `/opt/R`, Homebrew,
+`/Library/Frameworks/R.framework/Versions`, and `C:\Program Files\R`) and takes the newest
+installation that matches.[^rv] Otherwise ry keeps today's behavior and asks the `R` on `PATH`
+(`R RHOME`). ry does not install R itself in this design, because rig already does that well and ry
+can read its layout.[^rig]
+
+ry's runtime still needs a GNU R 4.6 installation on disk, because it loads base R's R sources from
+one instead of vendoring them (the runtime licensing decision in `.agents/memory/decisions.md`). So
+ry's runtime has an `R_HOME` of its own, assembled like this:
+
+- `bin/R` and `bin/Rscript` (on Windows also `bin/<arch>/Rterm.exe` and `Rscript.exe`) start ry, so
+  worker processes run on the runtime of the session that started them. `parallel` starts workers
+  with `file.path(R.home("bin"), "Rscript")`, and `callr` starts `R.home()`'s `bin/R` (or `Rterm` on
+  Windows).
+- `etc/` holds ry's `Makeconf` and `Renviron`, and `include/` holds ry's headers, so source builds
+  compile and link against ry.
+- `library/` links the base packages (`base`, `stats`, `utils`, `methods`, `tools`, `parallel` and the
+  rest) to the GNU R 4.6 installation, and `share/` links to that installation's `share/`.
 
 ## What the lazy loader and the analysis read
 
@@ -143,24 +175,41 @@ set up, because ry runs those as R would. A dependency loads from its installed 
 cache entry, so a session pays only for the packages and objects it touches. The project's own
 package is never installed; it loads item by item from the analysis index.
 
-The analysis can read the same library without a running R, which fixes a known weakness: the export
-manifests in `types/` come from one live R session, and a manifest from an older R turns real exports
-into false `unresolved` findings. Instead, for each package the checker reads the installed
-`DESCRIPTION` (the version), `NAMESPACE` (the export rules) and `.rdx` (the object names that an
-`exportPattern` matches). Each is a salsa input per package name, so reinstalling one package
-invalidates only the items that use it, as the [architecture](/contributing/architecture/) requires.
-Stubs gain a version range, and the checker uses the stub whose range contains the installed version;
-outside every range, the package's exports are still known, with untyped signatures. The generated
-manifests stay for base R and for projects with no library.
+The analysis reads installed packages too, which fixes a known weakness: the export manifests in
+`types/` come from one live R session, and a manifest from an older R turns real exports into false
+`unresolved` findings. The analysis never runs R, so it cannot evaluate `.Rprofile` or renv's
+`activate.R`, and it finds the library by a fixed rule instead. The first of these that applies gives
+the library paths:
+
+1. `[r] libraries` in `ry.toml`, a list of directories.
+2. When the project has `renv.lock`, renv's project library, `renv/library/<platform prefix>/`.
+3. `R_LIBS` and `R_LIBS_USER`, then the selected R's site and default libraries.
+
+As in R, the first library that holds a package wins. Paths that only `.Rprofile` computes are not
+followed, so a project that sets its library that way names it in `[r] libraries`.
+
+For each package the checker reads the installed `DESCRIPTION` (the version), `NAMESPACE` (the export
+rules) and `.rdx` (the object names that an `exportPattern` matches). The host watches the library
+directories and sets one salsa input per installed package, and a check asks for a package through a
+tracked lookup by name that returns nothing when the package is absent. No check reads a listing of
+the whole library, so reinstalling one package invalidates only the items that use it, as the
+[architecture](/contributing/architecture/) requires, and `crates/semantics/tests/test_incremental.rs`
+pins that once it is built. Stubs gain a version range, and the checker uses the stub whose range
+contains the installed version; outside every range, the package's exports are still known, with
+untyped signatures. The generated manifests stay for base R and for projects with no library.
 
 ## The corpus
 
 Build step 1 installs the benchmark closure into a GNU R library for the differential oracle. It is
 pinned with an `renv.lock` against a dated P3M snapshot, so every rerun installs the same versions.
 renv is the tool because the benchmark depends on it, so the corpus exercises the same code ry's
-runtime must later run, and because it needs nothing new. The four packages P3M does not carry
-(`azidentity`, `esgtoolkit`, `loadfast` and `polars`) come from the GitHub remotes and the extra
-repository that the benchmark declares.
+runtime must later run, and because it needs nothing new.
+
+Four packages do not come as binaries, so the corpus needs build toolchains. The extra repository
+(`ak-finccam.github.io/r-packages`) serves only source packages, and two of them, `polars` and
+`azidentity`, are written in Rust, so the corpus machine needs a Rust toolchain and the longest
+builds of the closure are theirs. `esgtoolkit` (Rcpp) and `loadfast` build from their GitHub
+remotes. The binary speedup measured below does not cover these four.
 
 ## Where each piece lands
 
@@ -168,10 +217,10 @@ The steps are those of the [runtime design](/contributing/design/r-runtime/), se
 
 | Step | Work |
 | --- | --- |
-| 1. Corpus and oracle | The closure's `renv.lock` on a dated P3M snapshot; GNU R discovery and the `[r]` settings. |
-| 1, directly after | The analysis reads installed versions, `NAMESPACE` and `.rdx`; stubs gain version ranges. |
-| 4. Full C API and packages | Binary loading under ry with the `Built:` check, `R CMD INSTALL` under ry, ry's `R_HOME` with `bin/R` and `bin/Rscript`, and `install.packages`, renv and pak running under ry. At the exit criterion the default runtime flips. |
-| 5. Lazy loading | The per-package cache with the item index and bytecode, filled on first load. |
+| 1. Corpus and oracle | The closure's `renv.lock` on a dated P3M snapshot, with Rust and C++ toolchains for the four source-only packages; GNU R discovery and the `[r]` settings. |
+| 1, directly after | The analysis finds the library by the fixed rule and reads installed versions, `NAMESPACE` and `.rdx`; stubs gain version ranges. |
+| 4. Full C API and packages | Binary loading under ry from `.rdb`, `R CMD INSTALL` under ry with the `RyBuilt:` mark, ry's `R_HOME`, and `install.packages`, renv and pak running under ry. At the exit criterion the default runtime flips. |
+| 5. Lazy loading | The per-package cache with the object index and bytecode, filled on first load. |
 
 ## What was measured
 
@@ -200,13 +249,13 @@ These are inspiration, not the bar, and the table records only what bears on the
 | pak | Solves the whole request first (with `lpSolve`), downloads in parallel, installs system requirements[^pak] | Runs as a package |
 | rv | Declarative `rproject.toml` and `rv.lock`, cache hard-linked into libraries, finds installed R versions[^rv] | Where to look for GNU R |
 | rig | Installs and switches R versions, including portable builds, and has a PubGrub project solver[^rig] | Its install layout, read as is |
-| rpx | `DESCRIPTION` as the manifest, PubGrub over version history[^rpx] | Nothing yet; relevant to a future package manager |
+| rpx | `DESCRIPTION` as the manifest, PubGrub over version history from the rrepo API[^rpx] | Nothing yet; relevant to a future package manager |
 | uv | One tool for interpreter, lockfile, cache and runner[^uv] | The target experience, if ry adds a package manager |
 
-Other tools do not affect the runtime. groundhog and packrat (renv's predecessor) are R code, which
-ry runs like any package. conda, pixi, Nix's `rPackages`, rix, r2u and bspm deliver R and packages
-through a system package manager, and the runtime meets their result as an ordinary GNU R
-installation and library tree.
+Other tools do not affect the runtime. groundhog, packrat (renv's predecessor) and bspm (which
+redirects `install.packages` to the system package manager) are R code, which ry runs like any
+package. conda, pixi, Nix's `rPackages`, rix and r2u deliver R and packages through a system package
+manager, and the runtime meets their result as an ordinary GNU R installation and library tree.
 
 rv, rig and rpx were studied from their sources, because this container's policy blocked running
 their release binaries, so none of their speed is measured here.
@@ -216,6 +265,8 @@ their release binaries, so none of their speed is measured here.
 - **A package manager of ry's own.** Whether ry ships `ry add`, `ry sync` and a lockfile in the spirit
   of uv is undecided and does not block the runtime. If it does, it must read and write `renv.lock`
   for existing projects, and since binary indexes carry no checksums it must hash artifacts itself.
+  Resolving over CRAN's history needs metadata for archived versions, which rpx gets from the rrepo
+  API and rig from an index of all versions with source hashes.[^rig]
 - **Windows and macOS** binaries follow the same rules, but their `libR` naming and loader details
   belong to the runtime's Windows open question.
 
@@ -226,8 +277,8 @@ Like [prior art](/contributing/design/prior-art/), this page is an
 document: the frontmatter carries the sources, and each claim about a tool cites its source with a
 footnote that also carries the link.
 
-[^rv]: rv repository (v0.23.3): README.md, src/sync/link.rs, src/r_finder.rs, src/renv.rs, <https://github.com/A2-ai/rv>
-[^rig]: rig repository (0.11.2-dev): README.md, website/proj-guide.qmd, website/admin-vs-user-mode.qmd, <https://github.com/r-lib/rig>
+[^rv]: rv repository (v0.23.3): README.md, src/r_finder.rs, <https://github.com/A2-ai/rv>
+[^rig]: rig repository (0.11.2-dev): README.md, website/proj-guide.qmd, website/admin-vs-user-mode.qmd, src/repos/cranlike_metadata.rs, <https://github.com/r-lib/rig>
 [^rpx]: rpx repository (2.1.1): README.md, docs/05.manage-dependencies.md, <https://github.com/rrepo-org/rpx>
 [^renv]: renv 1.3.1, <https://rstudio.github.io/renv/>
 [^pak]: pak 0.11.1 and its bundled pkgdepends, <https://pak.r-lib.org/>

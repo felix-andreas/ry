@@ -563,9 +563,10 @@ reads that index:
 - **Compiled code** is rebuilt incrementally and loaded under a new name. Registered routines are
   re-resolved, so calls through `useDynLib(.registration = TRUE)` reach the new code, and objects
   that still point into the old library keep it alive.
-- **Installed packages** use the same mechanism, with the bytecode and the item index cached at
-  install time instead of a serialized lazy-load database. ry must still read GNU R's lazy-load
-  databases and `.rds` files, because installed binary packages ship them.
+- **Installed packages** keep GNU R's installed layout, so the same directory serves GNU R and ry.
+  ry reads their lazy-load databases and `.rds` files, and builds the object index and bytecode on
+  first load into a cache of its own, never into the package
+  ([packages and R versions](/contributing/design/packaging/)).
 
 Hooks run where R runs them: `.onLoad` after the eager expressions, `.onAttach` on attach, and
 `.onUnload` before a full teardown. `ry load` (or `load_all()` called from inside ry, which ry
