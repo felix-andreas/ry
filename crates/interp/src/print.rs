@@ -291,6 +291,16 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     };
     let items = escape_unquoted(format::format_vector(subset, options.settings, options.quote, na)?, vector, options);
     if names != nil() {
+        // A one-dimensional array prints the name of its dimension as a title line, even an
+        // empty one, as a `table` of one factor shows.
+        let dimnames = values::get_attr(vector, symbols().dimnames);
+        if values::dims(vector).is_some_and(|dims| dims.len() == 1) && dimnames.kind() == SexpType::List {
+            let dimension_names = values::get_attr(dimnames, symbols().names);
+            if dimension_names.kind() == SexpType::String && length(dimension_names) >= 1 {
+                let title = values::string_at(dimension_names, 0).map(|title| title.into_owned()).unwrap_or_else(|| "NA".to_owned());
+                out(&format!("{title}\n"));
+            }
+        }
         print_named_vector(&items, names, options);
     } else {
         let right = vector.kind() != SexpType::String || options.right;

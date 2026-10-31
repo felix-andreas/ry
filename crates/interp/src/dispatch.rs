@@ -580,7 +580,17 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     }
     let next_classes = class_suffix(classes, (next_index + 1).min(class_names.len()))?;
     values::set_attr(next_classes, symbols.previous, classes)?;
-    let method_string = scalar_string(&symbol_name(method_name))?;
+    // For a group generic `.Method` has one entry per operand, empty for an operand that did
+    // not dispatch; the next method keeps that shape, as `Ops.factor` relies on.
+    let method_string = if group_name.is_some() && current != unbound() && current.kind() == SexpType::String && length(current) > 1 {
+        let name = symbol_name(method_name).into_owned();
+        let entries: Vec<String> = (0..length(current))
+            .map(|index| if char_str(current.element(index)).is_empty() { String::new() } else { name.clone() })
+            .collect();
+        string_vector(&entries)?
+    } else {
+        scalar_string(&symbol_name(method_name))?
+    };
     let vars = dispatch_vars(
         &generic_name,
         next_classes,
