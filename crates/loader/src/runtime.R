@@ -176,7 +176,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 
 .ry_apply <- function(plan, state) {
   ns <- state$ns
-  keep <- isTRUE(getOption("keep.source.pkgs", getOption("keep.source", interactive())))
+  keep <- isTRUE(getOption("keep.source", interactive()))
   if (!is.null(plan$imports)) {
     .ry_import(ns, state$name, plan$imports)
   }
@@ -501,24 +501,22 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 }
 
 # Copies bindings, not values, so a lazy definition stays a promise on the search path too:
-# whichever environment forces it first, both see the value. `touched` limits the sync to the
-# bindings a plan changed; without it, everything is resynced.
+# whichever environment forces it first, both see the value. Stale names always go, since
+# running or undoing code (S4 registrations, `assign()`) changes names no plan lists; `touched`
+# limits the copying to the bindings a plan changed, and without it everything is copied.
 .ry_sync_package_env <- function(state, touched = NULL) {
   environment <- state$package_env
   ns <- state$ns
   exported <- names(getNamespaceInfo(ns, "exports"))
+  imported <- if (isTRUE(state$export_all)) names(parent.env(ns)) else character()
   present <- names(environment)
+  stale <- present[!(present %in% exported) & !(present %in% imported)]
+  if (length(stale)) rm(list = stale, envir = environment)
   if (!is.null(touched)) {
-    gone <- touched[!(touched %in% exported) & touched %in% present]
-    if (length(gone)) rm(list = gone, envir = environment)
-    names <- touched[touched %in% exported]
-    names <- c(names, exported[!(exported %in% present)])
+    names <- c(touched[touched %in% exported], exported[!(exported %in% present)])
     if (length(names)) .ry_internal("importIntoEnv", environment, names, ns, names)
     return(invisible())
   }
-  imported <- if (isTRUE(state$export_all)) names(parent.env(ns)) else character()
-  stale <- present[!(present %in% exported) & !(present %in% imported)]
-  if (length(stale)) rm(list = stale, envir = environment)
   imported <- imported[!(imported %in% exported)]
   if (length(imported)) {
     .ry_internal("importIntoEnv", environment, imported, parent.env(ns), imported)
@@ -541,6 +539,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
     if (length(plan$bind_name)) count(length(plan$bind_name), "function rebound", "functions rebound"),
     if (length(plan$run_path)) count(length(plan$run_path), "statement rerun", "statements rerun"),
     if (length(plan$remove)) count(length(plan$remove), "binding removed", "bindings removed"),
+    if (length(plan$unregister)) {
+      count(length(plan$unregister), "registration undone", "registrations undone")
+    },
     if (!is.null(plan$imports)) "imports rebuilt"
   )
   if (!length(parts)) parts <- "exports refreshed"

@@ -251,3 +251,60 @@ fn plain_r_gets_load_all_from_the_entry_point() {
     );
     assert!(printed.contains("hi b !"), "{printed}");
 }
+
+#[test]
+fn depends_attach_and_deleted_s4_definitions_are_undone() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        (
+            "DESCRIPTION",
+            "Package: sfour\nVersion: 1.0\nDepends: stats4\n",
+        ),
+        (
+            "R/a.R",
+            "setClass(\"Pt\", representation(x = \"numeric\"))\n\
+             setGeneric(\"mag\", function(p) standardGeneric(\"mag\"))\n\
+             setMethod(\"mag\", \"Pt\", function(p) abs(p@x))\n",
+        ),
+    ]);
+    let file = root.path().join("R/a.R");
+    let script = format!(
+        "cat('attached:', 'package:stats4' %in% search(), mag(new('Pt', x = -3)), '\\n')\n\
+         writeLines('setGeneric(\"mag\", function(p) standardGeneric(\"mag\"))', {path:?})\n\
+         load_all({root:?})\n\
+         cat('left:', existsMethod('mag', 'Pt'), isClass('Pt'), '\\n')\n",
+        path = file.display().to_string(),
+        root = root.path().display().to_string(),
+    );
+    let output = ry_load(root.path(), &[&script]);
+    let printed = text(&output);
+    assert!(output.status.success(), "{printed}");
+    assert!(printed.contains("attached: TRUE 3"), "{printed}");
+    assert!(printed.contains("2 registrations undone"), "{printed}");
+    assert!(printed.contains("left: FALSE FALSE"), "{printed}");
+}
+
+#[test]
+fn source_references_point_into_the_file() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: located\nVersion: 1.0\n"),
+        (
+            "R/a.R",
+            "first <- function() 1\n\n\nlater <- function() {\n  2\n}\n",
+        ),
+    ]);
+    let script = format!(
+        "options(keep.source = TRUE)\nload_all({root:?}, full = TRUE)\n\
+         cat('at', utils::getSrcLocation(later), basename(utils::getSrcFilename(later)), '\\n')\n",
+        root = root.path().display().to_string(),
+    );
+    let output = ry_load(root.path(), &[&script]);
+    let printed = text(&output);
+    assert!(output.status.success(), "{printed}");
+    assert!(printed.contains("at 4 a.R"), "{printed}");
+}

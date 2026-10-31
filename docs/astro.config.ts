@@ -58,6 +58,7 @@ export default defineConfig({
 					items: [
 						{ slug: 'getting-started' },
 						{ slug: 'why-ry' },
+						{ slug: 'loading-packages' },
 					],
 				},
 				{

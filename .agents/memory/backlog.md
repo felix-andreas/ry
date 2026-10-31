@@ -19,6 +19,27 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: the package loader
+
+The loader works on the GNU R backend (`crates/loader`, `docs/.../loading-packages.md`). Gaps,
+roughly in order of how often a real package hits them:
+
+- **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
+  read bundled files at load time (`.onLoad`) fail until this exists.
+- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` sources them itself,
+  but `load_all()` followed by interactive use of a helper does not see it.
+- **Importers of a development package keep stale copies** of its changed bindings; only one
+  development package reloads at a time. r-runtime.md section 6 describes the targeted update.
+- **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
+  new name.
+- **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
+  would fix it.
+- **`R/unix/` and `R/windows/` subdirectories are not loaded.**
+- **A statement reading a name before its defining statement** sees, on reload, the previous load's
+  value (a fresh load fails on such code); documented as a limit.
+- **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all
+  files' names (about 8 ms at 326,000 lines). A per-file name summary could make that O(changed).
+
 ## Open: false reports and gaps found by the documentation review
 
 An adversarial review of every docs page ran each claim against the binary. The docs now state the

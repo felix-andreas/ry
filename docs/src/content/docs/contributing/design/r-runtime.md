@@ -537,40 +537,57 @@ The cost there is the install step, which is exactly what the development loop w
 
 ### ry's design
 
-ry already has the index that makes this cheap: the analysis core parses every file, knows every
-top-level item and its name (`item_spans`), and recomputes only what an edit touched. The loader
-reads that index:
+The loader is built, ahead of the runtime, on the GNU R backend that `ry repl` embeds
+([loading packages](/loading-packages) is the user page). It splits into three parts, and only the
+last one knows which runtime runs the code:
 
-- **A top-level function definition** (`f <- function(...) ...`) becomes a lazy binding: the
-  namespace holds a cell that compiles the function from its syntax node on first access. Nothing
-  is evaluated at load time, which matters because function definitions are most of a package.
-- **Every other top-level expression** (`setClass`, `R6Class`, constants built by calls, `S7`
-  classes, registration calls) runs eagerly in `Collate` order, as R would, because it may have
-  effects. A constructor call that the analysis proves pure (for example a constant `list()` or a
-  call to a known pure base function) may also become lazy.
-- **Imports keep R's copy semantics, and a development reload refreshes them.** In GNU R an import
-  environment holds copies, and code depends on that: `assignInNamespace`, unlocking and reassigning
-  an exporter's binding, and testthat's `local_mocked_bindings` (which patches imports) all behave as
-  they do because of it. So imports stay copies. When `ry load` reloads a package it already knows,
-  from the analysis, which importers hold a copy of each changed binding, and it updates exactly those
-  copies, which removes loadfast's full-reload cascade without changing what an installed package
-  sees.
-- **Reload is a diff over items.** The analysis knows which items changed, appeared or disappeared,
-  so reloading rebinds the changed ones, removes the deleted ones, and reruns only the eager
-  expressions that changed or that read a changed binding. Stale symbols, loadfast's documented
-  limitation, cannot arise. `NAMESPACE` and `DESCRIPTION` are inputs to the same analysis, so a new
-  export or import is just another change.
-- **Compiled code** is rebuilt incrementally and loaded under a new name. Registered routines are
-  re-resolved, so calls through `useDynLib(.registration = TRUE)` reach the new code, and objects
-  that still point into the old library keep it alive.
+- **The item index** (`semantics::load_index`) is derived from the analysis: per item a content
+  hash, whether it is a function definition, the S4, R6 and S3 registrations it makes, and the names
+  it reads while it runs; per file the text R reads and each item's position; per package which
+  names are lazy. It is incremental like the rest of the analysis
+  ([architecture](/contributing/architecture/#the-package-load-index)).
+- **The plan** (`crates/loader`) is the diff between the index a session has loaded and the current
+  one: what to bind lazily, which statements to run in which order, which bindings to remove, which
+  registrations to undo or make, and whether imports, exports, data, compiled code and hooks need
+  work. It says nothing about how.
+- **A backend** applies the plan. The GNU R backend sends it to R as an RDS file, and R code
+  installed in the session (`runtime.R`) applies it. ry's runtime will apply the same plan natively,
+  so neither the index nor the diff changes when it arrives.
+
+The rules the implementation settled:
+
+- **A function definition is lazy when its name has exactly one top-level writer.** The namespace
+  holds a promise that parses and evaluates only that definition on first access. On GNU R the
+  promises are made in C by the `makeLazy` internal that installed packages use, so binding 24,500
+  definitions takes about 30 ms. Any second writer, conditional or replacing (`f <- memoise(f)`),
+  makes every writer of the name eager, in order.
+- **Every other top-level expression runs eagerly in `Collate` order**, then the files `Collate`
+  leaves out in C-locale order, as `load_all` does. Making a provably pure constructor call lazy is
+  not implemented.
+- **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
+  copies other development packages hold of a changed binding is not implemented; a session loads
+  one development package at a time without that cascade.
+- **A reload is a diff over items.** A changed or new function is rebound and a deleted one removed.
+  Statements in a changed file are matched to the file's old statements by content, in order, so an
+  inserted statement runs alone while two swapped writers of a name rerun. A statement reruns when it
+  is new, when it read a binding that changed while it ran (it holds the old value), or when it
+  writes a name that changed (the last writer must win again). A rerun statement that reads a name
+  it or a later statement rewrites first reruns that name's earlier writers, so `f <- memoise(f)`
+  sees `f` as at load time. A reorder of files by `Collate` falls back to a full load. The property
+  test in `crates/loader/tests/test_reload_fuzz.rs` checks all of this against a fresh load.
+- **Compiled code** is built by pkgbuild into `src/` and loaded, and a rebuild unloads the previous
+  library first, as `load_all` does. Loading a rebuild under a new name, so objects that point into
+  the old library stay valid, is not implemented.
 - **Installed packages** keep GNU R's installed layout, so the same directory serves GNU R and ry.
   ry reads their lazy-load databases and `.rds` files, and builds the object index and bytecode on
   first load into a cache of its own, never into the package
-  ([packages and R versions](/contributing/design/packaging/)).
+  ([packages and R versions](/contributing/design/packaging/)). This part waits for the runtime.
 
-Hooks run where R runs them: `.onLoad` after the eager expressions, `.onAttach` on attach, and
-`.onUnload` before a full teardown. `ry load` (or `load_all()` called from inside ry, which ry
-intercepts) is the user-facing entry point.
+Hooks run where R runs them: `.onLoad` after the eager expressions and S3 registration, `.onAttach`
+on attach. A reload runs `.onLoad` again only when the `.onLoad` definition changed, because it
+usually sets options or registers things once. `ry load` and `ry repl` are the entry points, and
+`load_all()`, attached in `tools:ry`, serves both ry's console and plain R sessions; ry does not
+intercept `devtools::load_all()`.
 
 ## 7. The table type
 
@@ -759,7 +776,8 @@ Each step ends with something real running, and each one is a large, whole chang
    installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
-   `loadfast` for the code bases.
+   `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
+   exists it applies the same plans.
 6. **Inline syntax, agreement warnings and strict mode,** in the parser, the checker and the
    runtime, with the runtime type summary and body facts.
 7. **The JIT.** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
