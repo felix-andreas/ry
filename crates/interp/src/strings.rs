@@ -2292,6 +2292,12 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
         // In POSIX syntax `.` matches a newline too.
         output.push_str("(?s)");
     }
+    // TRE runs a pattern with approximate-matching settings on its approximate matcher, which
+    // ignores minimal repetition, so such a pattern's `*?` matches as `*` does.
+    let approximate = syntax == Syntax::Extended
+        && (0..chars.len()).any(|index| {
+            (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
+        });
     let mut groups: Vec<usize> = Vec::new();
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
     let mut atom: Option<usize> = None;
@@ -2354,12 +2360,27 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                     output.push(character);
                     quantified = true;
                     let modifier = chars.get(index + 1).copied();
-                    if modifier == Some('?') || (syntax == Syntax::Perl && modifier == Some('+')) {
+                    if approximate && modifier == Some('?') {
+                        index += 1;
+                    } else if modifier == Some('?')
+                        || (syntax == Syntax::Perl && modifier == Some('+'))
+                    {
                         output.extend(modifier);
                         index += 1;
                     }
                 }
             },
+            '{' if approximate && approximate_settings(&chars, index).is_some() => {
+                // Settings without a `~` cost limit allow no errors, so the atom matches
+                // exactly; a real cost limit needs an approximate matcher ry does not have.
+                if let Some((next, exact)) = approximate_settings(&chars, index) {
+                    if !exact {
+                        problem.get_or_insert("approximate matching is not supported");
+                    }
+                    index = next;
+                }
+                continue;
+            }
             '{' => match (parse_interval(&chars, index, syntax), atom) {
                 (Some((interval, next)), Some(atom_start)) => {
                     if quantified {
@@ -2372,7 +2393,9 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                     quantified = true;
                     index = next;
                     if chars.get(index) == Some(&'?') {
-                        output.push('?');
+                        if !approximate {
+                            output.push('?');
+                        }
                         index += 1;
                     }
                     continue;
@@ -2954,6 +2977,33 @@ fn translate_verb(chars: &[char], index: usize, output: &mut String) -> usize {
 
 /// Reads an interval `{m}`, `{m,}` or `{m,n}` at `index` into the `regex` crate's form, with
 /// POSIX's `{,n}` written as `{0,n}`. Returns `None` when the brace does not start an interval.
+/// TRE's approximate-matching settings at a `{`, such as `{+}`, `{-2}` or `{~1,+2}`: each
+/// item is one of `+`, `-`, `#` or `~` with an optional count. Returns the index after the
+/// closing brace and whether the settings allow no errors (no `~` limit, or `~0`).
+fn approximate_settings(chars: &[char], index: usize) -> Option<(usize, bool)> {
+    if chars.get(index) != Some(&'{') {
+        return None;
+    }
+    let mut cursor = index + 1;
+    let mut exact = true;
+    let mut items = 0;
+    loop {
+        match chars.get(cursor)? {
+            '}' if items > 0 => return Some((cursor + 1, exact)),
+            ',' | ' ' if items > 0 => cursor += 1,
+            &operator @ ('+' | '-' | '#' | '~') => {
+                cursor += 1;
+                let count = read_number(chars, &mut cursor);
+                if operator == '~' && count != Some(0) {
+                    exact = false;
+                }
+                items += 1;
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn parse_interval(chars: &[char], index: usize, syntax: Syntax) -> Option<(String, usize)> {
     let mut cursor = index + 1;
     let minimum = read_number(chars, &mut cursor);

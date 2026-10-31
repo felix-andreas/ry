@@ -460,7 +460,7 @@ impl crate::boundary::Handout for Option<Sexp> {
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
     builtin(".External", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
-    builtin(".External2", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
+    builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
     builtin(".Call.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
     builtin(".External.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
@@ -484,7 +484,16 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
         return Ok(value);
     }
-    native_call(call.call, &tagged_values(call), kind)
+    native_call(call, kind, false)
+}
+
+/// `.External2`, whose routines also receive the call, the primitive and the calling
+/// environment.
+unsafe fn dot_external2(call: &Call<'_>) -> ApiResult<Sexp> {
+    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+        return Ok(value);
+    }
+    native_call(call, RoutineKind::External, true)
 }
 
 /// `.C` and `.Fortran`, routed like [`dot_call`].
@@ -496,20 +505,18 @@ unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
         return Ok(value);
     }
-    native_call(call.call, &tagged_values(call), kind)
+    native_call(call, kind, false)
 }
 
 fn tagged_values(call: &Call<'_>) -> Vec<(Sexp, Sexp)> {
     call.args.iter().map(|arg| (arg.tag, arg.value)).collect()
 }
 
-/// `.Call` and `.External` for the interpreter: `arguments` are the evaluated arguments with
-/// their tags, the first being `.NAME`.
-pub unsafe fn native_call(
-    call: Sexp,
-    arguments: &[(Sexp, Sexp)],
-    kind: RoutineKind,
-) -> ApiResult<Sexp> {
+/// A native routine through `.Call`, `.External`, `.C` or `.Fortran`, with `external2` for an
+/// `.External` routine that `.External2` calls. The first argument is `.NAME`.
+unsafe fn native_call(builtin_call: &Call<'_>, kind: RoutineKind, external2: bool) -> ApiResult<Sexp> {
+    let call = builtin_call.call;
+    let arguments = &tagged_values(builtin_call);
     let what = kind.interface();
     let Some(((_, name), rest)) = arguments.split_first() else {
         return Err(error_in(call, "'.NAME' is missing"));
@@ -630,7 +637,15 @@ pub unsafe fn native_call(
                 .heap
                 .alloc_triple(SexpType::Language, *name, list, nil)?;
             runtime().heap.root(list);
-            call_native(function, &[list], what)
+            if external2 {
+                call_native(
+                    function,
+                    &[call, builtin_call.op, list, builtin_call.env],
+                    ".External2",
+                )
+            } else {
+                call_native(function, &[list], what)
+            }
         }
         RoutineKind::C | RoutineKind::Fortran => {
             if values.len() > 65 {
