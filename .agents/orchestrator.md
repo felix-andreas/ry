@@ -62,6 +62,8 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Runtime step 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): tier-0 bytecode interpreter and base R loaded from the user's GNU R installation.
 - Runtime step 4a (session_0111kWqESzY2bDUMNQAL2or6, Opus): full C API surface, ALTREP, BLAS/LAPACK, connections, package install (owns `crates/libr`).
 - Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa (branch `feat/lazy-loader`): item index, lazy bindings and item-level reload, on the GNU R backend first.
+- Runtime step 8 core (session_0111kWqBmuEsPtQfPJkP31Vx, Opus): the polars-backed table engine crate, query lowering to Polars lazy plans, ALTREP column seam, checker support, and the benchmark harness against data.table.
+- Analysis at benchmark scale (session_0111kWqBbFHVfcMShb4eK3RJ, Sonnet): full-size benchmark code bases, cold and incremental `ry check` measurements, fixes in the analysis crates, and a committed benchmark harness.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -69,11 +71,9 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 1. Finish step 4: all 232 corpus packages pass their own tests.
 2. Inline syntax in the runtime.
 3. The Cranelift JIT.
-4. The polars-backed table type.
 
 Follow-ups:
 
-- Run `ry check` over the generated benchmark code bases and file the findings.
 - Install R 4.6 via rig for data.table's version check.
 - Recheck the Dependabot alerts.
 - Run a docs pass after the feature PRs land.
