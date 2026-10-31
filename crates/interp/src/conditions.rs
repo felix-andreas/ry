@@ -369,7 +369,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".getRestart", 1, do_get_restart),
     internal(".invokeRestart", 2, do_invoke_restart),
     internal(".addTryHandlers", 0, |_| unsafe { Ok(nil()) }).invisible(),
-    internal(".addGlobHands", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal(".addGlobHands", 5, |_| unsafe { Ok(nil()) }).invisible(),
     internal("warnings", 0, |_| unsafe { Ok(nil()) }),
     internal("interruptsSuspended", -1, |_| unsafe { values::scalar_bool(false) }),
 ];

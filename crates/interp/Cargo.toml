@@ -17,6 +17,7 @@ rustc-hash.workspace = true
 regex.workspace = true
 fancy-regex = { version = "0.20", features = ["leftmost_longest"] }
 flate2 = "1"
+lzma-rs = "0.3"
 libc = "0.2"
 stacker.workspace = true
 unicode-width.workspace = true

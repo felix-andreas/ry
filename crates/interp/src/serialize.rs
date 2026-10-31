@@ -942,15 +942,17 @@ fn decompress(record: &[u8], kind: i32) -> R<Vec<u8>> {
         _ => (b'1', body),
     };
     let mut output = Vec::with_capacity(expected);
+    let corrupt = |failure: &dyn std::fmt::Display| error(format!("lazy-load database is corrupt: {failure}"));
     match method {
-        b'1' | b'Z' if kind != 3 || method == b'1' => {
-            ZlibDecoder::new(payload)
-                .read_to_end(&mut output)
-                .map_err(|failure| error(format!("lazy-load database is corrupt: {failure}")))?;
+        b'1' => {
+            ZlibDecoder::new(payload).read_to_end(&mut output).map_err(|failure| corrupt(&failure))?;
         }
         b'0' => output.extend_from_slice(payload),
+        // A raw LZMA2 stream (GNU R writes no xz container), which `datasets` and packages built
+        // with `--data-compress=xz` use.
         b'Z' => {
-            return Err(error("xz-compressed lazy-load databases are not supported yet"));
+            let mut input = std::io::BufReader::new(payload);
+            lzma_rs::lzma2_decompress(&mut input, &mut output).map_err(|failure| corrupt(&failure))?;
         }
         b'2' => return Err(error("bzip2-compressed lazy-load databases are not supported yet")),
         _ => {

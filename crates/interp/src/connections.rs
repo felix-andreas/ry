@@ -17,7 +17,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("gzfile", 4, |call| unsafe { open_connection(call, Class::Gzfile) }),
     internal("bzfile", 4, |call| unsafe { open_connection(call, Class::Gzfile) }),
     internal("xzfile", 4, |call| unsafe { open_connection(call, Class::Gzfile) }),
-    internal("url", 5, |call| unsafe { Err(call.error("url connections are not supported")) }),
+    internal("url", 6, |call| unsafe { Err(call.error("url connections are not supported")) }),
     internal("textConnection", 5, do_text_connection),
     internal("textConnectionValue", 1, do_text_connection_value),
     internal("open", 3, do_open).invisible(),
