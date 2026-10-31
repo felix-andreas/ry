@@ -1,8 +1,8 @@
 # Overview
 
-ry is a language tool for R, shipped as a language server and a command-line tool. It aims to be world class at three things: code analysis on the level of rust-analyzer, code formatting, and linting. A static type checker sits at the core of the analysis.
+ry is becoming a full, backwards-compatible reimplementation of R, extended with ry's static typing (user directive). Today it ships as a language server and a command-line tool that aim to be world class at code analysis on the level of rust-analyzer, code formatting, and linting, with a static type checker at the core of the analysis. That tooling stays, and the runtime grows beside it.
 
-No static type checker exists for R, so ry defines its own typing semantics, and the typing reference at `docs/src/content/docs/reference/type-system.md` is their contract. R has no syntax for type annotations either, so annotations live in `#:` comments written in a JSDoc-like notation. Annotated code therefore stays ordinary R that every other tool can read.
+No static type checker exists for R, so ry defines its own typing semantics, and the typing reference at `docs/src/content/docs/reference/type-system.md` is their contract. R has no syntax for type annotations either, so annotations currently live in `#:` comments written in a JSDoc-like notation, which keeps annotated code ordinary R that every other tool can read. The mandate below adds an inline annotation syntax beside them.
 
 The crates live in `crates/`:
 
@@ -17,10 +17,43 @@ AI agents drive development here, with light human steering. They keep two writt
 
 # Goals
 
-- Deliver diagnostics for R in the style of Rust and Elm: clear, precise, and actionable. Prefer plain user-facing wording to internal or theory-heavy language, and precise source ranges to coarse fallback ones.
-- Provide full editor tooling (hover, completion, goto-definition, references, rename, and inlay hints), and preserve the semantic information those features need whenever practical.
-- Provide first-class formatting and linting alongside analysis.
-- Scale to very large code bases, beyond 300,000 lines of code. Performance matters.
+## The mandate (user directive)
+
+- Existing R code and packages must keep working unchanged.
+- An inline type annotation syntax exists alongside the `#:` comment annotations. It is enabled by default and can be turned off, but ry warns while it is off.
+- ry warns when a comment annotation and an inline annotation disagree.
+- A strict mode rejects untyped code.
+- Package development loading in the style of `devtools::load_all` is built in, and it lazy-loads only what a session actually needs. [loadfast](https://github.com/finccam/loadfast) prototypes the idea, and ry does it cleanly.
+- A built-in, typed table type replaces data.table and must outperform it. It may be backed by polars.
+- The performance bar is a JIT on the level of Bun.
+
+The tooling goals still hold. Diagnostics follow the style of Rust and Elm: clear, precise, and actionable, in plain user-facing wording rather than internal or theory-heavy language, and with precise source ranges rather than coarse fallback ones. Editor tooling stays complete (hover, completion, goto-definition, references, rename, and inlay hints), so preserve the semantic information those features need whenever practical. Formatting and linting stay first class.
+
+## The C API comes first
+
+Most packages that real R code depends on ship compiled C, C++ or Rust code written against R's C API: `SEXP` values, the memory-protection discipline, and `.Call`. Full compatibility therefore means implementing that C API, not only R's language semantics. Because that interface constrains the object model, the memory manager and the calling convention, it shapes the architecture more than the JIT does, so design it first and let the JIT fit around it.
+
+## Benchmark
+
+Three synthetic code bases, one each for finance, data science, and biostatistics, measure progress. Each has about 300,000 lines in about 500 files, and each uses exactly this dependency set:
+
+```
+Imports:
+    abind, assertthat, azidentity (>= 1.1.0), AzureAuth, AzureKeyVault, AzureStor, AzureTableStor,
+    brio, cachem, callr, cli, data.table, DBI, devtools, digest, doParallel, esgtoolkit (>= 1.0.0),
+    FLSSS, foreach, fs, git2r, httr, httr2, jsonlite, lgr, loadfast, lubridate, memoise, methods,
+    NlcOptim, odbc, ompr, ompr.roi, openxlsx, parallel, partitions, pdftools, PerformanceAnalytics,
+    plumber, polars, pool, progress, purrr, quadprog, R6, rappdirs, Rblpapi, RcppDE, RcppSimdJson,
+    readr, readxl, renv, Rglpk, rlang, rmgarch, ROI.plugin.highs, rugarch, rvest, snakecase, stats,
+    stringr, testthat, tools, tryCatchLog, utils, uuid, withr, xml2, xts, YieldCurve, zeallot, zoo
+Remotes:
+    github::Techtonique/esgtoolkit@v1.0.0,
+    github::finccam/loadfast
+Additional_repositories:
+    https://ak-finccam.github.io/r-packages
+```
+
+ry must run these code bases, and its analysis must check them fast enough for incremental editing.
 
 # How to write
 
@@ -65,23 +98,42 @@ The third is the one to write:
 
 > R's parser rewrites `x |> f(y)` into `f(x, y)` before anything runs, so the pipe types exactly like that call. The piped value becomes the first positional argument, and every call rule applies to it: arity, argument compatibility, and overload selection. A chain composes from left to right, and a type error in the piped value is reported on the left-hand expression.
 
-# Ownership mandate
+# Process (user directives)
 
-The user has delegated full technical ownership to the agents: empty the backlog and bring the project to the best possible state, which means rust-analyzer quality. That covers code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for a safe, minimal diff. Bring code to its intended shape, large refactors included, and take responsibility for the outcome.
+These rules replace the older ones that kept the correctness gates fixed, ran the gate before a change could land, allowed one subagent at a time, and sent all work through pull requests.
 
-Design decisions that once needed a user check-in are now yours to make. Decide, implement, and record the decision and its rationale in `.agents/memory/decisions.md` (or in the docs page it belongs to) in the same session.
+## Velocity first
 
-Work lands through pull requests (user directive).
+Velocity is the top priority, so do not de-risk. Committing broken code to main is allowed, and so is not waiting for CI. Main may stay broken for the next two to three weeks, because stability comes after something works. Fixtures and tests are still the semantics contract and still get written and kept honest, but they do not block landing during this phase.
 
-# Do not think like a human (user directive)
+Human engineers stage work, keep diffs small, and avoid rewrites that look scary, because their time is scarce and starting over is expensive for them. Neither is true for an agent, so here those instincts pick the wrong strategy.
 
-Human engineers de-risk work: they stage it, keep diffs small and reviewable, and shy away from rewrites that look scary. Those instincts exist because a human's time is scarce and starting over is expensive for them. Neither is true for an agent, so here those instincts pick the wrong strategy.
-
-- **Go directly to the intended end shape in one change**, however large and invasive. If the target design calls for it, break the whole codebase mid-change and then fix everything (compiler errors, warnings, tests) in one sweep. Splitting a redesign into small steps to manage risk trades the right design for ceremony.
-- **Never choose a watered-down design because the full version is a big change.** If the full version is right, build the full version. Starting over after a failed attempt is cheap; shipping the wrong shape is not.
+- **Go directly to the intended end shape in one change**, however large and invasive. Splitting a redesign into small steps to manage risk trades the right design for ceremony.
+- **Refactor strategically as soon as the direction looks wrong.** A large architectural refactor is encouraged, not something to postpone.
+- **Never choose a watered-down design because the full version is a big change.** Starting over after a failed attempt is cheap; shipping the wrong shape is not.
 - **File size is not a problem.** Do not split, reorganize, or flag a file just because it is large (the LSP server module is fine as one file). Split only when a genuinely new logical component appears.
-- **The correctness gates do not move.** The fixture suites, witnesses, clippy, and fmt must be green before a change lands. The point is to reach green in one big pass, not to shrink the change.
-- **Run the gate once, after the whole change.** For an agent, running the gate takes longer than making the change, so do not run it after each edit. Give subagents the same instruction.
+
+## Roles
+
+- **The orchestrating session** plans, delegates, reviews reports, decides, and merges. It does not do the work itself.
+- **One in-session worker subagent** takes small tasks and commits directly to main.
+- **Separate cloud sessions** take large tasks. Each delivers a large pull request (at least about 2,000 changed lines, and always one whole logical step), and a reviewer agent checks it.
+- **One persistent merge subagent** orchestrates merging those pull requests.
+
+Delegated work runs on Sonnet at high effort by default. A hard problem gets Opus at high effort, and an exceptionally hard one gets Opus at extra-high effort.
+
+Pull requests are for work from other sessions, so the orchestrator and its in-session worker push straight to main. Agents may merge pull requests. Commit and push after each logical step rather than saving everything for one final commit. Commit messages and pull request titles follow Conventional Commits, such as `refactor: drop the legacy resolver` or `docs: rewrite the tour`.
+
+## Ownership
+
+The user has delegated full technical ownership to the agents: code structure, crate boundaries, naming, performance, pipeline architecture, semantic correctness, and judged deduplication. Do not optimize for a safe, minimal diff. Design decisions that once needed a user check-in are yours to make: decide, implement, and record the decision and its rationale in `.agents/memory/decisions.md` (or in the docs page it belongs to) in the same session.
+
+## Standing constraints
+
+- Keep `roughly.toml` support and the REPL.
+- Never edit `NOTES.md`, which is human-maintained, or the landing-page hero animation, which is user-owned.
+- Do not edit `.github/workflows/*`, because the agent token lacks workflow scope.
+- Never put model identifiers in commits or pull requests.
 
 # Incremental analysis
 
@@ -90,12 +142,6 @@ The analysis core is incremental. `semantics` is a salsa database, so queries ar
 The architecture page at `docs/src/content/docs/contributing/architecture.md` is the contract. Read it before you touch the analysis core or the server's scheduling, and keep it accurate. Deferred performance work lives in `.agents/memory/backlog.md`.
 
 A check must never read a project-wide map directly, because then every edit anywhere would invalidate it. Go through a per-name or per-item tracked projection instead, and pin the property in `crates/semantics/tests/test_incremental.rs`.
-
-# Working autonomously
-
-When you work autonomously toward a larger goal (a workflow, a multi-step change, anything that spans several logical units), commit and push after each logical step rather than saving everything for one final commit. A single large, invasive redesign counts as one step: commit it once it is green, not in fragments along the way.
-
-Run one subagent at a time (user directive). Commit messages and pull request titles follow Conventional Commits, such as `refactor: drop the legacy resolver` or `docs: rewrite the tour`.
 
 # Knowledge base and documentation
 
@@ -204,7 +250,7 @@ The recorded decision must state the previous source of truth, what was duplicat
 - Use the lightest fixture change that captures the failing shape.
 - Read the testing page (`docs/src/content/docs/contributing/testing.md`) before you change the fixture harness or add a fixture suite.
 - Run a single fixture case with `just fixture group__case [test-binary] [package]`, which defaults to `test_typing_fixtures` in `semantics`. The testing page lists every suite's test target.
-- While iterating, prefer focused crate tests such as `cargo test -p semantics`. `just gate` is the full check to run before a change lands.
+- While iterating, prefer focused crate tests such as `cargo test -p semantics`. `just gate` runs the full check, which shows the whole picture but does not block landing during this phase.
 - A fixture's `group__case` name is its test identity, so keep it stable, and reject a duplicate name across the suite instead of letting one case silently shadow another.
 - Treat fixtures as the desired semantics contract, not as a regression suite that preserves known-wrong behavior. Review every expectation change deliberately, update an expectation only when wording or behavior improves on purpose, and never commit an intentionally wrong outcome just to keep the suite green.
 - Some fixture cases are unreasonable or no longer worth keeping. Clean such a case up rather than treating it as authoritative by default.
