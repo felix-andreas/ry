@@ -1,0 +1,36 @@
+[stdout]
+| [1] "THE QUICK BROWN FOX"
+| [1] 19
+| [1] "quick"
+| [1] "The"   "quick" "brown" "fox"  
+| [1] "a-b"
+| [1] "x1" "x2" "x3"
+| [1] "a+b"
+| [1] " 3.14|ab    |007|1.234568e+04|ff"
+| [1] "word has 4 chars"
+| [1] "The quick br0wn f0x"
+| [1] "quick The brown fox"
+| [1] "he"
+| [1]  TRUE FALSE
+| [1] "one" "two"
+| [1] "padded"
+| [1] "3.142"
+| [1] "00000042"
+| [1] "1,234,568"
+| [1] "TRUE"
+| [1] "  1" " 10" "100"
+| [1] "-003.500"
+| [1] "A" "B" "C" "D" "E"
+| [1] "abc"
+| [1] "xxyyzz"
+| [1] "o" "l" "l" "e" "h"
+| [1] TRUE
+| [1] "%"
+| [1]  1 NA  3
+| [1] "abc" "bcd" "cde"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("abc", "bcd", "cde")

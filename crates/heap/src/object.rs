@@ -115,7 +115,7 @@ impl SexpType {
             SexpType::ExternalPtr => "externalptr",
             SexpType::WeakRef => "weakref",
             SexpType::Raw => "raw",
-            SexpType::Object => "object",
+            SexpType::Object => "S4",
             SexpType::Binding => "binding",
             SexpType::Free => "FREESXP",
         }
@@ -265,6 +265,10 @@ pub mod gp {
     pub const BINDING_LOCKED: u16 = 1 << 14;
     pub const ACTIVE_BINDING: u16 = 1 << 15;
     pub const FRAME_LOCKED: u16 = 1 << 14;
+    /// An environment that is a closure call's frame. Bindings appear in such frames all the
+    /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
+    /// through one.
+    pub const FUNCTION_FRAME: u16 = 1 << 8;
 }
 
 pub(crate) mod gc_bits {
@@ -286,6 +290,9 @@ pub(crate) mod flag_bits {
     /// The object was preallocated by the heap (`R_NilValue`, `NA_STRING`, the environments).
     /// Allocated by `R_allocResizableVector`, so its length may change within its capacity.
     pub const RESIZABLE: u8 = 1 << 2;
+    /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
+    /// `*tmp*` value of a complex assignment, which must not make the target look shared.
+    pub const UNTRACKED: u8 = 1 << 3;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.

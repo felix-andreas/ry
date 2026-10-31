@@ -1,0 +1,19 @@
+[stdout]
+| body
+| first
+| second
+| cleanup
+| caught: boom 
+| [1] 300
+| [1] "outer"
+| [1] "positive"
+| [1] "non-positive"
+| [1] 5
+| [1] FALSE
+| [1] "from on.exit"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "from on.exit"

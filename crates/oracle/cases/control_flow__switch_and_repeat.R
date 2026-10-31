@@ -1,0 +1,15 @@
+f <- function(x) switch(x, a = "apple", b = , c = "b or c", "other")
+f("a"); f("b"); f("c"); f("z")
+switch(2, "one", "two", "three")
+is.null(switch(4, "one", "two"))
+g <- function(type) switch(type, num = 1, chr = "x", stop("unknown type: ", type))
+tryCatch(g("bad"), error = function(e) conditionMessage(e))
+i <- 0; repeat { i <- i + 1; if (i %% 2 == 0) next; if (i > 7) break; cat(i, "") }; cat("\n")
+n <- 10; steps <- 0; while (n != 1) { n <- if (n %% 2 == 0) n / 2 else 3 * n + 1; steps <- steps + 1 }; steps
+for (x in list(1, "a", TRUE)) cat(class(x), "")
+cat("\n")
+for (nm in names(c(p = 1, q = 2))) cat(nm, "")
+cat("\n")
+res <- for (i in 1:3) i; is.null(res)
+z <- sapply(1:5, function(k) if (k > 3) "big" else "small"); z
+ifelse(c(1, NA, 3) > 2, "yes", "no")

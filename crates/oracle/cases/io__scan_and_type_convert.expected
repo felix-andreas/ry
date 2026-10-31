@@ -1,0 +1,182 @@
+[stdout]
+| [1] 1 2 3 4 5
+| [1] "a"   "b"   "c d" "e f"
+| [1] "a" "b" ""  "d" ""  "e" "f" "" 
+| [1]  1  2 NA  4
+| [1] "x\"y" "z"   
+| [1] "ab" "cd" "ef"
+| [1] "a'b" "c"  
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] " a " " b " "c"  
+| [1] "a" "b" "c"
+| [1] 1.0 2.5 3.0
+| [1]  TRUE FALSE  TRUE FALSE    NA
+| [1]  1  2 NA  4 NA
+| $name
+| [1] "a" "b" "c"
+| 
+| $val
+| [1] 1 2 3
+| 
+| [[1]]
+| [1] "a" "b" "c"
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| [[1]]
+| [1] "a" "b" "c"
+| 
+| [[2]]
+| [1]  1 NA  3
+| 
+| [1] "Error: line 2 did not have 2 elements"
+| [[1]]
+| [1] "a" "b"
+| 
+| [[2]]
+| [1] 1 2
+| 
+| [1] "Error: scan() expected 'a real', got 'x'"
+| [1] 1 2 3 4
+| [1] 1 2 3 4
+| [1] 3 4 5 6
+| [[1]]
+| [1]  1 NA  3
+| 
+| [[2]]
+| [1]  2 NA  4
+| 
+| [1] 1+2i 3+0i
+| [1]   26.0 1000.0    0.5   -Inf    NaN    Inf
+| [1] "a\nb" "c"   
+| [1] "a"    "b"    "c\\d"
+| [1] NA NA
+| numeric(0)
+| [1] "Error: scan() expected 'an integer', got '3.5'"
+| [1] "Error: scan() expected 'a logical', got 'abc'"
+| [1] "Warning: EOF within quoted string"
+| [1] "a"  "'b" "c'" "d" 
+| [[1]]
+| [1] 1 3
+| 
+| [[2]]
+| NULL
+| 
+| [1] "Error: line 1 did not have 2 elements"
+| [[1]]
+| [1] "a" "x" "b"
+| 
+| [[2]]
+| [1]  1 NA  2
+| 
+| [[1]]
+| [1] "a" ""  "b"
+| 
+| [[2]]
+| [1]  1 NA  2
+| 
+| [1] "  a b  " "c"      
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] " NA "
+| 
+| [[3]]
+| [1] 3
+| 
+| [1] "Error: scan() expected 'an integer', got '2147483648'"
+| [1] 0a ff
+| [1] "x"   "y\"" "z"  
+| [1] "abc" "d"  
+| [1] 1 2 3
+| [[1]]
+| [1] "a" "b"
+| 
+| [[2]]
+| [1] 1 2
+| 
+| [1] 3 2 4
+| [1] 3 2 2 5
+| [1] 2 3 1
+| [1] NA  3  2
+| [1] 2 0 2
+| [1]  1  2 NA
+| [1] "integer"
+| [1]  1 NA  3
+| [1] "integer"
+| [1] 1.5 2.0  NA
+| [1] "double"
+| [1]  TRUE FALSE  TRUE FALSE
+| [1] "logical"
+| [1] "T"     "F"     "TRUE"  "false"
+| [1] "character"
+| [1] TRUE   NA   NA
+| [1] "logical"
+| [1] NA NA NA
+| [1] "logical"
+| logical(0)
+| [1] "logical"
+| [1] 1000   16 -Inf  NaN
+| [1] "double"
+| [1] 1.50 2.25
+| [1] "double"
+| [1] "1.5"  "2.25"
+| [1] "character"
+| [1]  2147483647 -2147483647
+| [1] "integer"
+| [1] 2147483648
+| [1] "double"
+| [1] -2147483648
+| [1] "double"
+| [1] 1 2
+| [1] "double"
+| [1] 1+2i 3+0i
+| [1] "complex"
+| [1] "a" "b" "1"
+| [1] "character"
+| [1] 1 2
+| [1] "integer"
+| [1] 0.1234568
+| [1] "double"
+| [1] "0.1234567890123456789"
+| [1] "character"
+| [1] "accuracy loss in conversion from \"0.1234567890123456789\" to numeric"
+| [1]  1 NA  3
+| [1] "integer"
+| [1] "NA" NA  
+| [1] "character"
+| [1] Inf Inf Inf  NA
+| [1] "double"
+| [1] "1L" "2" 
+| [1] "character"
+| [1] 0.5 5.0 5.0
+| [1] "double"
+| [1] "TRUE" "1"   
+| [1] "character"
+| [1] b    a    c    a    <NA>
+| Levels: a b c
+| [1] x   y
+| Levels:  x y
+| [1] 1 2
+|    [,1] [,2]
+| r1    1    3
+| r2    2    4
+| $a
+| [1] 1 2
+| 
+| $b
+| [1] "x" "y"
+| 
+|   a b
+| 1 1 x
+| 2 2 y
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(a = 1:2, b = structure(1:2, levels = c("x", "y"
+| ), class = "factor")), row.names = c(NA, -2L), class = "data.frame")

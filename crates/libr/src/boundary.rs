@@ -28,19 +28,9 @@ use std::{
 pub type DlFunc = unsafe extern "C" fn() -> *mut c_void;
 pub type ApiResult<T> = Result<T, Unwind>;
 
-/// A non-local exit in flight.
-#[derive(Debug)]
-pub enum Unwind {
-    Error(RError),
-    Interrupt,
-}
-
-#[derive(Debug)]
-pub struct RError {
-    pub message: String,
-    /// The call the error is reported against, or `R_NilValue`.
-    pub call: Sexp,
-}
+/// A non-local exit in flight. It is the interpreter's type, so an unwind crosses between R code
+/// and native code unchanged.
+pub use interp::unwind::{RError, Unwind};
 
 pub fn error(message: impl Into<String>) -> Unwind {
     Unwind::Error(RError {
@@ -54,12 +44,6 @@ pub fn error_in(call: Sexp, message: impl Into<String>) -> Unwind {
         message: message.into(),
         call,
     })
-}
-
-impl From<heap::HeapError> for Unwind {
-    fn from(error: heap::HeapError) -> Unwind {
-        crate::boundary::error(error.to_string())
-    }
 }
 
 unsafe extern "C" {
@@ -358,8 +342,13 @@ pub fn warn(message: impl Into<String>) {
 /// Prints an unwind the way R's top level does and records it for `R_curErrorBuf`.
 pub fn report(unwind: &Unwind, prefix: &str) {
     let text = match unwind {
-        Unwind::Error(error) => format_error(prefix, error),
+        Unwind::Error(error) => {
+            let call = unsafe { interp::unwind::resolve_call(error.call) };
+            format_error(prefix, &RError { message: error.message.clone(), call })
+        }
         Unwind::Interrupt => String::new(),
+        // A jump to top level was reported by the default error handler when it was signalled.
+        Unwind::Jump(_) => return,
     };
     let runtime = runtime();
     runtime.error_buffer = text.clone().into_bytes();
@@ -444,6 +433,12 @@ pub unsafe extern "C" fn ry_state_restore(protect: usize, vmax: usize) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_record_error(call: Sexp, message: *const c_char) {
     let message = CStr::from_ptr(message).to_string_lossy().into_owned();
+    // `Rf_error` passes no call; GNU R reports the innermost closure call for it.
+    let call = if call == runtime().nil() && interp::is_installed() {
+        runtime().heap.known().unbound
+    } else {
+        call
+    };
     set_pending(error_in(call, message));
 }
 
@@ -456,8 +451,20 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
             None => format!("Warning: {message}\n"),
         };
         write_console(text.as_bytes(), true);
+        warn(message);
+        return;
     }
-    warn(message);
+    runtime().warnings.push(message.clone());
+    if !interp::is_installed() {
+        return;
+    }
+    // A handler may leave through a jump (`tryCatch(warning = )`), which continues from the
+    // native call's context, as GNU R's warning does.
+    let call = if call == runtime().nil() { runtime().heap.known().unbound } else { call };
+    let result = interp::conditions::warning_call(call, message);
+    if let Err(unwind) = result {
+        raise(unwind);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -502,27 +509,116 @@ pub unsafe extern "C" fn ry_discard_pending() {
     drop(take_pending());
 }
 
-/// The pending unwind as an R condition object, if its class is one of `classes`; null
-/// otherwise. The unwind stays pending.
+/// Starts a C context in the interpreter's handler stack. With `classes`, the context is
+/// `R_tryCatch`'s: an exiting handler for those classes whose target is the returned token.
+/// Without, it is `R_ToplevelExec`'s, which hides every handler outside it. Either way the token
+/// restores the stacks in [`ry_handlers_leave`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_pending_condition(classes: Sexp) -> *mut c_void {
+pub unsafe extern "C" fn ry_handlers_enter(classes: Sexp) -> Sexp {
+    enter(|| {
+        let runtime = runtime();
+        let token = runtime.heap.alloc_environment(runtime.heap.known().empty_env)?;
+        runtime.heap.root(token);
+        let state = interp::interp();
+        let saved = (state.handlers.clone(), state.restarts.clone(), state.show_error_messages);
+        if classes.kind() == SexpType::String {
+            let mut stack = state.handlers.clone();
+            for index in (0..classes.length() as usize).rev() {
+                stack = Some(std::rc::Rc::new(interp::conditions::Handler {
+                    class: classes.element(index),
+                    handler: runtime.nil(),
+                    calling: false,
+                    parent_env: runtime.nil(),
+                    target: token,
+                    next: stack,
+                }));
+            }
+            state.handlers = stack;
+        } else {
+            // `R_ToplevelExec` reports the errors it stops, even inside a silent `R_tryEval`.
+            state.handlers = None;
+            state.restarts = None;
+            state.show_error_messages = true;
+        }
+        runtime.heap.preserve(token);
+        HANDLER_CONTEXTS.with_borrow_mut(|contexts| contexts.push((token, saved)));
+        Ok(token)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_handlers_leave(token: Sexp) {
+    let saved = HANDLER_CONTEXTS.with_borrow_mut(|contexts| {
+        let position = contexts.iter().rposition(|(candidate, _)| *candidate == token)?;
+        let entries = contexts.split_off(position);
+        entries.into_iter().next().map(|(_, saved)| saved)
+    });
+    if let Some((handlers, restarts, show)) = saved {
+        let state = interp::interp();
+        state.handlers = handlers;
+        state.restarts = restarts;
+        state.show_error_messages = show;
+        runtime().heap.release(token);
+    }
+}
+
+type SavedStacks = (interp::conditions::HandlerStack, interp::conditions::RestartStack, bool);
+
+thread_local! {
+    static HANDLER_CONTEXTS: std::cell::RefCell<Vec<(Sexp, SavedStacks)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The pending unwind as an R condition object, if `R_tryCatch` (whose handler token is
+/// `target`) handles it; null otherwise. The unwind stays pending.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_pending_condition(classes: Sexp, target: Sexp) -> *mut c_void {
     let runtime = runtime();
     let Some(unwind) = &runtime.pending else {
         return std::ptr::null_mut();
     };
-    let class = match unwind {
-        Unwind::Error(_) => "error",
-        Unwind::Interrupt => "interrupt",
+    let condition = match unwind {
+        // The interpreter chose this context's exiting handler.
+        Unwind::Jump(jump) => match **jump {
+            interp::Jump::Return { env, value } if env == target => {
+                let condition = if value.kind() == SexpType::List && value.length() >= 1 {
+                    value.element(0)
+                } else {
+                    runtime.nil()
+                };
+                if condition != runtime.nil() {
+                    Ok(condition)
+                } else {
+                    let call = if value.kind() == SexpType::List && value.length() >= 2 {
+                        value.element(1)
+                    } else {
+                        runtime.nil()
+                    };
+                    let message = interp::interp().error_message.clone();
+                    interp::conditions::make_condition(
+                        &message,
+                        call,
+                        &["simpleError", "error", "condition"],
+                    )
+                }
+            }
+            _ => return std::ptr::null_mut(),
+        },
+        // Native code raised it directly, so no handler saw it yet.
+        Unwind::Error(_) | Unwind::Interrupt => {
+            let class = if matches!(unwind, Unwind::Error(_)) { "error" } else { "interrupt" };
+            let wanted = classes.kind() == SexpType::String
+                && (0..classes.length() as usize).any(|index| {
+                    let element = classes.element(index);
+                    element.bytes() == class.as_bytes() || element.bytes() == b"condition"
+                });
+            if !wanted {
+                return std::ptr::null_mut();
+            }
+            crate::eval::make_condition(unwind)
+        }
     };
-    let wanted = classes.kind() == SexpType::String
-        && (0..classes.length() as usize).any(|index| {
-            let element = classes.element(index);
-            element.bytes() == class.as_bytes() || element.bytes() == b"condition"
-        });
-    if !wanted {
-        return std::ptr::null_mut();
-    }
-    match crate::eval::make_condition(unwind) {
+    match condition {
         Ok(condition) => condition.as_ptr().cast(),
         // Building the condition failed, so that failure replaces the unwind and propagates.
         Err(failure) => {

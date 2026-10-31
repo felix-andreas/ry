@@ -1,0 +1,118 @@
+[stdout]
+| [1] "#FF0000"
+| [1] "#80401A4D"
+| [1] "#FF8000"
+| [1] "#FF8040"
+|         a         b         c 
+| "#550000" "#AA0000" "#FF0000" 
+| [1] "color intensity 2, not in [0,1]"
+| [1] "color intensity NA, not in [0,1]"
+| [1] "color intensity 256, not in 0:255"
+| [1] "alpha level 2, not in [0,1]"
+| character(0)
+| [1] "#FF00FF" "#000000"
+| [1] "#1F80FF"
+| [1] "#7F0000"
+| [1] "#DA70D6"
+| [1] "#408080"
+| [1] "#FF0000" "#FF9900" "#05FF00" "#000AFF" "#FF0000"
+| [1] "#60664780"
+| [1] "#FF99004D" "#CCFF004D"
+| [1] "invalid hsv color"
+| [1] "#FFC5D0"
+| [1] "#E495A5" "#C7A76C" "#86B875" "#39BEB1" "#7DB0DD" "#CD99D8" "#E495A5"
+| [1] "#009800"
+| [1] NA
+| [1] "#5E3E3F80"
+| [1] NA
+| [1] "#5F3D44" "#765657" "#906E74"
+| [1] "invalid hcl color"
+| [1] "#000000" "#404040" "#808080" "#BFBFBF" "#FFFFFF"
+| [1] "#80808080"
+| [1] "#1A1A1A33" "#33333366" "#4D4D4D80"
+| [1] "invalid gray level, must be in [0,1]."
+|       [,1]
+| red    255
+| green    0
+| blue     0
+|         a  b   c
+| red   255 17 255
+| green   0 34 255
+| blue    0 51 255
+| alpha 255 68   0
+|       [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
+| red      0  223   97   34   40  205  245  158    0   223
+| green    0   83  208  151  226   11  199  158    0    83
+| blue     0  107   79  230  229  188   16  158    0   107
+|       [,1] [,2] [,3]
+| red    255  255  255
+| green  255  255  255
+| blue   255  255  255
+|       [,1]
+| red    238
+| green  220
+| blue   130
+|       [,1] [,2] [,3]
+| red      0  255  223
+| green    0  255   83
+| blue     0  255  107
+|      
+| red  
+| green
+| blue 
+| [1] "invalid color name 'notacolour'"
+| [1] "invalid RGB specification"
+| [1] "numerical color values must be >= 0, found -1"
+|   [,1]
+| h    0
+| s    1
+| v    1
+|        [,1]      [,2]      [,3]
+| h 0.1078431 0.5757576 0.0000000
+| s 1.0000000 0.6111111 0.0000000
+| v 1.0000000 0.7058824 0.4980392
+| [1] 657
+|  [1] "white"         "aliceblue"     "antiquewhite"  "antiquewhite1"
+|  [5] "antiquewhite2" "antiquewhite3" "antiquewhite4" "aquamarine"   
+|  [9] "aquamarine1"   "aquamarine2"   "aquamarine3"   "aquamarine4"  
+| [13] "azure"         "azure1"        "azure2"        "azure3"       
+| [17] "azure4"        "beige"         "bisque"        "bisque1"      
+| [1] "yellow"      "yellow1"     "yellow2"     "yellow3"     "yellow4"    
+| [6] "yellowgreen"
+| [1] "black"   "#DF536B" "#61D04F" "#2297E6" "#28E2E5" "#CD0BBC" "#F5C710"
+| [8] "gray62" 
+| [1] "black"   "#DF536B" "#61D04F" "#2297E6" "#28E2E5" "#CD0BBC" "#F5C710"
+| [8] "gray62" 
+| [1] "black"   "red"     "green3"  "blue"    "cyan"    "magenta" "yellow" 
+| [8] "gray"   
+| [1] "red"     "#123456" "blue"   
+| [1] "unknown palette (need >= 2 colors)"
+| [1] "invalid color name 'foo'"
+| [1] "transparent" "#FF000080"   "red"        
+|       [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8]
+| red      0  223   97   34   40  205  245  158
+| green    0   83  208  151  226   11  199  158
+| blue     0  107   79  230  229  188   16  158
+|  [1] "R3"              "R4"              "ggplot2"         "Okabe-Ito"      
+|  [5] "Accent"          "Dark 2"          "Paired"          "Pastel 1"       
+|  [9] "Pastel 2"        "Set 1"           "Set 2"           "Set 3"          
+| [13] "Tableau 10"      "Classic Tableau" "Polychrome 36"   "Alphabet"       
+|       black      orange     skyblue bluishgreen 
+|   "#000000"   "#E69F00"   "#56B4E9"   "#009E73" 
+| [1] "#4B0055" "#00588B" "#009B95" "#53CC67" "#FDE333"
+| [1] "#FF0000" "#FFDB00" "#49FF00" "#00FF92" "#0092FF" "#4900FF" "#FF00DB"
+| [1] "#FF0000" "#FF8000" "#FFFF00" "#FFFF80"
+| [1] "#00A600" "#E6E600" "#EAB64E" "#EEB99F" "#F2F2F2"
+| [1] "#4C00FF" "#004CFF" "#00E5FF" "#00FF4D" "#FFFF00"
+| [1] "#80FFFF" "#FFFFFF" "#FF80FF"
+| [1] "#4D4D4D" "#969696" "#C3C3C3" "#E6E6E6"
+| [1] "#FF000080"
+| [1] "#F7FBFF" "#DEEBF7" "#C6DBEF" "#9ECAE1" "#6BAED6" "#4292C6" "#2171B5"
+| [8] "#08519C" "#08306B"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("#F7FBFF", "#DEEBF7", "#C6DBEF", "#9ECAE1", "#6BAED6", "#4292C6", 
+| "#2171B5", "#08519C", "#08306B")

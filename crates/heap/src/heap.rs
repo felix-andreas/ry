@@ -63,6 +63,10 @@ pub struct Heap {
     inhibit: u32,
     stress_counter: u64,
     known: WellKnown,
+    /// Bumped whenever the set of bindings outside function frames changes (a binding created or
+    /// removed, an enclosure replaced), so a cached lookup that resolved through those
+    /// environments knows it is still valid when the epoch is unchanged.
+    binding_epoch: u64,
 }
 
 /// The objects every R session has, created with the heap.
@@ -293,6 +297,7 @@ impl Heap {
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
             mark_stack: Vec::new(),
+            binding_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
             roots: Roots {
@@ -662,9 +667,22 @@ impl Heap {
 
     #[inline]
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
-        new.increment_refcount();
-        old.decrement_refcount();
+        if parent.flags() & flag_bits::UNTRACKED == 0 {
+            new.increment_refcount();
+            old.decrement_refcount();
+        }
         self.write_barrier(parent, new);
+    }
+
+    /// Stops a cons-like object's fields from counting as references to what they hold.
+    pub unsafe fn untrack_references(&mut self, object: Sexp) {
+        if object.flags() & flag_bits::UNTRACKED != 0 || object.kind().shape() != Shape::Triple {
+            return;
+        }
+        object.car().decrement_refcount();
+        object.cdr().decrement_refcount();
+        object.tag().decrement_refcount();
+        object.set_flag(flag_bits::UNTRACKED, true);
     }
 
     pub unsafe fn set_car(&mut self, cell: Sexp, value: Sexp) {
@@ -693,6 +711,7 @@ impl Heap {
     }
 
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
+        self.binding_epoch += 1;
         self.write_barrier(env, value);
         env.set_enclosure_unbarriered(value);
     }
@@ -747,6 +766,9 @@ impl Heap {
         }
         let cell =
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
+        if !env.has_gp(gp::FUNCTION_FRAME) {
+            self.binding_epoch += 1;
+        }
         if self.is_symbol_frame(env) {
             self.store(symbol, symbol.cdr(), cell);
             symbol.set_cdr_unbarriered(cell);
@@ -773,6 +795,7 @@ impl Heap {
         if env.has_gp(gp::FRAME_LOCKED) {
             return Err(HeapError::LockedEnvironmentRemove);
         }
+        self.binding_epoch += 1;
         if self.is_symbol_frame(env) {
             let cell = symbol.cdr();
             if cell.kind() != SexpType::Binding {
@@ -786,6 +809,12 @@ impl Heap {
             return Ok(false);
         }
         Ok((*env.frame_ptr()).remove(symbol).is_some())
+    }
+
+    /// See the field: an unchanged epoch means no binding outside a function frame appeared or
+    /// disappeared, and no enclosure changed.
+    pub fn binding_epoch(&self) -> u64 {
+        self.binding_epoch
     }
 
     /// The symbols bound in `env`'s own frame.

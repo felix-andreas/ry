@@ -74,7 +74,16 @@ pub struct ProcessEngine {
     program: String,
     arguments: Vec<String>,
     /// Written next to the report and passed before the script, for engines that need a driver.
-    driver: Option<&'static str>,
+    driver: Option<Driver>,
+}
+
+/// How an engine is handed `driver.R`.
+#[derive(Clone, Copy)]
+enum Driver {
+    /// GNU R's command line: `-f driver.R --args <script> <report>`.
+    GnuR,
+    /// A script runner's: `driver.R <script> <report>`.
+    Script,
 }
 
 impl ProcessEngine {
@@ -85,7 +94,24 @@ impl ProcessEngine {
             arguments: ["--vanilla", "--slave", "--no-restore"]
                 .map(String::from)
                 .to_vec(),
-            driver: Some(DRIVER),
+            driver: Some(Driver::GnuR),
+        }
+    }
+
+    /// ry's own runtime, `ry run --runtime ry`. The binary is `$ORACLE_RY`, or the workspace's
+    /// debug build.
+    pub fn ry() -> Self {
+        let program = std::env::var("ORACLE_RY").unwrap_or_else(|_| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/ry")
+                .display()
+                .to_string()
+        });
+        ProcessEngine {
+            name: "ry".to_string(),
+            program,
+            arguments: ["run", "--runtime", "ry"].map(String::from).to_vec(),
+            driver: Some(Driver::Script),
         }
     }
 
@@ -118,9 +144,16 @@ impl Engine for ProcessEngine {
         command.args(&self.arguments);
         if let Some(driver) = self.driver {
             let driver_path = scratch.path().join("driver.R");
-            std::fs::write(&driver_path, driver)
+            std::fs::write(&driver_path, DRIVER)
                 .map_err(|error| EngineError::Failed(error.to_string()))?;
-            command.arg("-f").arg(&driver_path).arg("--args");
+            match driver {
+                Driver::GnuR => {
+                    command.arg("-f").arg(&driver_path).arg("--args");
+                }
+                Driver::Script => {
+                    command.arg(&driver_path);
+                }
+            }
         }
         command.arg(&script).arg(&report_path);
         command
@@ -205,11 +238,12 @@ pub fn gnu_r_available() -> bool {
 
 /// The engine named by `ORACLE_ENGINE`, or the stub.
 pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE")
-        .ok()
-        .and_then(|command| ProcessEngine::from_command(&command))
-    {
-        Some(engine) => Box::new(engine),
+    match std::env::var("ORACLE_ENGINE").ok().as_deref() {
+        Some("ry") => Box::new(ProcessEngine::ry()),
+        Some(command) => match ProcessEngine::from_command(command) {
+            Some(engine) => Box::new(engine),
+            None => Box::new(StubEngine),
+        },
         None => Box::new(StubEngine),
     }
 }

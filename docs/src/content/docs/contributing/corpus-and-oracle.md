@@ -60,17 +60,19 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 `from f (in f())`. The cases live in `crates/oracle/cases/`, one `group__name.R` file with a
 `.expected` file beside it holding GNU R's recorded outcome. They cover promises,
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
-control flow and printing. `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
+control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
+colours, contour lines and axis ticks, object sizes and hash tables. `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()`; `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
 The second engine is anything that implements the `Engine` trait. `ProcessEngine` covers a
 command line: it is invoked as `<command…> <script> <report>`, must print the script's output
 to stdout, and must write the JSON report that `crates/oracle/src/driver.R` defines (`messages`,
-`warnings`, `errors`, and `value` with `kind` and `deparsed`). Until the ry runtime exists the
-default engine is a stub and `compare` skips every case. To plug an engine in, set
-`ORACLE_ENGINE="ry oracle-run"` (or pass `--engine`), and `cargo test -p oracle` then also
-requires it to match GNU R on every case.
+`warnings`, `errors`, and `value` with `kind` and `deparsed`). ry's runtime is `--engine ry`:
+it runs the driver through `ry run --runtime ry` with the workspace's debug build (or the binary in
+`ORACLE_RY`), so build `ry` and `libr` first. Without `--engine` or `ORACLE_ENGINE` the second engine
+is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or any command line) makes
+`cargo test -p oracle` also require the engine to match GNU R on every case.
 
 ## The benchmark generator
 

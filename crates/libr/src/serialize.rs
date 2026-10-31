@@ -1683,7 +1683,7 @@ unsafe fn unserialize_altrep(
     if let Some(object) = altrep::unserialize(info, state, attributes, object_bit, levels)? {
         return Ok(object);
     }
-    if crate::eval::evaluator().is_some() {
+    if crate::eval::namespaces_loadable()? {
         let name = crate::strings::mk_char(package.car().bytes(), heap::strings::Encoding::Utf8)?;
         let name = crate::memory::scalar_string(name)?;
         runtime().heap.root(name);

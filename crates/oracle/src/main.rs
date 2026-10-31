@@ -22,7 +22,8 @@ enum Command {
     Record { paths: Vec<PathBuf> },
     /// Run files under GNU R and under a second engine, and compare the two.
     Compare {
-        /// The second engine as a command line (default: `$ORACLE_ENGINE`, then the stub).
+        /// The second engine: `ry` for ry's runtime, or a command line (default: `$ORACLE_ENGINE`,
+        /// then the stub).
         #[arg(long)]
         engine: Option<String>,
         paths: Vec<PathBuf>,
@@ -43,6 +44,7 @@ fn main() -> ExitCode {
         Command::Record { paths } => record(&gnu_r, &cases(paths)),
         Command::Compare { engine, paths } => {
             let second: Box<dyn Engine> = match engine.as_deref() {
+                Some("ry") => Box::new(ProcessEngine::ry()),
                 Some(command) => match ProcessEngine::from_command(command) {
                     Some(engine) => Box::new(engine),
                     None => {

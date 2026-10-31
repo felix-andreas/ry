@@ -87,13 +87,21 @@ impl Dll {
         }
     }
 
-    fn registered(&self, kind: RoutineKind) -> &[Routine] {
+    pub fn registered(&self, kind: RoutineKind) -> &[Routine] {
         match kind {
             RoutineKind::C => &self.c_routines,
             RoutineKind::Call => &self.call_routines,
             RoutineKind::Fortran => &self.fortran_routines,
             RoutineKind::External => &self.external_routines,
         }
+    }
+
+    pub fn handle(&self) -> *mut c_void {
+        self.handle
+    }
+
+    pub fn dynamic_lookup(&self) -> bool {
+        self.use_dynamic_symbols
     }
 }
 
@@ -402,7 +410,7 @@ pub unsafe extern "C" fn R_GetCCallable(
         if let Some(function) = registered(&key) {
             return Ok(Some(function));
         }
-        if crate::eval::evaluator().is_some()
+        if crate::eval::namespaces_loadable()?
             && crate::environments::registered_namespace(package.as_bytes())?.kind()
                 == SexpType::Nil
         {

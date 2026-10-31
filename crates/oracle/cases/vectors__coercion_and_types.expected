@@ -1,0 +1,42 @@
+[stdout]
+| [1] "1"    "a"    "TRUE"
+| [1] 1.0 2.5
+| [1] 1 2
+| [1] "integer"
+| [1]  1  2 NA
+| [1]  TRUE    NA FALSE    NA
+| [1] 1 2
+| [1] "1e+06"
+| [1] "123456.7"
+| [1] "0.333333333333333"
+| [1] 1 2 3 4
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] "complex"
+| [1] "integer"
+| [1] "matrix" "array" 
+| [1] "array"
+| [1] TRUE
+| [1] TRUE
+| [1] "double"    "character" "logical"   "NULL"      "list"     
+| [1] 0.00 0.25 0.50 0.75 1.00
+| integer(0)
+|  [1] 10  9  8  7  6  5  4  3  2  1
+| [1]  2  5  8 11
+| [[1]]
+| [1] "a"
+| 
+| [[2]]
+| [1] 1
+| 
+| [1] "x" "x" "y" "y" "y"
+| [1] 1 2 3 1 2 3 1
+[messages]
+[warnings]
+- NAs introduced by coercion
+[errors]
+[value]
+integer
+| c(1L, 2L, 3L, 1L, 2L, 3L, 1L)

@@ -1,0 +1,16 @@
+[stdout]
+| [1] 1
+| [1] 2
+| [1] 1
+| [1] 3
+| [1] 11 12 13
+| [1] 150
+| [1] 2
+| [1] 1
+| [1] "R_GlobalEnv"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "R_GlobalEnv"

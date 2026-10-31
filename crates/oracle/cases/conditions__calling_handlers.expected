@@ -1,0 +1,20 @@
+[stdout]
+| got message: m1
+| got warning: w1 
+| [1] "value"
+| call: f() 
+| [1] "f done"
+| signalled custom msg 
+| NULL
+| [1] "myCondition" "condition"  
+| [1] "handled first"
+| [1] "a b"
+| finally runs
+| [1] "deep"
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

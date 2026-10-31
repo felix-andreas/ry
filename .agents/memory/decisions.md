@@ -1786,6 +1786,50 @@ there was no previous source of truth; the choices that settle architecture are 
 - **The corpus is pinned with renv** on a dated P3M snapshot in build step 1, because renv is in the
   benchmark set and R's own installer cannot backtrack to older compatible versions.
 
+# Decision record: the interpreter and base R
+
+This settles step 3 of `contributing/design/r-runtime.md`. The code is `crates/interp`; before it
+there was no evaluator, so there was no previous source of truth.
+
+- **`interp` sits between `heap` and `libr`.** `libr` depends on `interp` and installs it on the
+  runtime's heap (`interp::install`), passing host hooks (console output, ALTREP materialization,
+  finalizers) and replacing the foreign-function builtins (`.Call`, `dyn.load`, ...) with
+  `interp::register_builtins`. `interp` never sees C, so it builds and tests without libR, and the C
+  API's `Rf_eval`, `R_tryEval` and `R_ToplevelExec` are thin calls into it.
+- **Every non-local exit is a Rust `Err(Unwind)`.** `return`, `break`, `next`, exiting handlers and
+  restarts are `Jump`s to a frame's environment; an error raised by a builtin stays unsignalled
+  (`Unwind::Error`) until the nearest `eval` or builtin boundary signals it, so calling handlers run
+  before any frame unwinds. Only the libR boundary converts to and from `longjmp`. This keeps Rust
+  destructors sound and needs no context stack beyond `Interp::frames`.
+- **Frames mirror GNU R's function contexts exactly** (closure calls, `eval()` and internal
+  dispatch push one), because `sys.call`, `sys.function`, `parent.frame` and the oracle driver's own
+  `sys.nframe()` arithmetic observe them.
+- **Base R's R code loads from the user's GNU R installation** (the base lazy-load database,
+  `R_HOME/library`), per the licensing record; GNU R's byte code reads back as its source
+  expression, which ry compiles itself.
+- **The default packages' native code is reimplemented in Rust** (`builtin_libraries.rs`). GNU R
+  builds the shared libraries of methods, utils, stats, grDevices, graphics and tools against its
+  internal headers, so they inline its object layout (`LENGTH`, `PROTECT` through `R_PPStack`) and
+  cannot run on ry's heap. `dyn.load` of one returns a library record backed by a table with GNU R's
+  routine names and arities, so `useDynLib` binds every `C_` symbol and an unimplemented routine fails
+  naming itself. CRAN packages are unaffected: since R 4.2 they see an opaque `SEXP`.
+- **Tier-0 code is a register machine stored in the closure** as a `BCODESXP` (instructions,
+  constants with the source first, inline caches), compiled on a body's second call. Keeping it in
+  the closure means it is collected with it and needs no side table; `closure_body` is the one
+  reader that must know. Inlined constructs run behind a cached guard that the symbol still names
+  the base primitive, falling back to the AST evaluator for the whole expression, so redefining
+  `if` or `+` keeps GNU R's semantics instead of GNU R's compiler's assumption that base is not
+  shadowed.
+- **Inline caches are validated by one heap counter, the binding epoch,** which moves when a
+  binding is created or removed outside a function frame, or an enclosure changes. Function frames
+  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a cached
+  lookup never resolves through one and the frame itself is probed directly. A function lookup that
+  skipped a non-function binding is not cached, because that binding could later hold a function
+  without moving the epoch.
+- **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
+  GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
+  quadratic.
+
 # Decision record: the full C API surface and package installation
 
 This settles the part of step 4 of `contributing/design/r-runtime.md` that does not need the
@@ -1937,6 +1981,39 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 - **Deferred:** updating other development packages' import copies of a changed binding, loading a
   rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and
   evaluating `if` in `NAMESPACE` (ignored with a warning). `backlog.md` lists them.
+
+# Decision record: base R's linear algebra
+
+- **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.
+- **Target shape.** `crates/interp/src/linalg.rs` calls the system's BLAS and LAPACK, opened at runtime with `dlopen` (the workspace builds without them; an operation that needs a missing library is an R error), with GNU R's arguments, workspace queries and gfortran's hidden character lengths. On the same libraries the results are GNU R's bit for bit, which `crates/interp/tests/test_linalg.rs` pins.
+- **`dqrdc2` is Rust, written from its description** (R's LINPACK variant, which no system library ships), as are the `dqrsl` family and `dtrco`. They still call BLAS level 1 (`dnrm2`, `ddot`, `daxpy`, `dscal`, `dasum`) because those decide the bits: reference `dnrm2` is a scaled algorithm, not a plain square root of a sum.
+- **One table of base's native routines**, `native::BASE_ROUTINES`. `getRegisteredRoutines` derives from it, and every `.Call`, `.C` and `.Fortran` (the interpreter's and libr's) asks `native::call_base_routine` first, so `qr()` works with or without libR. A routine is base's when its `NativeSymbolInfo`'s `dll` is named `base`, or when it is named by a string with no `PACKAGE` or `PACKAGE = "base"`.
+- **GNU R's quirks are kept on purpose**: `%*%` uses BLAS unless an operand may hold a NaN or an infinity, then a plain loop (which also stands in when BLAS is missing, since reference BLAS sums in the same order); `La_solve`'s condition check norms the already factored copy when `a` was not double; `La_dgecon` estimates with `n` as the leading dimension, which ry refuses for `m < n` instead of reading past the matrix.
+
+# Decision record: the default packages' utils, tools, grDevices and graphics routines
+
+The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by package in
+`builtin_libraries::implementation`. Each behavior was derived from GNU R's documentation and its
+observed output (the oracle cases `io__*`, `colours__*` and `utils__sizes_hashtabs_and_tools`),
+never from its C source.
+
+- **The session has only the null device.** `dev.cur()` is device 1, `.Device` and `.Devices` are
+  bound at startup, and every grDevices or graphics routine without an entry in the tables fails
+  with "graphics devices are not supported in ry yet" (`graphics::no_devices` is the fallback, so a
+  new routine needs no stub). `cairoProps` reports no cairo, so the default device is `pdf` and
+  `bitmapType` is `"Xlib"`, as in a headless build. A real device is a later step.
+- **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
+  low byte), because only the colour routines read it and the interpreter is single-threaded.
+- **`scan` is implemented in `utils.rs`, not `connections.rs`**, because `scan`, `readtablehead`
+  and `countfields` share one tokenizer and only `read.table` drives all three. Connections expose
+  their unread input through `connections::with_input`, and `pushBack` splices into it.
+- **A hash table keeps its entries in R vectors behind the external pointer** (type, keys, values,
+  hashes, count), and a lookup compares a hash that agrees with `identical()` before calling it. The
+  collector then sees every key and value without a Rust-side table it would have to trace.
+- **`contourLines` reproduces GNU R's line order and direction** by rules found from observation,
+  written on `graphics::contour_level`: segment edge order, the saddle rule, the triangle for one
+  missing corner, the nudge of values equal to the level, and closing a loop. A saddle whose
+  bilinear saddle value is within rounding of the level can still pick the other pairing.
 
 ## Cold-pass memory and time: interned names, compact HIR, parallel setup
 

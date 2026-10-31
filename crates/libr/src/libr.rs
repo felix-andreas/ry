@@ -129,6 +129,7 @@ pub fn runtime() -> &'static mut Runtime {
         if slot.is_none() {
             *slot = Some(Runtime::start());
             globals::publish(slot.as_mut().unwrap_or_else(|| unreachable!()));
+            eval::install_interpreter(slot.as_mut().unwrap_or_else(|| unreachable!()));
             embed::start_frontend();
         }
         slot.as_mut().unwrap_or_else(|| unreachable!())
@@ -163,7 +164,6 @@ impl Runtime {
         unsafe {
             runtime.heap.inhibit_collection();
             globals::install_symbols(&mut runtime.heap);
-            eval::install_primitives(&mut runtime.heap);
             legacy::start_pointer_protection(&mut runtime.heap);
             runtime.heap.allow_collection();
         }

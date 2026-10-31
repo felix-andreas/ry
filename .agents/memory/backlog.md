@@ -1766,35 +1766,55 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the runtime
 
-What steps 2 and 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
+What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
 
-- **Evaluation needs the interpreter.** `Rf_eval`, `R_ParseVector`, `Rf_PrintValue`, R-level
-  finalizers, S4 class lookup and namespace loading all go through `libr::eval::Evaluator`; until
-  the interpreter installs one, only the built-in evaluator of native calls and nine primitives
-  runs. Packages whose `R_init_*` evaluates R code (S7, yaml, nanoarrow) cannot load before then.
-- **Task callbacks need a caller.** The interpreter must call `libr::eval::run_task_callbacks`
-  after each top-level task; nothing runs `Rf_addTaskCallback` callbacks before then, and the
-  runner has no direct test because it is reachable only from Rust.
-- **Base packages' own libraries** (utils, tools, methods, grDevices, stats) import GNU R
-  internals (`R_print`, `getPRIMNAME`, `R_ParseContextLast`, `Rf_utf8towcs`, ...). ry implements
-  those packages' internals in Rust instead, so their `.so` files are not a target; decide per
-  name when the interpreter reaches them.
+- **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
+  differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
+  unimplemented one when it is called) or printer details (complex numbers, wide matrices).
+- **Tier-0 speed.** A scalar `for` loop runs about 6x slower than GNU R's bytecode (`s <- s + i * 2`,
+  1e6 iterations: 0.27 s against 0.04 s). The cost is per-instruction allocation of scalar results,
+  handle-stack pushes, and the guard and frame probes. Next: reuse a register's scalar when it is
+  unshared, cache the frame cell of a local variable per activation, and skip guards proven by the
+  binding epoch for a whole loop body.
+- **Promise code is not compiled.** A closure argument is a promise over its AST, which the AST
+  evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
+  promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
+- **Missing internals.** Several `.Internal`s still raise "not supported" (`scan`'s binary
+  relatives `writeBin`/`readBin`, `save`/`load`, `url`, `polyroot`, `max.col`, `prmatrix`, ...);
+  `grep -n 'not supported' crates/interp/src` lists them.
+- **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
+  families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
 - **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Graphics devices.** The engine is exported and errors when used (`graphics.rs`).
 - **Connections gaps:** bzip2 and xz file connections, sockets, and `pipe()` are not implemented.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
-- **R-level finalizers** cannot run until closures can, and a finalized weak reference stays in the
+- **Task callbacks never run.** The interpreter does not yet call `libr::eval::run_task_callbacks`
+  after each top-level task.
+- **The interpreter keeps its own connections and RNG beside libr's.** Both RNGs sync through
+  `.Random.seed`; the interpreter's connection builtins should move onto `libr::connections`, and
+  libr's primitive table and built-in evaluator are unused while the interpreter is installed, so
+  the libr connection tests that call `file()`/`stdout()` without base R fail until then.
+- **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
   weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
   push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
   `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
 - **The handle scope retains a native loop's dropped temporaries until the call returns.** If a real
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
+- **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
+  only loader, so macOS and Windows need their own paths.
+- **Graphics devices.** The interpreter's session has only the null device, so plotting and opening
+  any device fail with a clear error (`decisions.md`, "the default packages' utils, tools,
+  grDevices and graphics routines"). `stem()` fails too: its layout rules are not derived yet.
+- **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
+  `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
+  `Rprofmem` warn and do nothing.
+- **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
+  context, so it prints `Calls: print -> .Call` where ry prints none.
 - **Native hazards GNU R shares.** A C++ exception thrown from a package's static initializer
   unwinds through Rust during `dlopen`, and unserializing from a `NativeSource` trusts a corrupt
   length enough to allocate before the read fails. Bound the allocation by the bytes remaining
