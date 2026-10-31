@@ -55,14 +55,25 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - **Reread this file every hour** (trig_01AqDtgjMPTkniw7hzX4x4d1, at minute 41) and check that every piece of work that could start now is running.
 - **Run a docs pass from time to time,** at least every few check-ins and after each feature PR lands, applying the docs directive in `AGENTS.md`.
 - **Babysit every cloud session.** Each session prompt must tell it to report to the orchestrator with the claude-code-remote `send_message` tool, session_id session_011xBmXWNoPRHsr6SYcwTwtm, when its PR is ready, when it is blocked, and at major milestones. An hourly scheduled check (trig_01LuX97P7ZbAg4TRxYu7c1tu, at minute 11) checks every in-flight session, resumes stalled ones and merges finished PRs; the hourly goal reread is trig_01AqDtgjMPTkniw7hzX4x4d1.
+- **Check a new cloud session's context window.** After creating a cloud session, read its record with `get_session` and check that `external_metadata.context_usage.max_tokens` is 300000 (the repo's `.claude/settings.json` sets `autoCompactWindow`). If it still shows 1000000, ask the user to set `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` in the cloud environment's variables.
 
 ## In flight
 
-- Runtime step 1 session session_0111kWqDPNiugVJPvUec1xKs: corpus, differential oracle, benchmark generator.
-- Runtime step 2 session session_0111kWqDWCzM9zgtXPN1prpJ: object model, GC, libR skeleton.
-- Lazy loading session session_0111kWqCTCdAYBE5wsQdMGsa: item index, lazy bindings and item-level reload, on the GNU R backend first.
+- Runtime step 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): tier-0 bytecode interpreter and base R loaded from the user's GNU R installation.
+- Runtime step 4a (session_0111kWqESzY2bDUMNQAL2or6, Opus): full C API surface, ALTREP, BLAS/LAPACK, connections, package install (owns `crates/libr`).
+- Runtime step 8 core (session_0111kWqBmuEsPtQfPJkP31Vx, Opus): the polars-backed table engine crate, query lowering to Polars lazy plans, ALTREP column seam, checker support, and the benchmark harness against data.table.
+- Analysis performance (session_0111kWqD76vZ2gv5bRe1mtDm, Sonnet): cut cold `ry check` time (6 to 7 s) and peak memory (~1 GiB) on the full-size benchmark code bases, without regressing incremental latency or diagnostics; measured with `just bench`.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
 
-- Step 3 (interpreter and base R) starts when step 2 merges; steps 5-8 follow `r-runtime.md`'s build order.
+1. Finish step 4: all 232 corpus packages pass their own tests.
+2. Move the lazy loader from the GNU R backend onto ry's own interpreter once step 3 lands.
+3. Inline syntax in the runtime.
+4. The Cranelift JIT.
+
+Follow-ups:
+
+- Install R 4.6 via rig for data.table's version check.
+- Recheck the Dependabot alerts.
+- Run a docs pass after the feature PRs land.

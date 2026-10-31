@@ -19,6 +19,32 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: the package loader
+
+The loader works on the GNU R backend (`crates/loader`, `docs/.../guides/loading-packages.md`). Gaps,
+roughly in order of how often a real package hits them:
+
+- **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
+  read bundled files at load time (`.onLoad`) fail until this exists.
+- **testthat helpers are not sourced** by `load_all()`; `testthat::test_dir()` sources them itself,
+  but `load_all()` followed by interactive use of a helper does not see it.
+- **Importers of a development package keep stale copies** of its changed bindings; only one
+  development package reloads at a time. r-runtime.md section 6 describes the targeted update.
+- **A rebuilt shared library unloads the old one** (as `pkgload` does) instead of loading under a
+  new name.
+- **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
+  would fix it.
+- **`R/unix/` and `R/windows/` subdirectories are not loaded**, nor are `data/` datasets (LazyData).
+- **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every
+  reload that re-registers it and never removed.
+- **A declared `S3method` whose function does not exist** registers a promise that fails at
+  dispatch; R refuses the load instead.
+- **Sources must be UTF-8**; a package with `Encoding: latin1` fails to load.
+- **A statement reading a name before its defining statement** sees, on reload, the previous load's
+  value (a fresh load fails on such code); documented as a limit.
+- **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all
+  files' names (about 8 ms at 326,000 lines). A per-file name summary could make that O(changed).
+
 ## Open: false reports and gaps found by the documentation review
 
 An adversarial review of every docs page ran each claim against the binary. The docs now state the
@@ -27,10 +53,9 @@ behavior below truthfully, most of it under "Where correct code is reported" in
 
 False reports on correct R, worst first:
 
-- **Inferred numeric parameters share one type.** `function(price, rate) price * rate` infers
-  `<T: numeric> fn(price: T, rate: T) -> T`, so `f(1L, 0.5)` reports `expected integer, found
-  double` and `f(TRUE, 0.5)` rejects the logical. Annotated `double` parameters widen correctly.
-  Widening has to apply where a type variable meets two numeric arguments.
+- **An inferred numeric parameter rejects a `logical`.** `f(TRUE, 0.5)` for `function(price, rate)
+  price * rate` is refused, while mixed `integer` and `double` widen (`InferenceTable::widen_numeric_binding`).
+  Promotion has to live in the type, not the binding (see "Promotion needs to live in the type").
 - **`pkg::name` does not activate a conditional namespace.** `dplyr::mutate()` or
   `jsonlite::fromJSON()` in a script without `library()` or `DESCRIPTION` reports an unknown
   namespace. The read names its package, so it should activate the namespace (or at least validate
@@ -2345,3 +2370,26 @@ What step 2 of `contributing/design/r-runtime.md` left for later steps, most pre
 - **The engine and its scheduling.** A red-green core with per-symbol interface firewalls, an SCC fixed point, tombstones, eviction and a stacker-grown validation spine. Durability tiers, with open documents LOW and the corpus HIGH, and a sound downgrade that re-mins through cutoff nodes. Memoized completion.
 - **The docs site.** Getting started leads with a real bug, installation is its own page, the typing guide and reference are contracts, and the architecture, structure and testing contributor pages are current.
 - **`legacy/` is deleted after a full port.** Every case of the previous implementation's suites was rendered on the shipping stack, bucketed by agreement and adjudicated against the typing reference, which fixed 18 real bugs and ported the distinct cases into the fixture suites. Its incrementality contracts became `crates/semantics/tests/test_incremental.rs`, which surfaced and fixed the missing per-name firewalls, its performance instruments became the one `test_perf.rs` witness, and its 1,967 programs stay as inputs in `crates/syntax/tests/programs/`.
+
+## Benchmark code bases (measured)
+
+`just bench` generates the three 300K-line code bases (about 413K lines with tests) and prints this
+table; `tools/bench/lsp_latency.py` drives `ry server` over stdio. Release build, 4-core container,
+typing on:
+
+| code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
+|---|---:|---:|---|---:|---:|
+| finance | 6.1 s | 997 MiB | 1005 `unused` (genuine) | 3 / 118 ms | 3 / 112 ms |
+| data science | 6.7 s | 1006 MiB | none | 5 / 116 ms | 3 / 122 ms |
+| biostatistics | 6.2 s | 1020 MiB | none | 3 / 94 ms | 3 / 105 ms |
+
+Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
+- Peak memory is about 2.4 KiB per line with tests, above the 2 KiB budget in `test_perf.rs`.
+- "Settled" includes the server's idle delay, so it is an upper bound on the semantic wave.
+- An `Unknown` argument to an overloaded call now yields `Unknown` when numeric results disagree
+  (`sum(x[[i]])`); other disagreements still take the first candidate.
+- A top-level zeallot pattern (`c(a, b) %<-% x` outside a function) defines no package global,
+  because `top_level_definition` yields one name per item. Other files then report `a` as
+  unresolved and the defining file reports it unused. Destructured names also lack declaration
+  occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
+- `Function | Null | Var` callee unions fall through to the not-callable finding.

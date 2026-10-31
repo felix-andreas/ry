@@ -37,6 +37,10 @@ struct ReplSession {
 
 impl ReplSession {
     fn start() -> ReplSession {
+        ReplSession::start_in(None)
+    }
+
+    fn start_in(directory: Option<&std::path::Path>) -> ReplSession {
         let lock = SESSION_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -50,6 +54,9 @@ impl ReplSession {
             .expect("openpty");
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ry"));
         command.arg("repl");
+        if let Some(directory) = directory {
+            command.cwd(directory);
+        }
         let child = pair.slave.spawn_command(command).expect("spawn repl");
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
         let writer = pair.master.take_writer().expect("pty writer");
@@ -210,6 +217,67 @@ fn run_script(body: &str) -> Option<(std::process::Output, String)> {
         .expect("run the binary");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     Some((output, stdout))
+}
+
+#[test]
+fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_command() {
+    if !r_available() {
+        return;
+    }
+    let package = std::env::temp_dir().join(format!("ry-repl-load-{}", std::process::id()));
+    fs::create_dir_all(package.join("R")).expect("create package");
+    fs::write(
+        package.join("DESCRIPTION"),
+        "Package: replpkg\nVersion: 1.0\n",
+    )
+    .expect("write");
+    fs::write(
+        package.join("R/a.R"),
+        "greet <- function() \"first version\"\n",
+    )
+    .expect("write");
+    let mut session = ReplSession::start_in(Some(&package));
+    session.expect("Loaded replpkg");
+    session.send("greet()\r");
+    session.expect("first version");
+    // Distinct sizes, so the change is visible even within one timestamp tick.
+    fs::write(
+        package.join("R/a.R"),
+        "greet <- function() \"second, edited version\"\n",
+    )
+    .expect("write");
+    session.send("greet()\r");
+    session.expect("Reloaded replpkg: 1 function rebound");
+    session.expect("second, edited version");
+    session.quit();
+    fs::remove_dir_all(&package).ok();
+}
+
+#[test]
+fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
+    if !r_available() {
+        return;
+    }
+    let package = std::env::temp_dir().join(format!("ry-repl-prompt-{}", std::process::id()));
+    fs::create_dir_all(package.join("R")).expect("create package");
+    fs::write(
+        package.join("DESCRIPTION"),
+        "Package: promptpkg\nVersion: 1.0\n",
+    )
+    .expect("write");
+    fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
+    let mut session = ReplSession::start_in(Some(&package));
+    session.expect("Loaded promptpkg");
+    session.send("options(prompt = \"R> \")\r");
+    session.settle(Duration::from_millis(300));
+    fs::write(package.join("R/a.R"), "level <- function() \"level two\"\n").expect("write");
+    session.send("answer <- readline(\"answer: \")\r");
+    session.expect("answer: ");
+    session.send("typed\r");
+    session.send("cat(\"got\", answer, level(), \"\\n\")\r");
+    session.expect("got typed level two");
+    session.quit();
+    fs::remove_dir_all(&package).ok();
 }
 
 #[test]

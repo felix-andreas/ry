@@ -2,7 +2,7 @@
 //! parses, evaluates, and autoprints the fed input.
 
 use crate::libr::{self, RApi};
-use crate::{Keybindings, ReplError, RunOptions, SessionCompleter};
+use crate::{ConsoleHooks, Keybindings, ReplError, RunOptions, SessionCompleter};
 use crossterm::terminal;
 use nu_ansi_term::{Color, Style};
 use reedline::{
@@ -75,13 +75,22 @@ pub fn run(api: RApi, options: RunOptions) -> Result<(), ReplError> {
           assign(\".Platform\", p, envir = e); \
           if (locked) lockBinding(\".Platform\", e) }))\n",
     );
-    if let Some(path) = &options.file {
-        let script = fs::read_to_string(path)
-            .map_err(|error| ReplError(format!("cannot read {}: {error}", path.display())))?;
-        if options.batch {
-            // A top-level error quits with a failing status, which becomes the exit code.
-            pending.extend(b"options(error = function() q(status = 1, save = \"no\"))\n");
-        }
+    let script = match &options.file {
+        Some(path) => Some(
+            fs::read_to_string(path)
+                .map_err(|error| ReplError(format!("cannot read {}: {error}", path.display())))?,
+        ),
+        None => None,
+    };
+    if options.batch && (script.is_some() || !options.input.is_empty()) {
+        // A top-level error quits with a failing status, which becomes the exit code.
+        pending.extend(b"options(error = function() q(status = 1, save = \"no\"))\n");
+    }
+    if !options.input.is_empty() {
+        pending.extend(normalize_line_endings(&options.input).into_bytes());
+        pending.push_back(b'\n');
+    }
+    if let Some(script) = script {
         pending.extend(normalize_line_endings(&script).into_bytes());
         pending.push_back(b'\n');
     }
@@ -91,10 +100,16 @@ pub fn run(api: RApi, options: RunOptions) -> Result<(), ReplError> {
             pending,
             batch: options.batch,
             completer,
+            hooks: options.hooks,
         });
     });
     install_sigint_handler();
-    api.initialize(read_console, write_console_ex)?;
+    // A batch run prints only what its code prints.
+    api.initialize(read_console, write_console_ex, options.batch)?;
+    api.register_call_routines(&options.routines);
+    for statement in &options.startup {
+        api.eval(statement);
+    }
     if !options.batch {
         // R's `width` defaults to 80 whatever the terminal is, and R exports no setter.
         // Evaluated directly: fed input taken before the first prompt leaves the terminal
@@ -142,6 +157,7 @@ struct Console {
     /// End the session (EOF) once `pending` is exhausted instead of prompting.
     batch: bool,
     completer: Option<SharedSessionCompleter>,
+    hooks: Option<Box<dyn ConsoleHooks>>,
 }
 
 /// R's parser rejects a raw `\r`, but scripts and the editor buffer carry CRLF on
@@ -192,9 +208,18 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
             }
             // R hands its hook a valid NUL-terminated prompt (or null).
             let prompt_text = unsafe { libr::prompt_text(prompt) };
+            // Input for `readline()`, `menu()` or the browser must reach them untouched.
+            let at_top_level = libr::at_top_level();
             match console.editor.read_line(&RPrompt { text: prompt_text }) {
                 Ok(Signal::Success(line)) => {
                     let line = normalize_line_endings(&line);
+                    if at_top_level
+                        && let Some(hooks) = console.hooks.as_mut()
+                        && let Some(code) = hooks.before_command()
+                    {
+                        console.pending.extend(code.into_bytes());
+                        console.pending.push_back(b'\n');
+                    }
                     if let Some(completer) = &console.completer {
                         completer
                             .lock()

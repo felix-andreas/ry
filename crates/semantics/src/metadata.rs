@@ -236,6 +236,307 @@ fn namespace_directives(source: &str) -> Vec<(String, Vec<SyntaxNode>)> {
     directives
 }
 
+/// Everything a loader reads from `NAMESPACE`, in directive order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct NamespaceSpec {
+    pub imports: Vec<NamespaceImportDirective>,
+    pub exports: Vec<String>,
+    pub export_patterns: Vec<String>,
+    pub export_classes: Vec<String>,
+    pub export_class_patterns: Vec<String>,
+    pub export_methods: Vec<String>,
+    pub s3_methods: Vec<S3MethodDirective>,
+    pub dynamic_libraries: Vec<DynamicLibraryDirective>,
+    /// Directives a loader cannot honor statically, such as an `if` around other directives
+    /// (R evaluates the condition at load time), rendered as their source text.
+    pub unsupported: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum NamespaceImportDirective {
+    /// `import(pkg, except = c(...))`.
+    Namespace {
+        package: String,
+        except: Vec<String>,
+    },
+    /// `importFrom(pkg, ...)`.
+    Names { package: String, names: Vec<String> },
+    /// `importClassesFrom(pkg, ...)`.
+    Classes { package: String, names: Vec<String> },
+    /// `importMethodsFrom(pkg, ...)`.
+    Methods { package: String, names: Vec<String> },
+}
+
+/// `S3method(generic, class, function)`. The generic may be qualified (`pkg::generic`), which
+/// R registers once that package loads.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct S3MethodDirective {
+    pub generic: String,
+    pub class: String,
+    /// The method's binding, `generic.class` unless the directive names another.
+    pub function: String,
+}
+
+/// `useDynLib(library, symbols..., .registration = , .fixes = )`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct DynamicLibraryDirective {
+    pub library: String,
+    pub registration: bool,
+    pub fixes: String,
+    /// `(binding, symbol)`: `useDynLib(lib, alias = symbol)` binds `alias`.
+    pub symbols: Vec<(String, String)>,
+}
+
+/// Directives R would reject are skipped: R validates `NAMESPACE` syntax itself when it
+/// installs the package.
+pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
+    let mut spec = NamespaceSpec::default();
+    for node in syntax::parse(source).syntax_node().children() {
+        if !is_expression_kind(node.kind()) {
+            continue;
+        }
+        let Some(Call {
+            callee: directive,
+            qualified: false,
+            arguments,
+        }) = call_parts(&node)
+        else {
+            spec.unsupported.push(node.text().to_string());
+            continue;
+        };
+        let positional = || {
+            arguments
+                .iter()
+                .filter(|argument| argument.name.is_none())
+                .filter_map(|argument| name_argument(&argument.value).map(|(name, _)| name))
+        };
+        let named = |wanted: &str| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some(wanted))
+                .map(|argument| &argument.value)
+        };
+        match directive.as_str() {
+            "import" => {
+                let except = named("except").map(name_list).unwrap_or_default();
+                for package in positional() {
+                    spec.imports.push(NamespaceImportDirective::Namespace {
+                        package,
+                        except: except.clone(),
+                    });
+                }
+            }
+            "importFrom" | "importClassesFrom" | "importMethodsFrom" => {
+                let mut values = positional();
+                let Some(package) = values.next() else {
+                    continue;
+                };
+                let names: Vec<String> = values.collect();
+                spec.imports.push(match directive.as_str() {
+                    "importFrom" => NamespaceImportDirective::Names { package, names },
+                    "importClassesFrom" => NamespaceImportDirective::Classes { package, names },
+                    _ => NamespaceImportDirective::Methods { package, names },
+                });
+            }
+            "export" => spec.exports.extend(positional()),
+            "exportPattern" => spec.export_patterns.extend(positional()),
+            "exportClasses" | "exportClass" => spec.export_classes.extend(positional()),
+            "exportClassPattern" => spec.export_class_patterns.extend(positional()),
+            "exportMethods" => spec.export_methods.extend(positional()),
+            "S3method" => {
+                let values: Vec<String> = positional().collect();
+                let (Some(generic), Some(class)) = (values.first(), values.get(1)) else {
+                    continue;
+                };
+                let bare_generic = generic.rsplit("::").next().unwrap_or(generic);
+                spec.s3_methods.push(S3MethodDirective {
+                    generic: generic.clone(),
+                    class: class.clone(),
+                    function: values
+                        .get(2)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{bare_generic}.{class}")),
+                });
+            }
+            "useDynLib" => {
+                let Some((library, symbols)) = arguments.split_first() else {
+                    continue;
+                };
+                let Some((library, _)) = name_argument(&library.value) else {
+                    continue;
+                };
+                let flag = |wanted: &str| {
+                    named(wanted).is_some_and(|value| {
+                        matches!(value.text().to_string().trim(), "TRUE" | "T")
+                    })
+                };
+                let fixes = named(".fixes")
+                    .and_then(name_argument)
+                    .map(|(fixes, _)| fixes)
+                    .unwrap_or_default();
+                let symbols = symbols
+                    .iter()
+                    .filter(|argument| {
+                        !argument
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with('.'))
+                    })
+                    .filter_map(|argument| {
+                        let (symbol, _) = name_argument(&argument.value)?;
+                        let binding = argument.name.clone().unwrap_or_else(|| symbol.clone());
+                        Some((binding, symbol))
+                    })
+                    .collect();
+                spec.dynamic_libraries.push(DynamicLibraryDirective {
+                    library,
+                    registration: flag(".registration"),
+                    fixes,
+                    symbols,
+                });
+            }
+            _ => spec.unsupported.push(node.text().to_string()),
+        }
+    }
+    spec
+}
+
+/// A call as the loader and `NAMESPACE` read it.
+pub struct Call {
+    /// The function name, without a `pkg::` qualifier.
+    pub callee: String,
+    pub qualified: bool,
+    pub arguments: Vec<CallArgument>,
+}
+
+pub struct CallArgument {
+    pub name: Option<String>,
+    pub value: SyntaxNode,
+}
+
+/// `callee(...)` or `pkg::callee(...)`; anything else is not a call this reads.
+pub fn call_parts(node: &SyntaxNode) -> Option<Call> {
+    if node.kind() != SyntaxKind::CALL_EXPR {
+        return None;
+    }
+    let callee = node.children().next()?;
+    let (callee, qualified) = match callee.kind() {
+        SyntaxKind::NAME => (callee, false),
+        SyntaxKind::NAMESPACE_EXPR => (
+            callee
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::NAME)
+                .last()?,
+            true,
+        ),
+        _ => return None,
+    };
+    let arguments = node
+        .children()
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+        .map(|list| {
+            list.children()
+                .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+                .filter_map(|argument| {
+                    let value = argument
+                        .children()
+                        .filter(|child| is_expression_kind(child.kind()))
+                        .last()?;
+                    Some(CallArgument {
+                        name: argument_name(&argument),
+                        value,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Call {
+        callee: unquote(&callee.text().to_string()),
+        qualified,
+        arguments,
+    })
+}
+
+/// The `name` of a `name = value` argument, unquoted. A bare `value` has none.
+pub fn argument_name(argument: &SyntaxNode) -> Option<String> {
+    let mut seen_name = None;
+    for element in argument.children_with_tokens() {
+        match element {
+            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::EQ => {
+                return seen_name;
+            }
+            rowan::NodeOrToken::Token(token) if token.kind().is_trivia() => {}
+            rowan::NodeOrToken::Token(token) => {
+                seen_name = Some(unquote(token.text()));
+            }
+            rowan::NodeOrToken::Node(node) => {
+                seen_name = name_argument(&node).map(|(name, _)| name);
+            }
+        }
+    }
+    None
+}
+
+/// `c(a, "b")` or a single name, as `except =` takes.
+fn name_list(value: &SyntaxNode) -> Vec<String> {
+    if let Some((name, _)) = name_argument(value) {
+        return vec![name];
+    }
+    match call_parts(value) {
+        Some(call) if call.callee == "c" => call
+            .arguments
+            .iter()
+            .filter_map(|argument| name_argument(&argument.value).map(|(name, _)| name))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn unquote(text: &str) -> String {
+    let stripped = text
+        .strip_prefix('`')
+        .and_then(|text| text.strip_suffix('`'))
+        .or_else(|| {
+            text.strip_prefix('"')
+                .and_then(|text| text.strip_suffix('"'))
+        })
+        .or_else(|| {
+            text.strip_prefix('\'')
+                .and_then(|text| text.strip_suffix('\''))
+        });
+    stripped.unwrap_or(text).to_owned()
+}
+
+/// One `DESCRIPTION` field, with continuation lines folded into single spaces.
+pub fn description_field(source: &str, field: &str) -> Option<String> {
+    dcf_fields(source)
+        .into_iter()
+        .find(|(name, _)| *name == field)
+        .map(|(_, value)| value)
+}
+
+/// The packages `Depends` attaches, without `R` and without version requirements.
+pub fn parse_description_depends(source: &str) -> Vec<String> {
+    description_field(source, "Depends")
+        .map(|depends| {
+            depends
+                .split(',')
+                .map(|entry| {
+                    entry
+                        .split('(')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned()
+                })
+                .filter(|name| !name.is_empty() && name != "R")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Sorted and deduplicated, so reordering or reformatting directives does not invalidate queries.
 pub fn normalized_imports(imports: &[NamespaceImport]) -> Vec<(String, Option<String>)> {
     let set: BTreeSet<(String, Option<String>)> = imports
@@ -312,20 +613,48 @@ fn dcf_fields(source: &str) -> Vec<(&str, String)> {
 /// R accepts a bare name or a string literal for a NAMESPACE directive argument.
 fn name_argument(value: &SyntaxNode) -> Option<(String, TextRange)> {
     match value.kind() {
-        SyntaxKind::NAME => Some((value.text().to_string(), value.text_range())),
+        SyntaxKind::NAME => Some((unquote(&value.text().to_string()), value.text_range())),
         SyntaxKind::LITERAL => {
             let token = value
                 .children_with_tokens()
                 .filter_map(|element| element.into_token())
                 .find(|token| token.kind() == SyntaxKind::STRING)?;
-            let text = token.text();
-            let content = text
-                .trim_start_matches(['"', '\''])
-                .trim_end_matches(['"', '\'']);
-            Some((content.to_owned(), value.text_range()))
+            Some((string_content(token.text()), value.text_range()))
         }
+        // `S3method(pkg::generic, class)` names a generic in another namespace.
+        SyntaxKind::NAMESPACE_EXPR => Some((value.text().to_string(), value.text_range())),
         _ => None,
     }
+}
+
+/// A string literal's value: quotes removed and R's escapes resolved, so `"^[^\\.]"` is the
+/// regex `^[^\.]`. An escape this does not know keeps its backslash.
+pub fn string_content(literal: &str) -> String {
+    let inner = literal
+        .strip_prefix(['"', '\''])
+        .and_then(|inner| inner.strip_suffix(['"', '\'']))
+        .unwrap_or(literal);
+    let mut out = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            out.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some(escaped @ ('\\' | '"' | '\'' | '`' | ' ')) => out.push(escaped),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
