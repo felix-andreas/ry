@@ -1197,7 +1197,10 @@ fn file_binders<'db>(
         }
         for name in item_top_level_names(db, item) {
             if own_name.as_deref() != Some(name.as_str()) {
-                binders.entry(name.to_string()).or_default().push((index, item));
+                binders
+                    .entry(name.to_string())
+                    .or_default()
+                    .push((index, item));
             }
         }
     }
@@ -1573,7 +1576,10 @@ mod tests {
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
-            top_level_bindings: vec![(hir::Symbol::new("value"), types::TypeScheme::monomorphic(integer))],
+            top_level_bindings: vec![(
+                hir::Symbol::new("value"),
+                types::TypeScheme::monomorphic(integer),
+            )],
         };
 
         let once = refuse_check(&db, check);
@@ -1582,7 +1588,10 @@ mod tests {
 
         let unknown = types::TypeScheme::monomorphic(types::unknown(&db));
         assert_eq!(once.scheme.as_ref(), Some(&unknown));
-        assert_eq!(once.top_level_bindings, vec![(hir::Symbol::new("value"), unknown)]);
+        assert_eq!(
+            once.top_level_bindings,
+            vec![(hir::Symbol::new("value"), unknown)]
+        );
     }
 
     #[test]

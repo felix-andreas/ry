@@ -10,9 +10,9 @@ use miette::{
 };
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
 use semantics::metadata::{
-    PackageMetadata, attached_union, file_attached_namespaces, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace_exports,
-    parse_namespace_imports,
+    PackageMetadata, attached_union, file_attached_namespaces, normalized_imports,
+    parse_description_collate, parse_description_dependencies, parse_description_package,
+    parse_namespace_exports, parse_namespace_imports,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,

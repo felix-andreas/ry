@@ -100,7 +100,9 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     }
     for (&expression, read) in &naming.namespace_reads {
         let separator = if read.internal { ":::" } else { "::" };
-        let name = read.name.map_or_else(|| "?".to_owned(), |name| name.to_string());
+        let name = read
+            .name
+            .map_or_else(|| "?".to_owned(), |name| name.to_string());
         reads.push((
             start_of(module, expression),
             format!(

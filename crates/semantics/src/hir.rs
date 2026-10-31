@@ -29,7 +29,9 @@ impl Symbol {
         let shard = &SYMBOLS[hasher.finish() as usize % SYMBOL_SHARDS];
         // A poisoned shard means another thread died mid-insert; the set is still a valid
         // set of leaked strings, so keep serving it.
-        let mut shard = shard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(&interned) = shard.get(text) {
             return Symbol(interned);
         }
@@ -602,7 +604,9 @@ impl Module {
                 let variable_node = children.next();
                 let (variable, variable_range) = match &variable_node {
                     Some(node) if node.kind() == SyntaxKind::NAME => (
-                        Name::cast(node.clone()).and_then(|name| name.text()).map(Symbol::from),
+                        Name::cast(node.clone())
+                            .and_then(|name| name.text())
+                            .map(Symbol::from),
                         Some(node.text_range()),
                     ),
                     _ => (None, None),
@@ -691,13 +695,7 @@ impl Module {
                         value: Some(self.lower_optional(operand, range)),
                     })
                     .collect();
-                return self.allocate(
-                    ExpressionKind::Call {
-                        callee,
-                        arguments,
-                    },
-                    range,
-                );
+                return self.allocate(ExpressionKind::Call { callee, arguments }, range);
             }
             SyntaxKind::PIPE_GREATER => {
                 if let Some(call) = self.lower_pipe(lhs.clone(), rhs.clone(), range) {
@@ -998,7 +996,9 @@ fn string_value(text: &str) -> String {
 
 fn field_name_text(node: &SyntaxNode) -> Option<Symbol> {
     match node.kind() {
-        SyntaxKind::NAME => Name::cast(node.clone()).and_then(|name| name.text()).map(Symbol::from),
+        SyntaxKind::NAME => Name::cast(node.clone())
+            .and_then(|name| name.text())
+            .map(Symbol::from),
         SyntaxKind::LITERAL => {
             let token = node.first_token()?;
             (token.kind() == SyntaxKind::STRING).then(|| Symbol::new(&string_value(token.text())))

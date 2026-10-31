@@ -397,9 +397,10 @@ pub fn check_item_with_annotation<'db>(
     }
     let mut expression_types = vec![None; module.expressions.len()];
     for (&id, &ty) in &context.recorded {
-        if let Some(slot) = expression_types.get_mut(id.0 as usize) {
-            *slot = Some(context.table.resolve(context.db, ty));
-        }
+        let slot = expression_types
+            .get_mut(id.0 as usize)
+            .unwrap_or_else(|| panic!("recorded type for {id:?} outside the item's module"));
+        *slot = Some(context.table.resolve(context.db, ty));
     }
     let expression_types = ExpressionTypes(expression_types.into_boxed_slice());
     // A failed item exports `Unknown` so downstream items do not cascade off an
@@ -1551,7 +1552,7 @@ impl<'db> Checker<'db, '_> {
                     .naming
                     .bindings
                     .get(&slot)
-                                        .map(|info| info.name.to_string())
+                    .map(|info| info.name.to_string())
                     .unwrap_or_default();
                 let range = self.module.expression(id).range;
                 self.errors.push(TypeError {

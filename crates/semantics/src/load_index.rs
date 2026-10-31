@@ -5,11 +5,11 @@
 //! `item_immediate_reads`) or from one file's own text (`file_load_index`), so an edit inside
 //! one item re-derives that item alone. `package_index` only joins those per-item results.
 
+use crate::hir::Symbol;
 use crate::metadata::{
     Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
     parse_namespace_spec, string_content,
 };
-use crate::hir::Symbol;
 use crate::{Db, Item, ItemKind, SourceFile, item_naming, item_spans, item_syntax, parse};
 use rowan::{GreenNodeData, Language, NodeOrToken};
 use rustc_hash::{FxHashMap, FxHashSet};
