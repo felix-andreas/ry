@@ -51,7 +51,7 @@ are real.
   bytecode the loader needs are built the first time ry's runtime loads the package, keyed by the
   installed package's identity. GNU R keeps loading exactly the files that were installed.
 - **Binaries are the default install path, and source builds use `R CMD INSTALL` semantics under
-  ry.** Compiling the benchmark closure from source took MEASURE_SRC, against 30 s for binaries, so
+  ry.** Compiling the benchmark closure from source took 17 minutes, against 30 s for binaries, so
   the runtime is only usable if prebuilt binaries work.
 - **Package management runs as R code at first.** `install.packages`, renv and pak are R code, and
   ry's runtime runs them like any other package, which keeps every existing workflow working. ry adds
@@ -230,9 +230,11 @@ jobs, on R 4.6.1 and Ubuntu 24.04 in a 4-core container.
 | Method | Wall time |
 | --- | --- |
 | `install.packages`, P3M Ubuntu 24.04 binaries | 30 s, 515 MB installed |
-| `install.packages`, CRAN source tarballs | MEASURE_SRC |
+| `install.packages`, CRAN source tarballs | 17 min (1016 s), 227 of 228 installed |
 
-Two further observations shaped the decisions. P3M's binary index has no checksum field (only
+The source build is about 34 times slower, and one package failed outright: `Rblpapi` links
+against Bloomberg's `blpapi3` library, which its source build could not provide here, while the P3M
+binary ships that library in its `blp/` directory and installed cleanly. Two further observations shaped the decisions. P3M's binary index has no checksum field (only
 `Package`, `Version`, the dependency fields, `License`, `NeedsCompilation` and `SystemRequirements`),
 while CRAN's source index has an `MD5sum` per tarball, so verifying a binary means hashing it
 yourself. And on Ubuntu's R 4.3.3, `install.packages` could not install `MASS`, `Matrix` or `mgcv`,
