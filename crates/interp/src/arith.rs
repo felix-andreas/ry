@@ -1652,7 +1652,8 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
     for arg in call.args {
         if arg.tag == symbols().na_rm {
             na_rm = values::as_logical_scalar(arg.value) == 1;
-        } else {
+        } else if arg.value != nil() {
+            // NULL holds no values, and reading its elements as integers would see garbage.
             items.push(values::materialize(arg.value)?);
         }
     }

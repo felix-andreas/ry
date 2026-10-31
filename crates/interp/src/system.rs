@@ -524,6 +524,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
             _ => alloc(SexpType::Integer, count),
         })
         .collect::<R<_>>()?;
+    let abbreviation = if tz == "GMT" { "GMT" } else { "UTC" };
     for (index, &value) in seconds.iter().enumerate() {
         if !value.is_finite() {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
@@ -546,7 +547,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         values::ints_mut(fields[6])[index] = time.weekday as i32;
         values::ints_mut(fields[7])[index] = time.yearday as i32;
         values::ints_mut(fields[8])[index] = 0;
-        values::set_elt(fields[9], index, values::mkchar("UTC")?);
+        values::set_elt(fields[9], index, values::mkchar(abbreviation)?);
         values::ints_mut(fields[10])[index] = 0;
     }
     let list = values::list_vector(&fields)?;
@@ -554,9 +555,11 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     values::set_attr(list, symbols().names, names)?;
     let class = string_vector(&["POSIXlt", "POSIXt"])?;
     values::set_attr(list, symbols().class, class)?;
+    // Every zone is computed as UTC, but the names stay as given: a GMT time stays GMT, and the
+    // session zone is the empty name followed by its standard and daylight-saving abbreviations.
     let tzone = values::install("tzone")?;
-    let zone = if tz.is_empty() || tz == "UTC" || tz == "GMT" { "UTC" } else { tz };
-    values::set_attr(list, tzone, scalar_string(zone)?)?;
+    let names = if tz.is_empty() { string_vector(&["", "UTC", "UTC"])? } else { scalar_string(tz)? };
+    values::set_attr(list, tzone, names)?;
     let balanced = values::install("balanced")?;
     values::set_attr(list, balanced, scalar_bool(true)?)?;
     Ok(list)
