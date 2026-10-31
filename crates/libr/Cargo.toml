@@ -1,0 +1,41 @@
+[package]
+name = "libr"
+description = "ry's implementation of R's C API, built as an ABI-compatible libR shared library"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+# `tests/harness.rs` is a module the test binaries share, not a test of its own.
+autotests = false
+
+# The shared library is `libR.so` (`libR.dylib`, `R.dll`), the name compiled packages link
+# against, and its soname is set in build.rs. The rlib serves the crate's own unit tests.
+[lib]
+name = "R"
+path = "src/libr.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+heap = { path = "../heap" }
+libc = "0.2"
+rustc-hash.workspace = true
+
+[build-dependencies]
+cc = "1.2"
+
+[dev-dependencies]
+libloading = "0.8"
+syntax = { path = "../syntax" }
+
+[[test]]
+name = "test_native"
+path = "tests/test_native.rs"
+
+[[test]]
+name = "test_gnu_r_binaries"
+path = "tests/test_gnu_r_binaries.rs"
+
+[[test]]
+name = "test_fuzz_native"
+path = "tests/test_fuzz_native.rs"

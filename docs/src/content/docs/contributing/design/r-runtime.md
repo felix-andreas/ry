@@ -3,10 +3,13 @@ title: The R runtime
 description: "Proposal, not implemented: how ry runs R, from the C API up to the JIT, the table type and lazy package loading"
 ---
 
-This is a design draft. Nothing on this page is implemented: ry today is a type checker, formatter,
-linter and language server, and its console (`ry repl`) still drives a GNU R that it loads at runtime.
-The page sets out how ry becomes an R implementation of its own, in what order to build it, and why.
-The C API measurements in section 2 are real and reproducible; everything else is a recommendation.
+This is a design draft. Step 2 of the build order (section 10) is implemented: the object model and
+collector in `crates/heap`, and the C API as `libR.so` in `crates/libr`, which loads and runs real
+package binaries. Everything after it is not, so ry's console (`ry repl`) still drives a GNU R that
+it loads at runtime. The page sets out how ry becomes an R implementation of its own, in what order
+to build it, and why. The C API measurements in section 2 are real and reproducible; where section 4
+describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and
+native boundary") records the settled details.
 
 ## 1. The recommendations
 
@@ -332,9 +335,11 @@ What carries over to ry:
 
 ### Language and structure
 
-The runtime is Rust, in new crates beside the analysis: one for the object model and GC, one for the
-interpreter and the base library, one for the JIT, and one for the C API. The C API crate builds the
+The runtime is Rust, in new crates beside the analysis: `heap` for the object model and GC, one for
+the interpreter and the base library, one for the JIT, and `libr` for the C API. `libr` builds the
 shared `libR` and contains a small amount of C, for the reason in "Errors across the boundary" below.
+Because a package built against GNU R records `libR.so` as a needed library, `libR` is the whole
+runtime: the interpreter and the JIT link into it, and the `ry` binary loads it.
 The `repl` crate keeps driving GNU R until ry's runtime can run the console's own code, and then
 gains a backend switch, so `ry repl` and `ry run` keep working throughout.
 
@@ -353,8 +358,9 @@ object. Long vectors use `R_xlen_t` lengths throughout.
 - **Pairlists** are kept for language objects, attributes and `.External` arguments, because native
   code walks them. Ordinary function calls inside the interpreter never build them.
 - **Environments** are a hashed frame of binding cells, with a fast path for small frames. A binding
-  cell holds the value plus active-binding and locked flags, and the JIT can watch a cell for
-  redefinition.
+  cell is a heap object of its own holding the symbol, the value and the active-binding and locked
+  flags, so its address is stable for as long as anything references it and the JIT can watch it
+  for redefinition. The base environment's cells hang off the symbols.
 - **ALTREP is native.** An ALTREP object is a vector whose methods table decides length, element
   access, region access and dataptr materialization. Package-defined classes use the R API; ry's own
   compact sequences, memory-mapped vectors and table columns (section 6) use the same mechanism.
@@ -372,11 +378,16 @@ unboxed scalars, scalar-replaced temporaries, and vectors fused across a loop (s
 profiling later shows fragmentation, Immix-style regions with opportunistic, pinning-aware compaction
 of objects that native code has never seen are the upgrade path, and they need no API change.
 
-**Native calls get a handle scope.** Every object passed into `.Call` and every object a native
-function allocates stays alive until that call returns, as if it were protected. This makes ry
-strictly more forgiving than GNU R (code that forgets to `PROTECT` a temporary keeps working) while
-`PROTECT` itself keeps its exact semantics for objects that outlive the call through globals or
-preserved references.
+**Native calls get a handle scope.** Every object passed into `.Call` and every object the API hands
+to native code stays alive until that call returns, as if it were protected. This makes ry strictly
+more forgiving than GNU R (code that forgets to `PROTECT` a temporary keeps working) while `PROTECT`
+itself keeps its exact semantics for objects that outlive the call through globals or preserved
+references. The scope roots results, not allocations, so the temporaries of an `Rf_eval` that native
+code calls stay collectable. Each native call also owns a region of the `PROTECT` stack: unprotecting
+below it is an error, and a region left unbalanced on return is a warning and is cut back.
+
+Ready finalizers run when a native call returns and on `R_gc`, not inside the collection that found
+them, because a collection happens deep inside an allocation, where no native code may run.
 
 **`R_alloc` is an arena.** R frees `R_alloc` memory when the `.C`, `.Call` or `.External` call that
 allocated it returns, and `vmaxget`/`vmaxset` let code reset it earlier, so it is a stack of nested
@@ -392,12 +403,18 @@ boundary is a thin C layer with two directions:
   through a C trampoline that sets up a jump target. A native `Rf_error` or an R error raised in a
   nested `Rf_eval` jumps back to the trampoline, which returns an error value to Rust.
 - **Native code calling ry** (every API function) enters Rust through a wrapper that catches the
-  Rust-side error and, only once it is back in C, performs the `longjmp` to the innermost native
-  context. No Rust frame with pending destructors is ever crossed.
+  Rust-side error (and any panic), drops everything, and only then calls the C function that
+  performs the `longjmp` to the innermost native context. The jump skips only the wrapper's frame and
+  the exported function's, which hold nothing with a destructor at that point. No Rust frame with
+  pending destructors is ever crossed.
 
-`R_UnwindProtect`, `R_ToplevelExec`, `R_tryEval` and `R_tryCatch` map onto the same contexts. R
-conditions, restarts and `on.exit` are implemented natively in Rust, with the C layer only as the
-bridge.
+`R_UnwindProtect`, `R_ToplevelExec`, `R_ExecWithCleanup` and `R_tryCatch` are C contexts of their
+own, because the callbacks native code hands them are native code too, and a C++ exception that a
+binding throws from an `R_UnwindProtect` cleanup to run its destructors must unwind only C frames.
+`R_tryEval` is plain Rust, because inside Rust an error is already a value. R conditions, restarts
+and `on.exit` are implemented natively in Rust, with the C layer only as the bridge. The variadic
+functions (`Rf_error`, `Rprintf` and their family) are C too, because stable Rust cannot define a C
+variadic function.
 
 ### Native packages
 
@@ -744,9 +761,12 @@ Each step ends with something real running, and each one is a large, whole chang
    library, and build a differential harness that runs
    an R file under GNU R and under ry and compares output, errors and warnings. Write the benchmark
    generator and generate small versions of the three code bases.
-2. **The object model, GC and C API skeleton.** Objects, interned strings and symbols, the GC with
-   `PROTECT`, and the `libR` shared library with the top 150 or so symbols, enough for a C package to
-   load and run its `.Call` entry points from a Rust test harness.
+2. **The object model, GC and C API skeleton (done).** Objects, interned strings and symbols, the GC
+   with `PROTECT`, and the `libR` shared library with the top 150 or so symbols, enough for a C
+   package to load and run its `.Call` entry points from a Rust test harness. `libR` exports 149 of
+   the 150 API names the closure uses most (the gap is `R_ParseVector`, which needs the parser) and
+   195 of the top 200. brio from the closure and a purpose-written package run under it, built both
+   against ry's headers and by GNU R's `R CMD SHLIB`.
 3. **The interpreter and base R.** The tier-0 bytecode interpreter, closures, promises, environments,
    conditions, S3 dispatch, and base R's primitives and internals in Rust. Base R's R code (the
    `base`, `stats`, `utils`, `methods`, `tools` and `parallel` sources) is reused as R source, so only
