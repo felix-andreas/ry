@@ -404,12 +404,12 @@ fn rows(
             let mut exprs = Vec::with_capacity(keys.len());
             let mut descending = Vec::with_capacity(keys.len());
             for key in keys {
-                let value = lower.expr(&key.expr)?;
+                let mut value = lower.expr(&key.expr)?;
                 // Polars sorts `NaN` above every number, so a descending sort would put it first,
-                // where R's `order` puts it last with `NA`. A leading `is_nan` key fixes that.
+                // where R's `order` puts it last with `NA`. Sorting on the value with `NaN` read as
+                // null fixes that and keeps a single key on Polars' fast single-column sort.
                 if typer.expr(&key.expr)? == ColumnType::Double {
-                    exprs.push(value.clone().is_nan());
-                    descending.push(false);
+                    value = value.fill_nan(lit(NULL));
                 }
                 exprs.push(value);
                 descending.push(key.descending);
