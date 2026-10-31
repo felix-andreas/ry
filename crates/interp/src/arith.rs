@@ -1700,9 +1700,9 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                     total += value as i64;
                 }
             }
+            // An integer sum too large for an integer is a double, as in R 4.3.
             if total > i32::MAX as i64 || total < -(i32::MAX as i64) {
-                conditions::warning_call(call.call, "integer overflow - use sum(as.numeric(.))")?;
-                return scalar_integer(NA_INTEGER);
+                return scalar_real(total as f64);
             }
             scalar_integer(total as i32)
         }

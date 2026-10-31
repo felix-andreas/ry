@@ -157,6 +157,16 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
             match dims.as_deref() {
                 Some([rows, cols]) => print_matrix(value, *rows, *cols, options, true)?,
                 Some(dims) if dims.len() > 2 => print_array(value, dims, options)?,
+                Some([_]) => {
+                    // A one-dimensional array with a named dimnames shows the name, even an
+                    // empty one, on a line of its own, as a 1-D table does.
+                    let dimnames_names = values::names(get_attr(value, symbols().dimnames));
+                    if dimnames_names != nil() {
+                        let title = values::string_at(dimnames_names, 0).map(|text| text.into_owned()).unwrap_or_default();
+                        out(&format!("{title}\n"));
+                    }
+                    print_vector(value, options)?
+                }
                 _ => print_vector(value, options)?,
             }
         }
@@ -277,7 +287,7 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     } else {
         vector
     };
-    let items = format::format_vector(subset, options.settings, options.quote, na)?;
+    let items = escape_unquoted(format::format_vector(subset, options.settings, options.quote, na)?, vector, options);
     if names != nil() {
         print_named_vector(&items, names, options);
     } else {
@@ -353,9 +363,17 @@ unsafe fn matrix_columns(matrix: Sexp, rows: usize, cols: usize, options: &Print
     for col in 0..cols {
         let indices: Vec<usize> = (0..rows).map(|row| row + col * rows).collect();
         let column = crate::subset::select_elements(matrix, &indices)?;
-        columns.push(format::format_vector(column, options.settings, options.quote, na)?);
+        columns.push(escape_unquoted(format::format_vector(column, options.settings, options.quote, na)?, matrix, options));
     }
     Ok(columns)
+}
+
+/// Unquoted strings still print with their control characters and backslashes escaped.
+unsafe fn escape_unquoted(items: Vec<String>, vector: Sexp, options: &PrintOptions) -> Vec<String> {
+    if vector.kind() != SexpType::String || options.quote {
+        return items;
+    }
+    items.into_iter().map(|item| encode_string(&item, None)).collect()
 }
 
 pub unsafe fn print_matrix(
@@ -449,13 +467,8 @@ pub unsafe fn print_matrix(
         text.push_str(&pad(&row_title, row_label_width, false));
         for col in start..end {
             text.push_str(&" ".repeat(options.gap));
-            let label_right = right || col_names == nil();
-            let label = &col_labels[col];
-            if col_names == nil() || label_right {
-                text.push_str(&pad(label, widths[col], label_right && right || col_names == nil()));
-            } else {
-                text.push_str(&pad(label, widths[col], false));
-            }
+            // Column labels, named or `[,j]`, align like the column's entries.
+            text.push_str(&pad(&col_labels[col], widths[col], right));
         }
         text.push('\n');
         for row in 0..rows {

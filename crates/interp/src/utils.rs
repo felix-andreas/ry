@@ -1636,10 +1636,8 @@ unsafe fn do_unzip(call: &NativeCall<'_>) -> R<Sexp> {
         extracted.push(target.display().to_string());
     }
     if let Some(wanted) = &wanted {
-        for name in wanted {
-            if !entries.iter().any(|entry| &entry.name == name) {
-                warning(format!("requested file not found in the zip file: '{name}'"))?;
-            }
+        if wanted.iter().any(|name| !entries.iter().any(|entry| &entry.name == name)) {
+            warning("requested file not found in the zip file")?;
         }
     }
     let result = scalar_integer(0)?;
