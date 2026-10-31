@@ -1,0 +1,65 @@
+[stdout]
+|   x y
+| 1 1 a
+| 2 2 b
+| 3 3 c
+| [1] 3
+| [1] 2
+| [1] "x" "y"
+| [1] "a" "b" "c"
+|   x y
+| 2 2 b
+| [1] "b" "c"
+|   x y z
+| 1 1 a 2
+| 2 2 b 4
+| 3 3 c 6
+| [1] 1 2 3
+|   x z
+| 1 1 2
+| 2 2 4
+| 3 3 6
+|   x y z
+| 1 1 a 2
+| 2 2 b 4
+| 3 3 c 6
+| 4 9 q 0
+|   k a     b
+| 1 2 q  TRUE
+| 2 3 r FALSE
+|   x y z
+| 3 3 c 6
+| 2 2 b 4
+| 1 1 a 2
+| $x
+| [1] 1
+| 
+| $y
+| [1] "a"
+| 
+| $z
+| [1] 2
+| 
+| $x
+| [1] "integer"
+| 
+| $y
+| [1] "character"
+| 
+| $z
+| [1] "numeric"
+| 
+|   y z
+| 2 b 4
+| 3 c 6
+|   x y z w
+| 1 1 a 2 3
+| 2 2 b 4 6
+| 3 3 c 6 9
+| [1] "x"     "label" "z"    
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("x", "label", "z")

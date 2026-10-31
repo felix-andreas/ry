@@ -1,0 +1,18 @@
+[stdout]
+| [1] "Woof! I am an animal named Rex"
+| [1] "..."
+| [1] "I am an animal named Tom"
+| [1] "integer then numeric of length 3"
+| [1] "numeric of length 1"
+| [1] "matrix"
+| $ 12.50 
+| $ 12.50 
+| [1] "$12.5"
+| [1] "money!"
+| [1] 5
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 5L

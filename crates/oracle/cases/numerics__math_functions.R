@@ -1,0 +1,11 @@
+round(2.5); round(-1.5); round(3.14159, 2); signif(123456, 2); ceiling(2.1); floor(-2.1); trunc(-2.7)
+sqrt(c(4, 9)); exp(1); log(100, 10); log10(1000); log2(8); log1p(0); expm1(0)
+sum(1:100); prod(1:10); cumsum(1:5); cumprod(c(1, 2, 3)); cummax(c(1, 3, 2, 5)); diff(c(1, 4, 9, 16))
+max(3, 9, 2); min(c(4, NA, 1), na.rm = TRUE); range(c(5, 1, 9)); mean(c(1, 2, 3, 10))
+5 %/% 2; -5 %/% 2; 5 %% 3; -5 %% 3; 5.5 %% 2
+.Machine$integer.max; .Machine$double.eps > 0; 1/0; -1/0; 0/0; is.nan(0/0); is.finite(c(1, Inf, NA))
+choose(5, 2); factorial(5); gamma(5); beta(2, 3); abs(-3:3)
+bitwAnd(12L, 10L); bitwOr(12L, 10L); bitwXor(12L, 10L)
+sort(c(3, 1, 2), decreasing = TRUE); order(c(3, 1, 2)); rank(c(10, 30, 20)); rev(sort(c("b", "A", "a")))
+tabulate(c(1, 2, 2, 5)); table(c("x", "y", "x"))
+1e-300 * 1e-300; 2^1023 * 2; 100000; 1e5; 123456789012; 0.1 + 0.2 == 0.3; isTRUE(all.equal(0.1 + 0.2, 0.3))

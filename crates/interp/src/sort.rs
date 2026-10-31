@@ -45,9 +45,84 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("wrap_meta", 3, |call| Ok(call.arg(0))),
 ];
 
-/// Compares two strings in the C collation GNU R uses for `sort` and `ls` under `LC_COLLATE=C`.
+/// Compares two strings as GNU R's `sort` and `order` do. In the `C` and `POSIX` locales that is
+/// code point order. Otherwise GNU R collates with ICU's root collation, which this approximates
+/// for the scripts R code commonly sorts: spaces, then punctuation and symbols, then digits, then
+/// letters compared without case or accents; ties go to accents, then lowercase before uppercase.
 pub fn collate(left: &str, right: &str) -> Ordering {
-    left.cmp(right)
+    if c_collation() {
+        return left.cmp(right);
+    }
+    let primary = |text: &str| text.chars().map(primary_weight).collect::<Vec<_>>();
+    let secondary = |text: &str| text.chars().map(|character| base_letter(character).1).collect::<Vec<_>>();
+    let tertiary = |text: &str| text.chars().map(|character| character.is_uppercase()).collect::<Vec<_>>();
+    primary(left)
+        .cmp(&primary(right))
+        .then_with(|| secondary(left).cmp(&secondary(right)))
+        .then_with(|| tertiary(left).cmp(&tertiary(right)))
+        .then_with(|| left.cmp(right))
+}
+
+/// Whether the session collates by code point: `LC_ALL`, then `LC_COLLATE`, then `LANG` is `C` or
+/// `POSIX`.
+fn c_collation() -> bool {
+    static C_COLLATION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C_COLLATION.get_or_init(|| {
+        let locale = ["LC_ALL", "LC_COLLATE", "LANG"]
+            .iter()
+            .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+            .unwrap_or_else(|| "C".to_owned());
+        locale == "C" || locale == "POSIX"
+    })
+}
+
+/// The root collation's primary weight of a character, as a (group, value) pair.
+fn primary_weight(character: char) -> (u8, u32) {
+    // The punctuation and symbols of ASCII, in the order the root collation sorts them.
+    const PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+    if character.is_whitespace() {
+        return (0, character as u32);
+    }
+    if let Some(position) = PUNCTUATION.find(character) {
+        return (1, position as u32);
+    }
+    if let Some(digit) = character.to_digit(10) {
+        return (3, digit);
+    }
+    let (base, _) = base_letter(character);
+    if base.is_alphabetic() {
+        return (4, base.to_lowercase().next().unwrap_or(base) as u32);
+    }
+    if character.is_ascii() || !character.is_alphanumeric() {
+        return (2, character as u32);
+    }
+    (5, character as u32)
+}
+
+/// A Latin letter without its accent, and an accent rank (0 for none).
+fn base_letter(character: char) -> (char, u32) {
+    const ACCENTED: [(&str, char); 14] = [
+        ("àáâãäåāăą", 'a'),
+        ("ÀÁÂÃÄÅĀĂĄ", 'A'),
+        ("çćĉċč", 'c'),
+        ("ÇĆĈĊČ", 'C'),
+        ("èéêëēĕėęě", 'e'),
+        ("ÈÉÊËĒĔĖĘĚ", 'E'),
+        ("ìíîïĩīĭįı", 'i'),
+        ("ÌÍÎÏĨĪĬĮİ", 'I'),
+        ("ñńņňŉ", 'n'),
+        ("ÑŃŅŇ", 'N'),
+        ("òóôõöøōŏő", 'o'),
+        ("ÒÓÔÕÖØŌŎŐ", 'O'),
+        ("ùúûüũūŭůűų", 'u'),
+        ("ÙÚÛÜŨŪŬŮŰŲ", 'U'),
+    ];
+    for (variants, base) in ACCENTED {
+        if let Some(position) = variants.chars().position(|variant| variant == character) {
+            return (base, position as u32 + 1);
+        }
+    }
+    (character, 0)
 }
 
 pub fn sort_strings(names: &mut [String]) {

@@ -1,0 +1,27 @@
+[stdout]
+| [1] 338350
+| [1] 338350
+| [1] 338350
+| [1]   8  16 111
+| [1] 0.5 1.0 1.5 2.0 2.5
+| [1] 0.5 1.0 1.5 2.0 2.5
+| [1] "1 2"
+| [1] "1 2"
+| [1] "1 2"
+| [1] 1 2 4 5 7 8
+| [1] 1 2 4 5 7 8
+| [1] NA
+| [1] NA
+| [1] "na or true"
+| [1] "false"
+| [1] "na or true"
+| [1] 24
+| [1] 24
+[messages]
+[warnings]
+- NAs produced by integer overflow (in x + 1L)
+- NAs produced by integer overflow (in x + 1L)
+[errors]
+[value]
+double
+| 24

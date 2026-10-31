@@ -532,6 +532,14 @@ unsafe fn do_get_restart(call: &Call<'_>) -> R<Sexp> {
         position += 1;
         entry = restart.next.clone();
     }
+    // Below every established restart sits top level's `abort`, whose exit is `NULL`.
+    if position == index {
+        let name = values::scalar_string("abort")?;
+        let abort = values::list_vector(&[name, nil()])?;
+        let class = values::scalar_string("restart")?;
+        values::set_attr(abort, symbols().class, class)?;
+        return Ok(abort);
+    }
     Ok(nil())
 }
 

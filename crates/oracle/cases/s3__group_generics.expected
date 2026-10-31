@@ -1,0 +1,21 @@
+[stdout]
+| [1] 25
+| [1] TRUE
+| [1] "temp"
+| Math: sqrt 
+| [1] 4
+| Math: abs 
+| [1] 3
+| Summary: max 
+| [1] 9
+| Summary: range 
+| [1] 2 4
+| [1] 11 12
+| [1] "field anything"
+| [1] "custom equality"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "custom equality"

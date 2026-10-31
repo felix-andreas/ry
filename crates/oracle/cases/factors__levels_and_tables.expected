@@ -1,0 +1,41 @@
+[stdout]
+| [1] lo  hi  mid hi 
+| Levels: lo mid hi
+| [1] "lo"  "mid" "hi" 
+| [1] 3
+| [1] 1 3 2 3
+| f
+|  lo mid  hi 
+|   1   1   2 
+| [1] lo hi hi
+| Levels: lo hi
+| [1] b a c
+| Levels: a b c
+| [1] x y z
+| Levels: z x y
+| [1] L H M H
+| Levels: L M H
+| [1] a.x b.y
+| Levels: a.x b.x a.y b.y
+| [1] (0,3]  (3,6]  (6,10]
+| Levels: (0,3] (3,6] (6,10]
+|  lo mid  hi 
+|   1   1   2 
+| [1]  TRUE FALSE
+|  a  b 
+| 40 60 
+| $`1`
+| [1] 1 3 5
+| 
+| $`2`
+| [1] 2 4 6
+| 
+| [1] 1 2
+[messages]
+[warnings]
+- number of items to replace is not a multiple of replacement length (in x[i] <- value[[j]])
+- number of items to replace is not a multiple of replacement length (in x[i] <- value[[j]])
+[errors]
+[value]
+integer
+| 1:2

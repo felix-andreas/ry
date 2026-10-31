@@ -1,0 +1,13 @@
+[stdout]
+| [1] 99
+| [1] "skipped"
+| [1] "alpha" "beta" 
+| [1] "recovered from oops"
+| [1] "no 'restart' 'nonexistent' found"
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

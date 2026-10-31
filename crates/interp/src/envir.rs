@@ -1299,19 +1299,17 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
     let list = eval::eval_symbol(x_symbol, env)?;
     let count = length(list);
     let result = alloc(SexpType::List, count)?;
-    let index_value = values::alloc(SexpType::Integer, 1)?;
-    // `X[[i]]` with `i` a fresh integer each time, as GNU R builds it.
+    // `FUN(X[[i]], ...)`, with `i` bound afresh each time.
     let element = values::call(symbols.bracket2, &[x_symbol, i_symbol])?;
     let fun_call = values::call(fun_symbol, &[element, symbols.dots])?;
     for index in 0..count {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::eval(fun_call, env)
+            eval::force_and_call(fun_call, 1, env)
         })?;
         values::set_elt(result, index, value);
     }
-    let _ = index_value;
     let names = values::names(list);
     if names != nil() {
         values::set_attr(result, symbols.names, names)?;
@@ -1342,7 +1340,7 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::eval(fun_call, env)
+            eval::force_and_call(fun_call, 1, env)
         })?;
         if length(value) != template_length {
             return Err(error(format!(

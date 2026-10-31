@@ -1425,6 +1425,25 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
+/// `R_forceAndCall`: evaluates `call` in `env`, forcing the promises of a closure's first
+/// `count` arguments before its body runs. The apply family calls `FUN` this way, so a closure
+/// that captures its argument sees this iteration's element, not the last one.
+pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
+    let head = call.car();
+    let function = if head.kind() == SexpType::Symbol { find_fun(head, env)? } else { eval(head, env)? };
+    crate::heap().root(function);
+    if function.kind() != SexpType::Closure {
+        return apply_call(call, function, call.cdr(), env);
+    }
+    let args = promise_args(call.cdr(), env)?;
+    for arg in args.iter().take(count) {
+        if arg.value.kind() == SexpType::Promise {
+            force_promise(arg.value)?;
+        }
+    }
+    apply_closure(call, function, &args, env, None)
+}
+
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(0);
     let mut env = call.arg(1);
