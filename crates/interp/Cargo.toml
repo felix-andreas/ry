@@ -1,0 +1,21 @@
+[package]
+name = "interp"
+description = "ry's R interpreter: language objects, the bytecode interpreter, and base R's internals"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/interp.rs"
+
+[dependencies]
+heap = { path = "../heap" }
+syntax = { path = "../syntax" }
+rowan.workspace = true
+rustc-hash.workspace = true
+regex.workspace = true
+flate2 = "1"
+libc = "0.2"
+stacker.workspace = true
+unicode-width.workspace = true

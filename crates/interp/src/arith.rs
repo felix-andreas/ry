@@ -1,0 +1,2393 @@
+//! Arithmetic, comparison and logic operators, the `Math` and `Summary` groups, NA tests,
+//! sequences and repetition.
+
+use crate::{
+    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+    coerce::{self, coerce_vector},
+    conditions,
+    unwind::{R, error},
+    values::{
+        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
+    },
+};
+use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real};
+
+unsafe extern "C" {
+    fn tgamma(x: f64) -> f64;
+    fn lgamma(x: f64) -> f64;
+    fn expm1(x: f64) -> f64;
+    fn log1p(x: f64) -> f64;
+}
+
+pub const BUILTINS: &[BuiltinDef] = &[
+    builtin("+", -1, |call| unsafe { arithmetic(call, Op::Add) }).generic(Generic::Ops),
+    builtin("-", -1, |call| unsafe { arithmetic(call, Op::Subtract) }).generic(Generic::Ops),
+    builtin("*", 2, |call| unsafe { arithmetic(call, Op::Multiply) }).generic(Generic::Ops),
+    builtin("/", 2, |call| unsafe { arithmetic(call, Op::Divide) }).generic(Generic::Ops),
+    builtin("^", 2, |call| unsafe { arithmetic(call, Op::Power) }).generic(Generic::Ops),
+    builtin("%%", 2, |call| unsafe { arithmetic(call, Op::Modulo) }).generic(Generic::Ops),
+    builtin("%/%", 2, |call| unsafe { arithmetic(call, Op::IntegerDivide) }).generic(Generic::Ops),
+    builtin("==", 2, |call| unsafe { comparison(call, Comparison::Equal) }).generic(Generic::Ops),
+    builtin("!=", 2, |call| unsafe { comparison(call, Comparison::NotEqual) }).generic(Generic::Ops),
+    builtin("<", 2, |call| unsafe { comparison(call, Comparison::Less) }).generic(Generic::Ops),
+    builtin(">", 2, |call| unsafe { comparison(call, Comparison::Greater) }).generic(Generic::Ops),
+    builtin("<=", 2, |call| unsafe { comparison(call, Comparison::LessEqual) }).generic(Generic::Ops),
+    builtin(">=", 2, |call| unsafe { comparison(call, Comparison::GreaterEqual) }).generic(Generic::Ops),
+    builtin("&", 2, |call| unsafe { logic(call, true) }).generic(Generic::Ops),
+    builtin("|", 2, |call| unsafe { logic(call, false) }).generic(Generic::Ops),
+    builtin("!", 1, do_not).generic(Generic::Ops),
+    builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math),
+    builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math),
+    builtin("sqrt", 1, |call| unsafe { math1(call, Math::Sqrt) }).generic(Generic::Math),
+    builtin("floor", 1, |call| unsafe { math1(call, Math::Floor) }).generic(Generic::Math),
+    builtin("ceiling", 1, |call| unsafe { math1(call, Math::Ceiling) }).generic(Generic::Math),
+    builtin("trunc", -1, |call| unsafe { math1(call, Math::Trunc) }).generic(Generic::Math),
+    builtin("exp", 1, |call| unsafe { math1(call, Math::Exp) }).generic(Generic::Math),
+    builtin("expm1", 1, |call| unsafe { math1(call, Math::Expm1) }).generic(Generic::Math),
+    builtin("log1p", 1, |call| unsafe { math1(call, Math::Log1p) }).generic(Generic::Math),
+    builtin("log2", 1, |call| unsafe { math1(call, Math::Log2) }).generic(Generic::Math),
+    builtin("log10", 1, |call| unsafe { math1(call, Math::Log10) }).generic(Generic::Math),
+    builtin("cos", 1, |call| unsafe { math1(call, Math::Cos) }).generic(Generic::Math),
+    builtin("sin", 1, |call| unsafe { math1(call, Math::Sin) }).generic(Generic::Math),
+    builtin("tan", 1, |call| unsafe { math1(call, Math::Tan) }).generic(Generic::Math),
+    builtin("cospi", 1, |call| unsafe { math1(call, Math::Cospi) }).generic(Generic::Math),
+    builtin("sinpi", 1, |call| unsafe { math1(call, Math::Sinpi) }).generic(Generic::Math),
+    builtin("tanpi", 1, |call| unsafe { math1(call, Math::Tanpi) }).generic(Generic::Math),
+    builtin("acos", 1, |call| unsafe { math1(call, Math::Acos) }).generic(Generic::Math),
+    builtin("asin", 1, |call| unsafe { math1(call, Math::Asin) }).generic(Generic::Math),
+    builtin("atan", 1, |call| unsafe { math1(call, Math::Atan) }).generic(Generic::Math),
+    builtin("cosh", 1, |call| unsafe { math1(call, Math::Cosh) }).generic(Generic::Math),
+    builtin("sinh", 1, |call| unsafe { math1(call, Math::Sinh) }).generic(Generic::Math),
+    builtin("tanh", 1, |call| unsafe { math1(call, Math::Tanh) }).generic(Generic::Math),
+    builtin("acosh", 1, |call| unsafe { math1(call, Math::Acosh) }).generic(Generic::Math),
+    builtin("asinh", 1, |call| unsafe { math1(call, Math::Asinh) }).generic(Generic::Math),
+    builtin("atanh", 1, |call| unsafe { math1(call, Math::Atanh) }).generic(Generic::Math),
+    builtin("gamma", 1, |call| unsafe { math1(call, Math::Gamma) }).generic(Generic::Math),
+    builtin("lgamma", 1, |call| unsafe { math1(call, Math::Lgamma) }).generic(Generic::Math),
+    builtin("digamma", 1, |call| unsafe { math1(call, Math::Digamma) }).generic(Generic::Math),
+    builtin("trigamma", 1, |call| unsafe { math1(call, Math::Trigamma) }).generic(Generic::Math),
+    builtin("log", -1, do_log).generic(Generic::Math),
+    builtin("round", -1, |call| unsafe { round_like(call, false) }).generic(Generic::Math),
+    builtin("signif", -1, |call| unsafe { round_like(call, true) }).generic(Generic::Math),
+    builtin("cumsum", 1, |call| unsafe { cumulative(call, Cumulative::Sum) }).generic(Generic::Math),
+    builtin("cumprod", 1, |call| unsafe { cumulative(call, Cumulative::Product) }).generic(Generic::Math),
+    builtin("cummax", 1, |call| unsafe { cumulative(call, Cumulative::Max) }).generic(Generic::Math),
+    builtin("cummin", 1, |call| unsafe { cumulative(call, Cumulative::Min) }).generic(Generic::Math),
+    builtin("sum", -1, |call| unsafe { summary(call, Summary::Sum) }).generic(Generic::Summary),
+    builtin("prod", -1, |call| unsafe { summary(call, Summary::Product) }).generic(Generic::Summary),
+    builtin("max", -1, |call| unsafe { summary(call, Summary::Max) }).generic(Generic::Summary),
+    builtin("min", -1, |call| unsafe { summary(call, Summary::Min) }).generic(Generic::Summary),
+    builtin("range", -1, do_range).generic(Generic::Summary),
+    builtin("all", -1, |call| unsafe { all_any(call, true) }).generic(Generic::Summary),
+    builtin("any", -1, |call| unsafe { all_any(call, false) }).generic(Generic::Summary),
+    internal("mean", 1, do_mean),
+    builtin("is.na", 1, |call| unsafe { na_test(call, NaTest::Na) }).generic(Generic::Internal),
+    builtin("is.nan", 1, |call| unsafe { na_test(call, NaTest::NaN) }).generic(Generic::Internal),
+    builtin("is.finite", 1, |call| unsafe { na_test(call, NaTest::Finite) }).generic(Generic::Internal),
+    builtin("is.infinite", 1, |call| unsafe { na_test(call, NaTest::Infinite) }).generic(Generic::Internal),
+    builtin("anyNA", -1, do_any_na).generic(Generic::Internal),
+    builtin(":", 2, do_colon),
+    builtin("seq_len", 1, do_seq_len),
+    builtin("seq_along", 1, do_seq_along),
+    builtin("seq.int", -1, do_seq_int),
+    builtin("rep", -1, do_rep).generic(Generic::Internal),
+    internal("rep.int", 2, do_rep_int),
+    internal("rep_len", 2, do_rep_len),
+    internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
+    internal("choose", 2, |call| unsafe { math2(call, choose) }),
+    internal("lchoose", 2, |call| unsafe { math2(call, |n, k| choose(n, k).abs().ln()) }),
+    internal("beta", 2, |call| unsafe { math2(call, |a, b| (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()) }),
+    internal("lbeta", 2, |call| unsafe { math2(call, |a, b| gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)) }),
+    internal("bitwAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
+    internal("bitwOr", 2, |call| unsafe { bitwise(call, |a, b| a | b) }),
+    internal("bitwXor", 2, |call| unsafe { bitwise(call, |a, b| a ^ b) }),
+    internal("bitwNot", 1, do_bitw_not),
+    internal("bitwShiftL", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32) }),
+    internal("bitwShiftR", 2, |call| unsafe { bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32) }),
+    builtin("xtfrm", 1, |call| unsafe { Ok(call.arg(0)) }).generic(Generic::Internal),
+    builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
+    builtin("Im", 1, |call| unsafe { complex_part(call, 1) }).generic(Generic::Complex),
+    builtin("Mod", 1, |call| unsafe { complex_part(call, 2) }).generic(Generic::Complex),
+    builtin("Arg", 1, |call| unsafe { complex_part(call, 3) }).generic(Generic::Complex),
+    builtin("Conj", 1, |call| unsafe { complex_part(call, 4) }).generic(Generic::Complex),
+    internal("complex", 4, do_complex),
+    internal("polyroot", 1, |call| unsafe { Err(call.error("polyroot is not supported")) }),
+    internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
+    internal("pmax", -1, |call| unsafe { parallel_extreme(call, true) }),
+    internal("cumall", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("tabulate", 2, do_tabulate),
+    internal("which", 1, do_which),
+    internal("which.max", 1, |call| unsafe { which_extreme(call, true) }),
+    internal("which.min", 1, |call| unsafe { which_extreme(call, false) }),
+    internal("crossprod", 2, |call| unsafe { matrix_product(call, true, false) }),
+    internal("tcrossprod", 2, |call| unsafe { matrix_product(call, false, true) }),
+    builtin("%*%", 2, |call| unsafe { matrix_product(call, false, false) }),
+    internal("trunc", -1, |call| unsafe { math1(call, Math::Trunc) }),
+    internal("is.unsorted", 2, do_is_unsorted),
+];
+
+// Arithmetic.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Power,
+    Modulo,
+    IntegerDivide,
+}
+
+impl Op {
+    fn symbol(self) -> &'static str {
+        match self {
+            Op::Add => "+",
+            Op::Subtract => "-",
+            Op::Multiply => "*",
+            Op::Divide => "/",
+            Op::Power => "^",
+            Op::Modulo => "%%",
+            Op::IntegerDivide => "%/%",
+        }
+    }
+}
+
+unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
+    match call.args {
+        [single] => unary_arithmetic(call, op, single.value),
+        [left, right] => binary_arithmetic(call.call, op, left.value, right.value),
+        _ => Err(call.error(format!(
+            "operator needs one or two arguments"
+        ))),
+    }
+}
+
+unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
+    let operand = values::materialize(operand)?;
+    if !matches!(op, Op::Add | Op::Subtract) {
+        return Err(call.error(format!("invalid unary operator")));
+    }
+    let result = match operand.kind() {
+        SexpType::Logical => {
+            let converted = coerce_vector(operand, SexpType::Integer)?;
+            let result = values::duplicate(converted)?;
+            values::copy_most_attributes(operand, result, true)?;
+            result
+        }
+        SexpType::Integer | SexpType::Real | SexpType::Complex => {
+            if op == Op::Add {
+                return Ok(operand);
+            }
+            let result = values::shallow_duplicate(operand)?;
+            result
+        }
+        _ => return Err(call.error("invalid argument to unary operator")),
+    };
+    if op == Op::Subtract {
+        match result.kind() {
+            SexpType::Integer => {
+                for value in values::ints_mut(result) {
+                    if *value != NA_INTEGER {
+                        *value = -*value;
+                    }
+                }
+            }
+            SexpType::Real => {
+                for value in values::reals_mut(result) {
+                    *value = -*value;
+                }
+            }
+            SexpType::Complex => {
+                for value in values::complexes_mut(result) {
+                    value.r = -value.r;
+                    value.i = -value.i;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
+/// The result attributes of a binary operation: dims must agree, names come from the operand
+/// as long as the result, and other attributes are copied from both, the first taking
+/// precedence.
+pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
+    let left_dims = get_attr(left, symbols().dim);
+    let right_dims = get_attr(right, symbols().dim);
+    if left_dims != nil() && right_dims != nil() {
+        let equal = length(left_dims) == length(right_dims)
+            && (0..length(left_dims)).all(|index| {
+                crate::subset::numeric_element(left_dims, index)
+                    == crate::subset::numeric_element(right_dims, index)
+            });
+        if !equal {
+            return Err(crate::unwind::error_in(call, "non-conformable arrays"));
+        }
+    }
+    let result_length = length(result);
+    let left_attributes = left.attrib() != nil();
+    let right_attributes = right.attrib() != nil();
+    if !left_attributes && !right_attributes {
+        return Ok(());
+    }
+    if right_attributes && length(right) == result_length {
+        values::copy_most_attributes(right, result, false)?;
+    }
+    if left_attributes && length(left) == result_length {
+        values::copy_most_attributes(left, result, false)?;
+    }
+    for symbol in [symbols().dim, symbols().dimnames] {
+        let from_left = get_attr(left, symbol);
+        let from_right = get_attr(right, symbol);
+        if from_left != nil() && length(left) == result_length {
+            values::set_attr(result, symbol, from_left)?;
+        } else if from_right != nil() && length(right) == result_length {
+            values::set_attr(result, symbol, from_right)?;
+        }
+    }
+    let left_names = get_attr(left, symbols().names);
+    let right_names = get_attr(right, symbols().names);
+    if left_names != nil() && length(left) == result_length {
+        values::set_attr(result, symbols().names, left_names)?;
+    } else if right_names != nil() && length(right) == result_length {
+        values::set_attr(result, symbols().names, right_names)?;
+    }
+    Ok(())
+}
+
+unsafe fn recycled_length(left: usize, right: usize) -> R<usize> {
+    if left == 0 || right == 0 {
+        return Ok(0);
+    }
+    let longer = left.max(right);
+    if longer % left.min(right) != 0 {
+        conditions::warning(
+            "longer object length is not a multiple of shorter object length",
+        )?;
+    }
+    Ok(longer)
+}
+
+fn is_arithmetic_type(kind: SexpType) -> bool {
+    matches!(
+        kind,
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex
+    )
+}
+
+pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> R<Sexp> {
+    let left = values::materialize(left)?;
+    let right = values::materialize(right)?;
+    let left_kind = if left == nil() { SexpType::Integer } else { left.kind() };
+    let right_kind = if right == nil() { SexpType::Integer } else { right.kind() };
+    if !is_arithmetic_type(left_kind) || !is_arithmetic_type(right_kind) {
+        return Err(crate::unwind::error_in(call, "non-numeric argument to binary operator"));
+    }
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = recycled_length(left_length, right_length)?;
+    let result = if left_kind == SexpType::Complex || right_kind == SexpType::Complex {
+        complex_arithmetic(op, left, right, count)?
+    } else if left_kind == SexpType::Real
+        || right_kind == SexpType::Real
+        || matches!(op, Op::Divide | Op::Power)
+    {
+        real_arithmetic(op, left, right, count)?
+    } else {
+        integer_arithmetic(op, left, right, count)?
+    };
+    binary_attributes(left, right, result, call)?;
+    Ok(result)
+}
+
+/// Element `index` of a numeric vector as a double.
+#[inline]
+pub unsafe fn real_at(vector: Sexp, index: usize) -> f64 {
+    match vector.kind() {
+        SexpType::Real => values::reals(vector)[index],
+        SexpType::Integer | SexpType::Logical => {
+            let value = values::ints(vector)[index];
+            if value == NA_INTEGER { NA_REAL } else { value as f64 }
+        }
+        _ => NA_REAL,
+    }
+}
+
+unsafe fn real_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
+    let result = alloc(SexpType::Real, count)?;
+    let left_length = length(left);
+    let right_length = length(right);
+    let output = values::reals_mut(result);
+    if left.kind() == SexpType::Real && right.kind() == SexpType::Real {
+        let a = values::reals(left);
+        let b = values::reals(right);
+        for (index, slot) in output.iter_mut().enumerate() {
+            *slot = real_op(op, a[index % left_length], b[index % right_length]);
+        }
+    } else {
+        for (index, slot) in output.iter_mut().enumerate() {
+            *slot = real_op(
+                op,
+                real_at(left, index % left_length),
+                real_at(right, index % right_length),
+            );
+        }
+    }
+    Ok(result)
+}
+
+#[inline]
+pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
+    match op {
+        Op::Add => a + b,
+        Op::Subtract => a - b,
+        Op::Multiply => a * b,
+        Op::Divide => a / b,
+        Op::Power => power(a, b),
+        Op::Modulo => real_modulo(a, b),
+        Op::IntegerDivide => (a / b).floor(),
+    }
+}
+
+/// `^` with R's special cases: `1^y` and `x^0` are 1 even for `NA`.
+pub fn power(base: f64, exponent: f64) -> f64 {
+    if base == 1.0 || exponent == 0.0 {
+        return 1.0;
+    }
+    if is_na_real(base) || is_na_real(exponent) {
+        return NA_REAL;
+    }
+    base.powf(exponent)
+}
+
+pub fn real_modulo(a: f64, b: f64) -> f64 {
+    if b == 0.0 {
+        return f64::NAN;
+    }
+    if is_na_real(a) || is_na_real(b) {
+        return NA_REAL;
+    }
+    let quotient = (a / b).floor();
+    let remainder = a - quotient * b;
+    if remainder.abs() >= b.abs() && b.is_finite() {
+        remainder % b
+    } else if b.is_infinite() && a.is_finite() {
+        if (a >= 0.0) == (b > 0.0) { a } else { b }
+    } else {
+        remainder
+    }
+}
+
+unsafe fn integer_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
+    let result = alloc(SexpType::Integer, count)?;
+    let a = values::ints(left);
+    let b = values::ints(right);
+    let left_length = a.len();
+    let right_length = b.len();
+    let mut overflow = false;
+    let output = values::ints_mut(result);
+    for (index, slot) in output.iter_mut().enumerate() {
+        let x = a[index % left_length];
+        let y = b[index % right_length];
+        *slot = if x == NA_INTEGER || y == NA_INTEGER {
+            NA_INTEGER
+        } else {
+            let value = match op {
+                Op::Add => x.checked_add(y),
+                Op::Subtract => x.checked_sub(y),
+                Op::Multiply => x.checked_mul(y),
+                Op::Modulo => {
+                    if y == 0 {
+                        None
+                    } else {
+                        Some(x.rem_euclid(y) + if y < 0 && x.rem_euclid(y) != 0 { y } else { 0 })
+                    }
+                }
+                Op::IntegerDivide => {
+                    if y == 0 {
+                        None
+                    } else {
+                        Some((x as f64 / y as f64).floor() as i32)
+                    }
+                }
+                Op::Divide | Op::Power => unreachable!(),
+            };
+            match value {
+                Some(value) if value != NA_INTEGER => value,
+                _ => {
+                    if !matches!(op, Op::Modulo | Op::IntegerDivide) {
+                        overflow = true;
+                    }
+                    NA_INTEGER
+                }
+            }
+        };
+    }
+    if overflow {
+        conditions::warning("NAs produced by integer overflow")?;
+    }
+    Ok(result)
+}
+
+unsafe fn complex_at(vector: Sexp, index: usize) -> Rcomplex {
+    match vector.kind() {
+        SexpType::Complex => values::complexes(vector)[index],
+        _ => {
+            let value = real_at(vector, index);
+            if is_na_real(value) {
+                Rcomplex { r: NA_REAL, i: NA_REAL }
+            } else {
+                Rcomplex { r: value, i: 0.0 }
+            }
+        }
+    }
+}
+
+unsafe fn complex_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
+    let result = alloc(SexpType::Complex, count)?;
+    let left_length = length(left);
+    let right_length = length(right);
+    for index in 0..count {
+        let a = complex_at(left, index % left_length);
+        let b = complex_at(right, index % right_length);
+        let value = match op {
+            Op::Add => Rcomplex { r: a.r + b.r, i: a.i + b.i },
+            Op::Subtract => Rcomplex { r: a.r - b.r, i: a.i - b.i },
+            Op::Multiply => Rcomplex {
+                r: a.r * b.r - a.i * b.i,
+                i: a.r * b.i + a.i * b.r,
+            },
+            Op::Divide => {
+                let denominator = b.r * b.r + b.i * b.i;
+                Rcomplex {
+                    r: (a.r * b.r + a.i * b.i) / denominator,
+                    i: (a.i * b.r - a.r * b.i) / denominator,
+                }
+            }
+            Op::Power => {
+                let modulus = (a.r * a.r + a.i * a.i).sqrt();
+                let argument = a.i.atan2(a.r);
+                let log_modulus = modulus.ln();
+                let real = b.r * log_modulus - b.i * argument;
+                let imaginary = b.i * log_modulus + b.r * argument;
+                let scale = real.exp();
+                Rcomplex {
+                    r: scale * imaginary.cos(),
+                    i: scale * imaginary.sin(),
+                }
+            }
+            _ => return Err(error("invalid operation on complex numbers")),
+        };
+        values::complexes_mut(result)[index] = value;
+    }
+    Ok(result)
+}
+
+// Comparison.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Comparison {
+    Equal,
+    NotEqual,
+    Less,
+    Greater,
+    LessEqual,
+    GreaterEqual,
+}
+
+impl Comparison {
+    fn holds(self, ordering: std::cmp::Ordering) -> bool {
+        use std::cmp::Ordering::*;
+        match self {
+            Comparison::Equal => ordering == Equal,
+            Comparison::NotEqual => ordering != Equal,
+            Comparison::Less => ordering == Less,
+            Comparison::Greater => ordering == Greater,
+            Comparison::LessEqual => ordering != Greater,
+            Comparison::GreaterEqual => ordering != Less,
+        }
+    }
+}
+
+/// A language object as the string comparison sees it.
+unsafe fn comparable(value: Sexp) -> R<Sexp> {
+    match value.kind() {
+        SexpType::Symbol => values::scalar_string_charsxp(value.car()),
+        SexpType::Language => values::scalar_string(&crate::deparse::deparse_one_line(value)),
+        _ => Ok(value),
+    }
+}
+
+unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
+    if call.len() != 2 {
+        return Err(call.error("comparison is possible only for atomic and list types"));
+    }
+    let left = values::materialize(comparable(call.arg(0))?)?;
+    let right = values::materialize(comparable(call.arg(1))?)?;
+    let allowed = |value: Sexp| value.kind().is_atomic() || value == nil();
+    if !allowed(left) || !allowed(right) {
+        if left.kind() == SexpType::List || right.kind() == SexpType::List {
+            return Err(call.error(format!(
+                "comparison ({}) is possible only for atomic and list types",
+                call.name()
+            )));
+        }
+        return Err(call.error(format!(
+            "comparison ({}) is possible only for atomic and list types",
+            call.name()
+        )));
+    }
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = recycled_length(left_length, right_length)?;
+    let result = alloc(SexpType::Logical, count)?;
+    let kind = coerce::higher_type(
+        if left == nil() { SexpType::Logical } else { left.kind() },
+        if right == nil() { SexpType::Logical } else { right.kind() },
+    );
+    match kind {
+        SexpType::String => {
+            let left = coerce_vector(left, SexpType::String)?;
+            let right = coerce_vector(right, SexpType::String)?;
+            for index in 0..count {
+                let a = left.element(index % left_length);
+                let b = right.element(index % right_length);
+                values::ints_mut(result)[index] = if a == values::na_string() || b == values::na_string() {
+                    NA_LOGICAL
+                } else if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
+                    comparison.holds(if a == b { std::cmp::Ordering::Equal } else { std::cmp::Ordering::Less }) as i32
+                } else {
+                    let ordering = crate::sort::collate(&values::char_str(a), &values::char_str(b));
+                    comparison.holds(ordering) as i32
+                };
+            }
+        }
+        SexpType::Complex => {
+            if !matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
+                return Err(call.error("invalid comparison with complex values"));
+            }
+            for index in 0..count {
+                let a = complex_at(left, index % left_length);
+                let b = complex_at(right, index % right_length);
+                values::ints_mut(result)[index] = if a.r.is_nan() || a.i.is_nan() || b.r.is_nan() || b.i.is_nan() {
+                    NA_LOGICAL
+                } else {
+                    let equal = a.r == b.r && a.i == b.i;
+                    (equal == (comparison == Comparison::Equal)) as i32
+                };
+            }
+        }
+        SexpType::Raw if left.kind() == SexpType::Raw && right.kind() == SexpType::Raw => {
+            for index in 0..count {
+                let a = values::raws(left)[index % left_length];
+                let b = values::raws(right)[index % right_length];
+                values::ints_mut(result)[index] = comparison.holds(a.cmp(&b)) as i32;
+            }
+        }
+        SexpType::Integer | SexpType::Logical
+            if left.kind() != SexpType::Real && right.kind() != SexpType::Real =>
+        {
+            let left = coerce_vector(left, SexpType::Integer)?;
+            let right = coerce_vector(right, SexpType::Integer)?;
+            let a = values::ints(left);
+            let b = values::ints(right);
+            for index in 0..count {
+                let x = a[index % left_length];
+                let y = b[index % right_length];
+                values::ints_mut(result)[index] = if x == NA_INTEGER || y == NA_INTEGER {
+                    NA_LOGICAL
+                } else {
+                    comparison.holds(x.cmp(&y)) as i32
+                };
+            }
+        }
+        _ => {
+            let left = coerce_vector(left, SexpType::Real)?;
+            let right = coerce_vector(right, SexpType::Real)?;
+            let a = values::reals(left);
+            let b = values::reals(right);
+            for index in 0..count {
+                let x = a[index % left_length];
+                let y = b[index % right_length];
+                values::ints_mut(result)[index] = if x.is_nan() || y.is_nan() {
+                    NA_LOGICAL
+                } else {
+                    comparison.holds(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)) as i32
+                };
+            }
+        }
+    }
+    binary_attributes(call.arg(0), call.arg(1), result, call.call)?;
+    Ok(result)
+}
+
+// Logic.
+
+unsafe fn logical_at(vector: Sexp, index: usize) -> i32 {
+    match vector.kind() {
+        SexpType::Logical => values::ints(vector)[index],
+        SexpType::Integer => {
+            let value = values::ints(vector)[index];
+            if value == NA_INTEGER { NA_LOGICAL } else { (value != 0) as i32 }
+        }
+        SexpType::Real => {
+            let value = values::reals(vector)[index];
+            if value.is_nan() { NA_LOGICAL } else { (value != 0.0) as i32 }
+        }
+        SexpType::Complex => {
+            let value = values::complexes(vector)[index];
+            if value.r.is_nan() { NA_LOGICAL } else { (value.r != 0.0 || value.i != 0.0) as i32 }
+        }
+        _ => NA_LOGICAL,
+    }
+}
+
+unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
+    let left = values::materialize(call.arg(0))?;
+    let right = values::materialize(call.arg(1))?;
+    if left.kind() == SexpType::Raw && right.kind() == SexpType::Raw {
+        let left_length = length(left);
+        let right_length = length(right);
+        let count = recycled_length(left_length, right_length)?;
+        let result = alloc(SexpType::Raw, count)?;
+        for index in 0..count {
+            let a = values::raws(left)[index % left_length];
+            let b = values::raws(right)[index % right_length];
+            values::raws_mut(result)[index] = if is_and { a & b } else { a | b };
+        }
+        return Ok(result);
+    }
+    let valid = |value: Sexp| {
+        value == nil()
+            || matches!(
+                value.kind(),
+                SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex
+            )
+    };
+    if !valid(left) || !valid(right) {
+        return Err(call.error(format!(
+            "operations are possible only for numeric, logical or complex types"
+        )));
+    }
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = recycled_length(left_length, right_length)?;
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        let a = logical_at(left, index % left_length);
+        let b = logical_at(right, index % right_length);
+        values::ints_mut(result)[index] = if is_and {
+            if a == 0 || b == 0 {
+                0
+            } else if a == NA_LOGICAL || b == NA_LOGICAL {
+                NA_LOGICAL
+            } else {
+                1
+            }
+        } else if a == 1 || b == 1 {
+            1
+        } else if a == NA_LOGICAL || b == NA_LOGICAL {
+            NA_LOGICAL
+        } else {
+            0
+        };
+    }
+    binary_attributes(left, right, result, call.call)?;
+    Ok(result)
+}
+
+unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let count = length(operand);
+    match operand.kind() {
+        SexpType::Raw => {
+            let result = alloc(SexpType::Raw, count)?;
+            for index in 0..count {
+                values::raws_mut(result)[index] = !values::raws(operand)[index];
+            }
+            values::copy_most_attributes(operand, result, true)?;
+            Ok(result)
+        }
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Nil => {
+            let result = alloc(SexpType::Logical, count)?;
+            for index in 0..count {
+                let value = logical_at(operand, index);
+                values::ints_mut(result)[index] = if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value };
+            }
+            for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
+                let value = get_attr(operand, symbol);
+                if value != nil() {
+                    values::set_attr(result, symbol, value)?;
+                }
+            }
+            if operand.kind() == SexpType::Logical {
+                values::copy_most_attributes(operand, result, true)?;
+            }
+            Ok(result)
+        }
+        _ => Err(call.error("invalid argument type")),
+    }
+}
+
+// The Math group.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Math {
+    Abs,
+    Sign,
+    Sqrt,
+    Floor,
+    Ceiling,
+    Trunc,
+    Exp,
+    Expm1,
+    Log1p,
+    Log2,
+    Log10,
+    Cos,
+    Sin,
+    Tan,
+    Cospi,
+    Sinpi,
+    Tanpi,
+    Acos,
+    Asin,
+    Atan,
+    Cosh,
+    Sinh,
+    Tanh,
+    Acosh,
+    Asinh,
+    Atanh,
+    Gamma,
+    Lgamma,
+    Digamma,
+    Trigamma,
+}
+
+pub fn gamma_ln(value: f64) -> f64 {
+    // SAFETY: `lgamma` is a pure libm function.
+    unsafe { lgamma(value) }
+}
+
+pub fn gamma_fn(value: f64) -> f64 {
+    if value == 0.0 || (value < 0.0 && value == value.floor()) {
+        return f64::NAN;
+    }
+    // SAFETY: `tgamma` is a pure libm function.
+    unsafe { tgamma(value) }
+}
+
+fn digamma(mut x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let mut result = 0.0;
+    if x <= 0.0 && x == x.floor() {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        // Reflection.
+        return digamma(1.0 - x) - std::f64::consts::PI / (std::f64::consts::PI * x).tan();
+    }
+    while x < 6.0 {
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+    let inverse = 1.0 / x;
+    let inverse2 = inverse * inverse;
+    result + x.ln() - 0.5 * inverse
+        - inverse2
+            * (1.0 / 12.0
+                - inverse2
+                    * (1.0 / 120.0
+                        - inverse2 * (1.0 / 252.0 - inverse2 * (1.0 / 240.0 - inverse2 / 132.0))))
+}
+
+fn trigamma(mut x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let mut result = 0.0;
+    if x <= 0.0 && x == x.floor() {
+        return f64::INFINITY;
+    }
+    while x < 6.0 {
+        result += 1.0 / (x * x);
+        x += 1.0;
+    }
+    let inverse = 1.0 / x;
+    let inverse2 = inverse * inverse;
+    result + inverse + inverse2 / 2.0
+        + inverse * inverse2
+            * (1.0 / 6.0 - inverse2 * (1.0 / 30.0 - inverse2 * (1.0 / 42.0 - inverse2 / 30.0)))
+}
+
+fn math_value(function: Math, x: f64) -> f64 {
+    use std::f64::consts::PI;
+    match function {
+        Math::Abs => x.abs(),
+        Math::Sign => {
+            if x.is_nan() {
+                x
+            } else if x > 0.0 {
+                1.0
+            } else if x < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        }
+        Math::Sqrt => x.sqrt(),
+        Math::Floor => x.floor(),
+        Math::Ceiling => x.ceil(),
+        Math::Trunc => x.trunc(),
+        Math::Exp => x.exp(),
+        // SAFETY: pure libm functions.
+        Math::Expm1 => unsafe { expm1(x) },
+        Math::Log1p => unsafe { log1p(x) },
+        Math::Log2 => x.log2(),
+        Math::Log10 => x.log10(),
+        Math::Cos => x.cos(),
+        Math::Sin => x.sin(),
+        Math::Tan => x.tan(),
+        Math::Cospi => {
+            let reduced = (x.abs() % 2.0).abs();
+            if reduced == 0.5 || reduced == 1.5 {
+                0.0
+            } else if reduced == 1.0 {
+                -1.0
+            } else if reduced == 0.0 {
+                1.0
+            } else {
+                (PI * reduced).cos()
+            }
+        }
+        Math::Sinpi => {
+            let mut reduced = x % 2.0;
+            if reduced <= -1.0 {
+                reduced += 2.0;
+            } else if reduced > 1.0 {
+                reduced -= 2.0;
+            }
+            if reduced == 0.0 || reduced == 1.0 {
+                0.0
+            } else if reduced == 0.5 {
+                1.0
+            } else if reduced == -0.5 {
+                -1.0
+            } else {
+                (PI * reduced).sin()
+            }
+        }
+        Math::Tanpi => {
+            let reduced = x % 1.0;
+            if reduced == 0.0 { 0.0 } else { (PI * reduced).tan() }
+        }
+        Math::Acos => x.acos(),
+        Math::Asin => x.asin(),
+        Math::Atan => x.atan(),
+        Math::Cosh => x.cosh(),
+        Math::Sinh => x.sinh(),
+        Math::Tanh => x.tanh(),
+        Math::Acosh => x.acosh(),
+        Math::Asinh => x.asinh(),
+        Math::Atanh => x.atanh(),
+        Math::Gamma => gamma_fn(x),
+        Math::Lgamma => gamma_ln(x),
+        Math::Digamma => digamma(x),
+        Math::Trigamma => trigamma(x),
+    }
+}
+
+unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let count = length(operand);
+    match operand.kind() {
+        SexpType::Integer | SexpType::Logical
+            if matches!(function, Math::Abs) && operand.kind() == SexpType::Integer =>
+        {
+            let result = alloc(SexpType::Integer, count)?;
+            for index in 0..count {
+                let value = values::ints(operand)[index];
+                values::ints_mut(result)[index] = if value == NA_INTEGER { value } else { value.abs() };
+            }
+            values::copy_most_attributes(operand, result, true)?;
+            Ok(result)
+        }
+        SexpType::Integer | SexpType::Logical | SexpType::Real => {
+            let result = alloc(SexpType::Real, count)?;
+            let mut produced_nan = false;
+            for index in 0..count {
+                let x = real_at(operand, index);
+                let value = if is_na_real(x) { NA_REAL } else { math_value(function, x) };
+                if value.is_nan() && !x.is_nan() {
+                    produced_nan = true;
+                }
+                values::reals_mut(result)[index] = value;
+            }
+            values::copy_most_attributes(operand, result, true)?;
+            if produced_nan {
+                conditions::warning_call(call.call, "NaNs produced")?;
+            }
+            Ok(result)
+        }
+        SexpType::Complex => complex_math(call, function, operand),
+        _ => Err(call.error("non-numeric argument to mathematical function")),
+    }
+}
+
+unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp> {
+    let count = length(operand);
+    if function == Math::Abs {
+        let result = alloc(SexpType::Real, count)?;
+        for index in 0..count {
+            let value = values::complexes(operand)[index];
+            values::reals_mut(result)[index] = value.r.hypot(value.i);
+        }
+        return Ok(result);
+    }
+    let result = alloc(SexpType::Complex, count)?;
+    for index in 0..count {
+        let z = values::complexes(operand)[index];
+        let value = match function {
+            Math::Sqrt => {
+                let modulus = z.r.hypot(z.i);
+                let real = ((modulus + z.r) / 2.0).sqrt();
+                let imaginary = ((modulus - z.r) / 2.0).sqrt().copysign(z.i);
+                Rcomplex { r: real, i: imaginary }
+            }
+            Math::Exp => {
+                let scale = z.r.exp();
+                Rcomplex { r: scale * z.i.cos(), i: scale * z.i.sin() }
+            }
+            _ => return Err(call.error("unimplemented complex function")),
+        };
+        values::complexes_mut(result)[index] = value;
+    }
+    values::copy_most_attributes(operand, result, true)?;
+    Ok(result)
+}
+
+unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
+    let (matched, _) = call.match_args(&["x", "base"])?;
+    let operand = present(matched[0]).ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let base = present(matched[1]).map(|base| values::as_real_scalar(base));
+    let operand = values::materialize(operand)?;
+    match operand.kind() {
+        SexpType::Integer | SexpType::Logical | SexpType::Real => {
+            let count = length(operand);
+            let result = alloc(SexpType::Real, count)?;
+            let mut produced_nan = false;
+            for index in 0..count {
+                let x = real_at(operand, index);
+                let value = if is_na_real(x) {
+                    NA_REAL
+                } else {
+                    match base {
+                        Some(base) if base == 10.0 => x.log10(),
+                        Some(base) if base == 2.0 => x.log2(),
+                        Some(base) => x.ln() / base.ln(),
+                        None => x.ln(),
+                    }
+                };
+                if value.is_nan() && !x.is_nan() {
+                    produced_nan = true;
+                }
+                values::reals_mut(result)[index] = value;
+            }
+            values::copy_most_attributes(operand, result, true)?;
+            if produced_nan {
+                conditions::warning_call(call.call, "NaNs produced")?;
+            }
+            Ok(result)
+        }
+        SexpType::Complex => {
+            let count = length(operand);
+            let result = alloc(SexpType::Complex, count)?;
+            for index in 0..count {
+                let z = values::complexes(operand)[index];
+                let mut value = Rcomplex {
+                    r: z.r.hypot(z.i).ln(),
+                    i: z.i.atan2(z.r),
+                };
+                if let Some(base) = base {
+                    value.r /= base.ln();
+                    value.i /= base.ln();
+                }
+                values::complexes_mut(result)[index] = value;
+            }
+            Ok(result)
+        }
+        _ => Err(call.error("non-numeric argument to mathematical function")),
+    }
+}
+
+/// R's `round(x, digits)`: of the two candidates at `digits` decimals, the one closer to `x`,
+/// and on a tie the one with an even last digit.
+pub fn round_digits(x: f64, digits: i32) -> f64 {
+    if !x.is_finite() {
+        return x;
+    }
+    if digits > 308 {
+        return x;
+    }
+    if digits == 0 {
+        return x.round_ties_even();
+    }
+    let scale = 10f64.powi(digits);
+    let scaled = x * scale;
+    if !scaled.is_finite() {
+        return x;
+    }
+    let lower = scaled.floor();
+    let upper = scaled.ceil();
+    if lower == upper {
+        return x;
+    }
+    let lower_value = lower / scale;
+    let upper_value = upper / scale;
+    let lower_distance = (x - lower_value).abs();
+    let upper_distance = (upper_value - x).abs();
+    if lower_distance < upper_distance {
+        lower_value
+    } else if upper_distance < lower_distance {
+        upper_value
+    } else if lower % 2.0 == 0.0 {
+        lower_value
+    } else {
+        upper_value
+    }
+}
+
+pub fn signif_digits(x: f64, digits: i32) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    let digits = digits.max(1);
+    let magnitude = x.abs().log10().floor() as i32;
+    let text = format!("{:.*e}", (digits - 1) as usize, x);
+    let _ = magnitude;
+    text.parse().unwrap_or(x)
+}
+
+unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
+    let (matched, _) = call.match_args(&["x", "digits"])?;
+    let operand = present(matched[0]).ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    let digits = match present(matched[1]) {
+        Some(digits) => {
+            let value = values::as_real_scalar(digits);
+            if value.is_nan() {
+                return Err(call.error("invalid second argument of length 0"));
+            }
+            value.round() as i32
+        }
+        None => {
+            if significant {
+                6
+            } else {
+                0
+            }
+        }
+    };
+    let operand = values::materialize(operand)?;
+    match operand.kind() {
+        SexpType::Integer | SexpType::Logical if !significant || digits >= 10 => {
+            if digits >= 0 || operand.kind() == SexpType::Logical {
+                let result = coerce_vector(operand, SexpType::Integer)?;
+                return Ok(result);
+            }
+            let result = coerce_vector(operand, SexpType::Real)?;
+            let result = values::duplicate(result)?;
+            for value in values::reals_mut(result) {
+                *value = round_digits(*value, digits);
+            }
+            Ok(result)
+        }
+        SexpType::Integer | SexpType::Logical | SexpType::Real => {
+            let count = length(operand);
+            let result = alloc(SexpType::Real, count)?;
+            for index in 0..count {
+                let x = real_at(operand, index);
+                values::reals_mut(result)[index] = if x.is_nan() {
+                    x
+                } else if significant {
+                    signif_digits(x, digits)
+                } else {
+                    round_digits(x, digits)
+                };
+            }
+            values::copy_most_attributes(operand, result, true)?;
+            Ok(result)
+        }
+        SexpType::Complex => {
+            let count = length(operand);
+            let result = alloc(SexpType::Complex, count)?;
+            for index in 0..count {
+                let z = values::complexes(operand)[index];
+                values::complexes_mut(result)[index] = if significant {
+                    Rcomplex { r: signif_digits(z.r, digits), i: signif_digits(z.i, digits) }
+                } else {
+                    Rcomplex { r: round_digits(z.r, digits), i: round_digits(z.i, digits) }
+                };
+            }
+            Ok(result)
+        }
+        _ => Err(call.error("non-numeric argument to mathematical function")),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Cumulative {
+    Sum,
+    Product,
+    Max,
+    Min,
+}
+
+unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let count = length(operand);
+    let names = values::names(operand);
+    let result = match (operand.kind(), kind) {
+        (SexpType::Integer | SexpType::Logical, Cumulative::Sum | Cumulative::Max | Cumulative::Min) => {
+            let result = alloc(SexpType::Integer, count)?;
+            let mut accumulator: Option<i64> = None;
+            let mut overflow = false;
+            for index in 0..count {
+                let value = values::ints(operand)[index];
+                if value == NA_INTEGER {
+                    for slot in &mut values::ints_mut(result)[index..] {
+                        *slot = NA_INTEGER;
+                    }
+                    break;
+                }
+                let next = match (accumulator, kind) {
+                    (None, _) => value as i64,
+                    (Some(total), Cumulative::Sum) => total + value as i64,
+                    (Some(total), Cumulative::Max) => total.max(value as i64),
+                    (Some(total), _) => total.min(value as i64),
+                };
+                if next > i32::MAX as i64 || next < -(i32::MAX as i64) {
+                    overflow = true;
+                    for slot in &mut values::ints_mut(result)[index..] {
+                        *slot = NA_INTEGER;
+                    }
+                    break;
+                }
+                accumulator = Some(next);
+                values::ints_mut(result)[index] = next as i32;
+            }
+            if overflow {
+                conditions::warning("integer overflow in 'cumsum'; use 'cumsum(as.numeric(.))'")?;
+            }
+            result
+        }
+        (SexpType::Integer | SexpType::Logical | SexpType::Real, _) => {
+            let result = alloc(SexpType::Real, count)?;
+            let mut accumulator = match kind {
+                Cumulative::Sum => 0.0,
+                Cumulative::Product => 1.0,
+                Cumulative::Max => f64::NEG_INFINITY,
+                Cumulative::Min => f64::INFINITY,
+            };
+            let mut na = false;
+            for index in 0..count {
+                let value = real_at(operand, index);
+                if na {
+                    values::reals_mut(result)[index] = NA_REAL;
+                    continue;
+                }
+                if matches!(kind, Cumulative::Max | Cumulative::Min) && value.is_nan() {
+                    na = true;
+                    values::reals_mut(result)[index] = if is_na_real(value) { NA_REAL } else { f64::NAN };
+                    continue;
+                }
+                accumulator = match kind {
+                    Cumulative::Sum => accumulator + value,
+                    Cumulative::Product => accumulator * value,
+                    Cumulative::Max => accumulator.max(value),
+                    Cumulative::Min => accumulator.min(value),
+                };
+                values::reals_mut(result)[index] = accumulator;
+            }
+            result
+        }
+        (SexpType::Complex, Cumulative::Sum | Cumulative::Product) => {
+            let result = alloc(SexpType::Complex, count)?;
+            let mut accumulator = match kind {
+                Cumulative::Sum => Rcomplex { r: 0.0, i: 0.0 },
+                _ => Rcomplex { r: 1.0, i: 0.0 },
+            };
+            for index in 0..count {
+                let z = values::complexes(operand)[index];
+                accumulator = match kind {
+                    Cumulative::Sum => Rcomplex { r: accumulator.r + z.r, i: accumulator.i + z.i },
+                    _ => Rcomplex {
+                        r: accumulator.r * z.r - accumulator.i * z.i,
+                        i: accumulator.r * z.i + accumulator.i * z.r,
+                    },
+                };
+                values::complexes_mut(result)[index] = accumulator;
+            }
+            result
+        }
+        (SexpType::String, _) => {
+            let converted = coerce_vector(operand, SexpType::Real)?;
+            let args = [Arg { tag: nil(), value: converted }];
+            let inner = Call { call: call.call, op: call.op, args: &args, env: call.env };
+            return cumulative(&inner, kind);
+        }
+        (SexpType::Nil, _) => return alloc(SexpType::Real, 0),
+        _ => return Err(call.error(format!("'{}' not defined for \"{}\" objects", call.name(), operand.kind().name()))),
+    };
+    if names != nil() {
+        values::set_attr(result, symbols().names, names)?;
+    }
+    Ok(result)
+}
+
+// The Summary group.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Summary {
+    Sum,
+    Product,
+    Max,
+    Min,
+}
+
+/// The values a summary function reduces, and whether `na.rm` was set.
+unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
+    let mut items = Vec::new();
+    let mut na_rm = false;
+    for arg in call.args {
+        if arg.tag == symbols().na_rm {
+            na_rm = values::as_logical_scalar(arg.value) == 1;
+        } else {
+            items.push(values::materialize(arg.value)?);
+        }
+    }
+    Ok((items, na_rm))
+}
+
+/// Neumaier's compensated sum, which tracks GNU R's extended-precision accumulator.
+#[derive(Default)]
+pub struct CompensatedSum {
+    sum: f64,
+    compensation: f64,
+}
+
+impl CompensatedSum {
+    pub fn add(&mut self, value: f64) {
+        let total = self.sum + value;
+        if self.sum.abs() >= value.abs() {
+            self.compensation += (self.sum - total) + value;
+        } else {
+            self.compensation += (value - total) + self.sum;
+        }
+        self.sum = total;
+    }
+
+    pub fn total(&self) -> f64 {
+        if self.sum.is_finite() {
+            self.sum + self.compensation
+        } else {
+            self.sum
+        }
+    }
+}
+
+unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
+    let (items, na_rm) = summary_args(call)?;
+    for item in &items {
+        if !(item.kind().is_atomic() || *item == nil()) || (item.kind() == SexpType::String && matches!(function, Summary::Sum | Summary::Product)) {
+            return Err(call.error(format!(
+                "invalid 'type' ({}) of argument",
+                item.kind().name()
+            )));
+        }
+    }
+    let kind = items
+        .iter()
+        .fold(SexpType::Logical, |kind, item| {
+            if *item == nil() { kind } else { coerce::higher_type(kind, item.kind()) }
+        });
+    match function {
+        Summary::Sum => {
+            if kind == SexpType::Complex {
+                let mut total = Rcomplex { r: 0.0, i: 0.0 };
+                for &item in &items {
+                    for index in 0..length(item) {
+                        let z = complex_at(item, index);
+                        if na_rm && (z.r.is_nan() || z.i.is_nan()) {
+                            continue;
+                        }
+                        total.r += z.r;
+                        total.i += z.i;
+                    }
+                }
+                return values::scalar_complex(total);
+            }
+            if kind == SexpType::Real {
+                let mut total = CompensatedSum::default();
+                let mut na = false;
+                for &item in &items {
+                    for index in 0..length(item) {
+                        let value = real_at(item, index);
+                        if value.is_nan() {
+                            if na_rm {
+                                continue;
+                            }
+                            if is_na_real(value) {
+                                na = true;
+                            }
+                        }
+                        total.add(value);
+                    }
+                }
+                return scalar_real(if na { NA_REAL } else { total.total() });
+            }
+            let mut total: i64 = 0;
+            for &item in &items {
+                for &value in values::ints(item) {
+                    if value == NA_INTEGER {
+                        if na_rm {
+                            continue;
+                        }
+                        return scalar_integer(NA_INTEGER);
+                    }
+                    total += value as i64;
+                }
+            }
+            if total > i32::MAX as i64 || total < -(i32::MAX as i64) {
+                conditions::warning_call(call.call, "integer overflow - use sum(as.numeric(.))")?;
+                return scalar_integer(NA_INTEGER);
+            }
+            scalar_integer(total as i32)
+        }
+        Summary::Product => {
+            let mut total = 1.0;
+            for &item in &items {
+                for index in 0..length(item) {
+                    let value = real_at(item, index);
+                    if na_rm && value.is_nan() {
+                        continue;
+                    }
+                    total *= value;
+                }
+            }
+            scalar_real(total)
+        }
+        Summary::Max | Summary::Min => {
+            let is_max = function == Summary::Max;
+            if kind == SexpType::String {
+                let mut best: Option<String> = None;
+                for &item in &items {
+                    let strings = coerce_vector(item, SexpType::String)?;
+                    for index in 0..length(strings) {
+                        match values::string_at(strings, index) {
+                            None => {
+                                if !na_rm {
+                                    return values::scalar_string_charsxp(values::na_string());
+                                }
+                            }
+                            Some(text) => {
+                                let better = match &best {
+                                    None => true,
+                                    Some(current) => {
+                                        let ordering = crate::sort::collate(&text, current);
+                                        if is_max { ordering.is_gt() } else { ordering.is_lt() }
+                                    }
+                                };
+                                if better {
+                                    best = Some(text.into_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+                return match best {
+                    Some(text) => values::scalar_string(&text),
+                    None => Err(call.error(format!(
+                        "no non-missing arguments to {}",
+                        if is_max { "max" } else { "min" }
+                    ))),
+                };
+            }
+            if matches!(kind, SexpType::Integer | SexpType::Logical) {
+                let mut best: Option<i32> = None;
+                for &item in &items {
+                    for &value in values::ints(item) {
+                        if value == NA_INTEGER {
+                            if na_rm {
+                                continue;
+                            }
+                            return scalar_integer(NA_INTEGER);
+                        }
+                        best = Some(match best {
+                            None => value,
+                            Some(current) => if is_max { current.max(value) } else { current.min(value) },
+                        });
+                    }
+                }
+                if let Some(best) = best {
+                    return scalar_integer(best);
+                }
+            }
+            let mut best = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
+            let mut any = false;
+            let mut saw_nan = false;
+            for &item in &items {
+                for index in 0..length(item) {
+                    let value = real_at(item, index);
+                    if value.is_nan() {
+                        if na_rm {
+                            continue;
+                        }
+                        if is_na_real(value) {
+                            return scalar_real(NA_REAL);
+                        }
+                        saw_nan = true;
+                        continue;
+                    }
+                    any = true;
+                    best = if is_max { best.max(value) } else { best.min(value) };
+                }
+            }
+            if saw_nan {
+                return scalar_real(f64::NAN);
+            }
+            if !any {
+                conditions::warning_call(
+                    call.call,
+                    format!(
+                        "no non-missing arguments to {}; returning {}",
+                        if is_max { "max" } else { "min" },
+                        if is_max { "-Inf" } else { "Inf" }
+                    ),
+                )?;
+            }
+            scalar_real(best)
+        }
+    }
+}
+
+unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
+    let mut args: Vec<Arg> = Vec::new();
+    let mut finite = false;
+    for arg in call.args {
+        if arg.tag != nil() && values::symbol_name(arg.tag) == "finite" {
+            finite = values::as_logical_scalar(arg.value) == 1;
+        } else {
+            args.push(*arg);
+        }
+    }
+    if finite {
+        let mut filtered = Vec::new();
+        for arg in &args {
+            if arg.tag == symbols().na_rm {
+                continue;
+            }
+            let value = values::materialize(arg.value)?;
+            if matches!(value.kind(), SexpType::Real) {
+                let kept: Vec<f64> = values::reals(value).iter().copied().filter(|value| value.is_finite()).collect();
+                filtered.push(Arg { tag: nil(), value: values::real_vector(&kept)? });
+            } else {
+                filtered.push(*arg);
+            }
+        }
+        filtered.push(Arg { tag: symbols().na_rm, value: values::scalar_bool(true)? });
+        args = filtered;
+    }
+    let inner = Call { call: call.call, op: call.op, args: &args, env: call.env };
+    let minimum = summary(&inner, Summary::Min)?;
+    let maximum = summary(&inner, Summary::Max)?;
+    crate::subset::combine(&[minimum, maximum])
+}
+
+unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
+    let (items, na_rm) = summary_args(call)?;
+    let mut saw_na = false;
+    for item in items {
+        if item == nil() {
+            continue;
+        }
+        if !matches!(item.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw | SexpType::String) {
+            return Err(call.error(format!(
+                "invalid 'type' ({}) of argument",
+                item.kind().name()
+            )));
+        }
+        if item.kind() == SexpType::String {
+            return Err(call.error("invalid 'type' (character) of argument"));
+        }
+        if !matches!(item.kind(), SexpType::Logical | SexpType::Integer) && length(item) > 0 {
+            conditions::warning_call(
+                call.call,
+                format!("coercing argument of type '{}' to logical", item.kind().name()),
+            )?;
+        }
+        for index in 0..length(item) {
+            let value = logical_at(item, index);
+            if value == NA_LOGICAL {
+                saw_na = true;
+            } else if is_all && value == 0 {
+                return scalar_bool(false);
+            } else if !is_all && value == 1 {
+                return scalar_bool(true);
+            }
+        }
+    }
+    if saw_na && !na_rm {
+        return values::scalar_logical(NA_LOGICAL);
+    }
+    scalar_bool(is_all)
+}
+
+unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let count = length(operand);
+    match operand.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            let mut total = 0.0;
+            for &value in values::ints(operand) {
+                if value == NA_INTEGER {
+                    return scalar_real(NA_REAL);
+                }
+                total += value as f64;
+            }
+            scalar_real(total / count as f64)
+        }
+        SexpType::Real => {
+            let data = values::reals(operand);
+            let mut total = CompensatedSum::default();
+            for &value in data {
+                total.add(value);
+            }
+            let mean = total.total() / count as f64;
+            if !mean.is_finite() {
+                return scalar_real(mean);
+            }
+            let mut correction = CompensatedSum::default();
+            for &value in data {
+                correction.add(value - mean);
+            }
+            scalar_real(mean + correction.total() / count as f64)
+        }
+        SexpType::Complex => {
+            let mut total = Rcomplex { r: 0.0, i: 0.0 };
+            for &value in values::complexes(operand) {
+                total.r += value.r;
+                total.i += value.i;
+            }
+            values::scalar_complex(Rcomplex { r: total.r / count as f64, i: total.i / count as f64 })
+        }
+        _ => Err(call.error(format!("invalid 'type' ({}) of argument", operand.kind().name()))),
+    }
+}
+
+// NA tests.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NaTest {
+    Na,
+    NaN,
+    Finite,
+    Infinite,
+}
+
+unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let count = length(operand);
+    let result = alloc(SexpType::Logical, count)?;
+    match operand.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            for index in 0..count {
+                let value = values::ints(operand)[index];
+                values::ints_mut(result)[index] = match test {
+                    NaTest::Na => (value == NA_INTEGER) as i32,
+                    NaTest::NaN | NaTest::Infinite => 0,
+                    NaTest::Finite => (value != NA_INTEGER) as i32,
+                };
+            }
+        }
+        SexpType::Real => {
+            for index in 0..count {
+                let value = values::reals(operand)[index];
+                values::ints_mut(result)[index] = match test {
+                    NaTest::Na => value.is_nan() as i32,
+                    NaTest::NaN => (value.is_nan() && !is_na_real(value)) as i32,
+                    NaTest::Finite => value.is_finite() as i32,
+                    NaTest::Infinite => value.is_infinite() as i32,
+                };
+            }
+        }
+        SexpType::Complex => {
+            for index in 0..count {
+                let z = values::complexes(operand)[index];
+                values::ints_mut(result)[index] = match test {
+                    NaTest::Na => (z.r.is_nan() || z.i.is_nan()) as i32,
+                    NaTest::NaN => ((z.r.is_nan() && !is_na_real(z.r)) || (z.i.is_nan() && !is_na_real(z.i))) as i32,
+                    NaTest::Finite => (z.r.is_finite() && z.i.is_finite()) as i32,
+                    NaTest::Infinite => (z.r.is_infinite() || z.i.is_infinite()) as i32,
+                };
+            }
+        }
+        SexpType::String => {
+            for index in 0..count {
+                values::ints_mut(result)[index] = match test {
+                    NaTest::Na => (operand.element(index) == values::na_string()) as i32,
+                    _ => 0,
+                };
+            }
+        }
+        SexpType::List => {
+            for index in 0..count {
+                let element = operand.element(index);
+                values::ints_mut(result)[index] = match test {
+                    NaTest::Na => (element.kind().is_atomic()
+                        && length(element) == 1
+                        && values::as_logical_scalar(is_na_scalar(element)?) == 1)
+                        as i32,
+                    _ => 0,
+                };
+            }
+        }
+        SexpType::Raw | SexpType::Nil => {}
+        _ => {
+            if test == NaTest::Na {
+                conditions::warning_call(
+                    call.call,
+                    format!(
+                        "is.na() applied to non-(list or vector) of type '{}'",
+                        operand.kind().name()
+                    ),
+                )?;
+                return scalar_bool(false);
+            }
+            return Err(call.error(format!(
+                "default method not implemented for type '{}'",
+                operand.kind().name()
+            )));
+        }
+    }
+    for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
+        let value = get_attr(operand, symbol);
+        if value != nil() {
+            values::set_attr(result, symbol, value)?;
+        }
+    }
+    Ok(result)
+}
+
+unsafe fn is_na_scalar(value: Sexp) -> R<Sexp> {
+    let na = match value.kind() {
+        SexpType::Logical | SexpType::Integer => values::ints(value)[0] == NA_INTEGER,
+        SexpType::Real => values::reals(value)[0].is_nan(),
+        SexpType::String => value.element(0) == values::na_string(),
+        SexpType::Complex => values::complexes(value)[0].r.is_nan(),
+        _ => false,
+    };
+    scalar_bool(na)
+}
+
+unsafe fn do_any_na(call: &Call<'_>) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let recursive = call.args.get(1).is_some_and(|arg| values::as_logical_scalar(arg.value) == 1);
+    scalar_bool(any_na(operand, recursive)?)
+}
+
+unsafe fn any_na(operand: Sexp, recursive: bool) -> R<bool> {
+    Ok(match operand.kind() {
+        SexpType::Logical | SexpType::Integer => values::ints(operand).contains(&NA_INTEGER),
+        SexpType::Real => values::reals(operand).iter().any(|value| value.is_nan()),
+        SexpType::Complex => values::complexes(operand).iter().any(|value| value.r.is_nan() || value.i.is_nan()),
+        SexpType::String => (0..length(operand)).any(|index| operand.element(index) == values::na_string()),
+        SexpType::List => {
+            for index in 0..length(operand) {
+                let element = operand.element(index);
+                let na = if recursive || (element.kind().is_atomic() && length(element) == 1) {
+                    any_na(element, recursive)?
+                } else {
+                    false
+                };
+                if na {
+                    return Ok(true);
+                }
+            }
+            false
+        }
+        _ => false,
+    })
+}
+
+// Sequences.
+
+unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
+    let from = call.arg(0);
+    let to = call.arg(1);
+    if length(from) == 0 || length(to) == 0 {
+        return Err(call.error("argument of length 0"));
+    }
+    if length(from) > 1 {
+        conditions::warning_call(
+            call.call,
+            format!("numerical expression has {} elements: only the first used", length(from)),
+        )?;
+    }
+    if length(to) > 1 {
+        conditions::warning_call(
+            call.call,
+            format!("numerical expression has {} elements: only the first used", length(to)),
+        )?;
+    }
+    let start = values::as_real_scalar(from);
+    let end = values::as_real_scalar(to);
+    if start.is_nan() || end.is_nan() {
+        return Err(call.error("NA/NaN argument"));
+    }
+    colon(start, end)
+}
+
+/// `from:to`: integers when `from` is a whole number and the sequence fits, doubles otherwise.
+pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
+    let count = ((end - start).abs() + 1e-10).floor() as usize + 1;
+    let use_integer = start == start.floor()
+        && start.abs() <= i32::MAX as f64
+        && (start + (count as f64 - 1.0) * if start <= end { 1.0 } else { -1.0 }).abs() <= i32::MAX as f64;
+    if use_integer {
+        let result = alloc(SexpType::Integer, count)?;
+        let start = start as i64;
+        let output = values::ints_mut(result);
+        if start <= end as i64 || end >= start as f64 {
+            for (index, slot) in output.iter_mut().enumerate() {
+                *slot = (start + index as i64) as i32;
+            }
+        } else {
+            for (index, slot) in output.iter_mut().enumerate() {
+                *slot = (start - index as i64) as i32;
+            }
+        }
+        return Ok(result);
+    }
+    let result = alloc(SexpType::Real, count)?;
+    let step = if start <= end { 1.0 } else { -1.0 };
+    for (index, slot) in values::reals_mut(result).iter_mut().enumerate() {
+        *slot = start + index as f64 * step;
+    }
+    Ok(result)
+}
+
+unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
+    let value = call.arg(0);
+    if length(value) != 1 {
+        if length(value) == 0 {
+            return Err(call.error("argument of length 0"));
+        }
+        conditions::warning_call(call.call, "first element used of 'length.out' argument")?;
+    }
+    let count = values::as_real_scalar(value);
+    if count.is_nan() || count < 0.0 {
+        return Err(call.error("argument must be coercible to non-negative integer"));
+    }
+    let count = count as usize;
+    let result = alloc(SexpType::Integer, count)?;
+    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+        *slot = index as i32 + 1;
+    }
+    Ok(result)
+}
+
+unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
+    let object = call.arg(0);
+    let count = if object.is_object() {
+        crate::subset::dispatch_length(object, call.env)?
+    } else {
+        length(object)
+    };
+    let result = alloc(SexpType::Integer, count)?;
+    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+        *slot = index as i32 + 1;
+    }
+    Ok(result)
+}
+
+/// `seq.int(from, to, by, length.out, along.with, ...)`.
+unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
+    let (matched, _) = call.match_args(&["from", "to", "by", "length.out", "along.with", "..."])?;
+    let from = present(matched[0]);
+    let to = present(matched[1]);
+    let by = present(matched[2]);
+    let length_out = present(matched[3]);
+    let along = present(matched[4]);
+    let one = |value: Option<Sexp>, name: &str| -> R<Option<f64>> {
+        match value {
+            None => Ok(None),
+            Some(value) => {
+                if length(value) != 1 {
+                    return Err(call.error(format!("'{name}' must be of length 1")));
+                }
+                let number = values::as_real_scalar(value);
+                if !number.is_finite() {
+                    return Err(call.error(format!("'{name}' must be a finite number")));
+                }
+                Ok(Some(number))
+            }
+        }
+    };
+    let length_out = match along {
+        Some(along) => Some(length(along) as f64),
+        None => match length_out {
+            Some(value) => {
+                let number = values::as_real_scalar(value);
+                if number.is_nan() || number < 0.0 {
+                    return Err(call.error("'length.out' must be a non-negative number"));
+                }
+                Some(number.ceil())
+            }
+            None => None,
+        },
+    };
+    let integer_like = |value: Option<Sexp>| {
+        value.is_none_or(|value| matches!(value.kind(), SexpType::Integer | SexpType::Logical))
+    };
+    let all_integer = integer_like(from) && integer_like(to) && integer_like(by);
+    if from.is_some() && to.is_none() && by.is_none() && length_out.is_none() {
+        let value = from.unwrap_or(nil());
+        if length(value) == 1 {
+            let n = values::as_real_scalar(value);
+            return colon(1.0, n);
+        }
+        return do_seq_along(&Call { call: call.call, op: call.op, args: &[Arg { tag: nil(), value }], env: call.env });
+    }
+    let from_value = one(from, "from")?;
+    let to_value = one(to, "to")?;
+    let by_value = one(by, "by")?;
+    match (from_value, to_value, by_value, length_out) {
+        (from, to, None, None) => colon(from.unwrap_or(1.0), to.unwrap_or(1.0)),
+        (from, Some(to), Some(by), None) => {
+            let from = from.unwrap_or(1.0);
+            let span = to - from;
+            if span == 0.0 {
+                return if all_integer { values::integer_vector(&[from as i32]) } else { values::real_vector(&[from]) };
+            }
+            if by == 0.0 {
+                return Err(call.error("invalid '(to - from)/by' in seq(.)"));
+            }
+            if span / by < 0.0 {
+                return Err(call.error("wrong sign in 'by' argument"));
+            }
+            let steps = (span / by + 1e-10).floor() as usize;
+            if all_integer {
+                let values: Vec<i32> = (0..=steps).map(|index| (from + index as f64 * by) as i32).collect();
+                values::integer_vector(&values)
+            } else {
+                let values: Vec<f64> = (0..=steps).map(|index| from + index as f64 * by).collect();
+                values::real_vector(&values)
+            }
+        }
+        (from, to, by, Some(count)) => {
+            let count = count as usize;
+            match (from, to, by) {
+                (Some(from), Some(to), None) => {
+                    if count == 1 {
+                        return values::real_vector(&[from]);
+                    }
+                    let by = (to - from) / (count as f64 - 1.0);
+                    let values: Vec<f64> = (0..count)
+                        .map(|index| if index == count - 1 { to } else { from + index as f64 * by })
+                        .collect();
+                    if all_integer && values.iter().all(|value| value.fract() == 0.0) {
+                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
+                        return values::integer_vector(&integers);
+                    }
+                    values::real_vector(&values)
+                }
+                (from, None, by) => {
+                    let from = from.unwrap_or(1.0);
+                    let by = by.unwrap_or(1.0);
+                    let values: Vec<f64> = (0..count).map(|index| from + index as f64 * by).collect();
+                    if (from_value.is_none() || all_integer) && values.iter().all(|value| value.fract() == 0.0 && value.abs() < i32::MAX as f64) {
+                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
+                        return values::integer_vector(&integers);
+                    }
+                    values::real_vector(&values)
+                }
+                (None, Some(to), by) => {
+                    let by = by.unwrap_or(1.0);
+                    let from = to - (count as f64 - 1.0) * by;
+                    let values: Vec<f64> = (0..count).map(|index| from + index as f64 * by).collect();
+                    if all_integer && values.iter().all(|value| value.fract() == 0.0) {
+                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
+                        return values::integer_vector(&integers);
+                    }
+                    values::real_vector(&values)
+                }
+                _ => Err(call.error("too many arguments")),
+            }
+        }
+        _ => Err(call.error("invalid arguments")),
+    }
+}
+
+/// `rep(x, times, each, length.out)`.
+unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
+    let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
+    let object = present(matched[0]).unwrap_or(nil());
+    let times = present(matched[1]);
+    let length_out = present(matched[2])
+        .map(|value| values::as_real_scalar(value))
+        .filter(|value| !value.is_nan());
+    let each = present(matched[3])
+        .map(|value| values::as_integer_scalar(value))
+        .filter(|&value| value != NA_INTEGER)
+        .unwrap_or(1)
+        .max(0) as usize;
+    let object = values::materialize(object)?;
+    let count = length(object);
+    // Expand `each` first.
+    let mut indices: Vec<usize> = Vec::with_capacity(count * each);
+    for index in 0..count {
+        for _ in 0..each {
+            indices.push(index);
+        }
+    }
+    let base_count = indices.len();
+    let indices: Vec<usize> = match (length_out, times) {
+        (Some(out), _) => (0..out as usize)
+            .map(|position| if base_count == 0 { usize::MAX } else { indices[position % base_count] })
+            .collect(),
+        (None, Some(times)) => {
+            let times_count = length(times);
+            if times_count == 1 {
+                let repeat = values::as_real_scalar(times);
+                if repeat.is_nan() || repeat < 0.0 {
+                    return Err(call.error("invalid 'times' argument"));
+                }
+                let repeat = repeat as usize;
+                let mut result = Vec::with_capacity(base_count * repeat);
+                for _ in 0..repeat {
+                    result.extend_from_slice(&indices);
+                }
+                result
+            } else if times_count == base_count {
+                let mut result = Vec::new();
+                for (position, &index) in indices.iter().enumerate() {
+                    let repeat = crate::subset::numeric_element(times, position);
+                    if repeat.is_nan() || repeat < 0.0 {
+                        return Err(call.error("invalid 'times' argument"));
+                    }
+                    for _ in 0..repeat as usize {
+                        result.push(index);
+                    }
+                }
+                result
+            } else {
+                return Err(call.error("invalid 'times' argument"));
+            }
+        }
+        (None, None) => indices,
+    };
+    let result = crate::subset::select_elements(object, &indices)?;
+    let names = values::names(object);
+    if names != nil() {
+        let new_names = crate::subset::select_elements(names, &indices)?;
+        values::set_attr(result, symbols().names, new_names)?;
+    }
+    Ok(result)
+}
+
+unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
+    let object = values::materialize(call.arg(0))?;
+    let times = call.arg(1);
+    let count = length(object);
+    let mut indices = Vec::new();
+    if length(times) == 1 {
+        let repeat = values::as_real_scalar(times);
+        if repeat.is_nan() || repeat < 0.0 {
+            return Err(call.error("invalid 'times' value"));
+        }
+        for _ in 0..repeat as usize {
+            indices.extend(0..count);
+        }
+    } else if length(times) == count {
+        for index in 0..count {
+            for _ in 0..crate::subset::numeric_element(times, index) as usize {
+                indices.push(index);
+            }
+        }
+    } else {
+        return Err(call.error("invalid 'times' value"));
+    }
+    crate::subset::select_elements(object, &indices)
+}
+
+unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
+    let object = values::materialize(call.arg(0))?;
+    let out = values::as_integer_scalar(call.arg(1));
+    if out == NA_INTEGER || out < 0 {
+        return Err(call.error("invalid 'length.out' value"));
+    }
+    let count = length(object);
+    let indices: Vec<usize> = (0..out as usize)
+        .map(|position| if count == 0 { usize::MAX } else { position % count })
+        .collect();
+    crate::subset::select_elements(object, &indices)
+}
+
+// Two-argument math.
+
+fn choose(n: f64, k: f64) -> f64 {
+    let k = k.round();
+    if k < 0.0 {
+        return 0.0;
+    }
+    if k == 0.0 {
+        return 1.0;
+    }
+    if n == n.round() && k < 30.0 {
+        let mut result = 1.0;
+        for index in 0..k as i64 {
+            result = result * (n - index as f64) / (index as f64 + 1.0);
+        }
+        return result.round();
+    }
+    let mut result = 1.0;
+    for index in 0..k as i64 {
+        result = result * (n - index as f64) / (index as f64 + 1.0);
+    }
+    result
+}
+
+unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
+    let left = values::materialize(call.arg(0))?;
+    let right = values::materialize(call.arg(1))?;
+    if !matches!(left.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
+        || !matches!(right.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
+    {
+        return Err(call.error("non-numeric argument to mathematical function"));
+    }
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = recycled_length(left_length, right_length)?;
+    let result = alloc(SexpType::Real, count)?;
+    for index in 0..count {
+        let a = real_at(left, index % left_length);
+        let b = real_at(right, index % right_length);
+        values::reals_mut(result)[index] = if is_na_real(a) || is_na_real(b) { NA_REAL } else { function(a, b) };
+    }
+    binary_attributes(left, right, result, call.call)?;
+    Ok(result)
+}
+
+unsafe fn bitwise(call: &Call<'_>, function: fn(i32, i32) -> i32) -> R<Sexp> {
+    let left = coerce_vector(call.arg(0), SexpType::Integer)?;
+    let right = coerce_vector(call.arg(1), SexpType::Integer)?;
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = if left_length == 0 || right_length == 0 { 0 } else { left_length.max(right_length) };
+    let result = alloc(SexpType::Integer, count)?;
+    for index in 0..count {
+        let a = values::ints(left)[index % left_length];
+        let b = values::ints(right)[index % right_length];
+        values::ints_mut(result)[index] = if a == NA_INTEGER || b == NA_INTEGER { NA_INTEGER } else { function(a, b) };
+    }
+    Ok(result)
+}
+
+unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
+    let operand = coerce_vector(call.arg(0), SexpType::Integer)?;
+    let count = length(operand);
+    let result = alloc(SexpType::Integer, count)?;
+    for index in 0..count {
+        let value = values::ints(operand)[index];
+        values::ints_mut(result)[index] = if value == NA_INTEGER { NA_INTEGER } else { !value };
+    }
+    Ok(result)
+}
+
+unsafe fn complex_part(call: &Call<'_>, part: u8) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let count = length(operand);
+    if !matches!(operand.kind(), SexpType::Complex | SexpType::Real | SexpType::Integer | SexpType::Logical) {
+        return Err(call.error("non-numeric argument to function"));
+    }
+    if part == 4 {
+        if operand.kind() != SexpType::Complex {
+            return Ok(operand);
+        }
+        let result = alloc(SexpType::Complex, count)?;
+        for index in 0..count {
+            let z = values::complexes(operand)[index];
+            values::complexes_mut(result)[index] = Rcomplex { r: z.r, i: -z.i };
+        }
+        values::copy_most_attributes(operand, result, true)?;
+        return Ok(result);
+    }
+    let result = alloc(SexpType::Real, count)?;
+    for index in 0..count {
+        let z = complex_at(operand, index);
+        values::reals_mut(result)[index] = match part {
+            0 => z.r,
+            1 => z.i,
+            2 => z.r.hypot(z.i),
+            _ => z.i.atan2(z.r),
+        };
+    }
+    values::copy_most_attributes(operand, result, true)?;
+    Ok(result)
+}
+
+unsafe fn do_complex(call: &Call<'_>) -> R<Sexp> {
+    let count = values::as_integer_scalar(call.arg(0)).max(0) as usize;
+    let real = coerce_vector(call.arg(1), SexpType::Real)?;
+    let imaginary = coerce_vector(call.arg(2), SexpType::Real)?;
+    let count = count.max(length(real)).max(length(imaginary));
+    let result = alloc(SexpType::Complex, count)?;
+    for index in 0..count {
+        let r = if length(real) > 0 { values::reals(real)[index % length(real)] } else { 0.0 };
+        let i = if length(imaginary) > 0 { values::reals(imaginary)[index % length(imaginary)] } else { 0.0 };
+        values::complexes_mut(result)[index] = Rcomplex { r, i };
+    }
+    Ok(result)
+}
+
+unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
+    let na_rm = values::as_logical_scalar(call.arg(0)) == 1;
+    let items: Vec<Sexp> = call.args[1..]
+        .iter()
+        .map(|arg| values::materialize(arg.value))
+        .collect::<R<_>>()?;
+    if items.is_empty() {
+        return Err(call.error("no arguments"));
+    }
+    let count = items.iter().map(|&item| length(item)).max().unwrap_or(0);
+    if items.iter().any(|&item| length(item) == 0) {
+        return alloc(items[0].kind(), 0);
+    }
+    let kind = items.iter().fold(SexpType::Logical, |kind, item| coerce::higher_type(kind, item.kind()));
+    if kind == SexpType::String {
+        let result = alloc(SexpType::String, count)?;
+        for index in 0..count {
+            let mut best: Option<Sexp> = None;
+            let mut na = false;
+            for &item in &items {
+                let strings = coerce_vector(item, SexpType::String)?;
+                let value = strings.element(index % length(strings));
+                if value == values::na_string() {
+                    na = true;
+                    continue;
+                }
+                best = Some(match best {
+                    None => value,
+                    Some(current) => {
+                        let ordering = crate::sort::collate(&values::char_str(value), &values::char_str(current));
+                        if (is_max && ordering.is_gt()) || (!is_max && ordering.is_lt()) { value } else { current }
+                    }
+                });
+            }
+            values::set_elt(result, index, if na && !na_rm { values::na_string() } else { best.unwrap_or(values::na_string()) });
+        }
+        return Ok(result);
+    }
+    let integer = matches!(kind, SexpType::Integer | SexpType::Logical);
+    let result = alloc(if integer { SexpType::Integer } else { SexpType::Real }, count)?;
+    for index in 0..count {
+        let mut best: Option<f64> = None;
+        let mut na = false;
+        for &item in &items {
+            let value = real_at(item, index % length(item));
+            if value.is_nan() {
+                na = true;
+                continue;
+            }
+            best = Some(match best {
+                None => value,
+                Some(current) => if is_max { current.max(value) } else { current.min(value) },
+            });
+        }
+        let value = if na && !na_rm { NA_REAL } else { best.unwrap_or(NA_REAL) };
+        if integer {
+            values::ints_mut(result)[index] = if value.is_nan() { NA_INTEGER } else { value as i32 };
+        } else {
+            values::reals_mut(result)[index] = value;
+        }
+    }
+    values::copy_most_attributes(items[0], result, true)?;
+    Ok(result)
+}
+
+unsafe fn do_tabulate(call: &Call<'_>) -> R<Sexp> {
+    let bins = values::materialize(call.arg(0))?;
+    let count = values::as_integer_scalar(call.arg(1)).max(0) as usize;
+    let result = alloc(SexpType::Integer, count)?;
+    for &value in values::ints(bins) {
+        if value != NA_INTEGER && value >= 1 && (value as usize) <= count {
+            values::ints_mut(result)[value as usize - 1] += 1;
+        }
+    }
+    Ok(result)
+}
+
+unsafe fn do_which(call: &Call<'_>) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    if operand.kind() != SexpType::Logical {
+        return Err(call.error("argument to 'which' is not logical"));
+    }
+    let positions: Vec<i32> = values::ints(operand)
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| **value == 1)
+        .map(|(index, _)| index as i32 + 1)
+        .collect();
+    let result = values::integer_vector(&positions)?;
+    let names = values::names(operand);
+    if names != nil() {
+        let indices: Vec<usize> = positions.iter().map(|&position| position as usize - 1).collect();
+        let selected = crate::subset::select_elements(names, &indices)?;
+        values::set_attr(result, symbols().names, selected)?;
+    }
+    Ok(result)
+}
+
+unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let mut best: Option<(usize, f64)> = None;
+    for index in 0..length(operand) {
+        let value = real_at(operand, index);
+        if value.is_nan() {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, current)) => if is_max { value > current } else { value < current },
+        };
+        if better {
+            best = Some((index, value));
+        }
+    }
+    match best {
+        None => alloc(SexpType::Integer, 0),
+        Some((index, _)) => {
+            let result = values::integer_vector(&[index as i32 + 1])?;
+            let names = values::names(operand);
+            if names != nil() {
+                let name = crate::subset::select_elements(names, &[index])?;
+                values::set_attr(result, symbols().names, name)?;
+            }
+            Ok(result)
+        }
+    }
+}
+
+/// `%*%`, `crossprod` and `tcrossprod` on numeric matrices and vectors.
+unsafe fn matrix_product(call: &Call<'_>, transpose_left: bool, transpose_right: bool) -> R<Sexp> {
+    let left = values::materialize(call.arg(0))?;
+    let right_arg = call.arg(1);
+    let right = if right_arg == nil() { left } else { values::materialize(right_arg)? };
+    if !matches!(left.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
+        || !matches!(right.kind(), SexpType::Integer | SexpType::Real | SexpType::Logical)
+    {
+        return Err(call.error("requires numeric/complex matrix/vector arguments"));
+    }
+    let shape = |value: Sexp, other: Option<usize>| -> (usize, usize) {
+        match values::dims(value) {
+            Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
+            _ => {
+                let count = length(value);
+                match other {
+                    Some(rows) if rows == count => (count, 1),
+                    Some(1) => (1, count),
+                    _ => (count, 1),
+                }
+            }
+        }
+    };
+    let (mut left_rows, mut left_cols) = match values::dims(left) {
+        Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
+        _ => {
+            let count = length(left);
+            let right_rows = values::dims(right).filter(|dims| dims.len() == 2).map(|dims| dims[0]);
+            match right_rows {
+                Some(rows) if rows == count && !transpose_left => (1, count),
+                Some(1) => (count, 1),
+                _ if transpose_left => (count, 1),
+                _ => (1, count),
+            }
+        }
+    };
+    if transpose_left {
+        std::mem::swap(&mut left_rows, &mut left_cols);
+    }
+    let (mut right_rows, mut right_cols) = shape(right, Some(left_cols));
+    if transpose_right {
+        std::mem::swap(&mut right_rows, &mut right_cols);
+    }
+    if values::dims(right).is_none() && !transpose_right {
+        if right_rows != left_cols && length(right) == left_cols {
+            right_rows = left_cols;
+            right_cols = 1;
+        }
+    }
+    if left_cols != right_rows {
+        return Err(call.error("non-conformable arguments"));
+    }
+    let left_value = |row: usize, col: usize| {
+        if transpose_left { real_at(left, col + row * left_cols) } else { real_at(left, row + col * left_rows) }
+    };
+    let right_value = |row: usize, col: usize| {
+        if transpose_right { real_at(right, col + row * right_cols) } else { real_at(right, row + col * right_rows) }
+    };
+    let result = alloc(SexpType::Real, left_rows * right_cols)?;
+    for row in 0..left_rows {
+        for col in 0..right_cols {
+            let mut total = 0.0;
+            for inner in 0..left_cols {
+                total += left_value(row, inner) * right_value(inner, col);
+            }
+            values::reals_mut(result)[row + col * left_rows] = total;
+        }
+    }
+    let dim = values::integer_vector(&[left_rows as i32, right_cols as i32])?;
+    values::set_attr(result, symbols().dim, dim)?;
+    let row_names = dimnames_part(left, if transpose_left { 1 } else { 0 });
+    let col_names = dimnames_part(right, if transpose_right { 0 } else { 1 });
+    if row_names != nil() || col_names != nil() {
+        let dimnames = values::list_vector(&[row_names, col_names])?;
+        values::set_attr(result, symbols().dimnames, dimnames)?;
+    }
+    Ok(result)
+}
+
+unsafe fn dimnames_part(value: Sexp, index: usize) -> Sexp {
+    let dimnames = get_attr(value, symbols().dimnames);
+    if dimnames.kind() == SexpType::List && length(dimnames) > index {
+        dimnames.element(index)
+    } else {
+        nil()
+    }
+}
+
+unsafe fn do_is_unsorted(call: &Call<'_>) -> R<Sexp> {
+    let operand = values::materialize(call.arg(0))?;
+    let strictly = values::as_logical_scalar(call.arg(1)) == 1;
+    let count = length(operand);
+    for index in 1..count {
+        let ordering = match operand.kind() {
+            SexpType::String => crate::sort::collate(
+                &values::char_str(operand.element(index - 1)),
+                &values::char_str(operand.element(index)),
+            ),
+            _ => real_at(operand, index - 1)
+                .partial_cmp(&real_at(operand, index))
+                .unwrap_or(std::cmp::Ordering::Equal),
+        };
+        if ordering.is_gt() || (strictly && ordering.is_eq()) {
+            return scalar_bool(true);
+        }
+    }
+    scalar_bool(false)
+}
