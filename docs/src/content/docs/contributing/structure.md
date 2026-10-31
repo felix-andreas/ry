@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, loader, ry, repl, heap, libr, and rcmd crates
+description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, libr, and rcmd crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -90,6 +90,13 @@ The crate root is `src/loader.rs`.
 - **`runtime.R`**: the R side of the GNU R backend, which applies a plan to a session and provides
   `load_all()`.
 
+## `oracle`
+
+The library root is `src/oracle.rs`, and the binary root is `src/main.rs`. It runs one R file under
+GNU R and under a second engine and compares stdout, messages, warnings, errors and the last value;
+`driver.R` is the script that produces each engine's report. [Corpus, oracle and benchmark
+generator](/contributing/corpus-and-oracle) describes how to run it.
+
 ## `ry`
 
 The library root is `src/ry.rs`, and the binary root is `src/main.rs`.
@@ -175,6 +182,14 @@ runtime state and R's C API. Each exported function that can fail runs its body 
   (`TRUELENGTH`, `SETLENGTH`, `FRAME`, `R_PPStack` and the like).
 - **`graphics.rs`**: the graphics engine's names, so device packages load; drawing is an error.
 - **`arith.rs`**: NA tests, sorting, and the random number generator.
+- **`rmath.rs`**: `Rmath.h`: the densities, distribution functions, quantiles and random variates
+  of R's distributions, and the special functions under them.
+- **`applic.rs`**: `R_ext/Applic.h`: the `optim()` and `nlm()` optimizers, QUADPACK integration,
+  `findInterval`, `R_max_col` and `R_pretty`.
+- **`linpack.rs`**: the LINPACK routines R uses, including `dqrdc2` behind `qr()` and `lm.fit()`,
+  and the PORT machine constants.
+- **`utils.rs`**: `R_ext/Utils.h`: file and temporary names, string predicates, and the printing
+  and signalling helpers Fortran code calls.
 - **`globals.rs`**: GNU R's data symbols.
 - **`embed.rs`**: ry's own `ry_` entry points for an embedding host, declared in
   `include/ry_embed.h`, and the embedding functions of `Rembedded.h`.

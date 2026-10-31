@@ -38,6 +38,9 @@ illegal dependency unrepresentable.
 - **`loader`** is the package-development loader. It reads a package into the analysis, diffs the
   load index against what a session has loaded, and produces a backend-neutral plan. Its GNU R
   backend hands the plan to R code running in the session; ry's own runtime will take the same plan.
+- **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
+  and under another engine and compares the observable results. It depends on nothing else in the
+  workspace.
 - **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
   `repl` included, needs R to build.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
