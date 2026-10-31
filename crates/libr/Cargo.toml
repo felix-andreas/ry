@@ -77,3 +77,7 @@ path = "tests/test_connections_gnu_binary.rs"
 [[test]]
 name = "test_install"
 path = "tests/test_install.rs"
+
+[[test]]
+name = "test_headers"
+path = "tests/test_headers.rs"

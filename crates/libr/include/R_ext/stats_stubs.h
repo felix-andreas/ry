@@ -17,7 +17,7 @@ attribute_hidden void S_Rf_divset(int alg, int iv[], int liv, int lv, double v[]
 {
     static ry_stats_divset_t routine = NULL;
     if (routine == NULL)
-        routine = (ry_stats_divset_t) R_GetCCallable("stats", "Rf_divset");
+        routine = (ry_stats_divset_t) (void (*)(void)) R_GetCCallable("stats", "Rf_divset");
     routine(alg, iv, liv, lv, v);
 }
 
@@ -27,7 +27,7 @@ attribute_hidden void S_nlminb_iterate(double b[], double d[], double fx, double
 {
     static ry_stats_nlminb_t routine = NULL;
     if (routine == NULL)
-        routine = (ry_stats_nlminb_t) R_GetCCallable("stats", "nlminb_iterate");
+        routine = (ry_stats_nlminb_t) (void (*)(void)) R_GetCCallable("stats", "nlminb_iterate");
     routine(b, d, fx, g, h, iv, liv, lv, n, v, x);
 }
 
@@ -37,7 +37,7 @@ attribute_hidden void S_nlsb_iterate(double b[], double d[], double dr[], int iv
 {
     static ry_stats_nlsb_t routine = NULL;
     if (routine == NULL)
-        routine = (ry_stats_nlsb_t) R_GetCCallable("stats", "nlsb_iterate");
+        routine = (ry_stats_nlsb_t) (void (*)(void)) R_GetCCallable("stats", "nlsb_iterate");
     routine(b, d, dr, iv, liv, lv, n, nd, p, r, rd, v, x);
 }
 
@@ -46,6 +46,6 @@ attribute_hidden void S_rcont2(int nrow, int ncol, const int nrowt[], const int 
 {
     static ry_stats_rcont2_t routine = NULL;
     if (routine == NULL)
-        routine = (ry_stats_rcont2_t) R_GetCCallable("stats", "rcont2");
+        routine = (ry_stats_rcont2_t) (void (*)(void)) R_GetCCallable("stats", "rcont2");
     routine(nrow, ncol, nrowt, ncolt, ntotal, fact, jwork, matrix);
 }
