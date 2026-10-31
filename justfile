@@ -245,7 +245,7 @@ release-kind $version:
     	*) echo pre-release ;;
     esac
 
-# Install the benchmark dependency closure into .corpus/library (needs GNU R and network access).
+# Install the benchmark dependency closure into .corpus/library (needs GNU R, network access and tools/corpus/system-packages.txt).
 corpus:
     Rscript tools/corpus/install.R
 

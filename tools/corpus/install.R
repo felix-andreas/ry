@@ -70,6 +70,15 @@ with_warnings({
   install.packages(roots, lib = library_dir, dependencies = TRUE)
 })
 
+# A package missing from the pinned snapshot gets one more try against the newest one.
+missing_roots <- setdiff(roots, installed())
+if (length(missing_roots) > 0) {
+  with_warnings(install.packages(
+    missing_roots, lib = library_dir, dependencies = TRUE,
+    repos = c(CRAN = sprintf("https://packagemanager.posit.co/cran/__linux__/%s/latest", distro), FINCCAM = extra_repo)
+  ))
+}
+
 for (remote in remotes) {
   checkout <- file.path(source_dir, remote$name)
   if (!dir.exists(checkout)) {
@@ -85,7 +94,7 @@ for (remote in remotes) {
 }
 
 # Record the outcome per package: every root and remote, with its reason when missing.
-have <- installed()
+have <- rownames(installed.packages())
 targets <- c(roots, vapply(remotes, `[[`, "", "name"))
 suggested <- unlist(lapply(intersect(roots, have), function(package) {
   tools::package_dependencies(package, db = installed.packages(lib.loc = library_dir), which = "Suggests")[[package]]
@@ -99,7 +108,7 @@ reason_for <- function(package) {
   gsub("\\s+", " ", paste(unique(hits), collapse = " | "))
 }
 row <- function(package, role) {
-  ok <- package %in% have
+  ok <- package %in% rownames(installed.packages())
   data.frame(
     package = package, role = role, installed = ok,
     version = if (ok) as.character(packageVersion(package, lib.loc = library_dir)) else "",

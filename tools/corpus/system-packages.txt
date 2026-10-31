@@ -1,0 +1,4 @@
+# Ubuntu 24.04 packages the compiled corpus packages load at run time.
+r-base r-base-dev
+libcurl4-openssl-dev libssl-dev libxml2-dev
+libgit2-dev unixodbc-dev libpoppler-cpp-dev libglpk-dev libnlopt-dev libsodium-dev
