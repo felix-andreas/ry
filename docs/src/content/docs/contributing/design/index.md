@@ -57,10 +57,9 @@ What Roc, Bend, goose and Vx do best in memory management, compilation, typing a
 which of their ideas the R runtime adopts or rejects given that R's C API must keep working. It is
 written as an Open Knowledge Format v0.2 concept document, with sources in its frontmatter.
 
-### [Packaging and R versions](/contributing/design/packaging/)
+### [Packages and R versions in the runtime](/contributing/design/packaging/)
 
-How ry installs packages, pins environments and picks an R version and runtime, so that its
-packaging works as well as uv's does for Python while renv projects keep working unchanged. It
-compares rv, rig, rpx, renv, pak, P3M and r-universe, with measured install times for the benchmark
-closure, and decides on a package manager built into ry whose lockfile feeds the checker. Nothing on
-it is implemented.
+How packages install into ry's runtime (prebuilt GNU R 4.6 binaries load unchanged through the
+ABI-compatible `libR`), how ry chooses between GNU R and its own runtime and between R versions while
+the runtime is incomplete, and what the lazy loader, the analysis and the corpus read from an
+installed library. A package manager of ry's own is left open. Nothing on it is implemented.

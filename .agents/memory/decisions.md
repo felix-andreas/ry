@@ -1595,33 +1595,28 @@ GPL-2-or-later. The default is to load them at runtime from the user's own GNU R
 rather than vendor them, the way the `repl` crate already loads R at runtime. Relicensing the
 project is the owner's call and is not assumed.
 
-# Decision record: packaging and R version management
+# Decision record: packages and R versions in the runtime
 
 `contributing/design/packaging.md` holds the design and the measurements. Nothing existed before, so
 there was no previous source of truth; the choices that settle architecture are these.
 
-- **ry ships its own package manager in the `ry` binary** (`ry add/remove/lock/sync/run`,
-  `ry r install/list`) instead of embedding rv, rig or rpx or wrapping renv or pak. The installer
-  must write the runtime's per-package sidecar (item index and bytecode), and the resolved set must be
-  a salsa input read per package name; no external tool does either, and parsing a wrapped tool's
-  output would be a second source of truth. Resolution uses the `pubgrub` crate (as rig and rpx do).
-- **`DESCRIPTION` is the dependency manifest**, for packages and applications alike, so R CMD check,
-  devtools, renv, pak and the analysis read one source. `ry.toml` holds only what `DESCRIPTION` cannot
-  say: `[r] version`, `[r] runtime`, repositories and `exclude-newer`. `ry add` writes no automatic
-  upper bound, because R packages do not reliably follow semantic versioning.
-- **The lockfile follows the project.** With a `renv.lock` and no `ry.lock`, ry reads and writes
-  `renv.lock`, so renv projects and renv-using colleagues keep working. New projects get `ry.lock`
-  (TOML, one resolution valid across the listed platforms and R versions, a SHA-256 per artifact that
-  ry computes on first download, because P3M's binary index carries no checksum).
-- **One content-addressed cache serves GNU R 4.6 and ry's runtime,** because the runtime presents as
-  R 4.6 with an ABI-compatible `libR`. The ry sidecar lives beside the cache entry, never inside the
-  installed package, so GNU R loads byte-identical files. Projects link into the cache.
-- **Runtime selection is explicit** (`runtime = "gnu" | "ry"`, flag, `RY_RUNTIME`), with no silent
-  per-project fallback, because a silent switch hides the failures the transition must surface. GNU R
-  is the default until ry's runtime meets build step 4's exit criterion, then ry. A version other than
-  4.6 always selects GNU R.
-- **The analysis reads the environment, not a running R:** locked versions per package name, exports
-  from the installed `NAMESPACE` plus the `.rdx` object names, and stubs chosen by version range.
-  Generated export manifests remain for base R and as the no-library fallback.
-- **Packaging for GNU R lands in build step 1**, because the oracle needs a pinned closure; installing
-  into ry's runtime lands in step 4 and loading from the environment in step 5.
+- **One installed package directory serves GNU R 4.6 and ry's runtime,** because ry's `libR` is
+  ABI-compatible and presents as R 4.6. ry checks the installed `DESCRIPTION`'s `Built:` field and
+  refuses a binary from another R minor version.
+- **ry's per-package data (item index, bytecode) lives in ry's own cache, keyed by the installed
+  directory's content hash plus the runtime version, never inside the package,** so the differential
+  oracle loads byte-identical packages under both runtimes and shared libraries (site libraries,
+  renv's cache) are never written to. It is filled lazily on first load.
+- **Package management runs as R code under the runtime** (`install.packages`, renv, pak). A package
+  manager of ry's own (`ry add`, `ry sync`, a lockfile) is deliberately left open, because the runtime
+  does not need it; if it comes, it must read and write `renv.lock`.
+- **Runtime selection is explicit** (`[r] runtime`, `--runtime`, `RY_RUNTIME`) with no silent
+  fallback, because a silent switch hides the failures the transition must surface. GNU R is the
+  default until build step 4's exit criterion, then ry. A version other than 4.6 always selects GNU
+  R. ry's `R_HOME` ships `bin/R` and `bin/Rscript` that start ry, so `parallel` and `callr` workers
+  inherit the runtime.
+- **The analysis reads the installed library, not a running R:** per package name, the installed
+  `DESCRIPTION`, `NAMESPACE` and `.rdx` object names, with stubs chosen by version range. Generated
+  export manifests remain for base R and as the no-library fallback.
+- **The corpus is pinned with renv** on a dated P3M snapshot in build step 1, because renv is in the
+  benchmark set and R's own installer cannot backtrack to older compatible versions.
