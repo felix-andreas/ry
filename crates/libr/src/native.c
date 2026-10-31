@@ -1143,3 +1143,107 @@ int ry_stream_hook(SEXP (*function)(SEXP, SEXP), SEXP object, SEXP data, SEXP *r
     ry_context_pop(&context);
     return 0;
 }
+
+/* ------------------------------------------------------------------------------------------
+ * Connections (crates/libr/src/connections.rs).
+ *
+ * The methods of a custom connection are package code, so Rust reaches them only through these
+ * trampolines. The default vfprintf lives here because it takes a va_list.
+ * ------------------------------------------------------------------------------------------ */
+
+#include <R_ext/Connections.h>
+
+#define RY_CONNECTION_ENTER                                                                     \
+    RyContext context;                                                                          \
+    ry_context_push(&context);                                                                  \
+    if (setjmp(context.buffer)) {                                                               \
+        ry_context_land(&context);                                                              \
+        return 1;                                                                               \
+    }
+
+#define RY_CONNECTION_LEAVE                                                                     \
+    ry_context_pop(&context);                                                                   \
+    return 0;
+
+/* Formats into R_alloc memory, which the enclosing native scope reclaims even when write
+   raises an error, and hands the text to the connection's write method. */
+int ry_connection_vfprintf(Rconnection con, const char *format, va_list arguments)
+{
+    char small[1024];
+    va_list copy;
+    va_copy(copy, arguments);
+    int length = vsnprintf(small, sizeof small, format, arguments);
+    char *text = small;
+    if (length >= (int) sizeof small) {
+        text = R_alloc((size_t) length + 1, 1);
+        vsnprintf(text, (size_t) length + 1, format, copy);
+    }
+    va_end(copy);
+    if (length > 0)
+        con->write(text, 1, (size_t) length, con);
+    return length;
+}
+
+int ry_connection_open(Rboolean (*method)(Rconnection), Rconnection con, int *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_void(void (*method)(Rconnection), Rconnection con)
+{
+    RY_CONNECTION_ENTER
+    method(con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_int(int (*method)(Rconnection), Rconnection con, int *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_seek(double (*method)(Rconnection, double, int, int), Rconnection con,
+                       double position, int origin, int rw, double *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(con, position, origin, rw);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_read(size_t (*method)(void *, size_t, size_t, Rconnection), void *buffer,
+                       size_t size, size_t count, Rconnection con, size_t *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(buffer, size, count, con);
+    RY_CONNECTION_LEAVE
+}
+
+int ry_connection_write(size_t (*method)(const void *, size_t, size_t, Rconnection),
+                        const void *buffer, size_t size, size_t count, Rconnection con,
+                        size_t *result)
+{
+    RY_CONNECTION_ENTER
+    *result = method(buffer, size, count, con);
+    RY_CONNECTION_LEAVE
+}
+
+static int ry_connection_printf(int (*method)(Rconnection, const char *, va_list), Rconnection con,
+                                const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    int result = method(con, format, arguments);
+    va_end(arguments);
+    return result;
+}
+
+int ry_connection_print(int (*method)(Rconnection, const char *, va_list), Rconnection con,
+                        const char *text, int *result)
+{
+    RY_CONNECTION_ENTER
+    *result = ry_connection_printf(method, con, "%s", text);
+    RY_CONNECTION_LEAVE
+}

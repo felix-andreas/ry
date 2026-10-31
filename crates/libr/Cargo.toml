@@ -64,3 +64,11 @@ path = "tests/test_serialize.rs"
 [[test]]
 name = "test_serialize_native"
 path = "tests/test_serialize_native.rs"
+
+[[test]]
+name = "test_connections"
+path = "tests/test_connections.rs"
+
+[[test]]
+name = "test_connections_gnu_binary"
+path = "tests/test_connections_gnu_binary.rs"

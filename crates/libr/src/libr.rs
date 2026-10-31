@@ -20,6 +20,7 @@ pub mod arith;
 pub mod attributes;
 pub mod boundary;
 pub mod classes;
+pub mod connections;
 pub mod dynload;
 pub mod embed;
 pub mod environments;

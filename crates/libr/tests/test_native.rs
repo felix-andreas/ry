@@ -620,6 +620,10 @@ fn declared_function(statement: &str) -> Option<String> {
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect();
     let name: String = name.chars().rev().collect();
+    // `void (*destroy)(struct Rconn *);` is a struct member holding a function pointer.
+    if head[..head.len() - name.len()].trim_end().ends_with("(*") {
+        return None;
+    }
     let has_type = head.len() > name.len();
     (!name.is_empty() && has_type).then_some(name)
 }

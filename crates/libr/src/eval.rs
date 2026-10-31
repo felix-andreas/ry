@@ -45,7 +45,8 @@ const PRIMITIVES: &[(&str, SexpType, Primitive)] = &[
 
 pub(crate) unsafe fn install_primitives(heap: &mut Heap) {
     let base = heap.known().base_env;
-    for (index, (name, kind, _)) in PRIMITIVES.iter().enumerate() {
+    let all = PRIMITIVES.iter().chain(crate::connections::PRIMITIVES);
+    for (index, (name, kind, _)) in all.enumerate() {
         let result = (|| -> heap::HeapResult<()> {
             let primitive = heap.alloc_primitive(*kind, index as u32)?;
             let symbol = heap.install(name.as_bytes())?;
@@ -127,10 +128,16 @@ pub fn evaluator() -> Option<&'static dyn Evaluator> {
     EVALUATOR.get()
 }
 
-pub fn primitive_name(index: u32) -> &'static str {
+/// The primitive with this index: the table above, then each subsystem's own table.
+fn primitive_entry(index: u32) -> Option<&'static (&'static str, SexpType, Primitive)> {
+    let index = index as usize;
     PRIMITIVES
-        .get(index as usize)
-        .map_or("<unknown primitive>", |(name, _, _)| name)
+        .get(index)
+        .or_else(|| crate::connections::PRIMITIVES.get(index.checked_sub(PRIMITIVES.len())?))
+}
+
+pub fn primitive_name(index: u32) -> &'static str {
+    primitive_entry(index).map_or("<unknown primitive>", |(name, _, _)| name)
 }
 
 /// Evaluates through the installed [`Evaluator`], or the built-in one when none is installed.
@@ -235,9 +242,8 @@ unsafe fn invoke(
     arguments: &[(Sexp, Sexp)],
     env: Sexp,
 ) -> ApiResult<Sexp> {
-    let (_, _, primitive) = PRIMITIVES
-        .get(function.primitive_index() as usize)
-        .ok_or_else(|| error("invalid primitive"))?;
+    let (_, _, primitive) =
+        primitive_entry(function.primitive_index()).ok_or_else(|| error("invalid primitive"))?;
     primitive(call, arguments, env)
 }
 
