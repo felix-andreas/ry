@@ -1,0 +1,530 @@
+#==== literals
+#---- record_literal
+p <- (x = 1, y = 2L)
+#++++
+p: record{x: double, y: integer}
+
+#---- record_fields_print_sorted
+p <- (y = 2, x = 1)
+#++++
+p: record{x: double, y: double}
+
+#---- one_field_record
+p <- (x = 1,)
+#++++
+p: record{x: double}
+
+#---- tuple_literal
+t <- (1L, "a")
+#++++
+t: tuple{integer, character}
+
+#---- one_item_tuple
+t <- (1L,)
+#++++
+t: tuple{integer}
+
+#---- empty_tuple
+t <- ()
+#++++
+t: tuple{}
+
+#---- bare_tag
+n <- :None
+#++++
+n: :None
+
+#---- positional_tag
+s <- :Some(5L)
+#++++
+s: :Some(integer)
+
+#---- named_tag
+r <- :Rect(width = 2, height = 3)
+#++++
+r: :Rect(height: double, width: double)
+
+#---- nested_literals
+v <- (point = (x = 1, y = 2), tag = :Some((1L, "a")))
+#++++
+v: record{point: record{x: double, y: double}, tag: :Some(tuple{integer, character})}
+
+#==== field_access
+#---- dollar_reads_an_exact_field
+p <- (x = 1, y = 2L)
+y <- p$y
+#++++
+p: record{x: double, y: integer}
+y: integer
+
+#---- unknown_field_suggests_the_nearest_name
+p <- (width = 1, height = 2)
+w <- p$widht
+#++++
+p: record{height: double, width: double}
+w: Unknown
+36..41 error[type-mismatch] field `widht` does not exist in `record{height: double, width: double}`. Did you mean `width`?
+
+#---- unknown_field_without_a_near_name
+p <- (width = 1,)
+w <- p$z
+#++++
+p: record{width: double}
+w: Unknown
+25..26 error[type-mismatch] field `z` does not exist in `record{width: double}`
+
+#---- double_bracket_reads_a_field_by_string
+p <- (x = 1, y = 2L)
+y <- p[["y"]]
+#++++
+p: record{x: double, y: integer}
+y: integer
+
+#---- double_bracket_unknown_field
+p <- (x = 1, y = 2L)
+y <- p[["why"]]
+#++++
+p: record{x: double, y: integer}
+y: Unknown
+29..34 error[type-mismatch] field `why` does not exist in `record{x: double, y: integer}`
+
+#---- record_has_no_positions
+p <- (x = 1, y = 2L)
+y <- p[[1L]]
+#++++
+p: record{x: double, y: integer}
+y: Unknown
+29..31 error[type-mismatch] expected `character`, found `double`
+
+#---- tuple_reads_by_literal_position
+t <- (1L, "a")
+a <- t[[1L]]
+b <- t[[2L]]
+#++++
+t: tuple{integer, character}
+a: integer
+b: character
+
+#---- tuple_position_past_the_end
+t <- (1L, "a")
+c <- t[[3L]]
+#++++
+t: tuple{integer, character}
+c: Unknown
+23..25 error[type-mismatch] position 3 does not exist in `tuple{integer, character}`
+
+#---- tuple_has_no_fields
+t <- (1L, "a")
+c <- t$x
+#++++
+t: tuple{integer, character}
+c: Unknown
+22..23 error[type-mismatch] field `x` does not exist in `tuple{integer, character}`
+
+#---- single_bracket_is_not_supported
+p <- (x = 1,)
+q <- p["x"]
+#++++
+p: record{x: double}
+q: Unknown
+19..25 error[type-mismatch] `[` is not supported on `record{x: double}`
+
+#==== compatibility
+#---- record_is_not_a_list
+#: fn(l: list{x: double}) -> double
+f <- function(l) l$x
+y <- f((x = 1,))
+#++++
+f: fn(l: list{x: double}) -> double
+y: Unknown
+64..72 error[type-mismatch] expected `list{x: double}`, found `record{x: double}`
+
+#---- list_is_not_a_record
+#: fn(r: record{x: double}) -> double
+f <- function(r) r$x
+y <- f(list(x = 1))
+#++++
+f: fn(r: record{x: double}) -> double
+y: Unknown
+66..77 error[type-mismatch] expected `record{x: double}`, found `list{x: double}`
+
+#---- record_field_order_does_not_matter
+#: fn(r: record{x: double, y: double}) -> double
+f <- function(r) r$x
+z <- f((y = 2, x = 1))
+#++++
+f: fn(r: record{x: double, y: double}) -> double
+z: double
+
+#---- record_needs_every_field
+#: fn(r: record{x: double, y: double}) -> double
+f <- function(r) r$x
+z <- f((x = 1,))
+#++++
+f: fn(r: record{x: double, y: double}) -> double
+z: Unknown
+77..85 error[type-mismatch] expected `record{x: double, y: double}`, found `record{x: double}`
+
+#---- integer_widens_into_a_double_field
+#: fn(r: record{x: double}) -> double
+f <- function(r) r$x
+z <- f((x = 1L,))
+#++++
+f: fn(r: record{x: double}) -> double
+z: double
+
+#==== tag_unions
+#---- tag_fits_a_union_listing_it
+#: fn(o: :Some(integer) | :None) -> logical
+f <- function(o) TRUE
+a <- f(:Some(1L))
+b <- f(:None)
+#++++
+f: fn(o: :Some(integer) | :None) -> logical
+a: logical
+b: logical
+
+#---- tag_payload_mismatch
+#: fn(o: :Some(integer) | :None) -> logical
+f <- function(o) TRUE
+a <- f(:Some("a"))
+#++++
+f: fn(o: :Some(integer) | :None) -> logical
+a: Unknown
+73..83 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(character)`
+
+#---- tag_outside_a_closed_union
+#: fn(o: :Some(integer) | :None) -> logical
+f <- function(o) TRUE
+a <- f(:Other)
+#++++
+f: fn(o: :Some(integer) | :None) -> logical
+a: Unknown
+73..79 error[type-mismatch] expected `:Some(integer) | :None`, found `:Other`
+
+#---- payload_shape_must_match
+#: fn(o: :Some(integer) | :None) -> logical
+f <- function(o) TRUE
+a <- f(:Some(1L, 2L))
+#++++
+f: fn(o: :Some(integer) | :None) -> logical
+a: Unknown
+73..86 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(integer, integer)`
+
+#---- if_joins_tags_into_a_union
+f <- function(flag) if (flag) :Some(1L) else :None
+#++++
+f: fn(flag: logical) -> :Some(integer) | :None
+
+#---- if_merges_one_tag_payloads
+f <- function(flag) if (flag) :Some(1L) else :Some("a")
+#++++
+f: fn(flag: logical) -> :Some(integer | character)
+
+#---- if_with_two_payload_shapes_conflicts
+f <- function(flag) if (flag) :Some(1L) else :Some(1L, 2L)
+#++++
+f: Unknown
+30..58 error[type-mismatch] these branches build `:Some(integer)` and `:Some(integer, integer)`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart
+
+#---- generic_option_alias
+#: @alias Option<T> {:Some(T) | :None}
+
+#: fn(o: Option<integer>) -> logical
+f <- function(o) TRUE
+a <- f(:Some(1L))
+b <- f(:Some("a"))
+#++++
+f: fn(o: Option<integer>) -> logical
+a: logical
+b: Unknown
+124..134 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(character)`
+
+#==== open_unions
+#---- unlisted_tag_fits_an_open_union
+#: fn(r: :Ok(integer) | ..) -> logical
+f <- function(r) TRUE
+a <- f(:Err("x"))
+b <- f(:Ok(1L))
+#++++
+f: fn(r: :Ok(integer) | ..) -> logical
+a: logical
+b: logical
+
+#---- listed_tag_must_fit_its_member
+#: fn(r: :Ok(integer) | ..) -> logical
+f <- function(r) TRUE
+a <- f(:Ok("x"))
+#++++
+f: fn(r: :Ok(integer) | ..) -> logical
+a: Unknown
+68..76 error[type-mismatch] expected `:Ok(integer) | ..`, found `:Ok(character)`
+
+#---- closed_union_fits_an_open_one
+#: fn(r: :Ok(integer) | ..) -> logical
+f <- function(r) TRUE
+#: fn(flag: logical) -> :Ok(integer) | :Err(character)
+g <- function(flag) if (flag) :Ok(1L) else :Err("x")
+a <- f(g(TRUE))
+#++++
+f: fn(r: :Ok(integer) | ..) -> logical
+g: fn(flag: logical) -> :Ok(integer) | :Err(character)
+a: logical
+
+#---- open_union_never_fits_a_closed_one
+#: fn(r: :Ok(integer) | :Err(character)) -> logical
+f <- function(r) TRUE
+#: fn(r: :Ok(integer) | ..) -> logical
+g <- function(r) f(r)
+#++++
+f: fn(r: :Ok(integer) | :Err(character)) -> logical
+g: fn(r: :Ok(integer) | ..) -> logical
+132..133 error[type-mismatch] expected `:Ok(integer) | :Err(character)`, found `:Ok(integer) | ..`
+
+#---- open_union_fits_an_open_one_listing_fewer_tags
+#: fn(r: :Ok(integer) | ..) -> logical
+f <- function(r) TRUE
+#: fn(r: :Ok(integer) | :Err(character) | ..) -> logical
+g <- function(r) f(r)
+#++++
+f: fn(r: :Ok(integer) | ..) -> logical
+g: fn(r: :Ok(integer) | :Err(character) | ..) -> logical
+
+#---- open_union_does_not_fit_an_open_one_listing_more_tags
+#: fn(r: :Ok(integer) | :Err(character) | ..) -> logical
+f <- function(r) TRUE
+#: fn(r: :Ok(integer) | ..) -> logical
+g <- function(r) f(r)
+#++++
+f: fn(r: :Ok(integer) | :Err(character) | ..) -> logical
+g: fn(r: :Ok(integer) | ..) -> logical
+137..138 error[type-mismatch] expected `:Ok(integer) | :Err(character) | ..`, found `:Ok(integer) | ..`
+
+#==== match_inference
+#---- match_types_as_the_join_of_its_arms
+#: fn(o: :Some(integer) | :None) -> integer | character
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    :None => "none"
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer | character
+
+#---- binding_takes_the_payload_type
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    :None => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+
+#---- tuple_pattern_binds_each_item
+#: fn(t: tuple{integer, character}) -> character
+f <- function(t) {
+  match (t) {
+    (n, s) => s
+  }
+}
+#++++
+f: fn(t: tuple{integer, character}) -> character
+
+#---- record_pattern_binds_fields
+#: fn(r: record{x: double, y: integer}) -> integer
+f <- function(r) {
+  match (r) {
+    (y = b, ..) => b
+  }
+}
+#++++
+f: fn(r: record{x: double, y: integer}) -> integer
+
+#---- named_payload_pattern
+#: fn(s: :Rect(width: double, height: double) | :Empty) -> double
+area <- function(s) {
+  match (s) {
+    :Rect(width = w, height = h) => w * h
+    :Empty => 0
+  }
+}
+#++++
+area: fn(s: :Rect(height: double, width: double) | :Empty) -> double
+
+#---- unannotated_scrutinee_is_shaped_by_its_patterns
+g <- function(r) {
+  match (r) {
+    :Ok(v) => v
+    :Err(e) => 0
+  }
+}
+#++++
+g: <T, U> fn(r: :Ok(T) | :Err(U)) -> T | double
+
+#---- catch_all_makes_the_shape_open
+g <- function(r) {
+  match (r) {
+    :Ok(v) => v
+    _ => 0L
+  }
+}
+#++++
+g: <T> fn(r: :Ok(T) | ..) -> T | integer
+
+#---- tuple_patterns_shape_a_tuple
+g <- function(pair) {
+  match (pair) {
+    (a, b) => a + b
+  }
+}
+#++++
+g: <T: numeric> fn(pair: tuple{T, T}) -> T
+
+#---- binding_after_the_match_joins_the_arms
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => total <- v
+    :None => total <- 0L
+  }
+  total
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+
+#---- diverging_arm_does_not_join
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    :None => stop("none")
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+
+#---- or_pattern_binds_the_union
+#: fn(t: tuple{integer, character}) -> integer | character
+f <- function(t) {
+  match (t) {
+    (a, _) | (_, a) => a
+  }
+}
+#++++
+f: fn(t: tuple{integer, character}) -> integer | character
+
+#---- match_value_conflicting_tag_shapes
+#: fn(flag: logical) -> logical
+f <- function(flag) {
+  v <- match (flag) {
+    TRUE => :Some(1L)
+    _ => :Some(1L, 2L)
+  }
+  TRUE
+}
+#++++
+f: fn(flag: logical) -> logical
+56..57 warning[unused] `v` is assigned but never used.
+61..124 error[type-mismatch] these branches build `:Some(integer)` and `:Some(integer, integer)`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart
+
+#==== patterns_that_cannot_match
+#---- tag_not_in_the_closed_union
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    :Nothing => 0L
+    _ => 1L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+99..107 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`
+
+#---- payload_of_the_wrong_length
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(a, b) => a
+    _ => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+81..92 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`
+
+#---- field_the_record_lacks
+#: fn(r: record{x: double}) -> double
+f <- function(r) {
+  match (r) {
+    (z = v, ..) => v
+    _ => 0
+  }
+}
+#++++
+f: fn(r: record{x: double}) -> double
+75..86 error[type-mismatch] this pattern can never match: the value is `record{x: double}`
+
+#---- tuple_pattern_on_a_record
+#: fn(r: record{x: double}) -> double
+f <- function(r) {
+  match (r) {
+    (a, b) => a
+    _ => 0
+  }
+}
+#++++
+f: fn(r: record{x: double}) -> double
+75..81 error[type-mismatch] this pattern can never match: the value is `record{x: double}`
+
+#---- literal_of_another_kind
+#: fn(n: integer) -> character
+f <- function(n) {
+  match (n) {
+    "one" => "a"
+    1 => "b"
+    _ => "c"
+  }
+}
+#++++
+f: fn(n: integer) -> character
+68..73 error[type-mismatch] this pattern can never match: the value is `integer`
+
+#---- unlisted_tag_is_fine_in_an_open_union
+#: fn(r: :Ok(integer) | ..) -> integer
+f <- function(r) {
+  match (r) {
+    :Ok(v) => v
+    :Err(e) => 0L
+    _ => 1L
+  }
+}
+#++++
+f: fn(r: :Ok(integer) | ..) -> integer
+
+#==== guards
+#---- guard_sees_the_bindings
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(x) if (x > 0L) => x
+    _ => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+
+#---- guard_must_be_logical
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(x) if ("yes") => x
+    _ => 0L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+94..99 error[type-mismatch] expected `logical`, found `character`

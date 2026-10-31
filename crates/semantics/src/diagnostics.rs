@@ -2019,6 +2019,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *variable),
             renderer.render(db, *container)
         ),
+        TypeErrorKind::PatternNeverMatches { found } => format!(
+            "this pattern can never match: the value is `{}`",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ConflictingTags { first, second } => format!(
+            "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",
+            renderer.render(db, *first),
+            renderer.render(db, *second)
+        ),
     }
 }
 
