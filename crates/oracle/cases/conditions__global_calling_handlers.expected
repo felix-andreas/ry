@@ -1,0 +1,6 @@
+[stdout]
+[messages]
+[warnings]
+[errors]
+- should not be called with handlers on the stack (in globalCallingHandlers(warning = function(w) {)
+[value]

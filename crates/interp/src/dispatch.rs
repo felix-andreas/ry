@@ -790,8 +790,9 @@ unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> 
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, &promised, env, &found.vars);
     let state = interp();
+    // The frame's saved stack, which `.addGlobHands` may have rewritten.
+    state.handlers = state.frames[depth - 1].handlers.clone();
     state.frames.truncate(depth - 1);
-    state.handlers = handlers;
     state.restarts = restarts;
     result.map(Some)
 }

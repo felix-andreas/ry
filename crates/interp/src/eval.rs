@@ -669,8 +669,9 @@ pub unsafe fn run_closure(
     // so returns from it too.
     let result = catch_return(env, run_on_exit(depth, result));
     let state = interp();
+    // The frame's saved stack, which `.addGlobHands` may have rewritten.
+    state.handlers = state.frames[depth - 1].handlers.clone();
     state.frames.truncate(depth - 1);
-    state.handlers = handlers;
     state.restarts = restarts;
     result
 }
@@ -1588,8 +1589,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     // same frame and so returns from it too.
     let result = catch_return(env, run_on_exit(depth, catch_return(env, result)));
     let state = interp();
+    // The frame's saved stack, which `.addGlobHands` may have rewritten.
+    state.handlers = state.frames[depth - 1].handlers.clone();
     state.frames.truncate(depth - 1);
-    state.handlers = handlers;
     state.restarts = restarts;
     result
 }

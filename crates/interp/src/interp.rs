@@ -122,6 +122,9 @@ pub struct Interp {
     /// The handler and restart stacks in effect, which every frame saves and restores.
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
+    /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
+    /// starts.
+    pub global_handlers: HandlerStack,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
     pub symbols: values::Symbols,
@@ -225,6 +228,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         frames: Vec::new(),
         handlers: None,
         restarts: None,
+        global_handlers: None,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         symbols,
@@ -341,6 +345,7 @@ impl RootSource for InterpRoots {
                 conditions::trace_restarts(&frame.restarts, marker);
             }
             conditions::trace_handlers(&interp.handlers, marker);
+            conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             for &(call, _) in &interp.warnings {
                 marker.mark(call);

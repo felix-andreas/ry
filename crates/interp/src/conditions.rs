@@ -371,7 +371,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".getRestart", 1, do_get_restart),
     internal(".invokeRestart", 2, do_invoke_restart),
     internal(".addTryHandlers", 0, |_| unsafe { Ok(nil()) }).invisible(),
-    internal(".addGlobHands", 5, |_| unsafe { Ok(nil()) }).invisible(),
+    internal(".addGlobHands", 5, do_add_global_handlers).invisible(),
     internal("warnings", 0, |_| unsafe { Ok(nil()) }),
     internal("interruptsSuspended", -1, |_| unsafe { values::scalar_bool(false) }),
 ];
@@ -404,6 +404,29 @@ unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
         }));
     }
     state.handlers = stack;
+    Ok(nil())
+}
+
+/// `.addGlobHands(classes, handlers, parentenv, target, calling)`: replaces the global handlers
+/// at the bottom of the stack. Every frame between here and top level saved the old bottom, so
+/// each is rewritten to the new one, or returning from it would drop the new handlers.
+unsafe fn do_add_global_handlers(call: &Call<'_>) -> R<Sexp> {
+    let state = interp();
+    let same = |stack: &HandlerStack| match (stack, &state.global_handlers) {
+        (None, None) => true,
+        (Some(stack), Some(global)) => Rc::ptr_eq(stack, global),
+        _ => false,
+    };
+    if !same(&state.handlers) || !state.frames.iter().all(|frame| same(&frame.handlers)) {
+        return Err(error("should not be called with handlers on the stack"));
+    }
+    state.handlers = None;
+    do_add_cond_hands(call)?;
+    let state = interp();
+    for frame in &mut state.frames {
+        frame.handlers = state.handlers.clone();
+    }
+    state.global_handlers = state.handlers.clone();
     Ok(nil())
 }
 
