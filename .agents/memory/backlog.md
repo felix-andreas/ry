@@ -2394,6 +2394,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   for the naming maps, one source copy, `CallArgument.name` and `StrictOriginKind` as `Symbol`, and
   a smaller `Expression` layout. Salsa's LRU eviction runs only at revision boundaries, so it cannot
   shrink a single cold CLI pass; the CLI stays at memoize-everything.
+- Parses outside salsa remain in `server.rs` range formatting (re-parses the document text per request instead of reading `semantics::parse`) and the `ry debug` dumps; route range formatting through the memoized tree.
 - The CLI forgets the database instead of dropping it (about 0.9 s of frees on these code bases), so
   `check` cannot reuse a process for a second analysis without leaking the first.
 - "Settled" includes the server's idle delay, so it is an upper bound on the semantic wave.
