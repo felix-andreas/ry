@@ -14,7 +14,7 @@ use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real};
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("deparse", 5, do_deparse),
     internal("dput", 3, do_dput).invisible(),
-    internal("dump", 5, |call| unsafe { Err(call.error("dump is not supported")) }),
+    internal("dump", 5, do_dump).invisible(),
 ];
 
 /// Deparse options, GNU R's bit values.
@@ -1000,6 +1000,43 @@ unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
         lines.truncate(nlines as usize);
     }
     values::string_vector(&lines)
+}
+
+/// `.Internal(dump(list, file, envir, opts, evaluate))`: writes `name <-` and the deparsed value
+/// of each object that exists, and returns the names written.
+unsafe fn do_dump(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let file = call.arg(1);
+    let env = call.arg(2);
+    let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
+    let evaluate = values::as_logical_scalar(call.arg(4)) != 0;
+    if names.kind() != SexpType::String {
+        return Err(call.error("character arguments expected"));
+    }
+    let mut written = Vec::new();
+    let mut text = String::new();
+    for index in 0..length(names) {
+        let Some(name) = values::string_at(names, index).map(|name| name.into_owned()) else {
+            continue;
+        };
+        let symbol = values::install(&name)?;
+        let mut value = crate::eval::find_var(symbol, env)?;
+        if value == values::unbound() {
+            continue;
+        }
+        if value.kind() == SexpType::Promise && evaluate {
+            value = crate::eval::force_promise(value)?;
+        }
+        text.push_str(&quote_name(&name));
+        text.push_str(" <-\n");
+        for line in deparse_lines(value, 60, opts) {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        written.push(name);
+    }
+    crate::connections::write_text(file, &text)?;
+    values::string_vector(&written)
 }
 
 unsafe fn do_dput(call: &Call<'_>) -> R<Sexp> {
