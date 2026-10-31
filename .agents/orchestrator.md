@@ -15,7 +15,7 @@ ry becomes a full, backwards-compatible reimplementation of R, extended with ry'
 - Package development loading in the style of `devtools::load_all` is built in, and it lazy-loads only what is needed. This is the idea behind [loadfast](https://github.com/finccam/loadfast), done cleanly.
 - A built-in, typed table type replaces data.table and must outperform it. It may be backed by polars.
 - The performance bar is a JIT on the level of Bun.
-- Every R feature keeps working, including S4, R6 and Reference Classes, but ry discourages them: a lint warns on their use, and an option disables them. ry has its own records, tuples and tagged unions, in the style of Roc, as the recommended way to model data.
+- Every R feature keeps working, including S4, R6 and Reference Classes, but ry discourages them: a lint warns on their use, and an option disables them. ry has its own records, tuples and tagged unions, in the style of Roc, as the recommended way to model data. They are ry's own native types, like the built-in table type, so they need not support R's quirks (attributes, partial matching, recycling, implicit coercion), and R interop is an explicit boundary.
 
 Most of the benchmark dependencies ship compiled C, C++ or Rust code written against R's C API (`SEXP`, memory protection, `.Call`). Full compatibility therefore means implementing that C API, not only R's language semantics. That interface shapes the architecture more than the JIT does, so it is designed first.
 
