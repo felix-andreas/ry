@@ -918,7 +918,7 @@ pub unsafe fn primitive_methods(op: Sexp) -> Option<(Sexp, Sexp)> {
 
 /// `R_possible_dispatch`: dispatches primitive `op` through the methods package when it made
 /// the primitive generic. `None` means the primitive's own code runs.
-unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     if !interp().globals.allow_primitive_methods {
         return Ok(None);
     }
@@ -937,6 +937,9 @@ unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option
         let arguments = eval::args_pairlist(&promised)?;
         let method = crate::methods::quick_method_check(arguments, methods, generic)?;
         match method.kind() {
+            // The default method of an internal generic such as `as.vector` stands for the
+            // internal code itself; calling it would dispatch again.
+            SexpType::Closure if values::inherits(method, "internalDispatchMethod") => return Ok(None),
             SexpType::Closure => {
                 let value = apply_closure(call, method, &promised, env, None)?;
                 return Ok(Some(value));

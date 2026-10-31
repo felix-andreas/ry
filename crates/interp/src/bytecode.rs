@@ -924,7 +924,9 @@ unsafe fn step(
             let mut cell = call.cdr();
             for index in 0..count {
                 let value = register(first + index);
-                if value == missing_arg() && !definition.keep_missing {
+                // Only an empty argument in the source is an error. An argument that evaluates
+                // to the missing argument, as `quote(expr = )` does, is an ordinary value.
+                if cell.car() == missing_arg() && !definition.keep_missing {
                     return Err(error_in(call, format!("argument {} is empty", index + 1)));
                 }
                 args.push(Arg { tag: cell.tag(), value });
