@@ -1829,6 +1829,17 @@ there was no evaluator, so there was no previous source of truth.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
+- **Top-level task callbacks live in libr's C, behind two interpreter hooks**
+  (`Hooks::run_task_callbacks`, `Hooks::task_callback_routine`). C packages register callbacks
+  through `Rf_addTaskCallback`, so the list has to be the C one; R's `addTaskCallback` reaches the
+  same list through the routine hook rather than keeping a second list in `interp`.
+  `session::run_toplevel` runs them after printing the task's warnings, as GNU R does.
+- **S4 objects get their S3 class vector from a cache keyed by class name** (`Globals::s4_extends`,
+  filled by `.cache_class` or by calling methods' `.extendsForS3` on a miss). This is GNU R's
+  `R_S4_extends_table`: without it, S3 dispatch on an S4 object sees only its own class and misses
+  methods for the classes it contains.
+- **`.External2` routines get GNU R's four-argument convention** `(call, op, args, env)`, which
+  rlang's `ffi_eval` relies on to evaluate in the caller's environment.
 
 # Decision record: the full C API surface and package installation
 

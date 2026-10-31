@@ -1792,8 +1792,17 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
-- **Task callbacks never run.** The interpreter does not yet call `libr::eval::run_task_callbacks`
-  after each top-level task.
+- **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
+  under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
+- **Compact sequences are not ALTREP.** `1:2e9` allocates the whole vector; GNU R's compact
+  intseq does not.
+- **`save()` to a binary connection, and the compiler package's `cmpfun`/`bcVersion`,** are not
+  implemented.
+- **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
+  supported; exact settings such as `{+}` compile to nothing, as in GNU R.
+- **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
+  bodies, `example()` echo without `keep.source` (GNU R shows the original text and comments), and
+  the "deparse may be incomplete" warning.
 - **The interpreter keeps its own connections and RNG beside libr's.** Both RNGs sync through
   `.Random.seed`; the interpreter's connection builtins should move onto `libr::connections`, and
   libr's primitive table and built-in evaluator are unused while the interpreter is installed, so
