@@ -769,6 +769,58 @@ unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count:
     Ok(result)
 }
 
+/// Smith's algorithm, which scales by the larger part of the divisor so that neither the squared
+/// modulus nor the products overflow.
+fn complex_divide(a: Rcomplex, b: Rcomplex) -> Rcomplex {
+    if b.r.abs() >= b.i.abs() {
+        let ratio = b.i / b.r;
+        let denominator = b.r + ratio * b.i;
+        Rcomplex { r: (a.r + a.i * ratio) / denominator, i: (a.i - a.r * ratio) / denominator }
+    } else {
+        let ratio = b.r / b.i;
+        let denominator = b.i + ratio * b.r;
+        Rcomplex { r: (a.r * ratio + a.i) / denominator, i: (a.i * ratio - a.r) / denominator }
+    }
+}
+
+fn complex_multiply(a: Rcomplex, b: Rcomplex) -> Rcomplex {
+    Rcomplex { r: a.r * b.r - a.i * b.i, i: a.r * b.i + a.i * b.r }
+}
+
+/// `x ^ y` with GNU R's special cases: real powers of zero and of non-negative reals stay real,
+/// and a small integer power is repeated multiplication, so `(1+2i)^2` is exact.
+fn complex_power(x: Rcomplex, y: Rcomplex) -> Rcomplex {
+    if y.r == 0.0 && y.i == 0.0 {
+        return Rcomplex { r: 1.0, i: 0.0 };
+    }
+    if y.i == 0.0 {
+        if x.i == 0.0 && (x.r == 0.0 || x.r >= 0.0) {
+            return Rcomplex { r: power(x.r, y.r), i: 0.0 };
+        }
+        if y.r == y.r.trunc() && y.r.abs() <= 65536.0 {
+            let mut exponent = y.r.abs() as u32;
+            let mut base = x;
+            let mut result = Rcomplex { r: 1.0, i: 0.0 };
+            while exponent > 0 {
+                if exponent & 1 == 1 {
+                    result = complex_multiply(result, base);
+                }
+                exponent >>= 1;
+                if exponent > 0 {
+                    base = complex_multiply(base, base);
+                }
+            }
+            return if y.r < 0.0 { complex_divide(Rcomplex { r: 1.0, i: 0.0 }, result) } else { result };
+        }
+    }
+    let log_modulus = x.r.hypot(x.i).ln();
+    let argument = x.i.atan2(x.r);
+    let real = y.r * log_modulus - y.i * argument;
+    let imaginary = y.i * log_modulus + y.r * argument;
+    let scale = real.exp();
+    Rcomplex { r: scale * imaginary.cos(), i: scale * imaginary.sin() }
+}
+
 unsafe fn complex_at(vector: Sexp, index: usize) -> Rcomplex {
     match vector.kind() {
         SexpType::Complex => values::complexes(vector)[index],
@@ -797,25 +849,8 @@ unsafe fn complex_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R
                 r: a.r * b.r - a.i * b.i,
                 i: a.r * b.i + a.i * b.r,
             },
-            Op::Divide => {
-                let denominator = b.r * b.r + b.i * b.i;
-                Rcomplex {
-                    r: (a.r * b.r + a.i * b.i) / denominator,
-                    i: (a.i * b.r - a.r * b.i) / denominator,
-                }
-            }
-            Op::Power => {
-                let modulus = (a.r * a.r + a.i * a.i).sqrt();
-                let argument = a.i.atan2(a.r);
-                let log_modulus = modulus.ln();
-                let real = b.r * log_modulus - b.i * argument;
-                let imaginary = b.i * log_modulus + b.r * argument;
-                let scale = real.exp();
-                Rcomplex {
-                    r: scale * imaginary.cos(),
-                    i: scale * imaginary.sin(),
-                }
-            }
+            Op::Divide => complex_divide(a, b),
+            Op::Power => complex_power(a, b),
             _ => return Err(error("invalid operation on complex numbers")),
         };
         values::complexes_mut(result)[index] = value;
