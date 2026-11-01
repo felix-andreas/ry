@@ -50,7 +50,7 @@ integer
 #---- block_returns_unknown_when_last_expression_is_unknown
 {
   1L
-  1L ~ 2L
+  1L %undeclared% 2L
 }
 #++++
 Unknown

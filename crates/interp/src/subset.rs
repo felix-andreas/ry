@@ -78,6 +78,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
 
 /// A copy of `object` that may be modified in place.
 pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
+    // Ending a move hands the caller this same value back, which makes it shared.
+    crate::moves::modifying(object)?;
     if values::maybe_shared(object) {
         values::shallow_duplicate(object)
     } else {
@@ -1097,6 +1099,11 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
     }
     let object = eval::eval(call.arg(0), call.env)?;
     let name = name_argument(call.arg(1))?;
+    dollar_value(object, name, call.call, call.env)
+}
+
+/// `object$name` once the subject is evaluated: an object dispatches with the name as a string.
+pub unsafe fn dollar_value(object: Sexp, name: Sexp, call: Sexp, env: Sexp) -> R<Sexp> {
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
         let args = [
@@ -1109,11 +1116,11 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
                 value: name_string,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin("$", call.call, &args, call.env)? {
+        if let Some(value) = crate::dispatch::dispatch_builtin("$", call, &args, env)? {
             return Ok(value);
         }
     }
-    dollar(object, name, call.call)
+    dollar(object, name, call)
 }
 
 pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {

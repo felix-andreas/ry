@@ -750,9 +750,11 @@ impl Journey {
                 }
             }
             ["run", "ry", arguments @ ..] => {
+                // A private cache keeps verdicts ry remembers between runs inside the scenario.
                 let output = Command::new(env!("CARGO_BIN_EXE_ry"))
                     .args(arguments)
                     .current_dir(&self.root)
+                    .env("XDG_CACHE_HOME", self.root.join(".cache"))
                     .output()
                     .map_err(|error| format!("running ry: {error}"))?;
                 self.last_run = Some(Run {
