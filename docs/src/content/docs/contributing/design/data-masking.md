@@ -5,7 +5,7 @@ description: "Working draft: checking non-standard evaluation, data.table first"
 
 This page is a sketchpad for checking non-standard evaluation, also called data masking, with
 data.table as the most pressing target. The framing, a four-step design ladder and a survey of
-precedent, is section 7 of [open type-system questions](/contributing/design/open-questions/).
+precedent, is section 6 of [open type-system questions](/contributing/design/open-questions/).
 
 ## What ships today
 

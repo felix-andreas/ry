@@ -1,0 +1,156 @@
+#==== match_bindings
+#---- pattern_binds_for_guard_and_body
+f <- function(v) {
+  match (v) {
+    :Some(x) if (x > 0L) => x
+    _ => 0L
+  }
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 x pattern-variable 43..44
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..29 v -> b0
+  43..44 x <- b1
+  50..51 x -> b1
+  61..62 x -> b1
+
+#---- binding_reaches_after_the_match_as_maybe_undefined
+f <- function(v) {
+  match (v) {
+    :Some(x) => 1L
+    :None => 2L
+  }
+  x
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 x pattern-variable 43..44
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..29 v -> b0
+  43..44 x <- b1
+  74..75 x -> b1 maybe-undefined
+
+#---- binding_bound_by_every_arm_is_defined_after
+f <- function(v) {
+  match (v) {
+    :Some(x) => 1L
+    x => 2L
+  }
+  x
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 x pattern-variable 43..44
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..29 v -> b0
+  43..44 x <- b1
+  56..57 x <- b1
+  70..71 x -> b1
+
+#---- assignment_in_an_arm_reaches_the_frame
+f <- function(v) {
+  match (v) {
+    :Some(x) => total <- x
+    _ => total <- 0L
+  }
+  total
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 x pattern-variable 43..44
+  b2 total local 49..54
+  b3 f top-level 0..1
+  0..1 f <- b3
+  28..29 v -> b0
+  43..44 x <- b1
+  49..54 total <- b2
+  58..59 x -> b1
+  69..74 total <- b2
+  87..92 total -> b2
+
+#---- record_and_tuple_patterns
+f <- function(v) {
+  match (v) {
+    (a, b) => a + b
+    (x = p, ..) => p
+  }
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 a pattern-variable 38..39
+  b2 b pattern-variable 41..42
+  b3 p pattern-variable 62..63
+  b4 f top-level 0..1
+  0..1 f <- b4
+  28..29 v -> b0
+  38..39 a <- b1
+  41..42 b <- b2
+  47..48 a -> b1
+  51..52 b -> b2
+  62..63 p <- b3
+  72..73 p -> b3
+
+#---- or_pattern_binds_one_slot
+f <- function(v) {
+  match (v) {
+    (a, _) | (_, a) => a
+  }
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 a pattern-variable 38..39
+  b2 f top-level 0..1
+  0..1 f <- b2
+  28..29 v -> b0
+  38..39 a <- b1
+  50..51 a <- b1
+  56..57 a -> b1
+
+#---- or_pattern_alternatives_must_bind_the_same_names
+f <- function(v) {
+  match (v) {
+    (a, _) | (_, b) => 1L
+  }
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 a pattern-variable 38..39
+  b2 b pattern-variable 50..51
+  b3 f top-level 0..1
+  0..1 f <- b3
+  28..29 v -> b0
+  38..39 a <- b1
+  50..51 b <- b2
+  or-pattern-missing b 37..43
+  or-pattern-missing a 46..52
+
+#---- closure_reads_a_later_pattern_binding
+f <- function(v) {
+  g <- function() x
+  match (v) {
+    x => g()
+  }
+}
+#++++
+# f
+  b0 v parameter 14..15
+  b1 g local 21..22
+  b2 x pattern-variable 57..58
+  b3 f top-level 0..1
+  0..1 f <- b3
+  21..22 g <- b1
+  37..38 x -> b2 captured
+  48..49 v -> b0
+  57..58 x <- b2 captured
+  62..63 g -> b1

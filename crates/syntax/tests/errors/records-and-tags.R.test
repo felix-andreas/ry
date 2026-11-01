@@ -1,0 +1,81 @@
+#==== literals
+#---- mixed_items
+(1L, y = 2)
+#++++
+error: this item cannot have a name: no item of a tuple is named, so a literal cannot mix named and unnamed items
+ --> 1:6
+  | (1L, y = 2)
+  |      ^
+
+#---- repeated_field
+(x = 1, x = 2)
+#++++
+error: the field `x` appears twice
+ --> 1:9
+  | (x = 1, x = 2)
+  |         ^
+
+#---- empty_item
+(1, , 2)
+#++++
+error: expected an item in this literal
+ --> 1:5
+  | (1, , 2)
+  |     ^
+
+#---- spliced_dots
+f <- function(...) (1, ...)
+#++++
+error: `...` cannot be spliced into a literal
+ --> 1:24
+  | f <- function(...) (1, ...)
+  |                        ^^^
+
+#---- empty_payload
+:Some()
+#++++
+error: a tag without a payload is written without parentheses, as in `:None`
+ --> 1:6
+  | :Some()
+  |      ^^
+
+#==== patterns
+#---- missing_arrow
+match (x) {
+  :Some(v) v
+}
+#++++
+error: expected `=>` after this pattern, found identifier
+ --> 2:12
+  |   :Some(v) v
+  |            ^
+
+#---- one_field_record_pattern
+match (x) {
+  (a = v) => v
+}
+#++++
+error: a one-field record pattern needs a trailing comma, as in `(name = p,)`
+ --> 2:3
+  |   (a = v) => v
+  |   ^^^^^^^
+
+#---- logical_shorthand_pattern
+match (x) {
+  T => 1
+}
+#++++
+error: `T` in a pattern would bind any value to a variable; write `TRUE` to match the logical value
+ --> 2:3
+  |   T => 1
+  |   ^
+
+#---- rest_in_tuple_pattern
+match (x) {
+  (a, ..) => a
+}
+#++++
+error: `..` ignores the remaining fields of a record pattern, so it needs named fields before it
+ --> 2:3
+  |   (a, ..) => a
+  |   ^^^^^^^

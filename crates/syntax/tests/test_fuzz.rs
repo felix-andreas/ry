@@ -49,6 +49,11 @@ const SEEDS: &[&str] = &[
     "g <- function<T: numeric>(...: T) -> T[] c(...)",
     "lapply(xs, \\(x: integer) -> integer x + 1L)",
     "{\n  step: fn(x: integer) -> integer <- function(x) x\n}",
+    "p <- (x = 1, y = 2); t <- (1L, \"a\"); e <- (); one <- (x = 1,)",
+    "s <- :Rect(width = 2, height = 3); n <- :None",
+    "match (s) {\n  :Circle(radius = r) => r\n  :Rect(width = w, ..) if (w > 0) => w\n  (a, _) | (_, a) => a\n  -1L => 0; _ => NULL\n}",
+    "x: :Some(integer) | :None | .. <- :None",
+    "f <- function(p: record{x: double}, t: tuple{integer}) -> :Ok(value: double) p",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -132,6 +137,13 @@ const ALPHABET: &[&str] = &[
     "<T>",
     "NULL =",
     "\r\n",
+    "=>",
+    "match",
+    "..",
+    ":None",
+    ":Some(",
+    "record{",
+    "tuple{",
 ];
 
 fn iterations() -> usize {

@@ -425,6 +425,35 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
+            (TyKind::NativeTuple(left), TyKind::NativeTuple(right)) => {
+                if left.len() != right.len() {
+                    return Err(UnifyError::Mismatch(a, b));
+                }
+                for (&left, &right) in left.iter().zip(right) {
+                    self.unify(db, left, right)?;
+                }
+                Ok(())
+            }
+            (TyKind::NativeRecord(left), TyKind::NativeRecord(right)) => {
+                if left.len() != right.len()
+                    || left.iter().zip(right).any(|(l, r)| l.name != r.name)
+                {
+                    return Err(UnifyError::Mismatch(a, b));
+                }
+                for (left, right) in left.iter().zip(right) {
+                    self.unify(db, left.ty, right.ty)?;
+                }
+                Ok(())
+            }
+            (TyKind::Tag(left_name, left_payload), TyKind::Tag(right_name, right_payload))
+                if left_name == right_name =>
+            {
+                match (left_payload, right_payload) {
+                    (None, None) => Ok(()),
+                    (Some(left), Some(right)) => self.unify(db, *left, *right),
+                    _ => Err(UnifyError::Mismatch(a, b)),
+                }
+            }
             (TyKind::Union(_), TyKind::Union(_)) => self.unify_unions(db, a, b),
             _ => Err(UnifyError::Mismatch(a, b)),
         }
@@ -623,9 +652,47 @@ impl<'db> InferenceTable<'db> {
         }
         match (actual.kind(db), expected.kind(db)) {
             // First, so union-vs-union means every actual member fits some expected member.
-            (TyKind::Union(members), _) => members
-                .iter()
-                .all(|&member| self.compatible_probe(db, member, expected, depth + 1)),
+            // An open source fits only an open target that it can vouch for: a tag hidden in
+            // the source's `..` could carry any payload under a name the target lists.
+            (TyKind::Union(members), _) => {
+                if members
+                    .iter()
+                    .any(|member| matches!(member.kind(db), TyKind::OtherTags))
+                {
+                    let TyKind::Union(expected_members) = expected.kind(db) else {
+                        return false;
+                    };
+                    let target_is_open = expected_members
+                        .iter()
+                        .any(|member| matches!(member.kind(db), TyKind::OtherTags));
+                    let every_target_tag_listed = expected_members.iter().all(|target| {
+                        match target.kind(db) {
+                            TyKind::Tag(name, _) => members.iter().any(|member| {
+                                matches!(member.kind(db), TyKind::Tag(other, _) if other == name)
+                            }),
+                            _ => true,
+                        }
+                    });
+                    if !target_is_open || !every_target_tag_listed {
+                        return false;
+                    }
+                }
+                members
+                    .iter()
+                    .all(|&member| self.compatible_probe(db, member, expected, depth + 1))
+            }
+            // A tag the open target does not list falls into its `..`; a listed name must
+            // fit that member, which the general search below decides.
+            (TyKind::Tag(name, _), TyKind::Union(members))
+                if members
+                    .iter()
+                    .any(|member| matches!(member.kind(db), TyKind::OtherTags))
+                    && !members.iter().any(
+                        |member| matches!(member.kind(db), TyKind::Tag(other, _) if other == name),
+                    ) =>
+            {
+                true
+            }
             // Concrete members first: `NULL` into `T | NULL` must match the `NULL` member
             // and bind nothing, leaving `T` for a later argument.
             (_, TyKind::Union(members)) => {
@@ -806,6 +873,41 @@ impl<'db> InferenceTable<'db> {
             (TyKind::Function(actual_function), TyKind::Function(expected_function)) => {
                 self.function_compatible(db, actual_function, expected_function, depth)
             }
+            (TyKind::NativeTuple(actual_items), TyKind::NativeTuple(expected_items))
+                if actual_items.len() == expected_items.len() =>
+            {
+                actual_items.iter().zip(expected_items.iter()).all(
+                    |(&actual_item, &expected_item)| {
+                        self.compatible_probe(db, actual_item, expected_item, depth + 1)
+                    },
+                )
+            }
+            // Both sides are sorted by name, so equal names pair up position by position.
+            (TyKind::NativeRecord(actual_fields), TyKind::NativeRecord(expected_fields))
+                if actual_fields.len() == expected_fields.len() =>
+            {
+                actual_fields.iter().zip(expected_fields.iter()).all(
+                    |(actual_field, expected_field)| {
+                        actual_field.name == expected_field.name
+                            && self.compatible_probe(
+                                db,
+                                actual_field.ty,
+                                expected_field.ty,
+                                depth + 1,
+                            )
+                    },
+                )
+            }
+            (
+                TyKind::Tag(actual_name, actual_payload),
+                TyKind::Tag(expected_name, expected_payload),
+            ) if actual_name == expected_name => match (actual_payload, expected_payload) {
+                (None, None) => true,
+                (Some(actual_payload), Some(expected_payload)) => {
+                    self.compatible_probe(db, *actual_payload, *expected_payload, depth + 1)
+                }
+                _ => false,
+            },
             _ => false,
         }
     }

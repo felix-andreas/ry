@@ -3,6 +3,8 @@ title: Strict mode
 description: Reject code whose types ry cannot determine
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 By default, ry checks what it can and lets the rest through as `Unknown`. Strict mode turns that
 around: every value ry cannot type, and every parameter nothing constrains, is an error.
 
@@ -15,7 +17,8 @@ strict = true
 A `# typing: strict` comment turns it on for a single file instead.
 
 Strict mode also guards running code. `ry run` prints the errors and exits with status 1 instead
-of running a script that has one, and `ry repl` refuses each command that has one:
+of running a script that has one, `ry load` does the same for a package whose `R/` files have one,
+and `ry repl` refuses each command that has one:
 
 ```text
   x strict mode found 1 error, so this code does not run
@@ -40,18 +43,31 @@ returns the same type.
 
 An expression whose type ry could not determine is reported where it appears:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
 total <- function(df: data.frame) -> double sum(df$amount)
 ```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(df: data.frame) -> double
+total <- function(df) sum(df$amount)
+```
+
+</TabItem>
+</Tabs>
 
 ```text
 strict
 
   x strict mode: this expression has an undetermined type (`Unknown`)
-   --[R/a.R:3:49]
- 3 | total <- function(df: data.frame) -> double sum(df$amount)
-   |                                                 ^^^^^^^^^
 ```
+
+ry reports it on `df$amount`, and again on the `sum()` call that receives it.
 
 An unresolved name, normally a warning, becomes an error.
 

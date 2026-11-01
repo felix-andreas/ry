@@ -3,8 +3,8 @@
 //! falls outward exactly like R's runtime.
 
 use crate::hir::{
-    Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, Symbol, UnaryOperator,
-    destructure_leaves,
+    Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module, PatId,
+    PatternKind, Symbol, UnaryOperator, destructure_leaves,
 };
 use rustc_hash::FxHashMap;
 use std::collections::btree_map::Entry;
@@ -29,6 +29,8 @@ pub enum BindingKind {
     Local,
     Parameter,
     ForVariable,
+    /// A name a `match` arm's pattern binds.
+    PatternVariable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +78,15 @@ pub struct ItemNaming {
     /// Targets R parses but refuses at run time (a computed value or a number); reads inside
     /// them are suppressed as consequences of the mistake.
     pub invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
+    /// Alternatives of a `p | q` pattern that leave out a name another alternative binds.
+    pub or_pattern_mismatches: Vec<OrPatternMismatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrPatternMismatch {
+    pub name: Symbol,
+    /// The alternative that does not bind `name`.
+    pub range: TextRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,9 +502,7 @@ impl Context<'_> {
                 for parameter in parameters {
                     let slot =
                         self.mint_binding(&parameter.name, parameter.range, BindingKind::Parameter);
-                    self.current_scope()
-                        .slots
-                        .insert(parameter.name, slot);
+                    self.current_scope().slots.insert(parameter.name, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.premint_frame_assignments(*body);
@@ -558,6 +567,109 @@ impl Context<'_> {
                 }
             }
             ExpressionKind::Paren(inner) => self.resolve(*inner),
+            ExpressionKind::Tuple(items) => {
+                for &item in items {
+                    self.resolve(item);
+                }
+            }
+            ExpressionKind::Record(fields) => {
+                for field in fields {
+                    self.resolve(field.value);
+                }
+            }
+            ExpressionKind::Tag { payload, .. } => {
+                if let Some(payload) = payload {
+                    self.resolve(*payload);
+                }
+            }
+            ExpressionKind::Match { scrutinee, arms } => self.resolve_match(*scrutinee, arms),
+        }
+    }
+
+    /// Each arm runs from the state after the scrutinee, like an `if` branch. Its pattern's
+    /// names are written in the current frame, so the guard and body read them, and after the
+    /// `match` a name only some arms bind may be undefined.
+    fn resolve_match(&mut self, scrutinee: ExprId, arms: &[MatchArm]) {
+        let module = self.module;
+        self.resolve(scrutinee);
+        let entry = self.flow.clone();
+        let mut joined: Option<FlowState> = None;
+        for arm in arms {
+            self.flow = entry.clone();
+            if self.emit {
+                self.check_or_patterns(arm.pattern);
+            }
+            for &leaf in &arm.bindings {
+                if let ExpressionKind::NameRef(name) = &module.expression(leaf).kind {
+                    let range = module.expression(leaf).range;
+                    let slot = self.frame_slot(name, range, BindingKind::PatternVariable);
+                    self.naming.resolutions.insert(leaf, slot);
+                    self.record_write(slot, Reach::Implicit);
+                }
+            }
+            if let Some(guard) = arm.guard {
+                self.resolve(guard);
+            }
+            self.resolve(arm.body);
+            if diverges(module, arm.body) {
+                continue;
+            }
+            match &mut joined {
+                Some(state) => join_flow(state, &self.flow),
+                None => joined = Some(mem::take(&mut self.flow)),
+            }
+        }
+        self.flow = joined.unwrap_or(entry);
+    }
+
+    fn check_or_patterns(&mut self, pattern: PatId) {
+        let module = self.module;
+        match &module.pattern(pattern).kind {
+            PatternKind::Missing
+            | PatternKind::Wildcard
+            | PatternKind::Bind(_)
+            | PatternKind::Literal { .. } => {}
+            PatternKind::Tag { payload, .. } => {
+                if let Some(payload) = payload {
+                    self.check_or_patterns(*payload);
+                }
+            }
+            PatternKind::Tuple(items) => {
+                for &item in items {
+                    self.check_or_patterns(item);
+                }
+            }
+            PatternKind::Record { fields, .. } => {
+                for field in fields {
+                    self.check_or_patterns(field.pattern);
+                }
+            }
+            PatternKind::Or(alternatives) => {
+                let names_of = |alternative: PatId| -> BTreeSet<Symbol> {
+                    module
+                        .pattern_bindings(alternative)
+                        .into_iter()
+                        .filter_map(|leaf| match module.expression(leaf).kind {
+                            ExpressionKind::NameRef(name) => Some(name),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                let all: BTreeSet<Symbol> = alternatives
+                    .iter()
+                    .flat_map(|&alternative| names_of(alternative))
+                    .collect();
+                for &alternative in alternatives {
+                    let bound = names_of(alternative);
+                    for name in all.difference(&bound) {
+                        self.naming.or_pattern_mismatches.push(OrPatternMismatch {
+                            name: *name,
+                            range: module.pattern(alternative).range,
+                        });
+                    }
+                    self.check_or_patterns(alternative);
+                }
+            }
         }
     }
 
@@ -701,6 +813,24 @@ impl Context<'_> {
                 }
                 self.premint_frame_assignments(*sequence);
                 self.premint_frame_assignments(*body);
+            }
+            ExpressionKind::Match { scrutinee, arms } => {
+                self.premint_frame_assignments(*scrutinee);
+                for arm in arms {
+                    for &leaf in &arm.bindings {
+                        if let ExpressionKind::NameRef(name) = &module.expression(leaf).kind {
+                            self.frame_slot(
+                                name,
+                                module.expression(leaf).range,
+                                BindingKind::PatternVariable,
+                            );
+                        }
+                    }
+                    if let Some(guard) = arm.guard {
+                        self.premint_frame_assignments(guard);
+                    }
+                    self.premint_frame_assignments(arm.body);
+                }
             }
             _ => {
                 for child in kind.child_ids() {
@@ -1104,6 +1234,9 @@ fn diverges(module: &Module, id: ExprId) -> bool {
             ..
         } => diverges(module, *then_branch) && diverges(module, *else_branch),
         ExpressionKind::Paren(inner) => diverges(module, *inner),
+        ExpressionKind::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|arm| diverges(module, arm.body))
+        }
         _ => false,
     }
 }

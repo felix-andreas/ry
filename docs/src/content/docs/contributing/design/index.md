@@ -61,3 +61,9 @@ ABI-compatible `libR`), how ry chooses between GNU R and its own runtime and bet
 the runtime is incomplete, and what the lazy loader, the analysis and the corpus read from an
 installed library. A package manager of ry's own is left open. Only package installation and the
 explicit runtime choice are implemented.
+
+### [Records, tuples and tags](/contributing/design/records-and-tags/)
+
+Roc-style records, tuples and tagged unions as ry's replacement for S4, R6 and Reference Classes.
+They are implemented, and the typing rules have moved to the reference; the page keeps the
+rationale, the runtime representation as ry's own heap objects, and the open questions.

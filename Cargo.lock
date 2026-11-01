@@ -4101,6 +4101,9 @@ dependencies = [
  "libr",
  "polars",
  "polars-arrow",
+ "polars-buffer",
+ "polars-core",
+ "rayon",
  "syntax",
  "thiserror 2.0.17",
 ]

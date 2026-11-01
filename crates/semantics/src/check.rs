@@ -4,10 +4,11 @@
 use crate::Db;
 use crate::annotations::{Annotation, NamedDefinition};
 use crate::diagnostics::nearest_name;
+use crate::exhaustiveness::{MatchFinding, match_findings};
 use crate::hir::{
-    Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module, NaAtom,
-    Parameter as Formal, Symbol, UnaryOperator, destructure_leaves, integer_literal_position,
-    is_whole_number_double,
+    Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, MatchArm,
+    Module, NaAtom, Parameter as Formal, PatId, PatternKind, Symbol, UnaryOperator,
+    destructure_leaves, integer_literal_position, is_whole_number_double,
 };
 use crate::infer::{
     Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
@@ -18,15 +19,16 @@ use crate::naming::{
 };
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, Parameter, RecordField, RestParameter,
-    TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, column_type, contains_inference_var,
-    erase_vars, for_each_child_type, map_child_types, null, scalar, substitute_rigid, type_size,
-    union_of, unknown,
+    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, Parameter, RecordField,
+    RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags,
+    contains_inference_var, erase_vars, for_each_child_type, map_child_types, native_record, null,
+    scalar, substitute_rigid, type_size, union_of, unknown,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use syntax::TextRange;
+use syntax::native_values::accepts_native;
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct TypeError<'db> {
@@ -152,6 +154,32 @@ pub enum TypeErrorKind<'db> {
         variable: Ty<'db>,
         container: Ty<'db>,
     },
+    /// A `match` pattern that no value of the scrutinee's type fits.
+    PatternNeverMatches {
+        found: Ty<'db>,
+    },
+    /// Two branches build one tag with two payload shapes.
+    ConflictingTags {
+        first: Ty<'db>,
+        second: Ty<'db>,
+    },
+    /// A record, tuple or tag passed to an R function that refuses one at run time.
+    NativeValueToR {
+        function: String,
+        kind: NativeValueKind,
+    },
+    /// `point$z <- value` on a record without a field `z`: a record's fields are fixed.
+    FieldCannotBeAdded {
+        field: String,
+        container: Ty<'db>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum NativeValueKind {
+    Record,
+    Tuple,
+    Tag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -180,6 +208,9 @@ pub struct ItemCheck<'db> {
     /// Settled scheme of every name the top-level frame binds, so a statement item's
     /// conditional write serves cross-item reads; a definition resolves via `scheme`.
     pub top_level_bindings: Vec<(Symbol, TypeScheme<'db>)>,
+    /// Coverage of each `match`, kept apart from `errors` because a missing case does not
+    /// make the item's exported type untrustworthy.
+    pub match_findings: Vec<MatchFinding>,
 }
 
 /// Settled type of every expression the checker recorded, indexed by expression id.
@@ -464,7 +495,9 @@ pub fn check_item_with_annotation<'db>(
         };
         top_level_bindings.push((info.name, binding_scheme));
     }
+    let match_findings = match_findings(db, module, &expression_types);
     ItemCheck {
+        match_findings,
         expression_types,
         errors,
         strict_origins: context.strict_origins,
@@ -1205,8 +1238,10 @@ impl<'db> Checker<'db, '_> {
                 self.infer_binary(id, range, operator, special_name.as_deref(), lhs, rhs)
             }
             ExpressionKind::Call { callee, arguments } => {
-                let arguments = arguments.clone();
-                self.infer_call_expression(id, range, *callee, &arguments)
+                let (callee, arguments) = (*callee, arguments.clone());
+                let ty = self.infer_call_expression(id, range, callee, &arguments);
+                self.check_native_arguments(callee, &arguments);
+                ty
             }
             ExpressionKind::Index {
                 double,
@@ -1393,6 +1428,34 @@ impl<'db> Checker<'db, '_> {
             }
             ExpressionKind::Paren(inner) => self.infer(*inner),
             ExpressionKind::Break | ExpressionKind::Next => unknown(self.db),
+            ExpressionKind::Tuple(items) => {
+                let items = items.clone();
+                let items = items.iter().map(|&item| self.infer(item)).collect();
+                Ty::new(self.db, TyKind::NativeTuple(items))
+            }
+            ExpressionKind::Record(fields) => {
+                let fields = fields.clone();
+                let fields = fields
+                    .iter()
+                    .map(|field| NativeField {
+                        name: Name::new(self.db, field.name.as_str().to_owned()),
+                        ty: self.infer(field.value),
+                    })
+                    .collect();
+                native_record(self.db, fields)
+            }
+            ExpressionKind::Tag { name, payload, .. } => {
+                let (name, payload) = (*name, *payload);
+                let payload = payload.map(|payload| self.infer(payload));
+                Ty::new(
+                    self.db,
+                    TyKind::Tag(Name::new(self.db, name.as_str().to_owned()), payload),
+                )
+            }
+            ExpressionKind::Match { scrutinee, arms } => {
+                let (scrutinee, arms) = (*scrutinee, arms.clone());
+                self.infer_match(expression.range, scrutinee, &arms)
+            }
         };
         // Assignments applied their annotation before the slot write above.
         let ty = if matches!(expression.kind, ExpressionKind::Assign { .. }) {
@@ -1401,6 +1464,51 @@ impl<'db> Checker<'db, '_> {
             self.apply_expression_annotation(id, id, ty)
         };
         self.record(id, ty)
+    }
+
+    /// R functions and C code refuse a record, tuple or tag at run time, apart from the few in
+    /// [`accepts_native`], so passing one to a function that is not the project's own is an
+    /// error here too. A value only some of whose types are native may be R data at run time,
+    /// so it is not reported.
+    fn check_native_arguments(&mut self, callee: ExprId, arguments: &[Argument]) {
+        let function = match &self.module.expression(callee).kind {
+            ExpressionKind::NameRef(name) => {
+                let deferred = self.naming.deferred_non_locals.contains(&callee);
+                if self.naming.resolutions.contains_key(&callee)
+                    || self
+                        .globals
+                        .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                {
+                    return;
+                }
+                name.as_str()
+            }
+            ExpressionKind::Namespace {
+                name: Some(name), ..
+            } => name.as_str(),
+            _ => return,
+        };
+        if accepts_native(function) {
+            return;
+        }
+        for argument in arguments {
+            let Some(value) = argument.value else {
+                continue;
+            };
+            let Some(&ty) = self.recorded.get(&value) else {
+                continue;
+            };
+            let resolved = self.table.resolve(self.db, ty);
+            if let Some(kind) = native_value_kind(self.db, resolved) {
+                self.errors.push(TypeError {
+                    range: self.blame_range(value),
+                    kind: TypeErrorKind::NativeValueToR {
+                        function: function.to_owned(),
+                        kind,
+                    },
+                });
+            }
+        }
     }
 
     /// `@trust` and `@if-unknown` do not check the value, and `@new` mints a nominal
@@ -1552,7 +1660,7 @@ impl<'db> Checker<'db, '_> {
         match literal {
             LiteralKind::Integer(_) => scalar(self.db, Atomic::Integer),
             LiteralKind::Double(_) => scalar(self.db, Atomic::Double),
-            LiteralKind::Complex => scalar(self.db, Atomic::Complex),
+            LiteralKind::Complex(_) => scalar(self.db, Atomic::Complex),
             LiteralKind::String(_) => scalar(self.db, Atomic::Character),
             LiteralKind::Logical(_) => scalar(self.db, Atomic::Logical),
             LiteralKind::Null => null(self.db),
@@ -2111,6 +2219,41 @@ impl<'db> Checker<'db, '_> {
                         optional: false,
                     }]),
                 ),
+                // A ry record's fields are fixed, so the write is checked against the field and
+                // the record keeps its type.
+                TyKind::NativeRecord(fields) => {
+                    match fields
+                        .iter()
+                        .find(|field| field.name.text(self.db) == field_name)
+                    {
+                        Some(field) => {
+                            if !matches!(value.kind(self.db), TyKind::Unknown)
+                                && !self.table.compatible(self.db, value, field.ty)
+                            {
+                                let range = self.blame_range(value_expression);
+                                let kind = self.type_mismatch(range, field.ty, value, None).kind;
+                                self.errors.push(TypeError { range, kind });
+                            }
+                        }
+                        None => {
+                            let range = match kind {
+                                ExpressionKind::Field {
+                                    name_range: Some(name_range),
+                                    ..
+                                } => *name_range,
+                                _ => module.expression(lhs).range,
+                            };
+                            self.errors.push(TypeError {
+                                range,
+                                kind: TypeErrorKind::FieldCannotBeAdded {
+                                    field: field_name,
+                                    container: prior,
+                                },
+                            });
+                        }
+                    }
+                    prior
+                }
                 // A nominal's representation is fixed (that makes `@type` an invariant), so the
                 // write is checked against it and the value keeps its nominal type.
                 TyKind::Named(..) => {
@@ -2195,12 +2338,422 @@ impl<'db> Checker<'db, '_> {
             }
             (false, false) => {
                 self.join_writes(&then_writes);
-                self.join_branch_values(then_ty, else_ty)
+                let joined = self.join_branch_values(then_ty, else_ty);
+                let mut range = self.module.expression(then_branch).range;
+                if let Some(else_branch) = else_branch {
+                    range = range.cover(self.module.expression(else_branch).range);
+                }
+                self.report_conflicting_tags(range, joined)
             }
             (true, true) => {
                 self.environment.rollback(false_mark);
                 self.join_branch_values(then_ty, else_ty)
             }
+        }
+    }
+
+    /// Each arm checks from the state before the `match`, and the arms that complete join
+    /// like the branches of an `if`. Pattern bindings are ordinary writes to the frame.
+    fn infer_match(&mut self, range: TextRange, scrutinee: ExprId, arms: &[MatchArm]) -> Ty<'db> {
+        let scrutinee_ty = self.infer(scrutinee);
+        let resolved = self.table.shallow_resolve(self.db, scrutinee_ty);
+        if matches!(resolved.kind(self.db), TyKind::Var(_))
+            && let Some(shape) = self.scrutinee_shape(arms)
+        {
+            let snapshot = self.table.snapshot();
+            if self.table.unify(self.db, scrutinee_ty, shape).is_err() {
+                self.table.rollback(snapshot);
+            }
+        }
+        let subject = self.structural(scrutinee_ty);
+        let mut values = Vec::with_capacity(arms.len());
+        let mut all_values = Vec::with_capacity(arms.len());
+        let mut arm_writes = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let mark = self.environment.mark();
+            let mut bindings = Vec::new();
+            self.check_pattern(arm.pattern, subject, &mut bindings);
+            for (slot, ty) in bindings {
+                self.environment.set(slot, EnvEntry::Mono(ty));
+                self.note_captured_write(slot, ty);
+            }
+            if let Some(guard) = arm.guard {
+                self.expect_scalar_logical(guard);
+            }
+            let value = self.infer(arm.body);
+            all_values.push(value);
+            if !self.diverges(arm.body) {
+                values.push(value);
+                arm_writes.push(self.environment.writes_since(mark));
+            }
+            self.environment.rollback(mark);
+        }
+        // An arm that leaves a slot alone keeps its state from before the `match`, so that
+        // state joins too; with no arm completing, nothing after the `match` runs.
+        let mut written: Vec<BindingId> = Vec::new();
+        for writes in &arm_writes {
+            for (slot, _) in writes {
+                if !written.contains(slot) {
+                    written.push(*slot);
+                }
+            }
+        }
+        let before: Vec<(BindingId, Option<EnvEntry<'db>>)> = written
+            .iter()
+            .map(|&slot| (slot, self.environment.get(slot)))
+            .collect();
+        for (index, writes) in arm_writes.iter().enumerate() {
+            let complete: Vec<(BindingId, Option<EnvEntry<'db>>)> = before
+                .iter()
+                .map(|&(slot, entry)| {
+                    writes
+                        .iter()
+                        .find(|(written, _)| *written == slot)
+                        .map_or((slot, entry), |&write| write)
+                })
+                .collect();
+            if index == 0 {
+                for (slot, entry) in complete {
+                    if let Some(entry) = entry {
+                        self.environment.set(slot, entry);
+                    }
+                }
+            } else {
+                self.join_writes(&complete);
+            }
+        }
+        let joined_values = if values.is_empty() {
+            all_values
+        } else {
+            values
+        };
+        let mut joined_values = joined_values.into_iter();
+        let Some(first) = joined_values.next() else {
+            return unknown(self.db);
+        };
+        let joined = joined_values.fold(first, |joined, value| {
+            self.join_branch_values(joined, value)
+        });
+        self.report_conflicting_tags(range, joined)
+    }
+
+    /// The type an unannotated scrutinee must have for its patterns to make sense, as
+    /// `is.null(x)` shapes `x`: the arms' tags form a closed union, and tuple or record
+    /// patterns give a tuple or record of fresh variables. A catch-all arm accepts a value of
+    /// any type, so it leaves the scrutinee unshaped.
+    fn scrutinee_shape(&mut self, arms: &[MatchArm]) -> Option<Ty<'db>> {
+        let module = self.module;
+        let mut tops = Vec::new();
+        for arm in arms {
+            collect_alternatives(module, arm.pattern, &mut tops);
+        }
+        let catch_all = arms.iter().any(|arm| {
+            arm.guard.is_none()
+                && matches!(
+                    module.pattern(arm.pattern).kind,
+                    PatternKind::Wildcard | PatternKind::Bind(_)
+                )
+        });
+        if catch_all {
+            return None;
+        }
+        let shaped: Vec<PatId> = tops
+            .into_iter()
+            .filter(|&pattern| {
+                !matches!(
+                    module.pattern(pattern).kind,
+                    PatternKind::Wildcard | PatternKind::Bind(_) | PatternKind::Missing
+                )
+            })
+            .collect();
+        let first = *shaped.first()?;
+        match &module.pattern(first).kind {
+            PatternKind::Tag { .. } => {
+                let mut members = Vec::new();
+                for pattern in shaped {
+                    let PatternKind::Tag { name, payload, .. } = &module.pattern(pattern).kind
+                    else {
+                        return None;
+                    };
+                    let payload = match payload {
+                        Some(payload) => Some(self.pattern_shape(*payload)?),
+                        None => None,
+                    };
+                    members.push(Ty::new(
+                        self.db,
+                        TyKind::Tag(Name::new(self.db, name.as_str().to_owned()), payload),
+                    ));
+                }
+                let union = union_of(self.db, members);
+                conflicting_tags(self.db, union).is_none().then_some(union)
+            }
+            PatternKind::Tuple(_) | PatternKind::Record { .. } if shaped.len() == 1 => {
+                self.pattern_shape(first)
+            }
+            _ => None,
+        }
+    }
+
+    /// Fresh variables in the shape of a tuple or record pattern; a record pattern with a
+    /// rest names fields it cannot see, so it has no one shape.
+    fn pattern_shape(&mut self, pattern: PatId) -> Option<Ty<'db>> {
+        match &self.module.pattern(pattern).kind {
+            PatternKind::Tuple(items) => {
+                let items = items
+                    .iter()
+                    .map(|_| self.fresh(Constraint::Unconstrained))
+                    .collect();
+                Some(Ty::new(self.db, TyKind::NativeTuple(items)))
+            }
+            PatternKind::Record {
+                fields,
+                rest: false,
+            } => {
+                let fields = fields
+                    .iter()
+                    .map(|field| NativeField {
+                        name: Name::new(self.db, field.name.as_str().to_owned()),
+                        ty: self.fresh(Constraint::Unconstrained),
+                    })
+                    .collect();
+                Some(native_record(self.db, fields))
+            }
+            _ => None,
+        }
+    }
+
+    /// Checks that `pattern` can match a value of `subject`'s type and collects the type
+    /// of each name it binds. A name bound by both sides of `|` gets the union.
+    fn check_pattern(
+        &mut self,
+        pattern: PatId,
+        subject: Ty<'db>,
+        bindings: &mut Vec<(BindingId, Ty<'db>)>,
+    ) {
+        let module = self.module;
+        let node = module.pattern(pattern);
+        let subject = self.structural(subject);
+        if let TyKind::Union(members) = subject.kind(self.db)
+            && !matches!(
+                node.kind,
+                PatternKind::Wildcard
+                    | PatternKind::Bind(_)
+                    | PatternKind::Missing
+                    | PatternKind::Or(_)
+            )
+        {
+            // A union narrows to the members the pattern can match.
+            let mut members: Vec<Ty<'db>> = members
+                .iter()
+                .copied()
+                .filter(|&member| self.pattern_admits(pattern, member))
+                .collect();
+            // A tag the union lists is never among the tags its `..` stands for.
+            if members
+                .iter()
+                .any(|member| matches!(member.kind(self.db), TyKind::Tag(..)))
+            {
+                members.retain(|member| !matches!(member.kind(self.db), TyKind::OtherTags));
+            }
+            if members.is_empty() {
+                self.errors.push(TypeError {
+                    range: node.range,
+                    kind: TypeErrorKind::PatternNeverMatches { found: subject },
+                });
+                self.bind_unknown(pattern, bindings);
+                return;
+            }
+            let narrowed = union_of(self.db, members);
+            if !matches!(narrowed.kind(self.db), TyKind::Union(_)) {
+                return self.check_pattern(pattern, narrowed, bindings);
+            }
+            // Several members fit (records with a rest, numbers of two kinds): the
+            // components bind to what is known, positionally or by name.
+            return self.check_pattern_components(pattern, narrowed, bindings);
+        }
+        if !self.pattern_admits(pattern, subject) {
+            self.errors.push(TypeError {
+                range: node.range,
+                kind: TypeErrorKind::PatternNeverMatches { found: subject },
+            });
+            self.bind_unknown(pattern, bindings);
+            return;
+        }
+        self.check_pattern_components(pattern, subject, bindings);
+    }
+
+    fn check_pattern_components(
+        &mut self,
+        pattern: PatId,
+        subject: Ty<'db>,
+        bindings: &mut Vec<(BindingId, Ty<'db>)>,
+    ) {
+        let module = self.module;
+        let node = module.pattern(pattern);
+        match &node.kind {
+            PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => {}
+            PatternKind::Bind(leaf) => {
+                let leaf = *leaf;
+                self.recorded.insert(leaf, subject);
+                if let Some(&slot) = self.naming.resolutions.get(&leaf) {
+                    match bindings.iter_mut().find(|(bound, _)| *bound == slot) {
+                        Some((_, ty)) => *ty = union_of(self.db, [*ty, subject]),
+                        None => bindings.push((slot, subject)),
+                    }
+                }
+            }
+            PatternKind::Or(alternatives) => {
+                for &alternative in alternatives.iter() {
+                    self.check_pattern(alternative, subject, bindings);
+                }
+            }
+            PatternKind::Tag { payload, .. } => {
+                let Some(payload) = payload.filter(|&payload| !module.is_any_payload(payload))
+                else {
+                    return;
+                };
+                let payload_ty =
+                    self.component_union(subject, |db, member| match member.kind(db) {
+                        TyKind::Tag(_, Some(payload)) => Some(*payload),
+                        _ => None,
+                    });
+                self.check_pattern(payload, payload_ty, bindings);
+            }
+            PatternKind::Tuple(items) => {
+                for (position, &item) in items.iter().enumerate() {
+                    let item_ty =
+                        self.component_union(subject, |db, member| match member.kind(db) {
+                            TyKind::NativeTuple(types) => types.get(position).copied(),
+                            _ => None,
+                        });
+                    self.check_pattern(item, item_ty, bindings);
+                }
+            }
+            PatternKind::Record { fields, .. } => {
+                for field in fields.iter() {
+                    let name = field.name;
+                    let field_ty =
+                        self.component_union(subject, |db, member| match member.kind(db) {
+                            TyKind::NativeRecord(native) => native
+                                .iter()
+                                .find(|native| native.name.text(db) == name.as_str())
+                                .map(|native| native.ty),
+                            _ => None,
+                        });
+                    self.check_pattern(field.pattern, field_ty, bindings);
+                }
+            }
+        }
+    }
+
+    /// The union of one component over a subject's members; a member that does not say,
+    /// such as `Unknown` or the `..` of an open union, makes the component `Unknown`.
+    fn component_union(
+        &self,
+        subject: Ty<'db>,
+        component: impl Fn(&'db dyn Db, Ty<'db>) -> Option<Ty<'db>>,
+    ) -> Ty<'db> {
+        let members = match subject.kind(self.db) {
+            TyKind::Union(members) => members.clone(),
+            _ => vec![subject],
+        };
+        let mut found = Vec::with_capacity(members.len());
+        for member in members {
+            match component(self.db, member) {
+                Some(ty) => found.push(ty),
+                None => return unknown(self.db),
+            }
+        }
+        union_of(self.db, found)
+    }
+
+    /// Whether a value of `subject`'s type, which is not a union, could match `pattern`
+    /// at its top level. Components are checked separately, so a mismatch is reported
+    /// where it is.
+    fn pattern_admits(&mut self, pattern: PatId, subject: Ty<'db>) -> bool {
+        let module = self.module;
+        let subject = self.table.resolve(self.db, subject);
+        if matches!(
+            subject.kind(self.db),
+            TyKind::Unknown | TyKind::Any | TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Named(..)
+        ) {
+            return true;
+        }
+        if let TyKind::Union(members) = subject.kind(self.db) {
+            return members
+                .clone()
+                .into_iter()
+                .any(|member| self.pattern_admits(pattern, member));
+        }
+        match &module.pattern(pattern).kind {
+            PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => true,
+            PatternKind::Or(alternatives) => {
+                let alternatives = alternatives.clone();
+                alternatives
+                    .iter()
+                    .any(|&alternative| self.pattern_admits(alternative, subject))
+            }
+            PatternKind::Literal { literal, .. } => {
+                let literal_ty = self.literal_ty(literal);
+                literal_overlaps(self.db, literal, literal_ty, subject)
+            }
+            PatternKind::Tag { name, payload, .. } => match subject.kind(self.db) {
+                TyKind::OtherTags => true,
+                TyKind::Tag(subject_name, subject_payload) => {
+                    subject_name.text(self.db) == name.as_str()
+                        && match (payload, subject_payload) {
+                            (Some(payload), _) if self.module.is_any_payload(*payload) => true,
+                            (None, None) => true,
+                            (Some(payload), Some(subject_payload)) => {
+                                self.pattern_admits(*payload, *subject_payload)
+                            }
+                            _ => false,
+                        }
+                }
+                _ => false,
+            },
+            PatternKind::Tuple(items) => {
+                matches!(subject.kind(self.db), TyKind::NativeTuple(types) if types.len() == items.len())
+            }
+            PatternKind::Record { fields, rest } => match subject.kind(self.db) {
+                TyKind::NativeRecord(native) => {
+                    (*rest || native.len() == fields.len())
+                        && fields.iter().all(|field| {
+                            native
+                                .iter()
+                                .any(|native| native.name.text(self.db) == field.name.as_str())
+                        })
+                }
+                _ => false,
+            },
+        }
+    }
+
+    fn bind_unknown(&mut self, pattern: PatId, bindings: &mut Vec<(BindingId, Ty<'db>)>) {
+        let unknown = unknown(self.db);
+        for leaf in self.module.pattern_bindings(pattern) {
+            self.recorded.insert(leaf, unknown);
+            if let Some(&slot) = self.naming.resolutions.get(&leaf)
+                && !bindings.iter().any(|(bound, _)| *bound == slot)
+            {
+                bindings.push((slot, unknown));
+            }
+        }
+    }
+
+    /// A joined value holding one tag in two payload shapes is not a type a `match` could
+    /// take apart, so the join is reported and the value becomes `Unknown`.
+    fn report_conflicting_tags(&mut self, range: TextRange, joined: Ty<'db>) -> Ty<'db> {
+        let resolved = self.table.resolve(self.db, joined);
+        match conflicting_tags(self.db, resolved) {
+            Some((first, second)) => {
+                self.errors.push(TypeError {
+                    range,
+                    kind: TypeErrorKind::ConflictingTags { first, second },
+                });
+                unknown(self.db)
+            }
+            None => joined,
         }
     }
 
@@ -2323,12 +2876,7 @@ impl<'db> Checker<'db, '_> {
             if passes >= LOOP_PASS_CAP {
                 for slot in changed {
                     self.environment.set(slot, EnvEntry::Mono(unknown(self.db)));
-                    if let Some(name) = self
-                        .naming
-                        .bindings
-                        .get(&slot)
-                        .map(|info| info.name)
-                    {
+                    if let Some(name) = self.naming.bindings.get(&slot).map(|info| info.name) {
                         self.record_strict_origin(
                             loop_expression,
                             StrictOriginKind::LoopWidened(name.to_string()),
@@ -2403,6 +2951,9 @@ impl<'db> Checker<'db, '_> {
                 ..
             } => self.diverges(*then_branch) && self.diverges(*else_branch),
             ExpressionKind::Paren(inner) => self.diverges(*inner),
+            ExpressionKind::Match { arms, .. } => {
+                !arms.is_empty() && arms.iter().all(|arm| self.diverges(arm.body))
+            }
             _ => false,
         }
     }
@@ -5485,9 +6036,7 @@ impl<'db> Checker<'db, '_> {
                                 continue;
                             };
                             let ty = self.infer(item);
-                            let name = argument
-                                .name
-                                .or_else(|| variable_name(module, item));
+                            let name = argument.name.or_else(|| variable_name(module, item));
                             match name {
                                 Some(name) => {
                                     let field = self.column_field(&name, ty);
@@ -5803,6 +6352,49 @@ impl<'db> Checker<'db, '_> {
                     *element
                 })
             }
+            TyKind::NativeTuple(items) => match literal_position {
+                Some(position) => match items.get(position) {
+                    Some(&item) => Ok(item),
+                    None => Err(TypeError {
+                        range: key_range,
+                        kind: TypeErrorKind::PositionDoesNotExist {
+                            position: position + 1,
+                            container: subject,
+                        },
+                    }),
+                },
+                None => Ok(union_of(self.db, items.iter().copied())),
+            },
+            // A position counts fields in their sorted order, as the runtime stores them.
+            TyKind::NativeRecord(fields) => match literal_name {
+                Some(name) => match fields.iter().find(|field| field.name.text(self.db) == name) {
+                    Some(field) => Ok(field.ty),
+                    None => Err(TypeError {
+                        range: key_range,
+                        kind: TypeErrorKind::FieldDoesNotExist {
+                            suggestion: nearest_name(
+                                &name,
+                                fields.iter().map(|field| field.name.text(self.db)),
+                            ),
+                            field: name,
+                            container: subject,
+                        },
+                    }),
+                },
+                None => match literal_position {
+                    Some(position) => match fields.get(position) {
+                        Some(field) => Ok(field.ty),
+                        None => Err(TypeError {
+                            range: key_range,
+                            kind: TypeErrorKind::PositionDoesNotExist {
+                                position: position + 1,
+                                container: subject,
+                            },
+                        }),
+                    },
+                    None => Ok(union_of(self.db, fields.iter().map(|field| field.ty))),
+                },
+            },
             TyKind::Tuple(items) => match literal_position {
                 Some(position) => match items.get(position) {
                     Some(&item) => Ok(item),
@@ -5991,6 +6583,10 @@ impl<'db> Checker<'db, '_> {
             | TyKind::NamedList(_)
             | TyKind::Tuple(_)
             | TyKind::Record(_)
+            | TyKind::NativeTuple(_)
+            | TyKind::NativeRecord(_)
+            | TyKind::Tag(..)
+            | TyKind::OtherTags
             | TyKind::Frame(_)
             | TyKind::Function(_) => Err(TypeError {
                 range,
@@ -6107,7 +6703,23 @@ impl<'db> Checker<'db, '_> {
                     }),
                 }
             }
-            TyKind::Tuple(_) | TyKind::List(_) => Err(TypeError {
+            TyKind::NativeRecord(fields) => {
+                match fields.iter().find(|field| field.name.text(self.db) == name) {
+                    Some(field) => Ok(field.ty),
+                    None => Err(TypeError {
+                        range: name_range,
+                        kind: TypeErrorKind::FieldDoesNotExist {
+                            suggestion: nearest_name(
+                                name,
+                                fields.iter().map(|field| field.name.text(self.db)),
+                            ),
+                            field: name.to_owned(),
+                            container: subject,
+                        },
+                    }),
+                }
+            }
+            TyKind::Tuple(_) | TyKind::NativeTuple(_) | TyKind::List(_) => Err(TypeError {
                 range: name_range,
                 kind: TypeErrorKind::FieldDoesNotExist {
                     suggestion: None,
@@ -6440,6 +7052,10 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         | TyKind::NamedList(_)
         | TyKind::Tuple(_)
         | TyKind::Record(_)
+        | TyKind::NativeTuple(_)
+        | TyKind::NativeRecord(_)
+        | TyKind::Tag(..)
+        | TyKind::OtherTags
         | TyKind::Frame(_)
         | TyKind::Function(_) => false,
     }
@@ -6475,7 +7091,9 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                         }
                     }
                     ("." | "list", ExpressionKind::NameRef(y)) => keys.push(JoinKey {
-                        x: argument.name.map_or_else(|| y.to_string(), |name| name.to_string()),
+                        x: argument
+                            .name
+                            .map_or_else(|| y.to_string(), |name| name.to_string()),
                         y: y.to_string(),
                         x_range,
                         y_range: value_range,
@@ -6606,6 +7224,45 @@ fn validated_namespace_name(
             }
         }
     }
+}
+
+/// Every top-level alternative of a pattern, looking through `|`.
+fn collect_alternatives(module: &Module, pattern: PatId, alternatives: &mut Vec<PatId>) {
+    match &module.pattern(pattern).kind {
+        PatternKind::Or(inner) => {
+            for &alternative in inner.iter() {
+                collect_alternatives(module, alternative, alternatives);
+            }
+        }
+        _ => alternatives.push(pattern),
+    }
+}
+
+/// A literal pattern matches a length-one value of its own kind, with numbers matching
+/// numbers; `NA` matches a missing value of any atomic type, and `NULL` only `NULL`.
+fn literal_overlaps<'db>(
+    db: &'db dyn Db,
+    literal: &LiteralKind,
+    literal_ty: Ty<'db>,
+    subject: Ty<'db>,
+) -> bool {
+    let atomic = match subject.kind(db) {
+        TyKind::Scalar(atomic) => *atomic,
+        TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
+            TyKind::Scalar(atomic) => *atomic,
+            _ => return true,
+        },
+        TyKind::Null => return matches!(literal, LiteralKind::Null),
+        _ => return false,
+    };
+    if matches!(literal, LiteralKind::Na(_)) {
+        return true;
+    }
+    let TyKind::Scalar(literal_atomic) = literal_ty.kind(db) else {
+        return false;
+    };
+    let numeric = |atomic: Atomic| matches!(atomic, Atomic::Integer | Atomic::Double);
+    *literal_atomic == atomic || (numeric(*literal_atomic) && numeric(atomic))
 }
 
 #[cfg(test)]
@@ -7321,5 +7978,20 @@ mod tests {
         );
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
+    }
+}
+
+/// The kind of ry value `ty` is, when every value it describes is one.
+fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
+    match ty.kind(db) {
+        TyKind::NativeRecord(_) => Some(NativeValueKind::Record),
+        TyKind::NativeTuple(_) => Some(NativeValueKind::Tuple),
+        TyKind::Tag(..) | TyKind::OtherTags => Some(NativeValueKind::Tag),
+        TyKind::Union(members) => {
+            let mut kinds = members.iter().map(|&member| native_value_kind(db, member));
+            let first = kinds.next()??;
+            kinds.all(|kind| kind == Some(first)).then_some(first)
+        }
+        _ => None,
     }
 }

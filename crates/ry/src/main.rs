@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use ry::cli::{self, CommandError, Outcome, OutputFormat};
 use ry::config::Config;
 use ry::load;
-use ry::preflight::{ConsoleFilter, Erase, Preflight, Verdict};
+use ry::preflight::{self, ConsoleFilter, Erase, Preflight, Verdict};
 use ry::server;
 use ry::stats::analysis_stats;
 use std::path::PathBuf;
@@ -134,10 +134,15 @@ fn main() -> ExitCode {
                 input.push('\n');
                 input.push_str(expression);
             }
+            let Some(preflight) = Preflight::discover(&root, root.clone()) else {
+                return ExitCode::from(2);
+            };
+            match preflight::check_package(&root, preflight.config()) {
+                Ok(Verdict::Run) => {}
+                Ok(Verdict::Refuse) => return ExitCode::from(1),
+                Err(CommandError) => return ExitCode::from(2),
+            }
             if runtime.resolve(Runtime::Ry) == Runtime::Ry {
-                let Some(preflight) = Preflight::discover(&root, root.clone()) else {
-                    return ExitCode::from(2);
-                };
                 let flags = runtime_flags(preflight.config());
                 return runtime_exit(repl::run_on_ry_runtime(
                     file.as_deref(),

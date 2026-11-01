@@ -27,6 +27,8 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **A package with `src/` does not load on ry's runtime**: pkgbuild's `check_build_tools` fails
   there (callr and friends hit interpreter gaps). `readDCF` and classed comparisons were the first two
   blockers. Until it works, `--runtime gnu-r` is the documented route.
+- **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
+  and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
 - **ry's runtime keeps no source references**, so `print(f)` deparses and tracebacks name no file.
   The loader has the byte range of every definition, so a srcref could be built from it once the
   interpreter carries srcrefs at all.
@@ -1712,7 +1714,7 @@ tagging fences `r` for Zed if that proves distant.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
   rather than the newest build. The CI guide works around it by pinning an explicit tag. Promoting a
   release would let the docs recommend `latest` instead.
-- **Rework the typing reference's presentation.** `reference/type-system.md` runs about 2,700 lines.
+- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 2,700 lines.
   It wants tables and short bullets instead of prose subsections, preserving every normative claim.
   This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.
 
@@ -1790,6 +1792,20 @@ cycle all converge fine, because a single item pins and settles while the bug ne
 pins to interact. What is pinned instead is the structural property the fix rests on, which is
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
+
+## Open: the built-in frame
+
+- **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
+  `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
+- **Query features:** `.EACHI` and non-equi joins are not supported.
+- **No warning channel.** data.table warns when a value is truncated into an integer column and when
+  gsum coerces an overflowing sum to double; the engine returns no warnings.
+- **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
+  where data.table keeps it, and a frame updated in a nested closure is not refined there.
+- **Naming:** at runtime `frame()` clashes with `graphics::frame`.
+- **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
+  contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
+- **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
 
 ## Open: the runtime
 
@@ -1874,8 +1890,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Explicitly out of scope for now
 
-- Tags and discriminated unions, through a stdlib `match` the checker knows about. Design it in
-  `contributing/design/open-questions.md` first.
 - Modelling S3 dispatch, meaning `UseMethod`. It is the prerequisite for an honest `print`,
   `summary` and `plot`.
 - Column-level typing for a data.frame, matrix dimensionality, and real S4 typing.

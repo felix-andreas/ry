@@ -8,33 +8,7 @@ stopgap ry uses meanwhile. Nothing here is contract until it lands in the
 [type system reference](/reference/type-system/). When a question is resolved, record the decision
 in `.agents/memory/decisions.md` and delete the entry here.
 
-## 1. Tags and discriminated unions through a ry standard library
-
-**The question.** How should ry provide Roc-style tags, the same idea as OCaml's polymorphic
-variants? The shape under discussion is a library the checker knows about specially, exposing tag
-constructors and a `match` function with exhaustiveness checking.
-
-**The maintainer's direction.** Provide them through that specially known library, not through new
-R syntax, so that annotated R stays ordinary R.
-
-**An unresolved tension.** [Inline type syntax](/contributing/design/inline-type-syntax/) proposes
-the opposite route to the same capability: real syntax, in a compiled dialect. Both routes reach
-exhaustive case analysis. They differ in whether the checker blesses particular call shapes or owns a
-grammar, and in whether a build step is acceptable. Building both would be waste, so settle the fork
-(section 3 of that page) before implementing either, and delete the losing half.
-
-**What to work out before building:**
-
-- **Representation.** At run time a tagged value is presumably `list(tag = "Name", value = ...)`.
-  Does the type system model it as a union of nominal-like tag types, or as a new core form?
-- **Exhaustiveness.** Checking that the named arguments of `match(x, Some = fn, None = fn)` cover the
-  union's members requires the checker to know argument names at one blessed callee. How special is
-  that call form allowed to be?
-- **A separate type former?** Perhaps the general unions already decided, plus a literal
-  discriminant field, are enough, and tags need nothing of their own.
-- **Interaction with strict mode and narrowing.** A `match` arm should see the narrowed member type.
-
-## 2. S3 dispatch
+## 1. S3 dispatch
 
 **The question.** How should ry type an S3 generic such as `print`, `summary`, `plot`, `format`, or
 `predict`, whose result depends on the class of its first argument?
@@ -43,12 +17,12 @@ grammar, and in whether a build step is acceptable. Building both would be waste
 `print : fn(x: data.frame) -> data.frame`. That is available today, and it is the sanctioned form,
 because it lives in a declaration file. The other is a model of the class hierarchy that understands
 `UseMethod`. That is heavier, but it is the only option that reaches user-defined S3 classes. Traits
-are no longer an option, for the reasons in section 4.
+are no longer an option, for the reasons in section 3.
 
 **The stopgap.** S3 generics are `Any` in the corpus, or missing from it. The operator method tables
 that do ship, such as `+.Date` and `Arith.difftime`, show what a per-class answer looks like.
 
-## 3. Modeling data frames and matrices
+## 2. Modeling data frames and matrices
 
 **The question.** How should ry type a data frame down to its columns, so that `df$col` and
 `df[, "col"]` have useful types, and how should it carry a matrix's dimensions?
@@ -59,7 +33,7 @@ carrier, while a matrix wants an element type first, with no dimension tracking.
 the semantics of `[` and `[[`, and with how `x[i, j]` lowers. The built-in typed table type that the
 project mandate calls for will need the same answer.
 
-## 4. Traits and typeclasses: closed, and declined
+## 3. Traits and typeclasses: closed, and declined
 
 **The question, now settled.** Should ry have a general capability mechanism (numeric, atomic
 element, comparable, overloadable with `+`, S3) that subsumes the ad-hoc constraint kinds and the
@@ -84,7 +58,7 @@ Three pressures were examined, and none changed the answer:
 The pattern across all three is the useful lesson: what looked as if it needed traits was better
 served by one more constraint on machinery that already existed.
 
-## 5. Bridging variadic inference
+## 4. Bridging variadic inference
 
 **The question.** What type does `...` have inside the body of a `function(x, ...)`? That covers
 `list(...)`, `..1`, and forwarding to another variadic function. Inference first needs to lower a
@@ -94,7 +68,7 @@ trailing `...` as a rest parameter, and `backlog.md` records that decided direct
 signature is bridged. The full semantics of `...`, including compatibility when forwarding and
 `..N` access, is open.
 
-## 6. The NAMESPACE and import model
+## 5. The NAMESPACE and import model
 
 **The question.** How should library scoping work: what `library(pkg)` attaches, what `importFrom`
 in a `NAMESPACE` file imports, the order of the search path, and masking warnings?
@@ -105,7 +79,7 @@ a known namespace). Bare names are deliberately not gated on imports; `decisions
 Per-file visibility, attach order, and masking warnings still need the full model, which decides
 when an unresolved name is really unresolved, and so how useful strict mode is on a real project.
 
-## 7. Non-standard evaluation
+## 6. Non-standard evaluation
 
 **The question.** How far can a *masked* expression be checked statically, and what machinery does
 each step need? A masked expression is one whose names resolve against a data context the callee

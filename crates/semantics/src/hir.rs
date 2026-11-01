@@ -11,6 +11,9 @@ use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
 pub struct ExprId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
+pub struct PatId(pub u32);
+
 /// An identifier, interned process-wide: the same spelling is one allocation shared by every
 /// item that mentions it, and copying one costs two words. The table only grows, which is
 /// bounded by the distinct spellings a session has seen.
@@ -159,12 +162,59 @@ impl fmt::Debug for Symbol {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module {
     pub expressions: Vec<Expression>,
+    pub patterns: Vec<Pattern>,
     pub root: Option<ExprId>,
 }
 
 impl Module {
     pub fn expression(&self, id: ExprId) -> &Expression {
         &self.expressions[id.0 as usize]
+    }
+
+    pub fn pattern(&self, id: PatId) -> &Pattern {
+        &self.patterns[id.0 as usize]
+    }
+
+    /// Whether a tag payload pattern is a bare `..`, as in `:Tag(..)`, which matches the tag
+    /// with any payload or none.
+    pub fn is_any_payload(&self, payload: PatId) -> bool {
+        matches!(&self.pattern(payload).kind, PatternKind::Record { fields, rest: true } if fields.is_empty())
+    }
+
+    /// The names a pattern binds, as `NameRef` expressions, in source order.
+    pub fn pattern_bindings(&self, pattern: PatId) -> Vec<ExprId> {
+        let mut bindings = Vec::new();
+        self.collect_pattern_bindings(pattern, &mut bindings);
+        bindings
+    }
+
+    fn collect_pattern_bindings(&self, pattern: PatId, bindings: &mut Vec<ExprId>) {
+        match &self.pattern(pattern).kind {
+            PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => {}
+            PatternKind::Bind(name) => bindings.push(*name),
+            PatternKind::Tag { payload, .. } => {
+                if let Some(payload) = payload {
+                    self.collect_pattern_bindings(*payload, bindings);
+                }
+            }
+            PatternKind::Tuple(items) => {
+                for item in items {
+                    self.collect_pattern_bindings(*item, bindings);
+                }
+            }
+            PatternKind::Record { fields, .. } => {
+                for field in fields {
+                    self.collect_pattern_bindings(field.pattern, bindings);
+                }
+            }
+            // Every alternative binds the same names (naming reports it otherwise), and each
+            // alternative's leaf is its own write site, so all of them are listed.
+            PatternKind::Or(alternatives) => {
+                for alternative in alternatives {
+                    self.collect_pattern_bindings(*alternative, bindings);
+                }
+            }
+        }
     }
 }
 
@@ -254,7 +304,7 @@ pub enum LiteralKind {
     /// Source text is kept for literal index positions and the literal-as-integer courtesy.
     Integer(Box<str>),
     Double(Box<str>),
-    Complex,
+    Complex(Box<str>),
     String(Box<str>),
     Logical(bool),
     Null,
@@ -364,6 +414,78 @@ pub enum ExpressionKind {
     Paren(ExprId),
     Break,
     Next,
+    /// `(a, b)` and `(a,)`: a native tuple.
+    Tuple(Box<[ExprId]>),
+    /// `(x = 1, y = 2)`: a native record, fields in source order.
+    Record(Box<[RecordField]>),
+    /// `:Name` or `:Name(...)`. The payload is a `Tuple` or `Record` expression spanning the
+    /// parenthesized list, so a payload types exactly like the matching literal.
+    Tag {
+        name: Symbol,
+        name_range: TextRange,
+        payload: Option<ExprId>,
+    },
+    Match {
+        scrutinee: ExprId,
+        arms: Box<[MatchArm]>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordField {
+    pub name: Symbol,
+    pub name_range: TextRange,
+    pub value: ExprId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+    pub pattern: PatId,
+    /// The pattern's `Bind` leaves in source order, kept beside the pattern so `child_ids`
+    /// can list them without the pattern arena. Lowering fills both at once and neither
+    /// changes afterwards.
+    pub bindings: Box<[ExprId]>,
+    pub guard: Option<ExprId>,
+    pub body: ExprId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternKind {
+    /// A broken pattern: matches anything and reports nothing of its own.
+    Missing,
+    Wildcard,
+    /// The name is a `NameRef` expression, a write site exactly like an assignment target.
+    Bind(ExprId),
+    Literal {
+        literal: LiteralKind,
+        negative: bool,
+    },
+    /// The payload is a `Tuple` or `Record` pattern spanning the parenthesized list.
+    Tag {
+        name: Symbol,
+        name_range: TextRange,
+        payload: Option<PatId>,
+    },
+    Tuple(Box<[PatId]>),
+    /// Without `rest`, the pattern must list every field of the record it matches.
+    Record {
+        fields: Box<[PatternField]>,
+        rest: bool,
+    },
+    Or(Box<[PatId]>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternField {
+    pub name: Symbol,
+    pub name_range: TextRange,
+    pub pattern: PatId,
 }
 
 impl ExpressionKind {
@@ -414,6 +536,18 @@ impl ExpressionKind {
             ExpressionKind::Repeat { body } | ExpressionKind::Local { body } => vec![*body],
             ExpressionKind::Block { statements, .. } => statements.to_vec(),
             ExpressionKind::Paren(inner) => vec![*inner],
+            ExpressionKind::Tuple(items) => items.to_vec(),
+            ExpressionKind::Record(fields) => fields.iter().map(|field| field.value).collect(),
+            ExpressionKind::Tag { payload, .. } => payload.iter().copied().collect(),
+            ExpressionKind::Match { scrutinee, arms } => {
+                let mut ids = vec![*scrutinee];
+                for arm in arms {
+                    ids.extend(arm.bindings.iter().copied());
+                    ids.extend(arm.guard);
+                    ids.push(arm.body);
+                }
+                ids
+            }
         }
     }
 }
@@ -424,6 +558,7 @@ pub fn lower_item(root: &SyntaxNode) -> Module {
     module.root = Some(root_id);
     // The arena is kept for the life of the project, so the doubling slack is not free.
     module.expressions.shrink_to_fit();
+    module.patterns.shrink_to_fit();
     module
 }
 
@@ -640,8 +775,226 @@ impl Module {
             }
             SyntaxKind::BREAK_EXPR => self.allocate(ExpressionKind::Break, range),
             SyntaxKind::NEXT_EXPR => self.allocate(ExpressionKind::Next, range),
+            SyntaxKind::TUPLE_EXPR | SyntaxKind::RECORD_EXPR => match node
+                .children()
+                .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+            {
+                Some(list) => self.lower_items(&list, range),
+                None => self.missing(range),
+            },
+            SyntaxKind::TAG_EXPR => {
+                let Some(name_node) = node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::NAME)
+                else {
+                    return self.missing(range);
+                };
+                let name = field_name_text(&name_node).unwrap_or_default();
+                let payload = node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+                    .map(|list| self.lower_items(&list, list.text_range()));
+                self.allocate(
+                    ExpressionKind::Tag {
+                        name,
+                        name_range: name_node.text_range(),
+                        payload,
+                    },
+                    range,
+                )
+            }
+            SyntaxKind::MATCH_EXPR => {
+                let scrutinee = expression_children(node).next();
+                let scrutinee = self.lower_optional(scrutinee, range);
+                let arms = node
+                    .children()
+                    .filter(|child| child.kind() == SyntaxKind::MATCH_ARM)
+                    .map(|arm| self.lower_arm(&arm))
+                    .collect();
+                self.allocate(ExpressionKind::Match { scrutinee, arms }, range)
+            }
             _ => self.missing(range),
         }
+    }
+
+    /// The items of a native tuple or record literal. The parser already rejects a list that
+    /// mixes named and unnamed items, so the first item decides which one this is.
+    fn lower_items(&mut self, list: &SyntaxNode, range: TextRange) -> ExprId {
+        let arguments = self.lower_arguments_of(list, None);
+        let is_record = arguments
+            .first()
+            .is_some_and(|argument| argument.name.is_some());
+        if is_record {
+            let mut fields = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                let (Some(name), Some(name_range)) = (argument.name, argument.name_range) else {
+                    continue;
+                };
+                let value = match argument.value {
+                    Some(value) => value,
+                    None => self.missing(name_range),
+                };
+                fields.push(RecordField {
+                    name,
+                    name_range,
+                    value,
+                });
+            }
+            return self.allocate(ExpressionKind::Record(fields.into()), range);
+        }
+        let items = arguments
+            .into_iter()
+            .filter_map(|argument| argument.value)
+            .collect();
+        self.allocate(ExpressionKind::Tuple(items), range)
+    }
+
+    fn lower_arm(&mut self, arm: &SyntaxNode) -> MatchArm {
+        let range = significant_range(arm);
+        let pattern = match arm.children().find(|child| is_pattern_kind(child.kind())) {
+            Some(node) => self.lower_pattern(&node),
+            None => self.allocate_pattern(PatternKind::Missing, range),
+        };
+        let bindings = self.pattern_bindings(pattern).into();
+        let guard = arm
+            .children()
+            .find(|child| child.kind() == SyntaxKind::MATCH_GUARD)
+            .map(|guard| {
+                let condition = expression_children(&guard).next();
+                self.lower_optional(condition, significant_range(&guard))
+            });
+        let body = expression_children(arm).next();
+        let body = self.lower_optional(body, range);
+        MatchArm {
+            pattern,
+            bindings,
+            guard,
+            body,
+        }
+    }
+
+    fn allocate_pattern(&mut self, kind: PatternKind, range: TextRange) -> PatId {
+        let id = PatId(self.patterns.len() as u32);
+        self.patterns.push(Pattern { kind, range });
+        id
+    }
+
+    fn lower_pattern(&mut self, node: &SyntaxNode) -> PatId {
+        let range = significant_range(node);
+        let kind = match node.kind() {
+            SyntaxKind::PATTERN_WILDCARD => PatternKind::Wildcard,
+            SyntaxKind::PATTERN_BIND => {
+                let name = node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::NAME)
+                    .and_then(|name| field_name_text(&name))
+                    .unwrap_or_default();
+                PatternKind::Bind(self.allocate(ExpressionKind::NameRef(name), range))
+            }
+            SyntaxKind::PATTERN_LITERAL => {
+                let negative = node
+                    .children_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.kind() == SyntaxKind::MINUS);
+                match node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::LITERAL)
+                {
+                    Some(literal) => PatternKind::Literal {
+                        literal: literal_kind(&literal),
+                        negative,
+                    },
+                    None => PatternKind::Missing,
+                }
+            }
+            SyntaxKind::PATTERN_TAG => {
+                match node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::NAME)
+                {
+                    Some(name_node) => {
+                        let payload = node
+                            .children()
+                            .find(|child| child.kind() == SyntaxKind::PATTERN_LIST)
+                            .map(|list| self.lower_pattern(&list));
+                        PatternKind::Tag {
+                            name: field_name_text(&name_node).unwrap_or_default(),
+                            name_range: name_node.text_range(),
+                            payload,
+                        }
+                    }
+                    None => PatternKind::Missing,
+                }
+            }
+            SyntaxKind::PATTERN_LIST => {
+                let is_record = node.children().any(|child| {
+                    matches!(
+                        child.kind(),
+                        SyntaxKind::PATTERN_FIELD | SyntaxKind::PATTERN_REST
+                    )
+                });
+                if is_record {
+                    let rest = node
+                        .children()
+                        .any(|child| child.kind() == SyntaxKind::PATTERN_REST);
+                    let mut fields = Vec::new();
+                    for field in node
+                        .children()
+                        .filter(|child| child.kind() == SyntaxKind::PATTERN_FIELD)
+                    {
+                        let Some(name_node) = field
+                            .children()
+                            .find(|child| child.kind() == SyntaxKind::NAME)
+                        else {
+                            continue;
+                        };
+                        let Some(name) = field_name_text(&name_node) else {
+                            continue;
+                        };
+                        let pattern = match field
+                            .children()
+                            .find(|child| is_pattern_kind(child.kind()))
+                        {
+                            Some(pattern) => self.lower_pattern(&pattern),
+                            None => self
+                                .allocate_pattern(PatternKind::Missing, significant_range(&field)),
+                        };
+                        fields.push(PatternField {
+                            name,
+                            name_range: name_node.text_range(),
+                            pattern,
+                        });
+                    }
+                    PatternKind::Record {
+                        fields: fields.into(),
+                        rest,
+                    }
+                } else {
+                    let items = node
+                        .children()
+                        .filter(|child| is_pattern_kind(child.kind()))
+                        .map(|item| self.lower_pattern(&item))
+                        .collect();
+                    PatternKind::Tuple(items)
+                }
+            }
+            SyntaxKind::PATTERN_OR => {
+                let alternatives = node
+                    .children()
+                    .filter(|child| is_pattern_kind(child.kind()))
+                    .map(|alternative| self.lower_pattern(&alternative))
+                    .collect();
+                PatternKind::Or(alternatives)
+            }
+            SyntaxKind::PATTERN_PAREN => {
+                return match node.children().find(|child| is_pattern_kind(child.kind())) {
+                    Some(inner) => self.lower_pattern(&inner),
+                    None => self.allocate_pattern(PatternKind::Missing, range),
+                };
+            }
+            _ => PatternKind::Missing,
+        };
+        self.allocate_pattern(kind, range)
     }
 
     fn lower_binary(&mut self, node: &SyntaxNode, range: TextRange) -> ExprId {
@@ -805,12 +1158,20 @@ impl Module {
         node: &SyntaxNode,
         substitute: Option<(usize, ExprId)>,
     ) -> Vec<Argument> {
-        let Some(list) = node
+        match node
             .children()
             .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
-        else {
-            return Vec::new();
-        };
+        {
+            Some(list) => self.lower_arguments_of(&list, substitute),
+            None => Vec::new(),
+        }
+    }
+
+    fn lower_arguments_of(
+        &mut self,
+        list: &SyntaxNode,
+        substitute: Option<(usize, ExprId)>,
+    ) -> Vec<Argument> {
         list.children()
             .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
             .enumerate()
@@ -887,6 +1248,19 @@ impl Module {
     }
 }
 
+fn is_pattern_kind(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::PATTERN_WILDCARD
+            | SyntaxKind::PATTERN_BIND
+            | SyntaxKind::PATTERN_LITERAL
+            | SyntaxKind::PATTERN_TAG
+            | SyntaxKind::PATTERN_LIST
+            | SyntaxKind::PATTERN_OR
+            | SyntaxKind::PATTERN_PAREN
+    )
+}
+
 fn expression_children(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
     node.children()
         .filter(|child| is_expression_kind(child.kind()))
@@ -924,7 +1298,7 @@ fn literal_kind(node: &SyntaxNode) -> LiteralKind {
     match token.kind() {
         SyntaxKind::INTEGER => LiteralKind::Integer(token.text().into()),
         SyntaxKind::DOUBLE => LiteralKind::Double(token.text().into()),
-        SyntaxKind::COMPLEX => LiteralKind::Complex,
+        SyntaxKind::COMPLEX => LiteralKind::Complex(token.text().into()),
         SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
             LiteralKind::String(string_value(token.text()).into())
         }
