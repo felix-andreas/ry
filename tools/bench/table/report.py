@@ -103,24 +103,28 @@ def rust_driver():
 
 
 def parse(stdout):
-    """Maps each question to the faster of its runs, as (seconds, checksum)."""
+    """Maps each question to (the faster of its runs' seconds, the first run's checksum). The `:=`
+    loops modify the table, so only the first runs' answers are comparable across engines."""
     answers = {}
     for line in stdout.splitlines():
         if not line.strip() or line.startswith("#"):
             continue
-        question, _, seconds, _, _, checksum = line.split("\t")
+        question, run, seconds, _, _, checksum = line.split("\t")
         best = answers.get(question)
-        if best is None or float(seconds) < best[0]:
+        if best is None:
             answers[question] = (float(seconds), float(checksum))
+        elif float(seconds) < best[0]:
+            answers[question] = (float(seconds), best[1])
     return answers
 
 
 def write(rows, table):
     text = page.read_text()
-    pattern = re.compile(rf"(<!-- bench-table:{re.escape(rows)} -->\n).*?(\n<!-- /bench-table:{re.escape(rows)} -->)", re.S)
+    marker = re.escape(rows)
+    pattern = re.compile(rf"(<!-- bench-table:{marker} -->\n)(?:.*?\n)?(<!-- /bench-table:{marker} -->)", re.S)
     if not pattern.search(text):
         sys.exit(f"no bench-table:{rows} markers in {page}")
-    page.write_text(pattern.sub(lambda match: match.group(1) + table + match.group(2), text))
+    page.write_text(pattern.sub(lambda match: match.group(1) + table + "\n" + match.group(2), text, count=1))
     print(f"wrote the {rows} table into {page.relative_to(root)}", file=sys.stderr)
 
 

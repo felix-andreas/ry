@@ -767,8 +767,9 @@ columns as ALTREP vectors to native code. The user guide is [DataFrames](/guides
 
 The claim that the frame outperforms data.table rests on a benchmark of its own
 (`tools/bench/table/`): the db-benchmark group-by and join questions (the suite H2O started and
-DuckDB Labs maintains) at 0.5 GB and 5 GB, `:=` update loops and a keyed rolling join, run on the
-same machine against data.table with all threads.
+DuckDB Labs maintains), `:=` update loops and a keyed rolling join, run on the same machine against
+data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a table below (it
+generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
 `ry run` beat data.table under GNU R on every question, and all three runs give the
@@ -778,27 +779,35 @@ driven from Rust, without R.
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.151 | 0.022 | 0.034 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.192 | 0.020 | 0.044 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.272 | 0.096 | 0.110 |
-| groupby q4: three means by `id4` | 0.357 | 0.158 | 0.175 |
-| groupby q5: three sums by `id6` | 0.291 | 0.089 | 0.157 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.692 | 0.091 | 0.146 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.714 | 0.053 | 0.081 |
-| groupby q8: the two largest `v3` by `id6` | 0.759 | 0.177 | 0.235 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.769 | 0.041 | 0.099 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.733 | 1.033 | 0.896 |
-| `:=` on a whole column, 100 times | 5.349 | 0.291 | 2.081 |
-| `:=` on 1% of rows, 100 times | 3.803 | 1.112 | 0.891 |
-| `:=` adding a column, 100 times | 5.159 | 0.744 | 2.666 |
-| join q1: small, on `id1` | 0.356 | 0.110 | 0.149 |
-| join q2: medium, on `id2` | 0.522 | 0.131 | 0.229 |
-| join q3: medium, left, on `id2` | 0.612 | 0.179 | 0.192 |
-| join q4: medium, on factor `id5` | 0.499 | 0.119 | 0.230 |
-| join q5: big, on `id3` | 3.797 | 0.664 | 1.028 |
-| keyed rolling join, 1e6 trades | 0.130 | 0.094 | 0.100 |
-| total | 26.16 | 5.22 | 9.54 |
+| groupby q1: `sum(v1)` by `id1` | 0.160 | 0.019 | 0.036 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.185 | 0.017 | 0.035 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.276 | 0.104 | 0.114 |
+| groupby q4: three means by `id4` | 0.327 | 0.170 | 0.202 |
+| groupby q5: three sums by `id6` | 0.286 | 0.123 | 0.125 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.683 | 0.131 | 0.179 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.731 | 0.053 | 0.069 |
+| groupby q8: the two largest `v3` by `id6` | 0.701 | 0.191 | 0.253 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.860 | 0.050 | 0.103 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.845 | 0.715 | 0.813 |
+| `:=` on a whole column, 100 times | 4.925 | 0.373 | 2.122 |
+| `:=` on 1% of rows, 100 times | 3.772 | 0.833 | 0.813 |
+| `:=` adding a column, 100 times | 5.432 | 0.712 | 1.399 |
+| join q1: small, on `id1` | 0.365 | 0.113 | 0.141 |
+| join q2: medium, on `id2` | 0.480 | 0.182 | 0.255 |
+| join q3: medium, left, on `id2` | 0.628 | 0.245 | 0.185 |
+| join q4: medium, on factor `id5` | 0.498 | 0.185 | 0.264 |
+| join q5: big, on `id3` | 3.755 | 0.995 | 1.012 |
+| keyed rolling join | 0.127 | 0.113 | 0.098 |
+| total | 26.04 | 5.32 | 8.22 |
 <!-- /bench-table:1e7 -->
+
+At 5e7 rows (2.6 GB of CSV) the table holds the ten group-by questions alone, because the `:=` loop
+that adds 100 columns needs more than this machine's 15 GB. db-benchmark's 5 GB size (1e8 rows) is
+out of reach for the same reason: at 5e7 rows the CSV read already peaks at 10 GB and data.table's q10
+at 6.4 GB, and both grow with the row count.
+
+<!-- bench-table:5e7 -->
+<!-- /bench-table:5e7 -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the

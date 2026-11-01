@@ -14,6 +14,7 @@ heap = { path = "../heap" }
 smallvec = { version = "1.15", features = ["union"] }
 syntax = { path = "../syntax" }
 table = { path = "../table" }
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 rowan.workspace = true
 rustc-hash.workspace = true
 regex.workspace = true

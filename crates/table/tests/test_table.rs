@@ -2064,6 +2064,106 @@ fn large_grouped_medians_and_moments_match_the_plan() {
     }
 }
 
+/// Four integer keys whose ranges multiply past 64 bits, as db-benchmark's six-key question does
+/// at 5e7 rows: the kernel ranks the leading keys' codes before the next one would overflow, and
+/// must still give the plan's groups in both `by` and `keyby` order, `NA` keys included.
+#[test]
+fn keys_too_wide_for_one_64_bit_code_group_like_the_plan() {
+    let mut rng = SplitMix64(11);
+    let rows = 200_000;
+    let key = |rng: &mut SplitMix64| -> Vec<i32> {
+        (0..rows)
+            .map(|_| {
+                if rng.chance(1, 500) {
+                    NA_INTEGER
+                } else {
+                    (rng.below(6) as i32 - 3) * 300_000_000 + rng.below(3) as i32
+                }
+            })
+            .collect()
+    };
+    let keys: Vec<Vec<i32>> = (0..4).map(|_| key(&mut rng)).collect();
+    let values: Vec<f64> = (0..rows).map(|_| rng.below(1_000) as f64).collect();
+    let table = frame(vec![
+        ("k1", ints(&keys[0])),
+        ("k2", ints(&keys[1])),
+        ("k3", ints(&keys[2])),
+        ("k4", ints(&keys[3])),
+        ("v", doubles(&values)),
+    ]);
+    for keyed in [false, true] {
+        let query = Query {
+            select: Select::Columns(vec![
+                named("v", aggregate(Aggregate::Sum, column("v"))),
+                named("n", Expr::Count),
+            ]),
+            by: ["k1", "k2", "k3", "k4"]
+                .iter()
+                .map(|name| named(name, column(name)))
+                .collect(),
+            keyed,
+            ..Query::default()
+        };
+        assert_same_output(
+            execute(&mut table.fork(), query.clone()),
+            execute_with_plans_only(&mut table.fork(), query),
+            &format!("keyed {keyed}"),
+        );
+    }
+}
+
+/// A double `sum` adds each group's values in row order, as data.table does, however many threads
+/// split the groups. The values mix magnitudes so that any other order rounds differently.
+#[test]
+fn a_double_sum_over_many_groups_adds_in_row_order() {
+    let mut rng = SplitMix64(23);
+    let rows = 300_000;
+    let groups = 40_000;
+    let keys: Vec<i32> = (0..rows).map(|_| rng.below(groups) as i32).collect();
+    let values: Vec<f64> = (0..rows)
+        .map(|_| {
+            if rng.chance(1, 50) {
+                1e15
+            } else {
+                rng.below(1_000_000) as f64 / 7.0
+            }
+        })
+        .collect();
+    let mut expected = vec![0.0; groups as usize];
+    let mut seen = vec![false; groups as usize];
+    for (key, value) in keys.iter().zip(&values) {
+        expected[*key as usize] += value;
+        seen[*key as usize] = true;
+    }
+    let table = frame(vec![("k", ints(&keys)), ("v", doubles(&values))]);
+    let query = Query {
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
+        by: vec![named("k", column("k"))],
+        keyed: true,
+        ..Query::default()
+    };
+    let Ok(Executed {
+        output: Output::Table(mut output),
+        ..
+    }) = execute(&mut table.fork(), query)
+    else {
+        panic!("the grouped sum failed");
+    };
+    let RVector::Double(sums) = get(&mut output, "s") else {
+        panic!("the sum is not a double column");
+    };
+    let present: Vec<f64> = expected
+        .iter()
+        .zip(&seen)
+        .filter(|(_, seen)| **seen)
+        .map(|(sum, _)| *sum)
+        .collect();
+    assert_eq!(sums.len(), present.len());
+    for (group, (sum, want)) in sums.iter().zip(&present).enumerate() {
+        assert_eq!(sum.to_bits(), want.to_bits(), "group {group}");
+    }
+}
+
 /// data.table 1.18 under R 4.3 gives a double column for `s := sum(v) - 1L` when a total
 /// overflows, with or without `by`, because R's `sum` then returns a double.
 #[test]

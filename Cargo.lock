@@ -1790,6 +1790,7 @@ dependencies = [
  "jiff",
  "jpeg-encoder",
  "libc",
+ "libmimalloc-sys",
  "lzma-rust2",
  "regex",
  "regex-automata",

@@ -2644,6 +2644,7 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
     crate::heap().collect(heap::Collection::Major);
     (interp().hooks.run_finalizers)();
+    crate::frame::release_worker_memory();
     let stats = crate::heap().stats();
     let result = values::real_vector(&[
         stats.live_objects as f64,

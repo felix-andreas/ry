@@ -2013,8 +2013,14 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **A CSV read peaks far above the table it makes.** A 5e7-row `groupby.csv` (2.6 GB) peaks at
+  10 GB resident, 2.6 GB of it the mapped file, for a 1.7 GB table: Polars parses the three id
+  columns as strings (16-byte views per row) before `strings_as_factors` codes them. Parsing a
+  column that will become a factor straight into codes would cut the peak by about 2.4 GB.
 - **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
-  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena
+  10 ms, once the thread owning it runs again (the engine's workers are made to run by
+  `release_worker_memory`, `decisions.md`), so a kernel's scratch memory at 1e7 rows is faulted
+  in afresh each time. With lazy arena
   commit and the one-pass factor conversion, the whole db-benchmark script (load plus all
   questions) runs 97 s at 6.7 GB peak by default and 91 s at 8.1 GB with `MIMALLOC_PURGE_DELAY=-1`.
   The delay is process-wide and trades resident memory in every R program, so it stays at

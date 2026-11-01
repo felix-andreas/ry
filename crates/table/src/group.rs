@@ -5,7 +5,9 @@
 //! data.table. These kernels code the grouping columns into one integer per row instead: each
 //! column is a digit of a mixed-radix number, with `NA` as digit zero, a factor's level `l` as
 //! `l + 1` and an integer `v` as `v - min + 1`. Comparing codes compares the keys in `keyby`
-//! order (`NA` first), so a sorted result only sorts the groups.
+//! order (`NA` first), so a sorted result only sorts the groups. When the next column would
+//! carry the code past 64 bits, the code so far is replaced by its rank among the distinct codes,
+//! which keeps the order and is below the row count, so any number of grouping columns fits.
 //!
 //! When the codes span at most [`DENSE_CODES`] values, they index the group states directly, and
 //! each thread accumulates a contiguous run of rows that is merged in row order afterwards. Wider
@@ -116,8 +118,10 @@ pub(crate) fn aggregate(
         };
         aggregations.push(aggregation);
     }
-    let codes = row_codes(&keys, height);
-    let grouping = group(&codes, keys.radix, &aggregations, None);
+    let Some((codes, radix)) = row_codes(&keys, height) else {
+        return Ok(None);
+    };
+    let grouping = group(&codes, radix, &aggregations, None);
     let order = output_order(&grouping, query.keyed, height);
     let first_rows: Vec<u32> = order
         .iter()
@@ -158,8 +162,6 @@ pub(crate) fn aggregate(
 /// The grouping columns, each a digit of the row code.
 struct Keys {
     digits: Vec<Digit>,
-    /// The number of possible codes: the product of the digits' radixes.
-    radix: u64,
 }
 
 struct Digit {
@@ -180,15 +182,13 @@ enum DigitSource {
     },
 }
 
-/// The grouping columns as digits, or `None` when a group is computed, is a double or a string,
-/// or the codes would not fit in 64 bits.
+/// The grouping columns as digits, or `None` when a group is computed, is a double or a string.
 fn group_keys(
     frame: &DataFrame,
     schema: &Schema,
     by: &[(PlSmallStr, Expr)],
 ) -> Result<Option<Keys>> {
     let mut digits = Vec::with_capacity(by.len());
-    let mut radix: u64 = 1;
     for (_, expr) in by {
         let Expr::Column(name) = expr else {
             return Ok(None);
@@ -241,65 +241,129 @@ fn group_keys(
             }
             _ => return Ok(None),
         };
-        let Some(product) = radix.checked_mul(digit.radix) else {
-            return Ok(None);
-        };
-        radix = product;
         digits.push(digit);
     }
-    // `u64::MAX` marks an empty hash slot, so no code may reach it.
-    if radix == u64::MAX {
-        return Ok(None);
-    }
-    Ok(Some(Keys { digits, radix }))
+    Ok(Some(Keys { digits }))
 }
 
-/// Each row's code, the first grouping column being the most significant digit.
-fn row_codes(keys: &Keys, height: usize) -> Vec<u64> {
-    fill(height, |start, out| {
-        for slot in out.iter_mut() {
-            slot.write(0);
-        }
-        // SAFETY: every element was initialized above.
-        let out: &mut [u64] = unsafe { &mut *(out as *mut [_] as *mut [u64]) };
-        for digit in &keys.digits {
-            let radix = digit.radix;
-            match &digit.source {
-                DigitSource::Factor(codes) => match &codes.values {
-                    CodeValues::U8(values) => {
-                        append_digits(out, start, radix, &codes.validity, |row| {
-                            u64::from(values[row]) + 1
-                        })
-                    }
-                    CodeValues::U16(values) => {
-                        append_digits(out, start, radix, &codes.validity, |row| {
-                            u64::from(values[row]) + 1
-                        })
-                    }
-                    CodeValues::U32(values) => {
-                        append_digits(out, start, radix, &codes.validity, |row| {
-                            u64::from(values[row]) + 1
-                        })
-                    }
-                },
-                DigitSource::Integer {
-                    values,
-                    validity,
-                    min,
-                } => {
-                    let base = i64::from(*min) - 1;
-                    append_digits(out, start, radix, validity, |row| {
-                        (i64::from(values[row]) - base) as u64
-                    });
+/// Each row's code, the first grouping column being the most significant digit, and the number
+/// of possible codes. Before a digit that would carry the codes past 64 bits, they are replaced
+/// by their ranks, which keeps their order and bounds them by the row count. `None` when even a
+/// single digit on top of the ranks does not fit.
+fn row_codes(keys: &Keys, height: usize) -> Option<(Vec<u64>, u64)> {
+    let mut codes = vec![0u64; height];
+    let mut radix: u64 = 1;
+    for digit in &keys.digits {
+        // `u64::MAX` marks an empty hash slot, so no code may reach it.
+        let fits = |radix: u64| {
+            radix
+                .checked_mul(digit.radix)
+                .filter(|product| *product < u64::MAX)
+        };
+        radix = match fits(radix) {
+            Some(product) => product,
+            None => fits(rank(&mut codes))?,
+        };
+        let chunk =
+            PARALLEL_ROWS.max(height.div_ceil(THREAD_POOL.current_num_threads().max(1) * 4));
+        THREAD_POOL.install(|| {
+            codes
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .for_each(|(index, out)| append_digit(out, index * chunk, digit));
+        });
+    }
+    Some((codes, radix))
+}
+
+/// Replaces each code by its rank among the distinct codes, and gives how many there are. The
+/// (code, row) pairs are sorted, so equal codes are adjacent and in code order; each chunk of the
+/// sorted pairs counts where the code changes, and those counts give every chunk its first rank.
+fn rank(codes: &mut [u64]) -> u64 {
+    let height = codes.len();
+    if height == 0 {
+        return 0;
+    }
+    let mut pairs: Vec<u128> = THREAD_POOL.install(|| {
+        codes
+            .par_iter()
+            .enumerate()
+            .map(|(row, code)| (u128::from(*code) << 32) | row as u128)
+            .collect()
+    });
+    THREAD_POOL.install(|| pairs.par_sort_unstable());
+    let code_at = |position: usize| (pairs[position] >> 32) as u64;
+    let chunk = PARALLEL_ROWS.max(height.div_ceil(THREAD_POOL.current_num_threads().max(1) * 4));
+    let chunks = height.div_ceil(chunk);
+    let changes: Vec<u64> = THREAD_POOL.install(|| {
+        (0..chunks)
+            .into_par_iter()
+            .map(|index| {
+                let positions = (index * chunk).max(1)..((index + 1) * chunk).min(height);
+                positions
+                    .filter(|position| code_at(*position) != code_at(position - 1))
+                    .count() as u64
+            })
+            .collect()
+    });
+    let firsts: Vec<u64> = changes
+        .iter()
+        .scan(0u64, |total, count| {
+            let first = *total;
+            *total += count;
+            Some(first)
+        })
+        .collect();
+    let distinct = firsts.last().copied().unwrap_or(0) + changes.last().copied().unwrap_or(0) + 1;
+    let out = Shared(codes.as_mut_ptr());
+    THREAD_POOL.install(|| {
+        (0..chunks).into_par_iter().for_each(|index| {
+            let mut rank = firsts[index];
+            for position in index * chunk..((index + 1) * chunk).min(height) {
+                if position > 0 && code_at(position) != code_at(position - 1) {
+                    rank += 1;
                 }
-                DigitSource::Logical { values, validity } => {
-                    append_digits(out, start, radix, validity, |row| {
-                        u64::from(values.get_bit(row)) + 1
-                    });
-                }
+                let row = pairs[position] as u32 as usize;
+                // SAFETY: the pairs hold every row exactly once, so each row is written by one
+                // position only.
+                unsafe { out.write(row, rank) };
             }
+        });
+    });
+    distinct
+}
+
+/// Appends one digit to the codes of the rows from `start` on.
+fn append_digit(out: &mut [u64], start: usize, digit: &Digit) {
+    let radix = digit.radix;
+    match &digit.source {
+        DigitSource::Factor(codes) => match &codes.values {
+            CodeValues::U8(values) => append_digits(out, start, radix, &codes.validity, |row| {
+                u64::from(values[row]) + 1
+            }),
+            CodeValues::U16(values) => append_digits(out, start, radix, &codes.validity, |row| {
+                u64::from(values[row]) + 1
+            }),
+            CodeValues::U32(values) => append_digits(out, start, radix, &codes.validity, |row| {
+                u64::from(values[row]) + 1
+            }),
+        },
+        DigitSource::Integer {
+            values,
+            validity,
+            min,
+        } => {
+            let base = i64::from(*min) - 1;
+            append_digits(out, start, radix, validity, |row| {
+                (i64::from(values[row]) - base) as u64
+            });
         }
-    })
+        DigitSource::Logical { values, validity } => {
+            append_digits(out, start, radix, validity, |row| {
+                u64::from(values.get_bit(row)) + 1
+            });
+        }
+    }
 }
 
 /// Appends one digit to the codes of the rows from `start` on. A missing value is digit zero,
@@ -393,15 +457,19 @@ fn dense(
         matches!(aggregation.function, Function::Sum | Function::Mean)
             && matches!(aggregation.input, Input::Double { .. })
     });
-    // Each thread holds states for every code and they merge serially, which pays off only
-    // when the rows outnumber the threads' states.
-    if ordered || height < PARALLEL_ROWS || threads == 1 || radix.saturating_mul(threads) > height {
+    if height < PARALLEL_ROWS || threads == 1 {
         let (first_rows, states) = run(0, height);
         return Grouping {
             first_rows,
             codes: Vec::new(),
             states,
         };
+    }
+    // Each thread holding states for every code pays off only when the rows outnumber the
+    // threads' states, and it cannot keep a double sum in row order. Otherwise each thread owns a
+    // range of codes instead, which also keeps its states in cache when the codes are many.
+    if ordered || radix.saturating_mul(threads) > height {
+        return dense_by_code(codes, radix, aggregations, top, threads);
     }
     let step = height.div_ceil(threads);
     let parts: Vec<_> = THREAD_POOL.install(|| {
@@ -441,6 +509,76 @@ fn dense(
     }
 }
 
+/// Groups dense codes by giving each partition a contiguous range of codes. Every partition lists
+/// its rows in ascending order, so a group's values accumulate in row order, and the partitions'
+/// states line up end to end in code order.
+fn dense_by_code(
+    codes: &[u64],
+    radix: usize,
+    aggregations: &[Aggregation],
+    top: Option<&Ranking>,
+    threads: usize,
+) -> Grouping {
+    let shift = radix
+        .div_ceil(threads * 16)
+        .next_power_of_two()
+        .trailing_zeros();
+    let width = 1usize << shift;
+    let partitions = radix.div_ceil(width);
+    let (rows, row_codes, bounds) =
+        scatter(codes, partitions, |code| (code >> shift) as usize, threads);
+    let parts: Vec<(Vec<u32>, Vec<State>)> = THREAD_POOL.install(|| {
+        (0..partitions)
+            .into_par_iter()
+            .map(|partition| {
+                let low = partition * width;
+                let slots = width.min(radix - low);
+                let span = bounds[partition]..bounds[partition + 1];
+                let rows = &rows[span.clone()];
+                let codes = &row_codes[span];
+                let mut first_rows = vec![NO_ROW; slots];
+                for (row, code) in rows.iter().zip(codes) {
+                    let slot = &mut first_rows[*code as usize - low];
+                    if *slot == NO_ROW {
+                        *slot = *row;
+                    }
+                }
+                let mut states: Vec<State> = aggregations
+                    .iter()
+                    .map(|aggregation| State::new(aggregation, slots, top))
+                    .collect();
+                for (aggregation, state) in aggregations.iter().zip(&mut states) {
+                    update(
+                        state,
+                        aggregation,
+                        top,
+                        rows.len(),
+                        |index| rows[index] as usize,
+                        |index| codes[index] as usize - low,
+                    );
+                }
+                (first_rows, states)
+            })
+            .collect()
+    });
+    let mut first_rows = Vec::with_capacity(radix);
+    let mut states: Vec<State> = aggregations
+        .iter()
+        .map(|aggregation| State::new(aggregation, 0, top))
+        .collect();
+    for (part_rows, part_states) in parts {
+        first_rows.extend(part_rows);
+        for (state, part) in states.iter_mut().zip(part_states) {
+            state.append(part);
+        }
+    }
+    Grouping {
+        first_rows,
+        codes: Vec::new(),
+        states,
+    }
+}
+
 fn hash(code: u64) -> u64 {
     // splitmix64's finalizer: cheap, and every input bit affects every output bit.
     let mut value = code.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -465,6 +603,67 @@ fn hashed(codes: &[u64], aggregations: &[Aggregation], top: Option<&Ranking>) ->
             (hash(code) >> (64 - bits)) as usize
         }
     };
+    let (rows, row_codes, bounds) = scatter(codes, partitions, partition_of, threads);
+
+    let parts: Vec<(Vec<u32>, Vec<u64>, Vec<State>)> = THREAD_POOL.install(|| {
+        (0..partitions)
+            .into_par_iter()
+            .map(|partition| {
+                let span = bounds[partition]..bounds[partition + 1];
+                let rows = &rows[span.clone()];
+                let codes = &row_codes[span];
+                let (slots, first_rows, slot_codes) = number_groups(codes, rows);
+                let mut states: Vec<State> = aggregations
+                    .iter()
+                    .map(|aggregation| State::new(aggregation, first_rows.len(), top))
+                    .collect();
+                for (aggregation, state) in aggregations.iter().zip(&mut states) {
+                    update(
+                        state,
+                        aggregation,
+                        top,
+                        rows.len(),
+                        |index| rows[index] as usize,
+                        |index| slots[index] as usize,
+                    );
+                }
+                (first_rows, slot_codes, states)
+            })
+            .collect()
+    });
+    let groups: usize = parts
+        .iter()
+        .map(|(first_rows, _, _)| first_rows.len())
+        .sum();
+    let mut first_rows = Vec::with_capacity(groups);
+    let mut slot_codes = Vec::with_capacity(groups);
+    let mut states: Vec<State> = aggregations
+        .iter()
+        .map(|aggregation| State::new(aggregation, 0, top))
+        .collect();
+    for (part_rows, part_codes, part_states) in parts {
+        first_rows.extend(part_rows);
+        slot_codes.extend(part_codes);
+        for (state, part) in states.iter_mut().zip(part_states) {
+            state.append(part);
+        }
+    }
+    Grouping {
+        first_rows,
+        codes: slot_codes,
+        states,
+    }
+}
+
+/// Lays the rows out partition after partition, each partition listing its rows in ascending
+/// order, and returns the rows, their codes, and where each partition starts (with the total last).
+fn scatter(
+    codes: &[u64],
+    partitions: usize,
+    partition_of: impl Fn(u64) -> usize + Sync,
+    threads: usize,
+) -> (Vec<u32>, Vec<u64>, Vec<usize>) {
+    let height = codes.len();
     let chunks = if height < PARALLEL_ROWS {
         1
     } else {
@@ -473,8 +672,7 @@ fn hashed(codes: &[u64], aggregations: &[Aggregation], top: Option<&Ranking>) ->
     let step = height.div_ceil(chunks);
     let range = |chunk: usize| (chunk * step).min(height)..((chunk + 1) * step).min(height);
 
-    // Count each chunk's rows per partition, then lay partitions out one after another, each
-    // holding its chunks in order, so a partition lists its rows in ascending order.
+    // Each chunk counts its rows per partition, and each partition holds its chunks in order.
     let counts: Vec<Vec<u32>> = THREAD_POOL.install(|| {
         (0..chunks)
             .into_par_iter()
@@ -527,55 +725,7 @@ fn hashed(codes: &[u64], aggregations: &[Aggregation], top: Option<&Ranking>) ->
         rows.set_len(height);
         row_codes.set_len(height);
     }
-
-    let parts: Vec<(Vec<u32>, Vec<u64>, Vec<State>)> = THREAD_POOL.install(|| {
-        (0..partitions)
-            .into_par_iter()
-            .map(|partition| {
-                let span = bounds[partition]..bounds[partition + 1];
-                let rows = &rows[span.clone()];
-                let codes = &row_codes[span];
-                let (slots, first_rows, slot_codes) = number_groups(codes, rows);
-                let mut states: Vec<State> = aggregations
-                    .iter()
-                    .map(|aggregation| State::new(aggregation, first_rows.len(), top))
-                    .collect();
-                for (aggregation, state) in aggregations.iter().zip(&mut states) {
-                    update(
-                        state,
-                        aggregation,
-                        top,
-                        rows.len(),
-                        |index| rows[index] as usize,
-                        |index| slots[index] as usize,
-                    );
-                }
-                (first_rows, slot_codes, states)
-            })
-            .collect()
-    });
-    let groups: usize = parts
-        .iter()
-        .map(|(first_rows, _, _)| first_rows.len())
-        .sum();
-    let mut first_rows = Vec::with_capacity(groups);
-    let mut slot_codes = Vec::with_capacity(groups);
-    let mut states: Vec<State> = aggregations
-        .iter()
-        .map(|aggregation| State::new(aggregation, 0, top))
-        .collect();
-    for (part_rows, part_codes, part_states) in parts {
-        first_rows.extend(part_rows);
-        slot_codes.extend(part_codes);
-        for (state, part) in states.iter_mut().zip(part_states) {
-            state.append(part);
-        }
-    }
-    Grouping {
-        first_rows,
-        codes: slot_codes,
-        states,
-    }
+    (rows, row_codes, bounds)
 }
 
 /// Numbers the distinct codes of one partition in order of first appearance: each row's slot,
@@ -1971,10 +2121,12 @@ fn top_k(
         input: Input::None,
         na_rm: false,
     };
-    let codes = row_codes(keys, height);
+    let Some((codes, radix)) = row_codes(keys, height) else {
+        return Ok(None);
+    };
     let grouping = group(
         &codes,
-        keys.radix,
+        radix,
         std::slice::from_ref(&aggregation),
         Some(&ranking),
     );
@@ -2092,7 +2244,31 @@ impl Moments {
 
 #[cfg(test)]
 mod tests {
-    use super::Flags;
+    use super::{Flags, rank};
+
+    #[test]
+    fn ranks_keep_the_code_order_across_chunk_borders() {
+        // Several chunks of rows, with runs of equal codes that straddle the chunk borders.
+        let height = (1 << 16) * 5 + 123;
+        let mut state: u64 = 17;
+        let mut codes: Vec<u64> = (0..height)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 40) % 1000 * (u64::MAX / 1000)
+            })
+            .collect();
+        let original = codes.clone();
+        let mut distinct = original.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(rank(&mut codes), distinct.len() as u64);
+        for (code, ranked) in original.iter().zip(&codes) {
+            assert_eq!(distinct.get(*ranked as usize), Some(code));
+        }
+        assert_eq!(rank(&mut []), 0);
+    }
 
     #[test]
     fn appended_flags_keep_every_slot_at_any_offset() {
