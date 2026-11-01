@@ -8,6 +8,7 @@ pub mod lints;
 pub mod load_index;
 pub mod metadata;
 pub mod naming;
+pub mod sorted;
 pub mod stubs;
 pub mod testing;
 pub mod types;

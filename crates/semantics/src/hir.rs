@@ -1,7 +1,8 @@
 //! Spans are item-relative, so an edit elsewhere in the file reproduces an
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
-use rustc_hash::{FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHasher};
+use std::num::NonZeroU32;
 use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
 use std::{fmt, iter, ops};
@@ -15,49 +16,64 @@ pub struct ExprId(pub u32);
 pub struct PatId(pub u32);
 
 /// An identifier, interned process-wide: the same spelling is one allocation shared by every
-/// item that mentions it, and copying one costs two words. The table only grows, which is
-/// bounded by the distinct spellings a session has seen.
+/// item that mentions it, and a symbol is a four-byte index into that table, so an
+/// `Option<Symbol>` costs no more than the symbol. The table only grows, which is bounded by the
+/// distinct spellings a session has seen.
 #[derive(Clone, Copy, salsa::SalsaValue)]
-pub struct Symbol(&'static str);
+pub struct Symbol(NonZeroU32);
 
 const SYMBOL_SHARDS: usize = 16;
 
-static SYMBOLS: LazyLock<[Mutex<FxHashSet<&'static str>>; SYMBOL_SHARDS]> =
-    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(FxHashSet::default())));
+/// Spelling to symbol, sharded by the spelling's hash so parallel lowering rarely contends.
+static SYMBOL_IDS: LazyLock<[Mutex<FxHashMap<&'static str, Symbol>>; SYMBOL_SHARDS]> =
+    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(FxHashMap::default())));
+
+/// Symbol to spelling. Appending never moves an entry, so a read needs no lock.
+static SYMBOL_TEXT: LazyLock<boxcar::Vec<&'static str>> = LazyLock::new(boxcar::Vec::new);
 
 impl Symbol {
     pub fn new(text: &str) -> Symbol {
         let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
-        let shard = &SYMBOLS[hasher.finish() as usize % SYMBOL_SHARDS];
-        // A poisoned shard means another thread died mid-insert; the set is still a valid
-        // set of leaked strings, so keep serving it.
+        let shard = &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS];
+        // A poisoned shard means another thread died mid-insert; the map is still a valid
+        // map of leaked strings, so keep serving it.
         let mut shard = shard
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(&interned) = shard.get(text) {
-            return Symbol(interned);
+        if let Some(&symbol) = shard.get(text) {
+            return symbol;
         }
         let interned: &'static str = Box::leak(text.into());
-        shard.insert(interned);
-        Symbol(interned)
+        // Pushed under the shard lock, so one spelling can never get two indexes.
+        let index = SYMBOL_TEXT.push(interned);
+        let symbol = Symbol(
+            u32::try_from(index + 1)
+                .ok()
+                .and_then(NonZeroU32::new)
+                .expect("fewer than 2^32 distinct identifiers"),
+        );
+        shard.insert(interned, symbol);
+        symbol
     }
 
     pub fn as_str(self) -> &'static str {
-        self.0
+        SYMBOL_TEXT
+            .get(self.0.get() as usize - 1)
+            .expect("a symbol indexes the table that minted it")
     }
 }
 
 impl ops::Deref for Symbol {
     type Target = str;
     fn deref(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl PartialEq for Symbol {
     fn eq(&self, other: &Symbol) -> bool {
-        std::ptr::eq(self.0, other.0)
+        self.0 == other.0
     }
 }
 
@@ -65,31 +81,31 @@ impl Eq for Symbol {}
 
 impl PartialEq<str> for Symbol {
     fn eq(&self, other: &str) -> bool {
-        self.0 == other
+        self.as_str() == other
     }
 }
 
 impl PartialEq<&str> for Symbol {
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
+        self.as_str() == *other
     }
 }
 
 impl PartialEq<Symbol> for String {
     fn eq(&self, other: &Symbol) -> bool {
-        self.as_str() == other.0
+        self.as_str() == other.as_str()
     }
 }
 
 impl PartialEq<Symbol> for &str {
     fn eq(&self, other: &Symbol) -> bool {
-        *self == other.0
+        *self == other.as_str()
     }
 }
 
 impl PartialEq<Symbol> for str {
     fn eq(&self, other: &Symbol) -> bool {
-        self == other.0
+        self == other.as_str()
     }
 }
 
@@ -101,13 +117,13 @@ impl Default for Symbol {
 
 impl PartialEq<String> for Symbol {
     fn eq(&self, other: &String) -> bool {
-        self.0 == other
+        self.as_str() == other
     }
 }
 
 impl Hash for Symbol {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
+        self.as_str().hash(state);
     }
 }
 
@@ -119,19 +135,19 @@ impl PartialOrd for Symbol {
 
 impl Ord for Symbol {
     fn cmp(&self, other: &Symbol) -> std::cmp::Ordering {
-        self.0.cmp(other.0)
+        self.as_str().cmp(other.as_str())
     }
 }
 
 impl std::borrow::Borrow<str> for Symbol {
     fn borrow(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl AsRef<str> for Symbol {
     fn as_ref(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
@@ -149,13 +165,13 @@ impl From<String> for Symbol {
 
 impl fmt::Display for Symbol {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
+        formatter.write_str(self.as_str())
     }
 }
 
 impl fmt::Debug for Symbol {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.0, formatter)
+        fmt::Debug::fmt(self.as_str(), formatter)
     }
 }
 
