@@ -7,7 +7,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
         conditions,
-        long_double::LongDouble,
+        long_double::{self, LongDouble},
         rmath,
         unwind::{R, error},
         values::{
@@ -15,6 +15,7 @@ use {
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    smallvec::SmallVec,
 };
 
 unsafe extern "C" {
@@ -2568,8 +2569,8 @@ enum Summary {
 }
 
 /// The values a summary function reduces, and whether `na.rm` was set.
-unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
-    let mut items = Vec::new();
+unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
+    let mut items = SmallVec::new();
     let mut na_rm = false;
     for arg in call.args {
         if arg.tag == symbols().na_rm {
@@ -2583,9 +2584,7 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
-    let (mut items, na_rm) = summary_args(call)?;
-    // NULL contributes no values, and the typed loops below read vectors' payloads directly.
-    items.retain(|item| *item != nil());
+    let (items, na_rm) = summary_args(call)?;
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())
             || (item.kind() == SexpType::String
@@ -2597,8 +2596,6 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             )));
         }
     }
-    // `NULL` contributes nothing, and it has no elements to read.
-    let items: Vec<Sexp> = items.into_iter().filter(|item| *item != nil()).collect();
     let kind = items.iter().fold(SexpType::Logical, |kind, item| {
         coerce::higher_type(kind, item.kind())
     });
@@ -2626,16 +2623,30 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 for &item in &items {
                     let mut item_total = LongDouble::ZERO;
                     let mut first_nan = None;
-                    for index in 0..length(item) {
-                        let value = real_at(item, index);
-                        if value.is_nan() {
-                            if na_rm {
-                                continue;
+                    if item.kind() == SexpType::Real {
+                        let mut rest = values::reals(values::materialize(item)?);
+                        while let Some(at) = rest.iter().position(|value| value.is_nan()) {
+                            item_total = long_double::add_all(item_total, &rest[..at]);
+                            if !na_rm {
+                                first_nan = Some(rest[at]);
+                                rest = &[];
+                                break;
                             }
-                            first_nan = Some(value);
-                            break;
+                            rest = &rest[at + 1..];
                         }
-                        item_total += value;
+                        item_total = long_double::add_all(item_total, rest);
+                    } else {
+                        for index in 0..length(item) {
+                            let value = real_at(item, index);
+                            if value.is_nan() {
+                                if na_rm {
+                                    continue;
+                                }
+                                first_nan = Some(value);
+                                break;
+                            }
+                            item_total += value;
+                        }
                     }
                     let item_sum = first_nan.unwrap_or_else(|| item_total.to_f64());
                     na |= is_na_real(item_sum);
@@ -2924,7 +2935,7 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             if data.iter().any(|&value| is_na_real(value)) {
                 return scalar_real(NA_REAL);
             }
-            scalar_real(long_double_mean(data.iter().copied()).to_f64())
+            scalar_real(long_double_mean(data).to_f64())
         }
         SexpType::Complex => {
             let mut total = Rcomplex { r: 0.0, i: 0.0 };
@@ -2946,22 +2957,13 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
 
 /// GNU R's mean of doubles: the `long double` sum divided by the count, refined by the mean of
 /// the deviations from it unless it overflowed.
-pub fn long_double_mean(data: impl Iterator<Item = f64> + Clone) -> LongDouble {
-    let mut count = 0;
-    let mut total = LongDouble::ZERO;
-    for value in data.clone() {
-        total += value;
-        count += 1;
-    }
-    let mean = total / count;
+pub fn long_double_mean(data: &[f64]) -> LongDouble {
+    let count = data.len();
+    let mean = long_double::add_all(LongDouble::ZERO, data) / count;
     if !mean.is_finite() {
         return mean;
     }
-    let mut deviations = LongDouble::ZERO;
-    for value in data {
-        deviations = deviations + (LongDouble::from(value) - mean);
-    }
-    mean + deviations / count
+    mean + long_double::add_differences(LongDouble::ZERO, data, mean) / count
 }
 
 // NA tests.

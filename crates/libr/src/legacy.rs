@@ -16,7 +16,7 @@ use {
         runtime,
         vectors::sexp_type,
     },
-    heap::object::{Sexp, SexpType},
+    heap::object::{Sexp, SexpType, gp},
     std::ffi::c_int,
 };
 
@@ -182,8 +182,8 @@ pub unsafe extern "C" fn FRAME(env: Sexp) -> Sexp {
                 .heap
                 .alloc_triple(SexpType::Pairlist, cell.cdr(), list, symbol)?;
             runtime.heap.root(list);
-            if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
-                list.set_gp_bits(heap::object::gp::ACTIVE_BINDING, true);
+            if cell.has_gp(gp::ACTIVE_BINDING) {
+                list.set_gp_bits(gp::ACTIVE_BINDING, true);
             }
         }
         Ok(list)
@@ -197,6 +197,62 @@ pub unsafe extern "C" fn HASHTAB(env: Sexp) -> Sexp {
         checked(env, SexpType::Environment, "HASHTAB")?;
         Ok(runtime().nil())
     })
+}
+
+/// `SET_FRAME(env, list)`: replaces `env`'s bindings with the tagged elements of `list`, the
+/// shape `FRAME` returns. Serializers that rebuild environments (qs) call it on a fresh one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_FRAME(env: Sexp, list: Sexp) {
+    enter(|| {
+        let env = checked(env, SexpType::Environment, "SET_FRAME")?;
+        clear_frame(env)?;
+        define_from_pairlist(env, list)
+    })
+}
+
+/// `SET_HASHTAB(env, table)`: replaces `env`'s bindings with those of `table`, a list of
+/// bucket pairlists as GNU R hashes a frame. `NULL` is what `HASHTAB` reports for every frame,
+/// so setting it back leaves the frame as it is.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SET_HASHTAB(env: Sexp, table: Sexp) {
+    enter(|| {
+        let env = checked(env, SexpType::Environment, "SET_HASHTAB")?;
+        if table.kind() == SexpType::Nil {
+            return Ok(());
+        }
+        let table = checked(table, SexpType::List, "SET_HASHTAB")?;
+        clear_frame(env)?;
+        for index in 0..table.length() as usize {
+            define_from_pairlist(env, table.element(index))?;
+        }
+        Ok(())
+    })
+}
+
+unsafe fn clear_frame(env: Sexp) -> ApiResult<()> {
+    let runtime = runtime();
+    for symbol in runtime.heap.frame_symbols(env) {
+        runtime.heap.remove_binding(env, symbol)?;
+    }
+    Ok(())
+}
+
+/// Binds each tagged element of a pairlist, keeping the active-binding mark `FRAME` sets.
+unsafe fn define_from_pairlist(env: Sexp, mut list: Sexp) -> ApiResult<()> {
+    let runtime = runtime();
+    while list.kind() == SexpType::Pairlist {
+        let symbol = list.tag();
+        if symbol.kind() == SexpType::Symbol {
+            runtime.heap.define(env, symbol, list.car())?;
+            if list.has_gp(gp::ACTIVE_BINDING)
+                && let Some(cell) = runtime.heap.frame_cell(env, symbol)
+            {
+                cell.set_gp_bits(gp::ACTIVE_BINDING, true);
+            }
+        }
+        list = list.cdr();
+    }
+    Ok(())
 }
 
 #[unsafe(no_mangle)]

@@ -11,7 +11,7 @@ pub mod libr;
 pub use reedline;
 use std::{
     error::Error,
-    ffi::{CString, c_char, c_int},
+    ffi::{CString, c_char, c_int, c_void},
     fmt,
     io::IsTerminal,
     path::{Path, PathBuf},
@@ -213,6 +213,32 @@ pub fn run_console_on_ry_runtime(
             flags.bits(),
         )
     })
+}
+
+/// Reads the debug client's next message for [`debug_on_ry_runtime`]; `libr::eval::DebugReceive`
+/// states the contract.
+pub type DebugReceive = unsafe extern "C" fn(c_int, *mut usize, *mut c_void) -> *const c_char;
+
+/// Sends one message to the debug client; `libr::eval::DebugSend` states the contract.
+pub type DebugSend = unsafe extern "C" fn(*const c_char, usize, *mut c_void);
+
+/// Runs a Debug Adapter Protocol server on ry's runtime, which talks to the client through
+/// `receive` and `send` with `data` passed back to both, and returns the debugged program's
+/// exit status.
+///
+/// # Safety
+///
+/// The callbacks must keep their contracts, and `data` must stay valid, until this returns.
+pub unsafe fn debug_on_ry_runtime(
+    receive: DebugReceive,
+    send: DebugSend,
+    data: *mut c_void,
+    flags: RuntimeFlags,
+) -> Result<i32, ReplError> {
+    let library = ry_runtime()?;
+    type Adapter = unsafe extern "C" fn(DebugReceive, DebugSend, *mut c_void, c_int) -> c_int;
+    let adapter = runtime_entry::<Adapter>(library, "ry_debug_adapter")?;
+    Ok(unsafe { adapter(receive, send, data, flags.bits()) })
 }
 
 /// Has ry's runtime start analyzing the package at `package` in the background. Preparing
