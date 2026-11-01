@@ -39,9 +39,9 @@ use std::{
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("file", 6, do_file),
-    internal("gzfile", 4, do_gzfile),
-    internal("bzfile", 4, |_| Err(unsupported("bzfile"))),
-    internal("xzfile", 4, |_| Err(unsupported("xzfile"))),
+    internal("gzfile", 4, |call| unsafe { compressed_file(call, "gzfile") }),
+    internal("bzfile", 4, |call| unsafe { compressed_file(call, "bzfile") }),
+    internal("xzfile", 4, |call| unsafe { compressed_file(call, "xzfile") }),
     internal("fifo", 4, |_| Err(unsupported("fifo"))),
     internal("url", 6, |_| Err(error("ry does not support URL connections yet"))),
     internal("pipe", 3, do_pipe),
@@ -504,7 +504,7 @@ pub fn expand_path(path: &str) -> String {
 // The internals.
 
 /// `file(description, open, blocking, encoding, method, raw)`. An empty description is an
-/// anonymous file opened `"w+"`, and a file opened for reading that holds gzip data reads
+/// anonymous file, opened `"w+"` unless `open` says otherwise, and a file opened for reading that holds gzip data reads
 /// decompressed with class `gzfile`.
 unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
@@ -515,7 +515,8 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         return Err(error("ry does not support URL connections yet"));
     }
     let (path, temporary, open) = if description.is_empty() {
-        (temporary_path(), true, "w+".to_owned())
+        let open = if open.is_empty() { "w+".to_owned() } else { open };
+        (temporary_path(), true, open)
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
@@ -542,9 +543,11 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     Ok(object)
 }
 
-/// `gzfile(description, open, encoding, compression)`: gzip-compressed writes, and reads that
-/// decompress gzip data and pass anything else through.
-unsafe fn do_gzfile(call: &Call<'_>) -> R<Sexp> {
+/// `gzfile`, `bzfile` and `xzfile(description, open, encoding, compression)`: reads decompress
+/// gzip, bzip2 or xz data and pass anything else through. Writes are always gzip, because ry has
+/// no bzip2 or xz encoder for streams; every reader, GNU R's included, detects the format from
+/// the magic bytes, so `save(compress = "xz")` still loads anywhere.
+unsafe fn compressed_file(call: &Call<'_>, class: &str) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
     let open = values::require_string(call.arg(1), "open")?;
     let compression = values::as_integer_scalar(call.arg(3));
@@ -559,7 +562,7 @@ unsafe fn do_gzfile(call: &Call<'_>) -> R<Sexp> {
         compression: compression as u32,
         stream: None,
     });
-    new_builtin("gzfile", description.as_bytes(), &open, "rb", device, |_| {})
+    new_builtin(class, description.as_bytes(), &open, "rb", device, |_| {})
 }
 
 fn unsupported(class: &str) -> Unwind {
@@ -753,7 +756,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
             }
             if character == EOF {
                 if !line.is_empty() || nul {
-                    if (*con).text != 0 && (*con).blocking == 0 && class_of(con) != "gzfile" {
+                    if (*con).text != 0 && (*con).blocking == 0 && !matches!(class_of(con).as_ref(), "gzfile" | "bzfile" | "xzfile") {
                         push_back_bytes(con, &line);
                         (*con).incomplete = 1;
                     } else {

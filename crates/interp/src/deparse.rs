@@ -287,8 +287,11 @@ impl Deparser {
                     self.print(")");
                 } else if name.is_empty() {
                     // The empty symbol, `R_MissingArg`.
-                } else {
+                } else if self.backtick {
                     self.print(&quote_name(&name));
+                } else {
+                    // `backtick = FALSE`, the default for a symbol, prints a non-syntactic name bare.
+                    self.print(&name);
                 }
             }
             SexpType::Closure => self.closure(object),
