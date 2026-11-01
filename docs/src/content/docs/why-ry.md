@@ -21,7 +21,7 @@ discount("a", 0.2)   # expected a numeric value (`integer` or `double`), found `
 ```
 
 You write annotations inline, such as `function(x: integer) -> integer`, or as `#:` comments, and
-every example in the docs offers both. Inline annotations are on by default, at the price that plain
+most typed examples in the docs offer both. Inline annotations are on by default, at the price that plain
 `Rscript` cannot run the file unless it goes through `ry run`. Comments keep the file plain R that
 every other tool can read.
 

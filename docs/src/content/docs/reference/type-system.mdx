@@ -147,8 +147,6 @@ first <- function(items) items[[1L]]
 </TabItem>
 </Tabs>
 
-The tabs above show each form beside the comment it lowers to.
-
 - `name: TYPE <- value` declares a binding's type. The `=` spelling, `name: TYPE = value`, works too.
 - `name: TYPE` in a parameter list declares a parameter's type, before its default if it has one.
   `...: TYPE` declares the rest parameter.
@@ -228,7 +226,7 @@ the code agree, and a binder whose constraint differs is reported the same way, 
 constraint winning. A positional parameter type in a compact `#:` annotation is compared with
 the formal it pairs with.
 
-This example mixes both spellings on purpose.
+This example deliberately uses both spellings on one function:
 
 ```r
 #: fn(price: double, rate: double) -> double
@@ -254,9 +252,7 @@ erase the annotations, but ry's runtime registers no checks for them.
 `ry run` and `ry repl` run annotated code on both runtimes. GNU R reads the erasure. ry's runtime
 reads the annotations themselves and checks a function's parameter and return types at its
 boundary, so a function called with the wrong kind of value fails where it was called instead of
-somewhere inside it:
-
-Run-time checks come from the inline spelling, so this example has a single block.
+somewhere inside it. The checks come from the inline spelling, so this example has a single block:
 
 ```r
 scale <- function(values: double, by: double) -> double values * by
@@ -1132,7 +1128,7 @@ representation. Use [`@new`](#nominal-introduction) instead.
 already knows the type, `@if-unknown` is an error, even if the requested type matches the known one,
 so it can never override information the checker has.
 
-These coercions exist only as `#:` comments.
+Coercions have no inline spelling and are written only as `#:` comments:
 
 ```r
 #: @if-unknown integer
@@ -1172,7 +1168,7 @@ expression has the nominal type from then on.
 - `@new` is an annotation form, not a type expression, so it cannot appear inside a compact type or
   an expanded function annotation.
 
-Type definitions and `@new` exist only as `#:` comments.
+Type definitions and `@new` have no inline spelling and are written only as `#:` comments:
 
 ```r
 #: @type Person<T> {list{ value: T }}
