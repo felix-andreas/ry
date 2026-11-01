@@ -19,6 +19,10 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub fn with_capacity(bindings: usize) -> Frame {
+        Frame { cells: Vec::with_capacity(bindings), index: None }
+    }
+
     pub fn cells(&self) -> &[Sexp] {
         &self.cells
     }

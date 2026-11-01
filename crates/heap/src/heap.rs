@@ -542,9 +542,14 @@ impl Heap {
     }
 
     pub unsafe fn alloc_environment(&mut self, enclosure: Sexp) -> HeapResult<Sexp> {
+        self.alloc_environment_with_capacity(enclosure, 0)
+    }
+
+    /// An environment whose frame has room for `bindings` bindings before it grows.
+    pub unsafe fn alloc_environment_with_capacity(&mut self, enclosure: Sexp, bindings: usize) -> HeapResult<Sexp> {
         let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
         let object = self.allocate(SexpType::Environment, size, &[enclosure])?;
-        object.set_frame_ptr(Box::into_raw(Box::<Frame>::default()));
+        object.set_frame_ptr(Box::into_raw(Box::new(Frame::with_capacity(bindings))));
         object.set_enclosure_unbarriered(enclosure);
         Ok(object)
     }
