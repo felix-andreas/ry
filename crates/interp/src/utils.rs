@@ -1582,7 +1582,11 @@ unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
     };
     let append = values::as_logical_scalar(call.arg(1)) == 1;
     let interval = values::as_real_scalar(call.arg(2));
-    let interval = if interval.is_finite() && interval > 0.0 { interval } else { 0.02 };
+    let interval = if interval.is_finite() && interval > 0.0 {
+        interval
+    } else {
+        0.02
+    };
     let micros = (interval * 1e6).round().max(1.0) as u64;
     let path = crate::connections::expand_path(&filename);
     let file = std::fs::OpenOptions::new()
@@ -1591,7 +1595,11 @@ unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
         .append(append)
         .truncate(!append)
         .open(&path)
-        .map_err(|failure| error(format!("Rprof: cannot open profile file '{filename}': {failure}")))?;
+        .map_err(|failure| {
+            error(format!(
+                "Rprof: cannot open profile file '{filename}': {failure}"
+            ))
+        })?;
     let mut output = BufWriter::new(file);
     writeln!(output, "sample.interval={micros}").map_err(profile_write_error)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -1604,7 +1612,11 @@ unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
                 PROFILE_TICK.store(true, Ordering::Relaxed);
             }
         })
-        .map_err(|failure| error(format!("Rprof: cannot start the profiling timer: {failure}")))?;
+        .map_err(|failure| {
+            error(format!(
+                "Rprof: cannot start the profiling timer: {failure}"
+            ))
+        })?;
     PROFILER.with_borrow_mut(|profiler| *profiler = Some(Profiler { output, stop }));
     Ok(nil())
 }
@@ -1634,7 +1646,10 @@ pub unsafe fn record_profile_sample(innermost: Option<&str>) -> R<()> {
     }
     line.push('\n');
     PROFILER.with_borrow_mut(|profiler| match profiler {
-        Some(profiler) => profiler.output.write_all(line.as_bytes()).map_err(profile_write_error),
+        Some(profiler) => profiler
+            .output
+            .write_all(line.as_bytes())
+            .map_err(profile_write_error),
         None => Ok(()),
     })
 }

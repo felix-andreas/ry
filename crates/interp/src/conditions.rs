@@ -146,7 +146,9 @@ pub unsafe fn quietly(body: impl FnOnce() -> R<Sexp>) -> R<Option<Sexp>> {
     interp().handlers = saved;
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(Unwind::Jump(caught)) if matches!(*caught, Jump::Return { env, .. } if env == target) => Ok(None),
+        Err(Unwind::Jump(caught)) if matches!(*caught, Jump::Return { env, .. } if env == target) => {
+            Ok(None)
+        }
         Err(unwind) => Err(unwind),
     }
 }

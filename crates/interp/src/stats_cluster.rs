@@ -209,7 +209,8 @@ pub unsafe fn kmns(call: &NativeCall<'_>) -> R<Sexp> {
         }
     }
     values::reals_mut(arguments[3]).copy_from_slice(&state.c);
-    let one_based = |indices: &[usize]| -> Vec<i32> { indices.iter().map(|&index| index as i32 + 1).collect() };
+    let one_based =
+        |indices: &[usize]| -> Vec<i32> { indices.iter().map(|&index| index as i32 + 1).collect() };
     values::ints_mut(arguments[5]).copy_from_slice(&one_based(&state.ic1));
     values::ints_mut(arguments[6]).copy_from_slice(&one_based(&state.ic2));
     values::ints_mut(arguments[7]).copy_from_slice(&state.nc);
@@ -391,7 +392,10 @@ impl HartiganWong {
                 let mut l2 = first_other;
                 let mut r2 = self.distance(i, l2) * self.an2[l2];
                 for l in 0..k {
-                    if (step >= self.live[l1] && step >= self.live[l]) || l == l1 || l == first_other {
+                    if (step >= self.live[l1] && step >= self.live[l])
+                        || l == l1
+                        || l == first_other
+                    {
                         continue;
                     }
                     let rr = r2 / self.an2[l];
@@ -681,7 +685,13 @@ pub unsafe fn cutree(call: &NativeCall<'_>) -> R<Sexp> {
         // The cluster (as an observation in it) each merge step formed.
         let mut formed = vec![0usize; steps];
         for step in 0..n - groups as usize {
-            let member = |entry: i32, formed: &[usize]| if entry < 0 { (-entry - 1) as usize } else { formed[entry as usize - 1] };
+            let member = |entry: i32, formed: &[usize]| {
+                if entry < 0 {
+                    (-entry - 1) as usize
+                } else {
+                    formed[entry as usize - 1]
+                }
+            };
             let left = member(merge[step], &formed);
             let right = member(merge[step + steps], &formed);
             let (left_root, right_root) = (root(&mut parent, left), root(&mut parent, right));

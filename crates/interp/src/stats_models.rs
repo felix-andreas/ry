@@ -10,9 +10,8 @@
 use crate::{
     builtin_libraries::NativeCall,
     deparse::{deparse_lines, options},
-    eval,
+    eval, linalg,
     sort::{IdenticalFlags, identical},
-    linalg,
     stats::{as_reals, matrix_shape},
     unwind::R,
     values::{self, length, nil, symbols},
@@ -33,7 +32,10 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("'specials' must be NULL or a character vector"));
     }
     let frame_names: Vec<String> = match data.kind() {
-        SexpType::List => values::strings(values::names(data)).into_iter().flatten().collect(),
+        SexpType::List => values::strings(values::names(data))
+            .into_iter()
+            .flatten()
+            .collect(),
         _ => Vec::new(),
     };
     let has_response = length(formula) == 3;
@@ -53,7 +55,11 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
         lhs_symbols(lhs, &mut on_lhs);
         model.frame_names.retain(|name| !on_lhs.contains(name));
     }
-    let rhs = if has_response { formula.cdr().cdr().car() } else { formula.cdr().car() };
+    let rhs = if has_response {
+        formula.cdr().cdr().car()
+    } else {
+        formula.cdr().car()
+    };
     model.extract(rhs)?;
     let mut terms = model.encode(rhs)?;
     let offsets: Vec<usize> = (0..model.variables.len())
@@ -69,21 +75,38 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
     values::clear_attributes(result);
     if !model.frame_names.is_empty() {
         let expanded = expand_frame_dot(rhs, &model.frame_names)?;
-        let tail = if has_response { result.cdr().cdr() } else { result.cdr() };
+        let tail = if has_response {
+            result.cdr().cdr()
+        } else {
+            result.cdr()
+        };
         crate::heap().set_car(tail, expanded);
     }
 
     let variable_count = model.variables.len();
-    let variable_names: Vec<String> = model.variables.iter().map(|&variable| variable_label(variable)).collect();
+    let variable_names: Vec<String> = model
+        .variables
+        .iter()
+        .map(|&variable| variable_label(variable))
+        .collect();
     let variables = values::call(values::install("list")?, &model.variables)?;
     values::set_attr(result, values::install("variables")?, variables)?;
     if !offsets.is_empty() {
         let indices: Vec<i32> = offsets.iter().map(|&index| index as i32 + 1).collect();
-        values::set_attr(result, values::install("offset")?, values::integer_vector(&indices)?)?;
+        values::set_attr(
+            result,
+            values::install("offset")?,
+            values::integer_vector(&indices)?,
+        )?;
     }
     let term_labels: Vec<String> = terms
         .iter()
-        .map(|term| term.iter().map(|&variable| variable_names[variable].as_str()).collect::<Vec<_>>().join(":"))
+        .map(|term| {
+            term.iter()
+                .map(|&variable| variable_names[variable].as_str())
+                .collect::<Vec<_>>()
+                .join(":")
+        })
         .collect();
     let factors = if terms.is_empty() {
         values::alloc(SexpType::Integer, 0)?
@@ -98,12 +121,19 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
         }
         let dim = values::integer_vector(&[variable_count as i32, terms.len() as i32])?;
         values::set_attr(matrix, symbols().dim, dim)?;
-        let dimnames = values::list_vector(&[values::string_vector(&variable_names)?, values::string_vector(&term_labels)?])?;
+        let dimnames = values::list_vector(&[
+            values::string_vector(&variable_names)?,
+            values::string_vector(&term_labels)?,
+        ])?;
         values::set_attr(matrix, symbols().dimnames, dimnames)?;
         matrix
     };
     values::set_attr(result, values::install("factors")?, factors)?;
-    values::set_attr(result, values::install("term.labels")?, values::string_vector(&term_labels)?)?;
+    values::set_attr(
+        result,
+        values::install("term.labels")?,
+        values::string_vector(&term_labels)?,
+    )?;
     if specials != nil() {
         let mut items = Vec::new();
         for name in values::strings(specials).into_iter().flatten() {
@@ -111,17 +141,37 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
                 .filter(|&index| is_call_to(model.variables[index], &name))
                 .map(|index| index as i32 + 1)
                 .collect();
-            let value = if indices.is_empty() { nil() } else { values::integer_vector(&indices)? };
+            let value = if indices.is_empty() {
+                nil()
+            } else {
+                values::integer_vector(&indices)?
+            };
             items.push((values::install(&name)?, value));
         }
         let table = values::pairlist(&items, SexpType::Pairlist)?;
         values::set_attr(result, values::install("specials")?, table)?;
     }
     let orders: Vec<i32> = terms.iter().map(|term| term.len() as i32).collect();
-    values::set_attr(result, values::install("order")?, values::integer_vector(&orders)?)?;
-    values::set_attr(result, values::install("intercept")?, values::scalar_integer(model.intercept as i32)?)?;
-    values::set_attr(result, values::install("response")?, values::scalar_integer(has_response as i32)?)?;
-    values::set_attr(result, symbols().class, values::string_vector(&["terms", "formula"])?)?;
+    values::set_attr(
+        result,
+        values::install("order")?,
+        values::integer_vector(&orders)?,
+    )?;
+    values::set_attr(
+        result,
+        values::install("intercept")?,
+        values::scalar_integer(model.intercept as i32)?,
+    )?;
+    values::set_attr(
+        result,
+        values::install("response")?,
+        values::scalar_integer(has_response as i32)?,
+    )?;
+    values::set_attr(
+        result,
+        symbols().class,
+        values::string_vector(&["terms", "formula"])?,
+    )?;
     values::set_attr(result, values::install(".Environment")?, environment)?;
     Ok(result)
 }
@@ -147,7 +197,11 @@ pub unsafe fn updateform(call: &NativeCall<'_>) -> R<Sexp> {
         heap.set_car(new.cdr().cdr(), expanded);
     } else {
         let rhs = old.cdr().car();
-        let cell = if length(new) == 3 { new.cdr().cdr() } else { new.cdr() };
+        let cell = if length(new) == 3 {
+            new.cdr().cdr()
+        } else {
+            new.cdr()
+        };
         let expanded = expand_dots(cell.car(), rhs)?;
         heap.set_car(cell, expanded);
     }
@@ -183,24 +237,40 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
     let mut names = Vec::with_capacity(variable_count + dot_count);
     for index in 0..variable_count {
         columns.push(values::list_elt(variables, index));
-        names.push(values::string_at(variable_names, index).map(|name| name.into_owned()).unwrap_or_default());
+        names.push(
+            values::string_at(variable_names, index)
+                .map(|name| name.into_owned())
+                .unwrap_or_default(),
+        );
     }
     for index in 0..dot_count {
         let value = values::list_elt(dots, index);
         if value == nil() {
             continue;
         }
-        let name = values::string_at(dot_names, index).map(|name| name.into_owned()).unwrap_or_default();
+        let name = values::string_at(dot_names, index)
+            .map(|name| name.into_owned())
+            .unwrap_or_default();
         columns.push(value);
         names.push(format!("({name})"));
     }
     for (column, name) in columns.iter().zip(&names) {
         match column.kind() {
-            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::String | SexpType::Raw => {}
-            SexpType::List if values::inherits(*column, "AsIs") || values::inherits(*column, "data.frame") => {}
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw => {}
+            SexpType::List
+                if values::inherits(*column, "AsIs") || values::inherits(*column, "data.frame") => {
+            }
             SexpType::Object => {}
             other => {
-                return Err(call.error(format!("invalid type ({}) for variable '{name}'", other.name())));
+                return Err(call.error(format!(
+                    "invalid type ({}) for variable '{name}'",
+                    other.name()
+                )));
             }
         }
     }
@@ -247,7 +317,10 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("invalid result from na.action"));
     }
     for index in 0..length(result) {
-        copy_most_attributes_no_ts(values::list_elt(data, index), values::list_elt(result, index))?;
+        copy_most_attributes_no_ts(
+            values::list_elt(data, index),
+            values::list_elt(result, index),
+        )?;
     }
     Ok(result)
 }
@@ -262,13 +335,27 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
     let variables = attribute("variables")?;
     let factors_attribute = attribute("factors")?;
     let variable_count = length(variables).saturating_sub(1);
-    let term_count = if length(factors_attribute) == 0 { 0 } else { matrix_shape(factors_attribute).1 };
-    let mut codes: Vec<i32> = if term_count == 0 { Vec::new() } else { values::ints(factors_attribute).to_vec() };
+    let term_count = if length(factors_attribute) == 0 {
+        0
+    } else {
+        matrix_shape(factors_attribute).1
+    };
+    let mut codes: Vec<i32> = if term_count == 0 {
+        Vec::new()
+    } else {
+        values::ints(factors_attribute).to_vec()
+    };
     if frame.kind() != SexpType::List || length(frame) < variable_count {
         return Err(call.error("invalid model frame"));
     }
-    let variable_names: Vec<String> = (0..variable_count).map(|index| variable_label(nth(variables, index + 1))).collect();
-    let rows = if length(frame) > 0 { rows_of(values::list_elt(frame, 0)) } else { 0 };
+    let variable_names: Vec<String> = (0..variable_count)
+        .map(|index| variable_label(nth(variables, index + 1)))
+        .collect();
+    let rows = if length(frame) > 0 {
+        rows_of(values::list_elt(frame, 0))
+    } else {
+        0
+    };
 
     let mut kinds = Vec::with_capacity(variable_count);
     for (index, name) in variable_names.iter().enumerate() {
@@ -277,22 +364,31 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
             return Err(call.error(format!("variable lengths differ (found for '{name}')")));
         }
         let kind = if values::inherits(variable, "factor") {
-            Variable::Factor { levels: length(values::get_attr(variable, symbols().levels)) }
+            Variable::Factor {
+                levels: length(values::get_attr(variable, symbols().levels)),
+            }
         } else if variable.kind() == SexpType::Logical {
             Variable::Factor { levels: 2 }
         } else if matches!(variable.kind(), SexpType::Integer | SexpType::Real) {
-            Variable::Numeric { columns: matrix_shape(variable).1 }
+            Variable::Numeric {
+                columns: matrix_shape(variable).1,
+            }
         } else if index + 1 == response {
             Variable::Numeric { columns: 0 }
         } else {
-            return Err(call.error(format!("invalid type ({}) for variable '{name}'", variable.kind().name())));
+            return Err(call.error(format!(
+                "invalid type ({}) for variable '{name}'",
+                variable.kind().name()
+            )));
         };
         kinds.push(kind);
     }
     if !intercept {
         'first: for term in 0..term_count {
             for variable in response..variable_count {
-                if matches!(kinds[variable], Variable::Factor { levels } if levels > 0) && codes[variable + term * variable_count] > 0 {
+                if matches!(kinds[variable], Variable::Factor { levels } if levels > 0)
+                    && codes[variable + term * variable_count] > 0
+                {
                     codes[variable + term * variable_count] = 2;
                     break 'first;
                 }
@@ -309,10 +405,18 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
             if code == 0 || !matches!(kinds[variable], Variable::Factor { .. }) {
                 continue;
             }
-            let slot = if code == 1 { &mut contrasts[variable] } else { &mut full_codings[variable] };
+            let slot = if code == 1 {
+                &mut contrasts[variable]
+            } else {
+                &mut full_codings[variable]
+            };
             if slot.is_none() {
                 let value = values::list_elt(frame, variable);
-                let arguments = if code == 1 { vec![value] } else { vec![value, values::scalar_bool(false)?] };
+                let arguments = if code == 1 {
+                    vec![value]
+                } else {
+                    vec![value, values::scalar_bool(false)?]
+                };
                 let contrast_call = values::call(contrasts_symbol, &arguments)?;
                 let matrix = as_reals(eval::eval(contrast_call, call.env)?)?;
                 *slot = Some(matrix);
@@ -343,12 +447,21 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
                     let data = crate::stats::real_values(value)?;
                     let labels = column_labels(value, count)?;
                     for column in 0..count {
-                        let label = if count == 1 { name.clone() } else { format!("{name}{}", labels[column]) };
-                        factor_columns.push((data[column * rows..(column + 1) * rows].to_vec(), label));
+                        let label = if count == 1 {
+                            name.clone()
+                        } else {
+                            format!("{name}{}", labels[column])
+                        };
+                        factor_columns
+                            .push((data[column * rows..(column + 1) * rows].to_vec(), label));
                     }
                 }
                 Variable::Factor { levels } => {
-                    let coding = if code == 1 { contrasts[variable] } else { full_codings[variable] };
+                    let coding = if code == 1 {
+                        contrasts[variable]
+                    } else {
+                        full_codings[variable]
+                    };
                     let Some(coding) = coding else { continue };
                     let (coding_rows, coding_columns) = matrix_shape(coding);
                     if coding_rows != levels {
@@ -357,7 +470,16 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
                     let entries = values::reals(coding).to_vec();
                     let labels = column_labels(coding, coding_columns)?;
                     let level_codes: Vec<i32> = if value.kind() == SexpType::Logical {
-                        values::ints(value).iter().map(|&entry| if entry == NA_INTEGER { NA_INTEGER } else { entry + 1 }).collect()
+                        values::ints(value)
+                            .iter()
+                            .map(|&entry| {
+                                if entry == NA_INTEGER {
+                                    NA_INTEGER
+                                } else {
+                                    entry + 1
+                                }
+                            })
+                            .collect()
                     } else {
                         values::ints(value).to_vec()
                     };
@@ -379,8 +501,13 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
             let mut next = Vec::with_capacity(current.len() * factor_columns.len());
             for (factor_data, factor_label) in &factor_columns {
                 for (data, label) in &current {
-                    let product: Vec<f64> = data.iter().zip(factor_data).map(|(a, b)| a * b).collect();
-                    let joined = if label.is_empty() { factor_label.clone() } else { format!("{label}:{factor_label}") };
+                    let product: Vec<f64> =
+                        data.iter().zip(factor_data).map(|(a, b)| a * b).collect();
+                    let joined = if label.is_empty() {
+                        factor_label.clone()
+                    } else {
+                        format!("{label}:{factor_label}")
+                    };
                     next.push((product, joined));
                 }
             }
@@ -401,7 +528,11 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
     let row_names = expanded_row_names(values::get_attr(frame, symbols().row_names), rows)?;
     let dimnames = values::list_vector(&[row_names, values::string_vector(&column_names)?])?;
     values::set_attr(matrix, symbols().dimnames, dimnames)?;
-    values::set_attr(matrix, values::install("assign")?, values::integer_vector(&assign)?)?;
+    values::set_attr(
+        matrix,
+        values::install("assign")?,
+        values::integer_vector(&assign)?,
+    )?;
     Ok(matrix)
 }
 
@@ -429,7 +560,15 @@ pub unsafe fn influence(call: &NativeCall<'_>) -> R<Sexp> {
         let integer = |value: usize| values::scalar_integer(value as i32);
         let qraux = values::real_vector(&qraux)?;
         let decomposition = values::duplicate(qr)?;
-        linalg::dqrqy(&[decomposition, integer(n)?, integer(rank)?, qraux, units, integer(rank)?, rotated])?;
+        linalg::dqrqy(&[
+            decomposition,
+            integer(n)?,
+            integer(rank)?,
+            qraux,
+            units,
+            integer(rank)?,
+            rotated,
+        ])?;
         let rotated = values::reals(rotated);
         for column in 0..rank {
             for (total, value) in hat.iter_mut().zip(&rotated[column * n..(column + 1) * n]) {
@@ -449,7 +588,11 @@ pub unsafe fn influence(call: &NativeCall<'_>) -> R<Sexp> {
         let column = &errors[outcome * n..(outcome + 1) * n];
         let total: f64 = column.iter().map(|value| value * value).sum();
         for row in 0..n {
-            let left_out = if hat[row] < 1.0 { total - column[row] * column[row] / (1.0 - hat[row]) } else { total };
+            let left_out = if hat[row] < 1.0 {
+                total - column[row] * column[row] / (1.0 - hat[row])
+            } else {
+                total
+            };
             sigma[row + outcome * n] = (left_out / denominator).sqrt();
         }
     }
@@ -487,7 +630,11 @@ struct Model {
 impl Model {
     unsafe fn install(&mut self, variable: Sexp) -> R<usize> {
         let flags = IdenticalFlags::default();
-        if let Some(index) = self.variables.iter().position(|&known| identical(known, variable, &flags)) {
+        if let Some(index) = self
+            .variables
+            .iter()
+            .position(|&known| identical(known, variable, &flags))
+        {
             return Ok(index);
         }
         self.variables.push(variable);
@@ -515,7 +662,11 @@ impl Model {
                     self.install(expression).map(|_| ())
                 }
             }
-            SexpType::Logical | SexpType::Integer | SexpType::Real if is_zero_or_one(expression) => Ok(()),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+                if is_zero_or_one(expression) =>
+            {
+                Ok(())
+            }
             SexpType::Language => {
                 let operator = operator_name(expression);
                 match operator.as_deref() {
@@ -529,7 +680,9 @@ impl Model {
                         Ok(())
                     }
                     Some("^") => {
-                        if length(expression) != 3 || !is_numeric_scalar(expression.cdr().cdr().car()) {
+                        if length(expression) != 3
+                            || !is_numeric_scalar(expression.cdr().cdr().car())
+                        {
                             return Err(self.error("invalid power in formula"));
                         }
                         self.extract(expression.cdr().car())
@@ -544,7 +697,9 @@ impl Model {
     unsafe fn encode(&mut self, expression: Sexp) -> R<Vec<Term>> {
         match expression.kind() {
             SexpType::Nil => Ok(Vec::new()),
-            SexpType::Logical | SexpType::Integer | SexpType::Real if is_zero_or_one(expression) => {
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+                if is_zero_or_one(expression) =>
+            {
                 let one = values::as_real_scalar(expression) == 1.0;
                 self.intercept = if one { self.parity } else { !self.parity };
                 Ok(Vec::new())
@@ -590,7 +745,9 @@ impl Model {
                         let left = self.encode(first())?;
                         let right = self.encode(second())?;
                         let all = union_all(&right);
-                        Ok(trim_repeats(left.iter().map(|term| union(term, &all)).collect()))
+                        Ok(trim_repeats(
+                            left.iter().map(|term| union(term, &all)).collect(),
+                        ))
                     }
                     (Some("/"), 2) => {
                         let left = self.encode(first())?;
@@ -630,7 +787,10 @@ impl Model {
         let right = self.encode(removed);
         self.parity = !self.parity;
         let right = right?;
-        Ok(left.into_iter().filter(|term| !right.contains(term)).collect())
+        Ok(left
+            .into_iter()
+            .filter(|term| !right.contains(term))
+            .collect())
     }
 }
 
@@ -638,11 +798,17 @@ impl Model {
 /// variable removed is empty or contained in an earlier term (so contrasts suffice), 2 when the
 /// variable must be coded by indicators of all its levels.
 fn term_code(terms: &[Term], position: usize, variable: usize) -> i32 {
-    let remainder: Term = terms[position].iter().copied().filter(|&other| other != variable).collect();
+    let remainder: Term = terms[position]
+        .iter()
+        .copied()
+        .filter(|&other| other != variable)
+        .collect();
     if remainder.is_empty() {
         return 1;
     }
-    let covered = terms[..position].iter().any(|earlier| remainder.iter().all(|member| earlier.contains(member)));
+    let covered = terms[..position]
+        .iter()
+        .any(|earlier| remainder.iter().all(|member| earlier.contains(member)));
     if covered { 1 } else { 2 }
 }
 
@@ -688,7 +854,9 @@ unsafe fn operator_name(expression: Sexp) -> Option<String> {
 }
 
 pub(crate) unsafe fn is_call_to(expression: Sexp, name: &str) -> bool {
-    expression.kind() == SexpType::Language && expression.car().kind() == SexpType::Symbol && values::symbol_name(expression.car()) == name
+    expression.kind() == SexpType::Language
+        && expression.car().kind() == SexpType::Symbol
+        && values::symbol_name(expression.car()) == name
 }
 
 unsafe fn is_dot(expression: Sexp) -> bool {
@@ -696,11 +864,15 @@ unsafe fn is_dot(expression: Sexp) -> bool {
 }
 
 unsafe fn is_numeric_scalar(expression: Sexp) -> bool {
-    matches!(expression.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real) && length(expression) == 1
+    matches!(
+        expression.kind(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) && length(expression) == 1
 }
 
 unsafe fn is_zero_or_one(expression: Sexp) -> bool {
-    is_numeric_scalar(expression) && matches!(values::as_real_scalar(expression), value if value == 0.0 || value == 1.0)
+    is_numeric_scalar(expression)
+        && matches!(values::as_real_scalar(expression), value if value == 0.0 || value == 1.0)
 }
 
 /// The symbols of a left-hand side, which `.` on the right excludes.
@@ -726,7 +898,11 @@ unsafe fn expand_frame_dot(expression: Sexp, names: &[String]) -> R<Sexp> {
         for name in &names[1..] {
             sum = values::call(symbols().plus, &[sum, values::install(name)?])?;
         }
-        return if names.len() > 1 { values::call(symbols().paren, &[sum]) } else { Ok(sum) };
+        return if names.len() > 1 {
+            values::call(symbols().paren, &[sum])
+        } else {
+            Ok(sum)
+        };
     }
     if expression.kind() != SexpType::Language {
         return Ok(expression);
@@ -746,13 +922,25 @@ unsafe fn expand_frame_dot(expression: Sexp, names: &[String]) -> R<Sexp> {
 /// of, by the same table GNU R uses (which parenthesizes a little more than precedence needs).
 unsafe fn expand_dots(expression: Sexp, value: Sexp) -> R<Sexp> {
     if expression.kind() == SexpType::Symbol {
-        return if is_dot(expression) { values::duplicate(value) } else { Ok(expression) };
+        return if is_dot(expression) {
+            values::duplicate(value)
+        } else {
+            Ok(expression)
+        };
     }
     if expression.kind() != SexpType::Language {
         return Ok(expression);
     }
-    let value_operator = if value.kind() == SexpType::Language { operator_name(value) } else { None };
-    let wraps = |operators: &[&str]| value_operator.as_deref().is_some_and(|operator| operators.contains(&operator));
+    let value_operator = if value.kind() == SexpType::Language {
+        operator_name(value)
+    } else {
+        None
+    };
+    let wraps = |operators: &[&str]| {
+        value_operator
+            .as_deref()
+            .is_some_and(|operator| operators.contains(&operator))
+    };
     let (left, right): (&[&str], &[&str]) = match operator_name(expression).as_deref() {
         Some("+") => (&[], &[]),
         Some("-" | "*" | "/") => (&["+", "-"], &["+", "-"]),
@@ -811,7 +999,10 @@ unsafe fn rows_of(x: Sexp) -> usize {
 }
 
 pub(crate) unsafe fn compact_row_count(row_names: Sexp) -> Option<usize> {
-    if row_names.kind() == SexpType::Integer && length(row_names) == 2 && values::ints(row_names)[0] == NA_INTEGER {
+    if row_names.kind() == SexpType::Integer
+        && length(row_names) == 2
+        && values::ints(row_names)[0] == NA_INTEGER
+    {
         Some(values::ints(row_names)[1].unsigned_abs() as usize)
     } else {
         None
@@ -836,7 +1027,10 @@ unsafe fn column_labels(x: Sexp, count: usize) -> R<Vec<String>> {
     if dimnames.kind() == SexpType::List && length(dimnames) == 2 {
         let names = values::list_elt(dimnames, 1);
         if names.kind() == SexpType::String && length(names) == count {
-            return Ok(values::strings(names).into_iter().map(|name| name.unwrap_or_else(|| "NA".to_owned())).collect());
+            return Ok(values::strings(names)
+                .into_iter()
+                .map(|name| name.unwrap_or_else(|| "NA".to_owned()))
+                .collect());
         }
     }
     Ok((1..=count).map(|column| column.to_string()).collect())
@@ -845,13 +1039,22 @@ unsafe fn column_labels(x: Sexp, count: usize) -> R<Vec<String>> {
 /// Copies the attributes `na.action` may have dropped from a model frame column: all but the
 /// names, dimensions and time series properties.
 unsafe fn copy_most_attributes_no_ts(from: Sexp, to: Sexp) -> R<()> {
-    let skipped = [symbols().names, symbols().dim, symbols().dimnames, symbols().tsp];
+    let skipped = [
+        symbols().names,
+        symbols().dim,
+        symbols().dimnames,
+        symbols().tsp,
+    ];
     for (tag, value) in values::pairlist_items(from.attrib()) {
         if skipped.contains(&tag) {
             continue;
         }
         if tag == symbols().class {
-            let classes: Vec<String> = values::strings(value).into_iter().flatten().filter(|class| class != "ts").collect();
+            let classes: Vec<String> = values::strings(value)
+                .into_iter()
+                .flatten()
+                .filter(|class| class != "ts")
+                .collect();
             if classes.is_empty() {
                 continue;
             }
@@ -887,7 +1090,11 @@ pub unsafe fn numeric_deriv(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let evaluate = || -> R<Sexp> {
         let value = eval::eval(expression, env)?;
-        let value = if value.kind() == SexpType::Real { values::duplicate(value)? } else { crate::coerce::coerce_vector(value, SexpType::Real)? };
+        let value = if value.kind() == SexpType::Real {
+            values::duplicate(value)?
+        } else {
+            crate::coerce::coerce_vector(value, SexpType::Real)?
+        };
         Ok(value)
     };
     let answer = evaluate()?;
@@ -919,24 +1126,35 @@ pub unsafe fn numeric_deriv(call: &NativeCall<'_>) -> R<Sexp> {
     for (index, &parameter) in parameters.iter().enumerate() {
         for j in 0..length(parameter) {
             let original = values::reals(parameter)[j];
-            let delta = if original == 0.0 { epsilon } else { original.abs() * epsilon };
+            let delta = if original == 0.0 {
+                epsilon
+            } else {
+                original.abs() * epsilon
+            };
             values::reals_mut(parameter)[j] = original + directions[index] * delta;
             let forward = crate::scope(|| Ok(ValueVector(values::reals(evaluate()?).to_vec())))?.0;
             if central {
                 values::reals_mut(parameter)[j] = original - directions[index] * delta;
-                let backward = crate::scope(|| Ok(ValueVector(values::reals(evaluate()?).to_vec())))?.0;
+                let backward =
+                    crate::scope(|| Ok(ValueVector(values::reals(evaluate()?).to_vec())))?.0;
                 for k in 0..rows {
                     if !forward[k].is_finite() || !backward[k].is_finite() {
-                        return Err(call.error("Missing value or an infinity produced when evaluating the model"));
+                        return Err(call.error(
+                            "Missing value or an infinity produced when evaluating the model",
+                        ));
                     }
-                    gradient[column * rows + k] = directions[index] * (forward[k] - backward[k]) / (2.0 * delta);
+                    gradient[column * rows + k] =
+                        directions[index] * (forward[k] - backward[k]) / (2.0 * delta);
                 }
             } else {
                 for k in 0..rows {
                     if !forward[k].is_finite() {
-                        return Err(call.error("Missing value or an infinity produced when evaluating the model"));
+                        return Err(call.error(
+                            "Missing value or an infinity produced when evaluating the model",
+                        ));
                     }
-                    gradient[column * rows + k] = directions[index] * (forward[k] - base[k]) / delta;
+                    gradient[column * rows + k] =
+                        directions[index] * (forward[k] - base[k]) / delta;
                 }
             }
             values::reals_mut(parameter)[j] = original;
@@ -994,7 +1212,9 @@ pub unsafe fn nls_iter(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let get_parameters = component("getPars")?;
     let global = values::global_env();
-    let scalar = |expression: Sexp| -> R<f64> { crate::scope(|| Ok(values::as_real_scalar(eval::eval(expression, global)?))) };
+    let scalar = |expression: Sexp| -> R<f64> {
+        crate::scope(|| Ok(values::as_real_scalar(eval::eval(expression, global)?)))
+    };
     let mut parameters = crate::stats::real_values(eval::eval(get_parameters, global)?)?;
     let mut deviance = scalar(deviance_call)?;
     if trace_on {
@@ -1046,7 +1266,11 @@ pub unsafe fn nls_iter(call: &NativeCall<'_>) -> R<Sexp> {
                 evaluations += 1;
                 total_evaluations += 1;
             }
-            let trial: Vec<f64> = parameters.iter().zip(&step).map(|(value, change)| value + factor * change).collect();
+            let trial: Vec<f64> = parameters
+                .iter()
+                .zip(&step)
+                .map(|(value, change)| value + factor * change)
+                .collect();
             let singular = crate::scope(|| {
                 let argument = values::real_vector(&trial)?;
                 let expression = values::call(set_parameters, &[argument])?;
@@ -1057,7 +1281,14 @@ pub unsafe fn nls_iter(call: &NativeCall<'_>) -> R<Sexp> {
             }
             let new_deviance = scalar(deviance_call)?;
             if print_eval {
-                crate::write_console(format!(" new dev = {}\n", crate::format::c_general(new_deviance, 6, false)).as_bytes(), false);
+                crate::write_console(
+                    format!(
+                        " new dev = {}\n",
+                        crate::format::c_general(new_deviance, 6, false)
+                    )
+                    .as_bytes(),
+                    false,
+                );
             }
             if new_deviance <= deviance {
                 deviance = new_deviance;
@@ -1081,7 +1312,12 @@ pub unsafe fn nls_iter(call: &NativeCall<'_>) -> R<Sexp> {
         iteration += 1;
     }
     if !converged {
-        return fail(format!("number of iterations exceeded maximum of {max_iterations}"), 3, iteration, criterion);
+        return fail(
+            format!("number of iterations exceeded maximum of {max_iterations}"),
+            3,
+            iteration,
+            criterion,
+        );
     }
     finish("converged".to_owned(), 0, iteration, criterion)
 }
