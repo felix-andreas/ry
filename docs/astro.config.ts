@@ -6,6 +6,7 @@ import starlightThemeBlack from 'starlight-theme-black'
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://ry-lang.org',
 	// Every page published before the docs were reorganised keeps working.
 	redirects: {
 		'/formatter': '/guides/formatting',
