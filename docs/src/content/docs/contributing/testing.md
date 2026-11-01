@@ -356,6 +356,12 @@ its replay command, and `just fuzz-differential` and `just gc-torture` are the l
 `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
 allocation, which is too slow for a debug build today.
 
+`crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
+Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
+uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
+invalid, requests at every stop. Every request must get exactly one response, the session must end,
+and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing session.
+
 ### The table engine
 
 `crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes
@@ -365,8 +371,9 @@ tables and queries and checks the native kernels against the Polars plans
 iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
-`tools/bench/table/run.sh <dir> [rows]` runs the db-benchmark questions under data.table and the
-engine, each printing rows, columns and a checksum, so the answers compare line by line.
+`just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
+data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
+data.table's, and rewrites the matching results table in `contributing/design/r-runtime.md`.
 
 ### Coverage-guided fuzzing
 
@@ -556,7 +563,12 @@ The packages are brio from the benchmark closure, vendored in `tests/packages/br
   builds of one package never share a session.
 - `test_headers.rs` compiles every header as C11 and C++17 with warnings as errors, checks with
   the compiler that every declared name is exported, runs BLAS and LAPACK calls through the
-  headers, and compares the graphics structs' layout with GNU R's.
+  headers, and compares the graphics structs' layout with GNU R's. It also requires every name in
+  `tests/headers/r_api_names.txt` (GNU R's public header names that its `R.dll` exports, plus the
+  internals packages link) to be declared by ry's headers and exported by `libR`. With
+  `RY_GNU_R_INCLUDE` and `RY_GNU_R_EXPORTS` pointing at a GNU R `include/` and a list of its
+  `R.dll` exports, `api_names_cover_gnu_r` checks the list against that release, and
+  `RY_UPDATE_API_NAMES=1` regenerates it.
 - `test_altrep.rs` and `test_altrep_api.rs` drive the `altreptest` package's classes of every
   kind and base R's own classes, against a report recorded from GNU R.
 - `test_serialize.rs` and `test_serialize_native.rs` read and write GNU R's recorded streams byte

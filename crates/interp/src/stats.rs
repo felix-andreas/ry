@@ -586,8 +586,8 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> Lo
         }
         return sum;
     }
-    let x_mean = arith::long_double_mean(used_values(x, used));
-    let y_mean = arith::long_double_mean(used_values(y, used));
+    let x_mean = arith::long_double_mean(&used_values(x, used));
+    let y_mean = arith::long_double_mean(&used_values(y, used));
     for k in 0..x.len() {
         if used[k] {
             sum = sum + (LongDouble::from(x[k]) - x_mean) * (LongDouble::from(y[k]) - y_mean);
@@ -596,11 +596,12 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> Lo
     sum / (count - 1)
 }
 
-fn used_values<'a>(data: &'a [f64], used: &'a [bool]) -> impl Iterator<Item = f64> + Clone + 'a {
+fn used_values(data: &[f64], used: &[bool]) -> Vec<f64> {
     data.iter()
         .zip(used)
         .filter(|(_, flag)| **flag)
         .map(|(value, _)| *value)
+        .collect()
 }
 
 /// One entry of a pairwise-complete `cov` or `cor`.

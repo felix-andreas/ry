@@ -16,6 +16,7 @@ use {
         infer::apply_definition,
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
+        metadata::is_own_package,
         naming::{BindingId, BindingKind, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
@@ -1164,6 +1165,13 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                         SemanticClass::Function if library_reads.contains(&start) => {
                             SemanticClass::LibraryFunction
                         }
+                        // `pkg::name` naming the project's own package reads its own function.
+                        SemanticClass::LibraryFunction
+                            if namespace_of(&token)
+                                .is_some_and(|package| is_own_package(db, &package)) =>
+                        {
+                            SemanticClass::Function
+                        }
                         class => class,
                     })
                 }
@@ -1174,6 +1182,15 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
         }
     }
     spans
+}
+
+/// The package `pkg` of the name token in `pkg::name` or `pkg:::name`.
+fn namespace_of(token: &SyntaxToken) -> Option<String> {
+    let namespace = token.parent()?.parent()?;
+    (namespace.kind() == NAMESPACE_EXPR)
+        .then(|| child_node(&namespace, NAME))
+        .flatten()
+        .map(|package| package.text().to_string())
 }
 
 /// A token of type syntax, classified from its place in the tree alone; stub files, which have no
@@ -2701,6 +2718,68 @@ fn string_argument_content(node: Option<SyntaxNode>) -> Option<(String, TextRang
             TextSize::of(name),
         ),
     ))
+}
+
+/// An action an editor shows above a line. A reference count is only a place here: counting
+/// searches the project, so the server resolves it when the editor shows the lens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeLens {
+    pub kind: CodeLensKind,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeLensKind {
+    RunFile,
+    Test { name: String },
+    References,
+}
+
+/// "Run file" sits on the first top-level statement, so a file of definitions alone (a package's
+/// `R/` file, say) has nothing to run and no lens. A test is a top-level `test_that` call whose
+/// description is a plain string, which is what an editor can pass on to select it.
+pub fn code_lenses(db: &dyn Db, file: SourceFile) -> Vec<CodeLens> {
+    let mut lenses = Vec::new();
+    let mut run_file = false;
+    for &item in item_tree(db, file) {
+        match *item.kind(db) {
+            ItemKind::Function => {
+                if let Some(range) = item_name_range(db, item) {
+                    lenses.push(CodeLens {
+                        kind: CodeLensKind::References,
+                        range,
+                    });
+                }
+            }
+            ItemKind::Value => {}
+            ItemKind::Statement => {
+                let Some(node) = item_node(db, item) else {
+                    continue;
+                };
+                if !run_file {
+                    run_file = true;
+                    lenses.push(CodeLens {
+                        kind: CodeLensKind::RunFile,
+                        range: node.text_range(),
+                    });
+                }
+                if node.kind() == CALL_EXPR
+                    && s4_callee_name(&node).as_deref() == Some("test_that")
+                    && let Some((name, _)) = child_node(&node, ARGUMENT_LIST)
+                        .and_then(|arguments| {
+                            string_argument_content(s4_argument(&arguments, "desc", 0))
+                        })
+                        .filter(|(name, _)| !name.contains('\\'))
+                {
+                    lenses.push(CodeLens {
+                        kind: CodeLensKind::Test { name },
+                        range: node.text_range(),
+                    });
+                }
+            }
+        }
+    }
+    lenses
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5233,6 +5312,24 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     if !spells_name {
                         continue;
                     }
+                    // `ownpkg::name` reaches the project's own definition, so it is a use too.
+                    result.extend(
+                        node.descendants()
+                            .filter(|namespace| namespace.kind() == NAMESPACE_EXPR)
+                            .filter_map(|namespace| {
+                                let mut names =
+                                    namespace.children().filter(|child| child.kind() == NAME);
+                                let package = names.next()?;
+                                let used = names.next()?;
+                                (used.text() == name.as_str()
+                                    && is_own_package(db, &package.text().to_string()))
+                                .then(|| Occurrence {
+                                    file,
+                                    range: used.text_range(),
+                                    is_declaration: false,
+                                })
+                            }),
+                    );
                     let Some(naming) = item_naming(db, item) else {
                         continue;
                     };

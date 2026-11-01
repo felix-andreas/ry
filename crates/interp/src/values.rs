@@ -224,6 +224,9 @@ pub struct Globals {
     /// `.cache_class`: each S4 class's S3 class vector (the class and what it extends), which
     /// the methods package keeps current as it defines and removes classes.
     pub s4_extends: rustc_hash::FxHashMap<Box<[u8]>, Sexp>,
+    /// The implicit class vectors S3 dispatch builds for unclassed objects, by dimension shape
+    /// and type, so that dispatching on a plain vector allocates no class vector.
+    pub implicit_classes: rustc_hash::FxHashMap<(u8, SexpType), Sexp>,
 }
 
 impl Globals {
@@ -235,6 +238,7 @@ impl Globals {
             primitive_methods: rustc_hash::FxHashMap::default(),
             keep: Vec::new(),
             s4_extends: rustc_hash::FxHashMap::default(),
+            implicit_classes: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -255,6 +259,9 @@ impl Globals {
         }
         for &extends in self.s4_extends.values() {
             marker.mark(extends);
+        }
+        for &classes in self.implicit_classes.values() {
+            marker.mark(classes);
         }
     }
 }
@@ -541,7 +548,17 @@ pub unsafe fn call(function: Sexp, arguments: &[Sexp]) -> R<Sexp> {
 // Reading.
 
 /// R's `length()` for every type, without dispatch.
+#[inline]
 pub unsafe fn length(object: Sexp) -> usize {
+    if object.kind().is_vector() && !object.is_altrep() {
+        return object.length() as usize;
+    }
+    other_length(object)
+}
+
+// Out of line, so that `length` of a plain vector inlines.
+#[inline(never)]
+unsafe fn other_length(object: Sexp) -> usize {
     match object.kind() {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => pairlist_length(object),
