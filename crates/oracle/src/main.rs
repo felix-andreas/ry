@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use oracle::bench::{self, Summary};
 use oracle::{
     Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
-    gnu_r_available, packages, parse, render,
+    gnu_r_available, install, packages, parse, render,
 };
 use packages::{PackageOutcome, Runtime, Settings};
 
@@ -80,6 +80,27 @@ enum Command {
         /// The packages to run (default: every package in `closure.txt`).
         packages: Vec<String>,
     },
+    /// Install corpus packages from source through ry's `R CMD INSTALL` on ry's runtime, in
+    /// dependency order, and load each one.
+    Install {
+        /// ry's R home, from `ry-rcmd assemble` (default: `.corpus/ry-home`).
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// The library to install into (default: `.corpus/ry-library`).
+        #[arg(long)]
+        library: Option<PathBuf>,
+        /// Packages installed in parallel.
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+        /// The limit in seconds for one package's installation.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// The corpus directory (default: `$RY_CORPUS_DIR`, then `.corpus` in the repository).
+        #[arg(long)]
+        corpus: Option<PathBuf>,
+        /// The packages to install (default: every package in `closure.txt`).
+        packages: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -141,6 +162,14 @@ fn main() -> ExitCode {
             corpus,
             packages,
         } => run_packages(runtime, jobs, timeout, rerun_gnu_r, corpus, packages),
+        Command::Install {
+            home,
+            library,
+            jobs,
+            timeout,
+            corpus,
+            packages,
+        } => run_install(home, library, jobs, timeout, corpus, packages),
         Command::Show { path } => match gnu_r.run(&path) {
             Ok(outcome) => {
                 print!("{}", render(&outcome));
@@ -259,6 +288,64 @@ fn compare(gnu_r: &ProcessEngine, second: &dyn Engine, cases: &[PathBuf]) -> Exi
     summarize(cases.len() - skipped, failures)
 }
 
+fn corpus_directory(corpus: Option<PathBuf>) -> PathBuf {
+    corpus
+        .or_else(|| std::env::var_os("RY_CORPUS_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"))
+}
+
+fn run_install(
+    home: Option<PathBuf>,
+    library: Option<PathBuf>,
+    jobs: usize,
+    timeout: u64,
+    corpus: Option<PathBuf>,
+    packages: Vec<String>,
+) -> ExitCode {
+    let corpus = corpus_directory(corpus);
+    let absolute = |path: PathBuf| std::path::absolute(&path).unwrap_or(path);
+    let everything = match packages::closure(&corpus) {
+        Ok(everything) => everything,
+        Err(error) => {
+            eprintln!("cannot read {}: {error}; run `just corpus-sources` first", corpus.join("closure.txt").display());
+            return ExitCode::from(2);
+        }
+    };
+    let packages = if packages.is_empty() { everything } else { packages };
+    let settings = install::Settings {
+        home: absolute(home.unwrap_or_else(|| corpus.join("ry-home"))),
+        library: absolute(library.unwrap_or_else(|| corpus.join("ry-library"))),
+        corpus: absolute(corpus),
+        jobs,
+        timeout: Duration::from_secs(timeout),
+    };
+    if !settings.home.join("bin/R").exists() {
+        eprintln!("{} is not an R home; run `just ry-home` first", settings.home.display());
+        return ExitCode::from(2);
+    }
+    let report = |package: &str, outcome: &install::Outcome| {
+        let line = match outcome {
+            install::Outcome::Installed { seconds, loaded: Ok(()) } => format!("installed {seconds:>6.1}s, loads"),
+            install::Outcome::Installed { seconds, loaded: Err(error) } => {
+                format!("installed {seconds:>6.1}s, load failed: {error}")
+            }
+            install::Outcome::Failed { seconds, error } => format!("failed    {seconds:>6.1}s: {error}"),
+            install::Outcome::Skipped(reason) => format!("skipped: {reason}"),
+            install::Outcome::NoSources => "no sources".to_owned(),
+        };
+        println!("{package:<24} {line}");
+    };
+    let outcomes = install::run(&settings, &packages, &report);
+    let path = settings.corpus.join("ry-install").join("summary.tsv");
+    if let Err(error) = std::fs::write(&path, install::summary(&outcomes)) {
+        eprintln!("cannot write {}: {error}", path.display());
+        return ExitCode::FAILURE;
+    }
+    let (installed, loaded) = install::counts(&outcomes);
+    println!("{} packages: {installed} installed, {loaded} load; summary in {}", outcomes.len(), path.display());
+    ExitCode::SUCCESS
+}
+
 fn run_packages(
     runtime: String,
     jobs: usize,
@@ -276,9 +363,7 @@ fn run_packages(
             return ExitCode::from(2);
         }
     };
-    let corpus = corpus
-        .or_else(|| std::env::var_os("RY_CORPUS_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
+    let corpus = corpus_directory(corpus);
     let everything = match packages::closure(&corpus) {
         Ok(everything) => everything,
         Err(error) => {

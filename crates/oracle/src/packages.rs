@@ -312,7 +312,7 @@ fn run_suite(
 
 /// Runs `command` in its own process group and kills the group at `deadline`, or when the
 /// script exits, because test suites start workers (callr, parallel) that would outlive it.
-fn run_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Status> {
+pub fn run_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Status> {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let mut child = command.spawn()?;
