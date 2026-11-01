@@ -66,7 +66,6 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   new name.
 - **`if` around `NAMESPACE` directives is ignored** with a warning; evaluating the condition in R
   would fix it.
-- **`R/unix/` and `R/windows/` subdirectories are not loaded**, nor are `data/` datasets (LazyData).
 - **A delayed `S3method(pkg::generic, class)` hook** (`setHook(packageEvent(...))`) is added on every
   reload that re-registers it and never removed.
 - **A declared `S3method` whose function does not exist** registers a promise that fails at
@@ -2280,13 +2279,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   libr's built-in evaluator is unused while the interpreter is installed.
 - **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
   weak list with a `NULL` key.
-- **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
-  push for each returned handle. If profiling shows it, the hot accessors (`INTEGER`, `REAL`,
-  `TYPEOF`, `XLENGTH`) can get C fast paths that read the header directly.
-- **The handle scope retains a native loop's dropped temporaries until the call returns.** If a real
-  package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
-- **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
-  only loader, so macOS and Windows need their own paths.
 - **Graphics gaps** (`decisions.md`, "One graphics engine for base graphics, grid and device
   packages"). Base graphics, grid, lattice and ragg match GNU R pixel for pixel on the `grid__*`
   oracle cases; what is left:

@@ -3,7 +3,7 @@
 use {
     crate::{
         Rboolean,
-        boundary::{ApiResult, Handout, enter, error},
+        boundary::{ApiResult, Handout, Reachable, enter, error},
         eval::force_promise,
         runtime,
         strings::utf8_text,
@@ -360,7 +360,7 @@ pub unsafe extern "C" fn Rf_findFun(symbol: Sexp, env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ENCLOS(env: Sexp) -> Sexp {
-    enter(|| Ok(environment(env, "ENCLOS")?.enclosure()))
+    enter(|| Ok(Reachable(environment(env, "ENCLOS")?.enclosure()))).0
 }
 
 #[unsafe(no_mangle)]

@@ -21,6 +21,7 @@ use {
 
 pub type Sexp = *mut c_void;
 
+pub const NILSXP: c_int = 0;
 pub const INTSXP: c_int = 13;
 pub const REALSXP: c_int = 14;
 pub const STRSXP: c_int = 16;

@@ -19,7 +19,7 @@
 use {
     crate::{
         Global, R_xlen_t, Rboolean,
-        boundary::{ApiResult, Handout, enter, error, with_native_scope, write_console},
+        boundary::{ApiResult, Handout, Reachable, enter, error, with_native_scope, write_console},
         memory, runtime,
         vectors::{self, sexp_type},
     },
@@ -933,12 +933,12 @@ unsafe fn instance(object: Sexp) -> ApiResult<Sexp> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_altrep_data1(object: Sexp) -> Sexp {
-    enter(|| Ok(instance(object)?.car()))
+    enter(|| Ok(Reachable(instance(object)?.car()))).0
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_altrep_data2(object: Sexp) -> Sexp {
-    enter(|| Ok(instance(object)?.cdr()))
+    enter(|| Ok(Reachable(instance(object)?.cdr()))).0
 }
 
 #[unsafe(no_mangle)]
@@ -959,7 +959,7 @@ pub unsafe extern "C" fn R_set_altrep_data2(object: Sexp, value: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ALTREP_CLASS(object: Sexp) -> Sexp {
-    enter(|| Ok(instance(object)?.tag()))
+    enter(|| Ok(Reachable(instance(object)?.tag()))).0
 }
 
 #[unsafe(no_mangle)]

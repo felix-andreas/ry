@@ -1813,12 +1813,33 @@ interned symbol, the weak-reference list, and any `RootSource` an interpreter or
 function that allocates while it holds a handle that nothing else roots must root it first, and collection stress is what
 exposes a miss.
 
-**The handle scope roots what the API hands out, not every allocation.** While a native call is on
-the stack, every handle an API function returns to native code is pushed to the handle stack, and
-the native call's return truncates it. Rooting results rather than allocations matters for
-`Rf_eval` called from native code: the evaluator's own temporaries stay collectable, and only the
-value native code receives is kept. The cost is that a native loop that allocates and drops many
-temporaries keeps them until it returns, which GNU R would have collected.
+**The handle scope roots what the API hands out, not every allocation, and only recently.** While a
+native call is on the stack, a handle an API function returns to native code goes to the heap's
+handouts stack (`Heap::hand_out`), which the native call truncates on return. Rooting results
+rather than allocations matters for `Rf_eval` called from native code: the evaluator's own
+temporaries stay collectable, and only the value native code receives is kept.
+- Previously every handout stayed rooted until the call returned, so a native loop that allocated
+  and dropped temporaries kept all of them, which GNU R would have collected. A call now keeps only
+  its most recent `HANDOUT_WINDOW` (1,024) to twice that; once it holds twice the window, the older
+  half is dropped in one `drain`, so the cost per handout stays constant and memory stays bounded.
+  Code correct under GNU R never needs an older handout, because GNU R may collect an unprotected
+  object at the next allocation.
+- Only the outermost API function hands out (`Runtime::api_depth`). A nested one returns to ry's own
+  code, which the outer function's handle scope covers, and pushing it to the window would let it
+  displace native code's recent handouts.
+- A result reachable through the argument it was read from (`CAR`, `CDR`, `TAG`, the `CADR` family,
+  `ENCLOS`, the external pointer and ALTREP fields, `PRINTNAME`) is `Reachable` and takes no handle.
+- The previous design kept one handle stack for both the Rust side and native code. Handouts got
+  their own stack because the window drops entries from the middle of a call's region, which must
+  never touch handles ry's own code pushed.
+
+**Accessors are inline in `Rinternals.h` and mirrored in libR.** The header reads the kind byte
+(offset 0), the ALTREP flag (offset 2, bit 1), a vector's length (offset 16), its elements
+(offset 32) and a cell's three fields (offsets 16, 24, 32) directly, and calls the exported
+function for anything else. `heap/src/object.rs` pins those offsets with const assertions. The
+exported functions take identical fast paths before `enter`, so binaries built against GNU R's
+headers skip the boundary too. A writable `DATAPTR` into a list or character vector stays out of
+line, because it makes the vector escape.
 
 **Each native call owns a `PROTECT` region.** `UNPROTECT` below the region's base is an error, in GNU
 R's words, rather than silently unprotecting the caller's objects, which GNU R allows. An imbalance

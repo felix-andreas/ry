@@ -516,6 +516,14 @@ pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
 
 const _: () = assert!(size_of::<Header>() == 16);
 const _: () = assert!(VECTOR_DATA_OFFSET == 32);
+// libR's `Rinternals.h` reads these offsets inline, so packages compiled against it depend on them.
+const _: () = assert!(std::mem::offset_of!(Header, kind) == 0);
+const _: () = assert!(std::mem::offset_of!(Header, flags) == 2);
+const _: () = assert!(flag_bits::ALTREP == 2);
+const _: () = assert!(std::mem::offset_of!(VectorObject, length) == 16);
+const _: () = assert!(std::mem::offset_of!(TripleObject, first) == 16);
+const _: () = assert!(std::mem::offset_of!(TripleObject, second) == 24);
+const _: () = assert!(std::mem::offset_of!(TripleObject, third) == 32);
 const _: () = assert!(RECORD_DATA_OFFSET == 32);
 
 /// The bytes an object of `kind` with `length` elements occupies, header included. `CHARSXP`

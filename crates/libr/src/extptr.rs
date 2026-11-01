@@ -3,7 +3,7 @@
 use {
     crate::{
         Rboolean,
-        boundary::{ApiResult, DlFunc, enter, error, run_finalizer},
+        boundary::{ApiResult, DlFunc, Reachable, enter, error, run_finalizer},
         runtime,
     },
     heap::object::{Sexp, SexpType},
@@ -62,12 +62,17 @@ pub unsafe extern "C" fn R_ExternalPtrAddr(object: Sexp) -> *mut c_void {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ExternalPtrTag(object: Sexp) -> Sexp {
-    enter(|| Ok(external_ptr(object, "R_ExternalPtrTag")?.external_tag()))
+    enter(|| Ok(Reachable(external_ptr(object, "R_ExternalPtrTag")?.external_tag()))).0
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ExternalPtrProtected(object: Sexp) -> Sexp {
-    enter(|| Ok(external_ptr(object, "R_ExternalPtrProtected")?.external_protected()))
+    enter(|| {
+        Ok(Reachable(
+            external_ptr(object, "R_ExternalPtrProtected")?.external_protected(),
+        ))
+    })
+    .0
 }
 
 #[unsafe(no_mangle)]

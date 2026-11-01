@@ -87,7 +87,7 @@ SEXP rytest_gc_churn(SEXP count)
 }
 
 /* Keeps temporaries in C locals without PROTECT. GNU R may collect them; ry's handle scope
-   keeps everything native code receives alive until the call returns. */
+   keeps a native call's recent handouts alive. */
 SEXP rytest_unprotected_temporaries(SEXP count)
 {
     int n = asInteger(count);
@@ -353,6 +353,22 @@ SEXP rytest_external_value(SEXP pointer)
     if (TYPEOF(R_ExternalPtrTag(pointer)) != SYMSXP)
         error("the tag was lost");
     return ScalarInteger(value == NULL ? NA_INTEGER : *value);
+}
+
+/* Drops an external pointer and then allocates `count` temporaries. Only a native call's most
+   recent handouts stay rooted, so a long enough loop lets the collection at its end finalize the
+   pointer, while a short one keeps it. */
+SEXP rytest_dropped_temporary(SEXP weight, SEXP count)
+{
+    int n = asInteger(count);
+    int *value = malloc(sizeof(int));
+    *value = asInteger(weight);
+    SEXP pointer = R_MakeExternalPtr(value, R_NilValue, R_NilValue);
+    R_RegisterCFinalizerEx(pointer, finalize_counter, FALSE);
+    for (int i = 0; i < n; i++)
+        allocVector(REALSXP, 8);
+    R_gc();
+    return R_NilValue;
 }
 
 SEXP rytest_finalized(void)
@@ -668,6 +684,120 @@ SEXP rytest_api_extras(void)
     return out;
 }
 
+/* Compares every inline accessor of Rinternals.h with its out-of-line libR function on x, and
+ * names the first one that disagrees, or returns "" when all agree. Parenthesizing the name,
+ * as in `(INTEGER)(x)`, suppresses the function-like macro and calls libR. */
+#define AGREE(label, inline_value, library_value)                                              \
+    do {                                                                                       \
+        if ((inline_value) != (library_value))                                                 \
+            return mkString(label);                                                            \
+    } while (0)
+
+static SEXP cell_agreement(SEXP x)
+{
+    AGREE("CAR", CAR(x), (CAR)(x));
+    AGREE("CDR", CDR(x), (CDR)(x));
+    AGREE("TAG", TAG(x), (TAG)(x));
+    AGREE("CADR", CADR(x), (CADR)(x));
+    AGREE("CDDR", CDDR(x), (CDDR)(x));
+    AGREE("CADDR", CADDR(x), (CADDR)(x));
+    return NULL;
+}
+
+SEXP rytest_accessor_agreement(SEXP x)
+{
+    AGREE("TYPEOF", TYPEOF(x), (TYPEOF)(x));
+    AGREE("Rf_isNull", Rf_isNull(x), (Rf_isNull)(x));
+    AGREE("Rf_length", Rf_length(x), (Rf_length)(x));
+    AGREE("Rf_xlength", Rf_xlength(x), (Rf_xlength)(x));
+    int kind = TYPEOF(x);
+    if (kind == LISTSXP || kind == LANGSXP) {
+        for (SEXP cell = x; cell != R_NilValue; cell = (CDR)(cell)) {
+            SEXP disagreement = cell_agreement(cell);
+            if (disagreement != NULL)
+                return disagreement;
+        }
+        return mkString("");
+    }
+    if (kind == NILSXP)
+        return mkString("");
+    AGREE("XLENGTH", XLENGTH(x), (XLENGTH)(x));
+    AGREE("LENGTH", LENGTH(x), (LENGTH)(x));
+    R_xlen_t n = (XLENGTH)(x);
+    int altrep = ALTREP(x);
+    switch (kind) {
+    case LGLSXP:
+        if (!altrep) {
+            AGREE("LOGICAL", LOGICAL(x), (LOGICAL)(x));
+            AGREE("DATAPTR", DATAPTR(x), (DATAPTR)(x));
+        }
+        AGREE("LOGICAL_RO", LOGICAL_RO(x), (LOGICAL_RO)(x));
+        for (R_xlen_t i = 0; i < n; i++)
+            AGREE("LOGICAL_ELT", LOGICAL_ELT(x, i), (LOGICAL_ELT)(x, i));
+        break;
+    case INTSXP:
+        if (!altrep) {
+            AGREE("INTEGER", INTEGER(x), (INTEGER)(x));
+            AGREE("DATAPTR", DATAPTR(x), (DATAPTR)(x));
+        }
+        for (R_xlen_t i = 0; i < n; i++)
+            AGREE("INTEGER_ELT", INTEGER_ELT(x, i), (INTEGER_ELT)(x, i));
+        AGREE("INTEGER_RO", INTEGER_RO(x), (INTEGER_RO)(x));
+        break;
+    case REALSXP:
+        if (!altrep) {
+            AGREE("REAL", REAL(x), (REAL)(x));
+            AGREE("DATAPTR", DATAPTR(x), (DATAPTR)(x));
+        }
+        AGREE("REAL_RO", REAL_RO(x), (REAL_RO)(x));
+        for (R_xlen_t i = 0; i < n; i++) {
+            double inline_value = REAL_ELT(x, i), library_value = (REAL_ELT)(x, i);
+            AGREE("REAL_ELT", memcmp(&inline_value, &library_value, sizeof(double)), 0);
+        }
+        break;
+    case CPLXSXP:
+        if (!altrep) {
+            AGREE("COMPLEX", COMPLEX(x), (COMPLEX)(x));
+            AGREE("DATAPTR", DATAPTR(x), (DATAPTR)(x));
+        }
+        AGREE("COMPLEX_RO", COMPLEX_RO(x), (COMPLEX_RO)(x));
+        for (R_xlen_t i = 0; i < n; i++) {
+            Rcomplex inline_value = COMPLEX_ELT(x, i), library_value = (COMPLEX_ELT)(x, i);
+            AGREE("COMPLEX_ELT", memcmp(&inline_value, &library_value, sizeof(Rcomplex)), 0);
+        }
+        break;
+    case RAWSXP:
+        if (!altrep) {
+            AGREE("RAW", RAW(x), (RAW)(x));
+            AGREE("DATAPTR", DATAPTR(x), (DATAPTR)(x));
+        }
+        AGREE("RAW_RO", RAW_RO(x), (RAW_RO)(x));
+        for (R_xlen_t i = 0; i < n; i++)
+            AGREE("RAW_ELT", RAW_ELT(x, i), (RAW_ELT)(x, i));
+        break;
+    case STRSXP:
+        AGREE("STRING_PTR_RO", STRING_PTR_RO(x), (STRING_PTR_RO)(x));
+        AGREE("DATAPTR_RO", DATAPTR_RO(x), (DATAPTR_RO)(x));
+        for (R_xlen_t i = 0; i < n; i++) {
+            SEXP element = STRING_ELT(x, i);
+            AGREE("STRING_ELT", element, (STRING_ELT)(x, i));
+            AGREE("R_CHAR", R_CHAR(element), (R_CHAR)(element));
+            AGREE("CHARSXP LENGTH", LENGTH(element), (LENGTH)(element));
+        }
+        break;
+    case VECSXP:
+        AGREE("DATAPTR_RO", DATAPTR_RO(x), (DATAPTR_RO)(x));
+        for (R_xlen_t i = 0; i < n; i++) {
+            AGREE("VECTOR_ELT", VECTOR_ELT(x, i), (VECTOR_ELT)(x, i));
+            SEXP nested = rytest_accessor_agreement((VECTOR_ELT)(x, i));
+            if (CHAR((STRING_ELT)(nested, 0))[0] != '\0')
+                return nested;
+        }
+        break;
+    }
+    return mkString("");
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
@@ -698,6 +828,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_external_ptr", (DL_FUNC) &rytest_external_ptr, 1},
     {"rytest_external_value", (DL_FUNC) &rytest_external_value, 1},
     {"rytest_finalized", (DL_FUNC) &rytest_finalized, 0},
+    {"rytest_dropped_temporary", (DL_FUNC) &rytest_dropped_temporary, 2},
     {"rytest_sequence", (DL_FUNC) &rytest_sequence, 2},
     {"rytest_sequence_info", (DL_FUNC) &rytest_sequence_info, 1},
     {"rytest_call_callable", (DL_FUNC) &rytest_call_callable, 1},
@@ -718,6 +849,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
+    {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
     {NULL, NULL, 0}
 };
 

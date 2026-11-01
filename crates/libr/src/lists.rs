@@ -3,7 +3,7 @@
 
 use {
     crate::{
-        boundary::{ApiResult, enter, error},
+        boundary::{ApiResult, Reachable, enter, error},
         globals::R_NamesSymbol,
         runtime,
     },
@@ -142,17 +142,41 @@ pub unsafe fn list_of(kind: SexpType, elements: &[Sexp]) -> ApiResult<Sexp> {
     Ok(list)
 }
 
+// Every reader below returns a field of its argument, which stays reachable through it, so the
+// results are `Reachable` and take no handle. A walk over list cells, the common case, skips the
+// boundary altogether, as `Rinternals.h` does inline.
+
 macro_rules! read_path {
     ($name:ident, $($step:ident),+) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
-            enter(|| {
-                let mut value = object;
-                $( value = triple(value, stringify!($name))?.$step(); )+
-                Ok(value)
-            })
+            let steps: &[unsafe fn(Sexp) -> Sexp] = &[$(Sexp::$step),+];
+            let mut value = object;
+            for step in steps {
+                if !is_cell(value.kind()) {
+                    return read_path_slowly(object, steps, stringify!($name));
+                }
+                value = step(value);
+            }
+            value
         }
     };
+}
+
+/// A path that reaches something other than a list cell, which `triple` accepts or reports.
+unsafe fn read_path_slowly(
+    object: Sexp,
+    steps: &[unsafe fn(Sexp) -> Sexp],
+    accessor: &str,
+) -> Sexp {
+    enter(|| {
+        let mut value = object;
+        for step in steps {
+            value = step(triple(value, accessor)?);
+        }
+        Ok(Reachable(value))
+    })
+    .0
 }
 
 /// GNU R lays an external pointer out as a cell, with the address in `CAR`, the protected
@@ -161,13 +185,17 @@ macro_rules! read_cell {
     ($name:ident, $step:ident, $external:expr) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp) -> Sexp {
+            if is_cell(object.kind()) {
+                return object.$step();
+            }
             enter(|| {
                 if object.kind() == SexpType::ExternalPtr {
                     let read: unsafe fn(Sexp) -> Sexp = $external;
-                    return Ok(read(object));
+                    return Ok(Reachable(read(object)));
                 }
-                Ok(triple(object, stringify!($name))?.$step())
+                Ok(Reachable(triple(object, stringify!($name))?.$step()))
             })
+            .0
         }
     };
 }
@@ -184,11 +212,15 @@ read_cell!(CDR, cdr, |object| unsafe { object.external_protected() });
 /// `obj_size`, for one) must not reach.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn TAG(object: Sexp) -> Sexp {
+    if is_cell(object.kind()) {
+        return object.tag();
+    }
     enter(|| match object.kind() {
-        SexpType::ExternalPtr => Ok(object.external_tag()),
-        SexpType::Bytecode => Ok(runtime().nil()),
-        _ => Ok(triple(object, "TAG")?.tag()),
+        SexpType::ExternalPtr => Ok(Reachable(object.external_tag())),
+        SexpType::Bytecode => Ok(Reachable(runtime().nil())),
+        _ => Ok(Reachable(triple(object, "TAG")?.tag())),
     })
+    .0
 }
 read_path!(CAAR, car, car);
 read_path!(CDAR, car, cdr);

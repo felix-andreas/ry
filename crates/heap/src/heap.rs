@@ -130,8 +130,17 @@ pub struct Roots {
     /// Objects kept alive for the rest of the current scope. A foreign call truncates it on
     /// return, which gives native code its handle scope.
     handles: Vec<Sexp>,
+    /// What the C API has handed to native code in the native calls in progress. Each call owns
+    /// the entries above the base it started at, and only its most recent ones stay rooted (see
+    /// [`Heap::hand_out`]), so a loop's dropped temporaries can be collected before it returns.
+    handouts: Vec<Sexp>,
     globals: Vec<Sexp>,
 }
+
+/// How many of a native call's most recent handouts stay rooted at least. Code that is correct
+/// under GNU R protects anything it keeps across an allocation, so it never needs an older
+/// handout rooted; the window forgives a forgotten `PROTECT` on a recent temporary.
+pub const HANDOUT_WINDOW: usize = 1024;
 
 /// The `PROTECT` stack. `base` is where the innermost native call's protections start, so
 /// native code cannot unprotect what its caller protected.
@@ -355,6 +364,7 @@ impl Heap {
                 },
                 precious: FxHashMap::default(),
                 handles: Vec::new(),
+                handouts: Vec::new(),
                 globals: Vec::new(),
             },
             sources: Vec::new(),
@@ -1216,6 +1226,25 @@ impl Heap {
         self.roots.handles.truncate(mark);
     }
 
+    /// Roots `object` for the native call whose handouts start at `base`. Once the call holds
+    /// twice the window, the older half is dropped in one move, which keeps the cost per handout
+    /// constant and the live set bounded however long the call's loop runs.
+    pub fn hand_out(&mut self, object: Sexp, base: usize) {
+        let handouts = &mut self.roots.handouts;
+        if handouts.len() - base >= 2 * HANDOUT_WINDOW {
+            handouts.drain(base..base + HANDOUT_WINDOW);
+        }
+        handouts.push(object);
+    }
+
+    pub fn handout_mark(&self) -> usize {
+        self.roots.handouts.len()
+    }
+
+    pub fn release_handouts(&mut self, mark: usize) {
+        self.roots.handouts.truncate(mark);
+    }
+
     /// Keeps `object` alive for the rest of the heap's life.
     pub fn add_global_root(&mut self, object: Sexp) {
         self.roots.globals.push(object);
@@ -1508,6 +1537,9 @@ impl Heap {
         }
         for index in 0..self.roots.handles.len() {
             self.mark(self.roots.handles[index]);
+        }
+        for index in 0..self.roots.handouts.len() {
+            self.mark(self.roots.handouts[index]);
         }
         // Marking only touches the mark stack, so the tables can be borrowed beside it instead of
         // copied out on every collection; a package with tens of thousands of symbols made that

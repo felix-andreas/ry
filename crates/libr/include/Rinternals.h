@@ -1027,6 +1027,255 @@ SEXP R_Unserialize(R_inpstream_t stream);
 #define xlengthgets Rf_xlengthgets
 #endif
 
+/* Inline accessors. A hot loop in native code calls these once per element, so the common case
+ * reads the object header directly instead of calling into libR: the kind byte at offset 0, the
+ * flags byte at offset 2, a vector's length at offset 16 and its elements from offset 32. Any
+ * other case (an ALTREP instance, a wrong type, an index out of bounds) calls the out-of-line
+ * function, which handles or reports it. The conditions mirror the out-of-line fast paths in
+ * libR, and libR's tests pin the layout. A package that wants the plain functions defines
+ * RY_NO_INLINE_ACCESSORS before including this header. */
+#ifndef RY_NO_INLINE_ACCESSORS
+
+#define RY_KIND(x) (((const unsigned char *)(x))[0])
+#define RY_IS_ALTREP(x) ((((const unsigned char *)(x))[2] & 2) != 0)
+#define RY_XLENGTH(x) (*(const R_xlen_t *)((const char *)(x) + 16))
+#define RY_DATA(x) ((void *)((char *)(x) + 32))
+#define RY_PLAIN(x, kind) (RY_KIND(x) == (kind) && !RY_IS_ALTREP(x))
+#define RY_PLAIN_VECTOR(x) \
+    (!RY_IS_ALTREP(x) && (RY_KIND(x) == CHARSXP || RY_KIND(x) == LGLSXP || \
+                          RY_KIND(x) == INTSXP || RY_KIND(x) == REALSXP || \
+                          RY_KIND(x) == CPLXSXP || RY_KIND(x) == STRSXP || \
+                          RY_KIND(x) == VECSXP || RY_KIND(x) == EXPRSXP || RY_KIND(x) == RAWSXP))
+#define RY_PLAIN_ATOMIC(x) \
+    (!RY_IS_ALTREP(x) && (RY_KIND(x) == LGLSXP || RY_KIND(x) == INTSXP || \
+                          RY_KIND(x) == REALSXP || RY_KIND(x) == CPLXSXP || RY_KIND(x) == RAWSXP))
+#define RY_IN_BOUNDS(x, i) ((i) >= 0 && (i) < RY_XLENGTH(x))
+#define RY_IS_CELL(x) (RY_KIND(x) == LISTSXP || RY_KIND(x) == LANGSXP || RY_KIND(x) == DOTSXP)
+#define RY_CAR(x) (((SEXP *)((char *)(x) + 16))[0])
+#define RY_CDR(x) (((SEXP *)((char *)(x) + 16))[1])
+#define RY_TAG(x) (((SEXP *)((char *)(x) + 16))[2])
+
+static inline int Ry_TYPEOF(SEXP x) { return RY_KIND(x); }
+
+static inline R_xlen_t Ry_XLENGTH(SEXP x)
+{
+    if (RY_PLAIN_VECTOR(x)) return RY_XLENGTH(x);
+    if (RY_KIND(x) == NILSXP) return 0;
+    return (XLENGTH)(x);
+}
+
+static inline int Ry_LENGTH(SEXP x)
+{
+    if (RY_PLAIN_VECTOR(x) && RY_XLENGTH(x) <= INT_MAX) return (int) RY_XLENGTH(x);
+    if (RY_KIND(x) == NILSXP) return 0;
+    return (LENGTH)(x);
+}
+
+static inline R_xlen_t Ry_Rf_xlength(SEXP x)
+{
+    if (RY_PLAIN_VECTOR(x)) return RY_XLENGTH(x);
+    if (RY_KIND(x) == NILSXP) return 0;
+    return (Rf_xlength)(x);
+}
+
+static inline R_len_t Ry_Rf_length(SEXP x)
+{
+    if (RY_PLAIN_VECTOR(x) && RY_XLENGTH(x) <= INT_MAX) return (R_len_t) RY_XLENGTH(x);
+    if (RY_KIND(x) == NILSXP) return 0;
+    return (Rf_length)(x);
+}
+
+static inline Rboolean Ry_Rf_isNull(SEXP x) { return RY_KIND(x) == NILSXP ? TRUE : FALSE; }
+
+static inline int *Ry_LOGICAL(SEXP x)
+{
+    return RY_PLAIN(x, LGLSXP) ? (int *) RY_DATA(x) : (LOGICAL)(x);
+}
+
+static inline int *Ry_INTEGER(SEXP x)
+{
+    return (RY_PLAIN(x, INTSXP) || RY_PLAIN(x, LGLSXP)) ? (int *) RY_DATA(x) : (INTEGER)(x);
+}
+
+static inline double *Ry_REAL(SEXP x)
+{
+    return RY_PLAIN(x, REALSXP) ? (double *) RY_DATA(x) : (REAL)(x);
+}
+
+static inline Rcomplex *Ry_COMPLEX(SEXP x)
+{
+    return RY_PLAIN(x, CPLXSXP) ? (Rcomplex *) RY_DATA(x) : (COMPLEX)(x);
+}
+
+static inline Rbyte *Ry_RAW(SEXP x)
+{
+    return RY_PLAIN(x, RAWSXP) ? (Rbyte *) RY_DATA(x) : (RAW)(x);
+}
+
+static inline const int *Ry_LOGICAL_RO(SEXP x)
+{
+    return RY_PLAIN(x, LGLSXP) ? (const int *) RY_DATA(x) : (LOGICAL_RO)(x);
+}
+
+static inline const int *Ry_INTEGER_RO(SEXP x)
+{
+    return (RY_PLAIN(x, INTSXP) || RY_PLAIN(x, LGLSXP)) ? (const int *) RY_DATA(x)
+                                                        : (INTEGER_RO)(x);
+}
+
+static inline const double *Ry_REAL_RO(SEXP x)
+{
+    return RY_PLAIN(x, REALSXP) ? (const double *) RY_DATA(x) : (REAL_RO)(x);
+}
+
+static inline const Rcomplex *Ry_COMPLEX_RO(SEXP x)
+{
+    return RY_PLAIN(x, CPLXSXP) ? (const Rcomplex *) RY_DATA(x) : (COMPLEX_RO)(x);
+}
+
+static inline const Rbyte *Ry_RAW_RO(SEXP x)
+{
+    return RY_PLAIN(x, RAWSXP) ? (const Rbyte *) RY_DATA(x) : (RAW_RO)(x);
+}
+
+/* A writable pointer into a list or character vector makes libR treat the vector as escaped,
+ * so only atomic vectors take the inline path. */
+static inline void *Ry_DATAPTR(SEXP x)
+{
+    return RY_PLAIN_ATOMIC(x) ? RY_DATA(x) : (DATAPTR)(x);
+}
+
+static inline const void *Ry_DATAPTR_RO(SEXP x)
+{
+    return RY_PLAIN_VECTOR(x) ? (const void *) RY_DATA(x) : (DATAPTR_RO)(x);
+}
+
+static inline const SEXP *Ry_STRING_PTR_RO(SEXP x)
+{
+    return RY_PLAIN(x, STRSXP) ? (const SEXP *) RY_DATA(x) : (STRING_PTR_RO)(x);
+}
+
+static inline SEXP Ry_STRING_ELT(SEXP x, R_xlen_t i)
+{
+    if (RY_PLAIN(x, STRSXP) && RY_IN_BOUNDS(x, i)) return ((SEXP *) RY_DATA(x))[i];
+    return (STRING_ELT)(x, i);
+}
+
+static inline SEXP Ry_VECTOR_ELT(SEXP x, R_xlen_t i)
+{
+    if ((RY_PLAIN(x, VECSXP) || RY_PLAIN(x, EXPRSXP)) && RY_IN_BOUNDS(x, i))
+        return ((SEXP *) RY_DATA(x))[i];
+    return (VECTOR_ELT)(x, i);
+}
+
+static inline int Ry_LOGICAL_ELT(SEXP x, R_xlen_t i)
+{
+    if (RY_PLAIN(x, LGLSXP) && RY_IN_BOUNDS(x, i)) return ((int *) RY_DATA(x))[i];
+    return (LOGICAL_ELT)(x, i);
+}
+
+static inline int Ry_INTEGER_ELT(SEXP x, R_xlen_t i)
+{
+    if ((RY_PLAIN(x, INTSXP) || RY_PLAIN(x, LGLSXP)) && RY_IN_BOUNDS(x, i))
+        return ((int *) RY_DATA(x))[i];
+    return (INTEGER_ELT)(x, i);
+}
+
+static inline double Ry_REAL_ELT(SEXP x, R_xlen_t i)
+{
+    if (RY_PLAIN(x, REALSXP) && RY_IN_BOUNDS(x, i)) return ((double *) RY_DATA(x))[i];
+    return (REAL_ELT)(x, i);
+}
+
+static inline Rcomplex Ry_COMPLEX_ELT(SEXP x, R_xlen_t i)
+{
+    if (RY_PLAIN(x, CPLXSXP) && RY_IN_BOUNDS(x, i)) return ((Rcomplex *) RY_DATA(x))[i];
+    return (COMPLEX_ELT)(x, i);
+}
+
+static inline Rbyte Ry_RAW_ELT(SEXP x, R_xlen_t i)
+{
+    if (RY_PLAIN(x, RAWSXP) && RY_IN_BOUNDS(x, i)) return ((Rbyte *) RY_DATA(x))[i];
+    return (RAW_ELT)(x, i);
+}
+
+static inline const char *Ry_R_CHAR(SEXP x)
+{
+    return RY_KIND(x) == CHARSXP ? (const char *) RY_DATA(x) : (R_CHAR)(x);
+}
+
+static inline SEXP Ry_CAR(SEXP x) { return RY_IS_CELL(x) ? RY_CAR(x) : (CAR)(x); }
+static inline SEXP Ry_CDR(SEXP x) { return RY_IS_CELL(x) ? RY_CDR(x) : (CDR)(x); }
+static inline SEXP Ry_TAG(SEXP x) { return RY_IS_CELL(x) ? RY_TAG(x) : (TAG)(x); }
+
+/* A path takes the inline route only while every step is a cell, so any other object reaches
+ * the out-of-line function and gets the same answer or error as without this header. */
+static inline SEXP Ry_CADR(SEXP x)
+{
+    if (RY_IS_CELL(x)) {
+        SEXP rest = RY_CDR(x);
+        if (RY_IS_CELL(rest)) return RY_CAR(rest);
+    }
+    return (CADR)(x);
+}
+
+static inline SEXP Ry_CDDR(SEXP x)
+{
+    if (RY_IS_CELL(x)) {
+        SEXP rest = RY_CDR(x);
+        if (RY_IS_CELL(rest)) return RY_CDR(rest);
+    }
+    return (CDDR)(x);
+}
+
+static inline SEXP Ry_CADDR(SEXP x)
+{
+    if (RY_IS_CELL(x)) {
+        SEXP rest = RY_CDR(x);
+        if (RY_IS_CELL(rest)) {
+            rest = RY_CDR(rest);
+            if (RY_IS_CELL(rest)) return RY_CAR(rest);
+        }
+    }
+    return (CADDR)(x);
+}
+
+#define TYPEOF(x) Ry_TYPEOF(x)
+#define XLENGTH(x) Ry_XLENGTH(x)
+#define LENGTH(x) Ry_LENGTH(x)
+#define Rf_xlength(x) Ry_Rf_xlength(x)
+#define Rf_length(x) Ry_Rf_length(x)
+#define Rf_isNull(x) Ry_Rf_isNull(x)
+#define LOGICAL(x) Ry_LOGICAL(x)
+#define INTEGER(x) Ry_INTEGER(x)
+#define REAL(x) Ry_REAL(x)
+#define COMPLEX(x) Ry_COMPLEX(x)
+#define RAW(x) Ry_RAW(x)
+#define LOGICAL_RO(x) Ry_LOGICAL_RO(x)
+#define INTEGER_RO(x) Ry_INTEGER_RO(x)
+#define REAL_RO(x) Ry_REAL_RO(x)
+#define COMPLEX_RO(x) Ry_COMPLEX_RO(x)
+#define RAW_RO(x) Ry_RAW_RO(x)
+#define DATAPTR(x) Ry_DATAPTR(x)
+#define DATAPTR_RO(x) Ry_DATAPTR_RO(x)
+#define STRING_PTR_RO(x) Ry_STRING_PTR_RO(x)
+#define STRING_ELT(x, i) Ry_STRING_ELT(x, i)
+#define VECTOR_ELT(x, i) Ry_VECTOR_ELT(x, i)
+#define LOGICAL_ELT(x, i) Ry_LOGICAL_ELT(x, i)
+#define INTEGER_ELT(x, i) Ry_INTEGER_ELT(x, i)
+#define REAL_ELT(x, i) Ry_REAL_ELT(x, i)
+#define COMPLEX_ELT(x, i) Ry_COMPLEX_ELT(x, i)
+#define RAW_ELT(x, i) Ry_RAW_ELT(x, i)
+#define R_CHAR(x) Ry_R_CHAR(x)
+#define CAR(x) Ry_CAR(x)
+#define CDR(x) Ry_CDR(x)
+#define TAG(x) Ry_TAG(x)
+#define CADR(x) Ry_CADR(x)
+#define CDDR(x) Ry_CDDR(x)
+#define CADDR(x) Ry_CADDR(x)
+
+#endif
+
 #ifdef __cplusplus
 }
 #endif

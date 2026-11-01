@@ -277,3 +277,102 @@ fn fuzz_api_sequences_keep_objects_intact() {
         r.release_to(mark);
     }
 }
+
+/// A random object for the accessor comparison: every vector kind, ALTREP sequences, nested
+/// lists, pairlists and calls with tags, and NULL.
+fn random_object(r: &R, rng: &mut SplitMix64, depth: usize) -> Sexp {
+    let length = rng.below(12);
+    let choice = if depth == 0 { rng.below(7) } else { rng.below(10) };
+    match choice {
+        0 => r.nil(),
+        1..=4 => {
+            let kind = [LGLSXP, INTSXP, REALSXP, RAWSXP][choice - 1];
+            let vector = r.keep(unsafe { (r.api().Rf_allocVector)(kind, length as isize) });
+            unsafe {
+                match kind {
+                    REALSXP => std::slice::from_raw_parts_mut((r.api().REAL)(vector), length)
+                        .iter_mut()
+                        .for_each(|value| *value = f64::from_bits(rng.next_u64())),
+                    RAWSXP => std::slice::from_raw_parts_mut((r.api().RAW)(vector), length)
+                        .iter_mut()
+                        .for_each(|value| *value = rng.next_u64() as u8),
+                    _ => std::slice::from_raw_parts_mut((r.api().INTEGER)(vector), length)
+                        .iter_mut()
+                        .for_each(|value| *value = rng.next_u64() as c_int),
+                }
+            }
+            vector
+        }
+        5 => {
+            let vector = r.keep(unsafe { (r.api().Rf_allocVector)(STRSXP, length as isize) });
+            for index in 0..length {
+                let element = if rng.chance(1, 5) {
+                    r.data("R_NaString")
+                } else {
+                    let bytes: Vec<u8> = (0..rng.below(6))
+                        .map(|_| b"abz\xc3\xa9 "[rng.below(6)])
+                        .collect();
+                    unsafe {
+                        (r.api().Rf_mkCharLenCE)(bytes.as_ptr().cast(), bytes.len() as c_int, 1)
+                    }
+                };
+                unsafe { (r.api().SET_STRING_ELT)(vector, index as isize, element) };
+            }
+            vector
+        }
+        6 => r.keep(
+            r.call(
+                "rytest_sequence",
+                &[r.integer(rng.below(100) as c_int), r.integer(length as c_int)],
+            )
+            .expect("an ALTREP sequence"),
+        ),
+        7 => {
+            let list = r.keep(unsafe { (r.api().Rf_allocVector)(VECSXP, length as isize) });
+            for index in 0..length {
+                let element = random_object(r, rng, depth - 1);
+                unsafe { (r.api().SET_VECTOR_ELT)(list, index as isize, element) };
+            }
+            list
+        }
+        _ => {
+            let mut cells = r.nil();
+            for position in (0..length.max(1)).rev() {
+                let value = random_object(r, rng, depth - 1);
+                cells = r.keep(unsafe {
+                    if position == 0 && choice == 9 {
+                        (r.api().Rf_lcons)(r.symbol("f"), cells)
+                    } else {
+                        (r.api().Rf_cons)(value, cells)
+                    }
+                });
+                if rng.chance(1, 2) {
+                    unsafe { (r.api().SET_TAG)(cells, r.symbol(&format!("t{position}"))) };
+                }
+            }
+            cells
+        }
+    }
+}
+
+/// The inline accessors in `Rinternals.h` read the object header directly, so they must agree
+/// with the libR functions on every object, including the ones they hand back to libR.
+#[test]
+fn fuzz_inline_accessors_agree_with_libr() {
+    let r = r();
+    rytest(&r);
+    let mut rng = SplitMix64(0xacce55);
+    for iteration in 0..fuzz_iterations(400) {
+        let mark = r.protected.get();
+        let object = random_object(&r, &mut rng, 3);
+        let disagreement = r
+            .call("rytest_accessor_agreement", &[r.quote(object)])
+            .expect("the comparison runs");
+        assert_eq!(
+            r.strings(disagreement),
+            vec![Some(String::new())],
+            "iteration {iteration}: the inline accessor disagrees with libR"
+        );
+        r.release_to(mark);
+    }
+}

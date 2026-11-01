@@ -387,13 +387,26 @@ unboxed scalars, scalar-replaced temporaries, and vectors fused across a loop (s
 profiling later shows fragmentation, Immix-style regions with opportunistic, pinning-aware compaction
 of objects that native code has never seen are the upgrade path, and they need no API change.
 
-**Native calls get a handle scope.** Every object passed into `.Call` and every object the API hands
-to native code stays alive until that call returns, as if it were protected. This makes ry strictly
-more forgiving than GNU R (code that forgets to `PROTECT` a temporary keeps working) while `PROTECT`
-itself keeps its exact semantics for objects that outlive the call through globals or preserved
-references. The scope roots results, not allocations, so the temporaries of an `Rf_eval` that native
-code calls stay collectable. Each native call also owns a region of the `PROTECT` stack: unprotecting
-below it is an error, and a region left unbalanced on return is a warning and is cut back.
+**Native calls get a handle scope.** Every object passed into `.Call` stays alive until that call
+returns, and so do the objects the API most recently handed to native code: at least the last 1,024
+of them, as if they were protected. This makes ry strictly more forgiving than GNU R (code that
+forgets to `PROTECT` a recent temporary keeps working, where GNU R could collect it at the next
+allocation) while `PROTECT` itself keeps its exact semantics for objects that outlive the call
+through globals or preserved references. A loop that allocates and drops millions of temporaries
+still runs in bounded memory, because older handouts leave the scope. The scope roots results, not
+allocations, so the temporaries of an `Rf_eval` that native code calls stay collectable, and a result
+reachable through the argument it was read from (a list element, a cell's `CAR`, an attribute) takes
+no handle at all. Each native call also owns a region of the `PROTECT` stack: unprotecting below it
+is an error, and a region left unbalanced on return is a warning and is cut back.
+
+**Hot accessors are inline.** `Rinternals.h` defines `INTEGER`, `REAL`, `LOGICAL`, `RAW`,
+`COMPLEX`, their `_RO` and `_ELT` forms, `DATAPTR`, `DATAPTR_RO`, `STRING_ELT`, `VECTOR_ELT`,
+`STRING_PTR_RO`, `TYPEOF`, `LENGTH`, `XLENGTH`, `Rf_length`, `Rf_xlength`, `Rf_isNull`, `R_CHAR`,
+`CAR`, `CDR`, `TAG`, `CADR`, `CDDR` and `CADDR` as inline functions that read the object header
+and fall back to libR for anything unusual (an ALTREP instance, a wrong type, an index out of
+bounds). The exported functions take the same fast paths before entering the API, so binaries built
+against GNU R's headers benefit too. A package that defines `RY_NO_INLINE_ACCESSORS` gets plain
+calls.
 
 Ready finalizers run when a native call returns and on `R_gc`, not inside the collection that found
 them, because a collection happens deep inside an allocation, where no native code may run.
@@ -662,7 +675,8 @@ The rules the implementation settled:
   definitions takes about 30 ms. Any second writer, conditional or replacing (`f <- memoise(f)`),
   makes every writer of the name eager, in order.
 - **Every other top-level expression runs eagerly in `Collate` order**, then the files `Collate`
-  leaves out in C-locale order, as `load_all` does. Making a provably pure constructor call lazy is
+  leaves out in C-locale order, as `load_all` does. The code files include `R/unix/` (or
+  `R/windows/`), and `Collate.unix` overrides `Collate`, as in R CMD INSTALL. Making a provably pure constructor call lazy is
   not implemented.
 - **Imports are copies, and a reload rebuilds them when `NAMESPACE` imports change.** Updating the
   copies other development packages hold of a changed binding is not implemented; a session loads

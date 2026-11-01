@@ -295,14 +295,15 @@ unsafe fn install_translated(charsxp: Sexp) -> ApiResult<Sexp> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PRINTNAME(symbol: Sexp) -> Sexp {
-    enter(|| {
-        if symbol.kind() != SexpType::Symbol {
-            return Err(error(format!(
-                "PRINTNAME() can only be applied to a 'symbol', not a '{}'",
-                symbol.kind().name()
-            )));
-        }
-        Ok(symbol.car())
+    // A symbol and its name live as long as the heap, so the name needs no handle.
+    if symbol.kind() == SexpType::Symbol {
+        return symbol.car();
+    }
+    enter(|| -> ApiResult<Sexp> {
+        Err(error(format!(
+            "PRINTNAME() can only be applied to a 'symbol', not a '{}'",
+            symbol.kind().name()
+        )))
     })
 }
 
