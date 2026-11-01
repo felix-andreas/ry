@@ -343,7 +343,8 @@ pub(crate) fn analyze_project(
     let imported = namespace::imported_names(&namespace_file.imports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
     let mut used_tokens = BTreeSet::new();
-    for (_, tokens) in in_batches(&mut db, workers, &by_size, |db, index| {
+    let tree_batch = workers * FILES_PER_WORKER_BATCH;
+    for (_, tokens) in in_batches(&mut db, workers, &by_size, tree_batch, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
         let mut tokens = BTreeSet::new();
@@ -364,15 +365,20 @@ pub(crate) fn analyze_project(
         metadata.set_attached(&mut db).to(attached);
     }
 
-    // Per-item naming runs across cores first: inside the project-wide interface walk it
-    // would serialize on one thread.
-    in_batches(&mut db, workers, &by_size, |db, index| {
+    // Per-item naming and the read sets derived from it run across cores first: inside the
+    // project-wide interface and slot walks they would serialize on one thread.
+    // Neither later pass reads a tree, so nothing they compute is evictable and they run as
+    // one batch: a barrier per batch would idle every worker behind its slowest file.
+    let one_batch = by_size.len();
+    in_batches(&mut db, workers, &by_size, one_batch, |db, index| {
         for &item in semantics::item_tree(db, files[index]) {
             let _ = semantics::item_naming(db, item);
+            let _ = semantics::item_interface_reads(db, item);
+            let _ = semantics::item_top_level_names(db, item);
         }
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
-    for (index, diagnostics) in in_batches(&mut db, workers, &by_size, |db, index| {
+    for (index, diagnostics) in in_batches(&mut db, workers, &by_size, one_batch, |db, index| {
         let rendered = document_diagnostics(db, files[index], &config);
         apply_suppressions(rendered, files[index].text(db))
     }) {
@@ -427,17 +433,18 @@ pub(crate) fn analyze_project(
     })
 }
 
-/// Runs `work` for every index in `order` across `workers` threads, a batch at a time.
-/// Between batches the least recently used trees are evicted, so a cold pass holds about a
-/// batch of them instead of the whole project's.
+/// Runs `work` for every index in `order` across `workers` threads, `batch_len` indices at
+/// a time. Between batches the least recently used trees are evicted, so a cold pass holds
+/// about a batch of them instead of the whole project's.
 fn in_batches<T: Send>(
     db: &mut RootDatabase,
     workers: usize,
     order: &[usize],
+    batch_len: usize,
     work: impl Fn(&RootDatabase, usize) -> T + Sync,
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
-    for batch in order.chunks(workers * FILES_PER_WORKER_BATCH) {
+    for batch in order.chunks(batch_len.max(1)) {
         // Shared rather than dealt out: check times vary by orders of magnitude per file.
         let next = AtomicUsize::new(0);
         thread::scope(|scope| {
@@ -758,8 +765,11 @@ pub(crate) fn render_findings<'a>(
     diagnostics: &[Diagnostic],
     resolve_note: &dyn Fn(&RelatedLocation) -> Option<RelatedNote<'a>>,
 ) -> usize {
-    let line_index = LineIndex::new(source);
-    let snippet_lines = LineStarts::new(source);
+    if diagnostics.is_empty() {
+        return 0;
+    }
+    let mut line_index = None;
+    let mut snippet_lines = None;
     let mut rendered = 0;
     for diagnostic in diagnostics {
         if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
@@ -770,10 +780,12 @@ pub(crate) fn render_findings<'a>(
             diagnostic.related.iter().filter_map(resolve_note).collect();
         match output {
             OutputFormat::Human => {
-                render_human_diagnostic(path, source, &snippet_lines, diagnostic, &related)
+                let lines = snippet_lines.get_or_insert_with(|| LineStarts::new(source));
+                render_human_diagnostic(path, source, lines, diagnostic, &related)
             }
             OutputFormat::Json => {
-                render_json_diagnostic(path, source, &line_index, diagnostic, &related)
+                let index = line_index.get_or_insert_with(|| LineIndex::new(source));
+                render_json_diagnostic(path, source, index, diagnostic, &related)
             }
         }
     }
