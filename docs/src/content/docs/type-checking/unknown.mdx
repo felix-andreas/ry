@@ -10,20 +10,14 @@ Their values are `Unknown`, which is compatible with everything. ry would rather
 report something false, so one unmodeled construct never causes a cascade of errors.
 
 The cost is that a clean run does not say how much was checked.
-[Strict mode](/type-checking/strict-mode) reports every place a value became `Unknown`.
+[Strict mode](/type-checking/strict-mode) reports the places a value became `Unknown`, with the
+exceptions listed under its [known gaps](/type-checking/strict-mode#known-gaps).
 
 ## Giving a value a type
 
 An annotation gives an `Unknown` value a type, so every later use is checked against it:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-amount: double <- df$amount
-```
-
-</TabItem>
 <TabItem label="Comments">
 
 ```r
@@ -32,10 +26,39 @@ amount <- df$amount
 ```
 
 </TabItem>
+<TabItem label="Inline">
+
+```r
+amount: double <- df$amount
+```
+
+</TabItem>
 </Tabs>
 
-[Annotations](/type-checking/annotations) shows `@if-unknown` and `@trust` for the cases where a
-checked annotation does not fit.
+## Overriding inference
+
+A plain annotation is checked against the value. Two forms give a type without that check, and
+inline they go between a binding's `:` and its type, as in `amount: @if-unknown double <- df$amount`.
+
+`#: @if-unknown TYPE` types an `Unknown` value, such as a data frame column, and becomes an error
+once ry can infer the type, so it never goes stale:
+
+```r
+#: @if-unknown double
+amount <- df$amount
+
+#: @if-unknown double
+n <- 1.5
+```
+
+```text
+type-mismatch
+
+  x `@if-unknown` applies only where the type is unknown, and this is already `double`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
+```
+
+A value declared `Any`, such as the result of `readRDS()`, takes a plain annotation instead.
+`#: @trust TYPE` overrides a type ry did infer, for the cases where you know better.
 
 ## `Any`
 
@@ -49,6 +72,4 @@ A base data frame's columns are not typed, so `df$amount` is `Unknown`. An annot
 `df: data.frame` checks that a data frame arrives, but not which columns it has. ry's built-in
 [`DataFrame`](/type-checking/dataframes) is the typed alternative, with every column, query and join checked.
 For analysis code this is the gap that matters most, and `data.frame()` is usually the first place
-strict mode reports. Bare column names
-inside dplyr verbs and the other data-masking functions are recognized, as
-[checking code](/guides/checking#names) shows.
+strict mode reports.

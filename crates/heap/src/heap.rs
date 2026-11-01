@@ -25,17 +25,19 @@ pub mod object;
 pub mod records;
 pub mod strings;
 
-use crate::{
-    env::Frame,
-    object::{
-        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, VECTOR_DATA_OFFSET, flag_bits,
-        gc_bits, gp, object_size, slot_for,
+use {
+    crate::{
+        env::Frame,
+        object::{
+            NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, VECTOR_DATA_OFFSET, flag_bits,
+            gc_bits, gp, object_size, slot_for,
+        },
+        records::Layouts,
+        strings::{Encoding, StringTable},
     },
-    records::Layouts,
-    strings::{Encoding, StringTable},
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{alloc::Layout, ffi::c_void, fmt, ptr::NonNull, rc::Rc},
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::{alloc::Layout, ffi::c_void, fmt, ptr::NonNull, rc::Rc};
 
 /// The longest vector R allows, `R_XLEN_T_MAX`.
 pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
@@ -271,6 +273,21 @@ pub type HeapResult<T> = Result<T, HeapError>;
 const SLOT_SIZES: [usize; 17] = [
     32, 40, 48, 64, 80, 96, 128, 160, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048,
 ];
+/// The size class for each object size in 8-byte words, so allocation finds its class with one
+/// load instead of a search through `SLOT_SIZES`.
+const SIZE_CLASS_BY_WORDS: [u8; 2048 / 8 + 1] = {
+    let mut table = [0u8; 2048 / 8 + 1];
+    let mut units = 0;
+    let mut class = 0;
+    while units < table.len() {
+        while SLOT_SIZES[class] < units * 8 {
+            class += 1;
+        }
+        table[units] = class as u8;
+        units += 1;
+    }
+    table
+};
 const PAGE_SIZE: usize = 64 * 1024;
 const LARGE_CLASS: u8 = u8::MAX;
 const POISON: u8 = 0xDB;
@@ -366,6 +383,36 @@ impl Heap {
 
     /// A vector of `length` elements. Atomic elements start zeroed, character elements as `""`
     /// and list elements as `NULL`, as in GNU R.
+    /// A vector of plain numbers whose elements are not initialized, for a kernel that writes
+    /// every element before anything reads the vector. Skipping the zeroing matters for the
+    /// large results of whole-vector arithmetic.
+    ///
+    /// # Safety
+    /// The caller must write every element before the vector is read.
+    pub unsafe fn alloc_vector_uninit(
+        &mut self,
+        kind: SexpType,
+        length: usize,
+    ) -> HeapResult<Sexp> {
+        if !matches!(
+            kind,
+            SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::Complex
+                | SexpType::Raw
+        ) {
+            return self.alloc_vector(kind, length as isize);
+        }
+        if length > MAX_VECTOR_LENGTH as usize {
+            return Err(HeapError::TooLong);
+        }
+        let size = object_size(kind, length).ok_or(HeapError::TooLong)?;
+        let object = self.allocate_with(kind, size, &[], VECTOR_DATA_OFFSET)?;
+        object.set_length_and_capacity(length as isize, length as isize);
+        Ok(object)
+    }
+
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
         if !kind.is_vector() {
             return Err(HeapError::InvalidVectorType { kind, length });
@@ -451,7 +498,7 @@ impl Heap {
         Ok(())
     }
 
-/// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
+    /// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
     /// the length it was allocated with. GNU R before 4.6 let native code shrink any vector this
     /// way (`SETLENGTH`), and binaries built then still do.
     pub unsafe fn mark_resizable(&mut self, vector: Sexp) {
@@ -545,9 +592,18 @@ impl Heap {
     }
 
     pub unsafe fn alloc_environment(&mut self, enclosure: Sexp) -> HeapResult<Sexp> {
+        self.alloc_environment_with_capacity(enclosure, 0)
+    }
+
+    /// An environment whose frame has room for `bindings` bindings before it grows.
+    pub unsafe fn alloc_environment_with_capacity(
+        &mut self,
+        enclosure: Sexp,
+        bindings: usize,
+    ) -> HeapResult<Sexp> {
         let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
         let object = self.allocate(SexpType::Environment, size, &[enclosure])?;
-        object.set_frame_ptr(Box::into_raw(Box::<Frame>::default()));
+        std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
         object.set_enclosure_unbarriered(enclosure);
         Ok(object)
     }
@@ -821,7 +877,7 @@ impl Heap {
         }
         let cell =
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
-        if !env.has_gp(gp::FUNCTION_FRAME) {
+        if !env.has_gp(gp::FUNCTION_FRAME) || symbol.has_gp(gp::WATCHED) {
             self.binding_epoch += 1;
         }
         if self.is_symbol_frame(env) {
@@ -839,6 +895,9 @@ impl Heap {
             return Err(HeapError::LockedBinding {
                 name: String::from_utf8_lossy(cell.car().car().bytes()).into_owned(),
             });
+        }
+        if cell.has_gp(gp::WATCHED) {
+            self.binding_epoch += 1;
         }
         self.store(cell, cell.cdr(), value);
         cell.set_cdr_unbarriered(value);
@@ -980,35 +1039,46 @@ impl Heap {
     // Collection.
 
     unsafe fn allocate(&mut self, kind: SexpType, size: usize, keep: &[Sexp]) -> HeapResult<Sexp> {
+        self.allocate_with(kind, size, keep, size)
+    }
+
+    /// Allocates an object and zeroes its first `zeroed` bytes. The rest is left as it was,
+    /// which only a vector of plain numbers that its caller fills in may rely on.
+    unsafe fn allocate_with(
+        &mut self,
+        kind: SexpType,
+        size: usize,
+        keep: &[Sexp],
+        zeroed: usize,
+    ) -> HeapResult<Sexp> {
         self.maybe_collect(size, keep);
-        let class = SLOT_SIZES.iter().position(|&slot| slot >= size);
+        let class = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).copied();
         let (memory, size_class, gc) = match class {
             Some(class) => {
+                let class = class as usize;
                 let memory = match self.classes[class].free.pop() {
                     Some(memory) => memory,
                     None => self.grow_class(class)?,
                 };
-                std::ptr::write_bytes(memory.as_ptr(), 0, SLOT_SIZES[class]);
+                // Every slot size is a multiple of 8 bytes, and zeroing word by word keeps the
+                // common small object clear of a call into `memset`.
+                let words = memory.as_ptr().cast::<u64>();
+                for word in 0..SLOT_SIZES[class].min(zeroed.next_multiple_of(8)) / 8 {
+                    words.add(word).write(0);
+                }
                 (memory, class as u8, 0)
             }
             None => {
                 let layout = Layout::from_size_align(size, 16)
                     .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
-                // `alloc_vector` fills a handle vector's elements right away, so only its header
-                // needs zeroing; writing a large one twice costs as much as filling it.
-                let fills_elements = matches!(
-                    kind,
-                    SexpType::String | SexpType::List | SexpType::Expression
-                );
-                let memory = if fills_elements {
-                    let memory = NonNull::new(std::alloc::alloc(layout))
-                        .ok_or(HeapError::CannotAllocate { bytes: size })?;
-                    std::ptr::write_bytes(memory.as_ptr(), 0, VECTOR_DATA_OFFSET.min(size));
-                    memory
-                } else {
+                let memory = if zeroed >= size {
                     NonNull::new(std::alloc::alloc_zeroed(layout))
-                        .ok_or(HeapError::CannotAllocate { bytes: size })?
-                };
+                } else {
+                    NonNull::new(std::alloc::alloc(layout)).inspect(|memory| {
+                        std::ptr::write_bytes(memory.as_ptr(), 0, zeroed);
+                    })
+                }
+                .ok_or(HeapError::CannotAllocate { bytes: size })?;
                 (memory, LARGE_CLASS, gc_bits::LARGE)
             }
         };
@@ -1238,11 +1308,8 @@ impl Heap {
             }
             Shape::Environment => {
                 self.mark(object.enclosure());
-                let frame = object.frame_ptr();
-                if !frame.is_null() {
-                    for &cell in (*frame).cells() {
-                        self.mark(cell);
-                    }
+                for &cell in (*object.frame_ptr()).cells() {
+                    self.mark(cell);
                 }
             }
             Shape::ExternalPtr => {
@@ -1309,7 +1376,8 @@ impl Heap {
     /// next minor collection would free a live child.
     unsafe fn verify_barrier(&self) {
         let check = |parent: Sexp| {
-            if !parent.is_marked() || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
+            if !parent.is_marked()
+                || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
             {
                 return;
             }
@@ -1324,7 +1392,9 @@ impl Heap {
                             SexpType::String | SexpType::List | SexpType::Expression
                         ) =>
                     {
-                        children.extend((0..parent.length() as usize).map(|index| parent.element(index)));
+                        children.extend(
+                            (0..parent.length() as usize).map(|index| parent.element(index)),
+                        );
                     }
                     Shape::Triple => children.extend([parent.car(), parent.cdr(), parent.tag()]),
                     Shape::Environment => {
@@ -1338,7 +1408,8 @@ impl Heap {
                         children.extend([parent.external_tag(), parent.external_protected()])
                     }
                     Shape::Record => children.extend(
-                        (0..parent.record_slot_count()).filter_map(|slot| parent.record_handle(slot)),
+                        (0..parent.record_slot_count())
+                            .filter_map(|slot| parent.record_handle(slot)),
                     ),
                     _ => {}
                 }
@@ -1348,7 +1419,11 @@ impl Heap {
                     panic!(
                         "write barrier violated: old {:?} (length {}) holds young {:?} at child {position}",
                         parent.kind(),
-                        if parent.kind().shape() == Shape::Vector { parent.length() } else { 0 },
+                        if parent.kind().shape() == Shape::Vector {
+                            parent.length()
+                        } else {
+                            0
+                        },
                         child.kind(),
                     );
                 }
@@ -1459,11 +1534,7 @@ impl Heap {
 
     unsafe fn free(&mut self, object: Sexp) {
         if object.kind() == SexpType::Environment && !object.is_altrep() {
-            let frame = object.frame_ptr();
-            if !frame.is_null() {
-                drop(Box::from_raw(frame));
-                object.set_frame_ptr(std::ptr::null_mut());
-            }
+            std::ptr::drop_in_place(object.frame_ptr());
         }
         self.stats.objects_freed += 1;
         let class = object.size_class();
@@ -1572,10 +1643,7 @@ impl Drop for Heap {
                         if object.kind_byte() == SexpType::Environment as u8
                             && object.flags() & flag_bits::ALTREP == 0
                         {
-                            let frame = object.frame_ptr();
-                            if !frame.is_null() {
-                                drop(Box::from_raw(frame));
-                            }
+                            std::ptr::drop_in_place(object.frame_ptr());
                         }
                     }
                     std::alloc::dealloc(

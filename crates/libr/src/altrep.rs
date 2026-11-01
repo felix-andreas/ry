@@ -16,16 +16,18 @@
 //! serialization agree: `compact_intseq` and `compact_realseq`, `deferred_string`, and the
 //! `wrap_*` classes that attach sortedness and missing-value metadata to a vector.
 
-use crate::{
-    Global, R_xlen_t, Rboolean,
-    boundary::{ApiResult, Handout, enter, error, with_native_scope, write_console},
-    memory, runtime,
-    vectors::{self, sexp_type},
-};
-use heap::object::{Header, NA_INTEGER, Rcomplex, Sexp, SexpType};
-use std::{
-    convert::Infallible,
-    ffi::{CStr, c_char, c_int, c_void},
+use {
+    crate::{
+        Global, R_xlen_t, Rboolean,
+        boundary::{ApiResult, Handout, enter, error, with_native_scope, write_console},
+        memory, runtime,
+        vectors::{self, sexp_type},
+    },
+    heap::object::{Header, NA_INTEGER, Rcomplex, Sexp, SexpType},
+    std::{
+        convert::Infallible,
+        ffi::{CStr, c_char, c_int, c_void},
+    },
 };
 
 pub const UNKNOWN_SORTEDNESS: c_int = i32::MIN;
@@ -1525,7 +1527,9 @@ unsafe fn deferred_length(object: Sexp) -> ApiResult<R_xlen_t> {
 
 unsafe fn deferred_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
     if index < 0 || index >= deferred_length(object)? {
-        return Err(error("attempt to access an element of a deferred string out of bounds"));
+        return Err(error(
+            "attempt to access an element of a deferred string out of bounds",
+        ));
     }
     let nil = runtime().nil();
     let converted = object.cdr();

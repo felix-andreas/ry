@@ -5,26 +5,50 @@ description: One toolchain for R, a type system on top of it, and a path from th
 
 import Venn from '../../components/Venn.astro';
 
-R code bases that are years old are now being changed by agents, and code an agent writes needs to
-be checked by something other than a person reading every line. The future of such a code base is
-typed, checked on every edit, and safe for an agent to change. R has no type checker, so ry adds
-one. You can use it today on the R code you already have, and it takes that code there one step at
-a time.
+R reports most mistakes only when a line runs: a misspelled name, a string where a number belongs,
+a `NULL` nobody handled. That was tolerable while people wrote and read every line. Now agents
+change R code bases that are years old, and code an agent writes needs to be checked by something
+other than a person reading it. R has no type checker, so ry adds one, and it works today on the R
+code you already have.
 
-With ry you check, format, load and run R from one tool configured by one `ry.toml`. Its type
-system sits on top of R, so plain R stays valid. ry also adds what R lacks: records, tagged unions,
-a typed table called `DataFrame` with a Polars-style API, and a standard library. Everything ry
-runs, plain R plus these additions, is what we call R++. Strict mode then keeps only code whose types are known, which we
-call R--.
+ry is one tool for R: it checks, formats, loads and runs your code, configured by one `ry.toml`.
+Its type system sits on top of R, so plain R stays valid. It also adds what R lacks: records,
+tagged unions, a typed table called `DataFrame` with a Polars-style API, and a standard library.
+Everything ry runs, plain R plus these additions, is what we call R++. Strict mode then keeps only
+code whose types are known, which we call R--.
 
 <figure>
   <Venn id="ry-venn" />
 </figure>
 
+## Speed
+
+On ry's own runtime, loops and vector code run several times faster than on GNU R, with the same
+results:
+
+| program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
+| --- | ---: | ---: | ---: | ---: |
+| closures | 0.818 s | 0.395 s | 0.397 s | 2.1x |
+| drawdown | 0.314 s | 0.024 s | 0.023 s | 13.1x |
+| fib | 0.080 s | 0.094 s | 0.109 s | 0.9x |
+| log_rank | 0.101 s | 0.073 s | 0.062 s | 1.4x |
+| loop_sum | 0.265 s | 0.042 s | 0.040 s | 6.3x |
+| vasicek | 0.042 s | 0.041 s | 0.039 s | 1.0x |
+| vector_arith | 0.176 s | 0.140 s | 0.135 s | 1.3x |
+
+Code dominated by small function calls (`fib`) is still about 10% slower, and `vasicek` is at
+parity. Types do not make code faster yet: a static `double` still admits an integer or a logical
+through promotion, so the compiled code keeps its runtime checks, and the differences between the
+two ry columns are measurement noise. The runtime is still incomplete (see [Status](#status)), and
+[How it was measured](#how-it-was-measured) describes the benchmark.
+
 ## From plain R to fully typed code in four steps
 
-Your code moves from the blue circle toward the purple one. Each step is optional, and you can stop
-after any of them.
+In the diagram above, your code moves from the blue circle toward the purple one, one step at a
+time. Each step is
+optional, and you can stop after any of them, so you can adopt ry on a large code base without a
+rewrite. Steps 1 and 2 work with GNU R as it is. Steps 3 and 4 use what ry adds, and ry's own data
+types run only on ry's runtime, which is still incomplete (see [Status](#status)).
 
 ### 1. Check the code you have
 
@@ -49,8 +73,9 @@ unresolved
  3 | }
 ```
 
-The same analysis drives [your editor](/guides/editors), and `ry fmt`, `ry load` and `ry repl`
-cover formatting, loading a package from its sources, and the console.
+The same analysis drives [your editor](/guides/editors). `ry fmt` formats the project, and
+`ry R`, started inside a package, [reloads what you edit](/guides/loading-packages) before each
+command, so you never call `load_all()` again.
 
 ### 2. Type your code
 
@@ -97,15 +122,15 @@ net_price(100, rate)
 On ry's runtime, the call fails at the boundary and names the argument:
 
 ```text
-$ ry run --runtime ry pricing.R
+$ ry run pricing.R
 Error in net_price(100, rate) :
   argument `rate` must be `double`, not `character`
 Execution halted
 ```
 
-GNU R fails later, inside the body: `Error in 1 - rate : non-numeric argument to binary operator`.
-`ry run` without `--runtime ry` runs the file on GNU R with the annotations erased, but plain
-`Rscript` cannot parse them, so a file with inline types needs ry.
+`ry R pricing.R` runs the file on GNU R with the annotations erased, and there it fails later, inside
+the body: `Error in 1 - rate : non-numeric argument to binary operator`. Plain `Rscript` cannot
+parse the annotations, so a file with inline types needs ry.
 
 ### 4. Go fully typed
 
@@ -117,7 +142,10 @@ columns the checker follows through every query, and the
 of `NA` or a warning:
 
 ```r
-alias Payment = :Paid(amount: double) | :Refunded(amount: double) | :Pending
+alias Payment =
+  | :Paid(amount: double)
+  | :Refunded(amount: double)
+  | :Pending
 
 balance <- function(payment: Payment) -> double {
   match (payment) {
@@ -137,8 +165,9 @@ non-exhaustive-match
    |   ^^^^^^^^^^^^^^^
 ```
 
-[Strict mode](/type-checking/strict-mode) (`strict = true`) finishes the move: a value ry cannot
-type, or a parameter nothing constrains, is an error, and `ry run` refuses to run code that has one.
+[Strict mode](/type-checking/strict-mode) (`strict = true`, kept beside `typing = true`) finishes the move: a value ry cannot
+type, or a parameter nothing constrains, is an error, and ry's run commands (`ry run`, `ry R`, `ry load` and the console) refuse to run code that has
+one.
 `object-systems = false` additionally rejects new S4, R6 and Reference Classes:
 
 ```text
@@ -163,7 +192,7 @@ left out on purpose:
 
 Some things it cannot model yet. S4 and R6 objects and data frame columns get a type that is
 compatible with everything, so they never cause a false error, but they are not checked either.
-Strict mode shows where that happens, and [limitations](/type-checking/limitations) lists the rest.
+Strict mode shows most of the places where that happens, and [limitations](/type-checking/limitations) lists the rest.
 
 ## Status
 
@@ -174,4 +203,16 @@ is why CI should pin the version.
 
 ry's own runtime is under construction. It still reads base R from your GNU R installation, and a
 script that uses something it lacks stops with an error that names it. Records, tagged unions, `DataFrame` and
-the standard library run only on it, so for production work today, run plain R and typed R on GNU R.
+the standard library run only on it, so for production work today, run plain R and typed R on GNU R
+with `ry R`.
+
+## How it was measured
+
+ry's runtime (`ry run`) interprets R and compiles hot code to machine code. Each
+program exists twice in `tools/bench/why/`: as plain R, and with inline annotations checked in
+[strict mode](/type-checking/strict-mode). Each time is the best of three runs after one warm-up
+run, measured inside the script, so it leaves out startup and, for the typed column, the static
+check. The best run is reported rather than the median because other load on a machine only ever
+slows a run down. Measured on an Intel Xeon at 2.10GHz with 4 cores, Linux 6.18, against GNU R
+4.3.3 with its bytecode compiler on. `just bench-why` builds ry and regenerates the table on your
+machine.

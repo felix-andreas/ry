@@ -4,7 +4,7 @@ description: What ry does not check, and where it reports correct code
 ---
 
 When ry cannot determine a type, the value becomes `Unknown` and its checks are skipped, so most
-gaps on this page are silent. [Strict mode](/type-checking/strict-mode) shows where they occur. The last
+gaps on this page are silent. [Strict mode](/type-checking/strict-mode) shows most of the places they occur. The last
 section lists the places where ry reports correct code instead.
 
 ## Not checked
@@ -23,21 +23,6 @@ section lists the places where ry reports correct code instead.
 - **A project's own `%op%` operators**, because one may quote its right operand instead of
   evaluating it, as magrittr's `%>%` does.
 
-## What is analyzed together
-
-Files under `R/` share one namespace, and every other file is analyzed on its own, seeing its own
-definitions plus the package's. `source()` is not followed, so a function from a sourced file is
-reported as unresolved where you call it, and as unused where you define it. Moving shared helpers
-into `R/` makes them visible to every script.
-
-Files directly under `tests/testthat/` see the package's definitions and the `helper-*.R` and
-`setup-*.R` files' definitions, but add nothing to the package, so a variable a test assigns never
-changes what a name means under `R/`. Each test file's own bindings stay in that file, as they do
-when testthat runs it.
-
-`ry check` reads the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents, but the language server does
-not analyze them and `ry fmt` skips them.
-
 ## Where correct code is reported
 
 These are known bugs, not design decisions:
@@ -49,8 +34,6 @@ These are known bugs, not design decisions:
   reports the trailing comma as it would for `c(1, 2, )`.
 - **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
   namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
-- **A `stop()` guard in strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an
-  undetermined type.
 - **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
   reported, because type parameters on a function that is not bound to a name are not instantiated.
   Leave the function's types off, or bind it to a name first.

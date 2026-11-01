@@ -296,12 +296,12 @@ language server once per load, for as long as the setting stays off. A `#:` bloc
 statement then applies alone, and so does a paired `#:` definition. An inline type definition with
 no `#:` partner still declares its name, so uses of it are not also reported as unknown types. A
 `type` stays nominal, so a plain value is still not accepted where it is expected, but its
-representation is `Unknown`. The setting also governs running code: `ry run` and `ry repl` still
-erase the annotations, but ry's runtime registers no checks for them.
+representation is `Unknown`. The setting also governs running code: `ry run` and `ry R` still
+run annotated code, but ry's runtime registers no checks for the annotations.
 
 ### Inline annotations at run time
 
-`ry run` and `ry repl` run annotated code on both runtimes. GNU R reads the erasure. ry's runtime
+`ry run` runs annotated code on ry's runtime and `ry R` on GNU R, which reads the erasure. ry's runtime
 reads the annotations themselves and checks a function's parameter and return types at its
 boundary, so a function called with the wrong kind of value fails where it was called instead of
 somewhere inside it. The checks come from the inline spelling, so this example has a single block:
@@ -351,10 +351,10 @@ The checks belong to the function definition that carried the annotations. A clo
 another function's `formals()` with a body of its own, as `rlang::new_function()` builds one, is a
 new definition and is not checked.
 
-Before running anything, `ry run` checks the script and `ry repl` checks each command, with the
+Before running anything, `ry run` and `ry R` check the script and their console checks each command, with the
 project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In
 [strict mode](/type-checking/strict-mode) they also print every error and refuse to run code that
-has one: `ry run` exits with status 1, and the console drops the command. Other findings are left
+has one: a script exits with status 1, and the console drops the command. Other findings are left
 to `ry check`, so they never change whether R code runs.
 
 ## Types
@@ -1747,6 +1747,15 @@ condition, a vector operand is accepted unless it is a `c()` call with two or mo
 `v && TRUE` on a `logical[]` passes, while `c(TRUE, FALSE) && TRUE` and `TRUE || c(FALSE, TRUE)` are
 type errors.
 
+### Elementwise operators `&` and `|`
+
+Each operand is a `logical`, `integer`, or `double` scalar or vector, and the result is `logical`.
+It is a scalar when both operands are scalars, and `logical[]` otherwise, so `a > 0 & b > 0` on two
+`double[]` parameters is `logical[]`. An operand whose type is `Any` makes the result `Any`, and
+one whose type is `Unknown` makes it `Unknown`, which strict mode reports where the operand's type
+was lost. An operand with no type yet, such as an unannotated parameter, could be a scalar or a
+vector, so the operator gives `Unknown` and strict mode reports it; annotate the parameter.
+
 ## Calls
 
 ### Function calls
@@ -1940,8 +1949,9 @@ both diverge. A diverging branch contributes neither its value nor the state of 
 `x <- if (c) return(NULL) else 5` gives `x` the type `double`, and a variable written inside a
 diverging branch does not join into the state after the `if`.
 
-A call that never returns has no bottom type of its own: `function() stop("no")` is
-`fn() -> Unknown`. `stop(...)` is recognized by its bare name, as `local` and `return` are, so
+A call that never returns has no bottom type of its own. A `stop(...)` call types as `Any`, which
+fits every context and which strict mode does not report, so `function() stop("no")` is
+`fn() -> Any`. `stop(...)` is recognized by its bare name, as `local` and `return` are, so
 rebinding `stop` is not modelled.
 
 ### Guard narrowing
@@ -2552,7 +2562,7 @@ bottom, so its top level is one sequential lexical scope, like a function body:
   enclosing statement's own binding, so self-recursion resolves.
 - A conditional top-level write creates the document's variable slot exactly as in package files.
 - A masked read, from `with` or from data.table indexing, and a read inside an opaque operator, which
-  is `&`, a user `%op%`, or a pipe R would reject, are never reported as unresolved. Each still counts
+  is a user `%op%` or a pipe R would reject, are never reported as unresolved. Each still counts
   as a use for the unused check, and navigation connects it.
 
 Scripts are type-checked like package files, against the package-global values and project-global

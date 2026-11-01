@@ -7,9 +7,11 @@
 
 mod harness;
 
-use harness::*;
-use std::ffi::c_int;
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    harness::*,
+    std::ffi::c_int,
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 #[derive(Clone, Debug)]
 enum Expression {

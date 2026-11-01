@@ -1,15 +1,17 @@
 //! Attributes, classes and the header bits native code reads.
 
-use crate::{
-    Rboolean,
-    boundary::{ApiResult, enter, error},
-    globals::{R_ClassSymbol, R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol, R_RowNamesSymbol},
-    runtime,
-    strings::c_bytes,
-    vectors::{coerce_vector, generic_length, integers, set_sexp_elt, sexp_elt, xlength},
+use {
+    crate::{
+        Rboolean,
+        boundary::{ApiResult, enter, error},
+        globals::{R_ClassSymbol, R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol, R_RowNamesSymbol},
+        runtime,
+        strings::c_bytes,
+        vectors::{coerce_vector, generic_length, integers, set_sexp_elt, sexp_elt, xlength},
+    },
+    heap::object::{NA_INTEGER, Sexp, SexpType, gp},
+    std::ffi::{c_char, c_int},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType, gp};
-use std::ffi::{c_char, c_int};
 
 /// Resolves an attribute name given as a symbol or as a character vector.
 unsafe fn attribute_symbol(name: Sexp) -> ApiResult<Sexp> {

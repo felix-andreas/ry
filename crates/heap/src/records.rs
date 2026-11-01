@@ -10,8 +10,7 @@
 //! Tag and field names are interned symbols, which the heap roots for its whole life, so the
 //! tables hold them without tracing.
 
-use crate::object::Sexp;
-use rustc_hash::FxHashMap;
+use {crate::object::Sexp, rustc_hash::FxHashMap};
 
 /// A record, tuple or tag shape.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

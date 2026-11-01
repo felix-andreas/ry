@@ -4,11 +4,16 @@
 
 #![cfg(any(unix, windows))]
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::io::{Read, Write};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
-use std::{fs, thread};
+use {
+    portable_pty::{CommandBuilder, PtySize, native_pty_system},
+    std::{
+        fs,
+        io::{Read, Write},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    },
+};
 
 fn r_available() -> bool {
     let available = std::process::Command::new("R")
@@ -41,9 +46,10 @@ impl ReplSession {
     }
 
     fn start_in(directory: Option<&std::path::Path>) -> ReplSession {
-        ReplSession::start_with(directory, &[])
+        ReplSession::start_with(directory, &["R"])
     }
 
+    /// `arguments` are ry's, starting with the subcommand.
     fn start_with(directory: Option<&std::path::Path>, arguments: &[&str]) -> ReplSession {
         let lock = SESSION_LOCK
             .lock()
@@ -57,7 +63,6 @@ impl ReplSession {
             })
             .expect("openpty");
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ry"));
-        command.arg("repl");
         command.args(arguments);
         if let Some(directory) = directory {
             command.cwd(directory);
@@ -207,7 +212,7 @@ fn start_session() -> Option<ReplSession> {
     Some(session)
 }
 
-/// Runs `body` as a script through `ry run`, or skips the test when no R is installed.
+/// Runs `body` as a script through `ry R`, or skips the test when no R is installed.
 fn run_script(body: &str) -> Option<(std::process::Output, String)> {
     if !r_available() {
         return None;
@@ -216,7 +221,7 @@ fn run_script(body: &str) -> Option<(std::process::Output, String)> {
     let script = directory.path().join("script.R");
     fs::write(&script, body).expect("write script");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-        .arg("run")
+        .arg("R")
         .arg(&script)
         .output()
         .expect("run the binary");
@@ -274,9 +279,11 @@ fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
     let mut session = ReplSession::start_in(Some(&package));
     session.expect("Loaded promptpkg");
     session.send("options(prompt = \"R> \")\r");
-    session.settle(Duration::from_millis(300));
+    // The echoed command line never contains the joined text, so only the output matches.
+    session.send("cat(\"prompt\", \"changed\\n\")\r");
+    session.expect("prompt changed");
     fs::write(package.join("R/a.R"), "level <- function() \"level two\"\n").expect("write");
-    session.send("answer <- readline(\"answer: \")\r");
+    session.send("answer <- readline(paste0(\"ans\", \"wer: \"))\r");
     session.expect("answer: ");
     session.send("typed\r");
     session.send("cat(\"got\", answer, level(), \"\\n\")\r");
@@ -409,30 +416,6 @@ fn run_error_exits_nonzero() {
     );
 }
 
-#[test]
-fn run_passes_trailing_arguments_to_the_script() {
-    if !r_available() {
-        return;
-    }
-    let directory = tempfile::tempdir().expect("temp dir");
-    let script = directory.path().join("script.R");
-    fs::write(
-        &script,
-        "cat(commandArgs(trailingOnly = TRUE), sep = \"|\")\n",
-    )
-    .expect("write script");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-        .arg("run")
-        .arg(&script)
-        .args(["--", "first", "--second"])
-        .output()
-        .expect("run the binary");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "first|--second"
-    );
-}
-
 /// ry's runtime is the `libR` built beside the binary, which `cargo test -p ry-lang` does not
 /// build, so these tests skip without it: `cargo build -p libr` first.
 fn ry_runtime_available() -> bool {
@@ -452,16 +435,22 @@ fn ry_runtime_available() -> bool {
     available
 }
 
-/// Runs `files[0]` with `ry run`, in a project made of `files` (name, text), on `runtime`.
+/// The command that runs code on `runtime`: `ry R` for GNU R, `ry run` for ry's own.
+fn runtime_command(runtime: &str) -> &'static str {
+    match runtime {
+        "gnu-r" => "R",
+        _ => "run",
+    }
+}
+
+/// Runs `files[0]` in a project made of `files` (name, text), on `runtime`.
 fn run_project(runtime: &str, files: &[(&str, &str)]) -> (Option<i32>, String, String) {
     let directory = tempfile::tempdir().expect("temp dir");
     for (name, text) in files {
         fs::write(directory.path().join(name), text).expect("write project file");
     }
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-        .arg("run")
-        .arg("--runtime")
-        .arg(runtime)
+        .arg(runtime_command(runtime))
         .arg(files[0].0)
         .current_dir(directory.path())
         .env("NO_COLOR", "1")
@@ -662,8 +651,7 @@ fn the_ry_console_refuses_class_definitions_when_object_systems_are_off() {
         "[check]\nobject-systems = false\n",
     )
     .expect("write config");
-    let mut session =
-        ReplSession::start_with(Some(directory.path()), &["--no-load", "--runtime", "ry"]);
+    let mut session = ReplSession::start_with(Some(directory.path()), &["run"]);
     session.expect("console");
     session.settle(Duration::from_millis(400));
     session.send("setRefClass(\"A\")\r");
@@ -679,7 +667,7 @@ fn piped_input_is_evaluated_and_autoprinted_on_both_runtimes() {
     let directory = tempfile::tempdir().expect("temp dir");
     for runtime in runtimes() {
         let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-            .args(["repl", "--no-load", "--runtime", runtime])
+            .arg(runtime_command(runtime))
             .current_dir(directory.path())
             .env("NO_COLOR", "1")
             .stdin(std::process::Stdio::piped())
@@ -747,7 +735,7 @@ fn the_console_holds_a_multiline_command_and_refuses_it_in_strict_mode() {
     .expect("write config");
     for runtime in runtimes() {
         let mut session =
-            ReplSession::start_with(Some(directory.path()), &["--no-load", "--runtime", runtime]);
+            ReplSession::start_with(Some(directory.path()), &[runtime_command(runtime)]);
         session.expect("console");
         // Input typed before the editor takes the terminal would arrive as one paste.
         for line in [
@@ -847,5 +835,207 @@ fn frame_types_agree_between_the_checker_and_the_runtime() {
             stdout.contains(&format!("[1] \"{ty}\"")),
             "the runtime schema differs from `{ty}`:\n{stdout}"
         );
+    }
+}
+
+/// Runs `ry <arguments>` in `directory` with `stdin` piped in, and returns the status, stdout
+/// and stderr.
+fn ry_with_input(
+    directory: &std::path::Path,
+    arguments: &[&str],
+    environment: &[(&str, &str)],
+    stdin: &str,
+) -> (Option<i32>, String, String) {
+    use std::io::Write;
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ry"));
+    command
+        .args(arguments)
+        .current_dir(directory)
+        .env("NO_COLOR", "1")
+        .env_remove("RY_RUNTIME")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("start ry");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write the input");
+    let output = child.wait_with_output().expect("ry exits");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// GNU R erases the annotation and runs the call; ry's runtime checks it and stops.
+const ANNOTATION_VIOLATION: &str = "f <- function(x: integer) x\nf(\"a\")\ncat(\"erased\\n\")\n";
+
+#[test]
+fn script_arguments_reach_command_args_verbatim_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("arguments.R"),
+        "cat(commandArgs(trailingOnly = TRUE), sep = \"|\")\ncat(\"\\n\")\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[
+                runtime_command(runtime),
+                "arguments.R",
+                "a",
+                "--b",
+                "c d",
+                "-i",
+            ],
+            &[],
+            "",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert_eq!(stdout, "a|--b|c d|-i\n", "{runtime}: {stderr}");
+    }
+}
+
+#[test]
+fn a_script_is_not_interactive_and_a_console_is_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("probe.R"), "print(interactive())\n").expect("write script");
+    for runtime in runtimes() {
+        let command = runtime_command(runtime);
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), &[command, "probe.R"], &[], "");
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert_eq!(stdout, "[1] FALSE\n", "{runtime} script: {stderr}");
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), &[command], &[], "print(interactive())\n");
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(
+            stdout.contains("[1] TRUE"),
+            "{runtime} console: {stdout}{stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_top_level_error_halts_the_script_with_status_one_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("failing.R"),
+        "stop(\"boom\")\ncat(\"not reached\\n\")\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "failing.R"],
+            &[],
+            "",
+        );
+        assert_eq!(status, Some(1), "{runtime}: {stdout}{stderr}");
+        assert!(!stdout.contains("not reached"), "{runtime}: {stdout}");
+        assert!(
+            stderr.contains("boom") && stderr.contains("Execution halted"),
+            "{runtime}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn run_defaults_to_ry_s_runtime_and_r_runs_gnu_r() {
+    if !r_available() || !ry_runtime_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("script.R"), ANNOTATION_VIOLATION).expect("write script");
+    let (status, stdout, stderr) = ry_with_input(directory.path(), &["run", "script.R"], &[], "");
+    assert_eq!(
+        status,
+        Some(1),
+        "ry run checks the annotation: {stdout}{stderr}"
+    );
+    assert!(!stdout.contains("erased"), "{stdout}");
+    let (status, stdout, stderr) = ry_with_input(directory.path(), &["R", "script.R"], &[], "");
+    assert_eq!(status, Some(0), "ry R erases the annotation: {stderr}");
+    assert_eq!(stdout, "[1] \"a\"\nerased\n");
+}
+
+/// ry's arguments, the environment, and the console's standard input.
+type Spelling<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)], &'a str);
+
+#[test]
+fn the_earlier_spellings_keep_their_runtimes() {
+    if !r_available() || !ry_runtime_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("script.R"), ANNOTATION_VIOLATION).expect("write script");
+    let gnu_r_spellings: &[Spelling] = &[
+        (&["run", "--runtime", "gnu-r", "script.R"], &[], ""),
+        (&["run", "script.R"], &[("RY_RUNTIME", "gnu-r")], ""),
+        (&["repl"], &[], ANNOTATION_VIOLATION),
+        (
+            &["repl", "--runtime", "gnu-r", "--no-load"],
+            &[("RY_RUNTIME", "ry")],
+            ANNOTATION_VIOLATION,
+        ),
+        (&["R", "script.R"], &[("RY_RUNTIME", "ry")], ""),
+    ];
+    for (arguments, environment, stdin) in gnu_r_spellings {
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), arguments, environment, stdin);
+        assert_eq!(status, Some(0), "{arguments:?} {environment:?}: {stderr}");
+        assert!(stdout.contains("erased\n"), "{arguments:?}: {stdout}");
+    }
+    let ry_spellings: &[Spelling] = &[
+        (
+            &["run", "--runtime", "ry", "script.R"],
+            &[("RY_RUNTIME", "gnu-r")],
+            "",
+        ),
+        (&["repl", "--runtime", "ry"], &[], ANNOTATION_VIOLATION),
+        (&["repl"], &[("RY_RUNTIME", "ry")], ANNOTATION_VIOLATION),
+        (&["run"], &[], ANNOTATION_VIOLATION),
+    ];
+    for (arguments, environment, stdin) in ry_spellings {
+        let (_, stdout, stderr) = ry_with_input(directory.path(), arguments, environment, stdin);
+        assert!(
+            stderr.contains("argument `x` must be `integer`, not `character`"),
+            "{arguments:?} {environment:?} must check the annotation: {stdout}{stderr}"
+        );
+    }
+}
+
+#[test]
+fn interactive_runs_the_script_and_then_reads_the_console_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("setup.R"), "answer <- 40 + 2\n").expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "-i", "setup.R"],
+            &[],
+            "answer\n",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(stdout.contains("[1] 42"), "{runtime}: {stdout}{stderr}");
+    }
+}
+
+#[test]
+fn a_console_without_input_exits_zero_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), &[runtime_command(runtime)], &[], "");
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert_eq!(stdout, "", "{runtime}: {stderr}");
     }
 }

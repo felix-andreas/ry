@@ -2,10 +2,15 @@
 //! untouched top-level children are shared and only the edited middle is
 //! reparsed. Anything unanchorable falls back to a full parse.
 
-use crate::kind::SyntaxKind::{self, *};
-use crate::lexer::lex;
-use crate::{Parse, SyntaxElement, parse};
-use rowan::{GreenNode, NodeOrToken, TextRange, TextSize};
+use {
+    crate::{
+        Parse, SyntaxElement,
+        kind::SyntaxKind::{self, *},
+        lexer::lex,
+        parse,
+    },
+    rowan::{GreenNode, NodeOrToken, TextRange, TextSize},
+};
 
 pub fn try_splice(
     old: &Parse,

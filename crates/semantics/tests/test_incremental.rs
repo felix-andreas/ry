@@ -1,17 +1,19 @@
-use salsa::{Database, Durability, Setter};
-use semantics::diagnostics::{derive_from_syntax, file_diagnostics};
-use semantics::lints::{LintConfig, lint_file};
-use semantics::load_index::{PackageFile, PackageSources, package_index};
-use semantics::metadata::{PackageMetadata, attached_union};
-use semantics::stubs::install_shipped_stubs;
-use semantics::testing::ProbeDatabase;
-use semantics::types::{Atomic, scalar, unknown};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme,
-    item_naming, item_tree, limit_resident_trees, package_definitions,
+use {
+    salsa::{Database, Durability, Setter},
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile,
+        diagnostics::{derive_from_syntax, file_diagnostics},
+        global_scheme, item_naming, item_tree, limit_resident_trees,
+        lints::{LintConfig, lint_file},
+        load_index::{PackageFile, PackageSources, package_index},
+        metadata::{PackageMetadata, attached_union},
+        package_definitions,
+        stubs::install_shipped_stubs,
+        testing::ProbeDatabase,
+        types::{Atomic, scalar, unknown},
+    },
+    std::{collections::BTreeMap, thread},
 };
-use std::collections::BTreeMap;
-use std::thread;
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
     for &file in files {
@@ -268,7 +270,7 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
     })
     .collect();
     let _project = ProjectFiles::builder(files.clone())
-        .durability(Durability::MEDIUM)
+        .durability(Durability::LOW)
         .new(&db);
     settle(&db, &files);
     files[0]
@@ -284,6 +286,49 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
         db.validations_since(&["parse", "item_syntax"]),
         [0, 0],
         "the untouched files' trees sit below memos that verify by durability alone"
+    );
+}
+
+#[test]
+fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
+    let mut db = ProbeDatabase::default();
+    let files: Vec<SourceFile> = [
+        "x <- function() 1L\n",
+        "use_x <- function() x()\nif (TRUE) slot <- 1L\ny <- function() use_x()\n",
+        "other <- function() 3L\nmore <- function() other()\nlast <- 4L\n",
+    ]
+    .into_iter()
+    .map(|text| {
+        SourceFile::builder(text.to_owned(), DocumentKind::Package)
+            .durability(Durability::MEDIUM)
+            .new(&db)
+    })
+    .collect();
+    // LOW, as hosts create it: the project-wide maps read it, so they are LOW before any
+    // file's first edit and can backdate through that file's drop from MEDIUM.
+    let _project = ProjectFiles::builder(files.clone())
+        .durability(Durability::LOW)
+        .new(&db);
+    settle(&db, &files);
+    db.checked_since();
+    files[0]
+        .set_text(&mut db)
+        .with_durability(Durability::LOW)
+        .to("x <- function() 2L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.checked_since(),
+        ["x"],
+        "a file's first edit drops its durability without re-executing the rest of the project"
+    );
+
+    db.edit(files[0], "x <- function() 3L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.validations_since(&["item_interface_reads", "item_top_level_names"]),
+        [1, 1],
+        "the project-wide name maps fold per-file memos, so an edit verifies only the edited \
+         file's one item and none of the five in the untouched files"
     );
 }
 

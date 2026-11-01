@@ -58,7 +58,7 @@ and `counts` is `Dict.from_list(list(("a", 2L), ("b", 1L)))`. The last line is t
 checker catches: the result has to be unwrapped, with `match` or `Result.with_default`, before its
 list can be summed.
 
-The library runs only on ry's runtime, so run such a script with `ry run --runtime ry`. GNU R does
+The library runs only on ry's runtime, so run such a script with `ry run`, not `ry R`. GNU R does
 not have these functions, and a script that calls one fails there with "could not find function".
 
 ## Conventions

@@ -3,17 +3,23 @@
 //! that talk to forked children) is not, so `mclapply` and `mcparallel` work only on the paths
 //! that run in the current process, such as `mc.cores = 1`.
 
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    coerce::coerce_vector,
-    unwind::R,
-    values::{self, nil, scalar_bool},
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        coerce::coerce_vector,
+        unwind::R,
+        values::{self, nil, scalar_bool},
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
-    ("nextStream", |call| unsafe { advance(call, &A1P127, &A2P127) }),
-    ("nextSubStream", |call| unsafe { advance(call, &A1P76, &A2P76) }),
+    ("nextStream", |call| unsafe {
+        advance(call, &A1P127, &A2P127)
+    }),
+    ("nextSubStream", |call| unsafe {
+        advance(call, &A1P76, &A2P76)
+    }),
     ("mc_is_child", |_| unsafe { scalar_bool(false) }),
     ("mc_children", |_| unsafe { values::integer_vector(&[]) }),
     ("mc_fds", |_| unsafe { values::integer_vector(&[]) }),

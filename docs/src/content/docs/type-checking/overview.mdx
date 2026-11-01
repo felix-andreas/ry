@@ -38,35 +38,10 @@ switched off, because hover, completion, and inlay hints in your editor are buil
 
 ## Annotations where they help
 
-You can write a type inline, after a name, and a function's return type after its parameters. Or you
-can put the same types in a `#:` comment, which keeps the file plain R that every other tool can
-read. The two spellings mean the same, and the tab you pick is remembered across this site:
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-apply_discount <- function(price: double, rate: double) -> double price * (1 - rate)
-apply_discount(100, "0.2")
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: fn(price: double, rate: double) -> double
-apply_discount <- function(price, rate) price * (1 - rate)
-apply_discount(100, "0.2")
-```
-
-</TabItem>
-</Tabs>
-
-```text
-type-mismatch
-
-  x expected `double`, found `character`
-```
+You can state a type in a `#:` comment above the code, which keeps the file plain R that every other
+tool can read. Or you can write it inline, after a name, with a function's return type after its
+parameters, as in `function(price: double, rate: double) -> double`. The two spellings mean the
+same, and every typed example on this site offers both in tabs, with the tab you pick remembered.
 
 Plain `Rscript` cannot run inline annotations, so use the comments if the file must also run there.
 
@@ -83,13 +58,16 @@ A comment in a file, usually at the top, overrides the project setting for that 
 # typing: on
 ```
 
-The values are `on`, `off`, and `strict`, so you can switch type checking on file by file, or keep
+The values are `on`, `off`, and `strict` (which also requires a type everywhere, see
+[strict mode](/type-checking/strict-mode)), so you can switch type checking on file by file, or keep
 it on for the project and switch it off where a file is not ready.
+
+To silence one type finding, name its code in a comment on the line, as in
+`# ry: allow(type-mismatch)` ([Silencing one finding](/guides/checking#silencing-one-finding)).
 
 ## What is not checked
 
-What ry cannot model, such as `data.frame` columns and R6 objects, becomes `Unknown`, which is
-compatible with everything. That way an unmodeled construct never causes a false error, but a clean
-run also proves less than it seems. [Strict mode](/type-checking/strict-mode) finds these places, and
-[limitations](/type-checking/limitations) lists them. ry's own [DataFrames](/type-checking/dataframes)
-are the exception: their columns are typed.
+What ry cannot model, such as `data.frame` columns and R6 objects, gets the type `Unknown`, which is
+compatible with everything, so its checks are skipped rather than reported and a clean run proves
+less than it seems. `Any` is also compatible with everything, but marks a deliberate opt-out. [Unknown and Any](/type-checking/unknown) explains how to
+find and close these gaps.

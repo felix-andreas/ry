@@ -1,17 +1,19 @@
 //! `CHARSXP`s, encodings and symbols.
 
-use crate::{
-    Rboolean,
-    boundary::{ApiResult, enter, error},
-    runtime,
-};
-use heap::{
-    object::{Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use std::{
-    borrow::Cow,
-    ffi::{CStr, c_char, c_int},
+use {
+    crate::{
+        Rboolean,
+        boundary::{ApiResult, enter, error},
+        runtime,
+    },
+    heap::{
+        object::{Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    std::{
+        borrow::Cow,
+        ffi::{CStr, c_char, c_int},
+    },
 };
 
 /// The bytes of a C string, without its NUL. A null pointer reads as empty.

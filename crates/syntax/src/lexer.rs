@@ -2,10 +2,11 @@
 //! switches to annotation mode for the rest of the line, so annotation bodies
 //! arrive as ordinary tokens.
 
-use crate::SyntaxError;
-use crate::kind::SyntaxKind;
-use SyntaxKind::*;
-use rowan::{TextRange, TextSize};
+use {
+    crate::{SyntaxError, kind::SyntaxKind},
+    SyntaxKind::*,
+    rowan::{TextRange, TextSize},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {

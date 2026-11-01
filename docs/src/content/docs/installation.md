@@ -3,6 +3,10 @@ title: Installation
 description: Every way to install ry
 ---
 
+Most people install ry through their editor, and the VS Code extension needs nothing else. Install
+the command-line binary as well if you want `ry check`, `ry fmt` and `ry R` in a terminal or in
+CI.
+
 ## VS Code
 
 The [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) bundles the
@@ -36,10 +40,11 @@ On Linux, use `ry-x86_64-unknown-linux-gnu.tar.gz` the same way. From 0.3.2-beta
 x86_64 distribution with glibc 2.17 or newer. The binary in 0.3.1-beta and earlier starts only under
 Nix, and fails elsewhere with `cannot execute: required file not found`.
 
-**From source**, with a [Rust toolchain](https://www.rust-lang.org/tools/install):
+**From source**, with [rustup](https://rustup.rs). ry builds on a nightly Rust toolchain, and
+`cargo install` does not read the toolchain the repository pins, so name a nightly yourself:
 
 ```bash
-cargo install --git https://github.com/felix-andreas/ry ry-lang
+cargo +nightly install --git https://github.com/felix-andreas/ry ry-lang
 ```
 
 The crate is `ry-lang`, and the command it installs is `ry`.
@@ -50,11 +55,20 @@ The crate is `ry-lang`, and the command it installs is `ry`.
 nix profile install github:felix-andreas/ry
 ```
 
+## R
+
+`ry check`, `ry fmt` and `ry server` need no R. Everything that runs code does: `ry R`, `ry run`
+and `ry load` need a GNU R installation built as a shared library (see the
+[CLI reference](/reference/cli)). That includes ry's own runtime (`ry run`), which reads base
+R's R sources and the default packages from your GNU R installation instead of shipping them, so
+ry stays independent of R's license.
+
 ## Zed
 
 The Zed extension is not in Zed's registry yet, so install it as a dev extension:
 
-1. Install a [Rust toolchain](https://rustup.rs), which Zed uses to compile dev extensions.
+1. Install [rustup](https://rustup.rs), which Zed uses to compile dev extensions. The first build
+   downloads the nightly toolchain that the repository pins.
 2. Clone the repository.
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 
@@ -62,13 +76,15 @@ Zed has no built-in R support, so install the [R extension](https://zed.dev/exte
 put the [command-line binary](#command-line) on your `PATH`: the extension's automatic download
 finds only 0.1.1, from before the rename, and fails.
 
-## Other editors
-
-Any editor with LSP support can run `ry server` as the language server for R files.
-
 ## RStudio
 
 RStudio has no language-server integration, but it can use ry as its formatter. Under **Tools →
 Global Options → Code → Formatting**, set **Code formatter** to **External** and **Reformat command**
 to `path/to/ry fmt`. For format-on-save, tick **Reformat documents on save** under **Code → Saving**.
-Diagnostics do not show up inside RStudio, so run `ry check` in a terminal or in CI.
+Diagnostics do not show up inside RStudio, so run `ry check` in a terminal or in CI. RStudio's
+console can still reload your package with ry's `load_all()`, as
+[Loading packages](/guides/loading-packages#from-rstudio-or-plain-r) shows.
+
+## Other editors
+
+Any editor with LSP support can run `ry server` as the language server for R files.
