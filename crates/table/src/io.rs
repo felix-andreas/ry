@@ -12,11 +12,13 @@
 //! The writer follows `fwrite`: `TRUE` and `FALSE`, an empty field for `NA`, a factor as its
 //! labels, and quotes only around a field that needs them, which includes the empty string so it
 //! reads back as `""` rather than `NA`. A double prints in the shortest form that reads back as
-//! the same value, so a written frame reads back unchanged.
+//! the same value, so a numeric column reads back unchanged. A string column can come back
+//! different: the string "NA" and a column of digit strings are unquoted, so they read back as
+//! `NA` and as numbers.
 
 use std::{
     fs::File,
-    io::{Cursor, Write},
+    io::{BufWriter, Cursor, Write},
     path::Path,
     sync::Arc,
 };
@@ -59,7 +61,7 @@ pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
 
 /// Writes a table as comma-separated text, as `fwrite(x, path)` does.
 pub fn write_csv(table: &Table, path: &Path) -> Result<()> {
-    let mut file = std::io::BufWriter::with_capacity(1 << 20, File::create(path)?);
+    let mut file = BufWriter::with_capacity(1 << 20, File::create(path)?);
     write_csv_to(table, &mut file)?;
     file.flush()?;
     Ok(())
@@ -284,7 +286,7 @@ impl<'a> Cells<'a> {
 
 /// Writes a double in the shortest form that reads back as the same value, with R's spellings
 /// for the special values and without a `.0` on a whole number, as `fwrite` writes `1`.
-fn write_double(buffer: &mut Vec<u8>, value: f64) {
+pub(crate) fn write_double(buffer: &mut Vec<u8>, value: f64) {
     if value.is_nan() {
         buffer.extend_from_slice(b"NaN");
     } else if value.is_infinite() {

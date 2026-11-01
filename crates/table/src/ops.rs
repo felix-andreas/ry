@@ -8,6 +8,7 @@
 //! way, with a warning.
 
 use std::collections::HashMap;
+use std::mem::swap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use polars::prelude::{
@@ -26,11 +27,12 @@ use rustc_hash::FxHashSet;
 use crate::{
     ColumnType, Error, Result, Table,
     convert::{enum_dtype, factor_levels},
+    io::write_double,
     kernel::{
         CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column,
         pack_map, pack_rows,
     },
-    query::{Aggregate, Executed, Output, Query, Select, Warning, build},
+    query::{Aggregate, Executed, Output, Query, Select, Warning, build, execute},
 };
 
 /// The row number's share of a packed sort key: a table has fewer than 2^32 rows.
@@ -48,12 +50,12 @@ const RADIX_BITS: u32 = 11;
 const MAX_LSD_PASSES: u32 = 3;
 /// The digit width of the MSD pass, which leaves buckets of a few hundred keys at ten million rows.
 const MSD_BITS: u32 = 16;
-/// The longest string a view holds inline.
 /// A string ranking run looks each short string up in a direct-mapped cache of 2^CACHE_BITS
 /// entries before its hash map, which pays off while the column has few distinct strings.
 const CACHE_BITS: u32 = 12;
 /// Past this many distinct strings in a run the cache mostly misses, so the run stops using it.
 const CACHED_DISTINCT: usize = 1 << (CACHE_BITS - 2);
+/// The longest string a view holds inline.
 const INLINE_BYTES: u32 = 12;
 /// Up to this many strings, `%chin%` compares each value against every string in the set.
 const SHORT_SET: usize = 8;
@@ -117,8 +119,9 @@ pub fn set_column_order(table: &mut Table, first: &[&str]) -> Result<()> {
 pub fn unique_rows(table: &Table, by: &[&str]) -> Result<Table> {
     let subset: Vec<String> = subset(table, by)?;
     let frame = table.frame();
-    if let Some(digits) = key_digits(frame, &subset)? {
-        let rows = first_rows(&digits, frame.height());
+    if let Some(digits) = key_digits(frame, &subset)?
+        && let Some(rows) = first_rows(&digits, frame.height())
+    {
         return Ok(Table::from_normalized(gather_frame(frame, &rows)?));
     }
     let unique = frame.unique_stable(Some(&subset), UniqueKeepStrategy::First, None)?;
@@ -339,7 +342,7 @@ pub fn dcast(
         ..Query::default()
     };
     let mut subject = table.fork();
-    let grouped = match crate::query::execute(&mut subject, query)?.output {
+    let grouped = match execute(&mut subject, query)?.output {
         Output::Table(grouped) => grouped,
         _ => return Err(Error::Query("dcast's grouping gave no table".into())),
     };
@@ -358,24 +361,38 @@ pub fn dcast(
             .with_nulls_last(false)
             .with_maintain_order(true),
     )?;
-    let label_text = |series: &Series| -> Result<Vec<String>> {
+    // A label is the value as R's `as.character` spells it, which for a double is the shortest
+    // round-tripping form; an `NA` stays `None` so that it never meets a literal "NA" string.
+    let label_text = |series: &Series| -> Result<Vec<Option<String>>> {
+        if let Ok(doubles) = series.f64() {
+            return Ok(doubles
+                .iter()
+                .map(|label| {
+                    label.map(|value| {
+                        let mut buffer = Vec::new();
+                        write_double(&mut buffer, value);
+                        String::from_utf8_lossy(&buffer).into_owned()
+                    })
+                })
+                .collect());
+        }
         let text = series.cast(&DataType::String)?;
         Ok(text
             .str()?
             .iter()
-            .map(|label| label.unwrap_or("NA").to_string())
+            .map(|label| label.map(str::to_string))
             .collect())
     };
     let labels = label_text(&labels_series)?;
-    let positions: HashMap<&str, usize> = labels
+    let positions: HashMap<Option<&str>, usize> = labels
         .iter()
         .enumerate()
-        .map(|(position, label)| (label.as_str(), position))
+        .map(|(position, label)| (label.as_deref(), position))
         .collect();
     let cell_labels = label_text(spread_column)?;
     let mut cells: Vec<Vec<Option<IdxSize>>> = vec![vec![None; row_count]; labels.len()];
     for (index, (row, label)) in row_ids.iter().zip(&cell_labels).enumerate() {
-        if let Some(position) = positions.get(label.as_str())
+        if let Some(position) = positions.get(&label.as_deref())
             && let Some(slot) = cells
                 .get_mut(*position)
                 .and_then(|column| column.get_mut(*row as usize))
@@ -402,7 +419,7 @@ pub fn dcast(
                 PlSmallStr::EMPTY,
                 cells.into_iter(),
             ))?
-            .with_name(PlSmallStr::from(label.as_str()));
+            .with_name(PlSmallStr::from(label.as_deref().unwrap_or("NA")));
         columns.push(fill_empty(taken, function)?.into_column());
     }
     let key = rows.iter().map(|name| PlSmallStr::from(*name)).collect();
@@ -452,7 +469,7 @@ pub fn fcoalesce(columns: &[&Column]) -> Result<Column> {
         return Err(Error::Query("fcoalesce needs at least one vector".into()));
     };
     let length = first.len();
-    let mut result = (*first).clone();
+    // Every item is checked, even those a full result never reads, as data.table does.
     for (index, column) in columns.iter().enumerate().skip(1) {
         if column.dtype() != first.dtype() {
             return Err(Error::Query(format!(
@@ -462,6 +479,9 @@ pub fn fcoalesce(columns: &[&Column]) -> Result<Column> {
                 type_name(first.dtype())
             )));
         }
+    }
+    let mut result = (*first).clone();
+    for column in columns.iter().skip(1) {
         if result.null_count() == 0 {
             break;
         }
@@ -503,7 +523,23 @@ pub fn nafill(column: &Column, fill: Fill) -> Result<Column> {
         )));
     }
     let name = column.name().clone();
-    match (Vector::of(column), fill) {
+    // data.table's default `nan = NA` fills `NaN` like `NA`, so a `NaN` becomes a missing value
+    // before the fill runs.
+    let vector = match Vector::of(column) {
+        Some(Vector::Double { values, validity }) if values.iter().any(|value| value.is_nan()) => {
+            let numbers = pack_map(values.len(), &values, |value: f64| !value.is_nan());
+            let validity = match validity {
+                Some(validity) => &validity & &numbers,
+                None => numbers,
+            };
+            Some(Vector::Double {
+                values,
+                validity: Some(validity),
+            })
+        }
+        vector => vector,
+    };
+    match (vector, fill) {
         (
             Some(Vector::Integer {
                 values,
@@ -639,16 +675,32 @@ pub fn tstrsplit(column: &Column, separator: &str) -> Result<Vec<Column>> {
     }
     let text = column.cast(&DataType::String)?;
     let strings = text.str()?;
-    let width = strings
+    // `strsplit` drops one empty piece after a trailing separator, so `"a,b,"` has two pieces
+    // and `""` has none.
+    fn split<'a>(value: &'a str, separator: &str) -> Vec<&'a str> {
+        let mut pieces: Vec<&str> = value.split(separator).collect();
+        if pieces.last().is_some_and(|last| last.is_empty()) {
+            pieces.pop();
+        }
+        pieces
+    }
+    let pieces: Vec<Option<Vec<&str>>> = strings
         .iter()
-        .map(|value| value.map_or(1, |value| value.split(separator).count()))
+        .map(|value| value.map(|value| split(value, separator)))
+        .collect();
+    let width = pieces
+        .iter()
+        .map(|pieces| pieces.as_ref().map_or(1, Vec::len))
         .max()
         .unwrap_or(0);
     let mut parts: Vec<Vec<Option<&str>>> = vec![Vec::with_capacity(strings.len()); width];
-    for value in strings.iter() {
-        let mut pieces = value.map(|value| value.split(separator));
-        for part in &mut parts {
-            part.push(pieces.as_mut().and_then(Iterator::next));
+    for pieces in &pieces {
+        for (index, part) in parts.iter_mut().enumerate() {
+            part.push(
+                pieces
+                    .as_ref()
+                    .and_then(|pieces| pieces.get(index).copied()),
+            );
         }
     }
     Ok(parts
@@ -1185,20 +1237,19 @@ fn sorted_rows(digits: &[Digit], height: usize) -> Option<Vec<u32>> {
     }
 }
 
-/// The first row of each distinct combination of the digits, in row order.
-fn first_rows(digits: &[Digit], height: usize) -> Vec<u32> {
+/// The first row of each distinct combination of the digits, in row order, or `None` when the
+/// digits need more than 96 bits.
+fn first_rows(digits: &[Digit], height: usize) -> Option<Vec<u32>> {
     let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
-    if bits <= DENSE_BITS {
+    if dense(bits, height) {
         let mut rows: Vec<u32> = dense_first_rows(digits, height, bits)
             .into_iter()
             .filter(|row| *row != u32::MAX)
             .collect();
         rows.sort_unstable();
-        return rows;
+        return Some(rows);
     }
-    let Some(sorted) = sorted_rows(digits, height) else {
-        return (0..height as u32).collect();
-    };
+    let sorted = sorted_rows(digits, height)?;
     let same = |left: u32, right: u32| {
         digits
             .iter()
@@ -1211,7 +1262,13 @@ fn first_rows(digits: &[Digit], height: usize) -> Vec<u32> {
         .map(|(_, row)| *row)
         .collect();
     THREAD_POOL.install(|| rows.par_sort_unstable());
-    rows
+    Some(rows)
+}
+
+/// Whether a key of `bits` bits takes the dense path: it fits `DENSE_BITS`, and its table is not
+/// far larger than the rows, which a short table with a sparse key would make it.
+fn dense(bits: u32, height: usize) -> bool {
+    bits <= DENSE_BITS && 1usize << bits <= height.max(1 << 10).saturating_mul(4)
 }
 
 /// For each packed combination of the digits, which fit in `bits` bits, the first row that holds
@@ -1253,7 +1310,7 @@ fn dense_first_rows(digits: &[Digit], height: usize, bits: u32) -> Vec<u32> {
 /// How many distinct combinations of the digits the rows hold.
 fn distinct_count(digits: &[Digit], height: usize) -> usize {
     let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
-    if bits <= DENSE_BITS {
+    if dense(bits, height) {
         // One shared bit per combination. A task reads a word before it sets a bit, so the words
         // of common combinations stay shared in every core's cache instead of bouncing.
         let words: Vec<AtomicU64> = (0..(1usize << bits).div_ceil(64))
@@ -1407,7 +1464,7 @@ fn radix_sort<T: Packed>(mut keys: Vec<T>, low: u32, high: u32) -> Vec<T> {
         let shift = low + pass * width;
         let digit_bits = width.min(high - shift);
         if counting_pass(&keys, &mut spare, shift, digit_bits).is_some() {
-            std::mem::swap(&mut keys, &mut spare);
+            swap(&mut keys, &mut spare);
         }
     }
     keys
@@ -1425,14 +1482,19 @@ fn counting_pass<T: Packed>(
     shift: u32,
     bits: u32,
 ) -> Option<Vec<usize>> {
+    debug_assert_eq!(out.len(), keys.len());
     let length = keys.len();
+    let buckets = 1usize << bits;
+    // Each task keeps a count and a start per digit, so a wide digit gets fewer, longer tasks:
+    // with 16 bits a task's tables are a megabyte, and a task shorter than its table spends
+    // more time on the table than on its keys.
     let tasks = if length < PARALLEL_ROWS {
         1
     } else {
-        THREAD_POOL.current_num_threads().max(1) * 4
+        let per_thread = if bits > 11 { 1 } else { 4 };
+        (THREAD_POOL.current_num_threads().max(1) * per_thread).min((length / buckets).max(1))
     };
     let task_length = length.div_ceil(tasks).max(1);
-    let buckets = 1usize << bits;
     let mask = (buckets - 1) as u64;
     let counts: Vec<Vec<u32>> = THREAD_POOL.install(|| {
         keys.par_chunks(task_length)
@@ -1445,12 +1507,12 @@ fn counting_pass<T: Packed>(
             })
             .collect()
     });
-    let mut starts = vec![vec![0usize; buckets]; counts.len()];
+    let mut starts = vec![0usize; counts.len() * buckets];
     let mut ends = Vec::with_capacity(buckets);
     let mut position = 0usize;
     for bucket in 0..buckets {
         for (task, counts) in counts.iter().enumerate() {
-            starts[task][bucket] = position;
+            starts[task * buckets + bucket] = position;
             position += counts[bucket] as usize;
         }
         ends.push(position);
@@ -1467,8 +1529,8 @@ fn counting_pass<T: Packed>(
     let target = Shared(out.as_mut_ptr());
     THREAD_POOL.install(|| {
         keys.par_chunks(task_length)
-            .zip(starts.into_par_iter())
-            .for_each(|(slice, mut next)| {
+            .zip(starts.par_chunks_mut(buckets))
+            .for_each(|(slice, next)| {
                 for key in slice {
                     let slot = &mut next[key.digit(shift, mask)];
                     // SAFETY: the counts reserve each task a run of positions per digit that no

@@ -3371,6 +3371,35 @@ fn dcast_spreads_sorted_values_into_sorted_columns() {
 }
 
 #[test]
+fn dcast_names_columns_as_r_spells_the_values() {
+    let numbers = frame(vec![
+        ("r", strings(&["a", "a"])),
+        ("c", doubles(&[0.5, 1.0])),
+        ("v", ints(&[1, 2])),
+    ]);
+    let cast =
+        ops::dcast(&numbers, &["r"], "c", "v", None).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        output_table(cast).schema().to_string(),
+        "frame{r: character[], 0.5: integer[], 1: integer[]}"
+    );
+}
+
+#[test]
+fn nafill_fills_nan_like_na() {
+    let gaps = column_of("x", doubles(&[f64::NAN, 1.0, f64::NAN]));
+    let filled = |fill| ops::nafill(&gaps, fill).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Forward))),
+        doubles(&[NA_REAL, 1.0, 1.0])
+    );
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Value(0.0)))),
+        doubles(&[0.0, 1.0, 0.0])
+    );
+}
+
+#[test]
 fn the_vector_helpers_follow_data_table() {
     let lagged = ops::shift(&column_of("x", ints(&[1, 2, 3])), 1);
     assert_eq!(vector(&lagged), ints(&[NA_INTEGER, 1, 2]));
@@ -3476,6 +3505,15 @@ fn the_vector_helpers_follow_data_table() {
             strings(&["NA", "e", "NA"])
         ]
     );
+
+    // As `strsplit`, a trailing separator adds no empty piece and an empty string has none.
+    let parts = ops::tstrsplit(&column_of("x", strings(&["a,b,", "", ","])), ",")
+        .unwrap_or_else(|error| panic!("{error}"));
+    let parts: Vec<RVector> = parts.iter().map(vector).collect();
+    assert_eq!(
+        parts,
+        [strings(&["a", "NA", ""]), strings(&["b", "NA", "NA"])]
+    );
 }
 
 #[test]
@@ -3495,6 +3533,29 @@ fn unique_keeps_the_first_row_of_each_combination() {
     let mut unique = ops::unique_rows(&d, &["r"]).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(get(&mut unique, "r"), strings(&["b", "a"]));
     assert_eq!(get(&mut unique, "c"), strings(&["y", "x"]));
+}
+
+#[test]
+fn unique_on_keys_too_wide_to_pack_still_drops_duplicates() {
+    // Two doubles spanning almost the whole range need more key bits than one packed integer
+    // holds, so the rows take the general path.
+    let d = frame(vec![
+        ("a", doubles(&[1e-300, 1e300, 1e-300, 1e300, -1e300])),
+        ("b", doubles(&[1e300, 1e-300, 1e300, 1e-300, -1e-300])),
+    ]);
+    let mut unique = ops::unique_rows(&d, &[]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(get(&mut unique, "a"), doubles(&[1e-300, 1e300, -1e300]));
+    assert_eq!(
+        ops::unique_count(&d, &[]).unwrap_or_else(|error| panic!("{error}")),
+        3
+    );
+}
+
+#[test]
+fn unique_on_a_short_table_with_a_sparse_key() {
+    let d = frame(vec![("k", ints(&[0, 9_000_000, 0, 9_000_000, 4]))]);
+    let mut unique = ops::unique_rows(&d, &["k"]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(get(&mut unique, "k"), ints(&[0, 9_000_000, 4]));
 }
 
 /// R's order of two values of one column under `setorder`: `NA` first and `NaN` next in both

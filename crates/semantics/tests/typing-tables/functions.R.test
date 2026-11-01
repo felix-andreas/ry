@@ -23,6 +23,19 @@ frame{key: integer[], close: double[]}
 keys: integer[]
 102..106 warning[unused] `keys` is assigned but never used.
 
+#---- a_user_function_named_setnames_keeps_its_subject_s_type
+setnames <- function(x, name) invisible(x)
+label <- "s"
+setnames(label, "b")
+wrong <- label + 1
+#++++
+setnames: <T, U> fn(x: T, name: U) -> T
+label: character
+character
+wrong: Unknown
+77..82 warning[unused] `wrong` is assigned but never used.
+86..91 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
 #---- the_old_column_must_exist
 library(data.table)
 prices <- frame(id = 1:3, price = c(1, 2, 3))

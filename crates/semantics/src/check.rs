@@ -4504,10 +4504,8 @@ impl<'db> Checker<'db, '_> {
             }
         }
         let ty = self.infer_ordinary_call(id, range, callee, arguments);
-        match self.table_function(callee) {
-            Some(function) => self.refine_table_call(id, function, arguments, ty),
-            None => ty,
-        }
+        let function = self.table_function(callee);
+        self.refine_table_call(id, function, arguments, ty)
     }
 
     fn infer_ordinary_call(
@@ -4616,24 +4614,27 @@ impl<'db> Checker<'db, '_> {
     fn refine_table_call(
         &mut self,
         id: ExprId,
-        function: TableFunction,
+        function: Option<TableFunction>,
         arguments: &[Argument],
         ordinary: Ty<'db>,
     ) -> Ty<'db> {
         let refined = match function {
-            TableFunction::Fread => Some(self.fread_type(arguments)),
-            TableFunction::SetNames => self.set_names(arguments),
-            TableFunction::SetColumnOrder => self.set_column_order(arguments),
-            TableFunction::SetKey | TableFunction::SetOrder => {
+            None => None,
+            Some(TableFunction::Fread) => Some(self.fread_type(arguments)),
+            Some(TableFunction::SetNames) => self.set_names(arguments),
+            Some(TableFunction::SetColumnOrder) => self.set_column_order(arguments),
+            Some(function @ (TableFunction::SetKey | TableFunction::SetOrder)) => {
                 self.check_named_columns(function, arguments)
             }
-            TableFunction::SetKeyOrOrderNamed => self.check_column_vector(arguments),
-            TableFunction::RbindList => Some(self.rbind_list_type(arguments)),
-            TableFunction::Melt => self.melt_type(arguments),
-            TableFunction::Fifelse => self.fifelse_type(arguments),
+            Some(TableFunction::SetKeyOrOrderNamed) => self.check_column_vector(arguments),
+            Some(TableFunction::RbindList) => Some(self.rbind_list_type(arguments)),
+            Some(TableFunction::Melt) => self.melt_type(arguments),
+            Some(TableFunction::Fifelse) => self.fifelse_type(arguments),
         };
         // `setnames` and `setcolorder` change the subject by reference, which ry models as a
-        // new write of its slot. A subject that is not a known frame keeps its type.
+        // new write of its slot. Naming records the write from the callee's name alone, so a
+        // subject that is not a known frame, or a call that turns out to be some other
+        // `setnames`, writes the subject's own type back and loses nothing.
         if let Some(&slot) = self.naming.column_updates.get(&id) {
             let written = match (refined, arguments.first().and_then(|first| first.value)) {
                 (Some(ty), _) => Some(ty),
