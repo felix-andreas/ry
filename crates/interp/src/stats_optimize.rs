@@ -324,7 +324,7 @@ fn brent_zeroin(
             fc = fa;
         }
     }
-    Ok((b, -1, -1.0))
+    Ok((b, -1, (c - b).abs()))
 }
 
 // optim.

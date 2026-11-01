@@ -156,15 +156,6 @@ fn dt_log_of_log(p: f64, lower: bool) -> f64 {
     if lower { p } else { log1_exp(p) }
 }
 
-/// `R_D_fexp`: `exp(x) / sqrt(f)` on the requested scale.
-fn d_fexp(f: f64, x: f64, log: bool) -> f64 {
-    if log {
-        -0.5 * f.ln() + x
-    } else {
-        x.exp() / f.sqrt()
-    }
-}
-
 /// `R_Q_P01_check`: whether `p` is not a probability on its scale.
 fn q_p01_invalid(p: f64, log: bool) -> bool {
     (log && p > 0.0) || (!log && !(0.0..=1.0).contains(&p))

@@ -296,7 +296,13 @@ unsafe fn find_s3_method(
             method_name = method_symbol(group, &class)?;
             found = lookup_method(method_name, call_env, def_env)?;
         }
-        if let Some(method) = found {
+        // base's `sort.list` is a function, not the `sort` method for class "list", and
+        // GNU R's dispatch passes over it.
+        if let Some(method) = found
+            && !(symbol_name(method_name) == "sort.list"
+                && method.kind() == SexpType::Closure
+                && method.tag() == values::base_namespace())
+        {
             let suffix = class_suffix(classes, index)?;
             let method_string = scalar_string(&symbol_name(method_name))?;
             let vars = dispatch_vars(generic, suffix, method_string, call_env, def_env, group)?;
@@ -433,13 +439,8 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
         return Ok(nil());
     }
     let value = eval::find_var_in_frame(first, env)?;
-    if value == missing_arg() {
-        return Err(error(format!(
-            "argument \"{}\" is missing, with no default",
-            symbol_name(first)
-        )));
-    }
-    if value == unbound() {
+    // A generic called without its first argument dispatches as on NULL.
+    if value == unbound() || value == missing_arg() {
         return Ok(nil());
     }
     value_of(value)

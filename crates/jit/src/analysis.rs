@@ -19,9 +19,7 @@
 
 use heap::object::{Sexp, SexpType, gp};
 use interp::{
-    bytecode::{
-        self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count,
-    },
+    bytecode::{self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count},
     values,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -136,7 +134,10 @@ pub struct Slot {
 }
 
 impl Slot {
-    const UNLOADED: Slot = Slot { status: status::NOT_LOADED, ty: Ty::Bottom };
+    const UNLOADED: Slot = Slot {
+        status: status::NOT_LOADED,
+        ty: Ty::Bottom,
+    };
 
     fn join(self, other: Slot) -> Slot {
         let ty = if self.status & status::LOADED == 0 {
@@ -146,7 +147,10 @@ impl Slot {
         } else {
             self.ty.join(other.ty)
         };
-        Slot { status: self.status | other.status, ty }
+        Slot {
+            status: self.status | other.status,
+            ty,
+        }
     }
 
     pub fn may_be(self, bits: u8) -> bool {
@@ -166,9 +170,23 @@ pub struct State {
 impl State {
     fn join(&self, other: &State) -> State {
         State {
-            registers: self.registers.iter().zip(&other.registers).map(|(a, b)| a.join(*b)).collect(),
-            slots: self.slots.iter().zip(&other.slots).map(|(a, b)| a.join(*b)).collect(),
-            visible: if self.visible == other.visible { self.visible } else { None },
+            registers: self
+                .registers
+                .iter()
+                .zip(&other.registers)
+                .map(|(a, b)| a.join(*b))
+                .collect(),
+            slots: self
+                .slots
+                .iter()
+                .zip(&other.slots)
+                .map(|(a, b)| a.join(*b))
+                .collect(),
+            visible: if self.visible == other.visible {
+                self.visible
+            } else {
+                None
+            },
         }
     }
 
@@ -243,35 +261,101 @@ pub enum Intrinsic {
 pub enum Action {
     /// Nothing: the instruction is unreachable or folds away.
     Skip,
-    Constant { dst: usize, value: Sexp, ty: Ty },
+    Constant {
+        dst: usize,
+        value: Sexp,
+        ty: Ty,
+    },
     /// Reads a slot; `load` when the slot may not be loaded, with the type to refine to.
     /// `forcing` marks a load that may evaluate a default argument, which runs in this frame.
-    GetVar { dst: usize, slot: usize, load: Option<Ty>, forcing: bool },
-    SetVar { slot: usize, src: usize },
+    GetVar {
+        dst: usize,
+        slot: usize,
+        load: Option<Ty>,
+        forcing: bool,
+    },
+    SetVar {
+        slot: usize,
+        src: usize,
+    },
     /// A function lookup resolved at compile time; the speculations check it still holds.
-    GetFun { dst: usize, function: Sexp },
+    GetFun {
+        dst: usize,
+        function: Sexp,
+    },
     /// Runs the instruction in tier 0, then refines its destination register.
-    Step { effect: Effect, objects: Vec<usize>, dst: Option<(usize, Ty)> },
+    Step {
+        effect: Effect,
+        objects: Vec<usize>,
+        dst: Option<(usize, Ty)>,
+    },
     /// The instruction's check always passes, so control falls through.
     FallThrough,
     /// Control always goes to the jump target.
     Branch,
-    BranchUnlessBuiltin { function: usize },
+    BranchUnlessBuiltin {
+        function: usize,
+    },
     Jump,
-    JumpUnless { src: usize },
-    Arithmetic { arith: Arith, numeric: Numeric, dst: usize, left: usize, right: usize },
-    Comparison { arith: Arith, numeric: Numeric, dst: usize, left: usize, right: usize },
-    Intrinsic { intrinsic: Intrinsic, dst: usize, args: Vec<usize>, result: Ty },
-    Return { src: usize },
-    ForInit { index: usize, src: usize, refine: Option<Ty> },
-    ForStep { index: usize, src: usize, slot: usize },
+    JumpUnless {
+        src: usize,
+    },
+    Arithmetic {
+        arith: Arith,
+        numeric: Numeric,
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    Comparison {
+        arith: Arith,
+        numeric: Numeric,
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    Intrinsic {
+        intrinsic: Intrinsic,
+        dst: usize,
+        args: Vec<usize>,
+        result: Ty,
+    },
+    Return {
+        src: usize,
+    },
+    ForInit {
+        index: usize,
+        src: usize,
+        refine: Option<Ty>,
+    },
+    ForStep {
+        index: usize,
+        src: usize,
+        slot: usize,
+    },
     /// Releases the reference `ForInit` took on the sequence.
-    ForEnd { src: usize },
+    ForEnd {
+        src: usize,
+    },
     Visible(bool),
-    LogicLeft { dst: usize, src: usize, is_and: bool },
-    LogicRight { dst: usize, left: usize, right: usize, is_and: bool },
+    LogicLeft {
+        dst: usize,
+        src: usize,
+        is_and: bool,
+    },
+    LogicRight {
+        dst: usize,
+        left: usize,
+        right: usize,
+        is_and: bool,
+    },
     /// `x[i] <- value` in place on a plain vector, with a generic path that copies or grows.
-    SubAssign { dst: usize, slot: usize, index: usize, value: usize },
+    SubAssign {
+        dst: usize,
+        slot: usize,
+        index: usize,
+        value: usize,
+    },
 }
 
 /// A function lookup compiled code assumes still resolves as it did at compile time.
@@ -323,7 +407,11 @@ unsafe fn defaulted_formals(formals: Sexp) -> FxHashSet<Sexp> {
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
         let default = formal.car();
-        if matches!(default.kind(), SexpType::Language | SexpType::Symbol | SexpType::Promise) && default != values::missing_arg() {
+        if matches!(
+            default.kind(),
+            SexpType::Language | SexpType::Symbol | SexpType::Promise
+        ) && default != values::missing_arg()
+        {
             defaulted.insert(formal.tag());
         }
         formal = formal.cdr();
@@ -344,9 +432,9 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
     // A body that reflects on its frame can bind any symbol, which slots cannot model.
-    if bytecode::local_symbols(source, formals).is_none() {
+    let Some(locals) = bytecode::local_symbols(source, formals) else {
         return Err(Refusal("the body reflects on its frame"));
-    }
+    };
     let insts = decode(code)?;
     let registers = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
     let loops = bytecode::loop_count(code);
@@ -357,6 +445,7 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         insts,
         slot_of: FxHashMap::default(),
         slots: Vec::new(),
+        locals,
         speculated: FxHashMap::default(),
         speculations: Vec::new(),
         registers,
@@ -404,10 +493,18 @@ pub unsafe fn decode(code: Sexp) -> Result<Vec<Inst>, Refusal> {
     let mut insts = Vec::new();
     let mut pc = 0;
     while pc < words.len() {
-        let op = *OPS.get(words[pc] as usize).ok_or(Refusal("an unknown opcode"))?;
+        let op = *OPS
+            .get(words[pc] as usize)
+            .ok_or(Refusal("an unknown opcode"))?;
         let count = operand_count(op);
-        let operands = words.get(pc + 1..pc + 1 + count).ok_or(Refusal("a truncated instruction"))?;
-        insts.push(Inst { pc, op, operands: operands.iter().map(|&word| word as usize).collect() });
+        let operands = words
+            .get(pc + 1..pc + 1 + count)
+            .ok_or(Refusal("a truncated instruction"))?;
+        insts.push(Inst {
+            pc,
+            op,
+            operands: operands.iter().map(|&word| word as usize).collect(),
+        });
         pc += 1 + count;
     }
     Ok(insts)
@@ -417,14 +514,100 @@ pub unsafe fn decode(code: Sexp) -> Result<Vec<Inst>, Refusal> {
 /// frame's variables alone. Internal generics among them dispatch on objects, which is why calls
 /// check their boxed arguments first.
 const PURE_BUILTINS: &[&str] = &[
-    "+", "-", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "!", "&", "|", "sqrt", "exp", "log",
-    "abs", "floor", "ceiling", "trunc", "round", "signif", "sin", "cos", "tan", "asin", "acos", "atan", "log2",
-    "log10", "log1p", "expm1", "length", "[", "[[", "c", "is.na", "is.null", "sum", "prod", "max", "min",
-    "cumsum", "cumprod", "seq_len", "seq_along", ":", "rnorm", "runif", "rexp", "rbinom", "rpois", "vector",
-    "numeric", "integer", "double", "logical", "character", "rep", "rep.int", "rep_len", "nchar", "paste",
-    "paste0", "unlist", "names", "any", "all", "which", "rev", "as.integer", "as.numeric", "as.double",
-    "as.character", "as.logical", "is.numeric", "is.character", "is.logical", "is.function", "identical",
-    "range", "dim", "list", "abs", "mean", "var", "order", "sort", "max", "pmin", "pmax",
+    "+",
+    "-",
+    "*",
+    "/",
+    "^",
+    "%%",
+    "%/%",
+    "==",
+    "!=",
+    "<",
+    ">",
+    "<=",
+    ">=",
+    "!",
+    "&",
+    "|",
+    "sqrt",
+    "exp",
+    "log",
+    "abs",
+    "floor",
+    "ceiling",
+    "trunc",
+    "round",
+    "signif",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "log2",
+    "log10",
+    "log1p",
+    "expm1",
+    "length",
+    "[",
+    "[[",
+    "c",
+    "is.na",
+    "is.null",
+    "sum",
+    "prod",
+    "max",
+    "min",
+    "cumsum",
+    "cumprod",
+    "seq_len",
+    "seq_along",
+    ":",
+    "rnorm",
+    "runif",
+    "rexp",
+    "rbinom",
+    "rpois",
+    "vector",
+    "numeric",
+    "integer",
+    "double",
+    "logical",
+    "character",
+    "rep",
+    "rep.int",
+    "rep_len",
+    "nchar",
+    "paste",
+    "paste0",
+    "unlist",
+    "names",
+    "any",
+    "all",
+    "which",
+    "rev",
+    "as.integer",
+    "as.numeric",
+    "as.double",
+    "as.character",
+    "as.logical",
+    "is.numeric",
+    "is.character",
+    "is.logical",
+    "is.function",
+    "identical",
+    "range",
+    "dim",
+    "list",
+    "abs",
+    "mean",
+    "var",
+    "order",
+    "sort",
+    "max",
+    "pmin",
+    "pmax",
 ];
 
 struct Builder<'a> {
@@ -434,6 +617,9 @@ struct Builder<'a> {
     insts: Vec<Inst>,
     slot_of: FxHashMap<Sexp, usize>,
     slots: Vec<Sexp>,
+    /// The symbols the frame can bind, formals included. A function lookup of one of them may
+    /// find the frame's own binding, so it cannot be speculated from the enclosure.
+    locals: FxHashSet<Sexp>,
     /// Speculation results by symbol, so each lookup resolves once.
     speculated: FxHashMap<Sexp, Option<Sexp>>,
     speculations: Vec<Speculation>,
@@ -479,7 +665,14 @@ impl Builder<'_> {
     /// Splits the instructions into blocks and finds each block's successors and the loop
     /// headers (the blocks a backward jump targets).
     #[allow(clippy::type_complexity)]
-    fn blocks(&self) -> (Vec<Block>, FxHashMap<usize, usize>, Vec<Vec<usize>>, Vec<usize>) {
+    fn blocks(
+        &self,
+    ) -> (
+        Vec<Block>,
+        FxHashMap<usize, usize>,
+        Vec<Vec<usize>>,
+        Vec<usize>,
+    ) {
         let mut leaders = FxHashSet::default();
         leaders.insert(0);
         for (position, inst) in self.insts.iter().enumerate() {
@@ -501,7 +694,11 @@ impl Builder<'_> {
                     last.end = position;
                 }
                 block_at.insert(inst.pc, blocks.len());
-                blocks.push(Block { start: position, end: position + 1, entry: None });
+                blocks.push(Block {
+                    start: position,
+                    end: position + 1,
+                    entry: None,
+                });
             }
         }
         if let Some(last) = blocks.last_mut() {
@@ -597,7 +794,9 @@ impl Builder<'_> {
             if rounds > 100_000 {
                 return Err(Refusal("the type analysis did not converge"));
             }
-            let Some(mut state) = blocks[index].entry.clone() else { continue };
+            let Some(mut state) = blocks[index].entry.clone() else {
+                continue;
+            };
             let (start, end) = (blocks[index].start, blocks[index].end);
             let mut edges = Vec::new();
             for position in start..end {
@@ -607,7 +806,9 @@ impl Builder<'_> {
                 }
             }
             for (target_pc, mut out) in edges {
-                let Some(&target) = block_at.get(&target_pc) else { continue };
+                let Some(&target) = block_at.get(&target_pc) else {
+                    continue;
+                };
                 let target_live = &live[blocks[target].start];
                 for (register, ty) in out.registers.iter_mut().enumerate() {
                     if !target_live[register] {
@@ -636,7 +837,11 @@ impl Builder<'_> {
 
     /// The action for the instruction at `position` and its effect on `state`. For the last
     /// instruction of a block it also returns the state along each outgoing edge, by target pc.
-    unsafe fn transfer(&mut self, position: usize, state: &mut State) -> Result<(Action, Vec<(usize, State)>), Refusal> {
+    unsafe fn transfer(
+        &mut self,
+        position: usize,
+        state: &mut State,
+    ) -> Result<(Action, Vec<(usize, State)>), Refusal> {
         let inst = self.insts[position].clone();
         let operand = |index: usize| inst.operands[index];
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
@@ -647,13 +852,21 @@ impl Builder<'_> {
                 let ty = constant_type(value);
                 state.registers[operand(0)] = ty;
                 state.visible = Some(true);
-                Action::Constant { dst: operand(0), value, ty }
+                Action::Constant {
+                    dst: operand(0),
+                    value,
+                    ty,
+                }
             }
             Op::GetVar => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
                 let load = if current.may_be(status::NOT_LOADED) {
-                    let ty = if current.may_be(status::LOADED) { current.ty } else { self.feedback_at(inst.pc) };
+                    let ty = if current.may_be(status::LOADED) {
+                        current.ty
+                    } else {
+                        self.feedback_at(inst.pc)
+                    };
                     Some(if ty == Ty::Bottom { Ty::Boxed } else { ty })
                 } else {
                     None
@@ -662,7 +875,10 @@ impl Builder<'_> {
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
-                    let loaded = Slot { status: status_bits, ty };
+                    let loaded = Slot {
+                        status: status_bits,
+                        ty,
+                    };
                     // Code generation writes the variables back before the load and forgets them
                     // after it, but only when the load really happens.
                     let mut forced = state.clone();
@@ -671,12 +887,21 @@ impl Builder<'_> {
                     forced.slots[slot] = loaded;
                     state.slots[slot] = loaded;
                     if forcing {
-                        *state = if current.may_be(status::LOADED) { state.join(&forced) } else { forced };
+                        *state = if current.may_be(status::LOADED) {
+                            state.join(&forced)
+                        } else {
+                            forced
+                        };
                     }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
                 state.visible = Some(true);
-                Action::GetVar { dst: operand(0), slot, load, forcing }
+                Action::GetVar {
+                    dst: operand(0),
+                    slot,
+                    load,
+                    forcing,
+                }
             }
             Op::SetVar => {
                 let slot = self.slot(self.constant(operand(0)));
@@ -684,18 +909,35 @@ impl Builder<'_> {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
-                state.slots[slot] = Slot { status: status::DIRTY, ty };
+                state.slots[slot] = Slot {
+                    status: status::DIRTY,
+                    ty,
+                };
                 state.visible = Some(false);
-                Action::SetVar { slot, src: operand(1) }
+                Action::SetVar {
+                    slot,
+                    src: operand(1),
+                }
             }
             Op::GetFun => {
                 let symbol = self.constant(operand(1));
                 match self.speculate(symbol) {
-                    Some(function) if !self.slot_of.contains_key(&symbol) => {
+                    Some(function)
+                        if !self.slot_of.contains_key(&symbol)
+                            && !self.locals.contains(&symbol) =>
+                    {
                         state.registers[operand(0)] = Ty::Fun(function);
-                        Action::GetFun { dst: operand(0), function }
+                        Action::GetFun {
+                            dst: operand(0),
+                            function,
+                        }
                     }
-                    _ => self.opaque_step(state, Some((operand(0), Ty::Boxed)), Vec::new(), Effect::Opaque),
+                    _ => self.opaque_step(
+                        state,
+                        Some((operand(0), Ty::Boxed)),
+                        Vec::new(),
+                        Effect::Opaque,
+                    ),
                 }
             }
             Op::BranchUnlessBuiltin => match state.registers[operand(0)] {
@@ -706,11 +948,18 @@ impl Builder<'_> {
                 }
                 _ => {
                     edges.push((operand(1), state.clone()));
-                    Action::BranchUnlessBuiltin { function: operand(0) }
+                    Action::BranchUnlessBuiltin {
+                        function: operand(0),
+                    }
                 }
             },
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
-            Op::CallGeneric | Op::Ast => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), Vec::new(), Effect::Opaque),
+            Op::CallGeneric | Op::Ast => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                Vec::new(),
+                Effect::Opaque,
+            ),
             Op::Guard => {
                 let symbol = self.constant(operand(0));
                 let expected = self.constant(operand(1));
@@ -737,27 +986,55 @@ impl Builder<'_> {
                 let ty = state.registers[src];
                 let refine = match ty {
                     // Code generation boxes an unboxed scalar sequence before the loop.
-                    Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::List | Ty::Int | Ty::Dbl | Ty::Lgl => None,
+                    Ty::IntVec
+                    | Ty::DblVec
+                    | Ty::LglVec
+                    | Ty::List
+                    | Ty::Int
+                    | Ty::Dbl
+                    | Ty::Lgl => None,
                     _ => {
                         if self.feedback.get(inst.pc).copied().unwrap_or(0) == 0 {
                             return Err(Refusal(COLD));
                         }
                         let speculated = self.feedback_at(inst.pc);
-                        if !matches!(speculated, Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::List | Ty::Int | Ty::Dbl | Ty::Lgl) {
-                            return Err(Refusal("a for loop over something other than a plain vector"));
+                        if !matches!(
+                            speculated,
+                            Ty::IntVec
+                                | Ty::DblVec
+                                | Ty::LglVec
+                                | Ty::List
+                                | Ty::Int
+                                | Ty::Dbl
+                                | Ty::Lgl
+                        ) {
+                            return Err(Refusal(
+                                "a for loop over something other than a plain vector",
+                            ));
                         }
                         Some(speculated.vector())
                     }
                 };
                 state.registers[src] = refine.unwrap_or(ty.vector());
-                Action::ForInit { index: operand(0), src, refine }
+                Action::ForInit {
+                    index: operand(0),
+                    src,
+                    refine,
+                }
             }
             Op::ForStep => {
                 let slot = self.slot(self.constant(operand(2)));
                 edges.push((operand(3), state.clone()));
                 let element = state.registers[operand(1)].element();
-                state.slots[slot] = Slot { status: status::DIRTY, ty: element };
-                Action::ForStep { index: operand(0), src: operand(1), slot }
+                state.slots[slot] = Slot {
+                    status: status::DIRTY,
+                    ty: element,
+                };
+                Action::ForStep {
+                    index: operand(0),
+                    src: operand(1),
+                    slot,
+                }
             }
             Op::ForEnd => Action::ForEnd { src: operand(0) },
             Op::Invisible => {
@@ -774,19 +1051,36 @@ impl Builder<'_> {
                 decided.visible = Some(true);
                 edges.push((operand(4), decided));
                 state.registers[operand(1)] = Ty::Lgl;
-                Action::LogicLeft { dst: operand(0), src: operand(1), is_and: operand(3) == 1 }
+                Action::LogicLeft {
+                    dst: operand(0),
+                    src: operand(1),
+                    is_and: operand(3) == 1,
+                }
             }
             Op::LogicRight => {
                 state.registers[operand(0)] = Ty::Lgl;
                 state.visible = Some(true);
-                Action::LogicRight { dst: operand(0), left: operand(1), right: operand(2), is_and: operand(4) == 1 }
+                Action::LogicRight {
+                    dst: operand(0),
+                    left: operand(1),
+                    right: operand(2),
+                    is_and: operand(4) == 1,
+                }
             }
             // The interpreter's own step sets the current srcref; it touches no register.
-            Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: None },
+            Op::SetSrcref => Action::Step {
+                effect: Effect::Pure,
+                objects: Vec::new(),
+                dst: None,
+            },
             Op::Closure => {
                 state.visible = Some(true);
                 state.registers[operand(0)] = Ty::Boxed;
-                Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: Some((operand(0), Ty::Boxed)) }
+                Action::Step {
+                    effect: Effect::Pure,
+                    objects: Vec::new(),
+                    dst: Some((operand(0), Ty::Boxed)),
+                }
             }
             Op::SubAssign => {
                 let slot = self.slot(self.constant(operand(1)));
@@ -798,8 +1092,11 @@ impl Builder<'_> {
                     Ty::LglVec => value == Ty::Lgl,
                     _ => false,
                 };
-                if fits && matches!(index, Ty::Int | Ty::Dbl) && state.slots[slot].may_be(status::LOADED)
-                    && !(self.defaulted.contains(&self.slots[slot]) && state.slots[slot].may_be(status::NOT_LOADED))
+                if fits
+                    && matches!(index, Ty::Int | Ty::Dbl)
+                    && state.slots[slot].may_be(status::LOADED)
+                    && !(self.defaulted.contains(&self.slots[slot])
+                        && state.slots[slot].may_be(status::NOT_LOADED))
                 {
                     // The generic path writes the variable back, runs the assignment in tier 0
                     // and forgets the variable; the fast path may make it dirty by copying it.
@@ -811,13 +1108,23 @@ impl Builder<'_> {
                     state.slots[slot] = fast.join(forgotten);
                     state.registers[operand(0)] = value;
                     state.visible = Some(false);
-                    Action::SubAssign { dst: operand(0), slot, index: operand(2), value: operand(3) }
+                    Action::SubAssign {
+                        dst: operand(0),
+                        slot,
+                        index: operand(2),
+                        value: operand(3),
+                    }
                 } else {
                     let refine = match value {
                         Ty::Bottom => Ty::Boxed,
                         ty => ty,
                     };
-                    let action = self.opaque_step(state, Some((operand(0), refine)), Vec::new(), Effect::Opaque);
+                    let action = self.opaque_step(
+                        state,
+                        Some((operand(0), refine)),
+                        Vec::new(),
+                        Effect::Opaque,
+                    );
                     state.visible = Some(false);
                     action
                 }
@@ -835,7 +1142,13 @@ impl Builder<'_> {
     }
 
     /// A tier-0 step whose destination is refined to `dst`'s type afterwards.
-    fn opaque_step(&mut self, state: &mut State, dst: Option<(usize, Ty)>, objects: Vec<usize>, effect: Effect) -> Action {
+    fn opaque_step(
+        &mut self,
+        state: &mut State,
+        dst: Option<(usize, Ty)>,
+        objects: Vec<usize>,
+        effect: Effect,
+    ) -> Action {
         match effect {
             Effect::Pure => {}
             // Only a call that dispatches or warns into a handler writes the variables back and
@@ -854,7 +1167,11 @@ impl Builder<'_> {
         if let Some((register, ty)) = dst {
             state.registers[register] = ty;
         }
-        Action::Step { effect, objects, dst }
+        Action::Step {
+            effect,
+            objects,
+            dst,
+        }
     }
 
     unsafe fn arithmetic(&mut self, inst: &Inst, state: &mut State) -> Action {
@@ -867,21 +1184,46 @@ impl Builder<'_> {
             let integers = !matches!(a, Ty::Dbl) && !matches!(b, Ty::Dbl);
             let comparison = matches!(
                 arith,
-                Arith::Equal | Arith::NotEqual | Arith::Less | Arith::Greater | Arith::LessEqual | Arith::GreaterEqual
+                Arith::Equal
+                    | Arith::NotEqual
+                    | Arith::Less
+                    | Arith::Greater
+                    | Arith::LessEqual
+                    | Arith::GreaterEqual
             );
             if comparison {
                 state.registers[dst] = Ty::Lgl;
                 let numeric = if integers { Numeric::Int } else { Numeric::Dbl };
-                return Action::Comparison { arith, numeric, dst, left, right };
+                return Action::Comparison {
+                    arith,
+                    numeric,
+                    dst,
+                    left,
+                    right,
+                };
             }
             let numeric = match arith {
                 Arith::Add | Arith::Subtract | Arith::Multiply if integers => Numeric::Int,
                 _ => Numeric::Dbl,
             };
-            state.registers[dst] = if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl };
-            return Action::Arithmetic { arith, numeric, dst, left, right };
+            state.registers[dst] = if numeric == Numeric::Int {
+                Ty::Int
+            } else {
+                Ty::Dbl
+            };
+            return Action::Arithmetic {
+                arith,
+                numeric,
+                dst,
+                left,
+                right,
+            };
         }
-        let effect = if a.is_plain() && b.is_plain() { Effect::PureUnlessObserved } else { Effect::Opaque };
+        let effect = if a.is_plain() && b.is_plain() {
+            Effect::PureUnlessObserved
+        } else {
+            Effect::Opaque
+        };
         let ty = self.feedback_at(inst.pc);
         let action = self.opaque_step(state, Some((dst, ty)), Vec::new(), effect);
         state.visible = Some(true);
@@ -898,18 +1240,38 @@ impl Builder<'_> {
         let Ty::Fun(function) = state.registers[operand(1)] else {
             return Ok(self.opaque_step(state, Some((dst, feedback)), Vec::new(), Effect::Opaque));
         };
-        let definition = interp::eval::builtin_def(function).map_err(|_| Refusal("a builtin without a definition"))?;
+        let definition = interp::eval::builtin_def(function)
+            .map_err(|_| Refusal("a builtin without a definition"))?;
         let name = definition.name;
-        let untagged = values::pairlist_items(call.cdr()).iter().all(|(tag, _)| *tag == values::nil());
-        let types: Vec<Ty> = args.iter().map(|&register| state.registers[register]).collect();
+        let untagged = values::pairlist_items(call.cdr())
+            .iter()
+            .all(|(tag, _)| *tag == values::nil());
+        let types: Vec<Ty> = args
+            .iter()
+            .map(|&register| state.registers[register])
+            .collect();
         if untagged && let Some((intrinsic, result)) = intrinsic_for(name, &types) {
             state.registers[dst] = result;
             state.visible = Some(true);
-            return Ok(Action::Intrinsic { intrinsic, dst, args, result });
+            return Ok(Action::Intrinsic {
+                intrinsic,
+                dst,
+                args,
+                result,
+            });
         }
         if PURE_BUILTINS.contains(&name) {
-            let objects: Vec<usize> = args.iter().copied().filter(|&register| !state.registers[register].is_plain()).collect();
-            return Ok(self.opaque_step(state, Some((dst, feedback)), objects, Effect::PureUnlessObserved));
+            let objects: Vec<usize> = args
+                .iter()
+                .copied()
+                .filter(|&register| !state.registers[register].is_plain())
+                .collect();
+            return Ok(self.opaque_step(
+                state,
+                Some((dst, feedback)),
+                objects,
+                Effect::PureUnlessObserved,
+            ));
         }
         Ok(self.opaque_step(state, Some((dst, feedback)), Vec::new(), Effect::Opaque))
     }
@@ -950,7 +1312,13 @@ pub unsafe fn resolve_function(symbol: Sexp, mut env: Sexp) -> Option<Speculatio
             }
             if values::is_function(value) {
                 let home = env.has_gp(gp::FUNCTION_FRAME).then_some(env);
-                return Some(Speculation { symbol, cell, function: value, frames, home });
+                return Some(Speculation {
+                    symbol,
+                    cell,
+                    function: value,
+                    frames,
+                    home,
+                });
             }
         }
         if env.has_gp(gp::FUNCTION_FRAME) {
@@ -977,29 +1345,69 @@ unsafe fn constant_type(value: Sexp) -> Ty {
 
 /// The intrinsic for a call of builtin `name` with arguments of these types, and its result.
 fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
-    let numeric = |ty: Ty| if ty == Ty::Dbl { Numeric::Dbl } else { Numeric::Int };
+    let numeric = |ty: Ty| {
+        if ty == Ty::Dbl {
+            Numeric::Dbl
+        } else {
+            Numeric::Int
+        }
+    };
     Some(match (name, types) {
-        ("[" | "[[", [vector, index]) if vector.is_vector() && matches!(index, Ty::Int | Ty::Dbl) => {
+        ("[" | "[[", [vector, index])
+            if vector.is_vector() && matches!(index, Ty::Int | Ty::Dbl) =>
+        {
             (Intrinsic::Element, vector.element())
         }
-        ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => (Intrinsic::Element, Ty::Boxed),
-        ("length", [ty]) if ty.is_vector() || ty.is_numeric_scalar() || *ty == Ty::List => (Intrinsic::Length, Ty::Int),
-        ("-", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Negate(numeric(*ty)), if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int }),
+        ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => {
+            (Intrinsic::Element, Ty::Boxed)
+        }
+        ("length", [ty]) if ty.is_vector() || ty.is_numeric_scalar() || *ty == Ty::List => {
+            (Intrinsic::Length, Ty::Int)
+        }
+        ("-", [ty]) if ty.is_numeric_scalar() => (
+            Intrinsic::Negate(numeric(*ty)),
+            if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int },
+        ),
         ("!", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Not, Ty::Lgl),
         ("is.na", [ty]) if ty.is_numeric_scalar() => (Intrinsic::IsNa, Ty::Lgl),
         ("sqrt", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Sqrt, Ty::Dbl),
         ("exp", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Exp, Ty::Dbl),
         ("log", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Log, Ty::Dbl),
-        ("abs", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Abs(numeric(*ty)), if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int }),
+        ("abs", [ty]) if ty.is_numeric_scalar() => (
+            Intrinsic::Abs(numeric(*ty)),
+            if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int },
+        ),
         ("floor", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Floor, Ty::Dbl),
         ("ceiling", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Ceiling, Ty::Dbl),
         ("%%", [a, b]) if a.is_numeric_scalar() && b.is_numeric_scalar() => {
-            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl { Numeric::Dbl } else { Numeric::Int };
-            (Intrinsic::Modulo(numeric), if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl })
+            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl {
+                Numeric::Dbl
+            } else {
+                Numeric::Int
+            };
+            (
+                Intrinsic::Modulo(numeric),
+                if numeric == Numeric::Int {
+                    Ty::Int
+                } else {
+                    Ty::Dbl
+                },
+            )
         }
         ("%/%", [a, b]) if a.is_numeric_scalar() && b.is_numeric_scalar() => {
-            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl { Numeric::Dbl } else { Numeric::Int };
-            (Intrinsic::IntegerDivide(numeric), if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl })
+            let numeric = if *a == Ty::Dbl || *b == Ty::Dbl {
+                Numeric::Dbl
+            } else {
+                Numeric::Int
+            };
+            (
+                Intrinsic::IntegerDivide(numeric),
+                if numeric == Numeric::Int {
+                    Ty::Int
+                } else {
+                    Ty::Dbl
+                },
+            )
         }
         _ => return None,
     })
@@ -1020,7 +1428,13 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
 fn ends_block(op: Op) -> bool {
     matches!(
         op,
-        Op::Jump | Op::JumpUnless | Op::BranchUnlessBuiltin | Op::ForStep | Op::LogicLeft | Op::Guard | Op::Return
+        Op::Jump
+            | Op::JumpUnless
+            | Op::BranchUnlessBuiltin
+            | Op::ForStep
+            | Op::LogicLeft
+            | Op::Guard
+            | Op::Return
     )
 }
 

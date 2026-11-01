@@ -1257,7 +1257,15 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
     let object = values::materialize(object)?;
-    let value = values::materialize(value)?;
+    let mut value = values::materialize(value)?;
+    // An S4 object that is not a vector goes in as its `as.vector()`, which dispatches, so a
+    // class's own method decides what its elements are.
+    if value.kind() == SexpType::Object && object.kind() != SexpType::List {
+        let coerce = values::call(values::install("as.vector")?, &[eval::quote_value(value)?])?;
+        value = eval::eval(coerce, values::base_env())?;
+    } else if value.kind() == SexpType::Object {
+        conditions::warning_call(call, "implicit list embedding of S4 objects is deprecated")?;
+    }
     if object.kind() == SexpType::Pairlist || object.kind() == SexpType::Language {
         let list = values::pairlist_to_list(object)?;
         let result = subassign(list, indices, value, call)?;
