@@ -1799,6 +1799,7 @@ dependencies = [
  "table",
  "tiny-skia",
  "unicode-width 0.2.2",
+ "zstd",
 ]
 
 [[package]]

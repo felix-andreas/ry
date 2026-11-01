@@ -120,16 +120,27 @@ pub const BUILTINS: &[BuiltinDef] = &[
         la_dgecon(call.arg(0), call.arg(1))
     }),
     internal("La_dtrcon", 2, |call| unsafe {
-        la_dtrcon(call.arg(0), call.arg(1))
+        la_dtrcon(call.arg(0), call.arg(1), c"U")
+    }),
+    // R 4.4's `rcond(triangular = TRUE, uplo = "L")` and `.kappa_tri(uplo =)`.
+    internal("La_dtrcon3", 3, |call| unsafe {
+        la_dtrcon(call.arg(0), call.arg(1), uplo(call.arg(2))?)
     }),
     internal("La_zgecon", 2, |call| unsafe {
         la_zgecon(call.arg(0), call.arg(1))
     }),
     internal("La_ztrcon", 2, |call| unsafe {
-        la_ztrcon(call.arg(0), call.arg(1))
+        la_ztrcon(call.arg(0), call.arg(1), c"U")
+    }),
+    internal("La_ztrcon3", 3, |call| unsafe {
+        la_ztrcon(call.arg(0), call.arg(1), uplo(call.arg(2))?)
     }),
     internal("La_dlange", 2, |call| unsafe {
         la_dlange(call.arg(0), call.arg(1))
+    }),
+    // R 4.4's `norm()` of a complex matrix.
+    internal("La_zlange", 2, |call| unsafe {
+        la_zlange(call.arg(0), call.arg(1))
     }),
     internal("backsolve", 5, |call| unsafe { backsolve(call) }),
     internal("La_version", 0, |_| unsafe { la_version() }),
@@ -2082,7 +2093,7 @@ unsafe fn la_dgecon(a: Sexp, norm: Sexp) -> R<Sexp> {
 }
 
 /// `rcond(x, triangular = TRUE)`: `dtrcon` on the upper triangle.
-unsafe fn la_dtrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
+unsafe fn la_dtrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
     let lapack = lapack()?;
     if matrix_dims(a).is_none() {
         return Err(error("'A' must be a numeric matrix"));
@@ -2100,7 +2111,7 @@ unsafe fn la_dtrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
     let mut info = 0;
     (lapack.dtrcon)(
         kind.as_ptr(),
-        c"U".as_ptr(),
+        triangle.as_ptr(),
         c"N".as_ptr(),
         &order,
         reals(matrix).as_ptr(),
@@ -2177,7 +2188,7 @@ unsafe fn la_zgecon(a: Sexp, norm: Sexp) -> R<Sexp> {
     values::scalar_real(rcond)
 }
 
-unsafe fn la_ztrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
+unsafe fn la_ztrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
     let lapack = lapack()?;
     if matrix_dims(a).is_none() {
         return Err(error("'A' must be a complex matrix"));
@@ -2195,7 +2206,7 @@ unsafe fn la_ztrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
     let mut info = 0;
     (lapack.ztrcon)(
         kind.as_ptr(),
-        c"U".as_ptr(),
+        triangle.as_ptr(),
         c"N".as_ptr(),
         &order,
         complexes(matrix).as_ptr(),
@@ -2212,6 +2223,41 @@ unsafe fn la_ztrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
         return Err(error(format!("error [{info}] from Lapack 'ztrcon()'")));
     }
     values::scalar_real(rcond)
+}
+
+/// The triangle `uplo` names, `"U"` or `"L"`.
+unsafe fn uplo(value: Sexp) -> R<&'static CStr> {
+    match values::first_string(value).as_deref() {
+        Some("U") => Ok(c"U"),
+        Some("L") => Ok(c"L"),
+        _ => Err(error("'uplo' must be \"U\" or \"L\"")),
+    }
+}
+
+/// `norm(x, type)` of a complex matrix, `zlange`.
+unsafe fn la_zlange(a: Sexp, norm: Sexp) -> R<Sexp> {
+    let lapack = lapack()?;
+    let Some((rows, cols)) = matrix_dims(a) else {
+        return Err(error("'A' must be a complex matrix"));
+    };
+    if norm.kind() != SexpType::String {
+        return Err(error("'type' must be a character string"));
+    }
+    let source = coerce_vector(a, SexpType::Complex)?;
+    let kind = norm_type(&first_text(norm), true)?;
+    let (m, n) = (rows as i32, cols as i32);
+    let mut work = vec![0.0; rows.max(1)];
+    let kind = [kind as c_char, 0];
+    let value = (lapack.zlange)(
+        kind.as_ptr(),
+        &m,
+        &n,
+        complexes(source).as_ptr(),
+        &m.max(1),
+        work.as_mut_ptr(),
+        1,
+    );
+    values::scalar_real(value)
 }
 
 /// The LAPACK norm letter `type` names: `M`, `O` (or `1`), `I`, `F` (or `E`); condition

@@ -715,11 +715,14 @@ impl Zone {
                 };
                 return instant - correction + fraction - shift;
             }
+            // In a spring-forward gap glibc's `mktime` reads the clock with the offset before
+            // the gap unless told the time is daylight time, so an unknown DST flag lands
+            // after the gap: New York's 02:30 becomes 03:30 EDT.
             AmbiguousOffset::Gap { before, after } => {
-                if isdst == 0 {
-                    before
-                } else {
+                if isdst == 1 {
                     after
+                } else {
+                    before
                 }
             }
             // glibc's `mktime` resolves a repeated time with the offset in force at the wall
@@ -1927,9 +1930,15 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
         }
         let (offset, _, _) = zone.offset_at(seconds[index]);
         if seconds[index] + offset as f64 != time.whole {
-            // A time in a spring-forward gap keeps its wall-clock fields and reports the zone
-            // in force after the gap, where the wall clock read with the earlier offset lands.
-            let (_, dst, abbreviation) = zone.offset_at(time.whole - offset as f64);
+            // A time in a spring-forward gap keeps its wall-clock fields. Through R 4.3 it
+            // reports the zone in force after the gap, where the wall clock read with the
+            // earlier offset lands; from R 4.4 on its DST flag is unknown and its zone empty.
+            let (dst, abbreviation) = if r_at_least(4, 4) {
+                (-1, String::new())
+            } else {
+                let (_, dst, abbreviation) = zone.offset_at(seconds[index]);
+                (dst as i32, abbreviation)
+            };
             let wall = broken_down(time.whole);
             values::ints_mut(fields[1])[index] = wall.minute as i32;
             values::ints_mut(fields[2])[index] = wall.hour as i32;
@@ -1938,7 +1947,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             values::ints_mut(fields[5])[index] = wall.year as i32 - 1900;
             values::ints_mut(fields[6])[index] = wall.weekday as i32;
             values::ints_mut(fields[7])[index] = wall.yearday as i32;
-            values::ints_mut(fields[8])[index] = dst as i32;
+            values::ints_mut(fields[8])[index] = dst;
             values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
         }
     }
@@ -2447,6 +2456,14 @@ impl RVersion {
     pub fn number(&self) -> String {
         format!("{}.{}.{}", self.major, self.minor, self.patch)
     }
+}
+
+/// Whether the emulated R is `major.minor` or later. Behavior that GNU R changed between
+/// supported releases follows the release in `R_HOME`, so the base packages' R code and the
+/// internals it calls always agree.
+pub fn r_at_least(major: u32, minor: u32) -> bool {
+    let version = r_version();
+    (version.major, version.minor) >= (major, minor)
 }
 
 /// The oldest GNU R whose base packages ry's runtime loads. Older releases call internals

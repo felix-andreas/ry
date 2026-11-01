@@ -6977,7 +6977,12 @@ pub fn psignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
     if n <= 0.0 || !signrank_valid(n) {
         return f64::NAN;
     }
-    let x = forceint(x + 1e-7);
+    // R 4.6's wilcox.test asks for the upper tail at `q - 1/4`, which only floors correctly.
+    let x = if crate::system::r_at_least(4, 6) {
+        (x + 1e-7).floor()
+    } else {
+        forceint(x + 1e-7)
+    };
     if x < 0.0 {
         return dt0(lower, log);
     }

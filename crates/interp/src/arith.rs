@@ -1956,13 +1956,14 @@ fn times_minus_i(z: Rcomplex) -> Rcomplex {
     Rcomplex { r: z.i, i: -z.r }
 }
 
-/// Far from the real axis the tangent is `±i`, which some C libraries return as NaN.
+/// Far from the real axis the imaginary part of the tangent is `±1`, which some C libraries
+/// return as NaN. The tiny real part stays as the library computed it.
 unsafe fn complex_tan(z: Rcomplex) -> Rcomplex {
     let result = ctan(z);
     if z.i.is_finite() && z.i.abs() > 25.0 {
         return Rcomplex {
-            r: 0.0,
-            i: if z.i > 0.0 { 1.0 } else { -1.0 },
+            r: result.r,
+            i: if z.i < 0.0 { -1.0 } else { 1.0 },
         };
     }
     result

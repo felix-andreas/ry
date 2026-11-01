@@ -154,6 +154,20 @@ pub unsafe fn swilk(call: &NativeCall<'_>) -> R<Sexp> {
 pub unsafe fn p_kolmogorov_2x(call: &NativeCall<'_>) -> R<Sexp> {
     let d = values::as_real_scalar(call.arg(0));
     let n = values::as_integer_scalar(call.arg(1)).max(1) as usize;
+    values::scalar_real(kolmogorov_exact(d, n))
+}
+
+/// R 4.4's `pkolmogorov_two_exact(q, n)`: [`p_kolmogorov_2x`] over a vector of statistics.
+pub unsafe fn p_kolmogorov_two_exact(call: &NativeCall<'_>) -> R<Sexp> {
+    let statistics = real_values(call.arg(0))?;
+    let n = values::as_integer_scalar(call.arg(1)).max(1) as usize;
+    let values: Vec<f64> = statistics.iter().map(|&d| kolmogorov_exact(d, n)).collect();
+    values::real_vector(&values)
+}
+
+/// `P(D_n < d)` for the one-sample Kolmogorov statistic, by Marsaglia, Tsang and Wang's matrix
+/// power ("Evaluating Kolmogorov's Distribution", 2003).
+fn kolmogorov_exact(d: f64, n: usize) -> f64 {
     let k = (n as f64 * d) as usize + 1;
     let m = 2 * k - 1;
     let h = k as f64 - n as f64 * d;
@@ -190,8 +204,7 @@ pub unsafe fn p_kolmogorov_2x(call: &NativeCall<'_>) -> R<Sexp> {
             exponent -= 140;
         }
     }
-    s *= 10f64.powi(exponent);
-    values::scalar_real(s)
+    s * 10f64.powi(exponent)
 }
 
 fn matrix_multiply(a: &[f64], b: &[f64], m: usize) -> Vec<f64> {
@@ -234,37 +247,61 @@ fn matrix_power(a: &[f64], a_exponent: i32, m: usize, n: usize) -> (Vec<f64>, i3
 /// alternating series (Durbin, "Distribution Theory for Tests Based on the Sample
 /// Distribution Function", 1973), with its theta-function form for small arguments.
 pub unsafe fn p_ks2(call: &NativeCall<'_>) -> R<Sexp> {
-    let mut x = real_values(call.arg(0))?;
+    let x = real_values(call.arg(0))?;
     let tolerance = values::as_real_scalar(call.arg(1));
-    let k_max = (2.0 - tolerance.ln()).sqrt() as i64;
-    for value in x.iter_mut() {
-        if *value < 1.0 {
-            let z =
-                -(std::f64::consts::FRAC_PI_2 * std::f64::consts::FRAC_PI_4) / (*value * *value);
-            let w = value.ln();
-            let mut sum = 0.0;
-            let mut k = 1;
-            while k < k_max {
-                sum += ((k * k) as f64 * z - w).exp();
-                k += 2;
-            }
-            *value = sum / (1.0 / (2.0 * std::f64::consts::PI).sqrt());
-        } else {
-            let z = -2.0 * *value * *value;
-            let mut sign = -1.0;
-            let mut k = 1i64;
-            let mut old = 0.0_f64;
-            let mut new = 1.0;
-            while (old - new).abs() > tolerance {
-                old = new;
-                new += 2.0 * sign * (z * (k * k) as f64).exp();
-                sign = -sign;
-                k += 1;
-            }
-            *value = new;
+    let values: Vec<f64> = x
+        .iter()
+        .map(|&value| kolmogorov_limit(value, true, tolerance))
+        .collect();
+    values::real_vector(&values)
+}
+
+/// R 4.4's `pkolmogorov_two_limit(statistic, lower.tail, tol)`: [`p_ks2`], whose upper tail is
+/// summed directly so that it keeps its precision far out.
+pub unsafe fn p_kolmogorov_two_limit(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = real_values(call.arg(0))?;
+    let lower = values::as_logical_scalar(call.arg(1)) != 0;
+    let tolerance = values::as_real_scalar(call.arg(2));
+    let values: Vec<f64> = x
+        .iter()
+        .map(|&value| kolmogorov_limit(value, lower, tolerance))
+        .collect();
+    values::real_vector(&values)
+}
+
+/// Kolmogorov's limiting distribution at `x`: the theta-function form below 1, and above it the
+/// alternating series `1 - 2 sum (-1)^(k-1) exp(-2 k^2 x^2)`, whose tail alone is the upper
+/// probability.
+fn kolmogorov_limit(x: f64, lower: bool, tolerance: f64) -> f64 {
+    if x < 1.0 {
+        let k_max = (2.0 - tolerance.ln()).sqrt() as i64;
+        let z = -(std::f64::consts::FRAC_PI_2 * std::f64::consts::FRAC_PI_4) / (x * x);
+        let w = x.ln();
+        let mut sum = 0.0;
+        let mut k = 1;
+        while k < k_max {
+            sum += ((k * k) as f64 * z - w).exp();
+            k += 2;
         }
+        let p = sum / (1.0 / (2.0 * std::f64::consts::PI).sqrt());
+        return if lower { p } else { 1.0 - p };
     }
-    values::real_vector(&x)
+    let z = -2.0 * x * x;
+    let mut sign = 1.0;
+    let mut k = 1i64;
+    // Both sums run term by term, so the lower tail rounds exactly as R 4.3's `pKS2` did.
+    let (mut below, mut tail) = (1.0_f64, 0.0_f64);
+    loop {
+        let term = 2.0 * sign * (z * (k * k) as f64).exp();
+        below -= term;
+        tail += term;
+        if term.abs() <= tolerance {
+            break;
+        }
+        sign = -sign;
+        k += 1;
+    }
+    if lower { below } else { tail }
 }
 
 /// `psmirnov_exact(q, m, n, z, two.sided, lower.tail)`: the exact distribution of the
@@ -829,4 +866,67 @@ unsafe fn random_table(
         table[row_count - 1 + column * row_count] = count as i32;
     }
     Ok(table)
+}
+
+/// R 4.6's `dpermdist1(scores)`: the distribution of the sum of a random subset of the
+/// (sorted, non-negative integer) scores, each in or out with probability one half, as the
+/// signed rank statistic with ties needs it. Element `s + 1` is `P(sum = s)`.
+pub unsafe fn dpermdist1(call: &NativeCall<'_>) -> R<Sexp> {
+    let scores = crate::stats::integer_values(call.arg(0))?;
+    let total: usize = scores.iter().map(|&score| score.max(0) as usize).sum();
+    let mut density = vec![0.0; total + 1];
+    density[0] = 1.0;
+    let mut reach = 0;
+    for &score in &scores {
+        let score = score.max(0) as usize;
+        reach += score;
+        for sum in (0..=reach).rev() {
+            let with = if sum >= score {
+                density[sum - score]
+            } else {
+                0.0
+            };
+            density[sum] = 0.5 * (density[sum] + with);
+        }
+    }
+    values::real_vector(&density)
+}
+
+/// R 4.6's `dpermdist2(scores, m)`: the distribution of the sum of `m` scores drawn without
+/// replacement, as the rank sum statistic with ties needs it. Element `s` is `P(sum = s)`, up
+/// to the sum of the `m` largest scores. Each step mixes "item `i` is in" and "item `i` is out"
+/// by their probabilities, which stays finite where counting subsets would overflow.
+pub unsafe fn dpermdist2(call: &NativeCall<'_>) -> R<Sexp> {
+    let mut scores = crate::stats::integer_values(call.arg(0))?;
+    scores.sort_unstable();
+    let m = (values::as_integer_scalar(call.arg(1)).max(0) as usize).min(scores.len());
+    let top: usize = scores
+        .iter()
+        .rev()
+        .take(m)
+        .map(|&score| score.max(0) as usize)
+        .sum();
+    let width = top + 1;
+    // `table[j * width + s]`: the probability that a uniform `j`-subset of the items so far sums
+    // to `s`.
+    let mut table = vec![0.0; (m + 1) * width];
+    table[0] = 1.0;
+    for (index, &score) in scores.iter().enumerate() {
+        let items = (index + 1) as f64;
+        let score = score.max(0) as usize;
+        for chosen in (0..=m.min(index + 1)).rev() {
+            let keep = (items - chosen as f64) / items;
+            let take = chosen as f64 / items;
+            for sum in (0..width).rev() {
+                let without = table[chosen * width + sum];
+                let with = if chosen > 0 && sum >= score {
+                    table[(chosen - 1) * width + sum - score]
+                } else {
+                    0.0
+                };
+                table[chosen * width + sum] = keep * without + take * with;
+            }
+        }
+    }
+    values::real_vector(&table[m * width + 1..(m + 1) * width])
 }

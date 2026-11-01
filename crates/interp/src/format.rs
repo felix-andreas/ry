@@ -264,8 +264,12 @@ pub fn format_complex_with(
     let real_part = if rounded.r == 0.0 { 0.0 } else { value.r };
     let imaginary_part = if rounded.i == 0.0 { 0.0 } else { value.i };
     let real_text = format_real_with(real_part, real, "NA");
-    let sign = if imaginary_part < 0.0 { '-' } else { '+' };
     let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
+    let sign = if imaginary_part < 0.0 && imaginary_text != "0" {
+        '-'
+    } else {
+        '+'
+    };
     format!("{real_text}{sign}{imaginary_text}i")
 }
 
@@ -297,8 +301,12 @@ pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
 }
 
 /// `value` rounded to `digits` significant digits relative to its larger part, as GNU R's
-/// `z_prec_r` rounds before printing: a part far smaller than the other one prints as zero.
+/// `z_prec_r` rounds before printing through R 4.3: a part far smaller than the other one
+/// prints as zero. From R 4.4 on, each part formats on its own, so nothing is rounded.
 fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
+    if crate::system::r_at_least(4, 4) {
+        return value;
+    }
     let magnitude = [value.r.abs(), value.i.abs()]
         .into_iter()
         .filter(|part| part.is_finite())
