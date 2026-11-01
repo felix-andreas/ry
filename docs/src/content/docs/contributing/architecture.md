@@ -192,7 +192,10 @@ spelling it passed through; it lives in the module's own text buffer, addressed 
 struct-of-arrays: an `ExprId` indexes separate kind and range arrays, and every list (arguments,
 parameters, statements, record fields, match arms, pattern lists) lives in one side array per
 element type that the expression addresses with a `Span`, so every HIR kind is `Copy` and a scan
-over kinds never touches ranges. Lowering reads the green tree through `syntax::GreenNodeAt` and
+over kinds never touches ranges. A name written at a site with its own range (an argument name, a
+field after `$` or `@`, a loop variable, a tag) is a `NameId` into a `NameSite` side array that
+holds the symbol and its range together, and every id is a `NonZeroU32`, so an optional child costs
+no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the green tree through `syntax::GreenNodeAt` and
 builds no red nodes. It writes into a per-thread scratch module that keeps its capacity across
 items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
 capacity and lowering allocates a handful of arrays per item. Naming

@@ -1,0 +1,2 @@
+# pdftools: one string per page.
+pdf_text : fn(pdf: character | raw[], [opw]: character, [upw]: character) -> character[]

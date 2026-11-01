@@ -67,7 +67,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         ExpressionKind::Field { at, name, .. } => format!(
             "Field {}{}",
             if *at { "@" } else { "$" },
-            name.as_deref().unwrap_or("?")
+            name.map(|name| module.name(name)).as_deref().unwrap_or("?")
         ),
         ExpressionKind::Namespace {
             internal,
@@ -91,6 +91,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         }
         ExpressionKind::If { .. } => "If".to_owned(),
         ExpressionKind::For { variable, .. } => {
+            let variable = variable.map(|variable| module.name(variable));
             format!("For {}", variable.as_deref().unwrap_or("?"))
         }
         ExpressionKind::While { .. } => "While".to_owned(),
@@ -109,7 +110,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
                 .collect();
             format!("Record({})", names.join(", "))
         }
-        ExpressionKind::Tag { name, .. } => format!("Tag :{name}"),
+        ExpressionKind::Tag { name, .. } => format!("Tag :{}", module.name(*name)),
         ExpressionKind::Match { .. } => "Match".to_owned(),
     };
     output.push_str(&format!("{}{label}\n", "  ".repeat(depth)));
@@ -168,6 +169,7 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
             literal_text(module, literal)
         )),
         PatternKind::Tag { name, payload, .. } => {
+            let name = module.name(*name);
             output.push_str(&format!("{indent}pattern tag :{name}\n"));
             if let Some(payload) = payload {
                 render_pattern(output, module, *payload, depth + 1);
@@ -201,7 +203,7 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
 fn render_arguments(output: &mut String, module: &Module, arguments: &[Argument], depth: usize) {
     let indent = "  ".repeat(depth);
     for argument in arguments {
-        match (&argument.name, argument.value) {
+        match (module.argument_name(argument), argument.value) {
             (Some(name), Some(value)) => {
                 output.push_str(&format!("{indent}arg {name} =\n"));
                 render_expression(output, module, value, depth + 1);

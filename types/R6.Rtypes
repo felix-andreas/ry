@@ -1,0 +1,10 @@
+# R6: a conditional namespace, whose declarations join resolution only when the project declares or
+# attaches R6.
+#
+# A generator's methods are whatever `public` lists, which a signature cannot name, so the generator
+# itself is `Any`. Defining one runs no user code, so a package may define classes at its top level
+# in strict mode.
+
+R6Class : @pure fn([classname]: character | NULL, [public]: list[named: Any], [private]: list[named: Any] | NULL, [active]: list[named: Any] | NULL, [inherit]: Any, [lock_objects]: logical, [class]: logical, [portable]: logical, [lock_class]: logical, [cloneable]: logical, [parent_env]: environment) -> Any
+is.R6 : @pure fn(x: Any) -> logical
+is.R6Class : @pure fn(x: Any) -> logical

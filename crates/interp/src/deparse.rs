@@ -639,8 +639,11 @@ impl Deparser {
                         }
                         return;
                     }
+                    // Every `PP_BINARY` operator called with one argument deparses as a
+                    // prefix, so `` `%*%`(x) `` is `%*%x`, as GNU R prints it.
                     (Kind::Binary | Kind::Binary2 | Kind::Unary, 1)
-                        if matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
+                        if info.kind == Kind::Binary
+                            || matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
                     {
                         let operand = arguments.car();
                         let info = if info.precedence == precedence::SUM {

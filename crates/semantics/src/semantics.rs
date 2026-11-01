@@ -575,6 +575,26 @@ pub fn item_annotations<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemAnnotation
 }
 
 fn root_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations::Annotation<'db>> {
+    let written = written_root_annotation(db, item);
+    if written
+        .as_ref()
+        .is_some_and(|annotation| annotation.declared.is_some() || !annotation.errors.is_empty())
+    {
+        return written;
+    }
+    let Some(declared) = package_hook_signature(db, item) else {
+        return written;
+    };
+    Some(annotations::Annotation {
+        declared: Some(declared),
+        ..written.unwrap_or_default()
+    })
+}
+
+fn written_root_annotation<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> Option<annotations::Annotation<'db>> {
     let comment = item_annotation_syntax(db, item)
         .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
     let root = item_syntax(db, item)?.syntax_node();
@@ -586,6 +606,54 @@ fn root_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations:
     }
     let inline = annotations::lower_inline_annotation(db, &site);
     annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+}
+
+/// R calls a package file's `.onLoad` and `.onAttach` with two character arguments, and
+/// `.onUnload`, `.onDetach` and `.Last.lib` with one, so an unannotated hook is typed as if it
+/// declared that. R passes them by position, so the hook's own formal names are kept, `...`
+/// takes whatever is left, and a formal past the passed ones is optional.
+fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types::TypeScheme<'db>> {
+    if *item.kind(db) != ItemKind::Function
+        || item.parent(db).is_some()
+        || *item.file(db).kind(db) != DocumentKind::Package
+    {
+        return None;
+    }
+    let passed = match item.name(db).as_deref()? {
+        ".onLoad" | ".onAttach" => 2,
+        ".onUnload" | ".onDetach" | ".Last.lib" => 1,
+        _ => return None,
+    };
+    let root = item_syntax(db, item)?.syntax_node();
+    let function = root
+        .descendants()
+        .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
+    let mut parameters = Vec::new();
+    let mut takes_rest = false;
+    for (position, formal) in annotations::formals(&function).iter().enumerate() {
+        if formal.name == "..." {
+            parameters.push("...: Any".to_owned());
+            takes_rest = true;
+            break;
+        }
+        let plain = formal
+            .name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_' || character == '.');
+        if !plain {
+            return None;
+        }
+        parameters.push(if position < passed {
+            format!("{}: character", formal.name)
+        } else {
+            format!("[{}]: Any", formal.name)
+        });
+    }
+    // A hook that cannot take the arguments R passes fails when R calls it, not when it is typed.
+    if !takes_rest && parameters.len() < passed {
+        return None;
+    }
+    stubs::lower_type_text(db, &format!("fn({}) -> Any", parameters.join(", ")))
 }
 
 fn expression_annotations<'db>(
@@ -661,7 +729,7 @@ fn expression_annotations<'db>(
         if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
             continue;
         }
-        attachments.push((hir::ExprId(index as u32), lowered));
+        attachments.push((hir::ExprId::new(index), lowered));
     }
     attachments
 }

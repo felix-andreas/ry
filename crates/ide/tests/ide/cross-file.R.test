@@ -156,8 +156,12 @@ hover 19..27: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: f: character | [[signature]: character[]] | [definition]: Any | ...: Any
+action: Add inferred type annotations for the whole file
+  edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @48: fn() -> Any
 
 #---- class_reference_in_signature_resolves_to_setclass_generic_ref
 #~~~~ R/classes.R
@@ -171,8 +175,12 @@ hover 10..17: character
 definition R/classes.R:67..72
 references: R/classes.R:67..72*, R/classes.R:104..109, R/methods.R:11..16
 rename: 3 edit(s)
-signature: none
+signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
+action: Add inferred type annotations for the whole file
+  edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @48: fn() -> Any
 
 #---- class_reference_in_signature_resolves_to_setclass_new_class_ref
 #~~~~ R/classes.R
@@ -186,8 +194,14 @@ hover 67..75: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> Any
+parameters: [Class: character] | ...: Any
+action: Add inferred type annotation for `make`
+  edit 44..44 -> "#: fn() -> Any\n"
+action: Add inferred type annotations for the whole file
+  edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @48: fn() -> Any
 
 #==== definition_annotation_type_names
 #---- cross_file_type_use_cross_file_use
@@ -458,7 +472,8 @@ hover 9..17: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> fn(...: Any) -> Any
+parameters: [Class: character] | ...: Any
 completion: none
 
 #==== type_names
@@ -594,5 +609,6 @@ hover 9..17: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> fn(...: Any) -> Any
+parameters: [Class: character] | ...: Any
 completion: none

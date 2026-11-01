@@ -13,8 +13,10 @@ use {
         hir::{
             AssignSpelling, BinaryOperator, ExprId, ExpressionKind, Module, Symbol, UnaryOperator,
         },
-        inline_annotations_enabled, item_annotation_syntax, item_hir, item_syntax, package_name,
-        stubs::stubs,
+        inline_annotations_enabled, item_annotation_syntax, item_hir, item_syntax,
+        metadata::namespace_active,
+        package_name,
+        stubs::{QUALIFIED_ONLY_NAMESPACES, StubSources, stubs},
         types::{Name, QueryName},
     },
     rustc_hash::FxHashSet,
@@ -106,6 +108,91 @@ pub fn item_declared_pure<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
     marked && inline_annotations_enabled(db)
 }
 
+/// The names the item's `<<-` assignments write, wherever they sit. A package namespace is
+/// locked once loading finishes, so a function body's `<<-` can reach a namespace binding
+/// only while `.onLoad`, or something it calls, runs.
+#[salsa::tracked(returns(ref))]
+pub fn item_super_assigned_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Symbol> {
+    let Some(module) = item_hir(db, item) else {
+        return Vec::new();
+    };
+    let mut names: Vec<Symbol> = module
+        .kinds()
+        .iter()
+        .filter_map(|kind| match kind {
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Super,
+                target,
+                ..
+            } => root_name(module, *target),
+            _ => None,
+        })
+        .collect();
+    names.sort_by_key(|name| name.as_str());
+    names.dedup();
+    names
+}
+
+/// The name a replacement target such as `x$a[[1]]` or `names(x)` changes.
+fn root_name(module: &Module, target: ExprId) -> Option<Symbol> {
+    match &module.expression(target).kind {
+        ExpressionKind::NameRef(name) => Some(*name),
+        ExpressionKind::Index { target, .. } | ExpressionKind::Field { target, .. } => {
+            root_name(module, *target)
+        }
+        ExpressionKind::Call { arguments, .. } => module[arguments]
+            .first()
+            .and_then(|argument| argument.value)
+            .and_then(|value| root_name(module, value)),
+        ExpressionKind::Paren(inner) => root_name(module, *inner),
+        _ => None,
+    }
+}
+
+/// Whether the item is `name <- value` with `value` a literal, or `c()` or `list()` of such
+/// values. Such a value is never an environment, so replacing in a copy of it leaves the
+/// binding alone.
+#[salsa::tracked]
+pub fn item_binds_plain_value<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    let Some(module) = item_hir(db, item) else {
+        return false;
+    };
+    let Some(root) = module.root else {
+        return false;
+    };
+    let ExpressionKind::Assign {
+        spelling: AssignSpelling::Local | AssignSpelling::Equals,
+        value,
+        ..
+    } = &module.expression(root).kind
+    else {
+        return false;
+    };
+    plain_value(module, *value)
+}
+
+fn plain_value(module: &Module, id: ExprId) -> bool {
+    match &module.expression(id).kind {
+        ExpressionKind::Literal(_) => true,
+        ExpressionKind::Unary {
+            operator: UnaryOperator::Minus,
+            operand,
+        }
+        | ExpressionKind::Paren(operand) => plain_value(module, *operand),
+        ExpressionKind::Call { callee, arguments } => {
+            matches!(
+                &module.expression(*callee).kind,
+                ExpressionKind::NameRef(name) if matches!(name.as_str(), "c" | "list")
+            ) && module[arguments].iter().all(|argument| {
+                argument
+                    .value
+                    .is_some_and(|value| plain_value(module, value))
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Whether calling `package::name`, or a bare `name`, is declared to have no effect, and
 /// where the declaration would live. A project definition shadows a stub's.
 pub fn callee_purity(db: &dyn Db, package: Option<&str>, name: &str) -> (bool, CalleeOrigin) {
@@ -121,14 +208,38 @@ pub fn callee_purity(db: &dyn Db, package: Option<&str>, name: &str) -> (bool, C
             return (true, CalleeOrigin::Other);
         }
     }
-    let pure = stubs(db).is_some_and(|library| match package {
-        Some(package) => library
-            .pure_by_namespace
-            .get(package)
-            .is_some_and(|names| names.contains(name)),
-        None => library.pure.contains(name),
-    });
+    let pure = stub_namespace_declares_pure(db, package, name);
     (pure, CalleeOrigin::Other)
+}
+
+/// A qualified call asks the named namespace. A bare call resolves to the namespace whose
+/// declaration of the name wins, which must be reachable without a qualifier, so a later
+/// package's undecorated redeclaration of the name never clears another package's marker.
+fn stub_namespace_declares_pure(db: &dyn Db, package: Option<&str>, name: &str) -> bool {
+    let (Some(library), Some(sources)) = (stubs(db), StubSources::try_get(db)) else {
+        return false;
+    };
+    let namespace = match package {
+        Some(package) => package,
+        None => {
+            let Some(declaration) = library.declarations.get(name) else {
+                return false;
+            };
+            let Some((namespace, _)) = sources.sources(db).get(declaration.source_index) else {
+                return false;
+            };
+            if QUALIFIED_ONLY_NAMESPACES.contains(&namespace.as_str())
+                && !namespace_active(db, namespace)
+            {
+                return false;
+            }
+            namespace.as_str()
+        }
+    };
+    library
+        .pure_by_namespace
+        .get(namespace)
+        .is_some_and(|names| names.contains(name))
 }
 
 /// Recognized by the checker or the parser rather than declared by a stub.
@@ -379,6 +490,13 @@ impl Classifier<'_> {
                             }
                             // A replacement changes a value only `local()` can see.
                             _ if target_name.is_some_and(|name| names.contains(&name)) => {}
+                            // R copies an outer vector or list into `local()`'s environment
+                            // before replacing in it, so only an environment would change.
+                            _ if let Some(name) = target_name
+                                && self.outer_value_is_copied(name) =>
+                            {
+                                names.insert(name);
+                            }
                             _ => {
                                 return found(Effect::Replacement {
                                     target: target_name.map(|name| name.as_str().to_owned()),
@@ -399,7 +517,7 @@ impl Classifier<'_> {
                 let Some(names) = locals.as_mut() else {
                     return found(Effect::Loop);
                 };
-                names.extend(*variable);
+                names.extend(variable.map(|variable| self.module.name(variable)));
                 self.children_effect(id, locals)
             }
             ExpressionKind::While { .. } | ExpressionKind::Repeat { .. } => {
@@ -430,6 +548,19 @@ impl Classifier<'_> {
         found
     }
 
+    /// Whether the project binds `name` once, unconditionally, to a value that is plainly a
+    /// vector or a list.
+    fn outer_value_is_copied(&self, name: Symbol) -> bool {
+        let definitions = package_name(
+            self.db,
+            QueryName::new(self.db, Name::new(self.db, name.as_str().to_owned())),
+        );
+        definitions.conditional_writers.is_empty()
+            && definitions
+                .winner
+                .is_some_and(|winner| *item_binds_plain_value(self.db, winner))
+    }
+
     /// Adds the names a zeallot pattern such as `c(a, c(b, ...rest))` binds.
     fn pattern_names(&self, pattern: ExprId, names: &mut FxHashSet<Symbol>) {
         match &self.module.expression(pattern).kind {
@@ -450,17 +581,6 @@ impl Classifier<'_> {
 
     /// The variable an assignment target writes: `x` in `x`, `names(x)`, `x$a[[1]]`.
     fn root_name(&self, target: ExprId) -> Option<Symbol> {
-        match &self.module.expression(target).kind {
-            ExpressionKind::NameRef(name) => Some(*name),
-            ExpressionKind::Index { target, .. } | ExpressionKind::Field { target, .. } => {
-                self.root_name(*target)
-            }
-            ExpressionKind::Call { arguments, .. } => self.module[arguments]
-                .first()
-                .and_then(|argument| argument.value)
-                .and_then(|value| self.root_name(value)),
-            ExpressionKind::Paren(inner) => self.root_name(*inner),
-            _ => None,
-        }
+        root_name(self.module, target)
     }
 }

@@ -1,0 +1,11 @@
+# cachem: key-value caches. A cache is a list of closures over shared state,
+# so its type is the record of those closures.
+
+@alias cachem {list{get: fn(key: character, [missing]: Any) -> Any, set: fn(key: character, value: Any) -> logical, exists: fn(key: character) -> logical, keys: fn() -> character[], remove: fn(key: character) -> logical, reset: fn() -> logical, prune: fn() -> logical, size: fn() -> integer, info: fn() -> list[named: Any]}}
+
+# Building a cache allocates its state and touches nothing else.
+cache_mem : @pure fn([max_size]: double, [max_age]: double, [max_n]: double, [evict]: character, [missing]: Any, [logfile]: Any) -> cachem
+cache_disk : fn([dir]: character, [max_size]: double, [max_age]: double, [max_n]: double, [evict]: character, [destroy_on_finalize]: logical, [read_fn]: Any, [write_fn]: Any, [extension]: character, [missing]: Any, [prune_rate]: double, [warn_ref_objects]: logical, [logfile]: Any) -> cachem
+cache_layered : fn(...: cachem, [logfile]: Any) -> cachem
+key_missing : @pure fn() -> Any
+is.key_missing : @pure fn(x: Any) -> logical

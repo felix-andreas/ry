@@ -955,9 +955,11 @@ Each step ends with something real running, and each one is a large, whole chang
    `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
-   implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
-   `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
-   but write no image.
+   implementation shared by the interpreter and `libR`. R's graphics engine runs on ry's runtime
+   with the R_GE_version 17 device API, so base graphics, grid, lattice and device packages such as
+   ragg share one engine, and the built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and
+   `tiff` devices are engine devices too. On ragg captures, base graphics, grid and lattice match
+   GNU R pixel for pixel.
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
@@ -975,9 +977,13 @@ Each step ends with something real running, and each one is a large, whole chang
    installed. All 23 recorded `.Call` routines that need no evaluation return what GNU R returns
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
    `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
-   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
-   R-level half of installation (the lazy-load database, `Meta/` and help indices) is R code that
-   `rcmd` does not run yet, although the interpreter now exists.
+   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. `rcmd`
+   also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
+   on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
+   packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
+   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
+   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
+   `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
@@ -1005,9 +1011,6 @@ JIT fits around them.
 
 ## 11. Open questions
 
-- **Graphics.** Five packages use the graphics engine, and only `ragg` implements a device. Implementing R's device API is large; the
-  alternative is to defer graphics to GNU R in a subprocess. Undecided, and not needed for the
-  benchmark's test suites.
 - **Windows runtime.** Designed, not built. The design:
   - The library is named `R.dll`. Windows reuses an already loaded module with the same base name,
     so a package DLL built with Rtools, which imports from `R.dll`, binds to ry's copy once ry has

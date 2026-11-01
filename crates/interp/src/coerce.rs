@@ -814,9 +814,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     .generic(Generic::Internal),
     builtin("is.atomic", 1, |call| unsafe {
         {
-            // GNU R 4.3, whose R code runs here, still counts NULL as atomic.
+            // NULL stopped counting as atomic in R 4.4, and R 4.3's own `var()` relies on
+            // the older answer.
             let kind = call.arg(0).kind();
-            scalar_bool(kind.is_atomic() || kind == SexpType::Nil)
+            scalar_bool(
+                kind.is_atomic() || (kind == SexpType::Nil && !crate::system::r_at_least(4, 4)),
+            )
         }
     }),
     builtin("is.recursive", 1, |call| unsafe {

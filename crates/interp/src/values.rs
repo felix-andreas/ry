@@ -574,10 +574,16 @@ pub unsafe fn env_length(env: Sexp) -> usize {
     crate::heap().bound_symbols(env).len()
 }
 
+/// Asks the class's `Length` method, without materializing the elements. `length` cannot
+/// fail, so an error from the method is parked like an element accessor's
+/// ([`crate::unwind::park`]) and the length reads as 0 until it is raised.
 unsafe fn altrep_length(object: Sexp) -> usize {
-    match materialize(object) {
-        Ok(vector) => vector.length() as usize,
-        Err(_) => 0,
+    match (interp().hooks.altrep_length)(object) {
+        Ok(count) => count,
+        Err(unwind) => {
+            crate::unwind::park(unwind);
+            0
+        }
     }
 }
 
@@ -599,9 +605,13 @@ macro_rules! typed_slice {
         #[inline]
         pub unsafe fn $name<'a>(object: Sexp) -> &'a [$type] {
             if object.is_altrep() {
+                // The accessor cannot fail, so a method's error is parked, as for elements.
                 match materialize(object) {
                     Ok(vector) => vector.slice::<$type>(),
-                    Err(_) => &[],
+                    Err(unwind) => {
+                        crate::unwind::park(unwind);
+                        &[]
+                    }
                 }
             } else {
                 object.slice::<$type>()
@@ -751,6 +761,15 @@ pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
         remove_attr(object, name);
         return Ok(());
     }
+    // An object cannot carry itself as an attribute: the cycle would make `serialize`, `identical`
+    // and printing recurse forever, so GNU R's `R_FixupRHS` attaches a copy instead.
+    let value = if value == object {
+        let copy = duplicate(value)?;
+        heap.root(copy);
+        copy
+    } else {
+        value
+    };
     let mut cell = object.attrib();
     let mut last = nil;
     while cell.kind() == SexpType::Pairlist {

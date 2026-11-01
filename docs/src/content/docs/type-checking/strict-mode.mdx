@@ -13,12 +13,11 @@ nothing from ry's runtime: it works on plain R with `#:` comments, run on GNU R.
 
 ```toml
 [check]
-typing = true
 strict = true
 ```
 
-Keep `typing = true` beside it: `strict = true` alone reports values with no type, but not type
-errors. A `# typing: strict` comment turns it on for a single file instead.
+Strict mode reports type errors too, so it needs no `typing = true` beside it. A `# typing: strict`
+comment turns it on for a single file instead.
 
 Strict mode also guards running code. `ry run` and `ry R` print the errors and exit with status 1 instead of
 running a script that has one, `ry load` does the same for a package whose `R/` files have one,

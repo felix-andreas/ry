@@ -1,0 +1,9 @@
+# progress: terminal progress bars.
+#
+# `progress_bar` is an R6 class generator, and an instance is typed as the
+# record of its public members. `tick()` and the other methods return the bar
+# invisibly for chaining, which a record type cannot say about itself, so
+# they return `Any`.
+@alias ProgressBar {list{finished: logical, tick: fn([len]: double, [tokens]: list[named: Any]) -> Any, update: fn(ratio: double, [tokens]: list[named: Any]) -> Any, message: fn(msg: character, [set_width]: logical) -> Any, terminate: fn() -> Any}}
+
+progress_bar : list{new: fn([format]: character, [total]: double, [width]: double, [stream]: Any, [complete]: character, [incomplete]: character, [current]: character, [callback]: fn(self: Any) -> Any, [clear]: logical, [show_after]: double, [force]: logical, [message_class]: character | NULL) -> ProgressBar}

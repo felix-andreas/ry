@@ -1,0 +1,23 @@
+# xts: extensible time series. An `xts` object is a matrix (or vector) of observations
+# indexed by time; its class vector is c("xts", "zoo"), but nominal types have no
+# subclassing, so functions that accept any zoo object list both classes.
+@type xts
+
+xts : fn([x]: Any, [order.by]: Any, [frequency]: Any, [unique]: logical, [tzone]: character, ...: Any) -> xts
+as.xts : fn(x: Any, ...: Any) -> xts
+is.xts : @pure fn(x: Any) -> logical
+try.xts : fn(x: Any, ...: Any, [error]: Any) -> Any
+reclass : fn(x: Any, [match.to]: Any, [error]: logical, ...: Any) -> Any
+
+# Subsetting by rows and columns keeps the class, whatever the indices are, because
+# `[.xts` defaults to `drop = FALSE`.
+[.xts : fn(x: xts, ...: Any) -> xts
+
+# `Ops.xts` aligns two series by time and keeps the class; a scalar or a plain vector
+# recycles. A comparison is an xts of logicals.
+Arith.xts : fn(e1: xts, e2: xts) -> xts
+Arith.xts : fn(e1: xts, e2: double[]) -> xts
+Arith.xts : fn(e1: double[], e2: xts) -> xts
+Compare.xts : fn(e1: xts, e2: xts) -> xts
+Compare.xts : fn(e1: xts, e2: double[]) -> xts
+Compare.xts : fn(e1: double[], e2: xts) -> xts

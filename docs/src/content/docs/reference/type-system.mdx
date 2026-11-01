@@ -1588,6 +1588,10 @@ name follows the same rule. `$` does not work on atomic vectors, because R rejec
 vector, named ones included: `c(foo = 1L)$foo` is a type error, while `c(foo = 1L)[["foo"]]` is
 `integer | NULL`.
 
+On a nominal whose class declares a `$` method, in a stub or in the project (`$.request` for
+`@type request`), `x$name` types as that method's result instead, because R dispatches the read to
+the method before it looks at the representation. The same holds for `[.class` and `[[.class`.
+
 Every element of `NULL` is `NULL` in R, so `NULL$name`, `NULL[["name"]]`, and `NULL[1]` are `NULL`.
 A list that may be absent is therefore read directly: on `list{retries: integer} | NULL`,
 `config$retries` is `integer | NULL`.
@@ -2085,7 +2089,11 @@ to such a name is resolved separately at each call site:
 - An argument whose type is not known statically fits every candidate, so the call does not guess
   among candidates whose results differ, and it is `Unknown`. So
   `function(w) sort(unique(unlist(w)))` is `<T> fn(w: T) -> Unknown` rather than taking `sort`'s
-  `factor` candidate.
+  `factor` candidate. A catch-all candidate, one whose results are all `Any`, is left out of that
+  comparison when a more specific candidate fits and every unknown argument lands on a parameter
+  that accepts any value there, because then the known arguments chose the candidate. So with `n`
+  unknown, `rep(0, n)` is `double[]`, since `n` is `rep`'s `times: Any`, while `rep(x, 2)` with `x`
+  unknown stays `Unknown`, since `x` is what `rep`'s vector candidate and its fallback differ on.
 - The [whole-number literal rule](#argument-compatibility) does not influence which candidate is
   selected. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the
   `double` candidate, matching what R computes. Only if no candidate accepts them is the set tried
@@ -2915,7 +2923,7 @@ that take a DataFrame directly would close the gap.
 variable keeps its name:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))   # DataFrame{team: character[], amount: double[]}
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])   # DataFrame{team: character[], amount: double[]}
 ```
 
 An unnamed computed argument, a repeated name, or `...` leaves the columns unknown, and so does a
@@ -3043,7 +3051,7 @@ sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 of `.SD`, each typed as `g` applied to that column alone. Under `by`, the group columns come first:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = ["a", "b"], units = [1L, 2L], price = [1.5, 2.5])
 sales[, lapply(.SD, sum), by = team]
 # DataFrame{team: character[], units: integer[], price: double[]}
 sales[, lapply(.SD, round, digits = 1), .SDcols = "price"]
@@ -3058,7 +3066,7 @@ type-mismatch
 
   x this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
    --[main.R:2:27]
- 1 | sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+ 1 | sales <- DataFrame(team = ["a", "b"], units = [1L, 2L], price = [1.5, 2.5])
  2 | print(sales[, lapply(.SD, function(v) v * 2)])
    |                           ^^^^^^^^^^^^^^^^^
 ```
@@ -3103,7 +3111,7 @@ columns ry cannot see, so the result has unknown columns.
 An alias taken earlier keeps the old type, and `y := NULL` removes the column:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])
 before <- sales
 sales[, tax := amount * 0.2]    # sales: DataFrame{team: character[], amount: double[], tax: double[]}
 before$tax                      # error: the frame `before` has no column `tax`. Its columns are `team`, `amount`
@@ -3144,7 +3152,7 @@ by reference, needs. When that name is a global frame, later reads in the same f
 the updated columns, while other top-level code keeps the frame's declared type:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])
 with_tax <- function() {
   sales[, tax := amount * 0.2]
   sales$tax                       # double[]
@@ -3202,8 +3210,8 @@ columns of `i` that no condition uses, renamed `i.name` when `x` has the same na
 repeats takes the first free numeric suffix, as R's `make.unique` gives it:
 
 ```r
-events <- DataFrame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
-windows <- DataFrame(id = 1:2, lo = c(0, 1), hi = c(2L, 5L))
+events <- DataFrame(id = 1:3, t = [1, 2, 3], v = ["a", "b", "c"])
+windows <- DataFrame(id = 1:2, lo = [0, 1], hi = [2L, 5L])
 events[windows, on = .(id, t >= lo)]           # DataFrame{id: integer[], t: double[], v: character[], hi: integer[]}
 events[windows, on = .(t >= lo, t < hi)]       # DataFrame{id: integer[], t: double[], v: character[], t.1: integer[], i.id: integer[]}
 ```
@@ -3221,7 +3229,7 @@ the order of their conditions and named as in the join's layout, followed by `j`
 the rows the row matched, and `.N` counts those rows:
 
 ```r
-counts <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+counts <- DataFrame(t = [1, 2, 3], v = [10L, 20L, 30L])
 counts[windows, on = .(t >= lo), .(n = .N, total = sum(v), wide = if (hi > 2L) "yes" else "no"), by = .EACHI]
 # DataFrame{t: double[], n: integer[], total: integer[], wide: character[]}
 ```
@@ -3487,7 +3495,11 @@ formulas, and the built-in operators have none. A call has none when its functio
 and its arguments have none; the arguments of `quote`, `expression`, `alist` and `substitute` are not
 evaluated, so they are not inspected. Inside `local()`, assignments and loops touch only the local
 environment and are allowed, but a call to a function bound inside that `local()` is an effect,
-because nothing declares it pure.
+because nothing declares it pure. A replacement inside `local()` of a name bound outside it, such as
+`local({ defaults$a <- 2; defaults })`, is allowed when the project binds that name once, at the top
+level, to a literal or to `c()` or `list()` of literals. R then replaces in a local copy, which leaves
+the outer value alone. Any other outer value might be an environment, which the replacement would
+change, so it is an effect.
 
 Anything else is an effect, which is a `strict` error reported on the expression that causes it.
 Only the first effect of a statement is reported. The effects are:
@@ -3513,7 +3525,9 @@ standard library's stubs mark base R's pure functions, such as `paste0`, `seq_le
 `c`, `list`, `switch`, `expression` and `alist` are pure without a stub.
 
 A project definition of a name shadows the stub's declaration, so a package's own `paste0` is pure
-only if it is marked. A function defined inside a condition, such as `if (cond) f <- function() 1`,
+only if it is marked. A bare call to a stub-declared function takes its purity from the declaration
+the name resolves to, the same one its type comes from: when two packages declare the same name, the
+later one wins, and its marker alone decides. `pkg::name` asks the named package's declaration. A function defined inside a condition, such as `if (cond) f <- function() 1`,
 is never pure, because which definition exists depends on the condition.
 
 Purity belongs to each definition alone. Adding `cat()` to the body of a function marked `@pure`
@@ -3524,7 +3538,10 @@ re-checks only that function, and removing the marker re-checks only the stateme
 `ry load` binds a library file's functions lazily, and under strict mode its constants too: a constant
 whose name has exactly one top-level writer becomes a promise that evaluates its initializer on first
 use. Every package name the initializer mentions must also be written exactly once, by a statement
-earlier in collation order, and otherwise the constant runs eagerly in order. Because the initializer
+earlier in collation order, and otherwise the constant runs eagerly in order. A `<<-` anywhere in a
+package function counts as a writer of its target that comes after every top-level statement,
+because the namespace locks once loading finishes and such a write can only land while `.onLoad`, or
+something it calls, runs. Because the initializer
 has no effect and what it reads cannot change after it, evaluating it later gives the value a load
 would have computed. A reload binds the constant again whenever anything its initializer reaches changed, such
 as the body of a pure function it calls.

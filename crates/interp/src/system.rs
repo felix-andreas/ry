@@ -22,56 +22,6 @@ use {
     },
 };
 
-/// The R version ry presents: that of the base package the session runs (`library/base` of the R
-/// home), so `R.version`, `getRversion()`, `packageVersion("base")` and the `Rversion.h` that
-/// `rcmd` generates from the same file agree, and a package compiled from source takes the same
-/// version branches in its C code as in its R code.
-pub struct RVersion {
-    pub major: String,
-    pub minor: String,
-    pub year: String,
-    pub month: String,
-    pub day: String,
-    pub revision: u32,
-}
-
-/// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
-/// guard for them also checks the revision, so ry reports at least this one.
-pub const MINIMUM_SVN_REVISION: u32 = 89194;
-
-/// The version of the session's base package; see [`RVersion`].
-pub fn r_version() -> &'static RVersion {
-    static VERSION: std::sync::OnceLock<RVersion> = std::sync::OnceLock::new();
-    VERSION.get_or_init(|| {
-        let path = Path::new(&r_home()).join("library/base/DESCRIPTION");
-        let description = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!("cannot read the base package's {}: {error}", path.display())
-        });
-        let field = |name: &str| {
-            description.lines().find_map(|line| {
-                let (key, value) = line.split_once(':')?;
-                (key == name).then(|| value.trim().to_owned())
-            })
-        };
-        let version =
-            field("Version").unwrap_or_else(|| panic!("{} has no Version field", path.display()));
-        let (major, minor) = version.split_once('.').unwrap_or((&version, ""));
-        let date = field("Last Changed Date").unwrap_or_default();
-        let mut date = date.splitn(3, '-').map(str::to_owned);
-        let revision = field("Revision")
-            .and_then(|revision| revision.parse().ok())
-            .unwrap_or(0);
-        RVersion {
-            major: major.to_owned(),
-            minor: minor.to_owned(),
-            year: date.next().unwrap_or_default(),
-            month: date.next().unwrap_or_default(),
-            day: date.next().unwrap_or_default(),
-            revision: revision.max(MINIMUM_SVN_REVISION),
-        }
-    })
-}
-
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
@@ -166,7 +116,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         map_paths(call, |path| Path::new(path).is_dir())
     }),
     internal("file.info", 2, do_file_info),
-    internal("list.files", 8, do_list_files),
+    internal("list.files", -1, do_list_files),
     internal("list.dirs", 3, do_list_dirs),
     internal("normalizePath", 3, do_normalize_path),
     internal("path.expand", 1, |call| unsafe {
@@ -220,7 +170,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
-    internal("Sys.umask", 1, |_| unsafe { scalar_integer(18) }),
+    internal("Sys.umask", 1, do_sys_umask),
     internal("Sys.getpid", 0, |_| unsafe {
         scalar_integer(std::process::id() as i32)
     }),
@@ -232,6 +182,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
+            if !(seconds >= 0.0) {
+                return Err(error("invalid 'time' value"));
+            }
             if seconds.is_finite() && seconds > 0.0 {
                 std::thread::sleep(
                     std::time::Duration::try_from_secs_f64(seconds)
@@ -253,7 +206,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", 3, do_system),
+    internal("system", -1, do_system),
     internal("Cstack_info", 0, |_| unsafe {
         values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
     }),
@@ -276,7 +229,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("as.POSIXlt", 2, do_as_posixlt),
     internal("as.POSIXct", 2, do_as_posixct),
-    internal("format.POSIXlt", 3, do_format_posixlt),
+    internal("format.POSIXlt", -1, do_format_posixlt),
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
@@ -763,11 +716,14 @@ impl Zone {
                 };
                 return instant - correction + fraction - shift;
             }
+            // In a spring-forward gap glibc's `mktime` reads the clock with the offset before
+            // the gap unless told the time is daylight time, so an unknown DST flag lands
+            // after the gap: New York's 02:30 becomes 03:30 EDT.
             AmbiguousOffset::Gap { before, after } => {
-                if isdst == 0 {
-                    before
-                } else {
+                if isdst == 1 {
                     after
+                } else {
+                    before
                 }
             }
             // glibc's `mktime` resolves a repeated time with the offset in force at the wall
@@ -1532,10 +1488,22 @@ unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
     values::set_attr(result, symbols().names, padded)
 }
 
+/// `format.POSIXlt(x, format, usetz)`, plus R 4.4's `digits`. A bare `%OS` prints that many
+/// decimals; before R 4.4 the C code read them from `options("digits.secs")` itself.
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let formats = call.arg(1);
     let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
+    let digits = if call.len() > 3 {
+        call.arg(3)
+    } else {
+        crate::envir::get_option("digits.secs")
+    };
+    let second_digits = if digits == nil() {
+        0
+    } else {
+        values::as_integer_scalar(digits).clamp(0, 6)
+    };
     let seconds = posixlt_seconds(list)?;
     let count = seconds.len();
     let result = alloc(SexpType::String, count)?;
@@ -1564,9 +1532,21 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             values::set_elt(result, index, values::mkchar(text)?);
             continue;
         }
-        let format = values::string_at(formats, index % length(formats).max(1))
+        let mut format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
+        if second_digits > 0 {
+            let pieces: Vec<&str> = format.split("%OS").collect();
+            let mut widened = pieces[0].to_owned();
+            for piece in &pieces[1..] {
+                widened.push_str("%OS");
+                if !piece.starts_with(|character: char| character.is_ascii_digit()) {
+                    widened.push_str(&second_digits.to_string());
+                }
+                widened.push_str(piece);
+            }
+            format = widened;
+        }
         // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
         let dst = if length(isdst) > 0 {
             crate::subset::numeric_element(isdst, index % length(isdst))
@@ -1624,10 +1604,33 @@ struct ParsedTime {
 }
 
 /// Parses `text` with a `strptime` format.
-fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<ParsedTime> {
+fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> R<Option<ParsedTime>> {
     let mut fields = Parsed::default();
     let mut input = text;
-    parse_with(&mut fields, &mut input, format)?;
+    let matched = parse_with(&mut fields, &mut input, format);
+    // Like GNU R, a `%Z` is an error only once parsing reaches it, and an out-of-range `%z`
+    // warns, so a text that fails earlier stays a quiet NA.
+    if fields.zone_requested {
+        return Err(error("use of %Z for input is not supported"));
+    }
+    if fields.offset_out_of_range {
+        warnings.push("values for %z outside +/-1400 are an error".to_owned());
+    }
+    Ok(matched.and_then(|()| resolve_fields(fields, warnings)))
+}
+
+fn resolve_fields(mut fields: Parsed, warnings: &mut Vec<String>) -> Option<ParsedTime> {
+    if let (Some((week, monday_first)), Some(weekday), None) =
+        (fields.week, fields.weekday, fields.yearday)
+        && (fields.month.is_none() || fields.day.is_none())
+        && let Some(year) = fields.year
+    {
+        // GNU R's formula from the weekday of 1 January, with the weekday not reduced modulo
+        // 7, so that `%u` 7 (Sunday) closes a Monday-first week.
+        let first = (days_from_civil(year, 1, 1) + 4).rem_euclid(7);
+        let shift = i64::from(monday_first);
+        fields.yearday = Some((7 - (first - shift)) % 7 + (week - 1) * 7 + weekday - shift + 1);
+    }
     // GNU R fills an unspecified year, month or day from today's date, except that a month
     // without a day is invalid, since today's day need not exist in that month.
     if fields.month.is_some() && fields.day.is_none() && fields.yearday.is_none() {
@@ -1641,10 +1644,11 @@ fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<Pa
             let (offset, _, _) = resolve_zone("").offset_at(now);
             civil_from_days((now as i64 + offset as i64).div_euclid(86400))
         };
-    let mut year = fields.year.unwrap_or(this_year);
-    if let Some(century) = fields.century {
-        year = century * 100 + year.rem_euclid(100);
-    }
+    let year = match (fields.century, fields.year) {
+        (Some(century), Some(year)) => century * 100 + year.rem_euclid(100),
+        (Some(century), None) => century * 100,
+        (None, year) => year.unwrap_or(this_year),
+    };
     let mut hour = fields.hour;
     if let (Some(afternoon), true) = (fields.afternoon, fields.twelve_hour) {
         hour = hour % 12 + if afternoon { 12 } else { 0 };
@@ -1684,7 +1688,11 @@ fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<Pa
             return None;
         }
     }
-    if hour > 24 || fields.minute > 59 || fields.second > 61.0 {
+    if hour > 24
+        || fields.minute > 59
+        || fields.second > 61.0
+        || hour == 24 && (fields.minute > 0 || fields.second > 0.0)
+    {
         return None;
     }
     let days = days_from_civil(year, month, 1) + day - 1;
@@ -1710,6 +1718,12 @@ struct Parsed {
     /// `%p` adjusts only an hour read with `%I` or `%l`.
     twelve_hour: bool,
     offset: Option<i64>,
+    /// Sunday is 0; `%u` reads Sunday as 7, which GNU R keeps as 0.
+    weekday: Option<i64>,
+    /// A `%U` or `%W` week number, and whether weeks start on Monday (`%W`).
+    week: Option<(i64, bool)>,
+    zone_requested: bool,
+    offset_out_of_range: bool,
 }
 
 /// Matches `input` against `format`, advancing `input` past what matched. Whitespace in the
@@ -1729,6 +1743,16 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
         let mut spec = characters.next()?;
         if spec == 'E' || spec == 'O' {
             let base = characters.next()?;
+            // GNU R's strptime fails on a modifier POSIX does not allow, such as `%Ob`, and
+            // lubridate relies on that to rank the formats it guesses.
+            let allowed = if spec == 'E' {
+                "cCyYxX"
+            } else {
+                "deHImMSUVWwy"
+            };
+            if !allowed.contains(base) {
+                return None;
+            }
             if spec == 'O' && base == 'S' {
                 // `%OS` reads seconds with an optional fraction; `%OSn` is for output only, so on
                 // input its digit is a literal the text must contain.
@@ -1756,7 +1780,7 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
         }
         match spec {
             'Y' => {
-                fields.year = Some(signed_number(input, 4)?);
+                fields.year = Some(number(input, 4)?);
                 fields.century = None;
             }
             'y' => {
@@ -1800,19 +1824,32 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
             'A' | 'a' => {
                 match_name(input, &WEEKDAYS)?;
             }
-            'u' | 'w' => {
-                number(input, 1)?;
+            'w' => fields.weekday = Some(Some(number(input, 1)?).filter(|day| *day <= 6)?),
+            'u' => {
+                fields.weekday =
+                    Some(Some(number(input, 1)?).filter(|day| (1..=7).contains(day))? % 7)
             }
-            'U'..='W' => {
+            'U' | 'W' => fields.week = Some((number(input, 2)?, spec == 'W')),
+            'V' => {
                 number(input, 2)?;
             }
-            'z' => fields.offset = Some(parse_offset(input)?),
-            'Z' => return None,
+            'z' => match parse_offset(input) {
+                Ok(offset) => fields.offset = Some(offset),
+                Err(out_of_range) => {
+                    fields.offset_out_of_range = out_of_range;
+                    return None;
+                }
+            },
+            'Z' => {
+                fields.zone_requested = true;
+                return None;
+            }
             'n' | 't' => *input = input.trim_start(),
             '%' => *input = input.trim_start().strip_prefix('%')?,
             'F' => parse_with(fields, input, "%Y-%m-%d")?,
             'T' | 'X' => parse_with(fields, input, "%H:%M:%S")?,
-            'D' | 'x' => parse_with(fields, input, "%m/%d/%y")?,
+            'D' => parse_with(fields, input, "%m/%d/%y")?,
+            'x' => parse_with(fields, input, "%y/%m/%d")?,
             'R' => parse_with(fields, input, "%H:%M")?,
             'r' => parse_with(fields, input, "%I:%M:%S %p")?,
             'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y")?,
@@ -1858,35 +1895,29 @@ fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
     trimmed[..digits].parse().ok()
 }
 
-fn signed_number(input: &mut &str, max_digits: usize) -> Option<i64> {
+/// A `%z` offset in seconds. The error is true when the offset is well formed but beyond
+/// +/-1400, which GNU R warns about.
+fn parse_offset(input: &mut &str) -> Result<i64, bool> {
     let trimmed = input.trim_start();
-    match trimmed.strip_prefix('-') {
-        Some(mut rest) => {
-            let value = number(&mut rest, max_digits)?;
-            *input = rest;
-            Some(-value)
-        }
-        None => number(input, max_digits),
-    }
-}
-
-fn parse_offset(input: &mut &str) -> Option<i64> {
-    let trimmed = input.trim_start();
-    let sign = match trimmed.chars().next()? {
-        '+' => 1,
-        '-' => -1,
-        _ => return None,
+    let sign = match trimmed.chars().next() {
+        Some('+') => 1,
+        Some('-') => -1,
+        _ => return Err(false),
     };
-    let digits = trimmed
+    let value = trimmed
         .get(1..5)
-        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))?;
-    let value = digits.parse::<i64>().ok()?;
+        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<i64>().ok())
+        .ok_or(false)?;
     let (hours, minutes) = (value / 100, value % 100);
-    if value > 1400 || minutes > 59 {
-        return None;
+    if minutes > 59 {
+        return Err(false);
+    }
+    if value > 1400 {
+        return Err(true);
     }
     *input = &trimmed[5..];
-    Some(sign * (hours * 3600 + minutes * 60))
+    Ok(sign * (hours * 3600 + minutes * 60))
 }
 
 unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
@@ -1903,22 +1934,16 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
         tz.clone()
     };
     let utc = name == "UTC" || name == "GMT";
-    for index in 0..length(formats) {
-        let format = values::string_at(formats, index).unwrap_or_default();
-        if format.replace("%%", "").contains("%Z") {
-            return Err(error("use of %Z for input is not supported"));
-        }
-    }
     let mut parsed = Vec::with_capacity(count);
     let mut warnings = Vec::new();
     for index in 0..count {
         let format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        parsed.push(
-            values::string_at(texts, index)
-                .and_then(|text| parse_time(&text, &format, &mut warnings)),
-        );
+        parsed.push(match values::string_at(texts, index) {
+            Some(text) => parse_time(&text, &format, &mut warnings)?,
+            None => None,
+        });
     }
     let seconds: Vec<f64> = parsed
         .iter()
@@ -1950,9 +1975,15 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
         }
         let (offset, _, _) = zone.offset_at(seconds[index]);
         if seconds[index] + offset as f64 != time.whole {
-            // A time in a spring-forward gap keeps its wall-clock fields and reports the zone
-            // in force after the gap, where the wall clock read with the earlier offset lands.
-            let (_, dst, abbreviation) = zone.offset_at(time.whole - offset as f64);
+            // A time in a spring-forward gap keeps its wall-clock fields. Through R 4.3 it
+            // reports the zone in force after the gap, where the wall clock read with the
+            // earlier offset lands; from R 4.4 on its DST flag is unknown and its zone empty.
+            let (dst, abbreviation) = if r_at_least(4, 4) {
+                (-1, String::new())
+            } else {
+                let (_, dst, abbreviation) = zone.offset_at(seconds[index]);
+                (dst as i32, abbreviation)
+            };
             let wall = broken_down(time.whole);
             values::ints_mut(fields[1])[index] = wall.minute as i32;
             values::ints_mut(fields[2])[index] = wall.hour as i32;
@@ -1961,7 +1992,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             values::ints_mut(fields[5])[index] = wall.year as i32 - 1900;
             values::ints_mut(fields[6])[index] = wall.weekday as i32;
             values::ints_mut(fields[7])[index] = wall.yearday as i32;
-            values::ints_mut(fields[8])[index] = dst as i32;
+            values::ints_mut(fields[8])[index] = dst;
             values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
         }
     }
@@ -2104,14 +2135,18 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
     let ignore_case = values::as_logical_scalar(call.arg(5)) == 1;
     let include_dirs = values::as_logical_scalar(call.arg(6)) == 1;
     let no_dots = values::as_logical_scalar(call.arg(7)) == 1;
+    // R 4.5 added `fixed`, which matches the pattern as a literal string.
+    let fixed = values::as_logical_scalar(call.arg(8)) == 1;
     let regex = match &pattern {
         Some(pattern) => Some(
-            regex::RegexBuilder::new(&crate::strings::translate_regex(pattern, true))
-                .case_insensitive(ignore_case)
-                .build()
-                .map_err(|failure| {
-                    error(format!("invalid 'pattern' regular expression: {failure}"))
-                })?,
+            regex::RegexBuilder::new(&if fixed {
+                regex::escape(pattern)
+            } else {
+                crate::strings::translate_regex(pattern, true)
+            })
+            .case_insensitive(ignore_case)
+            .build()
+            .map_err(|failure| error(format!("invalid 'pattern' regular expression: {failure}")))?,
         ),
         None => None,
     };
@@ -2391,10 +2426,17 @@ unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
-    let utf8 = scalar_bool(true)?;
-    let latin1 = scalar_bool(false)?;
-    let mbcs = scalar_bool(true)?;
-    let codeset = scalar_string("UTF-8")?;
+    let name = native_codeset();
+    let upper = name.to_ascii_uppercase();
+    let is_utf8 = matches!(upper.as_str(), "UTF-8" | "UTF8");
+    let utf8 = scalar_bool(is_utf8)?;
+    let latin1 = scalar_bool(matches!(
+        upper.as_str(),
+        "ISO-8859-1" | "ISO8859-1" | "LATIN1"
+    ))?;
+    // UTF-8 is the only multibyte codeset ry supports as a native encoding.
+    let mbcs = scalar_bool(is_utf8)?;
+    let codeset = scalar_string(&name)?;
     values::named_list(&[
         ("MBCS", mbcs),
         ("UTF-8", utf8),
@@ -2419,31 +2461,155 @@ unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
     let arch = std::env::consts::ARCH;
     let platform = format!("{arch}-{vendor}-{os}");
     let version = r_version();
-    let date = format!("{}-{}-{}", version.year, version.month, version.day);
+    let (year, month, day) = (
+        version.date.get(0..4).unwrap_or(""),
+        version.date.get(5..7).unwrap_or(""),
+        version.date.get(8..10).unwrap_or(""),
+    );
     let fields: Vec<(&str, String)> = vec![
         ("platform", platform.clone()),
         ("arch", arch.to_owned()),
         ("os", os.to_owned()),
         ("system", format!("{arch}, {os}")),
         ("status", String::new()),
-        ("major", version.major.clone()),
-        ("minor", version.minor.clone()),
-        ("year", version.year.clone()),
-        ("month", version.month.clone()),
-        ("day", version.day.clone()),
+        ("major", version.major.to_string()),
+        ("minor", format!("{}.{}", version.minor, version.patch)),
+        ("year", year.to_owned()),
+        ("month", month.to_owned()),
+        ("day", day.to_owned()),
         ("svn rev", version.revision.to_string()),
         ("language", "R".to_owned()),
         (
             "version.string",
-            format!("R version {}.{} ({date})", version.major, version.minor),
+            format!(
+                "R version {}.{}.{} ({})",
+                version.major, version.minor, version.patch, version.date
+            ),
         ),
-        ("nickname", "ry".to_owned()),
+        ("nickname", version.nickname.clone()),
     ];
     let items: Vec<(&str, Sexp)> = fields
         .iter()
         .map(|(name, value)| Ok((*name, scalar_string(value)?)))
         .collect::<R<_>>()?;
     values::named_list(&items)
+}
+
+/// The version of the GNU R whose base packages the session loads, which is the version the
+/// session presents (`R.version`, `getRversion()`, the `Built:` field it writes). Presenting
+/// that version, rather than a fixed one, is what keeps base R's own version checks honest:
+/// `library()` warns about a package built under a newer R by comparing its `Built:` field
+/// with `R.version`, and the default packages were built by exactly the R in `R_HOME`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    /// The release date, `YYYY-MM-DD`.
+    pub date: String,
+    /// The Subversion revision, at least [`MINIMUM_SVN_REVISION`].
+    pub revision: u32,
+    pub nickname: String,
+}
+
+impl RVersion {
+    /// GNU R's `R_Version(major, minor, patch)`, as `R_VERSION` and the serialization header
+    /// encode a version.
+    pub fn code(&self) -> i32 {
+        ((self.major << 16) + (self.minor << 8) + self.patch) as i32
+    }
+
+    pub fn number(&self) -> String {
+        format!("{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// Whether the emulated R is `major.minor` or later. Behavior that GNU R changed between
+/// supported releases follows the release in `R_HOME`, so the base packages' R code and the
+/// internals it calls always agree.
+pub fn r_at_least(major: u32, minor: u32) -> bool {
+    let version = r_version();
+    (version.major, version.minor) >= (major, minor)
+}
+
+/// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
+/// guard for them also checks the revision, so ry reports at least this one
+/// (`rcmd::MINIMUM_SVN_REVISION` writes the same floor into `Rversion.h`).
+pub const MINIMUM_SVN_REVISION: u32 = 89194;
+
+/// The oldest GNU R whose base packages ry's runtime loads. Older releases call internals
+/// with argument lists ry does not implement.
+pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
+
+/// The version of the R in [`r_home`], read once.
+pub fn r_version() -> &'static RVersion {
+    static VERSION: std::sync::OnceLock<RVersion> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| read_r_version(&r_home()))
+}
+
+/// Reads the version from the installation itself: the base package's `DESCRIPTION` holds
+/// the version that `library()`'s checks compare against, and `SVN-REVISION` in the GNU R home
+/// that base really lives in holds the revision and release date. ry's own R home links
+/// `library/base` from a GNU R home, so the link is resolved first. The session cannot start
+/// without a base package ([`missing_r_home`]), so a missing one is a broken installation.
+pub fn read_r_version(home: &str) -> RVersion {
+    let base = Path::new(home).join("library/base");
+    let path = base.join("DESCRIPTION");
+    let description = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("cannot read the base package's {}: {error}", path.display())
+    });
+    let field = |text: &str, name: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_owned())
+        })
+    };
+    let version = field(&description, "Version")
+        .unwrap_or_else(|| panic!("{} has no Version field", path.display()));
+    let mut parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let (major, minor, patch) = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    let gnu_home = std::fs::canonicalize(&base)
+        .ok()
+        .and_then(|base| Some(base.parent()?.parent()?.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from(home));
+    let svn = std::fs::read_to_string(gnu_home.join("SVN-REVISION")).unwrap_or_default();
+    let built_date = field(&description, "Built")
+        .and_then(|built| built.split(';').nth(2).map(|date| date.trim().to_owned()))
+        .and_then(|date| date.get(0..10).map(str::to_owned));
+    let date = field(&svn, "Last Changed Date")
+        .or(built_date)
+        .unwrap_or_default();
+    let revision = field(&svn, "Revision")
+        .and_then(|revision| revision.parse().ok())
+        .unwrap_or(0);
+    // Debian keeps the headers outside R_HOME and names them in the `R_INCLUDE_DIR` that
+    // `bin/R` exports.
+    let shared_include = std::env::var_os("R_INCLUDE_DIR").map(PathBuf::from);
+    let nickname = [gnu_home.join("include"), Path::new(home).join("include")]
+        .into_iter()
+        .chain(shared_include)
+        .find_map(|include| {
+            let header = std::fs::read_to_string(include.join("Rversion.h")).ok()?;
+            header.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix("#define R_NICK")?;
+                Some(rest.trim().trim_matches('"').to_owned())
+            })
+        })
+        .unwrap_or_default();
+    RVersion {
+        major,
+        minor,
+        patch,
+        date,
+        revision: revision.max(MINIMUM_SVN_REVISION),
+        nickname,
+    }
 }
 
 unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
@@ -2659,11 +2825,11 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     if !from_list && input.kind() != SexpType::String {
         return Err(call.error("'x' must be a character vector"));
     }
-    // The native encoding is always UTF-8 here, while the C library would read "" as the
-    // process locale's, which is ASCII until something calls setlocale.
+    // As in GNU R, "" names the codeset of the current LC_CTYPE, so text that a C locale
+    // cannot represent converts to NA; packages such as utf8 probe the locale this way.
     let system_name = |name: &str| -> String {
         match name {
-            "" => "UTF-8".to_string(),
+            "" => native_codeset(),
             other => other.to_string(),
         }
     };
@@ -3067,7 +3233,12 @@ unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
                 libc::globfree(&mut buffer);
                 return Err(error("internal out-of-memory condition"));
             }
-            libc::GLOB_ABORTED => crate::conditions::warning("read error on directory")?,
+            libc::GLOB_ABORTED => {
+                if let Err(condition) = crate::conditions::warning("read error on directory") {
+                    libc::globfree(&mut buffer);
+                    return Err(condition);
+                }
+            }
             _ => {}
         }
     }
@@ -3109,7 +3280,7 @@ unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
         }
         honoured
     } else {
-        if category == libc::LC_NUMERIC {
+        if category == libc::LC_NUMERIC && name != "C" {
             crate::conditions::warning("setting 'LC_NUMERIC' may cause R to function strangely")?;
         }
         !libc::setlocale(category, text.as_ptr()).is_null()
@@ -3176,6 +3347,17 @@ fn locale_category(number: i32) -> Option<libc::c_int> {
     })
 }
 
+/// The codeset of the current LC_CTYPE, as `l10n_info()` reports it.
+unsafe fn native_codeset() -> String {
+    let codeset = libc::nl_langinfo(libc::CODESET);
+    if codeset.is_null() {
+        return "UTF-8".to_owned();
+    }
+    std::ffi::CStr::from_ptr(codeset)
+        .to_string_lossy()
+        .into_owned()
+}
+
 unsafe fn current_locale(category: libc::c_int) -> String {
     let current = libc::setlocale(category, std::ptr::null());
     if current.is_null() {
@@ -3200,6 +3382,21 @@ unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// `Sys.umask(NA)` reports the mask visibly; setting a new one returns the old one invisibly.
+unsafe fn do_sys_umask(call: &Call<'_>) -> R<Sexp> {
+    let mode = values::as_integer_scalar(call.arg(0));
+    let old = if mode == NA_INTEGER {
+        current_umask()
+    } else {
+        interp().visible = false;
+        libc::umask(mode as libc::mode_t) as u32
+    };
+    let result = scalar_integer(old as i32)?;
+    let octmode = scalar_string("octmode")?;
+    values::set_attr(result, symbols().class, octmode)?;
+    Ok(result)
+}
+
 unsafe fn do_sys_chmod(call: &Call<'_>) -> R<Sexp> {
     let (paths, modes) = (
         call.arg(0),
@@ -3215,7 +3412,11 @@ unsafe fn do_sys_chmod(call: &Call<'_>) -> R<Sexp> {
                 .copied()
                 .unwrap_or(0o777) as u32,
         };
-        let mode = if use_umask { mode & !UMASK } else { mode };
+        let mode = if use_umask {
+            mode & !current_umask()
+        } else {
+            mode
+        };
         let changed = values::string_at(paths, index).is_some_and(|path| {
             std::fs::set_permissions(
                 crate::connections::expand_path(&path),
@@ -3264,16 +3465,32 @@ fn set_modified_time(path: &str, seconds: f64) -> std::io::Result<()> {
         std::time::UNIX_EPOCH.checked_sub(offset)
     }
     .ok_or_else(out_of_range)?;
-    let file = if Path::new(path).is_dir() {
-        std::fs::File::open(path)?
-    } else {
-        std::fs::File::options().write(true).open(path)?
+    let since_epoch = time.duration_since(std::time::UNIX_EPOCH);
+    let (whole, nanoseconds) = match since_epoch {
+        Ok(after) => (after.as_secs() as i64, after.subsec_nanos() as i64),
+        Err(before) => {
+            let before = before.duration();
+            let nanoseconds = before.subsec_nanos() as i64;
+            if nanoseconds == 0 {
+                (-(before.as_secs() as i64), 0)
+            } else {
+                (-(before.as_secs() as i64) - 1, 1_000_000_000 - nanoseconds)
+            }
+        }
     };
-    file.set_times(
-        std::fs::FileTimes::new()
-            .set_modified(time)
-            .set_accessed(time),
-    )
+    let stamp = libc::timespec {
+        tv_sec: whole as libc::time_t,
+        tv_nsec: nanoseconds as _,
+    };
+    let path = std::ffi::CString::new(path)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path holds a NUL"))?;
+    // utimensat, as in GNU R, needs only ownership, so a read-only file the user owns still
+    // takes the new time, and nothing is opened, which would block on a FIFO.
+    // SAFETY: both pointers point at live values for the duration of the call.
+    match unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), [stamp, stamp].as_ptr(), 0) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
 }
 
 unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
@@ -3290,4 +3507,12 @@ unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-const UMASK: u32 = 0o022;
+/// The process umask. The C library can only read it by setting it, so this sets it back at once.
+fn current_umask() -> u32 {
+    // SAFETY: umask only swaps the process's file creation mask and cannot fail.
+    unsafe {
+        let mask = libc::umask(0);
+        libc::umask(mask);
+        mask as u32
+    }
+}

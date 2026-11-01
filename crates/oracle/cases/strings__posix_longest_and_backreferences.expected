@@ -1,0 +1,47 @@
+[stdout]
+| [1] 2
+| attr(,"match.length")
+| [1] 2
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "abcd"
+| [1] "<0><0> c<0>"
+| [1] "[a|bcd]"
+| [1] 1 2 4
+| attr(,"match.length")
+| [1] 0 2 0
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "-a-c-"
+| [[1]]
+| [1] "a" "b" "c"
+| 
+| [1] 2
+| attr(,"match.length")
+| [1] 1
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] TRUE
+| [1] 1
+| attr(,"match.length")
+| [1] 112
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| [1] "f0 b0"
+| [1] "Xb"
+| [1] "Xc"
+| [1]  TRUE FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| c(TRUE, FALSE)

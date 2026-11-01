@@ -1,0 +1,10 @@
+# httr: the legacy HTTP client.
+
+# `parse_url()` returns a list of class "url" whose fields (`scheme`, `hostname`, `path`, ...) are
+# rebuilt into a string by `build_url()`.
+@type url
+@type response
+
+parse_url : @pure fn(url: character) -> url
+build_url : @pure fn(url: url) -> character
+GET : fn([url]: character | NULL, [config]: Any, ...: Any, [handle]: Any) -> response

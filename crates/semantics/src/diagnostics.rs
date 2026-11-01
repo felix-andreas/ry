@@ -590,10 +590,10 @@ fn classify_non_local_read(
     expression: &ExprId,
     symbol: Symbol,
 ) -> NonLocalRead {
+    let name = symbol.as_str();
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    let name = symbol.as_str();
     if let Some(&earliest) = frame_slot_positions(db, file).get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
