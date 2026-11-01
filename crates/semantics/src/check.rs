@@ -1267,6 +1267,12 @@ fn is_type_probe(name: &str) -> bool {
 /// which rlang, purrr and the packages that vendor rlang's standalone files define themselves.
 /// They test a type like `is.character` does, whether the project defines them or imports them.
 fn is_tidy_type_predicate(name: &str) -> bool {
+    if matches!(
+        name,
+        "is_condition" | "is_error" | "is_warning" | "is_message"
+    ) {
+        return true;
+    }
     let Some(rest) = name.strip_prefix("is_") else {
         return false;
     };
@@ -1297,7 +1303,18 @@ fn is_tidy_type_predicate(name: &str) -> bool {
             | "environment"
             | "symbol"
             | "call"
+            | "lang"
             | "expression"
+            | "pairlist"
+            | "node"
+            | "node_list"
+            | "lambda"
+            | "callable"
+            | "symbolic"
+            | "syntactic_literal"
+            | "quosures"
+            | "namespace"
+            | "weakref"
     )
 }
 
@@ -4090,7 +4107,7 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// The names whose runtime type the body inspects (`typeof(x)`, `class(x)`,
-    /// `is.character(x)`, `inherits(x, ...)`). Such a value is dynamically typed by
+    /// `is.character(x)`, `inherits(x, ...)`, rlang's `is_string(x)`). Such a value is dynamically typed by
     /// design: each branch uses it as a different type, so no one type describes it.
     /// `is.null` and `is.na` test a value, not its type, and keep their narrowing.
     fn collect_type_probed(&self, id: ExprId, probed: &mut FxHashSet<Symbol>) {

@@ -2222,7 +2222,8 @@ The details:
   The inspections are `typeof()`, `class()`, `mode()`, `storage.mode()`, `inherits()`,
   `is.object()`, `oldClass()`, the `is.*` family tests, such as `is.character()`, and rlang's
   type predicates, such as `is_string()`, `is_function()`, `is_formula()`, `is_bare_list()` and
-  `is_scalar_integer()`, which count whether rlang exports them or the project vendors them. So
+  `is_scalar_integer()`. These count by name, whatever the name refers to, since packages vendor
+  rlang's standalone files and define the predicates themselves. So
   `function(x) if (is.character(x)) x else "other"` is `fn(x: Unknown) -> Unknown`. `is.null()`,
   `is.na()`, and `is.finite()` test a value rather than its type, so they keep the parameter typed,
   and an annotated parameter still narrows.
