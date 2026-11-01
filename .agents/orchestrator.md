@@ -87,6 +87,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Robustness (session_0111kWqEc21A1crSxX4mXKyF, Opus): a `contributing/robustness.md` contract, deterministic simulation seams, an LSP simulator, differential fuzzing (tier-0 vs JIT vs GNU R), a GC torture mode, cargo-fuzz targets, a scenario test format, the AGENTS.md testing rule, and docs as tests (every documented `ry` output executed by the suite).
 - Docs top-down rewrite (session_0111kWqERA9qW4qw3fByw7PK, Opus): the introduction, guides/ and type-checking/ restructured so each page opens with motivation and the most common task (the console reload loop first in the package-loading and console guides), with critic subagent rounds. Excludes index.astro and reference/.
 - Strict mode round 2 (session_0111kWqBB9Ca4CRxyz8Xzcxm, Opus): a strict library file's top level holds only definitions, purity declared on functions (never inferred), lazy pure constants in `ry load`, `object-systems = false` enforced at run time. Self-merges.
+- Try ry and beta release (session_0111kWqBeVFPbHpyqC8bDyWu, Opus): `just try` end-to-end demo, working nix builds on the pinned nightly, beta release readiness (`just release-dry-run`, checklist, and the list of workflow diffs and secrets only the user can provide). Self-merges.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
