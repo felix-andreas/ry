@@ -133,6 +133,7 @@ fn render_at(
                     namespace,
                     overloads,
                     declaration,
+                    documentation,
                 }) => {
                     let declared = declaration
                         .map(|target| {
@@ -145,7 +146,10 @@ fn render_at(
                         .unwrap_or_default();
                     output.push_str(&format!(
                         "hover-definition: package {namespace} ({overloads} declaration(s){declared})\n"
-                    ))
+                    ));
+                    for line in documentation.iter().flat_map(|text| text.lines()) {
+                        output.push_str(&format!("hover-documentation: {line}\n"));
+                    }
                 }
                 None => {}
             }

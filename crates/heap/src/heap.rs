@@ -656,6 +656,20 @@ impl Heap {
     /// Each value is stored raw or as a handle as [`slot_for`] decides, and stays rooted across
     /// the allocation.
     pub unsafe fn alloc_record(&mut self, layout: u32, values: &[Sexp]) -> HeapResult<Sexp> {
+        let object = self.alloc_counted_record(layout, values)?;
+        // Immutable: a modification always builds a new value.
+        object.mark_not_mutable();
+        Ok(object)
+    }
+
+    /// A record whose reference count tracks its holders, so a holder that owns its only
+    /// reference may update it in place through [`Heap::set_record_slot`]. Dictionaries and sets
+    /// use it.
+    pub unsafe fn alloc_counted_record(
+        &mut self,
+        layout: u32,
+        values: &[Sexp],
+    ) -> HeapResult<Sexp> {
         let size = object_size(SexpType::Record, values.len()).ok_or(HeapError::TooLong)?;
         if values.len() > u32::MAX as usize {
             return Err(HeapError::TooLong);
@@ -672,9 +686,22 @@ impl Heap {
             }
         }
         object.init_record(layout, &slots);
-        // Immutable: a modification always builds a new value.
-        object.mark_not_mutable();
         Ok(object)
+    }
+
+    /// Replaces slot `index` of `record`, storing `value` raw or as a handle as [`slot_for`]
+    /// decides.
+    pub unsafe fn set_record_slot(&mut self, record: Sexp, index: usize, value: Sexp) {
+        let slot = slot_for(value, index);
+        let old = record.record_handle(index);
+        if let Slot::Handle(handle) = slot {
+            handle.increment_refcount();
+            self.write_barrier(record, handle);
+        }
+        if let Some(old) = old {
+            old.decrement_refcount();
+        }
+        record.set_record_slot_unbarriered(index, slot);
     }
 
     /// The interned `CHARSXP` for `bytes` in `encoding`, which `Rf_mkCharLenCE` returns. ASCII

@@ -436,7 +436,8 @@ impl Slot {
 }
 
 /// How `value` is stored in slot `index`: raw when it is a length-one double, integer or logical
-/// without attributes, and a handle otherwise.
+/// without attributes, and a handle otherwise. A resizable vector stays a handle, because it is
+/// kept to grow in place.
 pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
     unsafe {
         if index >= UNBOXED_SLOTS
@@ -447,6 +448,7 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
                 SexpType::Real | SexpType::Integer | SexpType::Logical
             )
             || value.length() != 1
+            || value.flags() & flag_bits::RESIZABLE != 0
         {
             return Slot::Handle(value);
         }
@@ -846,7 +848,7 @@ impl Sexp {
     }
 
     /// The handle in slot `index`, if the slot holds one.
-    pub(crate) unsafe fn record_handle(self, index: usize) -> Option<Sexp> {
+    pub unsafe fn record_handle(self, index: usize) -> Option<Sexp> {
         match unsafe { self.record_slot(index) } {
             Slot::Handle(handle) => Some(handle),
             _ => None,
@@ -855,6 +857,22 @@ impl Sexp {
 
     unsafe fn record_slots(self) -> *mut u8 {
         unsafe { (self.0.as_ptr() as *mut u8).add(RECORD_DATA_OFFSET) }
+    }
+
+    pub(crate) unsafe fn set_record_slot_unbarriered(self, index: usize, slot: Slot) {
+        unsafe {
+            let payload = self.payload::<RecordObject>();
+            if index < UNBOXED_SLOTS {
+                let bit = 1u64 << index;
+                let unboxed = payload.unboxed.get();
+                payload.unboxed.set(if matches!(slot, Slot::Handle(_)) {
+                    unboxed & !bit
+                } else {
+                    unboxed | bit
+                });
+            }
+            *(self.record_slots() as *mut u64).add(index) = slot.encode();
+        }
     }
 
     /// Fills a fresh record's header fields and slots. Nothing may read the record before.

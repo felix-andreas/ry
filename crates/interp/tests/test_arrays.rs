@@ -109,7 +109,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.join([[1], [2, 3]])", "[1, 2, 3]\n"),
     // R's own positions where they give no NA.
     ("xs[-1]", "[2, 3]\n"),
-    ("xs[0]", "[]\n"),
+    ("xs[0]", "as.Array(numeric(0))\n"),
     ("xs[c(0, 2)]", "[2]\n"),
     ("xs[-5]", "[1, 2, 3]\n"),
     // A value an Array cannot hold makes the result the plain R vector, so R code keeps working.
@@ -127,10 +127,7 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     ("is.Array(List.single([1, 2]))", "[1] FALSE\n"),
     // Empty Arrays deparse to text that rebuilds them with their item type.
-    (
-        "deparse(as.Array(character(0)))",
-        "[1] \"as.Array(character(0))\"\n",
-    ),
+    ("deparse(words[0])", "[1] \"as.Array(character(0))\"\n"),
     ("deparse(xs[0])", "[1] \"as.Array(numeric(0))\"\n"),
 ];
 

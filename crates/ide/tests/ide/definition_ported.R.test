@@ -171,7 +171,7 @@ action: Add inferred type annotations for the whole file
   edit 76..76 -> "    #: character\n"
   edit 52..52 -> "  #: fn() -> double\n"
   edit 0..0 -> "#: fn() -> double\n"
-completion (28): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @5: fn() -> double
 hint @30: fn(y: T) -> double
 hint @59: fn() -> double
@@ -197,7 +197,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T, by: T) -> T\n"
   edit 64..64 -> "  #: double\n"
   edit 35..35 -> "#: fn(x: double) -> double\n"
-completion (36): scale_by, scale, scale.default, cmdscale, apply_scale, sequence.default, setGraphicsEventHandlers, srcfilealias
+completion (38): scale_by, scale, scale.default, cmdscale, apply_scale, sequence.default, setGraphicsEventHandlers, srcfilealias
 hint @8: <T: numeric> fn(x: T, by: T) -> T
 hint @46: fn(x: double) -> double
 hint @74: double

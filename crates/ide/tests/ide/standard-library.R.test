@@ -3,19 +3,18 @@
 doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
 #++++
 hover 11..19: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
-hover-definition: package ry (2 declaration(s), declared in stub source 11 at `List.map`)
+hover-definition: package ry (1 declaration(s), declared in stub source 11 at `List.map`)
+hover-documentation: Applies `f` to each element.
 definition: stub source 11 at `List.map`
 references: none
 rename: none
-signature: <T, U> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
-parameters: [list: Array<T>] | f: fn(T) -> U
-signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
+signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
 parameters: [list: list[integer]] | f: fn(integer) -> integer
 action: Add inferred type annotation for `doubled`
   edit 0..0 -> "#: list[integer]\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: list[integer]\n"
-completion (10): List.map, List.map2, List.map_try, List.map_with_index, List.max, List.min, List.from_vector, List.is_empty
+completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @7: list[integer]
 
 #---- completion_after_a_module_prefix
@@ -38,6 +37,7 @@ hover 43..51:   dict: Dict<character, double>,
 hover 43..51:   key: character,
 hover 43..51: ) -> :Ok(double) | :Err(:KeyNotFound)
 hover-definition: package ry (1 declaration(s), declared in stub source 11 at `Dict.get`)
+hover-documentation: The value stored under `key`, or `:Err(:KeyNotFound)`.
 definition: stub source 11 at `Dict.get`
 references: none
 rename: none

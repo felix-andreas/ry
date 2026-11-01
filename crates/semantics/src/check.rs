@@ -33,6 +33,7 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         mem,
+        ops::Range,
         sync::atomic::{AtomicUsize, Ordering},
     },
     syntax::{TextRange, TextSize, native_values::accepts_native},
@@ -6211,6 +6212,8 @@ impl<'db> Checker<'db, '_> {
         callee: ExprId,
         arguments: &[Argument],
     ) -> Ty<'db> {
+        // The variables typing a named callee creates are its scheme's instantiated parameters.
+        let first_var = self.table.next_var().0;
         let looked_up = match self.function_lookup(callee) {
             FunctionLookup::Ordinary => None,
             FunctionLookup::Found(ty) => Some(ty),
@@ -6249,6 +6252,15 @@ impl<'db> Checker<'db, '_> {
             Some(ty) => ty,
             None => self.infer(callee),
         };
+        let named_callee = matches!(
+            self.module.expression(callee).kind,
+            ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
+        );
+        let callback_outputs = if named_callee {
+            self.callback_outputs(callee_ty, first_var..self.table.next_var().0)
+        } else {
+            Vec::new()
+        };
         if self.is_null_placeholder(self.table.resolve(self.db, callee_ty)) {
             self.infer_call_arguments(range, arguments);
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -6269,7 +6281,126 @@ impl<'db> Checker<'db, '_> {
         }
         let mut call_arguments = self.infer_call_arguments(range, arguments);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
-        self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
+        let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
+        if callback_outputs.is_empty() {
+            return result;
+        }
+        self.drop_unconstrained_members(result, &callback_outputs, first_var)
+    }
+
+    /// The callee's freshly instantiated type parameters (`instantiated`) that its parameter
+    /// types mention only as what a callback returns, such as `F` in `Result.and_then`'s
+    /// `f: fn(A) -> Result<B, F>`. Only those can stand for no value after the call: a
+    /// parameter an argument fills directly, or one that appears only in the result, means
+    /// "any value" when it stays open.
+    fn callback_outputs(&self, callee_ty: Ty<'db>, instantiated: Range<u32>) -> Vec<InferenceVar> {
+        let db = self.db;
+        if instantiated.is_empty() {
+            return Vec::new();
+        }
+        let TyKind::Function(function) = self.table.shallow_resolve(db, callee_ty).kind(db) else {
+            return Vec::new();
+        };
+        let mut direct = FxHashSet::default();
+        let mut outputs = FxHashSet::default();
+        let parameter_types = function
+            .positional
+            .iter()
+            .copied()
+            .chain(function.named.iter().map(|parameter| parameter.ty))
+            .chain(function.variadic.iter().map(|rest| rest.element));
+        for ty in parameter_types {
+            match ty.kind(db) {
+                TyKind::Function(callback) => {
+                    collect_vars(db, callback.ret, &mut outputs);
+                    let inputs = callback
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(callback.named.iter().map(|parameter| parameter.ty))
+                        .chain(callback.variadic.iter().map(|rest| rest.element));
+                    for input in inputs {
+                        collect_vars(db, input, &mut direct);
+                    }
+                }
+                _ => collect_vars(db, ty, &mut direct),
+            }
+        }
+        outputs
+            .into_iter()
+            .filter(|var| instantiated.contains(&var.0) && !direct.contains(var))
+            .collect()
+    }
+
+    /// A callback output that no argument constrained stands for no value, so as a member of a
+    /// union in the result it adds nothing: `Result.and_then`'s `Result<B, E | F>` is `:Err(E)`
+    /// when the step never fails. A union of nothing but such parameters stays as it is, and a
+    /// parameter that a variable from before the call reaches (an unannotated outer parameter
+    /// passed as the callback) stays too, because its value is decided by that outer code.
+    fn drop_unconstrained_members(
+        &mut self,
+        result: Ty<'db>,
+        callback_outputs: &[InferenceVar],
+        first_var: u32,
+    ) -> Ty<'db> {
+        let db = self.db;
+        let mut open: FxHashSet<InferenceVar> = callback_outputs
+            .iter()
+            .map(|&var| self.table.find(var))
+            .filter(|&root| matches!(self.table.entry(root), Entry::Unbound { .. }))
+            .collect();
+        if open.is_empty() {
+            return result;
+        }
+        let resolved = self.table.resolve(db, result);
+        let mut in_result = FxHashSet::default();
+        collect_vars(db, resolved, &mut in_result);
+        open.retain(|var| in_result.contains(var));
+        if open.is_empty() {
+            return resolved;
+        }
+        for outer in 0..first_var {
+            let outer = InferenceVar(outer);
+            let mut reached = FxHashSet::default();
+            match self.table.entry(outer) {
+                Entry::Unbound { .. } => {
+                    reached.insert(self.table.find(outer));
+                }
+                Entry::Bound { ty, .. } => {
+                    let ty = self.table.resolve(db, *ty);
+                    collect_vars(db, ty, &mut reached);
+                }
+                Entry::Redirect(_) => {}
+            }
+            open.retain(|var| !reached.contains(var));
+            if open.is_empty() {
+                return resolved;
+            }
+        }
+        let unconstrained = |member: Ty<'db>| match member.kind(db) {
+            TyKind::Var(var) => open.contains(var),
+            _ => false,
+        };
+        fn walk<'db>(
+            db: &'db dyn Db,
+            ty: Ty<'db>,
+            unconstrained: &dyn Fn(Ty<'db>) -> bool,
+        ) -> Ty<'db> {
+            let ty = map_child_types(db, ty, &mut |child| walk(db, child, unconstrained));
+            match ty.kind(db) {
+                TyKind::Union(members) if members.iter().any(|&member| !unconstrained(member)) => {
+                    union_of(
+                        db,
+                        members
+                            .iter()
+                            .copied()
+                            .filter(|&member| !unconstrained(member)),
+                    )
+                }
+                _ => ty,
+            }
+        }
+        walk(db, resolved, &unconstrained)
     }
 
     /// R looks a called name up as a function: a binding that holds no function is skipped,
@@ -12927,4 +13058,12 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
     }
+}
+
+/// The inference variables `ty` mentions, as the table resolved them when `ty` was read.
+fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<InferenceVar>) {
+    if let TyKind::Var(var) = ty.kind(db) {
+        into.insert(*var);
+    }
+    for_each_child_type(db, ty, &mut |child| collect_vars(db, child, into));
 }
