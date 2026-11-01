@@ -6283,7 +6283,10 @@ pub fn qnchisq(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
             }
         }
     }
-    bisect(low, high, below_root)
+    // GNU R stops at a relative accuracy of about 1e-13, and its own tests compare round trips
+    // with all.equal, which leaves exact matches out of the mean: a quantile that is exact more
+    // often than GNU's shifts that mean, so the search stops at the same accuracy.
+    bisect(low, high, 1e-13, below_root)
 }
 
 /// The density of the noncentral beta distribution, the Poisson mixture
@@ -6434,7 +6437,7 @@ pub fn qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         precision_warning("qnbeta");
         return f64::NAN;
     }
-    bisect(0.0, 1.0, |x| {
+    bisect(0.0, 1.0, 0.0, |x| {
         let value = pnbeta_both(x, 0.5 - x + 0.5, a, b, ncp, lower, log);
         if lower { value < p } else { value > p }
     })
@@ -6443,9 +6446,13 @@ pub fn qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
 /// The point where `below_root` turns from true to false within `(low, high)`, to the
 /// resolution of a double. While the bracket spans more than a factor of four, its geometric
 /// mean is tried, so a root many orders of magnitude below `high` is found in a number of
-/// steps that grows with the number of exponent bits rather than mantissa bits.
-fn bisect(mut low: f64, mut high: f64, below_root: impl Fn(f64) -> bool) -> f64 {
+/// steps that grows with the number of exponent bits rather than mantissa bits. A positive
+/// `tolerance` stops the search once the bracket is narrower than that fraction of its midpoint.
+fn bisect(mut low: f64, mut high: f64, tolerance: f64, below_root: impl Fn(f64) -> bool) -> f64 {
     loop {
+        if high - low < tolerance * 0.5 * (low + high) {
+            return 0.5 * (low + high);
+        }
         let middle = if low == 0.0 {
             if high > 0.5 { 0.5 * high } else { high * high }
         } else if high > 4.0 * low {
