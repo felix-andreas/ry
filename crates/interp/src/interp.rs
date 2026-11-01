@@ -41,6 +41,7 @@ pub mod eval;
 pub mod format;
 pub mod frame;
 pub mod graphics;
+pub mod graphics_engine;
 pub mod graphics_render;
 pub mod linalg;
 pub mod lower;
@@ -129,6 +130,10 @@ pub struct Hooks {
     /// Runs `body` as an entry from native code: the host's boundary turns an unwind into a
     /// `longjmp` into whatever native frame called the connection.
     pub enter_from_native: unsafe fn(&mut dyn FnMut() -> R<()>),
+    /// Calls a graphics device or system callback, which may be C code, under the host's
+    /// native-code boundary: a `longjmp` out of it becomes an `Err`, and the protection stack
+    /// and handles it left behind are released.
+    pub guard_native: unsafe fn(&mut dyn FnMut()) -> R<()>,
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
@@ -330,6 +335,10 @@ pub fn default_hooks() -> Hooks {
                 panic!("an R error escaped into native code without the libR host");
             }
         },
+        guard_native: |body| {
+            body();
+            Ok(())
+        },
         connection_vfprintf: None,
     }
 }
@@ -410,6 +419,7 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            graphics_engine::trace(marker);
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);

@@ -28,6 +28,18 @@ use {
     std::ffi::{c_char, c_int, c_void},
 };
 
+/// Runs a graphics callback inside a C context, so that an R error raised from C code in it
+/// unwinds to here instead of past Rust frames.
+unsafe fn guard_native(body: &mut dyn FnMut()) -> interp::R<()> {
+    unsafe extern "C" fn trampoline(data: *mut c_void) {
+        // SAFETY: `data` is the `&mut &mut dyn FnMut()` passed below, alive for the call.
+        let body = unsafe { &mut *(data as *mut &mut dyn FnMut()) };
+        body();
+    }
+    let mut body = body;
+    crate::boundary::call_void(trampoline, (&mut body as *mut &mut dyn FnMut()).cast())
+}
+
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
@@ -40,6 +52,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         task_callback_routine: |routine, args| unsafe { task_callback_routine(routine, args) },
         connection_method: |con, call| unsafe { crate::connections::call_method(con, call) },
         enter_from_native: |body| unsafe { crate::boundary::enter(|| body()) },
+        guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
     };
     interp::install(&mut runtime.heap, hooks);
