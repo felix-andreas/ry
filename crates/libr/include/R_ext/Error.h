@@ -16,6 +16,8 @@ extern "C" {
 NORET void Rf_error(const char *, ...) R_PRINTF_FORMAT(1, 2);
 void Rf_warning(const char *, ...) R_PRINTF_FORMAT(1, 2);
 void R_ShowMessage(const char *);
+NORET void UNIMPLEMENTED(const char *);
+NORET void WrongArgCount(const char *);
 
 #ifndef R_NO_REMAP
 #define error Rf_error

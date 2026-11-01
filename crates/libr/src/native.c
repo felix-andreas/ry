@@ -30,6 +30,7 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 #include <Rinternals.h>
@@ -1261,8 +1262,9 @@ SEXP ry_add_r_task_callback(SEXP function, SEXP data, SEXP use_data, SEXP name)
     return result;
 }
 
-/* The routine behind `removeTaskCallback()`: a name, or a one-based position. */
-SEXP ry_remove_r_task_callback(SEXP id)
+/* `R_removeTaskCallback`, also the routine behind `removeTaskCallback()`: a name, or a one-based
+   position. */
+RY_EXPORT SEXP R_removeTaskCallback(SEXP id)
 {
     Rboolean removed = FALSE;
     if (TYPEOF(id) == STRSXP) {
@@ -1655,4 +1657,494 @@ RY_EXPORT void rexit_(char *message, size_t length)
 RY_EXPORT void rwarn_(char *message, size_t length)
 {
     Rf_warning("%.*s", ry_fortran_length(message, (int) length), message);
+}
+
+/* The rest of GNU R's public function list that is simplest in C: error helpers, checked
+   memory copies, XDR encoding, small predicates, the S4 class queries the methods package
+   answers, and the start-up parameter block of embedding front ends. */
+
+#include <wchar.h>
+#include <R_ext/RStartup.h>
+
+RY_EXPORT void UNIMPLEMENTED(const char *what)
+{
+    Rf_error("unimplemented feature in %s", what);
+}
+
+RY_EXPORT void WrongArgCount(const char *what)
+{
+    Rf_error("incorrect number of arguments to \"%s\"", what);
+}
+
+RY_EXPORT void *R_chk_memcpy(void *destination, const void *source, size_t length)
+{
+    return length == 0 ? destination : memcpy(destination, source, length);
+}
+
+RY_EXPORT void *R_chk_memset(void *destination, int value, size_t length)
+{
+    return length == 0 ? destination : memset(destination, value, length);
+}
+
+/* XDR is big-endian IEEE 754 for doubles and big-endian two's complement for integers. */
+static void ry_store_big_endian(uint64_t bits, unsigned char *out, int size)
+{
+    for (int index = 0; index < size; index++)
+        out[index] = (unsigned char) (bits >> (8 * (size - 1 - index)));
+}
+
+static uint64_t ry_load_big_endian(const unsigned char *in, int size)
+{
+    uint64_t bits = 0;
+    for (int index = 0; index < size; index++)
+        bits = (bits << 8) | in[index];
+    return bits;
+}
+
+RY_EXPORT void R_XDREncodeDouble(double value, void *buffer)
+{
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    ry_store_big_endian(bits, buffer, 8);
+}
+
+RY_EXPORT double R_XDRDecodeDouble(void *buffer)
+{
+    uint64_t bits = ry_load_big_endian(buffer, 8);
+    double value;
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+RY_EXPORT void R_XDREncodeInteger(int value, void *buffer)
+{
+    ry_store_big_endian((uint32_t) value, buffer, 4);
+}
+
+RY_EXPORT int R_XDRDecodeInteger(void *buffer)
+{
+    return (int) (uint32_t) ry_load_big_endian(buffer, 4);
+}
+
+/* `R_system`: runs a shell command and returns its exit status, or -1 when it could not run. */
+RY_EXPORT int R_system(const char *command)
+{
+    fflush(stdout);
+    fflush(stderr);
+#ifdef _WIN32
+    return system(command);
+#else
+    int status = system(command);
+    if (status == -1)
+        return -1;
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return status;
+#endif
+}
+
+/* `R_typeToChar`: the type name R messages use, which for an `OBJSXP` says whether it is S4. */
+RY_EXPORT const char *R_typeToChar(SEXP x)
+{
+    if (TYPEOF(x) == OBJSXP)
+        return IS_S4_OBJECT(x) ? "S4" : "object";
+    return Rf_type2char(TYPEOF(x));
+}
+
+/* Whether two arrays have the same dimensions. */
+RY_EXPORT Rboolean Rf_conformable(SEXP x, SEXP y)
+{
+    SEXP x_dim = PROTECT(Rf_getAttrib(x, R_DimSymbol));
+    SEXP y_dim = PROTECT(Rf_getAttrib(y, R_DimSymbol));
+    Rboolean same = Rf_length(x_dim) == Rf_length(y_dim);
+    for (int index = 0; same && index < Rf_length(x_dim); index++)
+        same = INTEGER(x_dim)[index] == INTEGER(y_dim)[index];
+    UNPROTECT(2);
+    return same;
+}
+
+/* Whether `s` names a `%op%` operator. */
+RY_EXPORT Rboolean Rf_isUserBinop(SEXP s)
+{
+    if (TYPEOF(s) != SYMSXP)
+        return FALSE;
+    const char *name = CHAR(PRINTNAME(s));
+    size_t length = strlen(name);
+    return length >= 2 && name[0] == '%' && name[length - 1] == '%';
+}
+
+/* The position of `element` in the character vector `string`, compared after translation to
+   the native encoding, or -1. */
+RY_EXPORT int Rf_stringPositionTr(SEXP string, const char *element)
+{
+    R_xlen_t count = XLENGTH(string);
+    for (R_xlen_t index = 0; index < count; index++) {
+        SEXP item = STRING_ELT(string, index);
+        if (item != NA_STRING && strcmp(Rf_translateChar(item), element) == 0)
+            return (int) index;
+    }
+    return -1;
+}
+
+RY_EXPORT SEXP Rf_installNoTrChar(SEXP name)
+{
+    return Rf_installChar(name);
+}
+
+/* `Rf_gsetVar`: assigns in the base environment, where GNU R keeps a symbol's global value. */
+RY_EXPORT void Rf_gsetVar(SEXP symbol, SEXP value, SEXP rho)
+{
+    (void) rho;
+    Rf_defineVar(symbol, value, R_BaseEnv);
+}
+
+/* Calls `function` from namespace `package` with one or two arguments. */
+static SEXP ry_call_in(const char *package, const char *function, SEXP first, SEXP second,
+                       SEXP env)
+{
+    SEXP callee = PROTECT(Rf_lang3(R_TripleColonSymbol, Rf_install(package), Rf_install(function)));
+    SEXP call = PROTECT(second == NULL ? Rf_lang2(callee, first) : Rf_lang3(callee, first, second));
+    SEXP value = Rf_eval(call, env);
+    UNPROTECT(2);
+    return value;
+}
+
+/* `R_FindPackageEnv`: base's `findPackageEnv(info)`, the environment a serialized package
+   environment reference restores to. */
+RY_EXPORT SEXP R_FindPackageEnv(SEXP info)
+{
+    return ry_call_in("base", "findPackageEnv", info, NULL, R_GlobalEnv);
+}
+
+/* Whether the methods package is loaded, so its class queries can be asked. */
+RY_EXPORT Rboolean R_has_methods_attached(void)
+{
+    SEXP methods = Rf_findVarInFrame(R_NamespaceRegistry, Rf_install("methods"));
+    return TYPEOF(methods) == ENVSXP;
+}
+
+/* `R_S4_extends`: the class vector S3 dispatch uses for an S4 class, its superclasses
+   included. Without the methods package the class is its own answer. */
+RY_EXPORT SEXP R_S4_extends(SEXP klass, SEXP use_table)
+{
+    (void) use_table;
+    if (!R_has_methods_attached())
+        return klass;
+    return ry_call_in("methods", ".extendsForS3", klass, NULL, R_GlobalEnv);
+}
+
+RY_EXPORT SEXP R_getClassDef_R(SEXP what)
+{
+    if (!R_has_methods_attached())
+        Rf_error("'methods' package not yet loaded");
+    return ry_call_in("methods", "getClassDef", what, NULL, R_GlobalEnv);
+}
+
+RY_EXPORT Rboolean R_isVirtualClass(SEXP class_def, SEXP env)
+{
+    if (!R_has_methods_attached())
+        return FALSE;
+    SEXP value = PROTECT(ry_call_in("methods", "isVirtualClass", class_def, NULL, env));
+    Rboolean result = Rf_asLogical(value) == TRUE;
+    UNPROTECT(1);
+    return result;
+}
+
+RY_EXPORT Rboolean R_extends(SEXP class1, SEXP class2, SEXP env)
+{
+    if (!R_has_methods_attached())
+        return FALSE;
+    SEXP value = PROTECT(ry_call_in("methods", "extends", class1, class2, env));
+    Rboolean result = Rf_asLogical(value) == TRUE;
+    UNPROTECT(1);
+    return result;
+}
+
+static int ry_valid_position(const char *name, const char **valid)
+{
+    for (int index = 0; valid[index][0] != '\0'; index++)
+        if (strcmp(name, valid[index]) == 0)
+            return index;
+    return -1;
+}
+
+/* `R_check_class_and_super`: the position in `valid` (terminated by "") of `x`'s class or, for
+   an S4 object, of its nearest non-virtual superclass, or -1. */
+RY_EXPORT int R_check_class_and_super(SEXP x, const char **valid, SEXP rho)
+{
+    SEXP klass = PROTECT(R_data_class(x, FALSE));
+    const char *name = Rf_translateChar(STRING_ELT(klass, 0));
+    int position = ry_valid_position(name, valid);
+    if (position >= 0 || !IS_S4_OBJECT(x) || !R_has_methods_attached()) {
+        UNPROTECT(1);
+        return position;
+    }
+    SEXP env = PROTECT(R_NewEnv(rho, FALSE, 0));
+    Rf_defineVar(Rf_install(".ry_class"), klass, env);
+    SEXP supers = PROTECT(R_ParseEvalString(
+        "methods::.selectSuperClasses(methods::getClass(.ry_class)@contains, dropVirtual = TRUE,"
+        " namesOnly = TRUE, directOnly = FALSE, simpleOnly = TRUE)",
+        env));
+    for (R_xlen_t index = 0; position < 0 && index < XLENGTH(supers); index++)
+        position = ry_valid_position(Rf_translateChar(STRING_ELT(supers, index)), valid);
+    UNPROTECT(3);
+    return position;
+}
+
+/* The start-up parameter block. ry's session reads its settings from the `ry` front end, so
+   the block's job here is to carry the values GNU R's defaults give and to publish the ones
+   native code reads as globals (`R_Interactive`, `R_NoEcho`). */
+
+RY_EXPORT int R_DefParamsEx(Rstart parameters, int version)
+{
+    if (version != 0 && version != RSTART_VERSION)
+        return -1;
+    parameters->R_Quiet = FALSE;
+    parameters->R_NoEcho = FALSE;
+    parameters->R_Interactive = TRUE;
+    parameters->R_Verbose = FALSE;
+    parameters->RestoreAction = SA_RESTORE;
+    parameters->SaveAction = SA_SAVEASK;
+    parameters->LoadSiteFile = TRUE;
+    parameters->LoadInitFile = TRUE;
+    parameters->DebugInitFile = FALSE;
+    parameters->vsize = (size_t) 6291456 * sizeof(double);
+    parameters->nsize = 350000;
+    parameters->max_vsize = SIZE_MAX;
+    parameters->max_nsize = SIZE_MAX;
+    parameters->ppsize = 50000;
+    parameters->nconnections = 128;
+    parameters->NoRenviron = FALSE;
+    parameters->RstartVersion = version;
+#ifdef _WIN32
+    parameters->EmitEmbeddedUTF8 = FALSE;
+    if (version >= 1) {
+        parameters->CleanUp = NULL;
+        parameters->ClearerrConsole = NULL;
+        parameters->FlushConsole = NULL;
+        parameters->ResetConsole = NULL;
+        parameters->Suicide = NULL;
+    }
+#endif
+    return 0;
+}
+
+RY_EXPORT void R_DefParams(Rstart parameters)
+{
+    R_DefParamsEx(parameters, 0);
+}
+
+RY_EXPORT void R_SetParams(Rstart parameters)
+{
+    R_Interactive = parameters->R_Interactive != 0;
+    R_NoEcho = parameters->R_NoEcho != 0;
+}
+
+/* Reads a memory size such as "6M", "1G" or "500k" from the environment variable `name`. */
+static int ry_size_from_env(const char *name, size_t *size)
+{
+    const char *text = getenv(name);
+    if (text == NULL || *text == '\0')
+        return 0;
+    char *end;
+    double value = strtod(text, &end);
+    switch (*end) {
+    case 'G': value *= 1024.0 * 1024.0 * 1024.0; end++; break;
+    case 'M': value *= 1024.0 * 1024.0; end++; break;
+    case 'K': case 'k': value *= 1024.0; end++; break;
+    default: break;
+    }
+    if (*end != '\0' || !(value > 0) || value > (double) SIZE_MAX)
+        return 0;
+    *size = (size_t) value;
+    return 1;
+}
+
+RY_EXPORT void R_SizeFromEnv(Rstart parameters)
+{
+    size_t size;
+    if (ry_size_from_env("R_VSIZE", &size))
+        parameters->vsize = size;
+    if (ry_size_from_env("R_NSIZE", &size))
+        parameters->nsize = size;
+    if (ry_size_from_env("R_MAX_VSIZE", &size))
+        parameters->max_vsize = size;
+}
+
+/* `R_common_command_line`: applies the options every front end shares and removes them from
+   `argv`, leaving the rest (and everything after `--args`) for the front end. */
+RY_EXPORT void R_common_command_line(int *argc, char **argv, Rstart parameters)
+{
+    int kept = 1;
+    int processing = 1;
+    for (int index = 1; index < *argc; index++) {
+        const char *option = argv[index];
+        int used = 1;
+        if (!processing || option[0] != '-')
+            used = 0;
+        else if (strcmp(option, "--args") == 0) {
+            processing = 0;
+            used = 0;
+        } else if (strcmp(option, "--save") == 0)
+            parameters->SaveAction = SA_SAVE;
+        else if (strcmp(option, "--no-save") == 0)
+            parameters->SaveAction = SA_NOSAVE;
+        else if (strcmp(option, "--restore") == 0)
+            parameters->RestoreAction = SA_RESTORE;
+        else if (strcmp(option, "--no-restore") == 0 || strcmp(option, "--no-restore-data") == 0)
+            parameters->RestoreAction = SA_NORESTORE;
+        else if (strcmp(option, "--no-restore-history") == 0)
+            ;
+        else if (strcmp(option, "--silent") == 0 || strcmp(option, "--quiet") == 0
+                 || strcmp(option, "-q") == 0)
+            parameters->R_Quiet = TRUE;
+        else if (strcmp(option, "--vanilla") == 0) {
+            parameters->SaveAction = SA_NOSAVE;
+            parameters->RestoreAction = SA_NORESTORE;
+            parameters->LoadSiteFile = FALSE;
+            parameters->LoadInitFile = FALSE;
+            parameters->NoRenviron = TRUE;
+        } else if (strcmp(option, "--no-environ") == 0)
+            parameters->NoRenviron = TRUE;
+        else if (strcmp(option, "--no-site-file") == 0)
+            parameters->LoadSiteFile = FALSE;
+        else if (strcmp(option, "--no-init-file") == 0)
+            parameters->LoadInitFile = FALSE;
+        else if (strcmp(option, "--verbose") == 0)
+            parameters->R_Verbose = TRUE;
+        else if (strcmp(option, "--no-echo") == 0 || strcmp(option, "--slave") == 0
+                 || strcmp(option, "-s") == 0) {
+            parameters->R_Quiet = TRUE;
+            parameters->R_NoEcho = TRUE;
+            parameters->SaveAction = SA_NOSAVE;
+        } else if (strcmp(option, "--interactive") == 0)
+            parameters->R_Interactive = TRUE;
+        else if (strncmp(option, "--min-vsize=", 12) == 0 || strncmp(option, "--min-nsize=", 12) == 0
+                 || strncmp(option, "--max-ppsize=", 13) == 0
+                 || strncmp(option, "--max-connections=", 18) == 0) {
+            char *end;
+            double value = strtod(strchr(option, '=') + 1, &end);
+            switch (*end) {
+            case 'G': value *= 1024.0 * 1024.0 * 1024.0; break;
+            case 'M': value *= 1024.0 * 1024.0; break;
+            case 'K': case 'k': value *= 1024.0; break;
+            default: break;
+            }
+            if (value > 0) {
+                if (option[6] == 'v')
+                    parameters->vsize = (size_t) value;
+                else if (option[6] == 'n')
+                    parameters->nsize = (size_t) value;
+                else if (option[6] == 'p')
+                    parameters->ppsize = (size_t) value;
+                else
+                    parameters->nconnections = (int) value;
+            }
+        } else
+            used = 0;
+        if (!used)
+            argv[kept++] = argv[index];
+    }
+    *argc = kept;
+}
+
+/* GNU R's growable string buffer, which packages written against its internals use for
+   scratch text. The layout is GNU R's. */
+typedef struct {
+    char *data;
+    size_t bufsize;
+    size_t defaultSize;
+} RyStringBuffer;
+
+/* Makes `buffer` hold at least `length` + 1 bytes, growing in multiples of its default size. */
+RY_EXPORT void *R_AllocStringBuffer(size_t length, RyStringBuffer *buffer)
+{
+    if (length < buffer->bufsize)
+        return buffer->data;
+    size_t step = buffer->defaultSize > 0 ? buffer->defaultSize : 1;
+    size_t wanted = length + 1;
+    size_t size = (wanted + step - 1) / step * step;
+    char *data = buffer->data == NULL ? malloc(size) : realloc(buffer->data, size);
+    if (data == NULL) {
+        free(buffer->data);
+        buffer->data = NULL;
+        buffer->bufsize = 0;
+        Rf_error("could not allocate memory (%u Mb) in C function 'R_AllocStringBuffer'",
+                 (unsigned) (size / 1024 / 1024));
+    }
+    if (buffer->data == NULL)
+        data[0] = '\0';
+    buffer->data = data;
+    buffer->bufsize = size;
+    return data;
+}
+
+RY_EXPORT void R_FreeStringBuffer(RyStringBuffer *buffer)
+{
+    free(buffer->data);
+    buffer->data = NULL;
+    buffer->bufsize = 0;
+}
+
+/* The length of the UTF-8 sequence that starts with byte `c`; a stray continuation byte
+   counts as one. */
+RY_EXPORT int utf8clen(char c)
+{
+    unsigned char byte = (unsigned char) c;
+    if (byte < 0xC0)
+        return 1;
+    if (byte < 0xE0)
+        return 2;
+    if (byte < 0xF0)
+        return 3;
+    if (byte < 0xF8)
+        return 4;
+    if (byte < 0xFC)
+        return 5;
+    return 6;
+}
+
+/* `mbrtowc` that reports an invalid sequence as an R error naming the bytes, written as text
+   with the undecodable ones shown as `<xx>`. */
+RY_EXPORT size_t Rf_mbrtowc(wchar_t *wc, const char *s, size_t n, mbstate_t *ps)
+{
+    if (n == 0 || *s == '\0')
+        return 0;
+    size_t used = mbrtowc(wc, s, n, ps);
+    if (used != (size_t) -1 && used != (size_t) -2)
+        return used;
+    size_t length = strlen(s);
+    char *shown = R_alloc(4 * length + 1, 1);
+    char *out = shown;
+    mbstate_t state;
+    memset(&state, 0, sizeof state);
+    for (const char *p = s; *p != '\0';) {
+        size_t step = mbrtowc(NULL, p, length - (size_t) (p - s), &state);
+        if (step == (size_t) -1 || step == (size_t) -2 || step == 0) {
+            snprintf(out, 5, "<%02x>", (unsigned char) *p);
+            out += 4;
+            p++;
+            memset(&state, 0, sizeof state);
+        } else {
+            memcpy(out, p, step);
+            out += step;
+            p += step;
+        }
+    }
+    *out = '\0';
+    Rf_error("invalid multibyte string at '%s'", shown);
+}
+
+/* The error a missing argument raises, as GNU R's evaluator words it. */
+RY_EXPORT void R_MissingArgError_c(const char *arg, SEXP call, const char *subclass)
+{
+    (void) subclass;
+    if (arg != NULL && *arg != '\0')
+        Rf_errorcall(call, "argument \"%s\" is missing, with no default", arg);
+    Rf_errorcall(call, "argument is missing, with no default");
+}
+
+RY_EXPORT void R_MissingArgError(SEXP symbol, SEXP call, const char *subclass)
+{
+    R_MissingArgError_c(TYPEOF(symbol) == SYMSXP ? CHAR(PRINTNAME(symbol)) : "", call, subclass);
 }

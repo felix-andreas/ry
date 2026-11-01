@@ -3272,8 +3272,30 @@ pub unsafe fn init_locale() {
         LC_MEASUREMENT,
     ] {
         set_locale(category, c"".as_ptr());
+        #[cfg(windows)]
+        use_utf8_codeset(category);
     }
     crate::sort::refresh_collation();
+}
+
+/// Moves a Windows locale category to the UTF-8 codeset of the same language and region
+/// (`English_United States.1252` becomes `English_United States.utf8`). ry's native encoding is
+/// UTF-8 on Windows, as GNU R's is from 4.2 on, and `ry.exe` asks Windows for the UTF-8 code page
+/// in its manifest. A system that ignores the manifest (older Windows, Wine) still starts the C
+/// runtime in the ANSI code page, which would convert native strings as Latin-1 and report a
+/// locale that contradicts `l10n_info()`.
+#[cfg(windows)]
+unsafe fn use_utf8_codeset(category: libc::c_int) {
+    let current = current_locale(category);
+    let Some((language, codeset)) = current.rsplit_once('.') else {
+        return;
+    };
+    if codeset.eq_ignore_ascii_case("utf8") || codeset.eq_ignore_ascii_case("utf-8") {
+        return;
+    }
+    if let Ok(name) = std::ffi::CString::new(format!("{language}.UTF-8")) {
+        set_locale(category, name.as_ptr());
+    }
 }
 
 /// macOS's C library has no paper or measurement category, and Windows's has no messages

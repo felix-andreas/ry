@@ -9,7 +9,7 @@
 mod harness;
 
 use {
-    R::linpack::{dqrcf_, dqrdc2_, dqrls_, dqrqty_, dqrqy_, dqrrsd_, dqrxb_},
+    R::linpack::{dchdc_, dqrcf_, dqrdc2_, dqrls_, dqrqty_, dqrqy_, dqrrsd_, dqrxb_},
     harness::{gnu_r_available, temporary_file},
     std::{collections::HashMap, ffi::c_int, path::Path, process::Command},
 };
@@ -359,4 +359,103 @@ fn expectations_match_a_fresh_gnu_r_run() {
          tests/data/linpack.R if GNU R changed):\n{}",
         problems.join("\n")
     );
+}
+
+/// Reconstructs `P'AP` from the upper factor `dchdc` leaves in `a`, as an `n` by `n` matrix.
+fn reconstruct(factor: &[f64], n: usize) -> Vec<f64> {
+    let upper = |row: usize, column: usize| {
+        if row <= column {
+            factor[row + column * n]
+        } else {
+            0.0
+        }
+    };
+    let mut product = vec![0.0; n * n];
+    for row in 0..n {
+        for column in 0..n {
+            product[row + column * n] = (0..n).map(|k| upper(k, row) * upper(k, column)).sum();
+        }
+    }
+    product
+}
+
+#[test]
+fn dchdc_factors_with_and_without_pivoting() {
+    let n = 4usize;
+    // A full-rank symmetric matrix whose largest diagonal entry is last, so pivoting moves it.
+    let matrix = [
+        4.0, 2.0, 0.6, 1.0, //
+        2.0, 5.0, 1.0, 2.0, //
+        0.6, 1.0, 6.0, 3.0, //
+        1.0, 2.0, 3.0, 9.0,
+    ];
+    let order = n as c_int;
+    let mut work = vec![0.0; n];
+    let mut info = 0;
+
+    let mut plain = matrix;
+    let mut pivots = vec![0 as c_int; n];
+    unsafe {
+        dchdc_(
+            plain.as_mut_ptr(),
+            &order,
+            &order,
+            work.as_mut_ptr(),
+            pivots.as_mut_ptr(),
+            &0,
+            &mut info,
+        )
+    };
+    assert_eq!(info, 4);
+    let product = reconstruct(&plain, n);
+    for (actual, expected) in product.iter().zip(matrix.iter()) {
+        assert!((actual - expected).abs() < 1e-12, "{product:?}");
+    }
+
+    let mut pivoted = matrix;
+    let mut pivots = vec![0 as c_int; n];
+    unsafe {
+        dchdc_(
+            pivoted.as_mut_ptr(),
+            &order,
+            &order,
+            work.as_mut_ptr(),
+            pivots.as_mut_ptr(),
+            &1,
+            &mut info,
+        )
+    };
+    assert_eq!(info, 4);
+    assert_eq!(
+        pivots[0], 4,
+        "the largest diagonal entry comes first: {pivots:?}"
+    );
+    let product = reconstruct(&pivoted, n);
+    for row in 0..n {
+        for column in 0..n {
+            let expected = matrix[(pivots[row] - 1) as usize + (pivots[column] - 1) as usize * n];
+            assert!(
+                (product[row + column * n] - expected).abs() < 1e-12,
+                "{product:?} {pivots:?}"
+            );
+        }
+    }
+
+    // A rank-2 matrix stops after two positive pivots. The entries keep the arithmetic exact,
+    // because LINPACK has no tolerance and a rounding residue would count as a third pivot.
+    let mut singular = [4.0, 2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let order = 3;
+    let mut pivots = vec![0 as c_int; 3];
+    unsafe {
+        dchdc_(
+            singular.as_mut_ptr(),
+            &order,
+            &order,
+            work.as_mut_ptr(),
+            pivots.as_mut_ptr(),
+            &1,
+            &mut info,
+        )
+    };
+    assert_eq!(info, 2, "{singular:?} {pivots:?}");
 }
