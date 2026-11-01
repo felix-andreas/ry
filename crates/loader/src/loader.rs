@@ -20,8 +20,8 @@ use {
             classify_constants, file_binds, file_items, file_load_index, fnv1a, package_index,
         },
         metadata::{
-            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
-            parse_description_collate,
+            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, OS_TYPE,
+            S3MethodDirective, parse_description_collate,
         },
         stubs::install_shipped_stubs,
     },
@@ -65,6 +65,8 @@ pub struct PackageInputs {
     pub files: Vec<(String, Option<String>)>,
     /// Of `R/sysdata.rda`.
     pub sysdata: Option<u64>,
+    /// Of `data/`.
+    pub data: Option<Datasets>,
     /// Of the sources under `src/`.
     pub compiled: Option<u64>,
     /// `[check] strict`, the mode of each file without its own `# typing:` directive.
@@ -92,13 +94,26 @@ pub struct LoadState {
     pub index: Arc<PackageIndex>,
     /// Of `R/sysdata.rda`.
     pub sysdata: Option<u64>,
+    /// A state saved before datasets were loaded has none.
+    #[serde(default)]
+    pub data: Option<Datasets>,
     /// Of the names, sizes and modification times under `src/`.
     pub compiled: Option<u64>,
 }
 
+/// The dataset files in `data/`, which a load reads into the namespace's lazy data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Datasets {
+    /// Paths relative to the package root, in the order R CMD INSTALL reads them.
+    pub files: Vec<String>,
+    /// Of the files' names, sizes and modification times, so a changed dataset is noticed
+    /// without reading it.
+    pub fingerprint: u64,
+}
+
 /// Backend-neutral instructions, applied in field order: imports, sources, removals,
-/// unregistrations, lazy bindings, eager code, data, S3 registrations, compiled code,
-/// exports, and finally the hooks.
+/// unregistrations, lazy bindings, eager code, `sysdata.rda`, datasets, S3 registrations,
+/// compiled code, exports, and finally the hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub package: String,
@@ -123,6 +138,9 @@ pub struct Plan {
     /// Top-level code to run, in collation order.
     pub run: Vec<Code>,
     pub sysdata: SysdataChange,
+    /// `Some` when the datasets must be read again: every file of `data/` to read, in order,
+    /// into a cleared lazy data environment. Empty when the last dataset went away.
+    pub data: Option<Vec<String>>,
     /// `S3method()` registrations to (re)make.
     pub s3_register: Vec<S3MethodDirective>,
     /// `S3method()` registrations that `NAMESPACE` no longer declares.
@@ -289,6 +307,7 @@ impl Loader {
     ) -> Result<Plan, LoadError> {
         let root = root.to_path_buf();
         let (sysdata, compiled) = (inputs.sysdata, inputs.compiled);
+        let data = inputs.data.clone();
         let position = self.analyze(&root, inputs)?;
         let package = &self.packages[position];
         let index = package_index(&self.db, package.sources);
@@ -306,6 +325,7 @@ impl Loader {
             root: root.clone(),
             index: index.clone(),
             sysdata,
+            data,
             compiled,
         };
         let previous = if full {
@@ -526,6 +546,7 @@ impl Loader {
             namespace,
             files,
             sysdata: file_hash(&root.join("R").join("sysdata.rda"))?,
+            data: datasets(root)?,
             compiled: compiled_fingerprint(&root.join("src"))?,
             strict: self.strict,
         })
@@ -632,47 +653,126 @@ impl Loader {
     }
 }
 
-/// `R/` code files in R's order: the `Collate` field's files first, as listed, then any
-/// file it leaves out in C-locale order, as `devtools::load_all` does.
+/// `R/` code files in R's order, by path relative to the root: those of `R/` and then those of
+/// its operating-system subdirectory (`R/unix/` or `R/windows/`), ordered by
+/// [`collate_code_files`].
 pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, LoadError> {
     let directory = root.join("R");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(LoadError::Io(directory, error)),
-    };
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| LoadError::Io(directory.clone(), error))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_r_code(&name) && entry.path().is_file() {
-            names.push(name);
+    let mut paths = Vec::new();
+    for (subdirectory, prefix) in [(directory.clone(), ""), (directory.join(OS_TYPE), OS_TYPE)] {
+        let entries = match fs::read_dir(&subdirectory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(LoadError::Io(subdirectory, error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| LoadError::Io(subdirectory.clone(), error))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_r_code(&name) && entry.path().is_file() {
+                paths.push(if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                });
+            }
         }
     }
-    names.sort();
-    let mut ordered: Vec<String> = collate
-        .iter()
-        .filter(|name| names.contains(name))
-        .cloned()
-        .collect();
-    let mut seen: FxHashSet<String> = ordered.iter().cloned().collect();
-    for name in names {
-        if seen.insert(name.clone()) {
-            ordered.push(name);
-        }
-    }
-    Ok(ordered
+    Ok(collate_code_files(paths, collate)
         .into_iter()
-        .map(|name| format!("R/{name}"))
+        .map(|path| format!("R/{path}"))
         .collect())
 }
 
-/// Whether a file in `R/` is code a load sources, as R CMD INSTALL decides.
+/// Orders code files given by path relative to `R/` (`a.R`, `unix/b.R`) as a load runs them:
+/// the files the collation field lists first, in its order, then the rest as R CMD INSTALL
+/// lists them, the files of `R/` before those of a subdirectory and each group in C-locale
+/// order. R CMD INSTALL refuses a package whose collation field leaves a file out, while
+/// `devtools::load_all` appends it, and so does this.
+pub fn collate_code_files(mut paths: Vec<String>, collate: &[String]) -> Vec<String> {
+    paths.sort_by(|left, right| (left.contains('/'), left).cmp(&(right.contains('/'), right)));
+    let mut ordered: Vec<String> = collate
+        .iter()
+        .filter(|path| paths.contains(path))
+        .cloned()
+        .collect();
+    let mut seen: FxHashSet<String> = ordered.iter().cloned().collect();
+    for path in paths {
+        if seen.insert(path.clone()) {
+            ordered.push(path);
+        }
+    }
+    ordered
+}
+
+/// Whether a file in `R/` is code a load sources, as R CMD INSTALL decides: its name starts
+/// with a letter or digit, which leaves out an editor's `.a.R.swp`, and its extension is one
+/// of R's code extensions, which leaves out `a.R~`.
 fn is_r_code(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
+    name.starts_with(|character: char| character.is_ascii_alphanumeric())
+        && Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
+}
+
+/// The dataset files of `data/`, as `data()` and R CMD INSTALL find them: `.rda` and `.RData`
+/// files, which `load()` reads, `.R` files, which `sys.source()` runs, and `.csv`, `.tab` and
+/// `.txt` tables, which `read.table()` reads.
+fn datasets(root: &Path) -> Result<Option<Datasets>, LoadError> {
+    let directory = root.join("data");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(LoadError::Io(directory, error)),
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| LoadError::Io(directory.clone(), error))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_dataset(&name) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| LoadError::Io(entry.path(), error))?;
+        if metadata.is_file() {
+            records.push((name, stamp(&metadata)));
+        }
+    }
+    if records.is_empty() {
+        return Ok(None);
+    }
+    records.sort();
+    let fingerprint = fnv1a(
+        records
+            .iter()
+            .map(|(name, stamp)| format!("{name}\0{stamp}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .as_bytes(),
+    );
+    Ok(Some(Datasets {
+        files: records
+            .into_iter()
+            .map(|(name, _)| format!("data/{name}"))
+            .collect(),
+        fingerprint,
+    }))
+}
+
+/// Whether a file in `data/` is a dataset a load reads. The R side picks the reader by the
+/// same extensions.
+pub fn is_dataset(name: &str) -> bool {
+    !name.starts_with('.')
+        && Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension,
+                    "R" | "r" | "rda" | "RData" | "rdata" | "csv" | "CSV" | "tab" | "txt" | "TXT"
+                )
+            })
 }
 
 /// The plan that turns `previous` (nothing, for a full load) into `next`. It looks inside only
@@ -686,6 +786,7 @@ pub fn diff<'text>(
     if let Some(previous) = previous
         && Arc::ptr_eq(&previous.index, &next.index)
         && previous.sysdata == next.sysdata
+        && previous.data == next.data
         && previous.compiled == next.compiled
     {
         return Plan::unchanged(next);
@@ -1101,6 +1202,15 @@ pub fn diff<'text>(
         (Some(_), None) => SysdataChange::Remove,
         _ => SysdataChange::Keep,
     };
+    let data = match (
+        previous.and_then(|previous| previous.data.as_ref()),
+        &next.data,
+    ) {
+        (_, Some(new)) if full => Some(new.files.clone()),
+        (old, Some(new)) if old != Some(new) => Some(new.files.clone()),
+        (Some(_), None) => Some(Vec::new()),
+        _ => None,
+    };
     let compiled_changed = previous.map(|previous| previous.compiled) != Some(next.compiled)
         || index.namespace.dynamic_libraries != old.namespace.dynamic_libraries;
 
@@ -1142,6 +1252,7 @@ pub fn diff<'text>(
         run_on_load: full || changed.contains(".onLoad"),
         run,
         sysdata,
+        data,
         s3_register,
         s3_unregister,
         s3_declared: s3_changed.then(|| declared.clone()),
@@ -1288,6 +1399,7 @@ impl Plan {
             bind: Vec::new(),
             run: Vec::new(),
             sysdata: SysdataChange::Keep,
+            data: None,
             s3_register: Vec::new(),
             s3_unregister: Vec::new(),
             s3_declared: None,
@@ -1308,6 +1420,7 @@ impl Plan {
             || !self.run.is_empty()
             || self.imports.is_some()
             || self.sysdata != SysdataChange::Keep
+            || self.data.is_some()
             || self.dynamic_libraries.is_some()
             || self.run_on_load
         {
@@ -1333,6 +1446,7 @@ impl Plan {
             && self.bind.is_empty()
             && self.run.is_empty()
             && self.sysdata == SysdataChange::Keep
+            && self.data.is_none()
             && self.s3_register.is_empty()
             && self.s3_unregister.is_empty()
             && self.dynamic_libraries.is_none()
@@ -1340,38 +1454,53 @@ impl Plan {
     }
 }
 
-/// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE` and the code
-/// files in `R/`, so a change is noticed without reading a file. `src/` is left out: hashing it
-/// would cost a walk of the compiled sources before every command, and a rebuild is slow enough
-/// that it is asked for with `load_all()`.
+/// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE`, the code
+/// files in `R/` and its operating-system subdirectory, `R/sysdata.rda` and the datasets in
+/// `data/`, so a change is noticed without reading a file. `src/` is left out: hashing it would
+/// cost a walk of the compiled sources before every command, and a rebuild is slow enough that
+/// it is asked for with `load_all()`.
 fn source_fingerprint(root: &Path) -> Option<u64> {
     let mut records = Vec::new();
     let mut record = |path: &Path| {
         if let Ok(metadata) = fs::metadata(path) {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |duration| duration.as_nanos());
-            records.push(format!(
-                "{}\0{}\0{modified}",
-                path.display(),
-                metadata.len()
-            ));
+            records.push(format!("{}\0{}", path.display(), stamp(&metadata)));
         }
     };
     record(&root.join("DESCRIPTION"));
     record(&root.join("NAMESPACE"));
-    let entries = fs::read_dir(root.join("R")).ok()?;
+    record(&root.join("R").join("sysdata.rda"));
+    let code = fs::read_dir(root.join("R")).ok()?;
+    let os_code = fs::read_dir(root.join("R").join(OS_TYPE))
+        .into_iter()
+        .flatten();
     // An editor's swap and backup files (`.a.R.swp`, `a.R~`) are not code, so saving one
     // reloads nothing.
-    for entry in entries.flatten() {
+    for entry in code.chain(os_code).flatten() {
         if is_r_code(&entry.file_name().to_string_lossy()) {
+            record(&entry.path());
+        }
+    }
+    for entry in fs::read_dir(root.join("data"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if is_dataset(&entry.file_name().to_string_lossy()) {
             record(&entry.path());
         }
     }
     records.sort();
     Some(fnv1a(records.join("\n").as_bytes()))
+}
+
+/// A file's size and modification time, as one record of a fingerprint.
+fn stamp(metadata: &fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    format!("{}\0{modified}", metadata.len())
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {
@@ -1410,17 +1539,12 @@ fn compiled_fingerprint(directory: &Path) -> Result<Option<u64>, LoadError> {
             if is_build_product(&path) {
                 continue;
             }
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |duration| duration.as_nanos());
             let relative = path
                 .strip_prefix(directory)
                 .unwrap_or(&path)
                 .display()
                 .to_string();
-            records.push(format!("{relative}\0{}\0{modified}", metadata.len()));
+            records.push(format!("{relative}\0{}", stamp(&metadata)));
         }
     }
     records.sort();

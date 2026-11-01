@@ -866,9 +866,13 @@ pub(crate) fn project_order<'a>(
         .map(|(rank, name)| (name.as_str(), rank))
         .collect();
     move |path| {
+        // A `Collate` entry is a path relative to `R/`, such as `unix/a.R`.
         let rank = path
-            .file_name()
-            .and_then(|name| collate_rank.get(name.to_string_lossy().as_ref()))
+            .strip_prefix(&r_path)
+            .ok()
+            .and_then(|relative| {
+                collate_rank.get(relative.to_string_lossy().replace('\\', "/").as_str())
+            })
             .copied()
             .unwrap_or(usize::MAX);
         (

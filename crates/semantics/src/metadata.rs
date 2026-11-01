@@ -766,27 +766,32 @@ pub fn parse_description_package(source: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-/// `Collate.unix` applies only when plain `Collate` is absent; Windows collation is not modeled.
+/// The operating system's name as R's `.Platform$OS.type` gives it, which names both the
+/// `R/` subdirectory whose code files a package loads and its `Collate.<os>` field.
+pub const OS_TYPE: &str = if cfg!(windows) { "windows" } else { "unix" };
+
+/// The collation field R CMD INSTALL reads: `Collate.unix` (or `Collate.windows`) when present,
+/// else `Collate`. Entries are paths relative to `R/`, so an entry may name `unix/a.R`.
 pub fn parse_description_collate(source: &str) -> Vec<String> {
-    let mut collate = Vec::new();
-    let mut unix_collate = Vec::new();
+    let os_field = format!("Collate.{OS_TYPE}");
+    let mut collate = None;
+    let mut os_collate = None;
     for (field, text) in dcf_fields(source) {
-        let target = match field {
-            "Collate" => &mut collate,
-            "Collate.unix" => &mut unix_collate,
-            _ => continue,
+        let target = if field == os_field {
+            &mut os_collate
+        } else if field == "Collate" {
+            &mut collate
+        } else {
+            continue;
         };
-        target.extend(
+        *target = Some(
             text.split_whitespace()
                 .map(|entry| entry.trim_matches(['"', '\'']).to_owned())
-                .filter(|name| !name.is_empty()),
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>(),
         );
     }
-    if collate.is_empty() {
-        unix_collate
-    } else {
-        collate
-    }
+    os_collate.or(collate).unwrap_or_default()
 }
 
 fn dcf_fields(source: &str) -> Vec<(&str, String)> {
@@ -928,10 +933,13 @@ mod tests {
     }
 
     #[test]
-    fn collate_unix_applies_only_without_plain_collate() {
+    #[cfg(not(windows))]
+    fn the_os_collation_field_takes_precedence_over_plain_collate() {
         let unix_only = parse_description_collate("Collate.unix: 'b.R' 'a.R'\n");
         assert_eq!(unix_only, ["b.R", "a.R"]);
-        let both = parse_description_collate("Collate: 'x.R'\nCollate.unix: 'y.R'\n");
-        assert_eq!(both, ["x.R"]);
+        let both = parse_description_collate("Collate: 'x.R'\nCollate.unix: 'unix/y.R' 'x.R'\n");
+        assert_eq!(both, ["unix/y.R", "x.R"]);
+        let other_os = parse_description_collate("Collate: 'x.R'\nCollate.windows: 'w.R'\n");
+        assert_eq!(other_os, ["x.R"]);
     }
 }

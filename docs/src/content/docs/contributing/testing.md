@@ -146,7 +146,9 @@ on purpose.
   `#~~~~ after <path>` exists on that side only, so the same path on both sides is an edit and one
   side alone is an addition or a deletion, while a plain `#~~~~ <path>` is unchanged. The case loads
   the `before` side, then renders the plan that takes it to the `after` side: what is bound, run,
-  removed, unregistered, and re-registered. Run it with
+  removed, unregistered, re-registered, and which datasets are read again. `R/` files run in the
+  order `DESCRIPTION`'s collation field gives them, and a `data/` file is a dataset whose text stands
+  in for its size and modification time. Run it with
   `cargo test -p loader --test test_reload_fixtures`.
 - **`crates/format/tests/format`**: the formatter's golden suite. Each case's source must format to
   the expected block, and the runner formats that output again to assert idempotence on every case.

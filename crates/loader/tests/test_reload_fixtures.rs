@@ -1,11 +1,14 @@
 //! Reload fixtures: the plan that takes a loaded package from its `before` sources to its
 //! `after` sources. A `#~~~~ before <path>` or `#~~~~ after <path>` file exists on one side
 //! only, so a path on both sides is an edit, on one side an addition or a deletion, and a
-//! plain `#~~~~ <path>` file is the same on both sides.
+//! plain `#~~~~ <path>` file is the same on both sides. `R/` files run in the order
+//! `DESCRIPTION`'s collation field and R's file order give them, and a `data/` file is a dataset
+//! whose fingerprint is its text.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
 use {
-    loader::{Loader, PackageInputs, Plan, SysdataChange},
+    loader::{Datasets, Loader, PackageInputs, Plan, SysdataChange, collate_code_files},
+    semantics::{load_index::fnv1a, metadata::parse_description_collate},
     std::path::{Path, PathBuf},
     syntax::testing::{run_fixture_suite, split_files},
 };
@@ -23,6 +26,8 @@ fn render(source: &str) -> String {
             description: "Package: demo\nVersion: 0.1.0\n".to_owned(),
             ..PackageInputs::default()
         };
+        let mut code = Vec::new();
+        let mut datasets = Vec::new();
         for (path, text) in &files {
             let path = match path.split_once(' ') {
                 Some((side, path)) if side == wanted => path,
@@ -32,10 +37,29 @@ fn render(source: &str) -> String {
             match path {
                 "DESCRIPTION" => inputs.description = text.clone(),
                 "NAMESPACE" => inputs.namespace = text.clone(),
-                _ => inputs.files.push((path.to_owned(), Some(text.clone()))),
+                _ if path.starts_with("data/") => datasets.push((path.to_owned(), text.clone())),
+                _ => code.push((path.to_owned(), text.clone())),
             }
         }
-        inputs.files.sort_by(|a, b| a.0.cmp(&b.0));
+        let collate = parse_description_collate(&inputs.description);
+        let relative = code
+            .iter()
+            .map(|(path, _)| path.strip_prefix("R/").unwrap_or(path).to_owned())
+            .collect();
+        for path in collate_code_files(relative, &collate) {
+            let path = format!("R/{path}");
+            let text = code.iter().find(|(candidate, _)| *candidate == path);
+            inputs
+                .files
+                .push((path, text.map(|(_, text)| text.clone())));
+        }
+        datasets.sort();
+        if !datasets.is_empty() {
+            inputs.data = Some(Datasets {
+                fingerprint: fnv1a(format!("{datasets:?}").as_bytes()),
+                files: datasets.into_iter().map(|(path, _)| path).collect(),
+            });
+        }
         inputs
     };
     let root = Path::new("/fixture");
@@ -101,6 +125,11 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
     }
     if plan.sysdata != SysdataChange::Keep {
         output.push_str(&format!("sysdata {:?}\n", plan.sysdata));
+    }
+    match plan.data.as_deref() {
+        Some([]) => output.push_str("clear datasets\n"),
+        Some(files) => output.push_str(&format!("load datasets {}\n", files.join(" "))),
+        None => {}
     }
     for method in &plan.s3_unregister {
         output.push_str(&format!(

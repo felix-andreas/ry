@@ -222,6 +222,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       character()
     }
   }
+  if (!is.null(plan$data)) {
+    .ry_load_data(state, plan$data)
+  }
   if (isNamespaceLoaded("methods") && (plan$full || isTRUE(plan$registers_s4)) &&
       .ry_has_s4_metadata(ns)) {
     methods::cacheMetaData(ns, TRUE, ns)
@@ -254,6 +257,26 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   .ry_phase("exports")
   if (isTRUE(plan$run_on_load) && exists(".onLoad", envir = ns, inherits = FALSE)) {
     get(".onLoad", envir = ns, inherits = FALSE)(dirname(state$root), state$name)
+  }
+}
+
+# Reads the datasets of `data/` into the namespace's lazy data the way `data()` reads them, as
+# pkgload does: `::` finds them there, and attaching copies them onto the search path.
+.ry_load_data <- function(state, files) {
+  lazydata <- getNamespaceInfo(state$ns, "lazydata")
+  rm(list = ls(lazydata, all.names = TRUE), envir = lazydata)
+  for (path in files) {
+    file <- file.path(state$root, path)
+    name <- sub("\\.[^.]*$", "", basename(path))
+    table <- function(...) {
+      assign(name, utils::read.table(file, header = TRUE, as.is = FALSE, ...), envir = lazydata)
+    }
+    switch(tolower(sub("^.*\\.", "", path)),
+      r = sys.source(file, envir = lazydata, chdir = TRUE),
+      rda = , rdata = load(file, envir = lazydata),
+      csv = table(sep = ";"),
+      tab = , txt = table()
+    )
   }
 }
 
@@ -456,6 +479,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
 # whichever environment forces it first, both see the value. Stale names always go, since
 # running or undoing code (S4 registrations, `assign()`) changes names no plan lists; `touched`
 # limits the copying to the bindings a plan changed, and without it everything is copied.
+# Datasets come last and win over an export of the same name, as in R's attachNamespace(). A
+# plan that reloads them lists no `touched`, so only a full copy needs them.
 .ry_sync_package_env <- function(state, touched = NULL, keeps_names = FALSE) {
   environment <- state$package_env
   ns <- state$ns
@@ -469,8 +494,11 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   exported <- names(exports)
   imported <- if (isTRUE(state$export_all)) names(parent.env(ns)) else character()
+  lazydata <- getNamespaceInfo(ns, "lazydata")
+  datasets <- names(lazydata)
   present <- names(environment)
-  stale <- present[!(present %in% exported) & !(present %in% imported)]
+  stale <- present[!(present %in% exported) & !(present %in% imported) &
+                     !(present %in% datasets)]
   if (length(stale)) rm(list = stale, envir = environment)
   if (!is.null(touched)) {
     names <- c(touched[touched %in% exported], exported[!(exported %in% present)])
@@ -483,6 +511,9 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   }
   if (length(exported)) {
     .ry_internal("importIntoEnv", environment, exported, ns, exported)
+  }
+  if (length(datasets)) {
+    .ry_internal("importIntoEnv", environment, datasets, lazydata, datasets)
   }
 }
 
@@ -503,6 +534,7 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
       count(length(plan$unregister), "registration undone", "registrations undone")
     },
     if (!is.null(plan$imports)) "imports rebuilt",
+    if (!is.null(plan$data)) "datasets reloaded",
     if (length(plan$s3_register) || length(plan$s3_unregister)) {
       count(length(plan$s3_register) + length(plan$s3_unregister), "S3 method re-registered",
             "S3 methods re-registered")

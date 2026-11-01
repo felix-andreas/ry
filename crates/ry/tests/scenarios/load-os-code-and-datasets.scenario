@@ -1,0 +1,43 @@
+# A package with Unix-only code and datasets loads both: `R/unix/` runs in the order
+# `Collate.unix` gives, the datasets in `data/` are reachable bare and through `::`, and a
+# reload picks up an edited or deleted dataset.
+
+requires ry-runtime
+
+file DESCRIPTION
+| Package: rates
+| Version: 0.1.0
+| Collate: 'curve.R'
+| Collate.unix: 'unix/platform.R' 'curve.R'
+file NAMESPACE
+| export(describe)
+file R/curve.R
+| describe <- function() paste(platform, nrow(yields), sum(spreads), codes$b)
+| order_seen <- c(order_seen, "curve")
+file R/unix/platform.R
+| platform <- "unix"
+| order_seen <- "platform"
+file R/windows/platform.R
+| platform <- "windows"
+file data/spreads.R
+| spreads <- c(1, 2, 3)
+file data/codes.csv
+| a;b
+| 1;x
+file tools/make-data.R
+| yields <- data.frame(t = 1:4)
+| save(yields, file = "data/yields.rda")
+
+run ry run --runtime ry tools/make-data.R
+expect exit 0
+
+run ry load -e "cat(describe(), order_seen, '\n')" -e "cat(rates::spreads, exists('yields', 'package:rates'), '\n')"
+expect exit 0
+expect stdout "unix 4 6 x platform curve"
+expect stdout "1 2 3 TRUE"
+
+run ry load -e "writeLines('spreads <- c(10, 20)', 'data/spreads.R')" -e "load_all()" -e "cat(sum(rates::spreads), sum(spreads), '\n')" -e "invisible(file.remove('data/codes.csv'))" -e "load_all()" -e "cat(exists('codes', 'package:rates'), '\n')"
+expect exit 0
+expect stderr "Reloaded rates: datasets reloaded"
+expect stdout "30 30"
+expect stdout "FALSE"

@@ -67,8 +67,8 @@ the console without loading the package at all.
 
 ## Differences from devtools
 
-Two things `devtools::load_all()` does are missing: `system.file()` does not find files under the
-package's `inst/`, and datasets in `data/` are not loaded.
+One thing `devtools::load_all()` does is missing: `system.file()` does not find files under the
+package's `inst/`.
 [Package loading](/reference/package-loading#limits) lists every difference.
 
 ## Which R runs your package

@@ -17,10 +17,22 @@ This page is the exact behavior.
   writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
   gives what a load would have computed
   ([lazy constants](/reference/type-system#lazy-constants)).
-- **Every other top-level statement** runs at load time, in `Collate` order, with the files that
-  `Collate` leaves out following in C-locale order.
+- **Every other top-level statement** runs at load time, in collation order. The code files are
+  those of `R/` and then those of `R/unix/` (`R/windows/` on Windows), as R CMD INSTALL finds them:
+  names that start with a letter or digit and end in `.R`, `.r`, `.S`, `.s` or `.q`. Collation
+  follows `Collate.unix` (`Collate.windows`) when `DESCRIPTION` has it, else `Collate`, whose entries
+  name subdirectory files as `unix/a.R`. Files the field leaves out follow, `R/` before `R/unix/` and
+  each in C-locale order; R CMD INSTALL would refuse such a package, but `load_all()` appends them
+  too.
 - **`NAMESPACE`** works as in an installed package: imports, `S3method()` registrations, and exports.
   With `export_all = TRUE` every object in the namespace is attached as `package:<name>`, as with
+  `load_all()`.
+- **Datasets in `data/`** are read into the namespace's lazy data the way `data()` reads them:
+  `.rda` and `.RData` files with `load()`, `.R` files with `sys.source(chdir = TRUE)`, and tables
+  with `read.table(header = TRUE, as.is = FALSE)`, which splits `.csv` files on `;` and `.tab` and
+  `.txt` files on whitespace. `pkg::name` finds a dataset there when no export has that name, and
+  the attached `package:<name>` holds a copy of each, which wins over an export of the same name.
+  Unlike an installed package, every dataset is read at load time whatever `LazyData` says, as with
   `load_all()`.
 - `Depends` packages are attached, `R/sysdata.rda` is loaded, `src/` is compiled with
   [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
@@ -52,16 +64,19 @@ A reload works out which top-level items changed and touches only those:
   statement like `f <- memoise(f)` sees `f` as it was at load time rather than wrapping it twice.
 - A `NAMESPACE` change rebuilds the imports or resyncs the exports, `.onLoad` runs again when you
   changed it, and a deleted S4 method or class is removed.
+- When a dataset file was added, changed or deleted, judged by the names, sizes and modification
+  times of the files in `data/`, every dataset is read again, and a deleted one is gone.
+  `R/sysdata.rda` is loaded again when its content changed.
 
 A console reloads before a command when the names, sizes or modification times of `DESCRIPTION`,
-`NAMESPACE` or the files in `R/` changed since the last load, so it never reads a file to find out.
+`NAMESPACE`, the code files in `R/` and `R/unix/`, `R/sysdata.rda` or the datasets in `data/`
+changed since the last load, so it never reads a file to find out.
 An edit under `src/` is not noticed, and neither is anything in a package whose first load failed:
 call `load_all()` after either.
 
 ## Limits
 
-- `system.file()` does not map a source package's `inst/` directory, and datasets in `data/` are not
-  loaded; `load_all()` does both.
+- `system.file()` does not map a source package's `inst/` directory; `load_all()` does.
 - `if` around directives in `NAMESPACE` is not evaluated; ry warns and ignores the directive.
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that

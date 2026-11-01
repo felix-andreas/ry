@@ -362,3 +362,74 @@ source R/b.R
 bind .onLoad from R/b.R:3:11
 run R/b.R:2 y <- z + 1
 run .onLoad
+
+#==== os_subdirectories
+#---- an_os_file_runs_after_the_files_of_r
+#~~~~ R/z.R
+level <- 1
+#~~~~ after R/unix/a.R
+level <- 2
+#++++
+source R/unix/a.R
+run R/z.R:1 level <- 1
+run R/unix/a.R:1 level <- 2
+
+#---- the_os_collation_field_wins_over_collate_and_reordering_reloads_in_full
+#~~~~ before DESCRIPTION
+Package: demo
+Version: 0.1.0
+Collate: 'b.R' 'unix/a.R'
+#~~~~ after DESCRIPTION
+Package: demo
+Version: 0.1.0
+Collate: 'b.R' 'unix/a.R'
+Collate.unix: 'unix/a.R' 'b.R'
+#~~~~ R/b.R
+level <- 1
+#~~~~ R/unix/a.R
+level <- 2
+#++++
+rebuild imports (0 directives)
+source R/unix/a.R
+source R/b.R
+run R/unix/a.R:1 level <- 2
+run R/b.R:1 level <- 1
+sync exports
+run .onLoad
+
+#==== datasets
+#---- an_added_dataset_loads_every_dataset
+#~~~~ R/a.R
+f <- function() 1
+#~~~~ data/prices.R
+prices <- c(1, 2)
+#~~~~ after data/rates.rda
+binary
+#++++
+load datasets data/prices.R data/rates.rda
+
+#---- a_changed_dataset_reloads_the_datasets
+#~~~~ R/a.R
+f <- function() 1
+#~~~~ before data/prices.R
+prices <- c(1, 2)
+#~~~~ after data/prices.R
+prices <- c(1, 2, 3)
+#++++
+load datasets data/prices.R
+
+#---- removing_the_last_dataset_clears_them
+#~~~~ R/a.R
+f <- function() 1
+#~~~~ before data/prices.R
+prices <- c(1, 2)
+#++++
+clear datasets
+
+#---- unchanged_datasets_need_nothing
+#~~~~ R/a.R
+f <- function() 1
+#~~~~ data/prices.R
+prices <- c(1, 2)
+#++++
+nothing to do
