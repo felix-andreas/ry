@@ -555,14 +555,76 @@ pub fn file_type_definitions<'db>(
 ) -> Vec<annotations::NamedDefinition<'db>> {
     let parse = parse(db, file);
     let root = parse.syntax_node();
-    let mut definitions = Vec::new();
-    for node in root
-        .children()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
-        definitions.extend(annotations::lower_annotation(db, &node).definitions);
+    let mut definitions: Vec<annotations::NamedDefinition<'db>> = Vec::new();
+    let mut inline_enabled = None;
+    for node in root.children() {
+        match node.kind() {
+            SyntaxKind::ANNOTATION => {
+                definitions.extend(annotations::lower_annotation(db, &node).definitions);
+            }
+            SyntaxKind::TYPE_DEFINITION => {
+                let enabled = *inline_enabled.get_or_insert_with(|| inline_annotations_enabled(db));
+                let paired = paired_comment_definition(&node).is_some();
+                for mut definition in annotations::lower_inline_annotation(db, &node).definitions {
+                    if paired {
+                        // One definition written two ways: on, the inline one wins; off, the
+                        // comment applies alone.
+                        if !enabled {
+                            continue;
+                        }
+                        definitions.retain(|known| known.name != definition.name);
+                    } else if !enabled {
+                        // Off, an inline definition types nothing, but its name stays declared
+                        // so uses of it are not also reported as unknown types.
+                        definition.body = types::unknown(db);
+                    }
+                    definitions.push(definition);
+                }
+            }
+            _ => {}
+        }
     }
     definitions
+}
+
+/// The `#:` block directly above an inline type definition when it defines the same
+/// name: then the two are one definition written two ways, not a duplicate.
+pub fn paired_comment_definition(definition: &SyntaxNode) -> Option<SyntaxNode> {
+    let name = definition_name(definition)?;
+    let mut newlines = 0;
+    let mut previous = definition.prev_sibling_or_token();
+    while let Some(element) = previous {
+        match element.kind() {
+            SyntaxKind::WHITESPACE => {}
+            SyntaxKind::NEWLINE if newlines == 0 => newlines += 1,
+            SyntaxKind::ANNOTATION => {
+                let comment = element.into_node()?;
+                let defines = comment
+                    .children()
+                    .filter(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
+                    .filter(|directive| {
+                        directive
+                            .children_with_tokens()
+                            .nth(1)
+                            .and_then(|element| element.into_token())
+                            .is_some_and(|word| matches!(word.text(), "type" | "alias"))
+                    })
+                    .any(|directive| definition_name(&directive).as_deref() == Some(name.as_str()));
+                return defines.then_some(comment);
+            }
+            _ => return None,
+        }
+        previous = element.prev_sibling_or_token();
+    }
+    None
+}
+
+/// The name a `#: @type` or `@alias` directive or an inline type definition declares.
+fn definition_name(node: &SyntaxNode) -> Option<String> {
+    node.children()
+        .find(|child| child.kind() == SyntaxKind::NAME)
+        .and_then(ast::Name::cast)
+        .and_then(|name| name.text())
 }
 
 #[salsa::tracked(returns(ref))]

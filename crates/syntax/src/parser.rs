@@ -638,25 +638,52 @@ impl Parser<'_, '_> {
 
     fn ann_union(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
+        // A leading `|` lines the members up when a union spans lines.
+        let mut open = self.ann_at(PIPE, end);
+        if open {
+            self.start(TYPE_UNION);
+            self.bump();
+            self.ann_trivia_continuing(end);
+        }
         self.ann_primary(end);
-        let mut members = 1usize;
         loop {
-            self.ann_trivia(end);
-            if self.ann_at(PIPE, end) {
-                if members == 1 {
-                    self.start_at(checkpoint, TYPE_UNION);
-                }
-                members += 1;
-                self.bump();
+            if self.inline_line_continues_with_pipe() {
                 self.ann_trivia_continuing(end);
-                self.ann_primary(end);
             } else {
+                self.ann_trivia(end);
+            }
+            if !self.ann_at(PIPE, end) {
                 break;
             }
+            if !open {
+                self.start_at(checkpoint, TYPE_UNION);
+                open = true;
+            }
+            self.bump();
+            self.ann_trivia_continuing(end);
+            self.ann_primary(end);
         }
-        if members > 1 {
+        if open {
             self.finish();
         }
+    }
+
+    /// An inline union continues on a line that starts with `|`. No R statement can start
+    /// with `|`, so reading that line as more of the type takes nothing away from R.
+    fn inline_line_continues_with_pipe(&self) -> bool {
+        if !self.inline_type || !self.inline_newlines_significant() {
+            return false;
+        }
+        let mut crossed_newline = false;
+        for token in &self.tokens[self.pos.min(self.tokens.len())..] {
+            match token.kind {
+                WHITESPACE | COMMENT => {}
+                NEWLINE => crossed_newline = true,
+                PIPE => return crossed_newline,
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn ann_primary(&mut self, end: usize) {

@@ -1,0 +1,219 @@
+#==== inline_type_definitions
+#---- nominal_definition_declares_a_type
+type UserId = integer
+f <- function(id: UserId) -> UserId id
+#++++
+f: fn(id: UserId) -> UserId
+
+#---- nominal_rejects_its_representation
+type UserId = integer
+f <- function(id: UserId) -> UserId id
+f(5L)
+#++++
+f: fn(id: UserId) -> UserId
+UserId
+63..65 error[type-mismatch] expected `UserId`, found `integer`
+
+#---- alias_is_structural
+alias Count = integer
+f <- function(n: Count) -> integer n
+f(5L)
+#++++
+f: fn(n: Count) -> integer
+integer
+
+#---- generic_alias
+alias Box<T> = list{value: T}
+unbox <- function<T>(b: Box<T>) -> T b$value
+x <- unbox(list(value = 1L))
+#++++
+unbox: <T> fn(b: Box<T>) -> T
+x: integer
+
+#---- constrained_binder
+alias Numeric<T: numeric> = T[]
+f <- function(x: Numeric<double>) -> double sum(x)
+#++++
+f: fn(x: Numeric<double>) -> double
+
+#---- multi_line_union
+alias Shape =
+  | :Circle(radius: double)
+  | :Rect(width: double, height: double)
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+#++++
+area: fn(s: Shape) -> double
+
+#---- definition_used_before_it_appears
+f <- function(id: UserId) -> UserId id
+type UserId = integer
+#++++
+f: fn(id: UserId) -> UserId
+
+#---- duplicate_inline_definitions
+type UserId = integer
+type UserId = character
+#++++
+0..21 error[annotation] the type name `UserId` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 22..45 another declaration of this name is here.
+22..45 error[annotation] the type name `UserId` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 0..21 another declaration of this name is here.
+
+#---- inline_and_comment_definitions_of_the_same_name_conflict_when_apart
+#: @type UserId {integer}
+
+x <- 1
+
+type UserId = integer
+#++++
+x: double
+3..25 error[annotation] the type name `UserId` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 35..56 another declaration of this name is here.
+35..56 error[annotation] the type name `UserId` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
+  = 3..25 another declaration of this name is here.
+
+#---- type_and_alias_stay_ordinary_names
+type <- "nominal"
+alias <- function(x) x
+y <- alias(type)
+#++++
+type: character
+alias: <T> fn(x: T) -> T
+y: character
+
+#---- definition_inside_a_function_is_an_error
+f <- function() {
+  type Inner = integer
+  1L
+}
+#++++
+f: fn() -> integer
+20..40 error[annotation] Type definitions are only allowed at the top level of a file.
+
+#==== nominal_constructors
+#---- constructor_introduces_the_nominal
+type UserId = integer
+id <- @UserId(5L)
+#++++
+id: UserId
+
+#---- constructor_checks_the_representation
+type UserId = integer
+id <- @UserId("five")
+#++++
+id: Unknown
+36..42 error[type-mismatch] expected `integer`, found `character`
+
+#---- single_line_union_with_leading_pipe
+alias Answer = | :Yes | :No
+a: Answer <- :Yes
+#++++
+a: Answer
+
+#---- constructor_with_type_arguments
+type Box<T> = list{value: T}
+b <- @Box<integer>(list(value = 1L))
+#++++
+b: Box<integer>
+
+#---- constructor_wraps_a_record
+type Point = record{x: double, y: double}
+p <- @Point((x = 1, y = 2))
+#++++
+p: Point
+
+#---- constructor_of_an_unknown_type
+id <- @Missing(5L)
+#++++
+id: integer
+7..14 error[annotation] I do not know the type `Missing`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- constructor_of_an_alias_is_an_error
+alias Count = integer
+n <- @Count(5L)
+#++++
+n: integer
+28..33 error[annotation] `@new` requires a nominal type declared with `@type`, but `Count` is an alias.
+
+#==== inline_coercions
+#---- new_binding
+type UserId = integer
+id: @new UserId <- 5L
+#++++
+id: UserId
+
+#---- trust_binding
+x: @trust integer <- readRDS("x.rds")
+#++++
+x: integer
+
+#---- if_unknown_binding
+frame <- data.frame(a = 1)
+gap: @if-unknown integer <- frame$a
+known: @if-unknown integer <- "a"
+#++++
+frame: Unknown
+gap: integer
+known: Unknown
+93..96 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `character`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
+
+#---- comment_and_inline_coercion_agree
+#: @trust integer
+x: @trust integer <- readRDS("x.rds")
+#++++
+x: integer
+
+#---- comment_and_inline_coercion_disagree
+#: @trust character
+x: @trust integer <- readRDS("x.rds")
+#++++
+x: integer
+30..37 warning[annotation-mismatch] this binding's inline annotation says `integer`, but its `#:` comment says `character`. ry applies the inline annotation's `@trust`; make the two agree, or delete one
+  = 10..19 the `#:` comment's type is here
+
+#==== paired_definitions
+#---- agreeing_pair_is_quiet
+#: @type Celsius {double}
+type Celsius = double
+#++++
+
+#---- pair_with_renamed_binders_agrees
+#: @alias Pair<T> {tuple{T, T}}
+alias Pair<U> = tuple{U, U}
+#++++
+
+
+#---- pair_bodies_disagree
+#: @type Celsius {double}
+type Celsius = integer
+x <- @Celsius(1L)
+#++++
+x: Celsius
+41..48 warning[annotation-mismatch] the inline definition of `Celsius` says `integer`, but the `#:` comment says `double`. ry uses the inline definition; make the two agree, or delete one
+  = 18..24 the `#:` comment's type is here
+
+#---- pair_kinds_disagree
+#: @alias Celsius {double}
+type Celsius = double
+#++++
+32..39 warning[annotation-mismatch] the inline definition makes `Celsius` a nominal type, but the `#:` comment declares it with `@alias`. ry uses the inline definition; make the two agree, or delete one
+  = 3..26 the `#:` comment's definition is here
+
+#---- pair_parameter_counts_disagree
+#: @alias Box<T> {list{value: T}}
+alias Box<T, U> = list{value: T}
+#++++
+43..49 warning[annotation-mismatch] the inline definition gives `Box` 2 type parameters, but the `#:` comment gives it 1. ry uses the inline definition; make the two agree, or delete one
+  = 13..16 the `#:` comment's type parameters are here
+
+#---- pair_constraints_disagree
+#: @alias Box<T: numeric> {list{value: T}}
+alias Box<T> = list{value: T}
+#++++
+53..54 warning[annotation-mismatch] the inline definition gives this type parameter no constraint, but the `#:` comment gives it `numeric`. ry uses the inline definition; make the two agree, or delete one
+  = 14..24 the `#:` comment's type parameter is here
