@@ -18,6 +18,7 @@ rowan.workspace = true
 rustc-hash.workspace = true
 regex.workspace = true
 fancy-regex = { version = "0.20", features = ["leftmost_longest"] }
+pcre2 = "0.2.11"
 flate2 = "1"
 libc = "0.2"
 stacker.workspace = true

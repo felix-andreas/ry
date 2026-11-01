@@ -2094,7 +2094,7 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
             regex::RegexBuilder::new(&if fixed {
                 regex::escape(pattern)
             } else {
-                crate::strings::translate_regex(pattern, true)
+                crate::strings::translate_regex(pattern)
             })
             .case_insensitive(ignore_case)
             .build()

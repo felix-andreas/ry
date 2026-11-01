@@ -1032,14 +1032,24 @@ impl Compiler {
                     self.emit(Op::Visible, &[]);
                 }
                 let srcrefs = values::get_attr(call, symbols().srcref);
+                // A statement's value is dead once the next statement starts, as GNU R pops it,
+                // so `dst` is cleared then: otherwise an object only that value held would
+                // survive a `gc()` in a later statement and miss its finalizer.
+                let null = self.constant(nil());
                 if srcrefs == nil() {
-                    for (_, statement) in args {
+                    for (index, (_, statement)) in args.iter().enumerate() {
+                        if index > 0 {
+                            self.emit(Op::Constant, &[dst, null]);
+                        }
                         self.expression(*statement, dst)?;
                     }
                     return Ok(());
                 }
                 let outer = self.srcref;
                 for (index, (_, statement)) in args.iter().enumerate() {
+                    if index > 0 {
+                        self.emit(Op::Constant, &[dst, null]);
+                    }
                     self.srcref = eval::statement_srcref(srcrefs, index + 1);
                     let srcref = self.constant(self.srcref);
                     self.emit(Op::SetSrcref, &[srcref]);
@@ -1569,6 +1579,11 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
         match step(machine, &mut pc) {
             Ok(Some(value)) => return Ok(value),
             Ok(None) => {
+                // Between instructions every live value sits in a register, so what an
+                // instruction rooted is released at once. Otherwise an object only a finished
+                // call held would stay alive until the body returns, past a later `gc()` and
+                // the finalizer GNU R runs there.
+                crate::heap().release_handles(machine.mark);
                 if pc < at
                     && let Some(tier) = interp().bytecode.tier
                 {
@@ -1789,7 +1804,6 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
         Op::Jump => {
             let target = operand(0);
             if target < at {
-                crate::heap().release_handles(machine.mark);
                 crate::unwind::poll_interrupt()?;
             }
             *pc = target;

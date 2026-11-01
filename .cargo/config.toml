@@ -1,0 +1,4 @@
+[env]
+# PCRE2 is compiled from the sources pcre2-sys bundles, so a release binary does not depend on the
+# system library being installed.
+PCRE2_SYS_STATIC = "1"

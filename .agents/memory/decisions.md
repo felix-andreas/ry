@@ -3882,3 +3882,33 @@ explicit allocators".
   be reinstalled when the linked base version changes.
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
+
+## `perl = TRUE` runs on PCRE2, linked statically
+
+- **Before.** Both regex dialects were translated into fancy-regex syntax
+  (`strings::translate`, with a Perl branch). PCRE features fancy-regex lacks failed to compile:
+  rcmdcheck's `(?<q>...)\g{q}`, lubridate's quantified lookahead `(?=\D+)?`, possessive and
+  atomic forms, and verbs beyond `(*UCP)`. Error messages were fancy-regex's, not PCRE's.
+- **Options weighed.** Extending the translator or fancy-regex would chase PCRE one construct at
+  a time and never match its backtracking semantics or messages exactly. Linking PCRE2 gives
+  GNU R's own engine for `perl = TRUE`, so behavior and messages are GNU R's by construction.
+- **Chosen.** The `pcre2` crate, compiled as `R_pcre2_prepare` compiles (UTF mode, `CASELESS`
+  for `ignore.case`, JIT when available), in `strings::compile_perl`. A compile failure warns
+  `PCRE pattern compilation error` with PCRE2's message and the rest of the pattern, then errors,
+  as GNU R does. `.cargo/config.toml` sets `PCRE2_SYS_STATIC=1`, so the bundled sources are built
+  and a release binary needs no system PCRE2.
+- **The TRE dialect stays on fancy-regex** behind the translator, which is now Extended-only.
+  Moving it to a real TRE build is the same trade and is open in `backlog.md`.
+
+## A dropped value is unrooted at once, so finalizers run at the next `gc()`
+
+- **Before.** `do_begin` kept the previous statement's value rooted while the next statement ran,
+  and compiled bodies released heap handles only on a backward jump, so a value a finished call
+  had rooted lived until the body returned. An object only such a value held survived a `gc()`
+  later in the same function, and its finalizer ran late (R6's finalizer tests failed this way).
+- **Now.** `do_begin` roots only the block's own value on the way out; compiled `{` clears its
+  result register before each later statement (GNU R's `POP`); and `bytecode::execute_code`
+  releases handles after every instruction. That is safe because between instructions every
+  live value sits in a register, the invariant the backward-jump release already relied on.
+  `evaluation__finalizer_run_points` pins it, and the bytecode, closure, promise and S3 cases
+  give the same output under `gctorture(TRUE)`.
