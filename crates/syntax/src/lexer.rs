@@ -208,12 +208,22 @@ impl Lexer<'_> {
             self.bump();
             let digits_start = self.pos;
             self.eat_while(|c| c.is_ascii_hexdigit());
-            if self.pos == digits_start {
+            let digits = self.pos - digits_start;
+            let fraction = self.eat(".");
+            if fraction {
+                self.eat_while(|c| c.is_ascii_hexdigit());
+            }
+            if digits == 0 && !fraction {
                 self.error("missing digits after `0x`", start);
                 return ERROR_TOKEN;
             }
-            // Hex-float exponent: `0x1Fp3`.
+            // Hex-float exponent: `0x1Fp3`, which a hexadecimal fraction like `0x1.8p1` requires.
+            let before_exponent = self.pos;
             self.exponent(['p', 'P']);
+            if fraction && self.pos == before_exponent {
+                self.error("a hexadecimal fraction needs a `p` exponent", start);
+                return ERROR_TOKEN;
+            }
         } else {
             self.eat_while(|c| c.is_ascii_digit());
             if self.eat(".") {

@@ -1866,6 +1866,47 @@ there was no evaluator, so there was no previous source of truth.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
+- **Top-level task callbacks live in libr's C, behind two interpreter hooks**
+  (`Hooks::run_task_callbacks`, `Hooks::task_callback_routine`). C packages register callbacks
+  through `Rf_addTaskCallback`, so the list has to be the C one; R's `addTaskCallback` reaches the
+  same list through the routine hook rather than keeping a second list in `interp`.
+  `session::run_toplevel` runs them after printing the task's warnings, as GNU R does.
+- **S4 objects get their S3 class vector from a cache keyed by class name** (`Globals::s4_extends`,
+  filled by `.cache_class` or by calling methods' `.extendsForS3` on a miss). This is GNU R's
+  `R_S4_extends_table`: without it, S3 dispatch on an S4 object sees only its own class and misses
+  methods for the classes it contains.
+- **`.External2` routines get GNU R's four-argument convention** `(call, op, args, env)`, which
+  rlang's `ffi_eval` relies on to evaluate in the caller's environment.
+
+# Decision record: one connection table, in the interpreter
+
+- **Previous sources of truth.** There were two connection tables. `libr::connections` held GNU R's
+  `struct Rconn` table (128 slots, the devices, custom connections, the C entry points) and an R
+  function table (`PRIMITIVES`) that nothing registered once the interpreter was installed.
+  `interp::connections` held a second, simpler table (its own connection records and class enum)
+  with the sinks, `cat` and every connection builtin the interpreter actually ran. A connection that
+  R code opened was therefore invisible to `R_GetConnection`, and a custom connection a package
+  created could not be read with `readLines`.
+- **What was duplicated.** The table, the slot numbering, the R-level connection object, every
+  device kind and the read and write paths existed twice, and the libr copy was dead code apart from
+  the C entry points. Warnings were also kept twice: libr's `Runtime.warnings` beside the
+  interpreter's deferred list.
+- **Target shape.** `interp::connections` owns the `#[repr(C)] Rconn`, the table, the devices, the
+  sinks and every connection internal, registered with GNU R 4.3.3's arities. A package's own C
+  method is called through the `Hooks::connection_method` hook, which libr implements with the
+  `native.c` trampolines under a native scope, and ry's methods that C calls enter through
+  `Hooks::enter_from_native`, libr's `enter`, so an R error becomes the `longjmp` C expects. The
+  default `vfprintf` is native code, so its address comes in as `Hooks::connection_vfprintf`. libr
+  keeps only `R_new_custom_connection`, `R_GetConnection`, `R_ReadConnection`, `R_WriteConnection`
+  and `ry_connection_count`. The interpreter's root source traces what the table holds (a text
+  output connection's variable and environment), replacing preserve and release. libr's
+  `boundary::warn` defers onto the interpreter's warning list, which the test exports read.
+- **Impact.** One table means R code and C code see the same connections, which makes the custom
+  connections of curl and processx readable from R. The interpreter still builds and tests
+  without libR, because native calls go through hooks whose defaults error, and the merged table
+  is about 750 lines smaller than the two were.
+- **`closeAllConnections` is not an internal.** GNU R defines it as a base closure over
+  `getAllConnections` and `close`, so ry registers no internal for it.
 
 # Decision record: the full C API surface and package installation
 
@@ -2054,6 +2095,30 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   and the reload logic are shared, because both backends apply the same plan; `test_load.rs` runs its
   namespace, S3/S4, collation and reload tests on both runtimes.
 
+# Decision record: package tests through the oracle
+
+`oracle packages` (`crates/oracle/src/packages.rs`, `contributing/corpus-and-oracle.md`, "Package
+tests") runs each corpus package's own `tests/` under GNU R and under ry and reports pass or fail per
+package. It is the measure for "the corpus packages run on ry".
+
+- **A file passes when its process exits with status 0, and a package passes when every file
+  does**, which is the rule `R CMD check` applies to `tests/`. The `.Rout` files are not diffed,
+  because they carry timings, temporary paths and addresses; testthat's summary counts are read
+  from them and reported beside the verdict, which shows how far a failing package got.
+- **The pass rate counts only packages GNU R passes**, because a package whose tests fail on GNU R
+  (missing suggests, network, a display) says nothing about ry.
+- **GNU R's results are reused** for the same package version unless `--rerun-gnu-r`, since they
+  change only when the corpus does.
+- **Each file runs in its own process group under `--timeout`**, killed as a group, because a hung
+  test usually leaves a child (callr, processx) behind that would keep the pipe open.
+- **Run it against a copied binary** (`ORACLE_RY`), not `target/release/ry`, because a full run is
+  long and a rebuild under it changes the engine midway.
+
+Fixes the harness drove are classes, each with an oracle case under `crates/oracle/cases/`:
+`deparse.level` naming in `cbind`/`rbind` (read from the closure's `...` promises), the `Summary`
+group's `na.rm` reordering, list comparison coercion, `return` outside a function, POSIXlt balancing,
+graphical parameters, `file.append` and anonymous `file()` buffers.
+
 # Decision record: base R's linear algebra
 
 - **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.
@@ -2066,14 +2131,40 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 
 The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by package in
 `builtin_libraries::implementation`. Each behavior was derived from GNU R's documentation and its
-observed output (the oracle cases `io__*`, `colours__*` and `utils__sizes_hashtabs_and_tools`),
-never from its C source.
+observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
+`utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **The session has only the null device.** `dev.cur()` is device 1, `.Device` and `.Devices` are
-  bound at startup, and every grDevices or graphics routine without an entry in the tables fails
-  with "graphics devices are not supported in ry yet" (`graphics::no_devices` is the fallback, so a
-  new routine needs no stub). `cairoProps` reports no cairo, so the default device is `pdf` and
-  `bitmapType` is `"Xlib"`, as in a headless build. A real device is a later step.
+- **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
+  xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
+  point size and the base graphics parameters. Output files follow GNU R for a device nothing was
+  drawn on: vector devices create their file at open (so a bad path fails there), `dev.off` on pdf
+  and cairo_pdf writes a valid PDF without pages, and bitmap devices write nothing, since they
+  write per finished page. Drawing routines check their arguments and a started plot, then return.
+  A real renderer would slot in behind the same table; nothing else reads pixels today.
+- **Display lists and snapshots stay empty until devices draw.** `dev.control` and
+  `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
+  GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
+  display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
+  `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
+  not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
+  and that belongs with real drawing, when the display list holds the calls to replay.
+- **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
+  (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
+  are rebound from the table after every change, `dev.set(1)` starts the default device but
+  reports device 1 as GNU R does, and any routine that needs a device opens
+  `getOption("device")` first, which is how a script with no device gets `pdf("Rplots.pdf")`.
+- **One copy of `par`.** GNU R keeps default and current parameters so a high-level call's inline
+  parameters apply for its duration; ry reads inline parameters from the call instead, so a single
+  `Pars` is the source of truth.
+- **Regions remember the unit they were set in** (`Margins`, `OuterMargins`, `PlotRegion`,
+  `FigureRegion` enums). Base graphics recomputes the others from that one when the device, `cex`,
+  `mex` or the layout changes, so `par(mai = ...)` followed by `par(cex = 2)` keeps the inches and
+  moves `mar`, and storing all units would let them drift apart.
+- **Text metrics are Helvetica's published AFM widths** (regular and bold; the oblique faces share
+  them) at the nearest whole point size, with the cap height for `strheight`. That matches the pdf
+  device's numbers exactly; bitmap devices in GNU R measure with cairo fonts and can differ.
+- **`cairoProps` reports cairo**, so `capabilities()` lists png, jpeg and tiff and the bitmap
+  devices take the cairo path, which needs no display.
 - **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
   low byte), because only the colour routines read it and the interpreter is single-threaded.
 - **`scan` is implemented in `utils.rs`, not `connections.rs`**, because `scan`, `readtablehead`

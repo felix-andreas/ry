@@ -43,6 +43,8 @@ pub enum Generic {
     /// S3 and S4 dispatch on the first argument (`length`, `[`, `as.character`, ...).
     Internal,
     Ops,
+    /// `%*%`, which dispatches on either operand through the `matrixOps` group.
+    MatrixOps,
     Math,
     Summary,
     Complex,

@@ -331,7 +331,7 @@ fn qr_routines_agree_with_gnu_r() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// The recorded expectations are what GNU R answers today.
+/// ry agrees with what this machine's GNU R answers today, not only with the recording.
 #[test]
 fn expectations_match_a_fresh_gnu_r_run() {
     if !gnu_r_available() {
@@ -346,9 +346,15 @@ fn expectations_match_a_fresh_gnu_r_run() {
         .expect("Rscript runs");
     assert!(status.success());
     let fresh = std::fs::read_to_string(&output).expect("the fresh recording");
-    let recorded = std::fs::read_to_string(expected_path()).expect("the recorded expectations");
+    // GNU R's QR routines call the system BLAS, whose summation order varies between builds,
+    // so a fresh run differs from the recording in the last bits, and in the arbitrary parts of
+    // a rank-deficient factorization. The check that matters is the one the recording feeds:
+    // ry agrees with this machine's GNU R under the same tolerances.
+    let problems: Vec<String> = parse_cases(&fresh).iter().flat_map(check_case).collect();
     assert!(
-        fresh == recorded,
-        "tests/data/linpack.expected is stale; regenerate it with tests/data/linpack.R"
+        problems.is_empty(),
+        "ry disagrees with a fresh GNU R run (regenerate tests/data/linpack.expected with \
+         tests/data/linpack.R if GNU R changed):\n{}",
+        problems.join("\n")
     );
 }

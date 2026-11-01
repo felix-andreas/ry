@@ -1,10 +1,11 @@
 //! The native routines of grDevices and graphics: colours, palettes, axis ticks, convex hulls
-//! and contour lines, which need no device, and the device and plotting routines.
+//! and contour lines, which need no device, and the devices and the base graphics engine.
 //!
-//! ry has no graphics devices yet, so a session behaves as one in which only the null device
-//! exists: `dev.cur()` is device 1, and every routine that would open or draw on a device fails
-//! with [`NO_DEVICES`]. The session reports neither cairo nor X11, as a headless build does,
-//! which makes the default device `pdf`, so loading the packages succeeds.
+//! Every device ry opens draws nothing. It keeps what R code can observe instead: the device
+//! list, the device size and text metrics, and the full set of base graphics parameters,
+//! which `plot.new`, `plot.window`, `layout` and the rest update as GNU R's base graphics
+//! does, so scripts that plot as a side effect run to completion and read back the same
+//! `par()` values.
 
 use crate::{
     builtin_libraries::{NativeCall, NativeFn},
@@ -41,67 +42,2753 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("makeQuartzDefault", |_| unsafe { scalar_bool(false) }),
     ("Type1FontInUse", |_| unsafe { scalar_bool(false) }),
     ("CIDFontInUse", |_| unsafe { scalar_bool(false) }),
-    ("devcur", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devnext", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devprev", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devset", |_| unsafe { scalar_integer(NULL_DEVICE) }),
-    ("devoff", |_| Ok(nil())),
-    ("devholdflush", |_| unsafe { scalar_integer(0) }),
+    ("devcur", do_dev_cur),
+    ("devnext", do_dev_next),
+    ("devprev", do_dev_prev),
+    ("devset", do_dev_set),
+    ("devoff", do_dev_off),
+    ("devholdflush", do_hold_flush),
     ("devAskNewPage", do_ask_new_page),
     ("getGraphicsEventEnv", |_| Ok(nil())),
-    ("PicTeX", no_devices),
-    ("PostScript", no_devices),
-    ("XFig", no_devices),
-    ("PDF", no_devices),
-    ("devCairo", no_devices),
-    ("Quartz", no_devices),
-    ("X11", no_devices),
-    ("savePlot", no_devices),
-    ("devcap", no_devices),
-    ("devcapture", no_devices),
-    ("devcontrol", no_devices),
-    ("devcopy", no_devices),
-    ("devdisplaylist", no_devices),
-    ("devsize", no_devices),
-    ("devUp", no_devices),
-    ("getSnapshot", no_devices),
-    ("playSnapshot", no_devices),
-    ("getGraphicsEvent", no_devices),
-    ("setGraphicsEventEnv", no_devices),
-    ("setPattern", no_devices),
-    ("setClipPath", no_devices),
-    ("setMask", no_devices),
-    ("defineGroup", no_devices),
-    ("useGroup", no_devices),
+    ("PicTeX", do_pictex),
+    ("PostScript", do_postscript),
+    ("XFig", do_xfig),
+    ("PDF", do_pdf),
+    ("devCairo", do_cairo),
+    ("Quartz", |_| {
+        Err(error(
+            "unable to create quartz() device target, given type may not be supported",
+        ))
+    }),
+    ("X11", do_x11),
+    ("savePlot", do_device_noop),
+    ("devcap", do_dev_capabilities),
+    ("devcapture", |_| Ok(nil())),
+    ("devcontrol", do_dev_control),
+    ("devcopy", do_device_noop),
+    ("devdisplaylist", do_dev_display_list),
+    ("devsize", do_dev_size),
+    ("devUp", do_dev_up),
+    ("getSnapshot", do_get_snapshot),
+    ("playSnapshot", do_play_snapshot),
+    ("getGraphicsEvent", no_events),
+    ("setGraphicsEventEnv", no_events),
+    ("setPattern", do_device_noop),
+    ("setClipPath", do_device_noop),
+    ("setMask", do_device_noop),
+    ("defineGroup", do_device_noop),
+    ("useGroup", do_device_noop),
 ];
 
 pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
     ("C_BinCount", do_bin_count),
+    ("C_par", do_par),
     ("C_StemLeaf", do_stem_leaf),
-    // Whether contour labels follow the contour, which every device ry could open does.
+    // Whether contour labels follow the contour, which every device ry opens does.
     ("C_contourDef", |_| unsafe { scalar_bool(true) }),
     ("RunregisterBase", |_| Ok(nil())),
+    ("C_plot_new", do_plot_new),
+    ("C_plot_window", do_plot_window),
+    ("C_layout", do_layout),
+    ("C_axis", do_axis),
+    ("C_strWidth", do_str_width),
+    ("C_strHeight", do_str_height),
+    ("C_convertX", do_convert_x),
+    ("C_convertY", do_convert_y),
+    ("C_persp", do_persp),
+    ("C_dendwindow", do_dend_window),
+    ("C_xspline", do_xspline),
+    ("C_plotXY", do_plot_xy),
+    ("C_locator", do_locator),
+    ("C_identify", do_identify),
+    ("C_abline", do_draw),
+    ("C_arrows", do_draw),
+    ("C_box", do_draw),
+    ("C_clip", do_draw),
+    ("C_contour", do_draw),
+    ("C_dend", do_draw),
+    ("C_erase", do_draw),
+    ("C_filledcontour", do_draw),
+    ("C_image", do_draw),
+    ("C_mtext", do_draw),
+    ("C_path", do_draw),
+    ("C_polygon", do_draw),
+    ("C_raster", do_draw),
+    ("C_rect", do_draw),
+    ("C_segments", do_draw),
+    ("C_symbols", do_draw),
+    ("C_text", do_draw),
+    ("C_title", do_draw),
 ];
-
-/// The error of every routine that needs a graphics device.
-pub const NO_DEVICES: &str = "graphics devices are not supported in ry yet";
-
-const NULL_DEVICE: i32 = 1;
 
 /// Binds `.Device` and `.Devices` in base as GNU R does at startup, for a session whose only
 /// device is the null device.
 pub unsafe fn define_device_variables() -> R<()> {
-    let name = scalar_string("null device")?;
-    crate::eval::define(symbols().dot_device, name, values::base_env())?;
-    let devices = values::list_vector(&[name])?;
-    crate::eval::define(values::install(".Devices")?, devices, values::base_env())?;
+    publish_devices()
+}
+
+/// How many devices can be open at once, counting the null device, as in GNU R.
+const MAX_DEVICES: usize = 64;
+
+const NULL_DEVICE_NAME: &str = "null device";
+
+thread_local! {
+    static DEVICES: RefCell<DeviceTable> = RefCell::new(DeviceTable::new());
+}
+
+/// The open devices. Slot 0 is the null device, which always exists and is never stored, so
+/// a device's number is its slot plus one.
+struct DeviceTable {
+    slots: Vec<Option<Device>>,
+    current: usize,
+    /// The length of `.Devices`, which GNU R never shrinks: a closed device leaves `""`.
+    listed: usize,
+}
+
+impl DeviceTable {
+    fn new() -> Self {
+        DeviceTable {
+            slots: (0..MAX_DEVICES).map(|_| None).collect(),
+            current: 0,
+            listed: 1,
+        }
+    }
+}
+
+/// A device that draws nothing but keeps the state R code can observe: its size, its text
+/// metrics and the base graphics parameters.
+struct Device {
+    name: &'static str,
+    /// The file the device was opened on, as given, which `.Devices` reports as the entry's
+    /// `filepath` attribute. `pdf(NULL)` has none.
+    file: Option<String>,
+    /// Width and height in inches.
+    size: [f64; 2],
+    /// The size of a device unit in inches: a big point for vector devices, a pixel for
+    /// bitmap ones.
+    unit_inches: f64,
+    /// Whether device y coordinates grow downwards, as in a bitmap.
+    y_down: bool,
+    pointsize: f64,
+    display_list: bool,
+    /// Whether `plot.new` has run on this device, without which nothing can be drawn.
+    started: bool,
+    pars: Pars,
+}
+
+/// The base graphics parameters of a device. GNU R keeps two copies, the defaults that
+/// `par` sets and the current values that a high-level call's inline parameters change for
+/// its duration; ry reads inline parameters straight from the call, so one copy is enough.
+#[derive(Clone)]
+struct Pars {
+    adj: f64,
+    ann: bool,
+    ask: bool,
+    bg: Colour,
+    bty: char,
+    cex: f64,
+    cex_axis: f64,
+    cex_lab: f64,
+    cex_main: f64,
+    cex_sub: f64,
+    col: Colour,
+    col_axis: Colour,
+    col_lab: Colour,
+    col_main: Colour,
+    col_sub: Colour,
+    crt: f64,
+    err: i32,
+    family: String,
+    fg: Colour,
+    font: i32,
+    font_axis: i32,
+    font_lab: i32,
+    font_main: i32,
+    font_sub: i32,
+    lab: [i32; 3],
+    las: i32,
+    lend: i32,
+    lheight: f64,
+    ljoin: i32,
+    lmitre: f64,
+    lty: u32,
+    lwd: f64,
+    mex: f64,
+    mgp: [f64; 3],
+    mkh: f64,
+    new: bool,
+    pch: Pch,
+    ps: i32,
+    pty: char,
+    smo: f64,
+    srt: f64,
+    tck: f64,
+    tcl: f64,
+    usr: [f64; 4],
+    xaxp: [f64; 3],
+    xaxs: char,
+    xaxt: char,
+    xlog: bool,
+    xpd: i32,
+    yaxp: [f64; 3],
+    yaxs: char,
+    yaxt: char,
+    ylbias: f64,
+    ylog: bool,
+    outer: OuterMargins,
+    margins: Margins,
+    plot_region: PlotRegion,
+    figure_region: FigureRegion,
+    layout: Layout,
+    /// The character expansion that turns margin lines into inches (`par("csi")`). `plot.new`
+    /// and the layout functions set it from `cex`; setting `cex` alone leaves it.
+    margin_cex: f64,
+    /// Whether the plot region is square, which `pty = "s"` asks for from the next
+    /// `plot.new` or region change on.
+    square: bool,
+}
+
+#[derive(Clone, PartialEq)]
+enum Pch {
+    Code(i32),
+    Text(String),
+}
+
+/// The outer margins in the unit they were last set in: lines (`oma`), inches (`omi`) or the
+/// inner region as a fraction of the device (`omd`).
+#[derive(Clone, Copy)]
+enum OuterMargins {
+    Lines([f64; 4]),
+    Inches([f64; 4]),
+    Inner([f64; 4]),
+}
+
+/// The figure margins in the unit they were last set in: lines (`mar`) or inches (`mai`).
+#[derive(Clone, Copy)]
+enum Margins {
+    Lines([f64; 4]),
+    Inches([f64; 4]),
+}
+
+/// How the plot region is placed in the figure: inside the margins, at a fraction of the
+/// figure (`plt`), or centred with a size in inches (`pin`).
+#[derive(Clone, Copy)]
+enum PlotRegion {
+    Margins,
+    Fraction([f64; 4]),
+    Size([f64; 2]),
+}
+
+/// How the figure region is placed in the inner region: the current cell of the layout, a
+/// fraction of the inner region (`fig`), or centred in the layout cell with a size in inches
+/// (`fin`).
+#[derive(Clone, Copy)]
+enum FigureRegion {
+    Layout,
+    Fraction([f64; 4]),
+    Size([f64; 2]),
+}
+
+/// An array of figures from `mfrow`, `mfcol` or `layout`. `cells` holds the figure number of
+/// each cell, row by row.
+#[derive(Clone)]
+struct Layout {
+    rows: usize,
+    columns: usize,
+    cells: Vec<usize>,
+    figures: usize,
+    widths: Vec<f64>,
+    heights: Vec<f64>,
+    cm_widths: Vec<bool>,
+    cm_heights: Vec<bool>,
+    respect: bool,
+    /// The figure being drawn, from 1; the last one before the first plot, so that the
+    /// next `plot.new` starts a page.
+    current: usize,
+}
+
+impl Layout {
+    fn grid(rows: usize, columns: usize, by_column: bool) -> Self {
+        let cells = (0..rows * columns)
+            .map(|cell| {
+                let (row, column) = (cell / columns, cell % columns);
+                if by_column {
+                    column * rows + row + 1
+                } else {
+                    cell + 1
+                }
+            })
+            .collect();
+        Layout {
+            rows,
+            columns,
+            cells,
+            figures: rows * columns,
+            widths: vec![1.0; columns],
+            heights: vec![1.0; rows],
+            cm_widths: vec![false; columns],
+            cm_heights: vec![false; rows],
+            respect: false,
+            current: rows * columns,
+        }
+    }
+}
+
+/// The text size reduction GNU R applies to an array of figures.
+fn layout_cex(rows: usize, columns: usize) -> f64 {
+    if rows >= 3 || columns >= 3 {
+        0.66
+    } else if rows == 2 && columns == 2 {
+        0.83
+    } else {
+        1.0
+    }
+}
+
+const BLACK: Colour = 0xFF00_0000;
+const WHITE: Colour = 0xFFFF_FFFF;
+
+/// The line type codes: four bits per dash length, the first dash in the low bits.
+const LTY_BLANK: u32 = u32::MAX;
+const LTY_SOLID: u32 = 0;
+const LINE_TYPES: [(&str, u32); 7] = [
+    ("blank", LTY_BLANK),
+    ("solid", LTY_SOLID),
+    ("dashed", 0x44),
+    ("dotted", 0x31),
+    ("dotdash", 0x3431),
+    ("longdash", 0x37),
+    ("twodash", 0x2262),
+];
+
+impl Pars {
+    fn new(pointsize: f64, bg: Colour, fg: Colour) -> Self {
+        Pars {
+            adj: 0.5,
+            ann: true,
+            ask: false,
+            bg,
+            bty: 'o',
+            cex: 1.0,
+            cex_axis: 1.0,
+            cex_lab: 1.0,
+            cex_main: 1.2,
+            cex_sub: 1.0,
+            col: fg,
+            col_axis: BLACK,
+            col_lab: BLACK,
+            col_main: BLACK,
+            col_sub: BLACK,
+            crt: 0.0,
+            err: 0,
+            family: String::new(),
+            fg,
+            font: 1,
+            font_axis: 1,
+            font_lab: 1,
+            font_main: 2,
+            font_sub: 1,
+            lab: [5, 5, 7],
+            las: 0,
+            lend: 0,
+            lheight: 1.0,
+            ljoin: 0,
+            lmitre: 10.0,
+            lty: LTY_SOLID,
+            lwd: 1.0,
+            mex: 1.0,
+            mgp: [3.0, 1.0, 0.0],
+            mkh: 0.001,
+            new: false,
+            pch: Pch::Code(1),
+            ps: pointsize.round() as i32,
+            pty: 'm',
+            smo: 1.0,
+            srt: 0.0,
+            tck: values::na_real(),
+            tcl: -0.5,
+            usr: [0.0, 1.0, 0.0, 1.0],
+            xaxp: [0.0, 1.0, 5.0],
+            xaxs: 'r',
+            xaxt: 's',
+            xlog: false,
+            xpd: 0,
+            yaxp: [0.0, 1.0, 5.0],
+            yaxs: 'r',
+            yaxt: 's',
+            ylbias: 0.2,
+            ylog: false,
+            outer: OuterMargins::Lines([0.0; 4]),
+            margins: Margins::Lines([5.1, 4.1, 4.1, 2.1]),
+            plot_region: PlotRegion::Margins,
+            figure_region: FigureRegion::Layout,
+            layout: Layout::grid(1, 1, false),
+            margin_cex: 1.0,
+            square: false,
+        }
+    }
+}
+
+/// The parameters `par` reports but refuses to set.
+const READ_ONLY_PARS: [&str; 6] = ["cin", "cra", "csi", "cxy", "din", "page"];
+
+// Device geometry. Regions are `[x0, x1, y0, y1]` and margins `[bottom, left, top, right]`,
+// as in `par`.
+
+impl Device {
+    /// `par("cin")`: the default character cell in inches.
+    fn char_inches(&self) -> [f64; 2] {
+        [0.9 * self.pointsize / 72.0, 1.2 * self.pointsize / 72.0]
+    }
+
+    /// `par("csi")`: the height of a margin line in inches, before `mex`.
+    fn line_inches(&self) -> f64 {
+        self.char_inches()[1] * self.pars.margin_cex
+    }
+
+    fn outer_inches(&self) -> [f64; 4] {
+        let [width, height] = self.size;
+        match self.pars.outer {
+            OuterMargins::Lines(lines) => {
+                lines.map(|line| line * self.pars.mex * self.line_inches())
+            }
+            OuterMargins::Inches(inches) => inches,
+            OuterMargins::Inner([x0, x1, y0, y1]) => [
+                y0 * height,
+                x0 * width,
+                (1.0 - y1) * height,
+                (1.0 - x1) * width,
+            ],
+        }
+    }
+
+    /// `par("omd")`: the inner region as a fraction of the device.
+    fn inner_region(&self) -> [f64; 4] {
+        let [width, height] = self.size;
+        let [bottom, left, top, right] = self.outer_inches();
+        [
+            left / width,
+            1.0 - right / width,
+            bottom / height,
+            1.0 - top / height,
+        ]
+    }
+
+    fn inner_size(&self) -> [f64; 2] {
+        let [x0, x1, y0, y1] = self.inner_region();
+        [(x1 - x0) * self.size[0], (y1 - y0) * self.size[1]]
+    }
+
+    /// `par("fig")`: the figure region as a fraction of the inner region.
+    fn figure_region(&self) -> [f64; 4] {
+        let inner = self.inner_size();
+        let cell = layout_region(&self.pars.layout, inner);
+        match self.pars.figure_region {
+            FigureRegion::Layout => cell,
+            FigureRegion::Fraction(region) => region,
+            FigureRegion::Size([width, height]) => {
+                let centre = [(cell[0] + cell[1]) / 2.0, (cell[2] + cell[3]) / 2.0];
+                let half = [width / inner[0] / 2.0, height / inner[1] / 2.0];
+                [
+                    centre[0] - half[0],
+                    centre[0] + half[0],
+                    centre[1] - half[1],
+                    centre[1] + half[1],
+                ]
+            }
+        }
+    }
+
+    /// `par("fin")`.
+    fn figure_size(&self) -> [f64; 2] {
+        let [x0, x1, y0, y1] = self.figure_region();
+        let inner = self.inner_size();
+        [(x1 - x0) * inner[0], (y1 - y0) * inner[1]]
+    }
+
+    /// `par("mai")`.
+    fn margin_inches(&self) -> [f64; 4] {
+        match self.pars.margins {
+            Margins::Lines(lines) => lines.map(|line| line * self.pars.mex * self.line_inches()),
+            Margins::Inches(inches) => inches,
+        }
+    }
+
+    /// `par("plt")`: the plot region as a fraction of the figure region.
+    fn plot_region(&self) -> [f64; 4] {
+        let [width, height] = self.figure_size();
+        let region = match self.pars.plot_region {
+            PlotRegion::Fraction(region) => region,
+            PlotRegion::Size(size) => {
+                let half = [size[0] / width / 2.0, size[1] / height / 2.0];
+                [0.5 - half[0], 0.5 + half[0], 0.5 - half[1], 0.5 + half[1]]
+            }
+            PlotRegion::Margins => {
+                let [bottom, left, top, right] = self.margin_inches();
+                [
+                    left / width,
+                    1.0 - right / width,
+                    bottom / height,
+                    1.0 - top / height,
+                ]
+            }
+        };
+        if !self.pars.square {
+            return region;
+        }
+        let plot = [
+            (region[1] - region[0]) * width,
+            (region[3] - region[2]) * height,
+        ];
+        let side = plot[0].min(plot[1]);
+        let centre = [(region[0] + region[1]) / 2.0, (region[2] + region[3]) / 2.0];
+        let half = [side / width / 2.0, side / height / 2.0];
+        [
+            centre[0] - half[0],
+            centre[0] + half[0],
+            centre[1] - half[1],
+            centre[1] + half[1],
+        ]
+    }
+
+    /// `par("pin")`.
+    fn plot_size(&self) -> [f64; 2] {
+        let [x0, x1, y0, y1] = self.plot_region();
+        let figure = self.figure_size();
+        [(x1 - x0) * figure[0], (y1 - y0) * figure[1]]
+    }
+
+    /// The width of the user coordinate range of each axis, in data units rather than
+    /// decades on a log axis, as `par("cxy")` measures it.
+    fn user_extent(&self) -> [f64; 2] {
+        let usr = self.pars.usr;
+        let extent = |low: f64, high: f64, log: bool| {
+            if log {
+                10f64.powf(high) - 10f64.powf(low)
+            } else {
+                high - low
+            }
+        };
+        [
+            extent(usr[0], usr[1], self.pars.xlog),
+            extent(usr[2], usr[3], self.pars.ylog),
+        ]
+    }
+
+    /// Whether the next `plot.new` starts a new page (`par("page")`).
+    fn page(&self) -> bool {
+        !self.pars.new && self.pars.layout.current == self.pars.layout.figures
+    }
+
+    /// The device coordinates of the corners of the device.
+    fn device_extent(&self) -> [f64; 4] {
+        let [width, height] = self.size.map(|inches| inches / self.unit_inches);
+        if self.y_down {
+            [0.0, width, height, 0.0]
+        } else {
+            [0.0, width, 0.0, height]
+        }
+    }
+}
+
+/// The region of the layout's current figure as a fraction of an inner region of `inner`
+/// inches. Centimetre widths and heights are absolute; the others share the rest in
+/// proportion, at the same scale in both directions when the layout respects them.
+fn layout_region(layout: &Layout, inner: [f64; 2]) -> [f64; 4] {
+    let absolute = |sizes: &[f64], cm: &[bool]| -> f64 {
+        sizes
+            .iter()
+            .zip(cm)
+            .filter(|(_, cm)| **cm)
+            .map(|(size, _)| size / 2.54)
+            .sum()
+    };
+    let relative = |sizes: &[f64], cm: &[bool]| -> f64 {
+        sizes
+            .iter()
+            .zip(cm)
+            .filter(|(_, cm)| !**cm)
+            .map(|(size, _)| *size)
+            .sum()
+    };
+    let fixed = [
+        absolute(&layout.widths, &layout.cm_widths),
+        absolute(&layout.heights, &layout.cm_heights),
+    ];
+    let shares = [
+        relative(&layout.widths, &layout.cm_widths),
+        relative(&layout.heights, &layout.cm_heights),
+    ];
+    let mut scale = [0, 1].map(|axis| {
+        if shares[axis] > 0.0 {
+            (inner[axis] - fixed[axis]).max(0.0) / shares[axis]
+        } else {
+            0.0
+        }
+    });
+    if layout.respect {
+        let common = scale[0].min(scale[1]);
+        scale = [common, common];
+    }
+    let inches = |sizes: &[f64], cm: &[bool], scale: f64| -> Vec<f64> {
+        sizes
+            .iter()
+            .zip(cm)
+            .map(|(size, cm)| if *cm { size / 2.54 } else { size * scale })
+            .collect()
+    };
+    let widths = inches(&layout.widths, &layout.cm_widths, scale[0]);
+    let heights = inches(&layout.heights, &layout.cm_heights, scale[1]);
+    let offset = [
+        (inner[0] - widths.iter().sum::<f64>()) / 2.0,
+        (inner[1] - heights.iter().sum::<f64>()) / 2.0,
+    ];
+    let mut rows = (usize::MAX, 0);
+    let mut columns = (usize::MAX, 0);
+    for (cell, figure) in layout.cells.iter().enumerate() {
+        if *figure == layout.current {
+            let (row, column) = (cell / layout.columns, cell % layout.columns);
+            rows = (rows.0.min(row), rows.1.max(row));
+            columns = (columns.0.min(column), columns.1.max(column));
+        }
+    }
+    if rows.0 == usize::MAX {
+        return [0.0, 1.0, 0.0, 1.0];
+    }
+    let left = offset[0] + widths[..columns.0].iter().sum::<f64>();
+    let right = left + widths[columns.0..=columns.1].iter().sum::<f64>();
+    let top = offset[1] + heights[..rows.0].iter().sum::<f64>();
+    let bottom = top + heights[rows.0..=rows.1].iter().sum::<f64>();
+    [
+        left / inner[0],
+        right / inner[0],
+        1.0 - bottom / inner[1],
+        1.0 - top / inner[1],
+    ]
+}
+
+/// The row and column of the top-left cell of the layout's current figure, from 1.
+fn current_cell(layout: &Layout) -> [usize; 2] {
+    layout
+        .cells
+        .iter()
+        .position(|figure| *figure == layout.current)
+        .map_or([1, 1], |cell| {
+            [cell / layout.columns + 1, cell % layout.columns + 1]
+        })
+}
+
+// The device table and `.Devices`.
+
+/// Runs `action` on the current device, opening the default device first when only the null
+/// device exists, as GNU R does for every routine that needs a device.
+unsafe fn with_device<T>(action: impl FnOnce(&mut Device) -> R<T>) -> R<T> {
+    if DEVICES.with(|devices| devices.borrow().current) == 0 {
+        open_default_device()?;
+    }
+    DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        let current = devices.current;
+        match devices.slots.get_mut(current).and_then(Option::as_mut) {
+            Some(device) => action(device),
+            None => Err(error("no active or default device")),
+        }
+    })
+}
+
+/// Like [`with_device`], for a routine that draws: drawing makes the next `plot.new` move to
+/// a fresh figure even after `par(new = TRUE)`.
+unsafe fn with_plot<T>(action: impl FnOnce(&mut Device) -> R<T>) -> R<T> {
+    with_started_plot(|device| {
+        device.pars.new = false;
+        action(device)
+    })
+}
+
+/// Like [`with_device`], for a routine that needs the coordinates of a plot started with
+/// `plot.new`.
+unsafe fn with_started_plot<T>(action: impl FnOnce(&mut Device) -> R<T>) -> R<T> {
+    with_device(|device| {
+        if !device.started {
+            return Err(error("plot.new has not been called yet"));
+        }
+        action(device)
+    })
+}
+
+/// Calls `getOption("device")`, which is a device function or the name of one.
+unsafe fn open_default_device() -> R<()> {
+    let option = crate::envir::get_option("device");
+    let function = if values::is_function(option) {
+        option
+    } else if let Some(name) =
+        values::first_string(option).filter(|_| option.kind() == SexpType::String)
+    {
+        let lookup = values::call(values::install("match.fun")?, &[scalar_string(&name)?])?;
+        crate::heap().root(lookup);
+        crate::eval::eval(lookup, values::global_env())?
+    } else {
+        return Err(error("no active or default device"));
+    };
+    crate::heap().root(function);
+    crate::eval::apply(nil(), function, &[], values::global_env())?;
     Ok(())
 }
 
-/// The routines that draw on or query a device, which are every graphics routine the table
-/// above leaves out.
-pub unsafe fn no_devices(_: &NativeCall<'_>) -> R<Sexp> {
-    Err(error(NO_DEVICES))
+/// Adds `device` in the first free slot and makes it current.
+unsafe fn add_device(device: Device) -> R<()> {
+    DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        let Some(slot) = (1..MAX_DEVICES).find(|slot| devices.slots[*slot].is_none()) else {
+            return Err(error("too many open devices"));
+        };
+        devices.slots[slot] = Some(device);
+        devices.current = slot;
+        devices.listed = devices.listed.max(slot + 1);
+        Ok(())
+    })?;
+    publish_devices()
+}
+
+/// The next open device after slot `from`, wrapping around, or the null device.
+fn next_device(devices: &DeviceTable, from: usize) -> usize {
+    // The wrap includes `from` itself, so a lone open device is its own successor.
+    (from + 1..MAX_DEVICES)
+        .chain(1..(from + 1).min(MAX_DEVICES))
+        .find(|slot| devices.slots[*slot].is_some())
+        .unwrap_or(0)
+}
+
+fn previous_device(devices: &DeviceTable, from: usize) -> usize {
+    (1..from.min(MAX_DEVICES))
+        .rev()
+        .chain((from.max(1)..MAX_DEVICES).rev())
+        .find(|slot| devices.slots[*slot].is_some())
+        .unwrap_or(0)
+}
+
+/// Rebinds `.Devices` and `.Device` in base to the device table. Like GNU R's, `.Devices` is a
+/// pairlist of device names, and the name of a device opened on a file carries the file as
+/// its `filepath` attribute.
+unsafe fn publish_devices() -> R<()> {
+    let (entries, current) = DEVICES.with(|devices| {
+        let devices = devices.borrow();
+        let entries: Vec<(&'static str, Option<String>)> = (0..devices.listed)
+            .map(|slot| match devices.slots[slot].as_ref() {
+                _ if slot == 0 => (NULL_DEVICE_NAME, None),
+                Some(device) => (device.name, device.file.clone()),
+                None => ("", None),
+            })
+            .collect();
+        let current = entries
+            .get(devices.current)
+            .map_or(NULL_DEVICE_NAME, |(name, _)| name);
+        (entries, current)
+    });
+    let mut list = nil();
+    for (name, file) in entries.iter().rev() {
+        let entry = scalar_string(name)?;
+        if let Some(file) = file {
+            values::set_attr(entry, values::install("filepath")?, scalar_string(file)?)?;
+        }
+        list = values::cons(entry, list)?;
+    }
+    let base = values::base_env();
+    crate::eval::define(values::install(".Devices")?, list, base)?;
+    crate::eval::define(symbols().dot_device, scalar_string(current)?, base)?;
+    Ok(())
+}
+
+/// A device argument as a device number from 1, the null device for anything else.
+unsafe fn device_number(value: Sexp) -> usize {
+    let number = values::as_integer_scalar(value);
+    if number == NA_INTEGER || number < 1 {
+        0
+    } else {
+        (number as usize - 1).min(MAX_DEVICES - 1)
+    }
+}
+
+unsafe fn device_result(slot: usize) -> R<Sexp> {
+    scalar_integer(slot as i32 + 1)
+}
+
+// grDevices: opening devices.
+
+/// The paper sizes `postscript`, `xfig` and `pdf` know, in inches.
+fn paper_size(paper: &str) -> Option<[f64; 2]> {
+    let a4 = [21.0 / 2.54, 29.7 / 2.54];
+    match paper.to_ascii_lowercase().as_str() {
+        "a4" => Some(a4),
+        "a4r" => Some([a4[1], a4[0]]),
+        "letter" | "us" => Some([8.5, 11.0]),
+        "usr" => Some([11.0, 8.5]),
+        "legal" => Some([8.5, 14.0]),
+        "executive" => Some([7.25, 10.5]),
+        _ => None,
+    }
+}
+
+/// The size of a paper device: the given width and height, or the paper less a quarter-inch
+/// margin all round when they are zero, turned sideways when `horizontal`.
+unsafe fn paper_device_size(paper: Sexp, width: Sexp, height: Sexp, horizontal: bool) -> [f64; 2] {
+    let given = [
+        values::as_real_scalar(width),
+        values::as_real_scalar(height),
+    ];
+    if given.iter().all(|size| size.is_finite() && *size > 0.0) {
+        return given;
+    }
+    let mut paper =
+        values::first_string(paper).map_or_else(String::new, |paper| paper.into_owned());
+    if paper == "default" {
+        paper = values::first_string(crate::envir::get_option("papersize"))
+            .map_or_else(|| "a4".to_owned(), |paper| paper.into_owned());
+    }
+    let [paper_width, paper_height] = paper_size(&paper).unwrap_or([21.0 / 2.54, 29.7 / 2.54]);
+    let size = [paper_width - 0.5, paper_height - 0.5];
+    if horizontal { [size[1], size[0]] } else { size }
+}
+
+unsafe fn colour_arg(value: Sexp, default: Colour) -> R<Colour> {
+    if value == nil() || length(value) == 0 {
+        return Ok(default);
+    }
+    colour_element(value, 0)
+}
+
+/// The file a device's `file` argument names: `NULL` and `""` name none.
+unsafe fn device_file(file: Sexp) -> Option<String> {
+    values::first_string(file)
+        .filter(|name| file.kind() == SexpType::String && !name.is_empty())
+        .map(|name| name.into_owned())
+}
+
+/// Where a device opened on `file` writes its first page, with a `%d`-style conversion
+/// filled in and `~` expanded. A pipe (`|command`) writes no file.
+fn output_path(file: &str) -> Option<String> {
+    if file.starts_with('|') {
+        return None;
+    }
+    let path = first_page_name(file);
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return Some(format!("{home}/{rest}"));
+    }
+    Some(path)
+}
+
+/// A file name with its `%d` (or `%03d`) conversion filled in with 1 and `%%` unescaped.
+fn first_page_name(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut characters = name.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '%' {
+            result.push(character);
+            continue;
+        }
+        let mut spec = String::new();
+        while let Some(next) = characters.peek().copied() {
+            if next.is_ascii_digit() {
+                spec.push(next);
+                characters.next();
+            } else {
+                break;
+            }
+        }
+        match characters.next() {
+            Some('d') => {
+                let width: usize = spec.parse().unwrap_or(0);
+                result.push_str(&format!("{:0width$}", 1, width = width));
+            }
+            Some('%') => result.push('%'),
+            Some(other) => {
+                result.push('%');
+                result.push_str(&spec);
+                result.push(other);
+            }
+            None => result.push('%'),
+        }
+    }
+    result
+}
+
+struct DeviceSpec {
+    name: &'static str,
+    file: Option<String>,
+    /// A bitmap device writes its file when a page is finished, so one that never draws
+    /// leaves no file; a vector device opens its file at once.
+    bitmap: bool,
+    size: [f64; 2],
+    unit_inches: f64,
+    y_down: bool,
+    pointsize: f64,
+    bg: Colour,
+    fg: Colour,
+}
+
+unsafe fn open_device(spec: DeviceSpec) -> R<Sexp> {
+    if !(spec.size[0] > 0.0 && spec.size[1] > 0.0)
+        || !spec.pointsize.is_finite()
+        || spec.pointsize <= 0.0
+    {
+        return Err(error(format!("unable to start {} device", spec.name)));
+    }
+    if !spec.bitmap
+        && let Some(path) = spec.file.as_deref().and_then(output_path)
+    {
+        std::fs::File::create(&path)
+            .map_err(|_| error(format!("cannot open file '{path}'")))?;
+    }
+    add_device(Device {
+        name: spec.name,
+        file: spec.file,
+        size: spec.size,
+        unit_inches: spec.unit_inches,
+        y_down: spec.y_down,
+        pointsize: spec.pointsize,
+        display_list: false,
+        started: false,
+        pars: Pars::new(spec.pointsize, spec.bg, spec.fg),
+    })?;
+    Ok(nil())
+}
+
+/// `pdf(file, paper, family, encoding, bg, fg, width, height, pointsize, ...)`.
+unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
+    let size = paper_device_size(call.arg(1), call.arg(6), call.arg(7), false);
+    let spec = DeviceSpec {
+        name: "pdf",
+        file: device_file(call.arg(0)),
+        bitmap: false,
+        size,
+        unit_inches: 1.0 / 72.0,
+        y_down: false,
+        pointsize: values::as_real_scalar(call.arg(8)),
+        bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
+        fg: colour_arg(call.arg(5), BLACK)?,
+    };
+    open_device(spec)
+}
+
+/// `postscript(file, paper, family, encoding, bg, fg, width, height, horizontal, pointsize,
+/// ...)`.
+unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
+    let horizontal = values::as_logical_scalar(call.arg(8)) == 1;
+    let spec = DeviceSpec {
+        name: "postscript",
+        file: device_file(call.arg(0)),
+        bitmap: false,
+        size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
+        unit_inches: 1.0 / 72.0,
+        y_down: false,
+        pointsize: values::as_real_scalar(call.arg(9)),
+        bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
+        fg: colour_arg(call.arg(5), BLACK)?,
+    };
+    open_device(spec)
+}
+
+/// `xfig(file, paper, family, bg, fg, width, height, horizontal, pointsize, ...)`.
+unsafe fn do_xfig(call: &NativeCall<'_>) -> R<Sexp> {
+    let horizontal = values::as_logical_scalar(call.arg(7)) == 1;
+    let spec = DeviceSpec {
+        name: "xfig",
+        file: device_file(call.arg(0)),
+        bitmap: false,
+        size: paper_device_size(call.arg(1), call.arg(5), call.arg(6), horizontal),
+        unit_inches: 1.0 / 72.0,
+        y_down: false,
+        pointsize: values::as_real_scalar(call.arg(8)),
+        bg: colour_arg(call.arg(3), TRANSPARENT_WHITE)?,
+        fg: colour_arg(call.arg(4), BLACK)?,
+    };
+    open_device(spec)
+}
+
+/// `pictex(file, bg, fg, width, height, debug)`, whose text is always ten points.
+unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
+    let spec = DeviceSpec {
+        name: "pictex",
+        file: device_file(call.arg(0)),
+        bitmap: false,
+        size: [
+            values::as_real_scalar(call.arg(3)),
+            values::as_real_scalar(call.arg(4)),
+        ],
+        unit_inches: 1.0 / 72.0,
+        y_down: false,
+        pointsize: 10.0,
+        bg: colour_arg(call.arg(1), WHITE)?,
+        fg: colour_arg(call.arg(2), BLACK)?,
+    };
+    open_device(spec)
+}
+
+/// `devCairo(file, type, width, height, pointsize, bg, res, ...)`: the bitmap devices take
+/// pixels at `res` pixels per inch, the vector ones (svg, cairo_pdf, cairo_ps) big points.
+unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
+    let (name, bitmap) = match values::as_integer_scalar(call.arg(1)) {
+        2 | 5 => ("png", true),
+        3 => ("jpeg", true),
+        4 => ("svg", false),
+        6 => ("cairo_pdf", false),
+        7 => ("cairo_ps", false),
+        8 => ("tiff", true),
+        9 => ("bmp", true),
+        _ => return Err(error("invalid type for cairo device")),
+    };
+    let resolution = values::as_real_scalar(call.arg(6));
+    let resolution = if bitmap && resolution.is_finite() && resolution > 0.0 {
+        resolution
+    } else {
+        72.0
+    };
+    let pixels = [
+        values::as_real_scalar(call.arg(2)),
+        values::as_real_scalar(call.arg(3)),
+    ];
+    let spec = DeviceSpec {
+        name,
+        file: device_file(call.arg(0)),
+        bitmap,
+        size: pixels.map(|count| count / resolution),
+        unit_inches: 1.0 / resolution,
+        y_down: true,
+        pointsize: values::as_real_scalar(call.arg(4)),
+        bg: colour_arg(call.arg(5), WHITE)?,
+        fg: BLACK,
+    };
+    open_device(spec)
+}
+
+/// `X11(display, width, height, pointsize, ..., bg, ..., res, ...)`: only the bitmap files
+/// that `png(type = "Xlib")` and friends name as `png::file` can open, since ry has no
+/// display.
+unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
+    let display =
+        values::first_string(call.arg(0)).map_or_else(String::new, |text| text.into_owned());
+    let Some((kind, rest)) = display.split_once("::") else {
+        return Err(error("unable to start device X11"));
+    };
+    let name = match kind {
+        "png" => "png",
+        "jpeg" => "jpeg",
+        "bmp" => "bmp",
+        "tiff" => "tiff",
+        _ => return Err(error("unable to start device X11")),
+    };
+    let file = rest
+        .rsplit_once(':')
+        .filter(|_| kind != "png" && kind != "bmp")
+        .map_or(rest, |(_, file)| file);
+    let resolution = values::as_real_scalar(call.arg(10));
+    let resolution = if resolution.is_finite() && resolution > 0.0 {
+        resolution
+    } else {
+        72.0
+    };
+    let pixels = [
+        values::as_real_scalar(call.arg(1)),
+        values::as_real_scalar(call.arg(2)),
+    ];
+    let spec = DeviceSpec {
+        name,
+        file: Some(file.to_owned()).filter(|file| !file.is_empty()),
+        bitmap: true,
+        size: pixels.map(|count| count / resolution),
+        unit_inches: 1.0 / resolution,
+        y_down: true,
+        pointsize: values::as_real_scalar(call.arg(3)),
+        bg: colour_arg(call.arg(7), WHITE)?,
+        fg: BLACK,
+    };
+    open_device(spec)
+}
+
+// grDevices: the device list.
+
+unsafe fn do_dev_cur(_: &NativeCall<'_>) -> R<Sexp> {
+    device_result(DEVICES.with(|devices| devices.borrow().current))
+}
+
+unsafe fn do_dev_next(call: &NativeCall<'_>) -> R<Sexp> {
+    let from = device_number(call.arg(0));
+    device_result(DEVICES.with(|devices| next_device(&devices.borrow(), from)))
+}
+
+unsafe fn do_dev_prev(call: &NativeCall<'_>) -> R<Sexp> {
+    let from = device_number(call.arg(0));
+    device_result(DEVICES.with(|devices| previous_device(&devices.borrow(), from)))
+}
+
+/// `dev.set(which)`: makes `which` current, or the next open device after it when it is not
+/// open.
+unsafe fn do_dev_set(call: &NativeCall<'_>) -> R<Sexp> {
+    let wanted = device_number(call.arg(0));
+    let slot = DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        let slot = if wanted > 0 && devices.slots[wanted].is_some() {
+            wanted
+        } else {
+            next_device(&devices, wanted)
+        };
+        devices.current = slot;
+        slot
+    });
+    publish_devices()?;
+    if slot == 0 {
+        // GNU R selects the null device and then asks for the current device, which starts
+        // the default one, yet still reports the null device as the one selected.
+        open_default_device()?;
+    }
+    device_result(slot)
+}
+
+/// `dev.off(which)`: closes `which`; when it was current, the next open device becomes
+/// current. A pdf device writes a document without pages, which is what GNU R writes for a
+/// device nothing was drawn on.
+unsafe fn do_dev_off(call: &NativeCall<'_>) -> R<Sexp> {
+    let which = device_number(call.arg(0));
+    let closed = DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        let closed = if which > 0 {
+            devices.slots[which].take()
+        } else {
+            None
+        };
+        if closed.is_some() && devices.current == which {
+            devices.current = next_device(&devices, which);
+        }
+        closed
+    });
+    publish_devices()?;
+    if let Some(device) = closed
+        && matches!(device.name, "pdf" | "cairo_pdf")
+        && let Some(path) = device.file.as_deref().and_then(output_path)
+    {
+        std::fs::write(&path, empty_pdf())
+            .map_err(|_| error(format!("cannot open file '{path}'")))?;
+    }
+    Ok(nil())
+}
+
+/// A valid PDF document without pages: a catalog, an empty page tree, and the cross-reference
+/// table that locates them.
+fn empty_pdf() -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [] /Count 0 >>",
+    ];
+    let mut document = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(document.len());
+        document.extend(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let table = document.len();
+    document.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        document.extend(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    document.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    document
+}
+
+/// `dev.size()`: the device's width and height in device units.
+unsafe fn do_dev_size(_: &NativeCall<'_>) -> R<Sexp> {
+    let size = with_device(|device| Ok(device.size.map(|inches| inches / device.unit_inches)))?;
+    values::real_vector(&size)
+}
+
+unsafe fn do_dev_up(_: &NativeCall<'_>) -> R<Sexp> {
+    let up = with_device(|device| Ok(!device.y_down))?;
+    scalar_bool(up)
+}
+
+/// `dev.control(enable)`: turns the display list on or off.
+unsafe fn do_dev_control(call: &NativeCall<'_>) -> R<Sexp> {
+    let enable = values::as_logical_scalar(call.arg(0)) == 1;
+    let old = with_device(|device| Ok(std::mem::replace(&mut device.display_list, enable)))?;
+    scalar_bool(old)
+}
+
+unsafe fn do_dev_display_list(_: &NativeCall<'_>) -> R<Sexp> {
+    let enabled = with_device(|device| Ok(device.display_list))?;
+    scalar_bool(enabled)
+}
+
+/// `dev.capabilities()`: the codes `dev.capabilities` decodes, for a device that supports
+/// semi-transparency and rasters but none of the newer features, since ry never draws them.
+unsafe fn do_dev_capabilities(_: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|_| Ok(()))?;
+    let codes: [&[i32]; 13] = [
+        &[2],
+        &[3],
+        &[2],
+        &[1],
+        &[1],
+        &[0, 0, 0, 0],
+        &[0],
+        &[0],
+        &[0],
+        &[0],
+        &[0],
+        &[0],
+        &[0],
+    ];
+    let result = alloc(SexpType::List, codes.len())?;
+    crate::heap().root(result);
+    for (index, code) in codes.iter().enumerate() {
+        values::set_elt(result, index, values::integer_vector(code)?);
+    }
+    Ok(result)
+}
+
+/// GNU R 4.3's `R_GE_version`, which a recorded plot carries as `engineVersion`.
+const GRAPHICS_ENGINE_VERSION: i32 = 16;
+
+/// `recordPlot()`'s snapshot, shaped like GNU R's: the display list, then one raw vector of
+/// state per graphics system (only base graphics here), with the engine version attached.
+/// Nothing is ever drawn, so the display list is always `NULL`, which is how code such as
+/// evaluate's plot capture tells that no plot was made. The state is empty because replaying
+/// an empty display list restores nothing.
+unsafe fn do_get_snapshot(_: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|_| Ok(()))?;
+    let state = alloc(SexpType::Raw, 0)?;
+    crate::heap().root(state);
+    values::set_attr(
+        state,
+        values::install("pkgName")?,
+        scalar_string("graphics")?,
+    )?;
+    let snapshot = values::list_vector(&[nil(), state])?;
+    crate::heap().root(snapshot);
+    values::set_attr(
+        snapshot,
+        values::install("engineVersion")?,
+        scalar_integer(GRAPHICS_ENGINE_VERSION)?,
+    )?;
+    Ok(snapshot)
+}
+
+/// `replayPlot(snapshot)`: replaying an empty display list draws nothing. A snapshot GNU R
+/// recorded with drawing on its display list cannot be replayed, since its state is GNU R's
+/// in-memory layout.
+unsafe fn do_play_snapshot(call: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|_| Ok(()))?;
+    let snapshot = call.arg(0);
+    if snapshot.kind() == SexpType::List && length(snapshot) > 0 && snapshot.element(0) == nil() {
+        return Ok(nil());
+    }
+    Err(error(
+        "cannot replay a plot whose display list is not empty: ry does not draw yet",
+    ))
+}
+
+unsafe fn do_hold_flush(_: &NativeCall<'_>) -> R<Sexp> {
+    scalar_integer(0)
+}
+
+unsafe fn no_events(_: &NativeCall<'_>) -> R<Sexp> {
+    Err(error("graphics device does not support graphics events"))
+}
+
+/// The routines that only draw: they need a started plot and return `NULL`.
+unsafe fn do_draw(_: &NativeCall<'_>) -> R<Sexp> {
+    with_plot(|_| Ok(()))?;
+    Ok(nil())
+}
+
+/// The routines that change a device's state without drawing: they need a device.
+unsafe fn do_device_noop(_: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|_| Ok(()))?;
+    Ok(nil())
+}
+
+// graphics: par.
+
+/// `par(args)`: each named element sets that parameter and reports its old value, and each
+/// unnamed string queries one.
+unsafe fn do_par(call: &NativeCall<'_>) -> R<Sexp> {
+    let args = call.arg(0);
+    let count = if args.kind() == SexpType::List {
+        length(args)
+    } else {
+        0
+    };
+    let names = values::names(args);
+    let mut warnings = Vec::new();
+    let mut entries: Vec<(String, ParValue)> = Vec::with_capacity(count);
+    with_device(|device| {
+        for index in 0..count {
+            let value = values::list_elt(args, index);
+            let tag = if names == nil() {
+                None
+            } else {
+                values::string_at(names, index).filter(|name| !name.is_empty())
+            };
+            match tag {
+                Some(name) => {
+                    let old = get_par(device, &name);
+                    if old.is_none() {
+                        warnings.push(format!("\"{name}\" is not a graphical parameter"));
+                    } else if READ_ONLY_PARS.contains(&&*name) {
+                        warnings.push(format!("graphical parameter \"{name}\" cannot be set"));
+                    } else {
+                        set_par(device, &name, value, &mut warnings)?;
+                    }
+                    entries.push((name.into_owned(), old.unwrap_or(ParValue::Null)));
+                }
+                None => {
+                    let query = if value.kind() == SexpType::String {
+                        values::string_at(value, 0).map(|name| name.into_owned())
+                    } else {
+                        None
+                    };
+                    match query {
+                        Some(name) => {
+                            let found = get_par(device, &name);
+                            if found.is_none() {
+                                warnings.push(format!("\"{name}\" is not a graphical parameter"));
+                            }
+                            entries.push((name, found.unwrap_or(ParValue::Null)));
+                        }
+                        None => entries.push((String::new(), ParValue::Null)),
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    let result = alloc(SexpType::List, entries.len())?;
+    crate::heap().root(result);
+    for (index, (_, value)) in entries.iter().enumerate() {
+        values::set_elt(result, index, par_value_sexp(value)?);
+    }
+    let labels: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+    values::set_attr(result, symbols().names, string_vector(&labels)?)?;
+    for warning in warnings {
+        call.warning(warning)?;
+    }
+    Ok(result)
+}
+
+/// A parameter value, read out of the device before it becomes an R object.
+enum ParValue {
+    Null,
+    Logical(Vec<i32>),
+    Integer(Vec<i32>),
+    Real(Vec<f64>),
+    Text(String),
+}
+
+unsafe fn par_value_sexp(value: &ParValue) -> R<Sexp> {
+    match value {
+        ParValue::Null => Ok(nil()),
+        ParValue::Logical(items) => values::logical_vector(items),
+        ParValue::Integer(items) => values::integer_vector(items),
+        ParValue::Real(items) => values::real_vector(items),
+        ParValue::Text(text) => scalar_string(text),
+    }
+}
+
+fn text(value: impl Into<String>) -> ParValue {
+    ParValue::Text(value.into())
+}
+
+fn real(items: &[f64]) -> ParValue {
+    ParValue::Real(items.to_vec())
+}
+
+fn logical(value: bool) -> ParValue {
+    ParValue::Logical(vec![i32::from(value)])
+}
+
+fn line_type_name(code: u32) -> String {
+    if let Some((name, _)) = LINE_TYPES.iter().find(|(_, value)| *value == code) {
+        return (*name).to_owned();
+    }
+    let mut digits = String::new();
+    let mut rest = code;
+    while rest != 0 {
+        digits
+            .push(char::from_digit(rest & 0xF, 16).map_or('0', |digit| digit.to_ascii_uppercase()));
+        rest >>= 4;
+    }
+    digits
+}
+
+/// The value of parameter `name`, or `None` when there is no such parameter.
+fn get_par(device: &Device, name: &str) -> Option<ParValue> {
+    let pars = &device.pars;
+    let value = match name {
+        "xlog" => logical(pars.xlog),
+        "ylog" => logical(pars.ylog),
+        "adj" => real(&[pars.adj]),
+        "ann" => logical(pars.ann),
+        "ask" => logical(pars.ask),
+        "bg" => text(colour_name(pars.bg)),
+        "bty" => text(pars.bty.to_string()),
+        "cex" => real(&[pars.cex]),
+        "cex.axis" => real(&[pars.cex_axis]),
+        "cex.lab" => real(&[pars.cex_lab]),
+        "cex.main" => real(&[pars.cex_main]),
+        "cex.sub" => real(&[pars.cex_sub]),
+        "cin" => real(&device.char_inches()),
+        "col" => text(colour_name(pars.col)),
+        "col.axis" => text(colour_name(pars.col_axis)),
+        "col.lab" => text(colour_name(pars.col_lab)),
+        "col.main" => text(colour_name(pars.col_main)),
+        "col.sub" => text(colour_name(pars.col_sub)),
+        "cra" => real(
+            &device
+                .char_inches()
+                .map(|inches| inches / device.unit_inches),
+        ),
+        "crt" => real(&[pars.crt]),
+        "csi" => real(&[device.line_inches()]),
+        "cxy" => {
+            let cin = device.char_inches();
+            let pin = device.plot_size();
+            let extent = device.user_extent();
+            real(&[cin[0] / pin[0] * extent[0], cin[1] / pin[1] * extent[1]])
+        }
+        "din" => real(&device.size),
+        "err" => ParValue::Integer(vec![pars.err]),
+        "family" => text(pars.family.clone()),
+        "fg" => text(colour_name(pars.fg)),
+        "fig" => real(&device.figure_region()),
+        "fin" => real(&device.figure_size()),
+        "font" => ParValue::Integer(vec![pars.font]),
+        "font.axis" => ParValue::Integer(vec![pars.font_axis]),
+        "font.lab" => ParValue::Integer(vec![pars.font_lab]),
+        "font.main" => ParValue::Integer(vec![pars.font_main]),
+        "font.sub" => ParValue::Integer(vec![pars.font_sub]),
+        "lab" => ParValue::Integer(pars.lab.to_vec()),
+        "las" => ParValue::Integer(vec![pars.las]),
+        "lend" => text(["round", "butt", "square"][pars.lend.clamp(0, 2) as usize]),
+        "lheight" => real(&[pars.lheight]),
+        "ljoin" => text(["round", "mitre", "bevel"][pars.ljoin.clamp(0, 2) as usize]),
+        "lmitre" => real(&[pars.lmitre]),
+        "lty" => text(line_type_name(pars.lty)),
+        "lwd" => real(&[pars.lwd]),
+        "mai" => real(&device.margin_inches()),
+        "mar" => {
+            let lines = match pars.margins {
+                Margins::Lines(lines) => lines,
+                Margins::Inches(inches) => {
+                    inches.map(|inches| inches / (pars.mex * device.line_inches()))
+                }
+            };
+            real(&lines)
+        }
+        "mex" => real(&[pars.mex]),
+        "mfrow" | "mfcol" => {
+            ParValue::Integer(vec![pars.layout.rows as i32, pars.layout.columns as i32])
+        }
+        "mfg" => {
+            let [row, column] = current_cell(&pars.layout);
+            ParValue::Integer(vec![
+                row as i32,
+                column as i32,
+                pars.layout.rows as i32,
+                pars.layout.columns as i32,
+            ])
+        }
+        "mgp" => real(&pars.mgp),
+        "mkh" => real(&[pars.mkh]),
+        "new" => logical(pars.new),
+        "oma" => {
+            let lines = match pars.outer {
+                OuterMargins::Lines(lines) => lines,
+                _ => device
+                    .outer_inches()
+                    .map(|inches| inches / (pars.mex * device.line_inches())),
+            };
+            real(&lines)
+        }
+        "omd" => real(&device.inner_region()),
+        "omi" => real(&device.outer_inches()),
+        "page" => logical(device.page()),
+        "pch" => match &pars.pch {
+            Pch::Code(code) => ParValue::Integer(vec![*code]),
+            Pch::Text(symbol) => text(symbol.clone()),
+        },
+        "pin" => real(&device.plot_size()),
+        "plt" => real(&device.plot_region()),
+        "ps" => ParValue::Integer(vec![pars.ps]),
+        "pty" => text(pars.pty.to_string()),
+        "smo" => real(&[pars.smo]),
+        "srt" => real(&[pars.srt]),
+        "tck" => real(&[pars.tck]),
+        "tcl" => real(&[pars.tcl]),
+        "usr" => real(&pars.usr),
+        "xaxp" => real(&pars.xaxp),
+        "xaxs" => text(pars.xaxs.to_string()),
+        "xaxt" => text(pars.xaxt.to_string()),
+        "xpd" => ParValue::Logical(vec![pars.xpd]),
+        "yaxp" => real(&pars.yaxp),
+        "yaxs" => text(pars.yaxs.to_string()),
+        "yaxt" => text(pars.yaxt.to_string()),
+        "ylbias" => real(&[pars.ylbias]),
+        _ => return None,
+    };
+    Some(value)
+}
+
+fn invalid_par(name: &str) -> crate::unwind::Unwind {
+    error(format!(
+        "invalid value specified for graphical parameter \"{name}\""
+    ))
+}
+
+/// The real values of a parameter that must have exactly `count` of them.
+unsafe fn par_reals(value: Sexp, name: &str, count: usize) -> R<Vec<f64>> {
+    if !values::is_numeric_type(value.kind()) {
+        return Err(invalid_par(name));
+    }
+    if length(value) != count {
+        return Err(error(format!(
+            "graphical parameter \"{name}\" has the wrong length"
+        )));
+    }
+    let reals = coerce_vector(value, SexpType::Real)?;
+    Ok(values::reals(reals).to_vec())
+}
+
+unsafe fn par_real(value: Sexp, name: &str) -> R<f64> {
+    if length(value) == 0
+        || !(values::is_numeric_type(value.kind()) || value.kind() == SexpType::String)
+    {
+        return Err(invalid_par(name));
+    }
+    let number = values::as_real_scalar(value);
+    if number.is_finite() {
+        Ok(number)
+    } else {
+        Err(invalid_par(name))
+    }
+}
+
+unsafe fn par_positive(value: Sexp, name: &str) -> R<f64> {
+    let number = par_real(value, name)?;
+    if number > 0.0 {
+        Ok(number)
+    } else {
+        Err(invalid_par(name))
+    }
+}
+
+unsafe fn par_integer(value: Sexp, name: &str) -> R<i32> {
+    let number = par_real(value, name)?;
+    Ok(number as i32)
+}
+
+unsafe fn par_flag(value: Sexp, name: &str) -> R<bool> {
+    match values::as_logical_scalar(value) {
+        flag if length(value) == 0 || flag == NA_INTEGER => Err(invalid_par(name)),
+        flag => Ok(flag == 1),
+    }
+}
+
+/// A one-character style parameter that must be one of `allowed`.
+unsafe fn par_style(value: Sexp, name: &str, allowed: &str) -> R<char> {
+    let text = values::first_string(value).filter(|_| value.kind() == SexpType::String);
+    match text.as_deref().and_then(|text| text.chars().next()) {
+        Some(style) if allowed.contains(style) => Ok(style),
+        _ => Err(invalid_par(name)),
+    }
+}
+
+unsafe fn par_colour(value: Sexp, name: &str, background: Colour) -> R<Colour> {
+    if length(value) == 0 {
+        return Err(invalid_par(name));
+    }
+    let colour = colour_element(value, 0)?;
+    // Colour 0 is the device background.
+    let zero = match value.kind() {
+        SexpType::String => values::string_at(value, 0).as_deref() == Some("0"),
+        _ => crate::subset::numeric_element(value, 0) == 0.0,
+    };
+    Ok(if zero { background } else { colour })
+}
+
+unsafe fn par_line_type(value: Sexp) -> R<u32> {
+    if length(value) == 0 {
+        return Err(invalid_par("lty"));
+    }
+    if value.kind() == SexpType::String {
+        let Some(text) = values::string_at(value, 0) else {
+            return Err(invalid_par("lty"));
+        };
+        if let Some((_, code)) = LINE_TYPES.iter().find(|(name, _)| *name == &*text) {
+            return Ok(*code);
+        }
+        return parse_dash_pattern(&text).map_err(error);
+    }
+    let number = values::as_real_scalar(value);
+    if !number.is_finite() || number < 0.0 {
+        return Err(error("invalid line type"));
+    }
+    let index = number as usize;
+    Ok(if index == 0 {
+        LTY_BLANK
+    } else {
+        LINE_TYPES[(index - 1) % 6 + 1].1
+    })
+}
+
+/// A line type given as hexadecimal dash and gap lengths, such as `"44"`.
+fn parse_dash_pattern(text: &str) -> Result<u32, String> {
+    if !matches!(text.len(), 2 | 4 | 6 | 8) {
+        return Err("invalid line type: must be length 2, 4, 6 or 8".to_owned());
+    }
+    let mut code = 0u32;
+    for (index, character) in text.chars().enumerate() {
+        let digit = character
+            .to_digit(16)
+            .ok_or_else(|| "invalid hex digit in 'color' or 'lty'".to_owned())?;
+        if digit == 0 {
+            return Err("invalid line type: zeroes are not allowed".to_owned());
+        }
+        code |= digit << (4 * index);
+    }
+    Ok(code)
+}
+
+unsafe fn par_line_style(value: Sexp, name: &str, names: [&str; 3]) -> R<i32> {
+    if value.kind() == SexpType::String {
+        let text = values::first_string(value);
+        return names
+            .iter()
+            .position(|candidate| text.as_deref() == Some(*candidate))
+            .map(|index| index as i32)
+            .ok_or_else(|| invalid_par(name));
+    }
+    let number = par_integer(value, name)?;
+    if (0..=2).contains(&number) {
+        Ok(number)
+    } else {
+        Err(invalid_par(name))
+    }
+}
+
+unsafe fn par_pch(value: Sexp) -> R<Pch> {
+    if length(value) == 0 {
+        return Err(invalid_par("pch"));
+    }
+    if value.kind() == SexpType::String {
+        let text = values::string_at(value, 0).map_or_else(String::new, |text| text.into_owned());
+        return Ok(Pch::Text(
+            text.chars().next().map_or_else(String::new, String::from),
+        ));
+    }
+    let number = values::as_real_scalar(value);
+    Ok(Pch::Code(if number.is_nan() {
+        NA_INTEGER
+    } else {
+        number as i32
+    }))
+}
+
+fn four(items: &[f64]) -> [f64; 4] {
+    [items[0], items[1], items[2], items[3]]
+}
+
+/// Sets parameter `name`, which [`get_par`] knows and is not read-only.
+unsafe fn set_par(
+    device: &mut Device,
+    name: &str,
+    value: Sexp,
+    warnings: &mut Vec<String>,
+) -> R<()> {
+    let background = device.pars.bg;
+    let pars = &mut device.pars;
+    match name {
+        "xlog" => pars.xlog = par_flag(value, name)?,
+        "ylog" => pars.ylog = par_flag(value, name)?,
+        "adj" => pars.adj = par_real(value, name)?,
+        "ann" => pars.ann = par_flag(value, name)?,
+        "ask" => pars.ask = par_flag(value, name)?,
+        "bg" => {
+            pars.bg = par_colour(value, name, background)?;
+            pars.new = false;
+        }
+        "bty" => pars.bty = par_style(value, name, "ol7cu]n")?,
+        "cex" => pars.cex = par_positive(value, name)?,
+        "cex.axis" => pars.cex_axis = par_positive(value, name)?,
+        "cex.lab" => pars.cex_lab = par_positive(value, name)?,
+        "cex.main" => pars.cex_main = par_positive(value, name)?,
+        "cex.sub" => pars.cex_sub = par_positive(value, name)?,
+        "col" => pars.col = par_colour(value, name, background)?,
+        "col.axis" => pars.col_axis = par_colour(value, name, background)?,
+        "col.lab" => pars.col_lab = par_colour(value, name, background)?,
+        "col.main" => pars.col_main = par_colour(value, name, background)?,
+        "col.sub" => pars.col_sub = par_colour(value, name, background)?,
+        "crt" => pars.crt = par_real(value, name)?,
+        "err" => pars.err = par_integer(value, name)?,
+        "family" => {
+            let family = values::first_string(value).filter(|_| value.kind() == SexpType::String);
+            pars.family = family.ok_or_else(|| invalid_par(name))?.into_owned();
+        }
+        // The foreground colour is also the drawing colour.
+        "fg" => {
+            pars.fg = par_colour(value, name, background)?;
+            pars.col = pars.fg;
+        }
+        "fig" => {
+            let region = four(&par_reals(value, name, 4)?);
+            if !(region[0] < region[1] && region[2] < region[3]) {
+                return Err(invalid_par(name));
+            }
+            pars.figure_region = FigureRegion::Fraction(region);
+            pars.layout = Layout::grid(1, 1, false);
+        }
+        "fin" => {
+            let size = par_reals(value, name, 2)?;
+            if size.iter().any(|size| !(*size > 0.0)) {
+                return Err(invalid_par(name));
+            }
+            pars.figure_region = FigureRegion::Size([size[0], size[1]]);
+        }
+        "font" => pars.font = par_font(value, name)?,
+        "font.axis" => pars.font_axis = par_font(value, name)?,
+        "font.lab" => pars.font_lab = par_font(value, name)?,
+        "font.main" => pars.font_main = par_font(value, name)?,
+        "font.sub" => pars.font_sub = par_font(value, name)?,
+        "lab" => {
+            let lab = par_reals(value, name, 3)?;
+            if lab.iter().any(|count| !(*count >= 0.0)) {
+                return Err(invalid_par(name));
+            }
+            pars.lab = [lab[0] as i32, lab[1] as i32, lab[2] as i32];
+        }
+        "las" => {
+            let las = par_integer(value, name)?;
+            if !(0..=3).contains(&las) {
+                return Err(invalid_par(name));
+            }
+            pars.las = las;
+        }
+        "lend" => pars.lend = par_line_style(value, name, ["round", "butt", "square"])?,
+        "lheight" => pars.lheight = par_positive(value, name)?,
+        "ljoin" => pars.ljoin = par_line_style(value, name, ["round", "mitre", "bevel"])?,
+        "lmitre" => {
+            let mitre = par_real(value, name)?;
+            if mitre < 1.0 {
+                return Err(invalid_par(name));
+            }
+            pars.lmitre = mitre;
+        }
+        "lty" => pars.lty = par_line_type(value)?,
+        "lwd" => {
+            let width = par_real(value, name)?;
+            if width < 0.0 {
+                return Err(invalid_par(name));
+            }
+            pars.lwd = width;
+        }
+        "mai" => {
+            pars.margins = Margins::Inches(four(&non_negative(par_reals(value, name, 4)?, name)?));
+            pars.plot_region = PlotRegion::Margins;
+        }
+        "mar" => {
+            pars.margins = Margins::Lines(four(&non_negative(par_reals(value, name, 4)?, name)?));
+            pars.plot_region = PlotRegion::Margins;
+        }
+        "mex" => pars.mex = par_positive(value, name)?,
+        "mfrow" | "mfcol" => {
+            let shape = par_reals(value, name, 2)?;
+            if shape.iter().any(|count| !(*count >= 1.0)) {
+                return Err(invalid_par(name));
+            }
+            let (rows, columns) = (shape[0] as usize, shape[1] as usize);
+            pars.layout = Layout::grid(rows, columns, name == "mfcol");
+            pars.figure_region = FigureRegion::Layout;
+            pars.cex = layout_cex(rows, columns);
+        }
+        "mfg" => {
+            let count = length(value);
+            if count != 2 && count != 4 {
+                return Err(error("parameter \"mfg\" has the wrong length"));
+            }
+            let cell = par_reals(value, name, count)?;
+            let layout = &mut pars.layout;
+            let (row, column) = (cell[0] as usize, cell[1] as usize);
+            if count == 4 && (cell[2] as usize != layout.rows || cell[3] as usize != layout.columns)
+            {
+                return Err(error(
+                    "value of 'nr' in \"mfg\" is wrong and will be ignored",
+                ));
+            }
+            if row < 1 || row > layout.rows || column < 1 || column > layout.columns {
+                return Err(invalid_par(name));
+            }
+            layout.current = layout.cells[(row - 1) * layout.columns + column - 1];
+            pars.new = true;
+        }
+        "mgp" => {
+            pars.mgp = {
+                let mgp = par_reals(value, name, 3)?;
+                [mgp[0], mgp[1], mgp[2]]
+            }
+        }
+        "mkh" => pars.mkh = par_positive(value, name)?,
+        "new" => {
+            let new = par_flag(value, name)?;
+            if new && !device.started {
+                warnings.push("calling par(new=TRUE) with no plot".to_owned());
+            } else {
+                pars.new = new;
+            }
+        }
+        "oma" => {
+            pars.outer = OuterMargins::Lines(four(&non_negative(par_reals(value, name, 4)?, name)?))
+        }
+        "omi" => {
+            pars.outer =
+                OuterMargins::Inches(four(&non_negative(par_reals(value, name, 4)?, name)?))
+        }
+        "omd" => {
+            let region = four(&par_reals(value, name, 4)?);
+            if !(region[0] < region[1] && region[2] < region[3]) {
+                return Err(invalid_par(name));
+            }
+            pars.outer = OuterMargins::Inner(region);
+        }
+        "pch" => pars.pch = par_pch(value)?,
+        "pin" => {
+            let size = par_reals(value, name, 2)?;
+            if size.iter().any(|size| !(*size > 0.0)) {
+                return Err(invalid_par(name));
+            }
+            pars.plot_region = PlotRegion::Size([size[0], size[1]]);
+        }
+        "plt" => {
+            let region = four(&par_reals(value, name, 4)?);
+            if !(region[0] < region[1] && region[2] < region[3]) {
+                return Err(invalid_par(name));
+            }
+            pars.plot_region = PlotRegion::Fraction(region);
+        }
+        "ps" => pars.ps = par_positive(value, name)? as i32,
+        "pty" => pars.pty = par_style(value, name, "ms")?,
+        "smo" => pars.smo = par_real(value, name)?,
+        "srt" => pars.srt = par_real(value, name)?,
+        "tck" => {
+            pars.tck = if length(value) == 1 && values::as_real_scalar(value).is_nan() {
+                values::na_real()
+            } else {
+                par_real(value, name)?
+            };
+        }
+        "tcl" => pars.tcl = par_real(value, name)?,
+        "usr" => {
+            let usr = four(&par_reals(value, name, 4)?);
+            if usr.iter().any(|limit| !limit.is_finite()) {
+                return Err(invalid_par(name));
+            }
+            pars.usr = usr;
+            // The ticks follow the new limits, measured in data units on a log axis.
+            let data = |low: f64, high: f64, log: bool| {
+                if log {
+                    [10f64.powf(low), 10f64.powf(high)]
+                } else {
+                    [low, high]
+                }
+            };
+            pars.xaxp = axis_parameters(data(usr[0], usr[1], pars.xlog), pars.lab[0], false);
+            pars.yaxp = axis_parameters(data(usr[2], usr[3], pars.ylog), pars.lab[1], false);
+        }
+        "xaxp" => pars.xaxp = three(&par_reals(value, name, 3)?),
+        "yaxp" => pars.yaxp = three(&par_reals(value, name, 3)?),
+        "xaxs" => pars.xaxs = par_style(value, name, "rised")?,
+        "yaxs" => pars.yaxs = par_style(value, name, "rised")?,
+        "xaxt" => pars.xaxt = par_style(value, name, "sltn")?,
+        "yaxt" => pars.yaxt = par_style(value, name, "sltn")?,
+        "xpd" => {
+            if length(value) == 0 {
+                return Err(invalid_par(name));
+            }
+            let flag = values::as_logical_scalar(value);
+            pars.xpd = if flag == NA_INTEGER {
+                NA_INTEGER
+            } else {
+                i32::from(flag != 0)
+            };
+        }
+        "ylbias" => pars.ylbias = par_real(value, name)?,
+        _ => {}
+    }
+    // Setting a region lays the page out again, which picks up the current `cex` and `pty`
+    // as `plot.new` does.
+    if REGION_PARS.contains(&name) {
+        pars.margin_cex = pars.cex;
+        pars.square = pars.pty == 's';
+    }
+    Ok(())
+}
+
+const REGION_PARS: [&str; 13] = [
+    "fig", "fin", "mai", "mar", "mex", "mfcol", "mfg", "mfrow", "oma", "omd", "omi", "pin", "plt",
+];
+
+fn three(items: &[f64]) -> [f64; 3] {
+    [items[0], items[1], items[2]]
+}
+
+fn non_negative(items: Vec<f64>, name: &str) -> R<Vec<f64>> {
+    if items.iter().all(|item| *item >= 0.0) {
+        Ok(items)
+    } else {
+        Err(invalid_par(name))
+    }
+}
+
+unsafe fn par_font(value: Sexp, name: &str) -> R<i32> {
+    let font = par_integer(value, name)?;
+    if font >= 1 {
+        Ok(font)
+    } else {
+        Err(invalid_par(name))
+    }
+}
+
+// graphics: the plot window.
+
+/// `plot.new()`: moves to the next figure unless `par(new = TRUE)`, and resets the user
+/// coordinates to the unit square.
+unsafe fn do_plot_new(_: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|device| {
+        // Over a plot kept with `par(new = TRUE)`, the regions stay as they were laid out,
+        // even when `cex` or `pty` changed since.
+        if !device.pars.new || !device.started {
+            let pars = &mut device.pars;
+            pars.layout.current = pars.layout.current % pars.layout.figures + 1;
+            pars.margin_cex = pars.cex;
+            pars.square = pars.pty == 's';
+        }
+        device.started = true;
+        let inner = device.inner_size();
+        if !(inner[0] > 0.0 && inner[1] > 0.0) {
+            return Err(error("outer margins too large (figure region too large)"));
+        }
+        let figure = device.figure_size();
+        if !(figure[0] > 0.0 && figure[1] > 0.0) {
+            return Err(error("figure region too large"));
+        }
+        let plot = device.plot_region();
+        if !(plot[0] < plot[1] && plot[2] < plot[3]) {
+            return Err(error("figure margins too large"));
+        }
+        let tolerance = 1e-6;
+        if plot[0] < -tolerance
+            || plot[1] > 1.0 + tolerance
+            || plot[2] < -tolerance
+            || plot[3] > 1.0 + tolerance
+        {
+            return Err(error("plot region too large"));
+        }
+        let pars = &mut device.pars;
+        pars.xlog = false;
+        pars.ylog = false;
+        let lab = pars.lab;
+        let (x, xaxp) = scale_axis([0.0, 1.0], pars.xaxs, false, lab[0]);
+        let (y, yaxp) = scale_axis([0.0, 1.0], pars.yaxs, false, lab[1]);
+        pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.xaxp = xaxp;
+        pars.yaxp = yaxp;
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+/// The value of inline parameter `name` among a call's tagged arguments. A `NULL` value, as
+/// in `plot.window(yaxs = pars$yaxs)` with no such element, leaves the parameter alone.
+unsafe fn inline_par(call: &NativeCall<'_>, name: &str) -> Option<Sexp> {
+    call.args
+        .iter()
+        .find(|arg| arg.tag.kind() == SexpType::Symbol && values::symbol_name(arg.tag) == name)
+        .map(|arg| arg.value)
+        .filter(|value| *value != nil())
+}
+
+unsafe fn inline_style(call: &NativeCall<'_>, name: &str, default: char) -> R<char> {
+    match inline_par(call, name) {
+        Some(value) => par_style(value, name, "rised"),
+        None => Ok(default),
+    }
+}
+
+/// `plot.window(xlim, ylim, log, asp, ...)`: the user coordinates for the data limits, with
+/// the axis styles and tick counts the call or `par` gives.
+unsafe fn do_plot_window(call: &NativeCall<'_>) -> R<Sexp> {
+    let limits = |index: usize, name: &str| -> R<[f64; 2]> {
+        let value = call.arg(index);
+        let reals = if values::is_numeric_type(value.kind()) && length(value) == 2 {
+            let reals = coerce_vector(value, SexpType::Real)?;
+            [values::reals(reals)[0], values::reals(reals)[1]]
+        } else {
+            [values::na_real(); 2]
+        };
+        if reals.iter().all(|limit| limit.is_finite()) {
+            Ok(reals)
+        } else {
+            Err(error(format!("need finite '{name}' values")))
+        }
+    };
+    let xlim = limits(0, "xlim")?;
+    let ylim = limits(1, "ylim")?;
+    let log = values::first_string(call.arg(2)).map_or_else(String::new, |log| log.into_owned());
+    let (mut xlog, mut ylog) = (false, false);
+    for character in log.chars() {
+        match character {
+            'x' => xlog = true,
+            'y' => ylog = true,
+            _ => return Err(error(format!("invalid \"log={log}\" specification"))),
+        }
+    }
+    if (xlog && xlim.iter().any(|limit| *limit <= 0.0))
+        || (ylog && ylim.iter().any(|limit| *limit <= 0.0))
+    {
+        return Err(error("Logarithmic axis must have positive limits"));
+    }
+    let asp = values::as_real_scalar(call.arg(3));
+    let lab = match inline_par(call, "lab") {
+        Some(value) => {
+            let lab = par_reals(value, "lab", 3)?;
+            Some([lab[0] as i32, lab[1] as i32])
+        }
+        None => None,
+    };
+    let xaxs_inline = inline_par(call, "xaxs").is_some();
+    let yaxs_inline = inline_par(call, "yaxs").is_some();
+    let (xaxs, yaxs) = with_device(|device| Ok((device.pars.xaxs, device.pars.yaxs)))?;
+    let xaxs = if xaxs_inline {
+        inline_style(call, "xaxs", xaxs)?
+    } else {
+        xaxs
+    };
+    let yaxs = if yaxs_inline {
+        inline_style(call, "yaxs", yaxs)?
+    } else {
+        yaxs
+    };
+    with_device(|device| {
+        let lab = lab.unwrap_or([device.pars.lab[0], device.pars.lab[1]]);
+        let logged =
+            |limits: [f64; 2], log: bool| if log { limits.map(f64::log10) } else { limits };
+        let mut x = logged(xlim, xlog);
+        let mut y = logged(ylim, ylog);
+        if asp.is_finite() && asp > 0.0 {
+            let pin = device.plot_size();
+            let (x_range, y_range) = ((x[1] - x[0]).abs(), (y[1] - y[0]).abs());
+            let x_needed = pin[0] * y_range / (asp * pin[1]);
+            let (x_range, y_range) = if x_needed >= x_range {
+                (x_needed, y_range)
+            } else {
+                (x_range, x_range * asp * pin[1] / pin[0])
+            };
+            x = centred(x, x_range);
+            y = centred(y, y_range);
+        }
+        let (x, xaxp) = scale_axis(x, xaxs, xlog, lab[0]);
+        let (y, yaxp) = scale_axis(y, yaxs, ylog, lab[1]);
+        let pars = &mut device.pars;
+        pars.xlog = xlog;
+        pars.ylog = ylog;
+        pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.xaxp = xaxp;
+        pars.yaxp = yaxp;
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+/// `limits` widened or narrowed to `range` about their centre, keeping their direction.
+fn centred(limits: [f64; 2], range: f64) -> [f64; 2] {
+    let centre = (limits[0] + limits[1]) / 2.0;
+    let half = if limits[1] >= limits[0] {
+        range / 2.0
+    } else {
+        -range / 2.0
+    };
+    [centre - half, centre + half]
+}
+
+/// The user limits of an axis spanning `limits` (in decades on a log axis) and its tick
+/// parameters: equal limits are spread apart, and style `"r"` extends the range by 4% at
+/// each end.
+fn scale_axis(limits: [f64; 2], style: char, log: bool, intervals: i32) -> ([f64; 2], [f64; 3]) {
+    let [mut low, mut high] = limits;
+    if low == high {
+        if low == 0.0 {
+            low = -1.0;
+            high = 1.0;
+        } else {
+            low -= 0.4 * low.abs();
+            high += 0.4 * high.abs();
+        }
+    }
+    if style == 'r' || style == 'e' || style == 's' {
+        let extension = (high - low) * 0.04;
+        low -= extension;
+        high += extension;
+    }
+    let data = if log {
+        [10f64.powf(low), 10f64.powf(high)]
+    } else {
+        [low, high]
+    };
+    ([low, high], axis_parameters(data, intervals, log))
+}
+
+/// `par("xaxp")` for an axis spanning `limits` in data units, in their direction.
+fn axis_parameters(limits: [f64; 2], intervals: i32, log: bool) -> [f64; 3] {
+    let reversed = limits[0] > limits[1];
+    let (low, high) = if reversed {
+        (limits[1], limits[0])
+    } else {
+        (limits[0], limits[1])
+    };
+    let (first, last, count) = if log {
+        log_axis(low, high, intervals)
+    } else {
+        linear_axis(low, high, intervals)
+    };
+    if reversed {
+        [last, first, f64::from(count)]
+    } else {
+        [first, last, f64::from(count)]
+    }
+}
+
+/// `layout(rows, columns, matrix, figures, widths, heights, cm.widths, cm.heights, respect,
+/// respect.matrix)`.
+unsafe fn do_layout(call: &NativeCall<'_>) -> R<Sexp> {
+    let rows = values::as_integer_scalar(call.arg(0));
+    let columns = values::as_integer_scalar(call.arg(1));
+    if rows < 1 || columns < 1 || rows == NA_INTEGER || columns == NA_INTEGER {
+        return Err(error("invalid layout"));
+    }
+    let (rows, columns) = (rows as usize, columns as usize);
+    let matrix = coerce_vector(call.arg(2), SexpType::Integer)?;
+    let figures = values::as_integer_scalar(call.arg(3)).max(1) as usize;
+    let cells_by_column = values::ints(matrix);
+    if cells_by_column.len() != rows * columns {
+        return Err(error("invalid layout"));
+    }
+    let cells: Vec<usize> = (0..rows * columns)
+        .map(|cell| {
+            let (row, column) = (cell / columns, cell % columns);
+            cells_by_column[column * rows + row].max(0) as usize
+        })
+        .collect();
+    let sizes = |index: usize, count: usize| -> R<Vec<f64>> {
+        let reals = coerce_vector(call.arg(index), SexpType::Real)?;
+        let reals = values::reals(reals);
+        Ok((0..count)
+            .map(|item| reals.get(item).copied().unwrap_or(1.0))
+            .collect())
+    };
+    let flags = |index: usize, count: usize| -> R<Vec<bool>> {
+        let mut flags = vec![false; count];
+        let value = call.arg(index);
+        if value != nil() {
+            let indices = coerce_vector(value, SexpType::Integer)?;
+            for &item in values::ints(indices) {
+                if item >= 1 && (item as usize) <= count {
+                    flags[item as usize - 1] = true;
+                }
+            }
+        }
+        Ok(flags)
+    };
+    let layout = Layout {
+        rows,
+        columns,
+        cells,
+        figures,
+        widths: sizes(4, columns)?,
+        heights: sizes(5, rows)?,
+        cm_widths: flags(6, columns)?,
+        cm_heights: flags(7, rows)?,
+        respect: values::as_integer_scalar(call.arg(8)) != 0,
+        current: figures,
+    };
+    with_device(|device| {
+        let pars = &mut device.pars;
+        pars.layout = layout;
+        pars.figure_region = FigureRegion::Layout;
+        pars.cex = layout_cex(rows, columns);
+        pars.margin_cex = pars.cex;
+        pars.square = pars.pty == 's';
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+/// `axis(side, at, labels, ...)`: the tick positions, `at` or those `par("xaxp")` or
+/// `par("yaxp")` gives.
+unsafe fn do_axis(call: &NativeCall<'_>) -> R<Sexp> {
+    let side = values::as_integer_scalar(call.arg(0));
+    if !(1..=4).contains(&side) {
+        return Err(error(format!("invalid axis number {side}")));
+    }
+    let at = call.arg(1);
+    let labels = call.arg(2);
+    let ticks = with_plot(|device| {
+        let pars = &device.pars;
+        let horizontal = side % 2 == 1;
+        let (axp, usr, log, intervals) = if horizontal {
+            (
+                pars.xaxp,
+                [pars.usr[0], pars.usr[1]],
+                pars.xlog,
+                pars.lab[0],
+            )
+        } else {
+            (
+                pars.yaxp,
+                [pars.usr[2], pars.usr[3]],
+                pars.ylog,
+                pars.lab[1],
+            )
+        };
+        let usr = if log {
+            usr.map(|limit| 10f64.powf(limit))
+        } else {
+            usr
+        };
+        Ok(at_vector(axp, usr, intervals, log))
+    })?;
+    let result = if at == nil() {
+        values::real_vector(&ticks)?
+    } else {
+        coerce_vector(at, SexpType::Real)?
+    };
+    let label_count = length(labels);
+    let logical_labels = matches!(labels.kind(), SexpType::Logical | SexpType::Nil);
+    if !logical_labels && label_count != length(result) {
+        return Err(error(format!(
+            "'at' and 'labels' lengths differ, {} != {label_count}",
+            length(result)
+        )));
+    }
+    Ok(result)
+}
+
+// graphics: text metrics and coordinate conversion.
+
+/// The widths of the printable ASCII characters in Helvetica, in thousandths of the font
+/// size, from Adobe's published font metrics. Other characters get the width of a digit.
+const HELVETICA_WIDTHS: [u16; 95] = [
+    278, 278, 355, 556, 556, 889, 667, 222, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556,
+    556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667,
+    611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667,
+    667, 611, 278, 278, 278, 469, 556, 222, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500,
+    222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
+];
+
+/// The same widths in Helvetica-Bold. The oblique faces share the widths of their upright ones.
+const HELVETICA_BOLD_WIDTHS: [u16; 95] = [
+    278, 333, 474, 556, 556, 889, 722, 278, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556,
+    556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975, 722, 722, 722, 722, 667,
+    611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667,
+    667, 611, 333, 278, 333, 584, 556, 278, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556,
+    278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584,
+];
+
+/// The height of a capital letter in Helvetica, in thousandths of the font size.
+const HELVETICA_CAP_HEIGHT: f64 = 718.0;
+
+/// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
+/// are bold).
+fn text_width_ems(line: &str, font: i32) -> f64 {
+    let widths = if font == 2 || font == 4 {
+        &HELVETICA_BOLD_WIDTHS
+    } else {
+        &HELVETICA_WIDTHS
+    };
+    line.chars()
+        .map(|character| {
+            let code = character as usize;
+            let width = if (32..127).contains(&code) {
+                widths[code - 32]
+            } else {
+                556
+            };
+            f64::from(width) / 1000.0
+        })
+        .sum()
+}
+
+/// The lines of each label of a `strwidth` or `text` argument: strings line by line, other
+/// atomic values as text, and plotmath expressions by their deparsed source.
+unsafe fn label_lines(labels: Sexp) -> R<Vec<Vec<String>>> {
+    let split = |text: &str| text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+    match labels.kind() {
+        SexpType::Nil => Ok(Vec::new()),
+        SexpType::Expression => {
+            let mut result = Vec::with_capacity(length(labels));
+            for index in 0..length(labels) {
+                result.push(vec![crate::deparse::deparse_one_line(values::list_elt(
+                    labels, index,
+                ))]);
+            }
+            Ok(result)
+        }
+        SexpType::Language | SexpType::Symbol => {
+            Ok(vec![vec![crate::deparse::deparse_one_line(labels)]])
+        }
+        SexpType::String => Ok((0..length(labels))
+            .map(|index| match values::string_at(labels, index) {
+                Some(text) => split(&text),
+                None => Vec::new(),
+            })
+            .collect()),
+        _ => {
+            let strings = coerce_vector(labels, SexpType::String)?;
+            Ok((0..length(strings))
+                .map(|index| {
+                    values::string_at(strings, index).map_or_else(Vec::new, |text| split(&text))
+                })
+                .collect())
+        }
+    }
+}
+
+/// `strwidth` and `strheight`: `(s, units, cex, font, vfont, ...)`, with units 1 for user
+/// coordinates, 2 for the figure and 3 for inches.
+unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
+    let labels = label_lines(call.arg(0))?;
+    let units = values::as_integer_scalar(call.arg(1));
+    if !(1..=3).contains(&units) {
+        return Err(error("invalid units"));
+    }
+    let cex_value = call.arg(2);
+    let cex = if cex_value == nil() {
+        values::na_real()
+    } else {
+        values::as_real_scalar(cex_value)
+    };
+    let font_value = call.arg(3);
+    let font = if font_value == nil() {
+        0
+    } else {
+        values::as_integer_scalar(font_value)
+    };
+    let sizes = with_started_plot(|device| {
+        let pars = &device.pars;
+        let font = if font >= 1 { font } else { pars.font };
+        // The `cex` argument scales `par("cex")` rather than replacing it.
+        let cex = pars.cex
+            * if cex.is_finite() && cex > 0.0 {
+                cex
+            } else {
+                1.0
+            };
+        let unrounded = f64::from(pars.ps) * cex;
+        // Fonts come in whole point sizes, so the glyphs are measured at the nearest one.
+        let points = unrounded.round().max(1.0);
+        let line_inches = 1.2 * unrounded / 72.0 * pars.lheight;
+        let (plot_inches, figure_inches, user_range) = if height {
+            (
+                device.plot_size()[1],
+                device.figure_size()[1],
+                pars.usr[3] - pars.usr[2],
+            )
+        } else {
+            (
+                device.plot_size()[0],
+                device.figure_size()[0],
+                pars.usr[1] - pars.usr[0],
+            )
+        };
+        let sizes: Vec<f64> = labels
+            .iter()
+            .map(|lines| {
+                let inches = if height {
+                    let extra = lines.len().saturating_sub(1) as f64 * line_inches;
+                    extra + HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0
+                } else {
+                    lines
+                        .iter()
+                        .map(|line| text_width_ems(line, font))
+                        .fold(0.0, f64::max)
+                        * points
+                        / 72.0
+                };
+                match units {
+                    1 => inches / plot_inches * user_range,
+                    2 => inches / figure_inches,
+                    _ => inches,
+                }
+            })
+            .collect();
+        Ok(sizes)
+    })?;
+    values::real_vector(&sizes)
+}
+
+unsafe fn do_str_width(call: &NativeCall<'_>) -> R<Sexp> {
+    string_metric(call, false)
+}
+
+unsafe fn do_str_height(call: &NativeCall<'_>) -> R<Sexp> {
+    string_metric(call, true)
+}
+
+/// `grconvertX(x, from, to)` and `grconvertY`: the unit codes are positions in
+/// `graphics:::.units`.
+unsafe fn convert(call: &NativeCall<'_>, vertical: bool) -> R<Sexp> {
+    let input = coerce_vector(call.arg(0), SexpType::Real)?;
+    let from = values::as_integer_scalar(call.arg(1));
+    let to = values::as_integer_scalar(call.arg(2));
+    let known = [1, 2, 7, 8, 13, 14, 15, 16, 17];
+    if !known.contains(&from) || !known.contains(&to) {
+        return Err(error("invalid units"));
+    }
+    let points = values::reals(input).to_vec();
+    let converted = with_device(|device| {
+        Ok(points
+            .iter()
+            .map(|value| {
+                let ndc = to_ndc(device, *value, from, vertical);
+                from_ndc(device, ndc, to, vertical)
+            })
+            .collect::<Vec<f64>>())
+    })?;
+    values::real_vector(&converted)
+}
+
+unsafe fn do_convert_x(call: &NativeCall<'_>) -> R<Sexp> {
+    convert(call, false)
+}
+
+unsafe fn do_convert_y(call: &NativeCall<'_>) -> R<Sexp> {
+    convert(call, true)
+}
+
+/// The regions a coordinate passes through on its way from user coordinates to the device,
+/// each `[low, high]` in the enclosing region's fractions, for one axis.
+struct AxisFrames {
+    inner: [f64; 2],
+    figure: [f64; 2],
+    plot: [f64; 2],
+    usr: [f64; 2],
+    log: bool,
+    device: [f64; 2],
+    size: f64,
+    figure_inches: f64,
+    line_inches: f64,
+    char_inches: f64,
+}
+
+fn axis_frames(device: &Device, vertical: bool) -> AxisFrames {
+    let axis = usize::from(vertical);
+    let pick = |region: [f64; 4]| [region[2 * axis], region[2 * axis + 1]];
+    let extent = device.device_extent();
+    AxisFrames {
+        inner: pick(device.inner_region()),
+        figure: pick(device.figure_region()),
+        plot: pick(device.plot_region()),
+        usr: pick(device.pars.usr),
+        log: if vertical {
+            device.pars.ylog
+        } else {
+            device.pars.xlog
+        },
+        device: pick(extent),
+        size: device.size[axis],
+        figure_inches: device.figure_size()[axis],
+        line_inches: device.pars.mex * device.line_inches(),
+        char_inches: device.char_inches()[1] * device.pars.cex,
+    }
+}
+
+fn lerp(range: [f64; 2], fraction: f64) -> f64 {
+    range[0] + fraction * (range[1] - range[0])
+}
+
+fn unlerp(range: [f64; 2], value: f64) -> f64 {
+    (value - range[0]) / (range[1] - range[0])
+}
+
+/// A coordinate in unit `unit` as a fraction of the device.
+fn to_ndc(device: &Device, value: f64, unit: i32, vertical: bool) -> f64 {
+    let frames = axis_frames(device, vertical);
+    let figure_to_ndc = |fraction: f64| lerp(frames.inner, lerp(frames.figure, fraction));
+    match unit {
+        1 => unlerp(frames.device, value),
+        2 => value,
+        7 => lerp(frames.inner, value),
+        8 => figure_to_ndc(value),
+        13 => {
+            let value = if frames.log { value.log10() } else { value };
+            figure_to_ndc(lerp(frames.plot, unlerp(frames.usr, value)))
+        }
+        14 => value / frames.size,
+        15 => figure_to_ndc(value * frames.line_inches / frames.figure_inches),
+        16 => figure_to_ndc(value * frames.char_inches / frames.figure_inches),
+        _ => figure_to_ndc(lerp(frames.plot, value)),
+    }
+}
+
+fn from_ndc(device: &Device, ndc: f64, unit: i32, vertical: bool) -> f64 {
+    let frames = axis_frames(device, vertical);
+    let ndc_to_figure = |ndc: f64| unlerp(frames.figure, unlerp(frames.inner, ndc));
+    match unit {
+        1 => lerp(frames.device, ndc),
+        2 => ndc,
+        7 => unlerp(frames.inner, ndc),
+        8 => ndc_to_figure(ndc),
+        13 => {
+            let value = lerp(frames.usr, unlerp(frames.plot, ndc_to_figure(ndc)));
+            if frames.log { 10f64.powf(value) } else { value }
+        }
+        14 => ndc * frames.size,
+        15 => ndc_to_figure(ndc) * frames.figure_inches / frames.line_inches,
+        16 => ndc_to_figure(ndc) * frames.figure_inches / frames.char_inches,
+        _ => unlerp(frames.plot, ndc_to_figure(ndc)),
+    }
+}
+
+// graphics: perspective plots and dendrograms.
+
+type Matrix4 = [[f64; 4]; 4];
+
+fn multiply(left: &Matrix4, right: &Matrix4) -> Matrix4 {
+    let mut product = [[0.0; 4]; 4];
+    for (row, product_row) in product.iter_mut().enumerate() {
+        for (column, cell) in product_row.iter_mut().enumerate() {
+            *cell = (0..4)
+                .map(|inner| left[row][inner] * right[inner][column])
+                .sum();
+        }
+    }
+    product
+}
+
+fn identity() -> Matrix4 {
+    let mut matrix = [[0.0; 4]; 4];
+    for (index, row) in matrix.iter_mut().enumerate() {
+        row[index] = 1.0;
+    }
+    matrix
+}
+
+fn translation(offset: [f64; 3]) -> Matrix4 {
+    let mut matrix = identity();
+    matrix[3][..3].copy_from_slice(&offset);
+    matrix
+}
+
+fn scaling(factors: [f64; 3]) -> Matrix4 {
+    let mut matrix = identity();
+    for (index, factor) in factors.iter().enumerate() {
+        matrix[index][index] = *factor;
+    }
+    matrix
+}
+
+/// A rotation of row vectors by `degrees` about the x axis, or about the y axis.
+fn rotation(degrees: f64, about_y: bool) -> Matrix4 {
+    let (sine, cosine) = degrees.to_radians().sin_cos();
+    let mut matrix = identity();
+    if about_y {
+        matrix[0][0] = cosine;
+        matrix[0][2] = -sine;
+        matrix[2][0] = sine;
+        matrix[2][2] = cosine;
+    } else {
+        matrix[1][1] = cosine;
+        matrix[1][2] = sine;
+        matrix[2][1] = -sine;
+        matrix[2][2] = cosine;
+    }
+    matrix
+}
+
+/// `persp(x, y, z, xlim, ylim, zlim, theta, phi, r, d, scale, expand, ...)`: the viewing
+/// transformation `persp` documents, which maps the box of the limits, scaled to a cube about
+/// the origin, through the rotations and the perspective projection. The plot window fits the
+/// projected box at aspect ratio 1.
+unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
+    let limits = |index: usize| -> R<[f64; 2]> {
+        let reals = coerce_vector(call.arg(index), SexpType::Real)?;
+        let reals = values::reals(reals);
+        if reals.len() != 2 || reals.iter().any(|limit| !limit.is_finite()) {
+            return Err(error("invalid 'x', 'y' or 'z' limits"));
+        }
+        Ok([reals[0], reals[1]])
+    };
+    let boxes = [limits(3)?, limits(4)?, limits(5)?];
+    let scalar = |index: usize| values::as_real_scalar(call.arg(index));
+    let (theta, phi, distance, viewing) = (scalar(6), scalar(7), scalar(8), scalar(9));
+    let scale = values::as_logical_scalar(call.arg(10)) == 1;
+    let expand = scalar(11);
+    if !(viewing > 0.0) || !(distance.is_finite()) || !expand.is_finite() {
+        return Err(error("invalid viewing parameters"));
+    }
+    let centre = boxes.map(|limits| (limits[0] + limits[1]) / 2.0);
+    let mut half = boxes.map(|limits| (limits[1] - limits[0]) / 2.0);
+    if !scale {
+        let largest = half.iter().copied().fold(0.0, f64::max);
+        half = [largest; 3];
+    }
+    if half.iter().any(|half| *half == 0.0) {
+        return Err(error("invalid 'x', 'y' or 'z' limits"));
+    }
+    let mut perspective = identity();
+    perspective[2][3] = -1.0 / viewing;
+    let steps = [
+        translation(centre.map(|centre| -centre)),
+        scaling([1.0 / half[0], 1.0 / half[1], expand / half[2]]),
+        rotation(-90.0, false),
+        rotation(-theta, true),
+        rotation(phi, false),
+        translation([0.0, 0.0, -distance - viewing]),
+        perspective,
+    ];
+    let transform = steps
+        .iter()
+        .fold(identity(), |product, step| multiply(&product, step));
+    let mut projected_x = [f64::INFINITY, f64::NEG_INFINITY];
+    let mut projected_y = [f64::INFINITY, f64::NEG_INFINITY];
+    for corner in 0..8 {
+        let point = [
+            boxes[0][corner & 1],
+            boxes[1][(corner >> 1) & 1],
+            boxes[2][(corner >> 2) & 1],
+            1.0,
+        ];
+        let image: Vec<f64> = (0..4)
+            .map(|column| (0..4).map(|row| point[row] * transform[row][column]).sum())
+            .collect();
+        let (x, y) = (image[0] / image[3], image[1] / image[3]);
+        projected_x = [projected_x[0].min(x), projected_x[1].max(x)];
+        projected_y = [projected_y[0].min(y), projected_y[1].max(y)];
+    }
+    with_device(|device| {
+        if !device.started {
+            return Err(error("plot.new has not been called yet"));
+        }
+        set_window(device, projected_x, projected_y, 1.0);
+        device.pars.new = false;
+        Ok(())
+    })?;
+    let result = alloc(SexpType::Real, 16)?;
+    let cells = values::reals_mut(result);
+    for column in 0..4 {
+        for row in 0..4 {
+            cells[column * 4 + row] = transform[row][column];
+        }
+    }
+    let dim = values::integer_vector(&[4, 4])?;
+    values::set_attr(result, symbols().dim, dim)?;
+    Ok(result)
+}
+
+/// The plot window over linear limits with aspect ratio `asp` and the current axis styles.
+fn set_window(device: &mut Device, xlim: [f64; 2], ylim: [f64; 2], asp: f64) {
+    let pin = device.plot_size();
+    let (x_range, y_range) = ((xlim[1] - xlim[0]).abs(), (ylim[1] - ylim[0]).abs());
+    let x_needed = pin[0] * y_range / (asp * pin[1]);
+    let (x_range, y_range) = if x_needed >= x_range {
+        (x_needed, y_range)
+    } else {
+        (x_range, x_range * asp * pin[1] / pin[0])
+    };
+    let pars = &mut device.pars;
+    let (x, xaxp) = scale_axis(centred(xlim, x_range), pars.xaxs, false, pars.lab[0]);
+    let (y, yaxp) = scale_axis(centred(ylim, y_range), pars.yaxs, false, pars.lab[1]);
+    pars.xlog = false;
+    pars.ylog = false;
+    pars.usr = [x[0], x[1], y[0], y[1]];
+    pars.xaxp = xaxp;
+    pars.yaxp = yaxp;
+}
+
+/// `C_dendwindow(n, merge, height, hang, labels, ...)`: the plot window of a dendrogram of
+/// `n` merges, its leaves at 1 to `n + 1` and its heights from the lowest hanging leaf to the
+/// root. GNU R also leaves room below for the leaf labels, which ry does not measure.
+unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
+    let leaves = values::as_integer_scalar(call.arg(0)).max(0) + 1;
+    let heights = coerce_vector(call.arg(2), SexpType::Real)?;
+    let heights: Vec<f64> = values::reals(heights)
+        .iter()
+        .copied()
+        .filter(|height| height.is_finite())
+        .collect();
+    let hang = values::as_real_scalar(call.arg(3));
+    let top = heights.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let bottom = heights.iter().copied().fold(f64::INFINITY, f64::min);
+    let (bottom, top) = if top.is_finite() {
+        (bottom, top)
+    } else {
+        (0.0, 1.0)
+    };
+    let bottom = if hang.is_finite() && hang >= 0.0 {
+        bottom - hang * (top - bottom)
+    } else {
+        0.0_f64.min(bottom)
+    };
+    with_started_plot(|device| {
+        let pars = &mut device.pars;
+        let (x, xaxp) = scale_axis([1.0, f64::from(leaves)], pars.xaxs, false, pars.lab[0]);
+        let (y, yaxp) = scale_axis([bottom, top], pars.yaxs, false, pars.lab[1]);
+        pars.xlog = false;
+        pars.ylog = false;
+        pars.usr = [x[0], x[1], y[0], y[1]];
+        pars.xaxp = xaxp;
+        pars.yaxp = yaxp;
+        Ok(())
+    })?;
+    Ok(nil())
+}
+
+/// `xspline(x, y, shape, open, repEnds, draw, ...)`: without drawing, the points of the
+/// spline, which ry approximates by its control points.
+unsafe fn do_xspline(call: &NativeCall<'_>) -> R<Sexp> {
+    with_plot(|_| Ok(()))?;
+    if values::as_logical_scalar(call.arg(5)) == 1 {
+        return Ok(nil());
+    }
+    let x = coerce_vector(call.arg(0), SexpType::Real)?;
+    crate::heap().root(x);
+    let y = coerce_vector(call.arg(1), SexpType::Real)?;
+    crate::heap().root(y);
+    values::named_list(&[("x", x), ("y", y)])
+}
+
+/// `locator` and `identify` on a device without a pointer: nothing is located.
+unsafe fn do_locator(_: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|_| Ok(()))?;
+    Ok(nil())
+}
+
+unsafe fn do_identify(_: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|_| Ok(()))?;
+    values::logical_vector(&[])
+}
+
+/// `plot.xy(xy, type, ...)`.
+unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
+    with_plot(|_| Ok(()))?;
+    let pch = call.arg(2);
+    if pch.kind() == SexpType::Logical && values::ints(pch).iter().any(|flag| *flag != NA_INTEGER) {
+        return Err(error("only NA allowed in logical plotting symbol"));
+    }
+    Ok(nil())
 }
 
 /// A colour as GNU R packs it: red in the low byte, then green, blue and alpha.
@@ -667,7 +3354,8 @@ unsafe fn do_palette2(call: &NativeCall<'_>) -> R<Sexp> {
 
 unsafe fn do_cairo_props(call: &NativeCall<'_>) -> R<Sexp> {
     match values::as_integer_scalar(call.arg(0)) {
-        1 | 2 => scalar_bool(false),
+        // Cairo with FreeType and with Pango, so `bitmapType` is "cairo" as in a desktop build.
+        1 | 2 => scalar_bool(true),
         _ => Ok(nil()),
     }
 }
@@ -797,6 +3485,11 @@ fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
         first = (log_low - 0.5).ceil();
         last = (log_high + 0.5).floor();
     }
+    // Subnormal numbers are too coarse for decades or pretty steps, so the axis keeps its
+    // limits and ticks once per decade.
+    if 10f64.powf(first.min(last)) < f64::MIN_POSITIVE {
+        return (low, high, 1);
+    }
     if last <= first {
         let (first, last, count) = linear_axis(low, high, intervals);
         return (first, last, -count);
@@ -849,6 +3542,9 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
             })
             .collect();
     }
+    if !(first > 0.0 && last.is_finite() && last >= first) {
+        return Vec::new();
+    }
     let (low, high) = (usr[0].min(usr[1]), usr[0].max(usr[1]));
     let inside = |tick: f64| tick >= low * (1.0 - 1e-7) && tick <= high * (1.0 + 1e-7);
     let multiples: &[f64] = match count {
@@ -879,8 +3575,10 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
         }
         return ticks;
     }
-    let mut decade = 10f64.powf(first.log10().floor() - 1.0);
-    while decade <= high * 10.0 {
+    let mut decade = 10f64
+        .powf(first.log10().floor() - 1.0)
+        .max(f64::MIN_POSITIVE);
+    while decade.is_finite() && decade <= high * 10.0 {
         for multiple in multiples {
             let tick = decade * multiple;
             if inside(tick) {
@@ -1170,7 +3868,11 @@ unsafe fn do_bin_count(call: &NativeCall<'_>) -> R<Sexp> {
     values::integer_vector(&counts)
 }
 
-unsafe fn do_stem_leaf(_: &NativeCall<'_>) -> R<Sexp> {
+unsafe fn do_stem_leaf(call: &NativeCall<'_>) -> R<Sexp> {
+    // A single value has no spread to split into stems, so GNU R prints nothing for it.
+    if length(call.arg(0)) <= 1 {
+        return Ok(nil());
+    }
     Err(error("stem() is not supported in ry yet"))
 }
 

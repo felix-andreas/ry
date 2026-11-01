@@ -697,6 +697,46 @@ const COLOR_NAMES: &[(&str, u32)] = &[
     ("yellowgreen", 0x32CD9A),
 ];
 
+/// GNU R's limit on graphics systems (`MAX_GRAPHICS_SYSTEMS`).
+const MAX_GRAPHICS_SYSTEMS: usize = 24;
+
+/// The registered graphics systems' callbacks, as addresses. A system such as grid registers
+/// when its namespace loads. With no devices open there is no per-device state to create, so
+/// registering only claims a slot.
+static GRAPHICS_SYSTEMS: std::sync::Mutex<[usize; MAX_GRAPHICS_SYSTEMS]> =
+    std::sync::Mutex::new([0; MAX_GRAPHICS_SYSTEMS]);
+
+/// `GEregisterSystem(callback, &index)`: claims the first free slot for a graphics system.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
+    let claimed = {
+        let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let free = systems.iter().position(|&slot| slot == 0);
+        if let Some(free) = free {
+            systems[free] = callback;
+        }
+        free
+    };
+    match claimed {
+        Some(free) if !index.is_null() => *index = free as c_int,
+        Some(_) => {}
+        None => raise(error("too many graphics systems registered")),
+    }
+}
+
+/// `GEunregisterSystem(index)`: frees a graphics system's slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEunregisterSystem(index: c_int) {
+    let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match usize::try_from(index).ok().and_then(|index| systems.get_mut(index)) {
+        Some(slot) if *slot != 0 => *slot = 0,
+        _ => {
+            drop(systems);
+            raise(error("no graphics system to unregister"))
+        }
+    }
+}
+
 fn unsupported_message() -> crate::boundary::Unwind {
     error("graphics devices are not supported by ry yet")
 }
@@ -757,7 +797,6 @@ unsupported!(
     GErecordGraphicOperation,
     GErecording,
     GERect,
-    GEregisterSystem,
     GEregisterWithDevice,
     GESetClip,
     GEStrHeight,
@@ -767,7 +806,6 @@ unsupported!(
     GESymbol,
     GEsystemState,
     GEText,
-    GEunregisterSystem,
     GEXspline,
     Rf_GAxisPars,
     Rf_CreateAtVector,

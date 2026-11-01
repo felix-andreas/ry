@@ -1,0 +1,74 @@
+[stdout]
+| [1] TRUE
+| [1] "recordedplot"
+| [1] TRUE
+| [1] 16
+| [1] TRUE
+| $mar
+| [1] 5.1 4.1 4.1 2.1
+| 
+| $cex
+| [1] 1
+| 
+| $mar
+| [1] 5.1 4.1 4.1 2.1
+| 
+| $mfrow
+| [1] 1 1
+| 
+| [1] 0.166 0.166 0.166 0.166
+| [1] 2 2
+| [1] "integer"
+| [1] 72
+| [1] 66
+| [1] "\"foo\" is not a graphical parameter"
+| [1] "graphical parameter \"din\" cannot be set"
+| $foo
+| NULL
+| 
+| $din
+| [1] 7 7
+| 
+| [1] 7 7
+| null device 
+|           1 
+| [1] 4 5
+| [1] 4 5
+| null device 
+|           1 
+| null device 
+|           1 
+| $cex
+| [1] 0.83
+| 
+| $csi
+| [1] 0.166
+| 
+| $mai
+| [1] 0.8466 0.6806 0.6806 0.3486
+| 
+| $omi
+| [1] 0 0 0 0
+| 
+| $mex
+| [1] 1
+| 
+| [1] 0.66
+| [1] 1
+| $mai
+| [1] 1.02 0.82 0.82 0.42
+| 
+| $csi
+| [1] 0.2
+| 
+| [1] 4.08 3.28 3.28 1.68
+| [1] 1.25 1.25 1.25 1.25
+| [1] 0.8 0.8 0.8 0.8
+| null device 
+|           1 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c("null device" = 1L)
