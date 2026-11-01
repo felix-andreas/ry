@@ -542,13 +542,14 @@ fn collect_unknown_nominals<'db>(
     });
 }
 
-/// The declared name of an `@alias` line or a generic `@type NAME<T, ...>` line. A plain
-/// `@type NAME` is the older opaque form, handled on its own.
+/// The declared name of an `@alias` line, a generic `@type NAME<T, ...>` line, or a `@type NAME
+/// {TYPE}` line with a representation. A plain `@type NAME` is the older opaque form, handled on
+/// its own.
 fn definition_line_name(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("@alias").or_else(|| {
         content
             .strip_prefix("@type")
-            .filter(|rest| rest.contains('<'))
+            .filter(|rest| rest.contains(['<', '{']))
     })?;
     let rest = rest.trim_start();
     let end = rest.find(['<', ' ', '{']).unwrap_or(rest.len());
@@ -556,12 +557,12 @@ fn definition_line_name(content: &str) -> Option<&str> {
     is_nominal_name(name).then_some(name)
 }
 
-/// An `@alias NAME<T> {TYPE}` or `@type NAME<T>` line, lowered through the annotation grammar a
-/// project's own `#: @alias` uses. A generic opaque type is a `@type` whose representation is
-/// `Unknown`, which the checker already treats as having none.
+/// An `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>` line, lowered through the
+/// annotation grammar a project's own `#: @alias` uses. A generic opaque type is a `@type` whose
+/// representation is `Unknown`, which the checker already treats as having none.
 fn type_definition_line<'db>(db: &'db dyn Db, content: &str) -> Option<NamedDefinition<'db>> {
     definition_line_name(content)?;
-    let text = if content.starts_with("@type") {
+    let text = if content.starts_with("@type") && !content.contains('{') {
         format!("#: {content} {{Unknown}}")
     } else {
         format!("#: {content}")

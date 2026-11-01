@@ -43,7 +43,10 @@
 # `@type NAME` declares a named type with no inspectable representation — compatible only with
 # itself, produced only by functions declared to return it. Consumers that accept them keep `Any`
 # parameters (R coerces liberally), so the nominals tighten *returns* without rejecting calls.
-@type data.frame
+#
+# A data frame is a named list of columns at run time, and `lapply(frame, f)` or `vapply` over its
+# columns is everyday R, so it declares that representation. Its columns are not typed.
+@type data.frame {list[named: Any]}
 @type factor
 @type matrix
 @type formula
