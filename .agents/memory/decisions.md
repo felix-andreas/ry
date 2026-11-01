@@ -1829,8 +1829,9 @@ constants, symbols, promises, and calls to a handful of primitives (`.Call`, `.E
 `warning`, `dyn.load`, `list`, `identity`, `invisible`, `quote`), which is what native code needs to
 drive native code. Calling a closure is an error that says so.
 
-**ry presents itself as R 4.6.2 with revision 89194**, the lowest revision that keeps data.table on
-its modern branches, and its native encoding is UTF-8.
+**ry presents the version of the base R it runs, with a revision of at least 89194** (the lowest
+that keeps data.table on its modern branches), and its native encoding is UTF-8. See "The presented
+R version comes from the base package the runtime runs" below.
 
 **Considered and rejected.** Source compatibility alone saves nothing, because the opaque `SEXP`
 already forces every accessor to be a real function. A moving nursery cannot coexist with raw
@@ -3309,6 +3310,13 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
+
+## The presented R version comes from the base package the runtime runs
+
+- **Previous shape.** Three sources: `Rversion.h` and `libr`'s `R_VERSION_STRING` said 4.6.2, `rcmd::R_VERSION` said 4.6.2, and the interpreter's `R.version` said 4.3.3, while `packageVersion("base")` came from the linked GNU R library. A package compiled from source took its R 4.6 C branches while its R code took the 4.3 branches: rlang's C made `ns_registry_env()` defunct and its R code still called it, which broke pkgload, generics and downlit; presenting 4.6.2 in R as well made `is_installed("base", version = getRversion())` false and sent R code to 4.4+ base functions that a 4.3 base lacks.
+- **Target shape.** One source of truth: `library/base/DESCRIPTION` of the R home (`Version`, `Revision`, `Last Changed Date`). The interpreter reads it for `R.version` and `getRversion()` (`interp::system::r_version`), `serialize` writes it as the writer version, and `rcmd::assemble` generates the home's `include/Rversion.h` from the same file. The revision is raised to at least 89194, because ry implements the API data.table guards on it. The checked-in `crates/libr/include/Rversion.h` (4.6.2) serves only code built directly against `crates/libr/include`.
+- **Why not always 4.6.** The runtime runs the base R code of the linked installation, so a version claim above it is false at the R level. With an R 4.6 library linked, as the packaging design intends, ry presents 4.6 and packages take their modern-API branches; with 4.3.3 linked, they take the 4.3 branches, which match the GNU R baseline the corpus is measured against.
+- **Impact.** Packages installed from source must be reinstalled after a home's base version changes. `tests/test_install.rs` pins that `getRversion()`, `packageVersion("base")`, `Rversion.h` and `R --version` agree.
 
 ## An Array is a flagged R vector, written `[...]`
 
