@@ -157,7 +157,10 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
     }
     let mut library = StubLibrary::default();
     for (source_index, (namespace, text)) in sources.sources(db).iter().enumerate() {
-        if CONDITIONAL_NAMESPACES.contains(&namespace.as_str())
+        // A qualified-only namespace's typed declarations would also resolve bare names, so they
+        // join only once the package is attached or declared, like a conditional namespace.
+        if (CONDITIONAL_NAMESPACES.contains(&namespace.as_str())
+            || QUALIFIED_ONLY_NAMESPACES.contains(&namespace.as_str()))
             && !project_overridden.contains(namespace.as_str())
             && !namespace_active(db, namespace)
         {

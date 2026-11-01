@@ -434,6 +434,26 @@ fn check_loads_valid_override_stubs_silently() {
 }
 
 #[test]
+fn strict_mode_reports_type_errors_without_typing() {
+    let directory = project(&[
+        ("ry.toml", "[check]\nstrict = true\n"),
+        (
+            "a.R",
+            "#: fn(x: double) -> double\nf <- function(x) x + 1\nprint(f(\"a\"))\n",
+        ),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert_eq!(output.code, 1, "stderr: {}", output.stderr);
+    assert!(
+        output
+            .stderr
+            .contains("expected `double`, found `character`"),
+        "expected the type error, got: {}",
+        output.stderr
+    );
+}
+
+#[test]
 fn check_keeps_declared_packages_active_beside_override_stubs() {
     let directory = project(&[
         (

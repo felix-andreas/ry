@@ -168,7 +168,7 @@ f <- function(r) {
 }
 #++++
 hover 128..136: :Missing
-definition: stub source 11 at `Missing`
+definition: stub source ry at `Missing`
 references: 30..37, 129..136
 rename: none
 signature: none
@@ -243,7 +243,7 @@ completion (2): Empty, ListWasEmpty
 check <- function(x) :O$0k(x)
 #++++
 hover 73..79: :Ok(integer)
-definition: stub source 11 at `Ok`
+definition: stub source ry at `Ok`
 references: 22..24, 74..76
 rename: none
 signature: none

@@ -22,7 +22,8 @@ quantile : @pure fn(x: Any, [probs]: Any, [na.rm]: logical, [names]: logical, [t
 fivenum : @pure fn(x: Any, [na.rm]: logical) -> double[]
 
 # `setNames` returns its first argument with names attached: a genuine generic.
-setNames : @pure <T> fn([object]: T, nm: Any) -> T
+setNames : @pure <T> fn(object: list[T], nm: character[]) -> list[named: T]
+setNames : <T> fn([object]: T, nm: Any) -> T
 
 # NA handling. `na.omit` mirrors its input (type-preserving). `complete.cases` is one logical per row
 # (scalar-claim).
@@ -49,7 +50,7 @@ as.formula : @pure Any
 aggregate : Any
 optim : Any
 optimize : Any
-uniroot : Any
+uniroot : fn(f: fn(double) -> double, [interval]: double[], ...: Any, [lower]: double, [upper]: double, [f.lower]: double, [f.upper]: double, [extendInt]: character, [check.conv]: logical, [tol]: double, [maxiter]: integer, [trace]: integer) -> list{root: double, f.root: double, iter: integer, init.it: integer, estim.prec: double}
 integrate : Any
 approx : Any
 density : Any
@@ -58,7 +59,10 @@ t.test : Any
 wilcox.test : Any
 chisq.test : Any
 cor.test : Any
-ts : Any
+@type ts
+ts : @pure fn([data]: Any, [start]: double[], [end]: double[], [frequency]: double, [deltat]: double, [ts.eps]: double, [class]: character, [names]: character[]) -> ts
+lag : @pure fn(x: ts, [k]: integer) -> ts
+approxfun : @pure fn(x: Any, [y]: Any, [method]: character, [yleft]: Any, [yright]: Any, [rule]: Any, [f]: double, [ties]: Any, [na.rm]: logical) -> fn(v: Any) -> double[]
 
 # Random generation: a double vector of `n` draws (`rbinom`/`rpois` genuinely return integer draws).
 # Distribution parameters are Any-param (numeric literals and vectorized parameters).

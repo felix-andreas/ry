@@ -8443,6 +8443,12 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
+        // An overload set ends in a catch-all returning `Any` for calls it cannot describe, so
+        // it fits every unchecked call too. A more specific fit refines it rather than
+        // disagreeing with it: `rep(0, n)` with `n` from `nrow()` is `double[]`.
+        if unchecked_argument && fits.iter().any(|(_, _, results)| !self.all_any(results)) {
+            fits.retain(|(_, _, results)| !self.all_any(results));
+        }
         // Without a free fit, a guess is taken only when every guess narrows the caller's
         // types alike; disagreeing narrowings make the variable `Unknown` (unchecked, not wrong).
         if unchecked_argument
@@ -8570,6 +8576,12 @@ impl<'db> Checker<'db, '_> {
         // A capture-discovery re-pass must not keep a stale commitment from the first pass.
         self.selected_overloads.remove(&callee);
         unknown(self.db)
+    }
+
+    fn all_any(&self, results: &[Ty<'db>]) -> bool {
+        results
+            .iter()
+            .all(|&result| matches!(result.kind(self.db), TyKind::Any))
     }
 
     /// An `Any` return is the corpus's fallback for calls it cannot describe and passes

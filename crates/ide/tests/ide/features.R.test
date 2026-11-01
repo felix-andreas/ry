@@ -242,8 +242,8 @@ hover 16..21:   [n]: Any,
 hover 16..21:   [na.print]: Any,
 hover 16..21:   [row.names]: Any,
 hover 16..21: ) -> double
-hover-definition: package base (1 declaration(s), declared in stub source 0 at `print`)
-definition: stub source 0 at `print`
+hover-definition: package base (1 declaration(s), declared in stub source base at `print`)
+definition: stub source base at `print`
 references: none
 rename: none
 signature: fn(x: double, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double
@@ -659,8 +659,14 @@ hover 64..72: character
 definition 10..16
 references: 10..16*, 65..71, 107..113
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> Any
+parameters: [Class: character] | ...: Any
+action: Add inferred type annotation for `p`
+  edit 55..55 -> "#: Any\n"
+action: Add inferred type annotations for the whole file
+  edit 55..55 -> "#: Any\n"
 completion: none
+hint @56: Any
 
 #---- generic_from_setmethod
 setGeneric("area", function(shape) standardGeneric("area"))
@@ -670,7 +676,8 @@ hover 70..76: character
 definition 12..16
 references: 12..16*, 52..56, 71..75
 rename: 3 edit(s)
-signature: none
+signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
 completion: none
 
 #---- call_of_a_script_generic_navigates_to_its_declaration
@@ -694,7 +701,8 @@ hover 11..17: character
 definition 12..16
 references: 12..16*, 52..56, 60..64
 rename: 3 edit(s)
-signature: none
+signature: fn(name: character, [def]: Any, ...: Any) -> character
+parameters: [name: character] | [def]: Any | ...: Any
 completion: none
 
 #---- signature_vector_classes
@@ -706,8 +714,14 @@ hover 90..93: character
 definition 10..11
 references: 10..11*, 56..57, 91..92
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> Any
+parameters: [Class: character] | ...: Any
+action: Add inferred type annotation for `q`
+  edit 81..81 -> "#: Any\n"
+action: Add inferred type annotations for the whole file
+  edit 81..81 -> "#: Any\n"
 completion: none
+hint @82: Any
 
 #==== type_definition
 #---- nominal_binding

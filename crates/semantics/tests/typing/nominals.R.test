@@ -208,9 +208,9 @@ setGeneric("deposit", function(account, amount) standardGeneric("deposit"))
 setMethod("deposit", "Account", function(account, amount) account)
 use <- function(account) deposit(account, 50)
 #++++
-Unknown
-Unknown
-Unknown
+fn(...: Any) -> Any
+character
+character
 use: <T> fn(account: T) -> Unknown
 
 #==== nominal_field_writes

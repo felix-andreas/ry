@@ -17,11 +17,11 @@
 # - `callNextMethod` forwards to the next method (result and named arguments are dispatch-dependent).
 is : Any
 as : Any
-new : Any
+new : fn(Class: character, ...: Any) -> Any
 validObject : Any
-setClass : Any
-setGeneric : Any
-setMethod : Any
+setClass : fn(Class: character, ...: Any) -> fn(...: Any) -> Any
+setGeneric : fn(name: character, [def]: Any, ...: Any) -> character
+setMethod : fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
 setValidity : Any
 setRefClass : Any
 representation : @pure Any

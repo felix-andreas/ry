@@ -40,7 +40,7 @@ Counter <- R6Class("Counter", public = list(
   }
 ))
 #++++
-Counter: Unknown
+Counter: Any
 
 #---- library_of_an_unstubbed_package_tolerates_any_read
 library(jsonlite)
