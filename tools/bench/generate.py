@@ -9,6 +9,12 @@ with a testthat test. The output is deterministic for a given seed.
 
 Usage:
     python3 -I generate.py --out DIR [--domain NAME|all] [--lines N] [--files N] [--seed N]
+                           [--typed] [--only TEMPLATE,...]
+
+The templates carry `#:` type annotations. By default they are stripped, which gives the plain
+R code base. `--typed` keeps them and turns on ry's strict mode in `ry.toml`, so ry checks the code
+base as fully typed strict code against the dependency types shipped in `types/`.
+`--only` restricts generation to the named templates, which is how a slice is checked alone.
 
 Template format (see templates/README.md): header lines start with `#@`, the R code
 follows, and a line `#@ test` starts the test code. Placeholders `@ID@` and `@<PARAM>@`
@@ -63,14 +69,26 @@ def main():
     parser.add_argument("--lines", type=int, default=10_000, help="target R lines per package (excluding tests)")
     parser.add_argument("--files", type=int, help="number of R files per package (default: lines / 600)")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--typed", action="store_true", help="keep the type annotations and turn on strict mode")
+    parser.add_argument("--only", help="comma-separated template names to draw from, such as returns,caching")
     args = parser.parse_args()
     if args.lines < 1 or (args.files is not None and args.files < 1):
         parser.error("--lines and --files must be at least 1")
 
     here = os.path.dirname(os.path.abspath(__file__))
     templates = {domain: load_templates(os.path.join(here, "templates", domain), domain) for domain in [*DOMAINS, "shared"]}
+    if args.only:
+        wanted = set(args.only.split(","))
+        known = {template.name for loaded in templates.values() for template in loaded}
+        if wanted - known:
+            parser.error(f"unknown templates: {', '.join(sorted(wanted - known))}")
+        templates = {domain: [template for template in loaded if template.name in wanted] for domain, loaded in templates.items()}
+    if not args.typed:
+        templates = {domain: [strip_annotations(template) for template in loaded] for domain, loaded in templates.items()}
     for domain in DOMAINS if args.domain == "all" else [args.domain]:
-        generate_package(args, domain, templates[domain], templates["shared"])
+        if not templates[domain] and not templates["shared"]:
+            continue
+        generate_package(args, domain, templates[domain] or templates["shared"], templates["shared"] or templates[domain])
 
 
 def load_templates(directory, domain):
@@ -101,6 +119,17 @@ def parse_template(name, domain, text):
         else:
             (test if in_test else code).append(line)
     return Template(name, domain, weight, params, ns, "\n".join(code).strip("\n") + "\n", "\n".join(test).strip("\n") + "\n")
+
+
+ANNOTATION = re.compile(r"^[ \t]*#:.*\n", flags=re.M)
+
+
+def annotated(args, text):
+    return text if args.typed else ANNOTATION.sub("", text)
+
+
+def strip_annotations(template):
+    return dataclasses.replace(template, code=ANNOTATION.sub("", template.code), test=ANNOTATION.sub("", template.test))
 
 
 def parse_param(spec):
@@ -156,17 +185,19 @@ def generate_package(args, domain, domain_templates, shared_templates):
         write(os.path.join(root, "R", f"{stem}.R"), f"# {package}: {label}\n\n" + "\n".join(code_parts))
         write(os.path.join(root, "tests", "testthat", f"test-{stem}.R"), "\n".join(test_parts))
 
-    write(os.path.join(root, "R", "zzz.R"), ZZZ.format(package=package))
-    write(os.path.join(root, "R", "dependencies.R"), dependencies_file())
-    write(os.path.join(root, "tests", "testthat", "test-dependencies.R"), DEPENDENCY_TEST)
+    write(os.path.join(root, "R", "zzz.R"), annotated(args, ZZZ.format(package=package)))
+    write(os.path.join(root, "R", "dependencies.R"), annotated(args, dependencies_file()))
+    write(os.path.join(root, "tests", "testthat", "test-dependencies.R"), annotated(args, DEPENDENCY_TEST))
     used_packages.update(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*)::", dependencies_file()))
     exports.extend(["backend_registry", "dependency_versions", "missing_dependencies", "reload_package", "run_package_tests", "azure_token", "highs_available"])
     write(os.path.join(root, "DESCRIPTION"), description(package, title))
     write(os.path.join(root, "NAMESPACE"), namespace_file(exports, namespace))
     write(os.path.join(root, "tests", "testthat.R"), f"library(testthat)\nlibrary({package})\n\ntest_check(\"{package}\")\n")
-    write(os.path.join(root, "tests", "testthat", "helper-seed.R"), HELPER)
+    write(os.path.join(root, "tests", "testthat", "helper-seed.R"), annotated(args, HELPER))
     write(os.path.join(root, ".Rbuildignore"), "^dev$\n")
     write(os.path.join(root, "dev", "reload.R"), RELOAD.format(package=package))
+    if args.typed:
+        write(os.path.join(root, "ry.toml"), "[check]\nstrict = true\n")
 
     uncovered = sorted({name.split(">=")[0] for name in IMPORTS} - used_packages - {"zeallot", "ROI.plugin.highs"})
     total = sum(count_lines(os.path.join(root, "R", name)) for name in os.listdir(os.path.join(root, "R")))
@@ -240,7 +271,7 @@ REGISTRY = {
     "odbc": "odbc", "ompr": "MIPModel", "ompr.roi": "with_ROI", "openxlsx": "read.xlsx",
     "parallel": "mclapply", "partitions": "parts", "pdftools": "pdf_text",
     "PerformanceAnalytics": "Return.calculate", "plumber": "pr", "polars": "as_polars_df",
-    "pool": "dbPool", "progress": "progress_bar", "purrr": "map", "quadprog": "solve.QP",
+    "pool": "dbPool", "progress": "progress_bar$new", "purrr": "map", "quadprog": "solve.QP",
     "R6": "R6Class", "rappdirs": "user_data_dir", "Rblpapi": "blpConnect", "RcppDE": "DEoptim",
     "RcppSimdJson": "fparse", "readr": "read_csv", "readxl": "read_excel", "renv": "snapshot",
     "Rglpk": "Rglpk_solve_LP", "rlang": "abort", "rmgarch": "dccspec", "rugarch": "ugarchspec",
@@ -259,36 +290,44 @@ def dependencies_file():
 
 
 DEPENDENCIES = """# The packages this code base builds on, and the entry points that reload and test it.
+#: character[]
 backend_packages <- c(
   @PACKAGES@
 )
 
+#: fn() -> character[]
 dependency_versions <- function() {
   vapply(backend_packages, function(name) as.character(utils::packageVersion(name)), character(1))
 }
 
+#: fn() -> character[]
 missing_dependencies <- function() {
   installed <- vapply(backend_packages, requireNamespace, logical(1), quietly = TRUE)
   backend_packages[!installed]
 }
 
 # One thin wrapper per backend, resolved only when called.
+#: fn() -> list[named: fn(...: Any) -> Any]
 backend_registry <- function() {
   list(
     @ENTRIES@
   )
 }
 
+#: fn() -> logical
 highs_available <- function() requireNamespace("ROI.plugin.highs", quietly = TRUE)
 
+#: fn([scopes]: character[], [provider]: fn(scopes: character[]) -> character) -> character
 azure_token <- function(scopes = "https://management.azure.com/.default", provider = azidentity::default_azure_credential) {
   provider(scopes)
 }
 
+#: fn([path]: character, [fast]: logical) -> environment | list[named: Any] | NULL
 reload_package <- function(path = ".", fast = FALSE) {
   if (fast) loadfast::load_fast(path) else devtools::load_all(path)
 }
 
+#: fn([path]: character, [reporter]: character) -> Any
 run_package_tests <- function(path = ".", reporter = "check") {
   testthat::test_local(path, reporter = reporter, stop_on_failure = FALSE)
 }
@@ -306,6 +345,7 @@ DEPENDENCY_TEST = """test_that("the registry names every backend", {
 
 ZZZ = """.datatable.aware <- TRUE
 
+#: fn(libname: character, pkgname: character) -> NULL
 .onLoad <- function(libname, pkgname) {{
   options(
     {package}.verbose = getOption("{package}.verbose", FALSE),

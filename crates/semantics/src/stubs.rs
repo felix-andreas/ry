@@ -735,6 +735,7 @@ mod tests {
             Vec::new(),
             CONDITIONAL_NAMESPACES
                 .iter()
+                .chain(QUALIFIED_ONLY_NAMESPACES)
                 .map(|namespace| (*namespace).to_owned())
                 .collect(),
             Default::default(),

@@ -1,0 +1,27 @@
+# stringr: vectorised string functions.
+#
+# `string` takes a character vector or anything `as.character()` turns into
+# one. Each function keeps the length of its input, so the results are vectors.
+str_trim : @pure fn(string: character[] | double[] | factor, [side]: character) -> character[]
+str_squish : @pure fn(string: character[] | double[] | factor) -> character[]
+str_replace : @pure fn(string: character[] | double[] | factor, pattern: character[], replacement: character[] | fn(character[]) -> character[]) -> character[]
+str_replace_all : @pure fn(string: character[] | double[] | factor, pattern: character[], replacement: character[] | fn(character[]) -> character[]) -> character[]
+str_remove : @pure fn(string: character[] | double[] | factor, pattern: character[]) -> character[]
+str_remove_all : @pure fn(string: character[] | double[] | factor, pattern: character[]) -> character[]
+str_to_lower : @pure fn(string: character[] | double[] | factor, [locale]: character) -> character[]
+str_to_upper : @pure fn(string: character[] | double[] | factor, [locale]: character) -> character[]
+str_to_title : @pure fn(string: character[] | double[] | factor, [locale]: character) -> character[]
+str_sub : @pure fn(string: character[] | double[] | factor, [start]: double[], [end]: double[]) -> character[]
+str_length : @pure fn(string: character[] | double[] | factor) -> integer[]
+str_count : @pure fn(string: character[] | double[] | factor, [pattern]: character[]) -> integer[]
+str_detect : @pure fn(string: character[] | double[] | factor, pattern: character[], [negate]: logical) -> logical[]
+str_starts : @pure fn(string: character[] | double[] | factor, pattern: character[], [negate]: logical) -> logical[]
+str_ends : @pure fn(string: character[] | double[] | factor, pattern: character[], [negate]: logical) -> logical[]
+str_extract : @pure fn(string: character[] | double[] | factor, pattern: character[], [group]: double | NULL) -> character[]
+str_pad : @pure fn(string: character[] | double[] | factor, width: double[], [side]: character, [pad]: character, [use_width]: logical) -> character[]
+str_c : @pure fn(...: Any, [sep]: character, [collapse]: character | NULL) -> character[]
+# A list with one character vector per input string; `simplify = TRUE` gives
+# a character matrix instead, so a call that passes `simplify` selects the
+# second candidate.
+str_split : @pure fn(string: character[] | double[] | factor, pattern: character[], [n]: double) -> list[character[]]
+str_split : @pure fn(string: character[] | double[] | factor, pattern: character[], [n]: double, [simplify]: logical) -> list[character[]] | matrix

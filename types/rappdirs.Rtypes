@@ -1,0 +1,3 @@
+# rappdirs: platform directories for an application.
+user_cache_dir : @pure fn([appname]: character | NULL, [appauthor]: character | NULL, [version]: character | NULL, [opinion]: logical, [expand]: logical, [os]: character | NULL) -> character
+user_data_dir : @pure fn([appname]: character | NULL, [appauthor]: character | NULL, [version]: character | NULL, [roaming]: logical, [expand]: logical, [os]: character | NULL) -> character
