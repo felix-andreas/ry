@@ -79,6 +79,8 @@ pub struct Summary {
     pub gnu_r_suite_seconds: Option<f64>,
     pub ry_suite_seconds: Option<f64>,
     pub ry_exit: String,
+    /// False for a GNU R-only run, whose report lists GNU R's own failures instead.
+    pub ry_ran: bool,
     pub comparisons: Vec<Comparison>,
 }
 
@@ -116,6 +118,7 @@ pub fn bench_package(package_dir: &Path, options: &Options) -> Result<Summary, B
         .canonicalize()
         .map_err(|error| BenchError::Setup(format!("{}: {error}", package_dir.display())))?;
     let name = package_name(&package_dir)?;
+
     let scratch = std::env::temp_dir().join(format!("ry-bench-{}-{name}", std::process::id()));
     if scratch.exists() {
         std::fs::remove_dir_all(&scratch).map_err(setup_error(&scratch))?;
@@ -128,6 +131,9 @@ pub fn bench_package(package_dir: &Path, options: &Options) -> Result<Summary, B
     std::fs::write(&driver, BENCH_DRIVER).map_err(setup_error(&driver))?;
 
     let gnu_r = run_suite(&copy, &name, &driver, "gnu-r", &scratch, options)?;
+    // A second GNU R run finds the values GNU R does not reproduce itself (a fresh UUID, a
+    // temporary path, a timestamp), which are then compared by status only.
+    let gnu_r_again = run_suite(&copy, &name, &driver, "gnu-r-again", &scratch, options)?;
     let ry = match options.skip_ry {
         true => None,
         false => Some(run_suite(&copy, &name, &driver, "ry", &scratch, options)?),
@@ -137,30 +143,23 @@ pub fn bench_package(package_dir: &Path, options: &Options) -> Result<Summary, B
     } else if let Err(error) = std::fs::remove_dir_all(&scratch) {
         eprintln!("could not remove {}: {error}", scratch.display());
     }
-    Ok(compare_runs(&name, &gnu_r, ry.as_ref()))
+    Ok(compare_runs(&name, &gnu_r, &gnu_r_again, ry.as_ref()))
 }
 
 /// Matches tests by file, name and occurrence, because a generated suite may repeat a name.
-pub fn compare_runs(package: &str, gnu_r: &Run, ry: Option<&Run>) -> Summary {
-    let tests: Vec<&TestResult> = gnu_r.results.iter().filter(|result| is_test(result)).collect();
-    let mut ry_by_key: HashMap<(String, String, usize), &TestResult> = HashMap::new();
-    if let Some(ry) = ry {
-        let mut seen: HashMap<(String, String), usize> = HashMap::new();
-        for result in ry.results.iter().filter(|result| is_test(result)) {
-            let count = seen.entry((result.file.clone(), result.test.clone())).or_default();
-            ry_by_key.insert((result.file.clone(), result.test.clone(), *count), result);
-            *count += 1;
-        }
-    }
-    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+pub fn compare_runs(package: &str, gnu_r: &Run, gnu_r_again: &Run, ry: Option<&Run>) -> Summary {
+    let tests = keyed(gnu_r);
+    let again: HashMap<Key, &TestResult> = keyed(gnu_r_again).into_iter().collect();
+    let ry_by_key: HashMap<Key, &TestResult> = ry.map(keyed).unwrap_or_default().into_iter().collect();
     let mut comparisons = Vec::with_capacity(tests.len());
-    for expected in &tests {
-        let count = seen.entry((expected.file.clone(), expected.test.clone())).or_default();
-        let actual = ry_by_key.get(&(expected.file.clone(), expected.test.clone(), *count));
-        *count += 1;
+    for (key, expected) in &tests {
+        let actual = ry_by_key.get(key);
+        let stable = again
+            .get(key)
+            .is_some_and(|other| other.value == expected.value && other.problems == expected.problems);
         let (verdict, detail) = match actual {
             None => (Verdict::Missing, String::new()),
-            Some(actual) => match difference(expected, actual) {
+            Some(actual) => match difference(expected, actual, stable) {
                 None => (Verdict::Match, String::new()),
                 Some(detail) => (Verdict::Differs, detail),
             },
@@ -179,7 +178,7 @@ pub fn compare_runs(package: &str, gnu_r: &Run, ry: Option<&Run>) -> Summary {
     // A test only ry reported (a file GNU R could not run at all) counts against ry too.
     let gnu_r_keys: HashSet<(String, String)> = tests
         .iter()
-        .map(|test| (test.file.clone(), test.test.clone()))
+        .map(|(_, test)| (test.file.clone(), test.test.clone()))
         .collect();
     if let Some(ry) = ry {
         for extra in ry.results.iter().filter(|result| is_test(result)) {
@@ -220,6 +219,7 @@ pub fn compare_runs(package: &str, gnu_r: &Run, ry: Option<&Run>) -> Summary {
             Some(_) => ry.exit.clone(),
             None => format!("{} before the suite finished: {}", ry.exit, ry.stderr_tail),
         }),
+        ry_ran: ry.is_some(),
         comparisons,
     }
 }
@@ -234,14 +234,24 @@ pub fn render_summary(summary: &Summary, verbose: bool) -> String {
     for (file, comparisons) in &by_file {
         let matching = comparisons
             .iter()
-            .filter(|c| c.verdict == Verdict::Match)
+            .filter(|c| match summary.ry_ran {
+                true => c.verdict == Verdict::Match,
+                false => c.gnu_r_status == "pass",
+            })
             .count();
         text.push_str(&format!(
-            "{} {file}: {matching}/{} match\n",
+            "{} {file}: {matching}/{} {}\n",
             summary.package,
-            comparisons.len()
+            comparisons.len(),
+            if summary.ry_ran { "match" } else { "pass under GNU R" }
         ));
         for comparison in comparisons {
+            if !summary.ry_ran {
+                if comparison.gnu_r_status != "pass" || verbose {
+                    text.push_str(&format!("  {:<8} {}\n", comparison.gnu_r_status, comparison.test));
+                }
+                continue;
+            }
             if comparison.verdict == Verdict::Match && !verbose {
                 continue;
             }
@@ -268,17 +278,37 @@ pub fn render_summary(summary: &Summary, verbose: bool) -> String {
     text
 }
 
+/// A test's identity: its file, its name, and which occurrence of that name in the file it is,
+/// because a generated suite may repeat a name.
+type Key = (String, String, usize);
+
+fn keyed(run: &Run) -> Vec<(Key, &TestResult)> {
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    let mut tests = Vec::new();
+    for result in run.results.iter().filter(|result| is_test(result)) {
+        let count = seen.entry((result.file.clone(), result.test.clone())).or_default();
+        tests.push(((result.file.clone(), result.test.clone(), *count), result));
+        *count += 1;
+    }
+    tests
+}
+
 fn is_test(result: &TestResult) -> bool {
     !matches!(result.test.as_str(), "<total>")
 }
 
-fn difference(expected: &TestResult, actual: &TestResult) -> Option<String> {
+/// The first way `actual` differs from `expected`. An unstable test (one GNU R does not
+/// reproduce itself) is compared by status alone.
+fn difference(expected: &TestResult, actual: &TestResult, stable: bool) -> Option<String> {
     if expected.status != actual.status {
         return Some(format!(
             "GNU R: {} | ry: {}",
             first_problem(expected),
             first_problem(actual)
         ));
+    }
+    if !stable {
+        return None;
     }
     if expected.problems != actual.problems {
         let index = expected

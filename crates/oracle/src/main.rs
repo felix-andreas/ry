@@ -116,8 +116,17 @@ fn main() -> ExitCode {
             json,
             packages,
         } => {
+            let ry = ry.unwrap_or_else(default_ry);
+            // The suites run with the package as their working directory.
+            let ry = match ry.canonicalize() {
+                Ok(ry) => ry,
+                Err(error) => {
+                    eprintln!("{}: {error}", ry.display());
+                    return ExitCode::from(2);
+                }
+            };
             let options = bench::Options {
-                ry: ry.unwrap_or_else(default_ry),
+                ry,
                 filter,
                 timeout: Duration::from_secs(timeout),
                 skip_ry: gnu_r_only,
