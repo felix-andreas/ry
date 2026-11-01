@@ -22,3 +22,4 @@ stacker.workspace = true
 unicode-width.workspace = true
 bzip2 = "0.6"
 lzma-rust2 = "0.24"
+jiff = "0.2"

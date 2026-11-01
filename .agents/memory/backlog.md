@@ -1857,9 +1857,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
   (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
   optimum along a slightly different path, so values agree to about seven digits only.
-- **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
-  computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
-  daylight-saving changes differ from GNU R.
 - **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
   stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that

@@ -65,7 +65,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("commandArgs", 0, |_| unsafe { string_vector(&interp().command_args) }),
     builtin("proc.time", 0, do_proc_time),
     internal("Sys.time", 0, do_sys_time),
-    internal("date", 0, |_| unsafe { scalar_string(&format_time(now_seconds(), "%a %b %d %H:%M:%S %Y")) }),
+    internal("date", 0, |_| unsafe {
+        let now = now_seconds();
+        let (offset, _, zone) = resolve_zone("").offset_at(now);
+        scalar_string(&format_broken_down(&broken_down(now + offset as f64), "%a %b %d %H:%M:%S %Y", &zone, offset))
+    }),
     internal("file.exists", 1, |call| unsafe { map_paths(call, |path| Path::new(path).exists()) }),
     internal("dir.exists", 1, |call| unsafe { map_paths(call, |path| Path::new(path).is_dir()) }),
     internal("file.info", 2, do_file_info),
@@ -183,7 +187,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".primTrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
     builtin(".primUntrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
     internal("format.Date", 2, |call| unsafe { Err(call.error("format.Date is not supported")) }),
-    internal("tzone_name", 0, |_| unsafe { scalar_string("UTC") }),
+    internal("tzone_name", 0, |_| unsafe { scalar_string(&session_zone_name()) }),
     internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
     internal("gettext", 3, |call| unsafe { Ok(call.arg(1)) }),
     internal("ngettext", 4, do_ngettext),
@@ -488,6 +492,113 @@ unsafe fn do_sys_time(_call: &Call<'_>) -> R<Sexp> {
     posixct(now_seconds(), "")
 }
 
+// Time zones.
+
+/// A time zone as R names it, with its rules from the system's tz database.
+struct Zone {
+    rules: jiff::tz::TimeZone,
+    /// The abbreviation of a name the database does not know. GNU R, through the C library,
+    /// treats such a zone as UTC under an abbreviation taken from the name's leading letters.
+    unknown: Option<String>,
+}
+
+impl Zone {
+    /// The UTC offset in seconds, whether daylight saving time is in effect, and the zone
+    /// abbreviation at `seconds` since the epoch.
+    fn offset_at(&self, seconds: f64) -> (i32, bool, String) {
+        if let Some(abbreviation) = &self.unknown {
+            return (0, false, abbreviation.clone());
+        }
+        let info = self.rules.to_offset_info(timestamp(seconds));
+        (info.offset().seconds(), info.dst().is_dst(), info.abbreviation().to_owned())
+    }
+
+    /// The instant a wall-clock time names, given as seconds since the epoch read as UTC.
+    /// A time skipped by a forward transition reads with the offset after it, and a repeated
+    /// time reads as its first occurrence, as the C library's `mktime` does; a known `isdst`
+    /// picks the matching side instead.
+    fn local_to_utc(&self, local: f64, isdst: i32) -> f64 {
+        if self.unknown.is_some() || !local.is_finite() {
+            return local;
+        }
+        let time = broken_down(local);
+        let fraction = local - local.floor();
+        let datetime = jiff::civil::DateTime::new(
+            time.year.clamp(-9999, 9999) as i16,
+            time.month as i8,
+            time.day as i8,
+            time.hour as i8,
+            time.minute as i8,
+            time.second.floor() as i8,
+            0,
+        );
+        let Ok(datetime) = datetime else {
+            return local;
+        };
+        use jiff::tz::AmbiguousOffset;
+        let offset = match self.rules.to_ambiguous_timestamp(datetime).offset() {
+            AmbiguousOffset::Unambiguous { offset } => offset,
+            AmbiguousOffset::Gap { before, after } => if isdst == 0 { before } else { after },
+            AmbiguousOffset::Fold { before, after } => if isdst == 0 { after } else { before },
+        };
+        local.floor() - offset.seconds() as f64 + fraction
+    }
+
+    /// The standard and daylight-saving abbreviations GNU R stores after the zone's name in
+    /// a POSIXlt's `tzone`: the most recent of each kind the zone has used.
+    fn abbreviations(&self) -> (String, String) {
+        if let Some(abbreviation) = &self.unknown {
+            return (abbreviation.clone(), abbreviation.clone());
+        }
+        let now = jiff::Timestamp::now();
+        let current = self.rules.to_offset_info(now);
+        let mut standard = (!current.dst().is_dst()).then(|| current.abbreviation().to_owned());
+        let mut daylight = current.dst().is_dst().then(|| current.abbreviation().to_owned());
+        for transition in self.rules.preceding(now) {
+            if standard.is_some() && daylight.is_some() {
+                break;
+            }
+            let slot = if transition.dst().is_dst() { &mut daylight } else { &mut standard };
+            if slot.is_none() {
+                *slot = Some(transition.abbreviation().to_owned());
+            }
+        }
+        let standard = standard.unwrap_or_else(|| current.abbreviation().to_owned());
+        let daylight = daylight.unwrap_or_else(|| standard.clone());
+        (standard, daylight)
+    }
+}
+
+/// The zone `tz` names, where the empty name is the session's zone: `TZ`, or else the system's.
+fn resolve_zone(tz: &str) -> Zone {
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    if name.is_empty() {
+        return Zone { rules: jiff::tz::TimeZone::system(), unknown: None };
+    }
+    let found = jiff::tz::TimeZone::get(&name).or_else(|_| jiff::tz::TimeZone::posix(&name));
+    match found {
+        Ok(rules) => Zone { rules, unknown: None },
+        Err(_) => {
+            let letters: String = name.chars().take_while(char::is_ascii_alphabetic).collect();
+            let abbreviation = if letters.len() >= 3 { letters } else { "UTC".to_owned() };
+            Zone { rules: jiff::tz::TimeZone::UTC, unknown: Some(abbreviation) }
+        }
+    }
+}
+
+/// The session's zone name as GNU R reports it: the value of `TZ`, or the empty name when
+/// `TZ` is unset and the system's zone applies.
+fn session_zone_name() -> String {
+    std::env::var("TZ").unwrap_or_default()
+}
+
+/// The instant `seconds` names, clamped into the range the tz database covers.
+fn timestamp(seconds: f64) -> jiff::Timestamp {
+    let bound = jiff::Timestamp::MAX.as_second() as f64;
+    let whole = seconds.floor().clamp(-bound, bound) as i64;
+    jiff::Timestamp::from_second(whole).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+}
+
 // Calendar arithmetic, in UTC.
 
 /// Days since 1970-01-01 for a civil date.
@@ -559,7 +670,7 @@ const WEEKDAYS: [&str; 7] = [
     "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 ];
 
-fn format_broken_down(time: &BrokenDown, format: &str, zone: &str) -> String {
+fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) -> String {
     let mut output = String::new();
     let mut characters = format.chars().peekable();
     while let Some(character) = characters.next() {
@@ -590,7 +701,11 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str) -> String {
             'u' => output.push_str(&(if time.weekday == 0 { 7 } else { time.weekday }).to_string()),
             'w' => output.push_str(&time.weekday.to_string()),
             'Z' => output.push_str(zone),
-            'z' => output.push_str("+0000"),
+            'z' => {
+                let sign = if offset < 0 { '-' } else { '+' };
+                let minutes = offset.unsigned_abs() / 60;
+                output.push_str(&format!("{sign}{:02}{:02}", minutes / 60, minutes % 60));
+            }
             'F' => output.push_str(&format!("{}-{:02}-{:02}", time.year, time.month, time.day)),
             'T' => output.push_str(&format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second.floor() as i64)),
             'D' => output.push_str(&format!("{:02}/{:02}/{:02}", time.month, time.day, time.year.rem_euclid(100))),
@@ -621,10 +736,6 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str) -> String {
     output
 }
 
-fn format_time(seconds: f64, format: &str) -> String {
-    format_broken_down(&broken_down(seconds), format, "UTC")
-}
-
 const POSIXLT_NAMES: [&str; 11] = [
     "sec", "min", "hour", "mday", "mon", "year", "wday", "yday", "isdst", "zone", "gmtoff",
 ];
@@ -639,7 +750,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
             _ => alloc(SexpType::Integer, count),
         })
         .collect::<R<_>>()?;
-    let abbreviation = if tz == "GMT" { "GMT" } else { "UTC" };
+    let zone = resolve_zone(tz);
     for (index, &value) in seconds.iter().enumerate() {
         if !value.is_finite() {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
@@ -648,11 +759,12 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
                 values::ints_mut(fields[field])[index] = NA_INTEGER;
             }
             values::ints_mut(fields[8])[index] = -1;
-            values::set_elt(fields[9], index, values::mkchar("UTC")?);
-            values::ints_mut(fields[10])[index] = 0;
+            values::set_elt(fields[9], index, values::mkchar("")?);
+            values::ints_mut(fields[10])[index] = NA_INTEGER;
             continue;
         }
-        let time = broken_down(value);
+        let (offset, dst, abbreviation) = zone.offset_at(value);
+        let time = broken_down(value + offset as f64);
         values::reals_mut(fields[0])[index] = time.second;
         values::ints_mut(fields[1])[index] = time.minute as i32;
         values::ints_mut(fields[2])[index] = time.hour as i32;
@@ -661,19 +773,25 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         values::ints_mut(fields[5])[index] = time.year as i32 - 1900;
         values::ints_mut(fields[6])[index] = time.weekday as i32;
         values::ints_mut(fields[7])[index] = time.yearday as i32;
-        values::ints_mut(fields[8])[index] = 0;
-        values::set_elt(fields[9], index, values::mkchar(abbreviation)?);
-        values::ints_mut(fields[10])[index] = 0;
+        values::ints_mut(fields[8])[index] = dst as i32;
+        values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
+        values::ints_mut(fields[10])[index] = offset;
     }
     let list = values::list_vector(&fields)?;
     let field_names = string_vector(&POSIXLT_NAMES)?;
     values::set_attr(list, symbols().names, field_names)?;
     let class = string_vector(&["POSIXlt", "POSIXt"])?;
     values::set_attr(list, symbols().class, class)?;
-    // Every zone is computed as UTC, but the names stay as given: a GMT time stays GMT, and the
-    // session zone is the empty name followed by its standard and daylight-saving abbreviations.
+    // UTC and GMT keep their bare name; every other zone, the session's included, adds its
+    // standard and daylight-saving abbreviations.
     let tzone = values::install("tzone")?;
-    let names = if tz.is_empty() { string_vector(&["", "UTC", "UTC"])? } else { scalar_string(tz)? };
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    let names = if name == "UTC" || name == "GMT" {
+        scalar_string(&name)?
+    } else {
+        let (standard, daylight) = zone.abbreviations();
+        string_vector(&[name.as_str(), standard.as_str(), daylight.as_str()])?
+    };
     values::set_attr(list, tzone, names)?;
     let balanced = values::install("balanced")?;
     values::set_attr(list, balanced, scalar_bool(true)?)?;
@@ -696,6 +814,30 @@ unsafe fn require_posixlt(list: Sexp) -> R<()> {
     Ok(())
 }
 
+/// The instants a POSIXlt's wall-clock fields name in the zone `tz`.
+unsafe fn posixlt_instants(list: Sexp, tz: &str) -> R<Vec<f64>> {
+    let mut seconds = posixlt_seconds(list)?;
+    let zone = resolve_zone(tz);
+    let isdst = if length(list) > 8 { list.element(8) } else { nil() };
+    for (position, value) in seconds.iter_mut().enumerate() {
+        let flag = if length(isdst) == 0 {
+            -1
+        } else {
+            let flag = crate::subset::numeric_element(isdst, position % length(isdst));
+            if flag.is_nan() { -1 } else { flag as i32 }
+        };
+        *value = zone.local_to_utc(*value, flag);
+    }
+    Ok(seconds)
+}
+
+/// The zone a POSIXlt's `tzone` attribute names, or the session's zone.
+unsafe fn posixlt_zone(list: Sexp) -> R<String> {
+    let tzone = get_attr(list, values::install("tzone")?);
+    Ok(values::first_string(tzone).map(|text| text.into_owned()).unwrap_or_default())
+}
+
+/// A POSIXlt's wall-clock fields as seconds since the epoch read as UTC.
 unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
     require_posixlt(list)?;
     let field = |index: usize| -> Sexp { if length(list) > index { list.element(index) } else { nil() } };
@@ -770,9 +912,8 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         values::set_attr(result, balanced_symbol, values::scalar_logical(NA_LOGICAL)?)?;
         result
     } else {
-        let tzone = get_attr(list, values::install("tzone")?);
-        let tz = values::first_string(tzone).map(|text| text.into_owned()).unwrap_or_default();
-        let seconds = posixlt_seconds(list)?;
+        let tz = posixlt_zone(list)?;
+        let seconds = posixlt_instants(list, &tz)?;
         let result = posixlt_from_seconds(&seconds, &tz)?;
         set_year_names(result, values::names(list.element(5)))?;
         result
@@ -783,8 +924,10 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
     Ok(result)
 }
 
+/// `as.POSIXct(x, tz)`: the instants a POSIXlt names in the zone `tz`.
 unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
-    let seconds = posixlt_seconds(call.arg(0))?;
+    let tz = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
+    let seconds = posixlt_instants(call.arg(0), &tz)?;
     let result = values::real_vector(&seconds)?;
     set_names_from_year(call.arg(0), result)?;
     Ok(result)
@@ -813,6 +956,9 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     let seconds = posixlt_seconds(list)?;
     let count = seconds.len();
     let result = alloc(SexpType::String, count)?;
+    let tzone = get_attr(list, values::install("tzone")?);
+    let field = |index: usize| if length(list) > index { list.element(index) } else { nil() };
+    let (isdst, zones, offsets) = (field(8), field(9), field(10));
     for (index, &value) in seconds.iter().enumerate() {
         if is_na_real(value) {
             values::set_elt(result, index, values::na_string());
@@ -826,9 +972,24 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         let format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
-        let mut text = format_time(value, &format);
-        if use_tz {
-            text.push_str(" UTC");
+        // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
+        let dst = if length(isdst) > 0 { crate::subset::numeric_element(isdst, index % length(isdst)) } else { 0.0 };
+        let zone = if zones.kind() == SexpType::String && length(zones) > 0 {
+            values::string_at(zones, index % length(zones)).map(|text| text.into_owned()).unwrap_or_default()
+        } else {
+            let slot = if dst > 0.0 { 2 } else { 1 };
+            values::string_at(tzone, slot.min(length(tzone).saturating_sub(1))).map(|text| text.into_owned()).unwrap_or_default()
+        };
+        let offset = if length(offsets) > 0 {
+            let offset = crate::subset::numeric_element(offsets, index % length(offsets));
+            if offset.is_nan() { 0 } else { offset as i32 }
+        } else {
+            0
+        };
+        let mut text = format_broken_down(&broken_down(value), &format, &zone, offset);
+        if use_tz && !zone.is_empty() {
+            text.push(' ');
+            text.push_str(&zone);
         }
         values::set_elt(result, index, values::mkchar(&text)?);
     }
@@ -950,6 +1111,10 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             .and_then(|text| parse_time(&text, &format))
             .unwrap_or(NA_REAL);
         seconds.push(value);
+    }
+    let zone = resolve_zone(&tz);
+    for value in &mut seconds {
+        *value = zone.local_to_utc(*value, -1);
     }
     let result = posixlt_from_seconds(&seconds, &tz)?;
     set_year_names(result, values::names(texts))?;
