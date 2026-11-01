@@ -596,7 +596,7 @@ matrix(c(1L, 2L), nrow = 1L)
 factor(c("a"), levels = c("a", "b"))
 #++++
 Any
-Any
+factor
 
 #---- rowSums_is_double_vector
 rowSums(matrix(c(1, 2), nrow = 1L), na.rm = TRUE)

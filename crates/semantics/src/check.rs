@@ -5889,6 +5889,23 @@ impl<'db> Checker<'db, '_> {
         result
     }
 
+    /// The return type a stub declares for `[.class` or `[[.class`. The index arguments are
+    /// not checked against it: the stubs declare these methods only to say which class the
+    /// subset keeps.
+    fn index_method_result(&mut self, class: &str, double: bool) -> Option<Ty<'db>> {
+        let method = format!("{}.{class}", if double { "[[" } else { "[" });
+        let scheme = self.globals?.scheme(&method, false)?;
+        let instantiated = self.instantiate(&scheme);
+        match self
+            .table
+            .shallow_resolve(self.db, instantiated)
+            .kind(self.db)
+        {
+            TyKind::Function(function) => Some(function.ret),
+            _ => None,
+        }
+    }
+
     /// Every index infers first regardless of shape, so names inside an unsupported
     /// form (`m[i, j]`) still get diagnostics.
     fn infer_plain_index(
@@ -5936,6 +5953,12 @@ impl<'db> Checker<'db, '_> {
             // A shape the author never wrote down (a sealed nominal, or `m` in
             // `function(m, i, j) m[i, j]`) refuses before the index-arity check: the caller
             // knows the shape, the callee does not.
+            // R dispatches `[` on the class, so a stub's `[.factor` gives the result type.
+            TyKind::Named(name, _)
+                if let Some(ty) = self.index_method_result(name.text(self.db), double) =>
+            {
+                return ty;
+            }
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 return unknown(self.db);
@@ -7950,6 +7973,16 @@ fn lossy_write<'db>(
         TyKind::Scalar(atomic) => Some(*atomic),
         _ => None,
     };
+    let factor_column = matches!(
+        column_element(db, column).kind(db),
+        TyKind::Named(name, _) if name.text(db) == "factor"
+    );
+    if factor_column {
+        return matches!(
+            atomic(value_ty),
+            Some(Atomic::Logical | Atomic::Integer | Atomic::Double)
+        );
+    }
     match (atomic(column), atomic(value_ty)) {
         (Some(Atomic::Logical | Atomic::Integer | Atomic::Double), Some(Atomic::Character)) => true,
         (Some(Atomic::Integer), Some(Atomic::Double)) => {
@@ -8318,6 +8351,8 @@ fn join_class<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<JoinClass> {
         TyKind::Scalar(Atomic::Logical) => Some(JoinClass::Logical),
         TyKind::Scalar(Atomic::Integer | Atomic::Double) => Some(JoinClass::Number),
         TyKind::Scalar(Atomic::Character) => Some(JoinClass::Text),
+        // data.table joins a factor on its labels, so it pairs with text and nothing else.
+        TyKind::Named(name, _) if name.text(db) == "factor" => Some(JoinClass::Text),
         _ => None,
     }
 }

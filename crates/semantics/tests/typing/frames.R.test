@@ -1032,3 +1032,62 @@ totals <- sales[, .(total = sum(amount)), by = team][, amount]
 sales: frame{team: character[], amount: double[]}
 totals: Unknown
 108..114 warning[unresolved] this frame has no column `amount`, and nothing else defines that name.
+
+#==== factor_columns
+
+#---- a_factor_keeps_its_class_through_subsetting_and_compares_with_labels
+x <- factor(c("a", "b"))
+a <- x == "a"
+b <- x[1]
+d <- levels(x)
+e <- x[x == "a"]
+o <- rev(x)
+p <- unique(x)
+q <- x[[1]]
+r <- c(x, x)
+s <- sort(x)
+hh <- head(x, 1L)
+lt <- x < "b"
+n <- x + 1
+dd <- as.Date("2020-01-01")[1]
+#++++
+x: factor
+a: logical
+b: factor
+d: character[]
+e: factor
+o: factor
+p: factor
+q: factor
+r: factor
+s: factor
+hh: factor
+lt: Unknown
+n: Unknown
+dd: Date
+170..171 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `factor`
+183..184 error[type-mismatch] expected a numeric value (`integer` or `double`), found `factor`
+
+#---- a_factor_column_joins_on_labels_and_refuses_numbers
+f <- frame(g = factor(c("a", "b")), v = c(1, 2))
+fa <- f[g == "a"]
+fb <- f[g == 1]
+k <- frame(k = c("a", "b"))
+j <- f[k, on = .(g = k)]
+m <- frame(k = c(1, 2))
+j2 <- f[m, on = .(g = k)]
+f[, g := "c"]
+f[, g := 3]
+#++++
+f: frame{g: factor, v: double[]}
+fa: frame{g: factor, v: double[]}
+fb: Unknown
+k: frame{k: character[]}
+j: frame{g: character[], v: double[]}
+m: frame{k: double[]}
+j2: Unknown
+frame{g: factor, v: double[]}
+frame{g: factor, v: double[]}
+75..81 error[type-mismatch] `==` is not defined between `factor` and `double`
+178..183 error[type-mismatch] the join condition `g == k` compares `factor` with `double[]`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.
+209..210 error[type-mismatch] column `g` holds `factor`, so this `double` value is read as a level's position rather than a label, and a number that is not one becomes `NA`

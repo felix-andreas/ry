@@ -2264,6 +2264,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 column_element(db, *column_ty).kind(db),
                 column_element(db, *found).kind(db),
             ) {
+                (TyKind::Named(..), _) => {
+                    "is read as a level's position rather than a label, and a number that is not one becomes `NA`"
+                }
                 (TyKind::Scalar(Atomic::Logical), TyKind::Scalar(Atomic::Character)) => {
                     "is parsed as `TRUE` or `FALSE`, and any other string becomes `NA`"
                 }
