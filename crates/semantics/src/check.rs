@@ -4613,16 +4613,15 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Whether a value of type `ty` can be called. An unconstrained variable is `Untyped`,
-    /// since nothing says what it holds.
+    /// Whether a value of type `ty` can be called. An unconstrained variable and a type
+    /// parameter are `Untyped`, since nothing says whether they hold a function.
     fn callable(&mut self, ty: Ty<'db>) -> Callable {
         let resolved = self.structural(ty);
         match resolved.kind(self.db) {
-            TyKind::Function(_)
-            | TyKind::Any
-            | TyKind::Unknown
-            | TyKind::Rigid(_)
-            | TyKind::Named(..) => Callable::Yes,
+            TyKind::Function(_) | TyKind::Any | TyKind::Unknown | TyKind::Named(..) => {
+                Callable::Yes
+            }
+            TyKind::Rigid(_) => Callable::Untyped,
             TyKind::Var(_) => match self.table.open_constraint(self.db, resolved) {
                 Some(Constraint::Unconstrained) => Callable::Untyped,
                 _ => Callable::No,

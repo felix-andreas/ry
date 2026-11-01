@@ -1762,6 +1762,7 @@ mod tests {
             masked_reads: Default::default(),
             column_misses: Default::default(),
             match_findings: Vec::new(),
+            callee_targets: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
