@@ -1,0 +1,5 @@
+# readr: `read_csv` returns a `spec_tbl_df`, a data.frame subclass whose columns come from the
+# file. `col_select` is a tidyselect expression.
+read_csv : fn(file: character | connection, [col_names]: logical | character[], [col_types]: Any, [col_select]: Any, [id]: character | NULL, [locale]: Any, [na]: character[], [quoted_na]: logical, [quote]: character, [comment]: character, [trim_ws]: logical, [skip]: double, [n_max]: double, [guess_max]: double, [name_repair]: Any, [num_threads]: double, [progress]: logical, [show_col_types]: logical | NULL, [skip_empty_rows]: logical, [lazy]: logical) -> data.frame
+# Returns `x` invisibly.
+write_csv : <T> fn(x: T, file: character | connection, [na]: character, [append]: logical, [col_names]: logical, [quote]: character, [escape]: character, [eol]: character, [num_threads]: double, [progress]: logical) -> T

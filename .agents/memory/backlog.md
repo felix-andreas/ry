@@ -166,6 +166,12 @@ classes, largest first:
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
+- **`lapply`, `vapply` or `Filter` over a `data.frame`** (rprojroot, nlme, rmarkdown). The opaque
+  `data.frame` fits no `list` parameter, so `vapply(df, length, numeric(1))` reports "expected
+  `list[T] | T[]`, found `data.frame`". A trailing `data.frame` overload fixes the call but makes an
+  untyped argument narrow two ways, which turns `lapply(items, f)` on a `NULL`-defaulted parameter
+  and `vapply(xs, ...)` into `Unknown` (`items_of` in `realworld.R.test`). The fix is to give
+  `data.frame` its named-list representation rather than more overloads.
 - **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
   on as a placeholder, but the same signature declared reports the call, so the round-trip test
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
@@ -397,9 +403,82 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 - **Calls to functions bound inside `local()`** are effects today, even when the local function is pure. Accept them when the local binding is a function literal whose body has no effect.
 - **`@pure` on a non-binding** (`#: @pure` above `cat(1)`) is ignored silently; warn instead.
 - **Evaluate pure constants once and cache them** with the bytecode, as Roc evaluates top-level constants at compile time.
-- **Bare-name stub purity is one flat set** (`StubLibrary::pure`): `callee_purity` consults it for any bare call whether or not the declaring package is attached, and a later stub that redeclares a name without `@pure` clears it for every package. Resolve a bare callee through the attached namespaces first.
-- **A replacement inside `local()` of an outer name** (`local({ cfg$a <- 2; cfg })`) is reported as changing `cfg`. That holds when `cfg` is an environment, but for an ordinary value R makes a local copy; with the outer value's type known, accept it.
-- **`.onLoad` writes** (`z <<- 5`) are invisible to the lazy-constant rule, so a lazy constant mentioning `z` that is forced after `.onLoad` sees the new value where an eager one saw the old. Count `<<-` targets of `.onLoad` as writers.
+
+## Open: strict-mode friction from typing finbench
+
+Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
+
+- **The loader never creates `PackageMetadata`** (`crates/loader/src/loader.rs`), so no namespace is active there and purity from conditional or qualified-only stubs (`tools::file_ext`) is invisible to load planning. Only an optimization is lost: such constants load eagerly.
+- **`seq(1, 10)` is typed `double[]`**, but R returns an integer vector when `by` is missing and the bounds are whole numbers. The stub cannot tell `1` from `1.5`, so a function declared `-> integer[]` returning it is refused.
+- **An overload set called with an `Any` argument is `Unknown`.** When no candidate is a catch-all, an `Any` argument (a forwarded `...` included) selects nothing, so the call is reported although every candidate accepts it. Joining the candidates' results was rejected (`decisions.md`, "An all-`Any` overload does not veto agreement among unchecked fits"); the open direction is a per-candidate result that does not depend on the unknown argument. The generator's `R/dependencies.R` registry avoids overloaded entry points for this reason (`function(...) YieldCurve::Nelson.Siegel(...)` and `digest::digest(...)` hit it), and it is why a callback parameter typed `Any` by its callee's stub poisons `sum(row)`.
+  ```r
+  #: fn(x: Any) -> double
+  f <- function(x) sum(x)
+  #: fn(...: Any) -> Any
+  first <- function(...) utils::head(...)
+  ```
+  Both report `` strict mode: this expression has an undetermined type (`Unknown`) ``, on `sum(x)` and on `utils::head(...)`.
+- **Calling a value declared bare `Any` is `Unknown`.** A stub line `t : @pure Any` is meant as an opt-out, but its call result is reported. Calling an `Any` should give `Any`, and `t` (also `formula`) should get real signatures. `#: fn(m: matrix) -> matrix` over `f <- function(m) { tm <- t(m); tm }` gives `` strict mode: could not determine the type of `tm`; add a type annotation ``.
+- **Operators do not dispatch per member of a union.** `m >= 0` works through `Compare.matrix` and `x >= 0` works for a double, but a `matrix | double` operand is refused, which matters because `PerformanceAnalytics::maxDrawdown` truly returns that union. `#: fn(x: matrix | double) -> logical` over `f <- function(x) x >= 0` gives `` expected a comparable value (numeric, `character`, or `logical`), found `matrix | double` ``.
+- **`data.frame` and `data.table` columns are `Unknown`.** Both constructors type as their opaque nominal, so every `$` read is reported, and an annotation on the enclosing binding does not cover a read inside it; each column needs its own annotated binding, the largest annotation cost in typed tests. Track columns as `DataFrame{...}` does.
+  ```r
+  #: fn() -> double
+  f <- function() {
+    dt <- data.table::data.table(pnl = c(1, 2))
+    sum(dt$pnl)
+  }
+  ```
+  Reports `Unknown` twice, on `dt$pnl` and on the `sum(...)` around it.
+- **An annotation cannot attach to a lambda argument.** Every callback whose parameter needs a type, or whose callee types it `Any` (`apply`, `uniroot`), must first become its own binding. Let a `#:` line inside an argument list annotate the argument that follows.
+  ```r
+  #: fn(m: matrix) -> Any
+  f <- function(m) apply(
+    m, 1,
+    #: fn(row: double[]) -> double
+    function(row) sum(row)
+  )
+  ```
+  Gives `` A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. `` plus the `Unknown` on `sum(row)`.
+- **A lambda default gets no type from its declared parameter.** The parameter's declared function type should be the context for its default, as it is for a call argument.
+  ```r
+  #: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+  connect <- function(dsn, connector = function(dsn) toupper(dsn)) connector(dsn)
+  ```
+  Gives `` strict mode: parameter `dsn` has no type. `` on the lambda's `dsn`.
+- **Stubs cannot declare a structural nominal or a subtype.** `@type DEoptim {list{bestmem: double[]}}` and `@type fs_path : character` both give `... is not a valid type name.`, so S3 list results become aliases that lose their class, and `xts` (class `c("xts", "zoo")`) is not a `zoo`: `#: fn(x: xts) -> zoo` over `f <- function(x) x` gives `` expected `zoo`, found `xts` ``. readr's `tbl_df` and fs's `fs_path` are declared as their parents for the same reason.
+- **One flat stub name map.** With rugarch imported, its `sigma` overloads replace `stats::sigma` even for a qualified call: `#: fn(fit: Any) -> double` over `f <- function(fit) stats::sigma(fit)` gives `` expected `double`, found `matrix` ``. Needs per-namespace stub tables.
+- **A formula is `Unknown`.** `~` should type as a `formula` nominal; inline as a `dcast` argument it cannot even be annotated. `shape <- id ~ n` gives `` strict mode: could not determine the type of `shape`; add a type annotation ``.
+- **`!!!` splice is `Unknown`.** In the `...` position it should splice the elements' type. `httr2::req_url_query(httr2::request(url), !!!query)` with `query: list[named: Any]` reports `Unknown` on `!!!query`.
+- **foreach's `%do%` body does not see the iterator.** `foreach::foreach(g = groups, .combine = c) %do% sum(g)` with `groups: list[integer[]]` reports `Unknown` on `sum(g)`. A stub attribute that binds a call's named arguments in the right operand of `%do%`/`%dopar%` would fix it.
+- **A chained `$` is reported at the innermost access, and `@if-unknown` on the statement does not clear it.** The user ends up annotating an intermediate they never named.
+  ```r
+  #: fn(v: environment, name: character) -> character
+  get_secret <- function(v, name) {
+    #: @if-unknown character
+    out <- v$secrets$get(name)$value
+    out
+  }
+  ```
+  Reports `Unknown` on `v$secrets` only.
+- **The `NULL`-default suggestion prints an unparenthesized function type.** `-> character | NULL` parses as the return type, which is right, but the fix it suggests is unparseable and pasting it reproduces the error; the printer must write `(fn(x: character) -> character) | NULL` inside a union. `#: fn(x: character, [f]: fn(x: character) -> character | NULL) -> character` over `apply_or <- function(x, f = NULL) if (is.null(f)) x else f(x)` gives `` `f` defaults to `NULL`, which its declared type `fn(x: character) -> character | NULL` does not admit. ... Declare it `fn(x: character) -> character | | NULL | NULL` ``.
+- **zeallot `%<-%` targets are silently untyped.** The targets are neither typed from the right-hand side nor reported, so a wrong return type passes.
+  ```r
+  #: fn(x: double[]) -> character
+  spread <- function(x) {
+    c(lo, hi) %<-% list(1, 2)
+    hi - lo
+  }
+  ```
+  With `importFrom(zeallot, "%<-%")`: `1 file checked, no problems`.
+- **A body annotation cannot name the signature's type parameter.** Bring the enclosing signature's type parameters into scope for annotations in the body. `#: <T> fn(fn: fn() -> T) -> T | NULL` over a body with `#: T | NULL` above `result <- tryCatch(fn(), error = function(e) NULL)` gives `` I do not know the type `T`. ``
+- **No record width subtyping.** An injected fake with extra fields is refused, so a dependency cannot be typed as "any record with at least `tick`". `#: @alias Ticker {list{tick: fn() -> NULL}}` and a call `run(list(tick = function() NULL, finished = TRUE))` give `` this list has a field `finished`, which is not expected here ``.
+- **A mismatch message leaks an uninstantiated type variable.** Against a field typed `fn([len]: double) -> Any`, `list(tick = function() invisible())` gives `` expected `fn([len]: double) -> Any` for field `tick`, found `fn() -> T` ``; the found type should not print the bare `T` of `invisible`'s signature.
+- **Recursive aliases are refused**, so chaining methods (lgr setters, `progress` `tick()`) return `Any`. `#: @alias Logger {list{set_threshold: fn(level: character) -> Logger}}` gives `` Type alias `Logger` expands in a cycle. ``, filed under `type-mismatch` and underlining the whole function that uses it. Allow recursive record aliases, or a `Self` type for R6-style records.
+- **No typed mutable environment.** A counter in `new.env()` cannot declare its fields: `calls <- new.env(); calls$count <- 0L; calls$count <- calls$count + 1L` reports `Unknown` on each `calls$count` read.
+- **S4 slots and generics are untyped.** A slot read is `Unknown` even on `Any` (`out <- b@v` with `b: Any` gives `` could not determine the type of `out` ``), slots of a class with a `representation` are not typed, and a generic made by `setGeneric("scale_by", ...)` is silently `Any` at its call sites (`out <- scale_by(q, 2)` returned as `double` checks clean).
+- **R6 method bodies are unchecked.** In `R6::R6Class("Counter", public = list(add = function(k) { self$n <- self$n + k; private$check(); invisible(self) }))` the untyped `k`, `self` and `private` produce no strict report: `1 file checked, no problems`.
+- **The summary counts checked files, not files with problems.** A project with one finding in `R/a.R` and two clean files prints `1 problem in 3 files`.
+- **Vectorised and matrix math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, `[.matrix` is undeclared, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``, and `current <- rates[t, ]` gives `` could not determine the type of `current` ``.
 
 ## Open: the JIT
 

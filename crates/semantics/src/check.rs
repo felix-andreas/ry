@@ -1131,6 +1131,7 @@ struct JoinedColumn<'db> {
 
 /// Inferred once before signature matching, so an overload probe re-matches without
 /// re-running inference.
+#[derive(Clone)]
 struct CallArgument<'db> {
     name: Option<String>,
     name_range: Option<TextRange>,
@@ -8735,23 +8736,9 @@ impl<'db> Checker<'db, '_> {
         // pick one return type (`sum(x[[i]])` as `integer`). The call is only typed when
         // all fitting candidates agree on the result.
         let unchecked_argument = caller_entries.is_empty()
-            && call_arguments.iter().any(|argument| {
-                argument.ty.is_some_and(|ty| {
-                    // `c(x, unknown)` is as unchecked as `unknown` itself: its element type
-                    // fits every candidate too.
-                    let resolved = self.table.shallow_resolve(self.db, ty);
-                    let ty = match resolved.kind(self.db) {
-                        TyKind::Vector(element)
-                        | TyKind::NamedVector(element)
-                        | TyKind::List(element)
-                        | TyKind::NamedList(element) => {
-                            self.table.shallow_resolve(self.db, *element)
-                        }
-                        _ => resolved,
-                    };
-                    matches!(ty.kind(self.db), TyKind::Unknown | TyKind::Any)
-                })
-            });
+            && call_arguments
+                .iter()
+                .any(|argument| argument.ty.is_some_and(|ty| self.is_unchecked(ty)));
 
         // `1` is a double at runtime, so the integer-literal courtesy round runs only when
         // the strict one matched nothing (`sum(1, 2)` must stay a double).
@@ -8811,6 +8798,17 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
+        // An overload set ends in a catch-all returning `Any` for calls it cannot describe, so
+        // it fits every unchecked call too. A more specific fit refines it rather than
+        // disagreeing with it, but only when the unchecked arguments cannot be what picks the
+        // candidate: `rep(0, n)` with `n` from `nrow()` is `double[]`, because `n` lands on
+        // `times: Any`, while `rep(unknown, 2)` stays `Unknown`.
+        if unchecked_argument
+            && fits.iter().any(|(_, _, results)| !self.all_any(results))
+            && self.unchecked_arguments_decide_nothing(callee, schemes, &fits, call_arguments)
+        {
+            fits.retain(|(_, _, results)| !self.all_any(results));
+        }
         // Without a free fit, a guess is taken only when every guess narrows the caller's
         // types alike; disagreeing narrowings make the variable `Unknown` (unchecked, not wrong).
         if unchecked_argument
@@ -8938,6 +8936,65 @@ impl<'db> Checker<'db, '_> {
         // A capture-discovery re-pass must not keep a stale commitment from the first pass.
         self.selected_overloads.remove(&callee);
         unknown(self.db)
+    }
+
+    /// `c(x, unknown)` is as unchecked as `unknown` itself: its element type fits every
+    /// candidate too.
+    fn is_unchecked(&mut self, ty: Ty<'db>) -> bool {
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        let ty = match resolved.kind(self.db) {
+            TyKind::Vector(element)
+            | TyKind::NamedVector(element)
+            | TyKind::List(element)
+            | TyKind::NamedList(element) => self.table.shallow_resolve(self.db, *element),
+            _ => resolved,
+        };
+        matches!(ty.kind(self.db), TyKind::Unknown | TyKind::Any)
+    }
+
+    /// Whether every specific fit still fits when each unchecked argument is replaced by a
+    /// type only `Any` or an unconstrained type parameter accepts. If so, those arguments
+    /// land where any value is fine, and the known arguments alone chose the candidate.
+    fn unchecked_arguments_decide_nothing(
+        &mut self,
+        callee: ExprId,
+        schemes: &[TypeScheme<'db>],
+        fits: &[(usize, bool, Vec<Ty<'db>>)],
+        call_arguments: &[CallArgument<'db>],
+    ) -> bool {
+        let witness = Ty::new(
+            self.db,
+            TyKind::Named(Name::new(self.db, " unchecked argument"), Vec::new()),
+        );
+        let mut witnessed = call_arguments.to_vec();
+        for argument in &mut witnessed {
+            if argument.ty.is_some_and(|ty| self.is_unchecked(ty)) {
+                argument.ty = Some(witness);
+            }
+        }
+        for (index, _, results) in fits {
+            if self.all_any(results) {
+                continue;
+            }
+            let Some(scheme) = schemes.get(*index) else {
+                return false;
+            };
+            let snapshot = self.table.snapshot();
+            let fits = self
+                .probe_overload_candidate(callee, scheme, &witnessed, false)
+                .is_ok();
+            self.table.rollback(snapshot);
+            if !fits {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn all_any(&self, results: &[Ty<'db>]) -> bool {
+        results
+            .iter()
+            .all(|&result| matches!(result.kind(self.db), TyKind::Any))
     }
 
     /// An `Any` return is the corpus's fallback for calls it cannot describe and passes
@@ -10270,7 +10327,11 @@ impl<'db> Checker<'db, '_> {
     /// not checked against it: the stubs declare these methods only to say which class the
     /// subset keeps.
     fn index_method_result(&mut self, class: &str, double: bool) -> Option<Ty<'db>> {
-        let method = format!("{}.{class}", if double { "[[" } else { "[" });
+        self.subset_method_result(if double { "[[" } else { "[" }, class)
+    }
+
+    fn subset_method_result(&mut self, operator: &str, class: &str) -> Option<Ty<'db>> {
+        let method = format!("{operator}.{class}");
         let scheme = self.globals?.scheme(&method, false)?;
         let instantiated = self.instantiate(&scheme);
         match self
@@ -10322,6 +10383,13 @@ impl<'db> Checker<'db, '_> {
         // rule covers: silent `Unknown`.
         if self.naming.masked_subsets.contains(&id) {
             return unknown(self.db);
+        }
+        // R dispatches `[` and `[[` on the class before any shape rule applies, so a stub's
+        // `[.factor` or `[[.Date` gives the result type.
+        if let TyKind::Named(name, _) = subject.kind(self.db)
+            && let Some(ty) = self.index_method_result(name.text(self.db), double)
+        {
+            return ty;
         }
         if let Some(element) = array_element(self.db, subject) {
             return self.array_index(range, double, subject, element, arguments, &index_types);
@@ -12073,6 +12141,14 @@ impl<'db> Checker<'db, '_> {
         let Some(name) = name else {
             return unknown(self.db);
         };
+        // R dispatches `$` on a classed value to its `$.class` method before the representation
+        // is ever read, so the method decides the result even for a transparent nominal.
+        if let TyKind::Named(class, _) =
+            self.table.shallow_resolve(self.db, target_ty).kind(self.db)
+            && let Some(ty) = self.subset_method_result("$", class.text(self.db))
+        {
+            return ty;
+        }
         let subject = self.structural(target_ty);
         match self.dollar_result(id, range, name_range, subject, &name) {
             Ok(ty) => ty,
@@ -12257,6 +12333,12 @@ impl<'db> Checker<'db, '_> {
                     container: subject,
                 },
             }),
+            // A stub types `$` on its class the way R dispatches it, through a `$.class` method.
+            TyKind::Named(class, _)
+                if let Some(ty) = self.subset_method_result("$", class.text(self.db)) =>
+            {
+                Ok(ty)
+            }
             // Refuse rather than reject: `df$col` and `function(node) node$value` are idiomatic.
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
