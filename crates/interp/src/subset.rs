@@ -2278,9 +2278,10 @@ unsafe fn expand_row_names(value: Sexp) -> R<Sexp> {
 }
 
 unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let which = call.arg(1);
-    let value = call.arg(2);
+    let (matched, _) = call.match_args(&["x", "which", "value"])?;
+    let object = present(matched[0]).unwrap_or(nil());
+    let which = present(matched[1]).unwrap_or(nil());
+    let value = present(matched[2]).unwrap_or(nil());
     if which.kind() != SexpType::String || length(which) != 1 {
         return Err(call.error("'name' must be non-null character string"));
     }
@@ -2809,7 +2810,16 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             if let Some(method) =
                 crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())?
             {
-                return eval::apply(call.call, method, &items, call.env);
+                // The method sees promises, so `data.frame` inside `cbind.data.frame` names a
+                // column after its argument expression.
+                let mut promises = Vec::with_capacity(items.len());
+                for (item, &expression) in items.iter().zip(&expressions) {
+                    promises.push(Arg {
+                        tag: item.tag,
+                        value: eval::forced_promise(expression, item.value)?,
+                    });
+                }
+                return eval::apply(call.call, method, &promises, call.env);
             }
         }
     }

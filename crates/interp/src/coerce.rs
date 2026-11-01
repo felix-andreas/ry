@@ -211,7 +211,9 @@ pub unsafe fn coerce_vector_quiet(
                 "cannot coerce type 'environment' to vector of type 'list'",
             ));
         }
-        SexpType::List | SexpType::Expression => coerce_list(object, kind, warnings)?,
+        SexpType::List | SexpType::Expression => {
+            coerce_list(object, kind, SexpType::List, warnings)?
+        }
         _ if source.is_atomic() => coerce_atomic(object, kind, warnings)?,
         SexpType::Closure | SexpType::Builtin | SexpType::Special if kind == SexpType::List => {
             return values::list_vector(&[object]);
@@ -245,7 +247,7 @@ unsafe fn coerce_symbol(symbol: Sexp, kind: SexpType) -> R<Sexp> {
         }
         SexpType::Language => values::call(symbol, &[]),
         _ => Err(error(format!(
-            "(symbol) object cannot be coerced to type '{}'",
+            "cannot coerce type 'symbol' to vector of type '{}'",
             kind.name()
         ))),
     }
@@ -296,12 +298,18 @@ unsafe fn coerce_pairlist(list: Sexp, kind: SexpType, warnings: &mut CoercionWar
         }
         _ => {
             let list_vector = values::pairlist_to_list(list)?;
-            coerce_list(list_vector, kind, warnings)
+            coerce_list(list_vector, kind, list.kind(), warnings)
         }
     }
 }
 
-unsafe fn coerce_list(list: Sexp, kind: SexpType, warnings: &mut CoercionWarnings) -> R<Sexp> {
+/// `source` is the type the error names: a call or pairlist arrives here as a list.
+unsafe fn coerce_list(
+    list: Sexp,
+    kind: SexpType,
+    source: SexpType,
+    warnings: &mut CoercionWarnings,
+) -> R<Sexp> {
     let count = length(list);
     match kind {
         SexpType::List | SexpType::Expression => {
@@ -325,7 +333,8 @@ unsafe fn coerce_list(list: Sexp, kind: SexpType, warnings: &mut CoercionWarning
                 let element = list.element(index);
                 if !(element.kind().is_atomic() && length(element) == 1) {
                     return Err(error(format!(
-                        "'list' object cannot be coerced to type '{}'",
+                        "'{}' object cannot be coerced to type '{}'",
+                        source.name(),
                         kind.name()
                     )));
                 }
@@ -338,7 +347,8 @@ unsafe fn coerce_list(list: Sexp, kind: SexpType, warnings: &mut CoercionWarning
             Ok(result)
         }
         _ => Err(error(format!(
-            "'list' object cannot be coerced to type '{}'",
+            "'{}' object cannot be coerced to type '{}'",
+            source.name(),
             kind.name()
         ))),
     }

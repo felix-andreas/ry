@@ -4649,6 +4649,21 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
     if x.len() < 2 || y.len() < 2 || z.len() != x.len() * y.len() {
         return Err(error("invalid x / y values or limits"));
     }
+    if let Some(index) = levels.iter().position(|level| !level.is_finite()) {
+        // GNU R formats the level with C's `%g`, which spells it `-inf`, `inf` or `nan`.
+        let level = levels[index];
+        let text = if level.is_nan() {
+            "nan"
+        } else if level > 0.0 {
+            "inf"
+        } else {
+            "-inf"
+        };
+        return Err(error(format!(
+            "non-finite level values: levels[{}] = {text}",
+            index + 1
+        )));
+    }
     with_inline_pars(call, 12, |device| {
         let pars = device.pars.clone();
         let clip = clip_rect(device);

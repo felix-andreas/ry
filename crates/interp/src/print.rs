@@ -488,7 +488,8 @@ pub unsafe fn print_matrix(
         .iter()
         .map(|label| display_width(label))
         .max()
-        .unwrap_or(0);
+        // A matrix without rows still reserves the width of a `[0,]` label.
+        .unwrap_or(if numbered_rows { 4 } else { 0 });
     let offset = if !titled {
         0
     } else if display_width(&row_title) < label_width + 2 {

@@ -831,7 +831,18 @@ pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> 
         || right_kind == SexpType::Real
         || matches!(op, Op::Divide | Op::Power)
     {
-        real_arithmetic(op, left, right, count)?
+        let result = real_arithmetic(op, left, right, count)?;
+        if op == Op::Modulo
+            && (0..count).any(|index| {
+                modulus_loses_accuracy(
+                    real_at(left, index % left_length),
+                    real_at(right, index % right_length),
+                )
+            })
+        {
+            conditions::warning("probable complete loss of accuracy in modulus")?;
+        }
+        result
     } else {
         integer_arithmetic(call, op, left, right, count)?
     };
@@ -888,7 +899,7 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
         Op::Divide => a / b,
         Op::Power => power(a, b),
         Op::Modulo => real_modulo(a, b),
-        Op::IntegerDivide => (a / b).floor(),
+        Op::IntegerDivide => real_integer_divide(a, b),
     }
 }
 
@@ -945,22 +956,61 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     f64::NAN
 }
 
+/// `a %% b`. The remainder is corrected in x87 extended precision, as GNU R computes it, so
+/// `1e17 %% 7` is the exact 5 rather than the 0 a double computation gives.
 pub fn real_modulo(a: f64, b: f64) -> f64 {
-    if b == 0.0 {
-        return f64::NAN;
-    }
     if is_na_real(a) || is_na_real(b) {
         return NA_REAL;
     }
-    let quotient = (a / b).floor();
-    let remainder = a - quotient * b;
-    if remainder.abs() >= b.abs() && b.is_finite() {
-        remainder % b
-    } else if b.is_infinite() && a.is_finite() {
-        if (a >= 0.0) == (b > 0.0) { a } else { b }
-    } else {
-        remainder
+    if b == 0.0 {
+        return f64::NAN;
     }
+    if let Some((remainder, _)) = beyond_divisor(a, b) {
+        return remainder;
+    }
+    let divisor = LongDouble::from(b);
+    let rough = LongDouble::from(a) - LongDouble::from((a / b).floor()) * divisor;
+    (rough - (rough / divisor).floor() * divisor).to_f64()
+}
+
+/// `a %/% b`, consistent with `real_modulo`: `a == (a %/% b) * b + a %% b` up to rounding.
+pub fn real_integer_divide(a: f64, b: f64) -> f64 {
+    if is_na_real(a) || is_na_real(b) {
+        return NA_REAL;
+    }
+    if let Some((_, quotient)) = beyond_divisor(a, b) {
+        return quotient;
+    }
+    let quotient = a / b;
+    if b == 0.0 || !quotient.is_finite() {
+        return quotient;
+    }
+    let whole = LongDouble::from(quotient.floor());
+    let divisor = LongDouble::from(b);
+    let rough = LongDouble::from(a) - whole * divisor;
+    (whole + (rough / divisor).floor()).to_f64()
+}
+
+/// The remainder and quotient when `|a| <= |b|` and `b` is too large for `a / b` to carry any
+/// precision (infinite `b` included), where the result follows from the signs alone.
+fn beyond_divisor(a: f64, b: f64) -> Option<(f64, f64)> {
+    if !(b.abs() * f64::EPSILON > 1.0 && a.is_finite() && a.abs() <= b.abs()) {
+        return None;
+    }
+    Some(if a.abs() == b.abs() {
+        (0.0, a / b)
+    } else if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
+        (a + b, -1.0)
+    } else {
+        (a, 0.0)
+    })
+}
+
+/// Whether `a %% b` has a quotient beyond what extended precision holds, which GNU R warns
+/// about.
+fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
+    let quotient = a / b;
+    quotient.is_finite() && quotient.abs() > 2f64.powi(63)
 }
 
 unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {

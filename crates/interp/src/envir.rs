@@ -1208,7 +1208,22 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             }
             scalar_integer(count)
         }
-        "warn" | "scipen" | "deparse.cutoff" => {
+        "warn" => {
+            let number = if length(value) == 1
+                && matches!(
+                    value.kind(),
+                    SexpType::Logical | SexpType::Integer | SexpType::Real
+                ) {
+                crate::arith::real_at(value, 0)
+            } else {
+                f64::NAN
+            };
+            if number.is_nan() || number < f64::from(i32::MIN) || number > f64::from(i32::MAX) {
+                return Err(error("invalid value for 'warn'"));
+            }
+            scalar_integer(number as i32)
+        }
+        "scipen" | "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))
             } else {

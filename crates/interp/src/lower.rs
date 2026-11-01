@@ -427,7 +427,13 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 symbols().bracket2
             };
             let mut items = vec![(nil(), operator), (nil(), lower(object, source)?)];
-            items.extend(argument_list(arguments, source)?);
+            let subscripts = argument_list(arguments, source)?;
+            // Unlike a call's `f()`, R keeps the lone empty subscript of `x[]`, so
+            // `nargs()` in a `[` method counts it.
+            if subscripts.is_empty() {
+                items.push((nil(), missing_arg()));
+            }
+            items.extend(subscripts);
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR | SyntaxKind::NAMESPACE_EXPR => {

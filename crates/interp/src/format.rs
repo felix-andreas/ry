@@ -599,10 +599,11 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     settings.nsmall = nsmall;
     if scientific != nil() {
         if scientific.kind() == SexpType::Logical {
-            // `NA`, the default of `format.default`, keeps `options(scipen)`.
+            // `NA`, the default of `format.default`, keeps `options(scipen)`. The penalties
+            // outweigh any width, so even `.Machine$double.xmax` prints all 309 digits.
             match values::as_logical_scalar(scientific) {
-                1 => settings.scipen = -100,
-                0 => settings.scipen = 100,
+                1 => settings.scipen = -10_000,
+                0 => settings.scipen = 10_000,
                 _ => {}
             }
         } else {

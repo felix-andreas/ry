@@ -93,6 +93,43 @@ impl LongDouble {
         round_wide(false, rounded, (exponent - shift) / 2)
     }
 
+    /// The largest integer not above the value, as `floorl` gives it.
+    pub fn floor(self) -> LongDouble {
+        let Repr::Finite {
+            negative,
+            significand,
+            exponent,
+        } = self.0
+        else {
+            return self;
+        };
+        if significand == 0 || exponent >= 0 {
+            return self;
+        }
+        let fraction_bits = exponent.unsigned_abs();
+        let (whole, has_fraction) = if fraction_bits >= 64 {
+            (0, true)
+        } else {
+            (
+                significand >> fraction_bits,
+                significand & ((1u64 << fraction_bits) - 1) != 0,
+            )
+        };
+        let whole = if negative && has_fraction {
+            whole as u128 + 1
+        } else {
+            whole as u128
+        };
+        if whole == 0 {
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        round_wide(negative, whole, 0)
+    }
+
     fn negate(self) -> LongDouble {
         match self.0 {
             Repr::Special(value) => LongDouble(Repr::Special(-value)),
@@ -254,6 +291,51 @@ impl Mul for LongDouble {
 impl AddAssign<f64> for LongDouble {
     fn add_assign(&mut self, value: f64) {
         *self = *self + LongDouble::from(value);
+    }
+}
+
+impl Div for LongDouble {
+    type Output = LongDouble;
+
+    fn div(self, other: LongDouble) -> LongDouble {
+        let (
+            Repr::Finite {
+                negative: left_negative,
+                significand: left,
+                exponent: left_exponent,
+            },
+            Repr::Finite {
+                negative: right_negative,
+                significand: right,
+                exponent: right_exponent,
+            },
+        ) = (self.0, other.0)
+        else {
+            return LongDouble(Repr::Special(self.to_f64() / other.to_f64()));
+        };
+        if right == 0 {
+            return LongDouble(Repr::Special(self.to_f64() / other.to_f64()));
+        }
+        let negative = left_negative != right_negative;
+        if left == 0 {
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        // Both significands have their top bit set, so the first quotient has at least 64
+        // bits; two more bits and a sticky bit make the rounding exact.
+        let numerator = (left as u128) << 64;
+        let divisor = right as u128;
+        let (quotient, remainder) = (numerator / divisor, numerator % divisor);
+        let extra = (remainder << 2) / divisor;
+        let sticky = u128::from((remainder << 2) % divisor != 0);
+        round_wide(
+            negative,
+            (quotient << 2) | extra | sticky,
+            left_exponent - right_exponent - 66,
+        )
     }
 }
 
