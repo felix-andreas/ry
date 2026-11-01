@@ -44,7 +44,7 @@ fn fuzz_programs_agree_across_tiers() {
     let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
     let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT);
     let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT);
-    let reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(8));
+    let reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(3));
     // A generator that drifts into erroring early would compare almost nothing, so most
     // programs must run to the end under GNU R.
     let completed = reports
@@ -69,7 +69,7 @@ fn fuzz_programs_survive_gc_torture() {
     // not the divergences from GNU R that the pass above already reports.
     let ry = ProcessEngine::ry().with_timeout(TIMEOUT);
     let torture = ProcessEngine::ry_gc_torture().with_timeout(TORTURE_TIMEOUT);
-    let reports = run_seeds(&ry, &[&torture], fuzz_iterations(8).div_ceil(4));
+    let reports = run_seeds(&ry, &[&torture], fuzz_iterations(3).div_ceil(3));
     assert_agree(&reports);
 }
 

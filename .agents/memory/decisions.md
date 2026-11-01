@@ -3076,7 +3076,9 @@ contract.
   missed (a closed test file staying in the project, a lost `library()` rescan after cancellation,
   a formatting edit measured in bytes instead of UTF-16 units, and two splice reparses that
   disagreed with a full parse: an edit that opened a string the suffix closed, and one that left a
-  `function(...)` whose body a full parse found in the suffix). Simplicity: two seams, no
+  `function(...)` whose body a full parse found in the suffix). Differential fuzzing against GNU R
+  found three runtime bugs (NA against NaN propagation in `mean`, `sum`, `prod` and the cumulative
+  functions, a zero-length replacement into a zero-length vector, and a top-level `nargs()`). Simplicity: two seams, no
   parallel implementation. Performance: none in production; the cross-checks are off unless a
   harness enables them. Incrementality: the from-scratch oracle now covers the server's own
   bookkeeping (open documents, attach sets, config, metadata), not only salsa queries.

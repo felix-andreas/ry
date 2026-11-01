@@ -325,6 +325,16 @@ non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`,
 checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
 released. A second battery drives random API sequences under collection stress against a model.
 
+`crates/oracle/tests/test_differential.rs` runs whole generated R programs (`oracle::fuzz::program`)
+under GNU R, ry's tier 0 and ry's JIT, and under collection stress against ry unstressed, and every
+engine must print the same output, warnings and errors. The generator covers loops shaped for the
+JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow,
+and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
+--count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
+its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
+`RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
+allocation, which is too slow for a debug build today.
+
 ### The table engine
 
 `crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes
