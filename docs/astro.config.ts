@@ -124,6 +124,7 @@ export default defineConfig({
 						{ slug: 'contributing/testing' },
 						{ slug: 'contributing/corpus-and-oracle' },
 						{ slug: 'contributing/authoring-stubs' },
+						{ slug: 'contributing/releasing' },
 						// Drafts under contributing/design/ are proposals, not contracts; their index is the way in.
 						{ slug: 'contributing/design' },
 					],

@@ -37,22 +37,41 @@
             renv
             devtools
           ];
+        # The toolchain comes from rust-toolchain.toml, the same file rustup reads, so nix and
+        # cargo builds use one compiler. Without that file, the latest nightly stands in.
         rustToolchain =
           pkgs:
-          pkgs.rust-bin.selectLatestNightlyWith (
-            toolchain:
-            toolchain.default.override {
-              targets = [
-                "x86_64-unknown-linux-gnu"
-                "x86_64-pc-windows-gnu"
-                "aarch64-apple-darwin"
-              ];
-              extensions = [
-                "rust-src"
-                "rust-analyzer"
-              ];
-            }
-          );
+          let
+            toolchainFile = ./rust-toolchain.toml;
+            pinned = (builtins.fromTOML (builtins.readFile toolchainFile)).toolchain;
+            crossTargets = [
+              "x86_64-unknown-linux-gnu"
+              "aarch64-unknown-linux-gnu"
+              "x86_64-pc-windows-gnu"
+              "aarch64-apple-darwin"
+              "x86_64-apple-darwin"
+            ];
+            extensions = [
+              "rust-src"
+              "rust-analyzer"
+            ];
+          in
+          if builtins.pathExists toolchainFile then
+            pkgs.rust-bin.fromRustupToolchain (
+              pinned
+              // {
+                targets = (pinned.targets or [ ]) ++ crossTargets;
+                components = (pinned.components or [ ]) ++ extensions;
+              }
+            )
+          else
+            pkgs.rust-bin.selectLatestNightlyWith (
+              toolchain:
+              toolchain.default.override {
+                targets = crossTargets;
+                inherit extensions;
+              }
+            );
       };
 
       packages = self.lib.eachSystem (
@@ -68,10 +87,10 @@
             root = unfilteredRoot;
             fileset = pkgs.lib.fileset.unions [
               (craneLib.fileset.commonCargoSources unfilteredRoot)
-              # Non-Rust files read by `include_str!` and tests, which `commonCargoSources` drops.
+              # Non-Rust files that `commonCargoSources` drops: libR's C sources and headers, the
+              # stubs and fixtures read by `include_str!` and tests, and the release metadata.
+              ./crates
               ./types
-              ./crates/format/tests/format
-              ./crates/ry/ry.exe.manifest
               ./editors/code/package.json
             ];
           };
@@ -82,8 +101,14 @@
             strictDeps = true;
           };
 
+          # libR links zlib, bzip2 and xz (crates/libr/build.rs).
           commonArgsNative = commonArgs // {
-            cargoExtraArgs = "-p ry-lang";
+            cargoExtraArgs = "-p ry-lang -p libr";
+            buildInputs = [
+              pkgs.zlib
+              pkgs.bzip2
+              pkgs.xz
+            ];
           };
 
           # The dep-only build stubs out every local .rs file, but chrono compiles against the
@@ -100,16 +125,40 @@
               extraDummyScript = keepPatchesInDummySrc;
             }
           );
-          packageNative = craneLib.buildPackage (
+          packageUnwrapped = craneLib.buildPackage (
             commonArgsNative
             // {
               cargoArtifacts = cargoArtifactsNative;
+              # libr's own suites drive GNU R binaries and the corpus, which the sandbox lacks.
+              checkPhaseCargoCommand = "cargoWithProfile test -p ry-lang";
               # Stub materialization writes to the user cache; the sandbox's HOME is read-only.
               preCheck = ''
                 export XDG_CACHE_HOME="$TMPDIR/.cache"
               '';
+              # `ry run` finds ry's runtime at ../lib/ry/libR.so relative to the executable, and the
+              # name must stay libR.so, the soname compiled packages record.
+              postInstall = ''
+                mkdir -p "$out/lib/ry"
+                mv "$out/lib/libR.so" "$out/lib/ry/libR.so"
+                rm -f "$out"/lib/libR.a "$out"/lib/*.rlib
+              '';
+              meta.mainProgram = "ry";
             }
           );
+
+          # ry's runtime reads base R from a GNU R installation (`R RHOME`). The user's own R on
+          # PATH wins; nixpkgs' R, built as a shared library, is the fallback.
+          packageNative =
+            pkgs.runCommand "ry-${packageUnwrapped.version}"
+              {
+                nativeBuildInputs = [ pkgs.makeWrapper ];
+                meta.mainProgram = "ry";
+              }
+              ''
+                mkdir -p "$out/bin" "$out/lib"
+                ln -s ${packageUnwrapped}/lib/ry "$out/lib/ry"
+                makeWrapper ${packageUnwrapped}/bin/ry "$out/bin/ry" --suffix PATH : ${pkgs.R}/bin
+              '';
 
           # Release binaries are cross-linked by zig and cannot run in the sandbox, so they skip
           # tests. Linux targets glibc 2.17 with the standard /lib64 loader, so it can load R. zig
@@ -179,6 +228,8 @@
         in
         {
           default = packageNative;
+          ry = packageNative;
+          ry-unwrapped = packageUnwrapped;
           ry-linux-x86_64 = buildCrossPackage "x86_64-unknown-linux-gnu.2.17";
           ry-macos-aarch64 = buildCrossPackage "aarch64-apple-darwin";
           ry-windows-x86_64 = buildCrossPackage "x86_64-pc-windows-gnu";
@@ -231,6 +282,12 @@
               zip
             ];
           };
+      });
+
+      # `nix flake check` builds the package, which runs ry-lang's tests, and the dev shell.
+      checks = self.lib.eachSystem (system: {
+        ry = self.packages.${system}.ry;
+        devshell = self.devShells.${system}.default;
       });
     };
 }

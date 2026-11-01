@@ -210,17 +210,24 @@ fn ry_runtime_library() -> Result<PathBuf, ReplError> {
     let executable = std::env::current_exe()
         .map_err(|error| ReplError(format!("cannot locate the ry executable: {error}")))?;
     let directory = executable.parent().unwrap_or(std::path::Path::new("."));
+    // `libR.so` on Linux and `libR.dylib` on macOS: the names compiled packages link against.
+    let library = format!(
+        "{}R{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
     for candidate in [
-        directory.join("libR.so"),
-        directory.join("deps").join("libR.so"),
-        directory.join("../lib/ry/libR.so"),
+        directory.join(&library),
+        directory.join("deps").join(&library),
+        directory.join("../lib/ry").join(&library),
     ] {
         if candidate.exists() {
             return Ok(candidate);
         }
     }
     Err(ReplError(format!(
-        "ry's runtime (libR.so) was not found beside {}; build it with `cargo build -p libr` or set RY_LIBR",
+        "ry's runtime ({library}) was not found beside {}; build it with `cargo build --release -p libr`, \
+         or set RY_LIBR to its path",
         executable.display()
     )))
 }

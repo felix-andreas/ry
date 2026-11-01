@@ -4,6 +4,25 @@ default:
 ry *args:
     @cargo run -q -- {{ args }}
 
+# Build ry and walk through checking, typing, formatting, running and package loading in a demo project.
+try:
+    tools/try.sh
+
+# Build ry and print how to point an editor's language client at it.
+try-editor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release -p ry-lang
+    ry="$PWD/target/release/ry"
+    echo "ry's language server is \`$ry server\`. Point your editor at it:"
+    echo
+    echo "  VS Code:  install the ry extension, then set \"ry.path\": \"$ry\" in settings.json"
+    echo "  Zed:      in settings.json, \"lsp\": { \"ry\": { \"binary\": { \"path\": \"$ry\" } } }"
+    echo "  Neovim:   vim.lsp.config('ry', { cmd = { '$ry', 'server' }, filetypes = { 'r' } }); vim.lsp.enable('ry')"
+    echo "  Helix:    [language-server.ry] command = \"$ry\", args = [\"server\"] in languages.toml"
+    echo
+    echo "Or put it on your PATH, which every editor integration searches: export PATH=\"$PWD/target/release:\$PATH\""
+
 test *args:
     cargo test -- --nocapture {{ args }}
 
@@ -215,6 +234,51 @@ publish-marketplace $version:
     just vsce publish $release_flag --packagePath ../../release/$version/ry-darwin-arm64.vsix
     just vsce publish $release_flag --packagePath ../../release/$version/ry-win32-x64.vsix
     just vsce publish $release_flag --packagePath ../../release/$version/ry.vsix
+
+# Build this machine's release archive into release/VERSION: `ry` and ry's runtime (libR) side by side.
+package version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target=$(rustc -vV | sed -n 's/^host: //p')
+    dir="release/{{ version }}"
+    stage="$dir/ry-$target"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    case "$target" in
+    	*windows*)
+    		# ry's runtime is not built for Windows yet, so the archive carries the CLI alone.
+    		cargo build --release --locked -p ry-lang
+    		cp target/release/ry.exe LICENSE "$stage/"
+    		(cd "$stage" && 7z a -tzip "../ry-$target.zip" ry.exe LICENSE >/dev/null)
+    		;;
+    	*)
+    		cargo build --release --locked -p ry-lang -p libr
+    		library=libR.so
+    		case "$target" in *apple*) library=libR.dylib ;; esac
+    		cp target/release/ry "target/release/$library" LICENSE "$stage/"
+    		tar -czf "$dir/ry-$target.tar.gz" -C "$stage" .
+    		;;
+    esac
+    echo "$dir/ry-$target.$(case "$target" in *windows*) echo zip ;; *) echo tar.gz ;; esac)"
+
+# Package this machine's release archive, then install it into a scratch directory and smoke-test it.
+release-dry-run version="0.0.0-dry-run":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    archive=$(just package {{ version }} | tail -n 1)
+    tools/smoke-test.sh "$archive"
+    if command -v bun >/dev/null 2>&1; then
+    	(cd editors/code && bun install --frozen-lockfile >/dev/null)
+    	just build-extension pre-release --out "../../release/{{ version }}/ry.vsix"
+    	echo "release/{{ version }}/ry.vsix"
+    else
+    	echo "note: bun is not installed, so the VS Code extension was not packaged"
+    fi
+    if command -v nix >/dev/null 2>&1; then
+    	nix build .#ry --no-link --print-out-paths
+    else
+    	echo "note: nix is not installed, so the nix package was not built"
+    fi
 
 package-tar target dir:
     mkdir -p {{ dir }}/ry-{{ target }}
