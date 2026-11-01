@@ -2016,12 +2016,12 @@ The end-to-end guard rests on the corpus suites.
 ## Open: DataFrame
 
 - **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
-  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. Measured on the
-  whole db-benchmark script (load plus all questions): the default ran 131 s at 6.7 GB peak, a
-  1000 ms purge delay 107 s at 7.6 GB, and never purging 96 s at 8.3 GB; the timed questions alone
-  barely moved (4.66 s, 4.66 s, 4.46 s), so the difference is almost all CSV loading. The delay is
-  process-wide and trades resident memory in every R program, so it stays at mimalloc's default.
-  Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
+  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena
+  commit and the one-pass factor conversion, the whole db-benchmark script (load plus all
+  questions) runs 97 s at 6.7 GB peak by default and 91 s at 8.1 GB with `MIMALLOC_PURGE_DELAY=-1`.
+  The delay is process-wide and trades resident memory in every R program, so it stays at
+  mimalloc's default. Keeping scratch small (the grouped median) and a per-query arena remain the
+  targeted fixes.
 - **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
   distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
   interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes

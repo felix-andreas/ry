@@ -3645,11 +3645,11 @@ explicit allocators".
 ## mimalloc's purge delay stays at its default
 
 - Raising `MIMALLOC_PURGE_DELAY` (or calling `mi_option_set` for `purge_delay` in
-  `crates/libr/src/libr.rs`) keeps freed pages resident, which made the whole db-benchmark script
-  18 to 27% faster but raised its peak memory by 0.9 to 1.6 GB. Nearly all of the gain was in CSV
-  loading, not in the timed queries, and the option is process-wide, so every R program would pay
-  the memory. The numbers are in the backlog item "Large allocations page-fault on every query";
-  revisit with a per-query arena, which keeps the gain without the global cost.
+  `crates/libr/src/libr.rs`) keeps freed pages resident. Measured on the whole db-benchmark script
+  with lazy arena commit (`LAZY_ARENA_COMMIT` in the same file), never purging was 7% faster and
+  raised peak memory by 1.4 GB. The option is process-wide, so every R program would pay the
+  memory for a gain that lies mostly in CSV loading. The numbers are in the backlog item "Large
+  allocations page-fault on every query"; revisit with a per-query arena, which keeps the gain without the global cost.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 
