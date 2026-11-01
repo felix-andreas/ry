@@ -1218,8 +1218,8 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
 
 /// The binding cell inline cache `slot` of `code` holds for lookups from `enclosure`, if it is
 /// still valid.
-pub unsafe fn cached_binding(code: Sexp, enclosure: Sexp, slot: usize) -> Option<Sexp> {
-    cached_cell(enclosure, code.cdr(), code.tag(), slot)
+pub unsafe fn cached_binding(code: Sexp, symbol: Sexp, enclosure: Sexp, slot: usize) -> Option<Sexp> {
+    cached_cell(symbol, enclosure, code.cdr(), code.tag(), slot)
 }
 
 /// Runs one instruction. `Some(value)` means the body returned.
@@ -1554,7 +1554,7 @@ unsafe fn lookup_variable(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp
         return if plain { Ok(value) } else { eval::eval_symbol(symbol, env) };
     }
     let enclosure = env.enclosure();
-    if let Some(cell) = cached_cell(enclosure, constants, caches, slot)
+    if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
     {
         let value = cell.cdr();
@@ -1566,7 +1566,7 @@ unsafe fn lookup_variable(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp
         }
     }
     if let Some(cell) = resolve(symbol, enclosure, false)? {
-        fill_cache(enclosure, cell, constants, caches, slot);
+        fill_cache(symbol, enclosure, cell, constants, caches, slot);
     }
     eval::eval_symbol(symbol, env)
 }
@@ -1585,7 +1585,7 @@ unsafe fn lookup_function(
         return eval::find_called_fun(symbol, env, call);
     }
     let enclosure = env.enclosure();
-    if let Some(cell) = cached_cell(enclosure, constants, caches, slot)
+    if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
     {
         let mut value = cell.cdr();
@@ -1597,7 +1597,7 @@ unsafe fn lookup_function(
         }
     }
     if let Some(cell) = resolve(symbol, enclosure, true)? {
-        fill_cache(enclosure, cell, constants, caches, slot);
+        fill_cache(symbol, enclosure, cell, constants, caches, slot);
     }
     eval::find_called_fun(symbol, env, call)
 }
@@ -1605,7 +1605,7 @@ unsafe fn lookup_function(
 /// [`lookup_function`] for a symbol the frame cannot bind: the frame is not probed.
 unsafe fn lookup_enclosing_function(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> R<Sexp> {
     let enclosure = env.enclosure();
-    if let Some(cell) = cached_cell(enclosure, constants, caches, slot)
+    if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
     {
         let value = cell.cdr();
@@ -1616,9 +1616,9 @@ unsafe fn lookup_enclosing_function(symbol: Sexp, env: Sexp, constants: Sexp, ca
     lookup_function(symbol, env, constants, caches, slot, unbound())
 }
 
-unsafe fn cached_cell(enclosure: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> Option<Sexp> {
+unsafe fn cached_cell(symbol: Sexp, enclosure: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> Option<Sexp> {
     let epochs = constants.element(EPOCHS);
-    if values::reals(epochs)[slot] != crate::heap().binding_epoch() as f64 {
+    if values::reals(epochs)[slot] != crate::heap().lookup_stamp(symbol) as f64 {
         return None;
     }
     if caches.element(slot * 2) != enclosure {
@@ -1627,12 +1627,12 @@ unsafe fn cached_cell(enclosure: Sexp, constants: Sexp, caches: Sexp, slot: usiz
     Some(caches.element(slot * 2 + 1))
 }
 
-unsafe fn fill_cache(enclosure: Sexp, cell: Sexp, constants: Sexp, caches: Sexp, slot: usize) {
+unsafe fn fill_cache(symbol: Sexp, enclosure: Sexp, cell: Sexp, constants: Sexp, caches: Sexp, slot: usize) {
     let heap = crate::heap();
     heap.set_element(caches, slot * 2, enclosure);
     heap.set_element(caches, slot * 2 + 1, cell);
     let epochs = constants.element(EPOCHS);
-    values::reals_mut(epochs)[slot] = heap.binding_epoch() as f64;
+    values::reals_mut(epochs)[slot] = heap.lookup_stamp(symbol) as f64;
 }
 
 /// The cell a lookup from `enclosure` finds, when the result can be cached: the walk passes no
@@ -1645,7 +1645,15 @@ unsafe fn resolve(symbol: Sexp, mut env: Sexp, function: bool) -> R<Option<Sexp>
         if env.has_gp(gp::FUNCTION_FRAME) {
             return Ok(None);
         }
-        if let Some(cell) = heap.frame_cell(env, symbol) {
+        let cell = if env == heap.known().global_env {
+            let Some(cell) = heap.global_cell(symbol) else {
+                return Ok(None);
+            };
+            Some(cell)
+        } else {
+            heap.frame_cell(env, symbol)
+        };
+        if let Some(cell) = cell {
             if cell.has_gp(gp::ACTIVE_BINDING) {
                 return Ok(None);
             }

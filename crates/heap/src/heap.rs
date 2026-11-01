@@ -28,14 +28,14 @@ pub mod strings;
 use crate::{
     env::Frame,
     object::{
-        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, VECTOR_DATA_OFFSET, flag_bits,
+        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, VECTOR_DATA_OFFSET, flag_bits,
         gc_bits, gp, object_size, slot_for,
     },
     records::Layouts,
     strings::{Encoding, StringTable},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{alloc::Layout, ffi::c_void, fmt, ptr::NonNull, rc::Rc};
+use std::{alloc::Layout, cell::Cell, ffi::c_void, fmt, ptr::NonNull, rc::Rc};
 
 /// The longest vector R allows, `R_XLEN_T_MAX`.
 pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
@@ -71,6 +71,9 @@ pub struct Heap {
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
     /// environments knows it is still valid when the epoch is unchanged.
     binding_epoch: u64,
+    /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
+    /// own epoch, so a cache keyed by symbol sees both kinds of change.
+    enclosure_epoch: u64,
 }
 
 /// The objects every R session has, created with the heap.
@@ -304,6 +307,7 @@ impl Heap {
             ready_to_finalize: Vec::new(),
             mark_stack: Vec::new(),
             binding_epoch: 0,
+            enclosure_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
             layouts: Layouts::default(),
@@ -516,6 +520,12 @@ impl Heap {
         first.increment_refcount();
         second.increment_refcount();
         third.increment_refcount();
+        if kind == SexpType::Symbol {
+            let symbol = object.as_ptr().cast::<SymbolObject>();
+            std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
+            std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
+            std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
+        }
         Ok(object)
     }
 
@@ -746,6 +756,7 @@ impl Heap {
 
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
         self.binding_epoch += 1;
+        self.enclosure_epoch += 1;
         self.write_barrier(env, value);
         env.set_enclosure_unbarriered(value);
     }
@@ -802,6 +813,7 @@ impl Heap {
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
         if !env.has_gp(gp::FUNCTION_FRAME) {
             self.binding_epoch += 1;
+            bump_symbol_epoch(symbol);
         }
         if self.is_symbol_frame(env) {
             self.store(symbol, symbol.cdr(), cell);
@@ -842,6 +854,7 @@ impl Heap {
             return Err(HeapError::LockedEnvironmentRemove);
         }
         self.binding_epoch += 1;
+        bump_symbol_epoch(symbol);
         if self.is_symbol_frame(env) {
             let cell = symbol.cdr();
             if cell.kind() != SexpType::Binding {
@@ -855,6 +868,40 @@ impl Heap {
             return Ok(false);
         }
         Ok((*env.frame_ptr()).remove(symbol).is_some())
+    }
+
+    /// A stamp for lookups of `symbol` through environments other than function frames: it
+    /// changes whenever a binding of `symbol` appears or disappears in such an environment, or
+    /// any enclosure is replaced, so a cell cached under an unchanged stamp is still the one a
+    /// fresh walk would find.
+    pub unsafe fn lookup_stamp(&self, symbol: Sexp) -> u64 {
+        symbol.symbol_payload().epoch.get() + self.enclosure_epoch
+    }
+
+    /// The first binding of `symbol` on the search path, from the global environment to the
+    /// base environment. GNU R keeps the same cache, because every free variable of top-level
+    /// code and of functions defined there resolves along the search path, which in a session
+    /// with many attached packages means many large frames to probe.
+    pub unsafe fn global_cell(&self, symbol: Sexp) -> Option<Sexp> {
+        let payload = symbol.symbol_payload();
+        let stamp = self.lookup_stamp(symbol);
+        if payload.global_stamp.get() == stamp {
+            return payload.global_cell.get();
+        }
+        let mut env = self.known.global_env;
+        let mut cacheable = true;
+        while env != self.known.empty_env {
+            cacheable &= !env.has_gp(gp::FUNCTION_FRAME);
+            if let Some(cell) = self.frame_cell(env, symbol) {
+                if cacheable {
+                    payload.global_cell.set(Some(cell));
+                    payload.global_stamp.set(stamp);
+                }
+                return Some(cell);
+            }
+            env = env.enclosure();
+        }
+        None
     }
 
     /// See the field: an unchanged epoch means no binding outside a function frame appeared or
@@ -1713,3 +1760,8 @@ pub const VECTOR_TYPES: [SexpType; 8] = [
 
 const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
+
+unsafe fn bump_symbol_epoch(symbol: Sexp) {
+    let epoch = &symbol.symbol_payload().epoch;
+    epoch.set(epoch.get() + 1);
+}

@@ -27,7 +27,7 @@ use heap::{
     strings::Encoding,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("paste", 4, do_paste),
@@ -2264,13 +2264,26 @@ type Groups = Vec<Option<(usize, usize)>>;
 
 enum Matcher {
     Literal(String),
-    Pattern(Regex),
+    Pattern(Rc<Regex>),
+}
+
+/// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
+/// same few patterns over and over, and building the automaton costs far more than matching one
+/// short string.
+const PATTERN_CACHE_SIZE: usize = 64;
+
+thread_local! {
+    static PATTERN_CACHE: RefCell<FxHashMap<(String, bool, bool), Rc<Regex>>> = RefCell::default();
 }
 
 impl Matcher {
     unsafe fn compile(pattern: &str, options: PatternOptions) -> R<Matcher> {
         if options.fixed {
             return Ok(Matcher::Literal(pattern.to_owned()));
+        }
+        let key = (pattern.to_owned(), options.ignore_case, options.perl);
+        if let Some(regex) = PATTERN_CACHE.with_borrow(|cache| cache.get(&key).cloned()) {
+            return Ok(Matcher::Pattern(regex));
         }
         let syntax = if options.perl {
             Syntax::Perl
@@ -2297,7 +2310,16 @@ impl Matcher {
             build(true).or_else(|_| build(false))
         };
         match compiled {
-            Ok(regex) => Ok(Matcher::Pattern(regex)),
+            Ok(regex) => {
+                let regex = Rc::new(regex);
+                PATTERN_CACHE.with_borrow_mut(|cache| {
+                    if cache.len() >= PATTERN_CACHE_SIZE {
+                        cache.clear();
+                    }
+                    cache.insert(key, regex.clone());
+                });
+                Ok(Matcher::Pattern(regex))
+            }
             Err(reason) => {
                 if options.perl {
                     warning(format!("PCRE pattern compilation error\n\t'{reason}'"))?;

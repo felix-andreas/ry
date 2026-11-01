@@ -8,6 +8,7 @@ use crate::{
     builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
     bytecode, conditions, deparse, dispatch, interp, scope,
     unwind::{Jump, R, Unwind, error, error_in, jump},
+    utils::{PROFILE_TICK, record_profile_sample},
     values::{
         self, alloc, cons_tagged, length, missing_arg, new_env, nil, symbol_name, symbols,
         triple, unbound,
@@ -15,6 +16,7 @@ use crate::{
 };
 use heap::object::{Sexp, SexpType, gp};
 use smallvec::SmallVec;
+use std::sync::atomic::Ordering;
 
 /// A call's arguments as values or promises. Inline for the common few, so a closure call
 /// allocates no vector for them.
@@ -129,8 +131,11 @@ unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
 /// The binding cell for `symbol` from `env` outward.
 pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
     let heap = crate::heap();
-    let empty = heap.known().empty_env;
-    while env != empty {
+    let known = heap.known();
+    while env != known.empty_env {
+        if env == known.global_env {
+            return heap.global_cell(symbol);
+        }
         if let Some(cell) = heap.frame_cell(env, symbol) {
             return Some(cell);
         }
@@ -190,9 +195,27 @@ pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> R<Sexp> {
 /// in GNU R.
 pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp> {
     let heap = crate::heap();
-    let empty = heap.known().empty_env;
-    while env != empty {
-        if let Some(cell) = heap.frame_cell(env, symbol) {
+    let known = heap.known();
+    while env != known.empty_env {
+        let cell = if env == known.global_env {
+            // The first binding on the search path usually is the function; only when it is not
+            // does the walk go on frame by frame, to skip it as GNU R does.
+            if let Some(cell) = heap.global_cell(symbol)
+                && !cell.has_gp(gp::ACTIVE_BINDING)
+            {
+                let mut value = cell.cdr();
+                if value.kind() == SexpType::Promise && value.car() != unbound() {
+                    value = value.car();
+                }
+                if values::is_function(value) {
+                    return Ok(value);
+                }
+            }
+            heap.frame_cell(env, symbol)
+        } else {
+            heap.frame_cell(env, symbol)
+        };
+        if let Some(cell) = cell {
             let mut value = cell_value(cell)?;
             if value.kind() == SexpType::Promise {
                 value = force_promise(value)?;
@@ -373,6 +396,9 @@ pub unsafe fn call_builtin(
     }
     if matches!(definition.kind, Kind::Builtin | Kind::Special) && args.iter().any(|arg| arg.tag != nil()) {
         check_argument_names(definition, call, args)?;
+    }
+    if PROFILE_TICK.load(Ordering::Relaxed) {
+        record_profile_sample(Some(definition.name))?;
     }
     let function = definition.function;
     let visibility = definition.visibility;
@@ -789,6 +815,9 @@ pub unsafe fn run_closure(
         restarts: restarts.clone(),
         srcref: state.srcref,
     });
+    if PROFILE_TICK.load(Ordering::Relaxed) {
+        record_profile_sample(None)?;
+    }
     let depth = state.frames.len();
     let caller_srcref = state.srcref;
     state.srcref = values::get_attr(function, symbols().srcref);
