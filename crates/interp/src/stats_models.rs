@@ -810,7 +810,7 @@ unsafe fn rows_of(x: Sexp) -> usize {
     }
 }
 
-unsafe fn compact_row_count(row_names: Sexp) -> Option<usize> {
+pub(crate) unsafe fn compact_row_count(row_names: Sexp) -> Option<usize> {
     if row_names.kind() == SexpType::Integer && length(row_names) == 2 && values::ints(row_names)[0] == NA_INTEGER {
         Some(values::ints(row_names)[1].unsigned_abs() as usize)
     } else {

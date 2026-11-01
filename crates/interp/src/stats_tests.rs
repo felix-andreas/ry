@@ -1,18 +1,19 @@
 //! The null distributions behind stats' classical tests: Shapiro and Wilk's W, Kolmogorov and
 //! Smirnov's statistics, the Ansari-Bradley, Kendall and Spearman rank statistics, and the
-//! exact conditional distribution of a stratified 2 x 2 table.
+//! exact conditional distribution of a stratified 2 x 2 table, and the random two-way tables
+//! behind simulated p-values.
 //!
 //! Normal quantiles, normal tail areas and hypergeometric densities come from stats' own R
 //! functions, so they agree with every other use of them in a session.
 
 use crate::{
     builtin_libraries::NativeCall,
-    eval,
-    stats::real_values,
+    eval, random,
+    stats::{integer_values, real_values},
     unwind::R,
     values,
 };
-use heap::object::{NA_REAL, Sexp};
+use heap::object::{NA_REAL, Sexp, SexpType};
 
 /// Calls the stats function `name` (as the calling R code sees it) on numeric arguments and
 /// returns its value as doubles.
@@ -555,4 +556,196 @@ pub unsafe fn d2x2xk(call: &NativeCall<'_>) -> R<Sexp> {
     let mut result: Vec<f64> = density.iter().map(|value| value / total).collect();
     result.resize(size, NA_REAL);
     values::real_vector(&result)
+}
+
+/// `Fisher_sim(sr, sc, B)`: for `B` random tables with row sums `sr` and column sums `sc`, the
+/// statistic `-sum(lfactorial(x))` that `fisher.test` compares against the observed table.
+pub unsafe fn fisher_sim(call: &NativeCall<'_>) -> R<Sexp> {
+    let margins = TableMargins::read(call, call.arg(0), call.arg(1))?;
+    let replicates = values::as_integer_scalar(call.arg(2)).max(0) as usize;
+    let log_factorials = log_factorials(margins.total);
+    let mut statistics = Vec::with_capacity(replicates);
+    random::get_rng_state()?;
+    for _ in 0..replicates {
+        let table = random_table(call, &margins, &log_factorials)?;
+        statistics.push(-table.iter().map(|&cell| log_factorials[cell as usize]).sum::<f64>());
+    }
+    random::put_rng_state()?;
+    values::real_vector(&statistics)
+}
+
+/// `chisq_sim(sr, sc, B, E)`: for `B` random tables with row sums `sr` and column sums `sc`,
+/// Pearson's statistic against the expected counts `E`.
+pub unsafe fn chisq_sim(call: &NativeCall<'_>) -> R<Sexp> {
+    let margins = TableMargins::read(call, call.arg(0), call.arg(1))?;
+    let replicates = values::as_integer_scalar(call.arg(2)).max(0) as usize;
+    let expected = real_values(call.arg(3))?;
+    if expected.len() != margins.rows.len() * margins.columns.len() {
+        return Err(call.error("'E' does not match the table's margins"));
+    }
+    let log_factorials = log_factorials(margins.total);
+    let mut statistics = Vec::with_capacity(replicates);
+    random::get_rng_state()?;
+    for _ in 0..replicates {
+        let table = random_table(call, &margins, &log_factorials)?;
+        let statistic = table
+            .iter()
+            .zip(&expected)
+            .map(|(&observed, &expected)| (observed as f64 - expected).powi(2) / expected)
+            .sum::<f64>();
+        statistics.push(statistic);
+    }
+    random::put_rng_state()?;
+    values::real_vector(&statistics)
+}
+
+/// `r2dtable(n, r, c)`: `n` random two-way tables, as integer matrices, with row sums `r` and
+/// column sums `c`.
+pub unsafe fn r2dtable(call: &NativeCall<'_>) -> R<Sexp> {
+    let count = values::as_integer_scalar(call.arg(0));
+    if count < 0 || count == heap::object::NA_INTEGER {
+        return Err(call.error("invalid argument 'n'"));
+    }
+    let margins = TableMargins::read(call, call.arg(1), call.arg(2))?;
+    let log_factorials = log_factorials(margins.total);
+    let result = values::alloc(SexpType::List, count as usize)?;
+    random::get_rng_state()?;
+    for index in 0..count as usize {
+        let table = random_table(call, &margins, &log_factorials)?;
+        let matrix = values::integer_vector(&table)?;
+        let dim = values::integer_vector(&[margins.rows.len() as i32, margins.columns.len() as i32])?;
+        values::set_attr(matrix, values::symbols().dim, dim)?;
+        values::set_elt(result, index, matrix);
+    }
+    random::put_rng_state()?;
+    Ok(result)
+}
+
+/// The fixed margins of a two-way table.
+struct TableMargins {
+    rows: Vec<i32>,
+    columns: Vec<i32>,
+    total: usize,
+}
+
+impl TableMargins {
+    unsafe fn read(call: &NativeCall<'_>, rows: Sexp, columns: Sexp) -> R<Self> {
+        let rows = integer_values(rows)?;
+        let columns = integer_values(columns)?;
+        let valid = |margin: &[i32]| margin.len() > 1 && margin.iter().all(|&count| count >= 0);
+        if !valid(&rows) {
+            return Err(call.error("invalid argument 'r'"));
+        }
+        if !valid(&columns) {
+            return Err(call.error("invalid argument 'c'"));
+        }
+        let total: i64 = rows.iter().map(|&count| i64::from(count)).sum();
+        if total != columns.iter().map(|&count| i64::from(count)).sum::<i64>() {
+            return Err(call.error("arguments 'r' and 'c' must have the same sums"));
+        }
+        Ok(TableMargins { rows, columns, total: total as usize })
+    }
+}
+
+/// `log(k!)` for `k` in `0..=n`, summed term by term so that equal tables give equal statistics.
+fn log_factorials(n: usize) -> Vec<f64> {
+    let mut table = vec![0.0; n + 1];
+    for k in 2..=n {
+        table[k] = table[k - 1] + (k as f64).ln();
+    }
+    table
+}
+
+/// A random table with the given margins, drawn uniformly among all such tables by Patefield's
+/// algorithm (Applied Statistics algorithm AS 159, 1981), as column-major counts.
+///
+/// Each cell but those in the last row and column is drawn in turn from its hypergeometric
+/// distribution given the cells already fixed. The search for the drawn value starts at the
+/// distribution's mode and widens one step up and one step down alternately, so a cell costs
+/// one uniform deviate unless rounding leaves the accumulated probability short of it.
+unsafe fn random_table(call: &NativeCall<'_>, margins: &TableMargins, log_factorials: &[f64]) -> R<Vec<i32>> {
+    let row_count = margins.rows.len();
+    let column_count = margins.columns.len();
+    let mut table = vec![0; row_count * column_count];
+    let mut columns_left: Vec<i64> = margins.columns.iter().map(|&count| i64::from(count)).collect();
+    let mut rows_below = margins.total as i64;
+    let factorial = |k: i64| log_factorials.get(k as usize).copied().unwrap_or(0.0);
+    for row in 0..row_count - 1 {
+        let mut row_left = i64::from(margins.rows[row]);
+        let mut block = rows_below;
+        rows_below -= row_left;
+        for column in 0..column_count - 1 {
+            let column_total = columns_left[column];
+            let remaining = block;
+            block -= column_total;
+            let below = remaining - row_left;
+            let corner = below - column_total;
+            if remaining == 0 {
+                break;
+            }
+            let probability = |value: i64| {
+                (factorial(row_left) + factorial(below) + factorial(block) + factorial(column_total)
+                    - factorial(remaining)
+                    - factorial(value)
+                    - factorial(column_total - value)
+                    - factorial(row_left - value)
+                    - factorial(corner + value))
+                    .exp()
+            };
+            let mode = (row_left as f64 * column_total as f64 / remaining as f64 + 0.5).floor() as i64;
+            let mut target = random::unif_rand()?;
+            let value = loop {
+                let at_mode = probability(mode);
+                if at_mode == 0.0 {
+                    return Err(call.error("the table's margins give a cell probability of zero"));
+                }
+                let mut accumulated = at_mode;
+                if accumulated >= target {
+                    break mode;
+                }
+                let (mut up, mut up_probability) = (mode, at_mode);
+                let (mut down, mut down_probability) = (mode, at_mode);
+                let mut drawn = None;
+                loop {
+                    let up_factor = (column_total - up) * (row_left - up);
+                    if up_factor > 0 {
+                        up += 1;
+                        up_probability *= up_factor as f64 / (up as f64 * (corner + up) as f64);
+                        accumulated += up_probability;
+                        if accumulated >= target {
+                            drawn = Some(up);
+                            break;
+                        }
+                    }
+                    let down_factor = down * (corner + down);
+                    if down_factor > 0 {
+                        down -= 1;
+                        down_probability *=
+                            down_factor as f64 / ((column_total - down) as f64 * (row_left - down) as f64);
+                        accumulated += down_probability;
+                        if accumulated >= target {
+                            drawn = Some(down);
+                            break;
+                        }
+                    }
+                    if up_factor <= 0 && down_factor <= 0 {
+                        break;
+                    }
+                }
+                match drawn {
+                    Some(value) => break value,
+                    None => target = accumulated * random::unif_rand()?,
+                }
+            };
+            table[row + column * row_count] = value as i32;
+            row_left -= value;
+            columns_left[column] -= value;
+        }
+        table[row + (column_count - 1) * row_count] = row_left as i32;
+        columns_left[column_count - 1] -= row_left;
+    }
+    for (column, &count) in columns_left.iter().enumerate() {
+        table[row_count - 1 + column * row_count] = count as i32;
+    }
+    Ok(table)
 }

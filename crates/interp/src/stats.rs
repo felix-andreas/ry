@@ -89,6 +89,9 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pKendall", stats_tests::p_kendall),
     ("pRho", stats_tests::p_rho),
     ("d2x2xk", stats_tests::d2x2xk),
+    ("Fisher_sim", stats_tests::fisher_sim),
+    ("chisq_sim", stats_tests::chisq_sim),
+    ("r2dtable", stats_tests::r2dtable),
     ("ARIMA_transPars", stats_arima::transpars),
     ("ARIMA_undoPars", stats_arima::undopars),
     ("ARIMA_Invtrans", stats_arima::invtrans),
@@ -703,7 +706,16 @@ unsafe fn compcases(call: &NativeCall<'_>) -> R<Sexp> {
     for arg in call.args {
         let value = arg.value;
         let items: Vec<Sexp> = match value.kind() {
-            SexpType::List => values::list_items(value),
+            SexpType::List => {
+                // A data frame without columns still has its rows, which its row names count.
+                let row_names = values::get_attr(value, symbols().row_names);
+                if length(value) == 0 && row_names != values::nil() {
+                    let rows = stats_models::compact_row_count(row_names).unwrap_or_else(|| length(row_names));
+                    record(value, rows, &mut columns)?;
+                    continue;
+                }
+                values::list_items(value)
+            }
             SexpType::Pairlist => values::pairlist_items(value).into_iter().map(|(_, item)| item).collect(),
             SexpType::Nil => continue,
             kind if kind.is_atomic() => vec![value],
