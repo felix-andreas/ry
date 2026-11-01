@@ -10,7 +10,7 @@ use {
         builtin_libraries::NativeCall,
         stats::{c_arguments, c_return},
         stats_optimize::brent_minimize,
-        unwind::R,
+        unwind::{R, error},
         values,
     },
     heap::object::Sexp,
@@ -33,9 +33,12 @@ pub unsafe fn rbart(call: &NativeCall<'_>) -> R<Sexp> {
     let (penalty, dof_offset, within_ss) = (real(0), real(1), real(5));
     let n = values::as_integer_scalar(arguments[6]).max(0) as usize;
     let count = values::as_integer_scalar(arguments[8]).max(0) as usize;
-    let x = &values::reals(arguments[2])[..n];
-    let y = &values::reals(arguments[3])[..n];
-    let weights = &values::reals(arguments[4])[..n];
+    let first_n = |index: usize| {
+        values::reals(arguments[index])
+            .get(..n)
+            .ok_or_else(|| error("'n' is larger than the data given to 'rbart'"))
+    };
+    let (x, y, weights) = (first_n(2)?, first_n(3)?, first_n(4)?);
     let knots = values::reals(arguments[7]).to_vec();
     let int_parameters = values::ints(arguments[13]).to_vec();
     let criterion = Criterion::from_code(int_parameters.first().copied().unwrap_or(1));
@@ -45,9 +48,7 @@ pub unsafe fn rbart(call: &NativeCall<'_>) -> R<Sexp> {
     let parameters = values::reals(arguments[15]).to_vec();
     let parameter = |index: usize| parameters.get(index).copied().unwrap_or(0.0);
     if knots.len() < count + 4 || count < 4 {
-        return Err(crate::unwind::error(
-            "invalid knots for the smoothing spline",
-        ));
+        return Err(error("invalid knots for the smoothing spline"));
     }
 
     let data = Data {
@@ -155,9 +156,7 @@ pub unsafe fn bvalus(call: &NativeCall<'_>) -> R<Sexp> {
     let coefficients = values::reals(arguments[2]).to_vec();
     let order = values::as_integer_scalar(arguments[6]).clamp(0, 4) as usize;
     if knots.len() < count + 4 || coefficients.len() < count || count < 4 {
-        return Err(crate::unwind::error(
-            "invalid knots for the smoothing spline",
-        ));
+        return Err(error("invalid knots for the smoothing spline"));
     }
     let x = values::reals(arguments[4]).to_vec();
     let values_out = values::reals_mut(arguments[5]);

@@ -1385,8 +1385,14 @@ impl<'p, 'b> Translator<'p, 'b> {
             Intrinsic::IntegerDivide(Numeric::Dbl) => {
                 let a = self.as_double(args[0], types[0]);
                 let b = self.as_double(args[1], types[1]);
-                let quotient = self.builder.ins().fdiv(a, b);
-                let result = self.builder.ins().floor(quotient);
+                let result = self
+                    .call(
+                        runtime::jit_real_integer_divide as *const () as usize,
+                        &[F64, F64],
+                        Some(F64),
+                        &[a, b],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
                 self.builder.def_var(self.doubles[dst], result);
             }
         }

@@ -90,14 +90,22 @@ pub enum Format {
     Bmp,
     Tiff,
     Jpeg,
-    /// `onefile = FALSE` writes each page to its own file. On `paper` (inches), the page is
-    /// centred, and turned a quarter anticlockwise when `landscape`; without paper, as for
-    /// `paper = "special"`, the document is an EPS file whose bounding box is the page itself.
+    /// The page is centred on `paper`, and turned a quarter anticlockwise when `landscape`;
+    /// without paper, the paper is the page itself. `onefile = FALSE` writes each page to its
+    /// own file as EPS.
     Postscript {
         onefile: bool,
-        paper: Option<[f64; 2]>,
+        paper: Option<Paper>,
         landscape: bool,
     },
+}
+
+/// A sheet of paper, named as PostScript's `%%DocumentMedia` comment names it, `size` inches
+/// across.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Paper {
+    pub name: &'static str,
+    pub size: [f64; 2],
 }
 
 /// Renders `pages` of a device `size` inches across into one file for PDF and PostScript (unless
@@ -121,7 +129,7 @@ pub fn write_pages(
             paper,
             landscape,
         } => {
-            let document = postscript_document(pages, size, paper, landscape, title);
+            let document = postscript_document(pages, size, paper, landscape, false, title);
             return std::fs::write(file_for_page(file, 1), document);
         }
         _ => {}
@@ -142,8 +150,14 @@ pub fn write_pages(
                 }
             }
             Format::Postscript {
-                paper, landscape, ..
-            } => postscript_document(std::slice::from_ref(page), size, paper, landscape, title),
+                onefile: false,
+                paper,
+                landscape,
+            } => {
+                let page = std::slice::from_ref(page);
+                postscript_document(page, size, paper, landscape, true, title)
+            }
+            Format::Postscript { onefile: true, .. } => Vec::new(),
             Format::Pdf => Vec::new(),
         };
         std::fs::write(file_for_page(file, index + 1), bytes)?;
@@ -632,59 +646,67 @@ const POSTSCRIPT_PROLOG: &str = "\
 ";
 
 /// A PostScript document of `pages`, each `size` inches, placed on `paper` as
-/// [`Format::Postscript`] describes. Text uses the standard Helvetica fonts in the ISO Latin-1
+/// [`Format::Postscript`] describes. An `encapsulated` document is EPS, which leaves out the
+/// media and orientation comments. Text uses the standard Helvetica fonts in the ISO Latin-1
 /// encoding, which matches the escapes `pdf_string` writes for it.
 fn postscript_document(
     pages: &[Page],
     size: [f64; 2],
-    paper: Option<[f64; 2]>,
+    paper: Option<Paper>,
     landscape: bool,
+    encapsulated: bool,
     title: &str,
 ) -> Vec<u8> {
     let [width, height] = size.map(|inches| inches * POINTS_PER_INCH);
-    // The paper's media and orientation comments, the bounding box in paper coordinates, and the
-    // transformation from page to paper.
-    let (media, bounding_box, placement) = match paper {
-        None => (String::new(), [0.0, 0.0, width, height], String::new()),
-        Some(paper) => {
-            let [paper_width, paper_height] = paper.map(|inches| inches * POINTS_PER_INCH);
-            let media = format!(
-                "%%DocumentMedia: custom {paper_width:.0} {paper_height:.0} 0 () ()\n\
-                 %%Orientation: {}\n",
-                if landscape { "Landscape" } else { "Portrait" }
-            );
-            if landscape {
-                let x = (paper_width - height) / 2.0;
-                let y = (paper_height - width) / 2.0;
-                (
-                    media,
-                    [x, y, x + height, y + width],
-                    format!("{paper_width:.2} 0 translate 90 rotate {y:.2} {x:.2} translate\n"),
-                )
-            } else {
-                let x = (paper_width - width) / 2.0;
-                let y = (paper_height - height) / 2.0;
-                (
-                    media,
-                    [x, y, x + width, y + height],
-                    format!("{x:.2} {y:.2} translate\n"),
-                )
-            }
-        }
+    let (paper, landscape) = match paper {
+        Some(paper) => (paper, landscape),
+        None => (
+            Paper {
+                name: "special",
+                size,
+            },
+            false,
+        ),
     };
-    let [left, bottom, right, top] = bounding_box;
+    let [paper_width, paper_height] = paper.size.map(|inches| inches * POINTS_PER_INCH);
+    let (bounding_box, placement) = if landscape {
+        let x = (paper_width - height) / 2.0;
+        let y = (paper_height - width) / 2.0;
+        (
+            [x, y, x + height, y + width],
+            format!("{paper_width:.2} 0 translate 90 rotate {y:.2} {x:.2} translate\n"),
+        )
+    } else {
+        let x = (paper_width - width) / 2.0;
+        let y = (paper_height - height) / 2.0;
+        (
+            [x, y, x + width, y + height],
+            format!("{x:.2} {y:.2} translate\n"),
+        )
+    };
+    let mut comments = String::new();
+    if !encapsulated {
+        // The media's size is whole points, cut down.
+        comments.push_str(&format!(
+            "%%DocumentMedia: {} {} {} 0 () ()\n",
+            paper.name,
+            paper_width.trunc(),
+            paper_height.trunc()
+        ));
+        if paper.name != "special" {
+            let orientation = if landscape { "Landscape" } else { "Portrait" };
+            comments.push_str(&format!("%%Orientation: {orientation}\n"));
+        }
+    }
+    let [left, bottom, right, top] = bounding_box.map(f64::round);
     let mut out = format!(
         "%!PS-Adobe-3.0{}\n%%DocumentNeededResources: font Helvetica Helvetica-Bold \
-         Helvetica-Oblique Helvetica-BoldOblique Symbol\n{media}%%Title: {}\n\
-         %%Creator: R (ry)\n%%Pages: {}\n%%BoundingBox: {:.0} {:.0} {:.0} {:.0}\n\
+         Helvetica-Oblique Helvetica-BoldOblique Symbol\n{comments}%%Title: {}\n\
+         %%Creator: R (ry)\n%%Pages: {}\n%%BoundingBox: {left} {bottom} {right} {top}\n\
          %%EndComments\n%%BeginProlog\n{POSTSCRIPT_PROLOG}%%EndProlog\n",
-        if paper.is_none() { " EPSF-3.0" } else { "" },
+        if encapsulated { " EPSF-3.0" } else { "" },
         title.replace(['\n', '\r'], " "),
         pages.len(),
-        left.floor(),
-        bottom.floor(),
-        right.ceil(),
-        top.ceil()
     );
     let mut opacities = BTreeMap::new();
     for (index, page) in pages.iter().enumerate() {

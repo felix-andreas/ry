@@ -742,22 +742,6 @@ pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Whether two `CHARSXP`s hold the same string. The cache keeps one object per bytes and
-/// encoding, so only strings with different encoding marks need a closer look. Those are
-/// compared as text, as GNU R compares them, unless one is marked as bytes, which have no text.
-pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
-    if left == right {
-        return true;
-    }
-    if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
-        return false;
-    }
-    if !left.has_gp(gp::LATIN1) && !right.has_gp(gp::LATIN1) {
-        return left.bytes() == right.bytes();
-    }
-    char_str(left) == char_str(right)
-}
-
 /// Whether two distinct interned strings hold the same text. Strings intern by bytes and
 /// encoding, so a native string and a UTF-8 one with the same bytes are distinct objects, and so
 /// are a latin1 string and its UTF-8 translation; GNU R's `Seql` calls both pairs equal because

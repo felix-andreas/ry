@@ -440,6 +440,8 @@ unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
             }),
         })
     };
+    // A right-hand side that fails to lower fails again, with its own error, when the whole
+    // expression is lowered after these grammar checks, so the checks defer to that error.
     let value = lower(&right, None).ok()?;
     if value.kind() != SexpType::Language {
         return failure(

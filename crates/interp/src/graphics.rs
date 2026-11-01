@@ -15,7 +15,7 @@ use {
         graphics_engine::{
             self, DevDesc, Event, GEContext, GEDevDesc, Unit, guarded, guarded_sexp,
         },
-        graphics_render::{self, Format, Rect, Shape, Stroke},
+        graphics_render::{self, Format, Paper, Rect, Shape, Stroke},
         unwind::{R, error},
         values::{
             self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
@@ -870,17 +870,19 @@ unsafe fn snapshot_saved(snapshot: Sexp) -> R<Option<Saved>> {
 // grDevices: opening devices.
 
 /// The paper sizes `postscript`, `xfig` and `pdf` know, in inches.
-fn paper_size(paper: &str) -> Option<[f64; 2]> {
+fn paper_size(paper: &str) -> Option<Paper> {
     let a4 = [21.0 / 2.54, 29.7 / 2.54];
-    match paper.to_ascii_lowercase().as_str() {
-        "a4" => Some(a4),
-        "a4r" => Some([a4[1], a4[0]]),
-        "letter" | "us" => Some([8.5, 11.0]),
-        "usr" => Some([11.0, 8.5]),
-        "legal" => Some([8.5, 14.0]),
-        "executive" => Some([7.25, 10.5]),
-        _ => None,
-    }
+    let (name, size) = match paper.to_ascii_lowercase().as_str() {
+        "a4" => ("a4", a4),
+        "a4r" => ("a4r", [a4[1], a4[0]]),
+        "letter" => ("letter", [8.5, 11.0]),
+        "us" => ("us", [8.5, 11.0]),
+        "usr" => ("usr", [11.0, 8.5]),
+        "legal" => ("legal", [8.5, 14.0]),
+        "executive" => ("executive", [7.25, 10.5]),
+        _ => return None,
+    };
+    Some(Paper { name, size })
 }
 
 /// The size of a paper device: the given width and height, or the paper less a quarter-inch
@@ -893,14 +895,15 @@ unsafe fn paper_device_size(paper: Sexp, width: Sexp, height: Sexp, horizontal: 
     if given.iter().all(|size| size.is_finite() && *size > 0.0) {
         return given;
     }
-    let [paper_width, paper_height] = named_paper(paper).unwrap_or([21.0 / 2.54, 29.7 / 2.54]);
+    let [paper_width, paper_height] =
+        named_paper(paper).map_or([21.0 / 2.54, 29.7 / 2.54], |paper| paper.size);
     let size = [paper_width - 0.5, paper_height - 0.5];
     if horizontal { [size[1], size[0]] } else { size }
 }
 
 /// The size of the paper a `paper` argument names, with `"default"` taken from
 /// `getOption("papersize")`, or `None` for `"special"`.
-unsafe fn named_paper(paper: Sexp) -> Option<[f64; 2]> {
+unsafe fn named_paper(paper: Sexp) -> Option<Paper> {
     let mut paper =
         values::first_string(paper).map_or_else(String::new, |paper| paper.into_owned());
     if paper == "default" {
@@ -949,15 +952,21 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
 /// ...)`.
 unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(8)) == 1;
+    let size = paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal);
+    // A special paper is the page itself, turned with it.
+    let paper = named_paper(call.arg(1)).unwrap_or(Paper {
+        name: "special",
+        size: if horizontal { [size[1], size[0]] } else { size },
+    });
     let spec = graphics_render::DeviceSpec {
         name: "postscript",
         file: device_file(call.arg(0)),
         format: Some(Format::Postscript {
             onefile: values::as_logical_scalar(call.arg(10)) != 0,
-            paper: named_paper(call.arg(1)),
+            paper: Some(paper),
             landscape: horizontal,
         }),
-        size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
+        size,
         unit_inches: 1.0 / 72.0,
         y_down: false,
         pointsize: values::as_real_scalar(call.arg(9)),

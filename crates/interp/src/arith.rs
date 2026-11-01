@@ -1259,6 +1259,9 @@ pub fn real_modulo(a: f64, b: f64) -> f64 {
     if b == 0.0 {
         return f64::NAN;
     }
+    if let Some(remainder) = exact_integer_modulo(a, b) {
+        return remainder;
+    }
     if let Some((remainder, _)) = beyond_divisor(a, b) {
         return remainder;
     }
@@ -1272,6 +1275,11 @@ pub fn real_integer_divide(a: f64, b: f64) -> f64 {
     if is_na_real(a) || is_na_real(b) {
         return NA_REAL;
     }
+    if b != 0.0
+        && let Some(remainder) = exact_integer_modulo(a, b)
+    {
+        return (a - remainder) / b;
+    }
     if let Some((_, quotient)) = beyond_divisor(a, b) {
         return quotient;
     }
@@ -1283,6 +1291,22 @@ pub fn real_integer_divide(a: f64, b: f64) -> f64 {
     let divisor = LongDouble::from(b);
     let rough = LongDouble::from(a) - whole * divisor;
     (whole + (rough / divisor).floor()).to_f64()
+}
+
+/// `a %% b` for whole numbers below 2^53 in magnitude, where every step is exact in doubles, so
+/// the common case skips the extended-precision model and its result is the same. `a - a %% b`
+/// is then an exact multiple of `b`, which makes `(a - a %% b) / b` the exact `a %/% b`.
+fn exact_integer_modulo(a: f64, b: f64) -> Option<f64> {
+    const LIMIT: f64 = 9_007_199_254_740_992.0;
+    if !(a.abs() < LIMIT && b.abs() < LIMIT && a == a.trunc() && b == b.trunc() && b != 0.0) {
+        return None;
+    }
+    let remainder = a % b;
+    Some(if remainder != 0.0 && (remainder < 0.0) != (b < 0.0) {
+        remainder + b
+    } else {
+        remainder
+    })
 }
 
 /// The remainder and quotient when `|a| <= |b|` and `b` is too large for `a / b` to carry any

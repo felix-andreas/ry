@@ -46,6 +46,10 @@ pub fn normalized(url: &str) -> String {
 
 /// GETs `url` with the extra request `headers` (each `"Name: value"`), following redirects.
 pub fn fetch(url: &str, headers: &[String]) -> Result<Fetched, FetchError> {
+    on_transfer_thread(|| fetch_here(url, headers))
+}
+
+fn fetch_here(url: &str, headers: &[String]) -> Result<Fetched, FetchError> {
     let response = send(client(true)?, url, headers, None)?;
     let status = response.status();
     if status.is_client_error() || status.is_server_error() {
@@ -69,6 +73,14 @@ pub fn fetch(url: &str, headers: &[String]) -> Result<Fetched, FetchError> {
 /// The response headers of `url` as libcurl reports them: for every hop, the status line, one
 /// `Name: value` line per header and a blank line, each ending in CRLF, and the final status.
 pub fn header_lines(
+    url: &str,
+    follow: bool,
+    timeout: Option<Duration>,
+) -> Result<(Vec<String>, u16), FetchError> {
+    on_transfer_thread(|| header_lines_here(url, follow, timeout))
+}
+
+fn header_lines_here(
     url: &str,
     follow: bool,
     timeout: Option<Duration>,
@@ -117,6 +129,21 @@ pub fn header_lines(
     })
 }
 
+/// Runs a whole transfer, from building the client to reading the body, on a thread of its own:
+/// the blocking client runs an async runtime inside, which must not nest in one the embedding
+/// program may already be running on the caller's thread.
+fn on_transfer_thread<T: Send>(
+    transfer: impl FnOnce() -> Result<T, FetchError> + Send,
+) -> Result<T, FetchError> {
+    std::thread::scope(|scope| scope.spawn(transfer).join()).unwrap_or_else(|_| {
+        Err(FetchError::Transport {
+            code: 2,
+            message: "Failed initialization",
+            detail: "the transfer thread stopped unexpectedly".to_owned(),
+        })
+    })
+}
+
 /// One client per redirect policy for the whole session, so connections are reused.
 fn client(follow: bool) -> Result<&'static Client, FetchError> {
     static FOLLOWING: OnceLock<Result<Client, String>> = OnceLock::new();
@@ -140,8 +167,6 @@ fn client(follow: bool) -> Result<&'static Client, FetchError> {
     })
 }
 
-/// Sends the request on its own thread: the blocking client runs an async runtime inside, which
-/// must not nest in one the embedding program may already be running on this thread.
 fn send(
     client: &'static Client,
     url: &str,
@@ -157,15 +182,7 @@ fn send(
     if let Some(timeout) = timeout {
         request = request.timeout(timeout);
     }
-    let outcome = std::thread::scope(|scope| scope.spawn(move || request.send()).join());
-    match outcome {
-        Ok(response) => response.map_err(transport),
-        Err(_) => Err(FetchError::Transport {
-            code: 2,
-            message: "Failed initialization",
-            detail: "the transfer thread stopped unexpectedly".to_owned(),
-        }),
-    }
+    request.send().map_err(transport)
 }
 
 /// Maps a client error to the libcurl code and description GNU R would have reported.
