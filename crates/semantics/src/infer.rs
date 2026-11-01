@@ -282,6 +282,25 @@ impl<'db> InferenceTable<'db> {
         if let Some(error) = constraint_rejects(db, self, constraint, ty) {
             return Err(error);
         }
+        if constraint == Constraint::Numeric
+            && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
+            && let TyKind::Var(element) = self.shallow_resolve(db, *element).kind(db)
+        {
+            let element = self.find(*element);
+            if let Entry::Unbound {
+                level: element_level,
+                constraint: element_constraint,
+            } = *self.entry(element)
+            {
+                self.set(
+                    element,
+                    Entry::Unbound {
+                        level: element_level,
+                        constraint: element_constraint.join(Constraint::ScalarNumeric),
+                    },
+                );
+            }
+        }
         self.adjust_levels(db, level, ty);
         let numeric = matches!(constraint, Constraint::Numeric | Constraint::ScalarNumeric);
         self.set(representative, Entry::Bound { ty, numeric });
@@ -605,20 +624,7 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         let actual = self.resolve(db, actual);
-        // R's arithmetic promotes `logical` to `integer` and `integer` to `double`.
-        let rank = |ty: Ty<'db>| match ty.kind(db) {
-            TyKind::Scalar(Atomic::Logical) => Some((false, 0)),
-            TyKind::Scalar(Atomic::Integer) => Some((false, 1)),
-            TyKind::Scalar(Atomic::Double) => Some((false, 2)),
-            TyKind::Vector(element) => match element.kind(db) {
-                TyKind::Scalar(Atomic::Logical) => Some((true, 0)),
-                TyKind::Scalar(Atomic::Integer) => Some((true, 1)),
-                TyKind::Scalar(Atomic::Double) => Some((true, 2)),
-                _ => None,
-            },
-            _ => None,
-        };
-        match (rank(bound), rank(actual)) {
+        match (numeric_rank(db, bound), numeric_rank(db, actual)) {
             (Some((bound_vector, bound_rank)), Some((actual_vector, actual_rank)))
                 if actual_rank > bound_rank
                     || (actual_rank == bound_rank && !bound_vector && actual_vector) =>
@@ -710,6 +716,29 @@ impl<'db> InferenceTable<'db> {
                 }
                 self.rollback(snapshot);
             }
+        }
+        // A constrained variable cannot bind to a union that has a member outside its
+        // constraint, so `lapply(n, f)` after `f(n)` made `n` numeric fits `X`'s `T[]` member.
+        // A union the constraint admits whole (`integer | double` for a number) binds whole,
+        // because picking a member would reject the others at every later call.
+        if let (TyKind::Var(var), TyKind::Union(members)) = (actual.kind(db), expected.kind(db))
+            && !matches!(
+                self.entry(self.find(*var)),
+                Entry::Unbound {
+                    constraint: Constraint::Unconstrained,
+                    ..
+                }
+            )
+        {
+            let members = members.clone();
+            let snapshot = self.snapshot();
+            if self.unify(db, actual, expected).is_ok() {
+                return true;
+            }
+            self.rollback(snapshot);
+            return members
+                .into_iter()
+                .any(|member| self.compatible_probe(db, actual, member, depth + 1));
         }
         if matches!(actual.kind(db), TyKind::Var(_)) || matches!(expected.kind(db), TyKind::Var(_))
         {
@@ -1544,12 +1573,21 @@ fn constraint_rejects<'db>(
             )
             | TyKind::Any
             | TyKind::Unknown => true,
-            TyKind::Vector(element) | TyKind::NamedVector(element) => matches!(
-                element.kind(db),
+            TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
                 TyKind::Scalar(
-                    Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex
-                )
-            ),
+                    Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
+                ) => true,
+                // `bind` carries the bound to an open element, so `T[]` is a number vector.
+                TyKind::Var(var) => match table.entry(table.find(*var)) {
+                    Entry::Unbound { .. } => true,
+                    Entry::Bound { ty, .. } => {
+                        constraint_rejects(db, table, Constraint::ScalarNumeric, *ty).is_none()
+                    }
+                    Entry::Redirect(_) => false,
+                },
+                TyKind::Rigid(name) => binder_implies(name),
+                _ => false,
+            },
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
@@ -1740,6 +1778,7 @@ mod tests {
                 }],
                 variadic: None,
                 ret: int,
+                inferred: false,
             }),
         );
         let positional_interface = Ty::new(
@@ -1749,6 +1788,7 @@ mod tests {
                 named: Vec::new(),
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
+                inferred: false,
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
@@ -1773,5 +1813,27 @@ fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
                 && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
         }
         _ => left == right,
+    }
+}
+
+/// Where a numeric type sits in R's promotion order, `logical` < `integer` < `double`, and
+/// whether it is a vector. A union of numeric types ranks as its widest member, since every
+/// member coerces to that one (`double | integer` widens a binding to `double`).
+fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
+    let atomic_rank = |ty: Ty<'db>| match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => Some(0),
+        TyKind::Scalar(Atomic::Integer) => Some(1),
+        TyKind::Scalar(Atomic::Double) => Some(2),
+        _ => None,
+    };
+    match ty.kind(db) {
+        TyKind::Vector(element) => atomic_rank(*element).map(|rank| (true, rank)),
+        TyKind::Union(members) => members
+            .iter()
+            .try_fold((false, 0), |(vector, rank), member| {
+                let (member_vector, member_rank) = numeric_rank(db, *member)?;
+                Some((vector || member_vector, rank.max(member_rank)))
+            }),
+        _ => atomic_rank(ty).map(|rank| (false, rank)),
     }
 }

@@ -71,10 +71,10 @@ f: Unknown
 21..26 error[type-mismatch] expected `logical`, found `character`
 
 #---- condition_blame_excludes_trailing_trivia
-f <- function(n) if (paste(n) ) 2L
+f <- function() if ("yes" ) 2L
 #++++
 f: Unknown
-21..29 error[type-mismatch] expected `logical`, found `character`
+20..25 error[type-mismatch] expected `logical`, found `character`
 
 #---- a_conditionally_reassigned_function_unions_both_signatures
 # Both paths write a function, so the slot cannot stay polymorphic: its type is
