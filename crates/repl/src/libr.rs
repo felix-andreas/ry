@@ -232,8 +232,13 @@ pub fn load() -> Result<RApi, ReplError> {
     })
 }
 
-/// Sibling DLLs are preloaded so compiled-package imports resolve, and the DLL
-/// directory is prepended to `PATH` so R.dll's own dependencies resolve.
+/// GNU R's `R.dll` loads first, and every DLL loads by its full path with the altered search
+/// order, so each one's dependencies resolve from GNU R's directory. Order matters because ry's
+/// own runtime is also named `R.dll` and sits beside `ry.exe`, which the default search order
+/// tries first: once GNU R's module is loaded, Windows binds every later import of `R.dll` by name
+/// (from `Rblas.dll`, `Rlapack.dll` and compiled packages) to it. The siblings are then preloaded
+/// so compiled-package imports resolve, and the DLL directory is prepended to `PATH` for the DLLs
+/// R loads itself.
 #[cfg(windows)]
 pub fn load() -> Result<RApi, ReplError> {
     let r_home = discover_r_home()?;
@@ -245,10 +250,17 @@ pub fn load() -> Result<RApi, ReplError> {
     if let Ok(joined) = env::join_paths(entries) {
         unsafe { env::set_var("PATH", joined) };
     }
+    let library = unsafe { load_from_directory(&library_path) }.map_err(|error| {
+        ReplError(format!(
+            "failed to load the R library at {}: {error}",
+            library_path.display()
+        ))
+    })?;
+    let library: &'static Library = Box::leak(Box::new(library));
     for sibling in ["Rblas.dll", "Rlapack.dll", "Riconv.dll"] {
         let candidate = library_directory.join(sibling);
         if candidate.exists()
-            && let Ok(loaded) = unsafe { Library::new(&candidate) }
+            && let Ok(loaded) = unsafe { load_from_directory(&candidate) }
         {
             Box::leak(Box::new(loaded));
         }
@@ -256,20 +268,13 @@ pub fn load() -> Result<RApi, ReplError> {
     // A hard requirement: `GA_initapp` is exported here, not by R.dll, and console
     // setup crashes when it never ran.
     let graphapp_path = library_directory.join("Rgraphapp.dll");
-    let graphapp = unsafe { Library::new(&graphapp_path) }.map_err(|error| {
+    let graphapp = unsafe { load_from_directory(&graphapp_path) }.map_err(|error| {
         ReplError(format!(
             "failed to load the R graphapp library at {}: {error}",
             graphapp_path.display()
         ))
     })?;
     let graphapp: &'static Library = Box::leak(Box::new(graphapp));
-    let library = unsafe { Library::new(&library_path) }.map_err(|error| {
-        ReplError(format!(
-            "failed to load the R library at {}: {error}",
-            library_path.display()
-        ))
-    })?;
-    let library: &'static Library = Box::leak(Box::new(library));
     Ok(RApi {
         r_home,
         setup_mainloop: symbol(library, &library_path, "setup_Rmainloop")?,
@@ -291,6 +296,17 @@ pub fn load() -> Result<RApi, ReplError> {
         user_break: symbol(library, &library_path, "UserBreak")?,
         _library: library,
     })
+}
+
+/// Loads a DLL with `LOAD_WITH_ALTERED_SEARCH_PATH`, which searches the DLL's own directory for
+/// its dependencies instead of the executable's. The flag needs a backslashed absolute path,
+/// and `R RHOME` reports one with forward slashes.
+#[cfg(windows)]
+unsafe fn load_from_directory(path: &Path) -> Result<Library, libloading::Error> {
+    use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library as WindowsLibrary};
+    let path = PathBuf::from(path.to_string_lossy().replace('/', "\\"));
+    unsafe { WindowsLibrary::load_with_flags(path, LOAD_WITH_ALTERED_SEARCH_PATH) }
+        .map(Library::from)
 }
 
 #[cfg(not(any(unix, windows)))]

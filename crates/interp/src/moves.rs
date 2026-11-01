@@ -667,10 +667,12 @@ unsafe fn inert(scope: &Scope<'_>, expression: Sexp, literals: &mut Vec<Sexp>) -
 unsafe fn acceptable(function: Sexp, name: &str) -> bool {
     match function.kind() {
         SexpType::Closure => true,
-        SexpType::Builtin | SexpType::Special => eval::builtin_def(function).is_ok_and(|definition| {
-            definition.name == name
-                && (definition.accepts_native || inert_builtin(definition.name))
-        }),
+        SexpType::Builtin | SexpType::Special => {
+            eval::builtin_def(function).is_ok_and(|definition| {
+                definition.name == name
+                    && (definition.accepts_native || inert_builtin(definition.name))
+            })
+        }
         _ => false,
     }
 }

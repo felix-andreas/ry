@@ -16,6 +16,7 @@ use {
         mem,
     },
     syntax::TextRange,
+    thin_vec::ThinVec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -66,8 +67,8 @@ pub struct ItemNaming {
     pub deferred_quiet_reads: SortedSet<ExprId>,
     /// `%op%` names read as operators; by name because the operator is a token, not a `NameRef`.
     pub quiet_operator_reads: SortedSet<Symbol>,
-    pub unused_assignments: Box<[UnusedAssignment]>,
-    pub unused_parameters: Box<[UnusedAssignment]>,
+    pub unused_assignments: ThinVec<UnusedAssignment>,
+    pub unused_parameters: ThinVec<UnusedAssignment>,
     /// Own top-level slots read within the item; the cross-item unused check seeds them as used.
     pub used_top_level_names: SortedSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
@@ -77,6 +78,9 @@ pub struct ItemNaming {
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
     /// a new write of that slot, so later reads see the added or removed column.
     pub column_updates: SortedMap<ExprId, BindingId>,
+    /// `assign("name", v)` and `delayedAssign("name", v)` calls and the local slot each binds
+    /// to a value ry does not track.
+    pub run_time_writes: SortedMap<ExprId, BindingId>,
     /// Qualified reads outside quiet contexts.
     pub namespace_reads: SortedMap<ExprId, NamespaceRead>,
     /// Names R creates in the global environment as a side effect: `<<-` targets with no
@@ -84,9 +88,9 @@ pub struct ItemNaming {
     pub super_globals: SortedSet<Symbol>,
     /// Targets R parses but refuses at run time (a computed value or a number); reads inside
     /// them are suppressed as consequences of the mistake.
-    pub invalid_assignment_targets: Box<[InvalidAssignmentTarget]>,
+    pub invalid_assignment_targets: ThinVec<InvalidAssignmentTarget>,
     /// Alternatives of a `p | q` pattern that leave out a name another alternative binds.
-    pub or_pattern_mismatches: Box<[OrPatternMismatch]>,
+    pub or_pattern_mismatches: ThinVec<OrPatternMismatch>,
     /// Call heads that resolved to a slot. R looks a called name up as a function, skipping
     /// every binding that does not hold one, so the checker may fall through to these.
     pub callee_fallbacks: SortedMap<ExprId, CalleeFallback>,
@@ -121,6 +125,7 @@ struct NamingDraft {
     captured_slots: BTreeSet<BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
+    run_time_writes: BTreeMap<ExprId, BindingId>,
     namespace_reads: BTreeMap<ExprId, NamespaceRead>,
     super_globals: BTreeSet<Symbol>,
     invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
@@ -140,16 +145,17 @@ impl NamingDraft {
             quiet_reads: self.quiet_reads.into(),
             deferred_quiet_reads: self.deferred_quiet_reads.into(),
             quiet_operator_reads: self.quiet_operator_reads.into(),
-            unused_assignments: self.unused_assignments.into_boxed_slice(),
-            unused_parameters: self.unused_parameters.into_boxed_slice(),
+            unused_assignments: ThinVec::from(self.unused_assignments),
+            unused_parameters: ThinVec::from(self.unused_parameters),
             used_top_level_names: self.used_top_level_names.into(),
             captured_slots: self.captured_slots.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
+            run_time_writes: self.run_time_writes.into(),
             namespace_reads: self.namespace_reads.into(),
             super_globals: self.super_globals.into(),
-            invalid_assignment_targets: self.invalid_assignment_targets.into_boxed_slice(),
-            or_pattern_mismatches: self.or_pattern_mismatches.into_boxed_slice(),
+            invalid_assignment_targets: ThinVec::from(self.invalid_assignment_targets),
+            or_pattern_mismatches: ThinVec::from(self.or_pattern_mismatches),
             callee_fallbacks: self.callee_fallbacks.into(),
             native_routine_reads: self.native_routine_reads.into(),
         }
@@ -467,6 +473,30 @@ impl Context<'_> {
                     self.naming.native_routine_reads.insert(routine);
                 }
                 match builtin_callee {
+                    // `assign("name", v)` and `delayedAssign("name", v)` bind `name` in the
+                    // calling frame, so a later read of `name` sees that binding and not an
+                    // outer one such as base's `length`. Its value is not tracked.
+                    Some("assign" | "delayedAssign")
+                        if self.current_function_depth() > 0
+                            && let [first, second] = &module[arguments][..]
+                            && module.argument_name(first).is_none_or(|name| name == "x")
+                            && module
+                                .argument_name(second)
+                                .is_none_or(|name| name == "value")
+                            && let Some(target) = first.value
+                            && let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(target) =>
+                    {
+                        self.resolve_arguments(&module[arguments]);
+                        let slot = self.frame_slot(
+                            Symbol::new(&module[text]),
+                            module.range(target),
+                            BindingKind::Local,
+                        );
+                        self.record_write(slot, Reach::Implicit);
+                        self.naming.run_time_writes.insert(id, slot);
+                        return;
+                    }
                     // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
                     // value and keep every write of those names alive.
                     Some("on.exit") => {

@@ -15,8 +15,8 @@
 use {
     crate::{
         analysis::{
-            Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, State, Ty, jump_target,
-            status,
+            Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, StateId, StateRef, Ty,
+            jump_target, status,
         },
         runtime::{self, Activation, offset, outcome, reason, representation},
     },
@@ -40,6 +40,7 @@ use {
         VECTOR_DATA_OFFSET,
     },
     interp::{
+        annotations,
         bytecode::{Arith, Op},
         values,
     },
@@ -64,8 +65,8 @@ const ATTRIB: i32 = 8;
 const LENGTH: i32 = 16;
 const DATA: i32 = VECTOR_DATA_OFFSET as i32;
 const ALTREP_FLAG: i64 = 1 << 1;
-/// ry's `Array<T>`: strict operator and indexing rules that the specialized paths do not apply,
-/// so an Array fails every type guard and runs on the generic path.
+/// ry's `Array<T>`: its own JIT types (`Ty::IntArr` and so on), and it fails every guard for a
+/// plain vector, whose operator and indexing rules differ.
 const ARRAY_FLAG: i64 = 1 << 4;
 const OBJECT_FLAG: i64 = 1 << 0;
 
@@ -145,20 +146,23 @@ fn new_module() -> Result<JITModule, Refusal> {
 struct Deopt {
     label: Label,
     pc: usize,
-    state: State,
-    live: Vec<bool>,
+    state: StateId,
+    /// A register the state has unboxed that holds a boxed value here.
+    boxed: Option<usize>,
+    /// The instruction whose live registers apply.
+    live: usize,
     why: i32,
 }
 
 /// An edge that converts representations before reaching its target block.
 struct PendingEdge {
     label: Label,
-    state: State,
+    state: StateId,
     target: usize,
 }
 
 struct Translator<'p, 'b> {
-    plan: &'p Plan,
+    plan: &'p Plan<'p>,
     code: Sexp,
     builder: FunctionBuilder<'b>,
     call_conv: CallConv,
@@ -186,7 +190,7 @@ fn flags() -> MemFlagsData {
 
 impl<'p, 'b> Translator<'p, 'b> {
     fn new(
-        plan: &'p Plan,
+        plan: &'p Plan<'p>,
         code: Sexp,
         mut builder: FunctionBuilder<'b>,
         call_conv: CallConv,
@@ -270,7 +274,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             .plan
             .blocks
             .iter()
-            .map(|block| block.entry.as_ref().map(|_| self.builder.create_block()))
+            .map(|block| block.entry.map(|_| self.builder.create_block()))
             .collect();
         let start = self
             .labels
@@ -354,22 +358,23 @@ impl<'p, 'b> Translator<'p, 'b> {
             self.builder.def_var(self.loop_indexes[index], loop_index);
             self.builder.def_var(self.loop_counts[index], count);
         }
-        let entry = self.plan.blocks[header]
-            .entry
-            .clone()
-            .ok_or(Refusal("an unreachable loop header"))?;
-        for (register, ty) in entry.registers.iter().enumerate() {
+        let entry = self.plan.state(
+            self.plan.blocks[header]
+                .entry
+                .ok_or(Refusal("an unreachable loop header"))?,
+        );
+        for (register, &ty) in entry.registers.iter().enumerate() {
             if matches!(ty, Ty::Bottom | Ty::Boxed) {
                 continue;
             }
             let value = self.load_register(register);
-            let fits = self.check(value, *ty);
+            let fits = self.check(value, ty);
             let next = self.builder.create_block();
             self.builder.ins().brif(fits, next, &[], declined, &[]);
             self.builder.switch_to_block(next);
             if ty.is_unboxed() {
-                let unboxed = self.unbox(value, *ty);
-                self.def_register(register, *ty, unboxed);
+                let unboxed = self.unbox(value, ty);
+                self.def_register(register, ty, unboxed);
             }
         }
         self.builder.ins().jump(label, &[]);
@@ -379,10 +384,10 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Translates one instruction; returns whether it emitted the block's terminator.
     unsafe fn instruction(&mut self, position: usize) -> Result<bool, Refusal> {
         let plan = self.plan;
-        let Some(before) = plan.before[position].clone() else {
+        let Some(before) = plan.before(position) else {
             return Ok(false);
         };
-        self.action(position, before, plan.actions[position].clone())
+        self.action(position, before, plan.actions[position])
     }
 
     /// Translates one action with the state before it; returns whether it emitted the block's
@@ -391,20 +396,20 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn action(
         &mut self,
         position: usize,
-        before: State,
-        action: Action,
+        before: StateRef<'p>,
+        action: Action<'p>,
     ) -> Result<bool, Refusal> {
         let plan = self.plan;
         let inst = &plan.insts[position];
         let pc = inst.pc;
         match action {
             Action::Skip | Action::FallThrough => {}
-            Action::Clear { registers } => {
+            Action::Clear { register, range } => {
                 let nil = self
                     .builder
                     .ins()
                     .iconst(I64, interp::heap().known().nil.as_ptr() as i64);
-                for register in registers {
+                for register in std::iter::once(register).chain(range.0..range.1) {
                     self.store_register(register, nil);
                 }
             }
@@ -437,7 +442,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             } => {
                 self.set_visible(&before, true);
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, forcing)?;
+                    self.load_slot(position, &before, slot, ty, forcing, Some(dst))?;
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.is_unboxed() {
@@ -467,14 +472,14 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Action::GetFunSlot { dst, slot, load } => {
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, false)?;
+                    self.load_slot(position, &before, slot, ty, false, None)?;
                 }
                 let value = self.load_slot_cell(slot);
                 self.store_register(dst, value);
             }
             Action::Inline { steps } => {
-                for (step, state) in steps {
-                    self.action(position, state, step)?;
+                for &(step, state) in steps {
+                    self.action(position, self.plan.state(state), step)?;
                 }
                 self.set_visible(&before, true);
             }
@@ -483,9 +488,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                 function,
                 call,
                 args,
+                entry,
                 dst,
             } => {
-                self.direct_call(position, before, steps, function, call, &args, dst)?;
+                self.direct_call(position, before, steps, function, call, &args, entry, dst)?;
             }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
             Action::Move { dst, src, ty } => {
@@ -524,7 +530,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let same =
                     self.builder
                         .ins()
-                        .icmp_imm(IntCC::Equal, value, expected.as_ptr() as i64);
+                        .icmp_imm_u(IntCC::Equal, value, expected.as_ptr() as i64);
                 let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
                 let taken = self.edge(position, target)?;
                 let next = self.next_pc(position)?;
@@ -553,12 +559,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
                     let address = self.builder.ins().iconst(I64, flag);
                     let requested = self.builder.ins().uload8(I32, flags(), address, 0);
-                    let interrupted = self.deopt(
-                        pc,
-                        before.clone(),
-                        plan.live[position].clone(),
-                        reason::INTERRUPT,
-                    );
+                    let interrupted = self.deopt(pc, before.id, None, position, reason::INTERRUPT);
                     let calm = self.builder.ins().icmp_imm_s(IntCC::Equal, requested, 0);
                     self.guard(calm, interrupted);
                 }
@@ -568,7 +569,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 return Ok(true);
             }
             Action::JumpUnless { src } => {
-                let call = runtime_constant(self.code, inst.operands[1]);
+                let call = runtime_constant(self.code, inst.operand(1));
                 let truth = self.condition(position, &before, src, call)?;
                 let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
                 let taken = self.edge(position, target)?;
@@ -609,12 +610,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.set_visible(&before, true);
             }
             Action::Return { src } => {
-                let failed = self.deopt(
-                    pc,
-                    before.clone(),
-                    plan.live[position].clone(),
-                    reason::PENDING,
-                );
+                let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
                 self.flush_all(&before, failed);
                 let ty = before.registers[src];
                 let value = if ty.is_unboxed() {
@@ -637,12 +633,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let value = self.load_register(src);
                     if let Some(expected) = refine {
                         let fits = self.check(value, expected);
-                        let failed = self.deopt(
-                            pc,
-                            before.clone(),
-                            plan.live[position].clone(),
-                            reason::SPECULATION,
-                        );
+                        let failed = self.deopt(pc, before.id, None, position, reason::SPECULATION);
                         self.guard(fits, failed);
                     }
                     value
@@ -704,7 +695,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Action::Visible(flag) => self.set_visible(&before, flag),
             Action::LogicLeft { dst, src, is_and } => {
-                let call = runtime_constant(self.code, inst.operands[2]);
+                let call = runtime_constant(self.code, inst.operand(2));
                 let value = self.logical(position, &before, src, call, is_and, false)?;
                 let decided =
                     self.builder
@@ -742,7 +733,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                         "a logic operator whose left operand is not a logical scalar",
                     ));
                 }
-                let call = runtime_constant(self.code, inst.operands[3]);
+                let call = runtime_constant(self.code, inst.operand(3));
                 let left_value = self.builder.use_var(self.integers[left]);
                 let right_value = self.logical(position, &before, right, call, is_and, true)?;
                 let na = self.builder.ins().iconst(I32, NA_INTEGER as i64);
@@ -780,19 +771,14 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn step(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         effect: Effect,
         objects: &[usize],
         dst: Option<(usize, Ty)>,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         self.box_reads(position, before);
-        let failed = self.deopt(
-            pc,
-            before.clone(),
-            self.plan.live[position].clone(),
-            reason::PENDING,
-        );
+        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         let validate = match effect {
             Effect::Pure => self.builder.ins().iconst(I32, 0),
             Effect::Opaque => {
@@ -832,13 +818,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         let result = self.call_step(pc, validate)?;
         let after = self.after_with_boxed(position, dst.map(|(register, _)| register))?;
         let next = self.next_pc(position)?;
-        let next_live = self
-            .plan
-            .live
-            .get(position + 1)
-            .cloned()
-            .unwrap_or_default();
-        let invalidated = self.deopt(next, after.clone(), next_live.clone(), reason::SPECULATION);
+        let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
         let ok = self
             .builder
             .ins()
@@ -869,7 +849,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
         }
         if let Some((register, ty)) = dst {
-            self.refine(register, ty, next, after, next_live);
+            self.refine(register, ty, next, after, position + 1);
         }
         Ok(())
     }
@@ -880,11 +860,12 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn direct_call(
         &mut self,
         position: usize,
-        before: State,
-        steps: Vec<(Action, State)>,
+        before: StateRef<'p>,
+        steps: &'p [(Action<'p>, StateId)],
         function: Sexp,
         call: Sexp,
         args: &[Argument],
+        entry: annotations::Entry,
         dst: (usize, Ty),
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
@@ -898,23 +879,13 @@ impl<'p, 'b> Translator<'p, 'b> {
                 &[],
             )
             .ok_or(Refusal("a helper without a result"))?;
-        let observed = self.deopt(
-            pc,
-            before.clone(),
-            self.plan.live[position].clone(),
-            reason::HANDOFF,
-        );
+        let observed = self.deopt(pc, before.id, None, position, reason::HANDOFF);
         let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, handlers, 0);
         self.guard(unobserved, observed);
-        for (step, state) in steps {
-            self.action(position, state, step)?;
+        for &(step, state) in steps {
+            self.action(position, self.plan.state(state), step)?;
         }
-        let failed = self.deopt(
-            pc,
-            before.clone(),
-            self.plan.live[position].clone(),
-            reason::PENDING,
-        );
+        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         self.flush_all(&before, failed);
         let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -956,23 +927,31 @@ impl<'p, 'b> Translator<'p, 'b> {
         let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
         let count = iconst(&mut self.builder, args.len());
         let register = iconst(&mut self.builder, dst.0);
+        let signature = match entry {
+            annotations::Entry::Unchecked => std::ptr::null_mut(),
+            annotations::Entry::Checked(None) => values::nil().as_ptr(),
+            annotations::Entry::Checked(Some(signature)) => signature.as_ptr(),
+        };
+        let signature = self.builder.ins().iconst(I64, signature as i64);
         let result = self
             .call(
                 runtime::jit_call as *const () as usize,
-                &[I64, I64, I64, I64, I64, I64],
+                &[I64, I64, I64, I64, I64, I64, I64],
                 Some(I32),
-                &[self.activation, function, call, pointer, count, register],
+                &[
+                    self.activation,
+                    function,
+                    call,
+                    pointer,
+                    count,
+                    signature,
+                    register,
+                ],
             )
             .ok_or(Refusal("a helper without a result"))?;
         let after = self.after_with_boxed(position, Some(dst.0))?;
         let next = self.next_pc(position)?;
-        let next_live = self
-            .plan
-            .live
-            .get(position + 1)
-            .cloned()
-            .unwrap_or_default();
-        let invalidated = self.deopt(next, after.clone(), next_live.clone(), reason::SPECULATION);
+        let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
         let ok = self
             .builder
             .ins()
@@ -991,7 +970,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             .brif(errored, failed, &[], invalidated, &[]);
         self.builder.switch_to_block(continued);
         self.forget_slots();
-        self.refine(dst.0, dst.1, next, after, next_live);
+        self.refine(dst.0, dst.1, next, after, position + 1);
         Ok(())
     }
 
@@ -1002,8 +981,8 @@ impl<'p, 'b> Translator<'p, 'b> {
         register: usize,
         ty: Ty,
         next: usize,
-        after: State,
-        live: Vec<bool>,
+        after: (StateId, Option<usize>),
+        live: usize,
     ) {
         // A closure an instruction just made has its type by construction.
         if matches!(ty, Ty::Boxed | Ty::Bottom | Ty::Closure(..)) {
@@ -1011,7 +990,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         }
         let value = self.load_register(register);
         let fits = self.check(value, ty);
-        let failed = self.deopt(next, after, live, reason::SPECULATION);
+        let failed = self.deopt(next, after.0, after.1, live, reason::SPECULATION);
         self.guard(fits, failed);
         if ty.is_unboxed() {
             let unboxed = self.unbox(value, ty);
@@ -1020,7 +999,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     }
 
     /// Boxes the unboxed registers the instruction at `position` reads, so tier 0 finds them.
-    unsafe fn box_reads(&mut self, position: usize, before: &State) {
+    unsafe fn box_reads(&mut self, position: usize, before: &StateRef<'p>) {
         for register in reads(&self.plan.insts[position]) {
             let ty = before
                 .registers
@@ -1038,14 +1017,9 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Leaves for tier 0 at the instruction, the slow path of an inline fast path. Tier 0 then
     /// runs it with the frame written back, so a warning handler sees every variable, and
     /// re-enters compiled code at the next loop back edge.
-    fn hand_off(&mut self, position: usize, before: &State) {
+    fn hand_off(&mut self, position: usize, before: &StateRef<'p>) {
         let pc = self.plan.insts[position].pc;
-        let handoff = self.deopt(
-            pc,
-            before.clone(),
-            self.plan.live[position].clone(),
-            reason::HANDOFF,
-        );
+        let handoff = self.deopt(pc, before.id, None, position, reason::HANDOFF);
         self.builder.ins().jump(handoff, &[]);
     }
 
@@ -1055,7 +1029,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn arithmetic(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         arith: Arith,
         numeric: Numeric,
         dst: usize,
@@ -1118,7 +1092,7 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     unsafe fn comparison(
         &mut self,
-        before: &State,
+        before: &StateRef<'p>,
         arith: Arith,
         numeric: Numeric,
         left: usize,
@@ -1165,7 +1139,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn intrinsic(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         intrinsic: Intrinsic,
         dst: usize,
         args: &[usize],
@@ -1202,9 +1176,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                             self.builder
                                 .ins()
                                 .fcmp(FloatCC::GreaterThanOrEqual, index, one);
-                        let bound = self.builder.ins().fcvt_from_sint(F64, length);
-                        let bound = self.builder.ins().fadd(bound, one);
-                        let within = self.builder.ins().fcmp(FloatCC::LessThan, index, bound);
+                        let within = self.within_length(index, length, types[0].is_array());
                         let in_range = self.builder.ins().band(positive, within);
                         // Only converted where it is in range, so the conversion cannot trap.
                         let safe = self.builder.ins().select(in_range, index, one);
@@ -1258,8 +1230,9 @@ impl<'p, 'b> Translator<'p, 'b> {
                     );
                     let failed = self.deopt(
                         self.plan.insts[position].pc,
-                        before.clone(),
-                        self.plan.live[position].clone(),
+                        before.id,
+                        None,
+                        position,
                         reason::SPECULATION,
                     );
                     self.guard(fits, failed);
@@ -1389,8 +1362,14 @@ impl<'p, 'b> Translator<'p, 'b> {
             Intrinsic::IntegerDivide(Numeric::Dbl) => {
                 let a = self.as_double(args[0], types[0]);
                 let b = self.as_double(args[1], types[1]);
-                let quotient = self.builder.ins().fdiv(a, b);
-                let result = self.builder.ins().floor(quotient);
+                let result = self
+                    .call(
+                        runtime::jit_real_integer_divide as *const () as usize,
+                        &[F64, F64],
+                        Some(F64),
+                        &[a, b],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
                 self.builder.def_var(self.doubles[dst], result);
             }
             Intrinsic::CollectionCount { set, empty } => {
@@ -1469,12 +1448,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let usable = self.builder.ins().band(is_record, plain);
                 self.hand_off_unless(position, before, usable);
                 // Only a record has a layout word, so it is read after the kind check.
-                let id = self.builder.ins().load(
-                    I32,
-                    flags(),
-                    record,
-                    RECORD_LAYOUT_OFFSET as i32,
-                );
+                let id = self
+                    .builder
+                    .ins()
+                    .load(I32, flags(), record, RECORD_LAYOUT_OFFSET as i32);
                 let same = self
                     .builder
                     .ins()
@@ -1484,12 +1461,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                     .map_err(|_| Refusal("a record field past the addressable slots"))?;
                 let raw = self.builder.ins().load(I64, flags(), record, offset);
                 let unboxed = if (index as usize) < UNBOXED_SLOTS {
-                    let mask = self.builder.ins().load(
-                        I64,
-                        flags(),
-                        record,
-                        RECORD_UNBOXED_OFFSET as i32,
-                    );
+                    let mask =
+                        self.builder
+                            .ins()
+                            .load(I64, flags(), record, RECORD_UNBOXED_OFFSET as i32);
                     let bit = self.builder.ins().band_imm_u(mask, 1i64 << index);
                     self.builder.ins().icmp_imm_s(IntCC::NotEqual, bit, 0)
                 } else {
@@ -1537,7 +1512,7 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     /// Continues when `condition` holds and otherwise hands the instruction to tier 0, which
     /// raises whatever error the compiled fast path declined to.
-    fn hand_off_unless(&mut self, position: usize, before: &State, condition: Value) {
+    fn hand_off_unless(&mut self, position: usize, before: &StateRef<'p>, condition: Value) {
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
         self.builder.ins().brif(condition, fast, &[], slow, &[]);
@@ -1597,18 +1572,13 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn condition(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         src: usize,
         call: Sexp,
     ) -> Result<Value, Refusal> {
         let ty = before.registers[src];
         let pc = self.plan.insts[position].pc;
-        let failed = self.deopt(
-            pc,
-            before.clone(),
-            self.plan.live[position].clone(),
-            reason::PENDING,
-        );
+        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         let (truth, valid) = match ty {
             Ty::Int | Ty::Lgl => {
                 let value = self.use_register(src, ty);
@@ -1673,7 +1643,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn logical(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         src: usize,
         call: Sexp,
         is_and: bool,
@@ -1703,12 +1673,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             _ => {
                 let pc = self.plan.insts[position].pc;
-                let failed = self.deopt(
-                    pc,
-                    before.clone(),
-                    self.plan.live[position].clone(),
-                    reason::PENDING,
-                );
+                let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
                 let value = self.load_register(src);
                 let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
                 let is_and = self.builder.ins().iconst(I32, is_and as i64);
@@ -1733,7 +1698,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn sub_assign(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         dst: usize,
         slot: usize,
         index: usize,
@@ -1742,9 +1707,8 @@ impl<'p, 'b> Translator<'p, 'b> {
         let pc = self.plan.insts[position].pc;
         let target = before.slots[slot].ty;
         let (index_ty, value_ty) = (before.registers[index], before.registers[value]);
-        let live = self.plan.live[position].clone();
-        let failed = self.deopt(pc, before.clone(), live.clone(), reason::PENDING);
-        let mismatch = self.deopt(pc, before.clone(), live, reason::SPECULATION);
+        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+        let mismatch = self.deopt(pc, before.id, None, position, reason::SPECULATION);
         // An unloaded variable is loaded first: a loop that calls a function every iteration
         // forgets its variables every time.
         if before.slots[slot].may_be(status::NOT_LOADED) {
@@ -1807,16 +1771,29 @@ impl<'p, 'b> Translator<'p, 'b> {
                     self.builder
                         .ins()
                         .fcmp(FloatCC::GreaterThanOrEqual, index_value, one);
-                let bound = self.builder.ins().fcvt_from_sint(F64, length);
-                let bound = self.builder.ins().fadd(bound, one);
-                let within = self
-                    .builder
-                    .ins()
-                    .fcmp(FloatCC::LessThan, index_value, bound);
+                let within = self.within_length(index_value, length, target.is_array());
                 let in_range = self.builder.ins().band(positive, within);
                 let safe = self.builder.ins().select(in_range, index_value, one);
                 (self.builder.ins().fcvt_to_sint(I64, safe), in_range)
             }
+        };
+        // An Array cannot hold a missing value, so storing one is tier 0's to do: it turns the
+        // Array into an R vector.
+        let in_range = match target {
+            Ty::DblArr => {
+                let element = self.use_register(value, Ty::Dbl);
+                let present = self.builder.ins().fcmp(FloatCC::Ordered, element, element);
+                self.builder.ins().band(in_range, present)
+            }
+            Ty::IntArr | Ty::LglArr => {
+                let element = self.use_register(value, value_ty);
+                let present =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::NotEqual, element, NA_INTEGER as i64);
+                self.builder.ins().band(in_range, present)
+            }
+            _ => in_range,
         };
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
@@ -1865,13 +1842,13 @@ impl<'p, 'b> Translator<'p, 'b> {
         let vector = self.builder.block_params(store)[0];
         let element_offset = self.builder.ins().iadd_imm_s(position_value, -1);
         match target {
-            Ty::DblVec => {
+            Ty::DblVec | Ty::DblArr => {
                 let element = self.as_double(value, value_ty);
                 let scaled = self.builder.ins().imul_imm_s(element_offset, 8);
                 let address = self.builder.ins().iadd(vector, scaled);
                 self.builder.ins().store(flags(), element, address, DATA);
             }
-            Ty::IntVec | Ty::LglVec => {
+            Ty::IntVec | Ty::LglVec | Ty::IntArr | Ty::LglArr => {
                 let element = self.use_register(value, value_ty);
                 let scaled = self.builder.ins().imul_imm_s(element_offset, 4);
                 let address = self.builder.ins().iadd(vector, scaled);
@@ -1918,15 +1895,25 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn load_slot(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         slot: usize,
         ty: Ty,
         forcing: bool,
+        dst: Option<usize>,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
-        let live = self.plan.live[position].clone();
-        let failed = self.deopt(pc, before.clone(), live.clone(), reason::PENDING);
-        let mismatch = self.deopt(pc, before.clone(), live, reason::SPECULATION);
+        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+        // Once the load has run, tier 0 resumes after it with the loaded value rather than
+        // loading again: the load may have forced a promise, and only that forcing knows whether
+        // the value is visible, which `withVisible(x)` reads.
+        let mismatch = match dst {
+            Some(dst) => {
+                let after = self.after_with_boxed(position, Some(dst))?;
+                let next = self.next_pc(position)?;
+                self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION)
+            }
+            None => self.deopt(pc, before.id, None, position, reason::SPECULATION),
+        };
         let done = self.builder.create_block();
         let load = self.builder.create_block();
         if before.slots[slot].may_be(status::LOADED) {
@@ -1962,11 +1949,14 @@ impl<'p, 'b> Translator<'p, 'b> {
                 .ins()
                 .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
         let valid = self.builder.ins().bxor_imm_u(invalid, 1);
+        let value = self.load_slot_cell(slot);
+        if let Some(dst) = dst {
+            self.store_register(dst, value);
+        }
         self.guard(valid, mismatch);
         if forcing {
             self.forget_slots();
         }
-        let value = self.load_slot_cell(slot);
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
             self.guard(fits, mismatch);
@@ -1993,17 +1983,12 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn peek(
         &mut self,
         position: usize,
-        before: &State,
+        before: &StateRef<'p>,
         slot: usize,
         ty: Ty,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
-        let mismatch = self.deopt(
-            pc,
-            before.clone(),
-            self.plan.live[position].clone(),
-            reason::SPECULATION,
-        );
+        let mismatch = self.deopt(pc, before.id, None, position, reason::SPECULATION);
         let done = self.builder.create_block();
         let load = self.builder.create_block();
         if before.slots[slot].may_be(status::LOADED) {
@@ -2057,7 +2042,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Makes `slot` dirty with `value`: unboxed for an unboxed `ty`, else an object the slot
     /// then owns a reference to. Releases the reference the slot held to its old value, if it
     /// was dirty and boxed, after counting the new one, since the two may be the same object.
-    unsafe fn assign_slot(&mut self, before: &State, slot: usize, ty: Ty, value: Value) {
+    unsafe fn assign_slot(&mut self, before: &StateRef<'p>, slot: usize, ty: Ty, value: Value) {
         let old = before.slots[slot];
         let release = (!old.ty.is_unboxed() && old.ty != Ty::Bottom && old.may_be(status::DIRTY))
             .then(|| {
@@ -2084,13 +2069,13 @@ impl<'p, 'b> Translator<'p, 'b> {
     }
 
     /// Writes every dirty slot back to the environment.
-    unsafe fn flush_all(&mut self, state: &State, failed: Label) {
+    unsafe fn flush_all(&mut self, state: &StateRef<'p>, failed: Label) {
         for slot in 0..state.slots.len() {
             self.flush_slot(state, slot, failed);
         }
     }
 
-    unsafe fn flush_slot(&mut self, state: &State, slot: usize, failed: Label) {
+    unsafe fn flush_slot(&mut self, state: &StateRef<'p>, slot: usize, failed: Label) {
         let current = state.slots[slot];
         if !current.may_be(status::DIRTY) {
             return;
@@ -2156,27 +2141,30 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// The block to branch to for the edge from `position` to `target`: the target block
     /// itself, or a new block that first converts the values whose representation differs.
     fn edge(&mut self, position: usize, target: usize) -> Result<Label, Refusal> {
-        let state = self.plan.edges[position]
+        let state = self
+            .plan
+            .edges(position)
             .iter()
             .find(|(pc, _)| *pc == target)
-            .map(|(_, state)| state.clone())
+            .map(|&(_, state)| state)
             .ok_or(Refusal("an edge the analysis did not see"))?;
-        let block = *self
+        let block = self
             .plan
-            .block_at
-            .get(&target)
+            .block_at(target)
             .ok_or(Refusal("a jump into an instruction"))?;
         let label = self.labels[block].ok_or(Refusal("a jump to unreachable code"))?;
-        let entry = self.plan.blocks[block]
-            .entry
-            .as_ref()
-            .ok_or(Refusal("a jump to unreachable code"))?;
-        let registers = state
+        let entry = self.plan.state(
+            self.plan.blocks[block]
+                .entry
+                .ok_or(Refusal("a jump to unreachable code"))?,
+        );
+        let from = self.plan.state(state);
+        let registers = from
             .registers
             .iter()
-            .zip(&entry.registers)
+            .zip(entry.registers)
             .any(|(from, to)| from.is_unboxed() && *to != Ty::Bottom && !to.is_unboxed());
-        let slots = state.slots.iter().zip(&entry.slots).any(|(from, to)| {
+        let slots = from.slots.iter().zip(entry.slots).any(|(from, to)| {
             from.ty.is_unboxed()
                 && from.may_be(status::LOADED)
                 && to.ty != Ty::Bottom
@@ -2198,24 +2186,20 @@ impl<'p, 'b> Translator<'p, 'b> {
         let edges = std::mem::take(&mut self.edges);
         for edge in edges {
             self.builder.switch_to_block(edge.label);
-            let entry = self.plan.blocks[edge.target]
-                .entry
-                .clone()
-                .ok_or(Refusal("a jump to unreachable code"))?;
-            for (register, (from, to)) in edge
-                .state
-                .registers
-                .iter()
-                .zip(&entry.registers)
-                .enumerate()
-            {
+            let entry = self.plan.state(
+                self.plan.blocks[edge.target]
+                    .entry
+                    .ok_or(Refusal("a jump to unreachable code"))?,
+            );
+            let state = self.plan.state(edge.state);
+            for (register, (from, to)) in state.registers.iter().zip(entry.registers).enumerate() {
                 if from.is_unboxed() && *to != Ty::Bottom && !to.is_unboxed() {
                     let value = self.use_register(register, *from);
                     let boxed = self.box_value(*from, value);
                     self.store_register(register, boxed);
                 }
             }
-            for (slot, (from, to)) in edge.state.slots.iter().zip(&entry.slots).enumerate() {
+            for (slot, (from, to)) in state.slots.iter().zip(entry.slots).enumerate() {
                 if from.ty.is_unboxed()
                     && from.may_be(status::LOADED)
                     && to.ty != Ty::Bottom
@@ -2261,12 +2245,20 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.switch_to_block(done);
     }
 
-    fn deopt(&mut self, pc: usize, state: State, live: Vec<bool>, why: i32) -> Label {
+    fn deopt(
+        &mut self,
+        pc: usize,
+        state: StateId,
+        boxed: Option<usize>,
+        live: usize,
+        why: i32,
+    ) -> Label {
         let label = self.builder.create_block();
         self.deopts.push(Deopt {
             label,
             pc,
             state,
+            boxed,
             live,
             why,
         });
@@ -2276,15 +2268,19 @@ impl<'p, 'b> Translator<'p, 'b> {
     unsafe fn emit_deopt(&mut self, deopt: Deopt) {
         self.builder.switch_to_block(deopt.label);
         self.builder.set_cold_block(deopt.label);
-        for (register, ty) in deopt.state.registers.iter().enumerate() {
-            if ty.is_unboxed() && deopt.live.get(register).copied().unwrap_or(false) {
-                let value = self.use_register(register, *ty);
-                let boxed = self.box_value(*ty, value);
+        let state = self.plan.state(deopt.state);
+        for (register, &ty) in state.registers.iter().enumerate() {
+            if ty.is_unboxed()
+                && deopt.boxed != Some(register)
+                && self.plan.live.get(deopt.live, register)
+            {
+                let value = self.use_register(register, ty);
+                let boxed = self.box_value(ty, value);
                 self.store_register(register, boxed);
             }
         }
-        for slot in 0..deopt.state.slots.len() {
-            let current = deopt.state.slots[slot];
+        for slot in 0..state.slots.len() {
+            let current = state.slots[slot];
             if !current.may_be(status::DIRTY) {
                 continue;
             }
@@ -2340,25 +2336,26 @@ impl<'p, 'b> Translator<'p, 'b> {
             .ok_or(Refusal("the body falls off its end"))
     }
 
-    fn after(&self, position: usize) -> Result<State, Refusal> {
+    fn after(&self, position: usize) -> Result<StateId, Refusal> {
         let next = self.next_pc(position)?;
-        self.plan.edges[position]
+        self.plan
+            .edges(position)
             .iter()
             .find(|(pc, _)| *pc == next)
-            .map(|(_, state)| state.clone())
+            .map(|&(_, state)| state)
             .ok_or(Refusal("an instruction without a fallthrough state"))
     }
 
     /// The state after an instruction that ran in tier 0, whose destination is still boxed.
-    fn after_with_boxed(&self, position: usize, dst: Option<usize>) -> Result<State, Refusal> {
-        let mut state = self.after(position)?;
-        if let Some(register) = dst {
-            state.registers[register] = Ty::Boxed;
-        }
-        Ok(state)
+    fn after_with_boxed(
+        &self,
+        position: usize,
+        dst: Option<usize>,
+    ) -> Result<(StateId, Option<usize>), Refusal> {
+        Ok((self.after(position)?, dst))
     }
 
-    fn set_visible(&mut self, before: &State, flag: bool) {
+    fn set_visible(&mut self, before: &StateRef<'p>, flag: bool) {
         if before.visible != Some(flag) {
             let value = self.builder.ins().iconst(I8, flag as i64);
             self.builder.ins().store(flags(), value, self.visible, 0);
@@ -2465,6 +2462,29 @@ impl<'p, 'b> Translator<'p, 'b> {
             Ty::DblVec => (SexpType::Real, false),
             Ty::LglVec => (SexpType::Logical, false),
             Ty::List => (SexpType::List, false),
+            Ty::IntArr | Ty::DblArr | Ty::LglArr => {
+                // The Array bit promises no attributes, so the kind and the bits decide it.
+                let kind = match ty {
+                    Ty::IntArr => SexpType::Integer,
+                    Ty::DblArr => SexpType::Real,
+                    _ => SexpType::Logical,
+                };
+                let actual = self.builder.ins().uload8(I32, flags(), value, KIND);
+                let fits = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, actual, kind as i64);
+                let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+                let bits = self
+                    .builder
+                    .ins()
+                    .band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG);
+                let array = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, bits, ARRAY_FLAG);
+                return self.builder.ins().band(fits, array);
+            }
             Ty::Boxed | Ty::Bottom => return self.builder.ins().iconst(I8, 1),
         };
         let actual = self.builder.ins().uload8(I32, flags(), value, KIND);
@@ -2491,6 +2511,22 @@ impl<'p, 'b> Translator<'p, 'b> {
             fits = self.builder.ins().band(fits, single);
         }
         fits
+    }
+
+    /// Whether a double position at least one is within `length`. R truncates the position,
+    /// so a vector accepts anything below `length + 1`; an Array rejects a position past its
+    /// last item before truncating.
+    fn within_length(&mut self, index: Value, length: Value, array: bool) -> Value {
+        let bound = self.builder.ins().fcvt_from_sint(F64, length);
+        if array {
+            return self
+                .builder
+                .ins()
+                .fcmp(FloatCC::LessThanOrEqual, index, bound);
+        }
+        let one = self.builder.ins().f64const(1.0);
+        let bound = self.builder.ins().fadd(bound, one);
+        self.builder.ins().fcmp(FloatCC::LessThan, index, bound)
     }
 
     fn unbox(&mut self, value: Value, ty: Ty) -> Value {
@@ -2595,7 +2631,7 @@ unsafe fn runtime_constant(code: Sexp, index: usize) -> Sexp {
 
 /// The registers an instruction reads.
 fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
-    let operand = |index: usize| inst.operands[index];
+    let operand = |index: usize| inst.operand(index);
     match inst.op {
         Op::CallBuiltin => std::iter::once(operand(1))
             .chain(operand(3)..operand(3) + operand(4))

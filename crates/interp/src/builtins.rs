@@ -217,6 +217,7 @@ impl BuiltinDef {
 pub(crate) unsafe fn install_all() {
     let mut seen = rustc_hash::FxHashSet::default();
     let library = crate::standard_library::BUILTINS;
+    let mut package_ry = None;
     for table in [
         crate::eval::BUILTINS,
         crate::envir::BUILTINS,
@@ -227,6 +228,7 @@ pub(crate) unsafe fn install_all() {
         crate::coerce::BUILTINS,
         crate::subset::BUILTINS,
         crate::strings::BUILTINS,
+        crate::approximate::BUILTINS,
         crate::print::BUILTINS,
         crate::format::BUILTINS,
         crate::frame::BUILTINS,
@@ -258,10 +260,16 @@ pub(crate) unsafe fn install_all() {
                 definition.name
             );
         }
-        // The standard library lives in `package:ry`, not base, so that plain R code which never
-        // names it sees exactly GNU R's base namespace.
-        if std::ptr::eq(table, library) {
-            register_in(table, crate::standard_library::attach());
+        // ry's own values, tables and standard library live in `package:ry`, not base, so that
+        // plain R code which never names them sees exactly GNU R's base namespace.
+        if [library, crate::records::BUILTINS, crate::frame::BUILTINS]
+            .iter()
+            .any(|own| std::ptr::eq(table, *own))
+        {
+            register_in(
+                table,
+                *package_ry.get_or_insert_with(|| crate::standard_library::attach()),
+            );
         } else {
             register(table);
         }

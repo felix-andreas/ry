@@ -758,17 +758,35 @@ impl Sexp {
 
     /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`. An ALTREP instance has no element
     /// storage, so its class's `Elt` method answers through the accessor the host installed.
+    #[inline]
     pub unsafe fn element(self, index: usize) -> Sexp {
         unsafe {
-            if self.is_altrep()
-                && let Some(elements) = ALTREP_ELEMENTS.get()
-            {
-                return (elements.read)(self, index);
+            if self.is_altrep() {
+                return self.altrep_element(index);
             }
             *(self.data() as *const Sexp).add(index)
         }
     }
 
+    // Out of line, so that `element` is small enough to inline into the interpreter's loop.
+    #[cold]
+    #[inline(never)]
+    unsafe fn altrep_element(self, index: usize) -> Sexp {
+        unsafe {
+            match ALTREP_ELEMENTS.get() {
+                Some(elements) => (elements.read)(self, index),
+                None => *(self.data() as *const Sexp).add(index),
+            }
+        }
+    }
+
+    /// An element of a vector the caller knows is not ALTREP.
+    #[inline]
+    pub(crate) unsafe fn stored_element(self, index: usize) -> Sexp {
+        unsafe { *(self.data() as *const Sexp).add(index) }
+    }
+
+    #[inline]
     pub(crate) unsafe fn set_element_unbarriered(self, index: usize, value: Sexp) {
         unsafe { *(self.data() as *mut Sexp).add(index) = value }
     }

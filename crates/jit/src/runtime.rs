@@ -13,6 +13,7 @@ use {
         records::NativeKind,
     },
     interp::{
+        annotations::{self, Entry},
         arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
@@ -126,6 +127,22 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
 /// How many times a body may be compiled before the JIT gives up on it.
 pub const MAX_COMPILES: i32 = 4;
 
+/// How many times a body may be refused as cold before it compiles without the types it is
+/// missing.
+pub const MAX_COLD_REFUSALS: i32 = 3;
+
+/// The profile's tier state counts compilations in its low byte and cold refusals above it,
+/// because a cold refusal compiles nothing and so must not use up a compilation.
+pub const COLD_REFUSAL: i32 = 1 << 8;
+
+pub fn compiles(state: i32) -> i32 {
+    state & (COLD_REFUSAL - 1)
+}
+
+pub fn cold_refusals(state: i32) -> i32 {
+    state / COLD_REFUSAL
+}
+
 /// Discards `code`'s compiled code after a speculation failed. Activations still running it
 /// keep running, so the objects it embeds stay rooted for the rest of the session.
 pub unsafe fn invalidate(code: Sexp) {
@@ -140,7 +157,7 @@ pub unsafe fn invalidate(code: Sexp) {
     let counters = values::ints_mut(constants.element(PROFILE));
     counters[profile::ENTRIES] = 0;
     counters[profile::BACK_EDGES] = 0;
-    if counters[profile::TIER_STATE] >= MAX_COMPILES {
+    if compiles(counters[profile::TIER_STATE]) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
     }
 }
@@ -343,14 +360,16 @@ pub unsafe extern "C" fn jit_closure_matches(
 
 /// Calls the closure `function` for `call` with arguments compiled code evaluated, and puts the
 /// result in register `dst`. `arguments` holds a representation and its bits for each argument
-/// (see [`representation`]); an argument whose expression is code is bound to a promise that
-/// already holds its value, so the callee cannot tell it was evaluated early.
+/// (see [`representation`]). Each argument is bound to its value rather than to a promise: the
+/// callee is frame-safe, so it never calls `substitute` or `missing`, and compiled code makes
+/// the call only while no handler is established, so no other R code can look at its frame.
 pub unsafe extern "C" fn jit_call(
     activation: *mut Activation,
     function: *mut Header,
     call: *mut Header,
     arguments: *const i64,
     count: i64,
+    signature: *mut Header,
     dst: i64,
 ) -> i32 {
     unsafe {
@@ -365,7 +384,6 @@ pub unsafe extern "C" fn jit_call(
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
                 let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
-                let mut expressions = call.cdr();
                 for pair in arguments.chunks_exact(2) {
                     let (kind, bits) = (pair[0] as i32, pair[1]);
                     let value = match kind {
@@ -376,21 +394,29 @@ pub unsafe extern "C" fn jit_call(
                             .ok_or_else(|| error("compiled code passed a null argument"))?,
                     };
                     heap.root(value);
-                    let expression = expressions.car();
-                    let value = match expression.kind() {
-                        SexpType::Symbol | SexpType::Language => {
-                            eval::forced_promise(expression, value)?
-                        }
-                        _ => value,
-                    };
-                    heap.root(value);
                     args.push(Arg {
                         tag: values::nil(),
                         value,
                     });
-                    expressions = expressions.cdr();
                 }
-                eval::apply_closure(call, function, &args, machine.env, None)
+                // `signature` is what the compiler decided about the callee's annotation checks:
+                // null when they depend on the values, `NULL` for an untyped callee, otherwise
+                // the signature of a typed callee whose arguments' types already satisfy it.
+                let entry = match Sexp::from_raw(signature) {
+                    None => {
+                        // The values are at hand, so the checks read them here instead of
+                        // looking each formal up again in the new frame.
+                        let values: SmallVec<[Sexp; 4]> =
+                            args.iter().map(|arg| arg.value).collect();
+                        annotations::enter_positional(call, function, &values)?
+                    }
+                    Some(signature) if signature == values::nil() => Entry::Checked(None),
+                    Some(signature) => Entry::Checked(Some(signature)),
+                };
+                // The frame records no argument list: only `nargs`, method dispatch and
+                // `standardGeneric` read it, and a frame-safe callee calls none of them.
+                let env = eval::bind_arguments(call, function, &args, None)?;
+                eval::run_closure(call, function, env, machine.env, values::nil(), entry)
             });
             match result {
                 Err(unwind) => {
@@ -464,6 +490,9 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
         guarded(activation, std::ptr::null_mut(), |activation| {
             let machine = machine(activation);
             let compiled = compiled(activation);
+            if std::env::var_os("RY_JIT_LOG").is_some() {
+                eprintln!("jit: deopt at pc {pc} (reason {why})");
+            }
             if why == reason::SPECULATION && activation.pending.is_none() {
                 invalidate(machine.code);
             }
@@ -543,6 +572,8 @@ pub unsafe extern "C" fn jit_duplicate(
             let old = *cell;
             match scoped(|| values::shallow_duplicate(old)) {
                 Ok(copy) => {
+                    // Assigning an item into an Array keeps it an Array, as tier 0 does.
+                    copy.set_array(old.is_array());
                     copy.increment_refcount();
                     *cell = copy;
                     if dirty != 0 {
@@ -682,6 +713,11 @@ pub extern "C" fn jit_log(value: f64) -> f64 {
 
 pub extern "C" fn jit_real_modulo(a: f64, b: f64) -> f64 {
     arith::real_modulo(a, b)
+}
+
+/// `%/%` on doubles, as the interpreter computes it.
+pub extern "C" fn jit_real_integer_divide(a: f64, b: f64) -> f64 {
+    arith::real_integer_divide(a, b)
 }
 
 /// `%%` on integers: `NA` for an `NA` operand or a zero divisor, else the sign of the divisor.

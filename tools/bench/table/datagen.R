@@ -6,11 +6,13 @@
 # medium (N/1e3) and a big (N) right-hand table, with about 90% of the right-hand keys matching.
 # `rolljoin_*.csv` are a keyed price history and a set of trades for the rolling-join question.
 #
-# Usage: Rscript datagen.R <out-dir> <rows>   (1e7 rows is the 0.5 GB size, 1e8 the 5 GB size)
+# Usage: Rscript datagen.R <out-dir> <rows> [groupby]
+#   1e7 rows is the 0.5 GB size, 1e8 the 5 GB size; `groupby` writes only `groupby.csv`.
 
 args <- commandArgs(trailingOnly = TRUE)
 out <- args[[1]]
 n <- as.numeric(args[[2]])
+groupby_only <- identical(args[3], "groupby")
 k <- 100
 library(data.table, lib.loc = Sys.getenv("RY_BENCH_RLIB", "~/R/library"))
 setDTthreads(0L)
@@ -32,6 +34,7 @@ groupby <- data.table(
 )
 fwrite(groupby, file.path(out, "groupby.csv"))
 rm(groupby)
+if (groupby_only) quit(save = "no")
 
 # A right-hand table of `rows` rows over a key space of `space` values: 90% of its keys are drawn
 # from the left-hand key space, so they match, and 10% from just above it, so they do not.

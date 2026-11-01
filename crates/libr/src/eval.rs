@@ -312,7 +312,7 @@ pub unsafe fn run_task_callbacks(
 
 unsafe extern "C" {
     fn ry_add_r_task_callback(function: Sexp, data: Sexp, use_data: Sexp, name: Sexp) -> Sexp;
-    fn ry_remove_r_task_callback(id: Sexp) -> Sexp;
+    fn R_removeTaskCallback(id: Sexp) -> Sexp;
     fn ry_task_callback_names() -> Sexp;
 }
 
@@ -324,10 +324,9 @@ unsafe fn task_callback_routine(routine: TaskCallbackRoutine, args: &[Sexp]) -> 
             unsafe extern "C" fn(Sexp, Sexp, Sexp, Sexp) -> Sexp,
             DlFunc,
         >(ry_add_r_task_callback),
-        TaskCallbackRoutine::Remove => std::mem::transmute::<
-            unsafe extern "C" fn(Sexp) -> Sexp,
-            DlFunc,
-        >(ry_remove_r_task_callback),
+        TaskCallbackRoutine::Remove => {
+            std::mem::transmute::<unsafe extern "C" fn(Sexp) -> Sexp, DlFunc>(R_removeTaskCallback)
+        }
         TaskCallbackRoutine::Names => {
             std::mem::transmute::<unsafe extern "C" fn() -> Sexp, DlFunc>(ry_task_callback_names)
         }
@@ -1170,8 +1169,13 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     if report_missing_r_home() {
         return 2;
     }
+    let embedding_arguments = &*crate::embed::EMBEDDING_ARGUMENTS.as_ptr();
     let options = interp::session::StartOptions {
-        command_args: vec!["ry".to_owned()],
+        command_args: if embedding_arguments.is_empty() {
+            vec!["ry".to_owned()]
+        } else {
+            embedding_arguments.clone()
+        },
         site_profile: false,
         user_profile: false,
         interactive: false,
@@ -1274,8 +1278,10 @@ pub unsafe extern "C" fn ry_run(
         );
     }
     if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
-        outcome = match std::fs::read_to_string(path) {
-            Ok(text) => interp::session::run_text(&text, path),
+        outcome = match std::fs::read(path) {
+            Ok(bytes) => {
+                interp::session::run_text(&interp::values::escape_invalid_bytes(&bytes), path)
+            }
             Err(failure) => {
                 let message = format!("Fatal error: cannot open file '{path}': {failure}\n");
                 crate::boundary::write_console(message.as_bytes(), true);

@@ -4,8 +4,9 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
+        http::FetchError,
         interp,
-        platform::{Iconv, convert_all},
+        platform::{Iconv, IconvStop, convert_all},
         unwind::{R, error},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
@@ -48,7 +49,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("debugonce", 3, |_| Ok(nil())).invisible(),
     internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
-    internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
+    internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
     internal("browserText", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
@@ -84,12 +85,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Err(call.error("file.choose() needs an interactive session"))
     }),
     internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
-    internal("curlGetHeaders", 5, |call| {
-        Err(call.error("libcurl is not available in this session"))
-    }),
-    internal("curlDownload", 6, |call| {
-        Err(call.error("libcurl is not available in this session"))
-    }),
+    internal("curlGetHeaders", 5, do_curl_get_headers),
+    internal("curlDownload", 6, do_curl_download),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
     internal("R.home", 0, |_| unsafe { scalar_string(&r_home()) }),
     internal("Sys.getenv", 2, do_sys_getenv),
@@ -170,6 +167,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 .unwrap_or_default()
         })
     }),
+    internal("Sys.which", 1, do_sys_which),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
     internal("Sys.umask", 1, do_sys_umask),
     internal("Sys.getpid", 0, |_| unsafe {
@@ -215,9 +213,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
     internal("system", -1, do_system),
-    internal("Cstack_info", 0, |_| unsafe {
-        values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
-    }),
+    internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
     internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
     internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
@@ -263,6 +259,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     // ry has no interactive debugger, so `browser()` continues as it does in a
     // non-interactive GNU R session.
     special("browser", -1, |_| Ok(nil())).invisible(),
+    internal("inspect", -1, do_inspect).invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
@@ -378,6 +375,53 @@ fn temp_dir() -> String {
     }
 }
 
+/// `Sys.which` as base R's Windows code calls it: each name's program on `PATH`, with `PATHEXT`
+/// suffixes tried when the name has none, as a forward-slash path named by the name, or "".
+/// Unix base R finds programs with `command -v` in R code instead.
+unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let result = map_strings(call, |name| {
+        find_program(name)
+            .map(|path| path.display().to_string().replace('\\', "/"))
+            .unwrap_or_default()
+    })?;
+    if names != nil() {
+        values::set_attr(result, symbols().names, names)?;
+    }
+    Ok(result)
+}
+
+fn find_program(name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(name);
+    let extensions: Vec<String> = if candidate.extension().is_some() || !cfg!(windows) {
+        vec![String::new()]
+    } else {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| extension.to_ascii_lowercase())
+            .chain([String::new()])
+            .collect()
+    };
+    let directories: Vec<PathBuf> = if candidate.components().count() > 1 {
+        vec![PathBuf::new()]
+    } else {
+        std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default()
+    };
+    directories.iter().find_map(|directory| {
+        extensions.iter().find_map(|extension| {
+            let path = directory.join(format!("{name}{extension}"));
+            path.is_file().then_some(path)
+        })
+    })
+}
+
 unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<Sexp> {
     let paths = call.arg(0);
     if paths.kind() != SexpType::String && paths != nil() {
@@ -393,6 +437,90 @@ unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<S
         values::set_elt(result, index, charsxp);
     }
     Ok(result)
+}
+
+/// `.Internal(inspect(x))`: GNU R's dump of an object's internal structure, with the header
+/// layout GNU R prints. ry has no GC generations or reference counts to report, so those
+/// fields always read `g0c0 []`.
+unsafe fn do_inspect(call: &Call<'_>) -> R<Sexp> {
+    let object = call.arg(0);
+    let mut text = String::new();
+    inspect_into(&mut text, object, 0);
+    crate::write_console(text.as_bytes(), false);
+    Ok(object)
+}
+
+unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
+    const SHOWN: usize = 5;
+    let indent = " ".repeat(depth * 2);
+    let kind = object.kind();
+    let header = format!(
+        "{indent}@{:x} {:02} {} g0c0 [] ",
+        object.as_ptr() as usize,
+        kind as u8,
+        kind.constant_name()
+    );
+    text.push_str(&header);
+    let count = if kind.is_vector() { length(object) } else { 0 };
+    match kind {
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
+            let shown: Vec<String> = (0..count.min(SHOWN))
+                .map(|index| match kind {
+                    SexpType::Real => {
+                        crate::format::format_real_alone(values::reals(object)[index], 7)
+                    }
+                    SexpType::Complex => {
+                        crate::format::format_complex_alone(values::complexes(object)[index], 7)
+                    }
+                    _ => match values::ints(object)[index] {
+                        NA_INTEGER => "NA".to_owned(),
+                        value => value.to_string(),
+                    },
+                })
+                .collect();
+            let more = if count > SHOWN { ",..." } else { "" };
+            text.push_str(&format!("(len={count}, tl=0) {}{more}\n", shown.join(",")));
+        }
+        SexpType::Raw => {
+            text.push_str(&format!("(len={count}, tl=0)\n"));
+        }
+        SexpType::Char => {
+            let ascii = if object.bytes().is_ascii() {
+                "[ASCII] "
+            } else {
+                ""
+            };
+            text.push_str(&format!(
+                "{ascii}[cached] \"{}\"\n",
+                crate::format::encode_string(&String::from_utf8_lossy(object.bytes()), None)
+            ));
+        }
+        SexpType::Symbol => text.push_str(&format!("\"{}\"\n", values::symbol_name(object))),
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            text.push_str(&format!("(len={count}, tl=0)\n"));
+            for index in 0..count {
+                inspect_into(text, object.element(index), depth + 1);
+            }
+        }
+        SexpType::Pairlist | SexpType::Language => {
+            text.push('\n');
+            let mut node = object;
+            while node != nil() && matches!(node.kind(), SexpType::Pairlist | SexpType::Language) {
+                if node.tag() != nil() {
+                    text.push_str(&format!("{indent}  TAG: "));
+                    inspect_into(text, node.tag(), 0);
+                }
+                inspect_into(text, node.car(), depth + 1);
+                node = node.cdr();
+            }
+        }
+        _ => text.push('\n'),
+    }
+    let attributes = object.attrib();
+    if attributes != nil() && kind != SexpType::Char {
+        text.push_str(&format!("{indent}ATTRIB:\n"));
+        inspect_into(text, attributes, depth + 1);
+    }
 }
 
 unsafe fn map_strings_bool(call: &Call<'_>, function: impl Fn(&str) -> bool) -> R<Sexp> {
@@ -1490,6 +1618,21 @@ unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
     values::set_attr(result, symbols().names, padded)
 }
 
+/// `Cstack_info()`: the size GNU R reports for an 8 MiB stack, the bytes in use (estimated from
+/// what is left of the current stack segment, which is the main stack until recursion grows
+/// past it), a stack that grows downwards, and the closure call depth.
+unsafe fn cstack_info() -> R<Sexp> {
+    const MAIN_STACK: usize = 8 * 1024 * 1024;
+    let current = stacker::remaining_stack().map_or(NA_INTEGER, |remaining| {
+        MAIN_STACK.saturating_sub(remaining) as i32
+    });
+    let depth = crate::interp().frames.len() as i32;
+    let result = values::integer_vector(&[7969177, current, 1, depth])?;
+    let names = ["size", "current", "direction", "eval_depth"];
+    values::set_attr(result, symbols().names, values::string_vector(&names)?)?;
+    Ok(result)
+}
+
 /// `format.POSIXlt(x, format, usetz)`, plus R 4.4's `digits`. A bare `%OS` prints that many
 /// decimals; before R 4.4 the C code read them from `options("digits.secs")` itself.
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
@@ -1507,7 +1650,12 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         values::as_integer_scalar(digits).clamp(0, 6)
     };
     let seconds = posixlt_seconds(list)?;
-    let count = seconds.len();
+    // A longer `format` recycles the times, as in GNU R.
+    let count = if seconds.is_empty() {
+        0
+    } else {
+        seconds.len().max(length(formats))
+    };
     let result = alloc(SexpType::String, count)?;
     let tzone = get_attr(list, values::install("tzone")?);
     let field = |index: usize| {
@@ -1518,7 +1666,8 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         }
     };
     let (isdst, zones, offsets) = (field(8), field(9), field(10));
-    for (index, &value) in seconds.iter().enumerate() {
+    for index in 0..count {
+        let value = seconds[index % seconds.len()];
         if is_na_real(value) {
             values::set_elt(result, index, values::na_string());
             continue;
@@ -1593,7 +1742,20 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         }
         values::set_elt(result, index, values::mkchar(&text)?);
     }
-    set_names_from_year(list, result)?;
+    let year_names = values::names(field(5));
+    if count > seconds.len() && year_names != nil() {
+        let recycled = alloc(SexpType::String, count)?;
+        for position in 0..count {
+            values::set_elt(
+                recycled,
+                position,
+                year_names.element(position % length(year_names)),
+            );
+        }
+        values::set_attr(result, symbols().names, recycled)?;
+    } else {
+        set_names_from_year(list, result)?;
+    }
     Ok(result)
 }
 
@@ -1925,6 +2087,12 @@ fn parse_offset(input: &mut &str) -> Result<i64, bool> {
 unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let texts = call.arg(0);
     let formats = call.arg(1);
+    if texts.kind() != SexpType::String {
+        return Err(error("invalid 'x' argument"));
+    }
+    if formats.kind() != SexpType::String || length(formats) == 0 {
+        return Err(error("invalid 'format' argument"));
+    }
     let tz = values::first_string(call.arg(2))
         .map(|text| text.into_owned())
         .unwrap_or_default();
@@ -2238,12 +2406,38 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
     let paths = call.arg(0);
     let must_work = values::as_logical_scalar(call.arg(2));
     // Only Windows has a second separator to choose; elsewhere `winslash` is ignored, as in GNU R.
-    let separator =
-        values::first_string(call.arg(1)).map_or_else(|| "\\".to_owned(), |text| text.into_owned());
+    let separator = if cfg!(windows) {
+        let slash = call.arg(1);
+        if slash.kind() != SexpType::String || length(slash) != 1 {
+            return Err(call.error("'winslash' must be a character string"));
+        }
+        match values::string_at(slash, 0).as_deref() {
+            Some(text @ ("/" | "\\")) => text.to_owned(),
+            _ => return Err(call.error("'winslash' must be '/' or '\\\\'")),
+        }
+    } else {
+        String::new()
+    };
+    // GNU R reports the Windows system message for a path that does not exist.
+    let missing = if cfg!(windows) {
+        "The system cannot find the file specified"
+    } else {
+        "No such file or directory"
+    };
     let count = length(paths);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
         let Some(path) = values::string_at(paths, index) else {
+            // NA names no file, so it fails like a missing one. GNU R reports it against the
+            // closure's call rather than the internal one.
+            let message = format!("path[{}]=NA", index + 1);
+            let closure_call = crate::unwind::current_call();
+            if must_work == 1 {
+                return Err(crate::unwind::error_in(closure_call, message));
+            }
+            if must_work == NA_INTEGER {
+                crate::conditions::warning_call(closure_call, message)?;
+            }
             values::set_elt(result, index, values::na_string());
             continue;
         };
@@ -2255,18 +2449,22 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
             Ok(canonical) => crate::platform::path_text(&canonical),
             Err(_) => {
                 if must_work == 1 {
-                    return Err(call.error(format!(
-                        "path[{}]=\"{path}\": No such file or directory",
-                        index + 1
-                    )));
+                    return Err(call.error(format!("path[{}]=\"{path}\": {missing}", index + 1)));
                 }
                 if must_work == NA_INTEGER {
                     crate::conditions::warning_call(
                         call.call,
-                        format!("path[{}]=\"{path}\": No such file or directory", index + 1),
+                        format!("path[{}]=\"{path}\": {missing}", index + 1),
                     )?;
                 }
-                expanded
+                // Windows makes a path that does not exist absolute, as GetFullPathName does;
+                // elsewhere it comes back as given, after tilde expansion.
+                match std::path::absolute(&expanded) {
+                    Ok(absolute) if cfg!(windows) => {
+                        crate::platform::path_text(&absolute).replace('\\', &separator)
+                    }
+                    _ => expanded,
+                }
             }
         };
         values::set_elt(result, index, values::mkchar(&normalized)?);
@@ -2649,16 +2847,146 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
         "long.double",
         "libcurl",
     ];
-    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0];
+    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1];
     let result = values::logical_vector(&flags)?;
     let names = string_vector(&names)?;
     values::set_attr(result, symbols().names, names)?;
     Ok(result)
 }
 
+/// `curlDownload(url, destfile, quiet, mode, cacheOK, headers)`: fetches each URL into its
+/// destination file. A single URL reports its progress the way GNU R's libcurl method does and
+/// errors when the transfer fails; several URLs only announce themselves and warn per failure.
+unsafe fn do_curl_download(call: &Call<'_>) -> R<Sexp> {
+    let urls = call.arg(0);
+    let destinations = call.arg(1);
+    let quiet = values::as_logical_scalar(call.arg(2)) == 1;
+    let headers = crate::connections::header_lines(call.arg(5));
+    let count = length(urls);
+    if count == 0 {
+        return Err(call.error("no URL supplied"));
+    }
+    if length(destinations) != count {
+        return Err(call.error("lengths of 'url' and 'destfile' must match"));
+    }
+    let mut failed = 0;
+    for index in 0..count {
+        let (Some(url), Some(destination)) = (
+            values::string_at(urls, index),
+            values::string_at(destinations, index),
+        ) else {
+            return Err(call.error("invalid 'url' argument"));
+        };
+        if !quiet {
+            crate::write_console(format!("trying URL '{url}'\n").as_bytes(), true);
+        }
+        let fetched = match crate::http::fetch(&url, &headers) {
+            Ok(fetched) => fetched,
+            Err(failure) => {
+                let message = match failure {
+                    FetchError::Status(status) => format!(
+                        "cannot open URL '{url}': HTTP status was '{}'",
+                        crate::http::status_text(status)
+                    ),
+                    FetchError::Transport { message, .. } => format!(
+                        "URL '{}': status was '{message}'",
+                        crate::http::normalized(&url)
+                    ),
+                };
+                crate::conditions::warning(message)?;
+                if count == 1 {
+                    return Err(call.error(format!("cannot open URL '{url}'")));
+                }
+                failed += 1;
+                continue;
+            }
+        };
+        let path = crate::connections::expand_path(&destination);
+        std::fs::write(&path, &fetched.body).map_err(|failure| {
+            call.error(format!(
+                "cannot open destfile '{destination}', reason '{failure}'"
+            ))
+        })?;
+        if !quiet && count == 1 {
+            let size = fetched.body.len() as u64;
+            let length = match fetched.content_length {
+                Some(length) => {
+                    let scaled = transfer_size(length);
+                    if scaled.ends_with("bytes") {
+                        format!("length {scaled}")
+                    } else {
+                        format!("length {length} bytes ({scaled})")
+                    }
+                }
+                None => "length unknown".to_owned(),
+            };
+            let report = format!(
+                "Content type '{}' {length}\n{}\ndownloaded {}\n\n",
+                fetched.content_type.as_deref().unwrap_or("unknown"),
+                "=".repeat(50),
+                transfer_size(size)
+            );
+            crate::write_console(report.as_bytes(), true);
+        }
+    }
+    if failed > 0 {
+        crate::conditions::warning("some files were not downloaded")?;
+    }
+    scalar_integer(0)
+}
+
+/// A transfer size the way GNU R's download progress prints it.
+fn transfer_size(bytes: u64) -> String {
+    if bytes > 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes > 10 * 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// `curlGetHeaders(url, redirect, verify, timeout, TLS)`: the response header lines, with the
+/// final HTTP status as attribute `status`.
+unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
+    let url = values::require_string(call.arg(0), "url")?;
+    let follow = values::as_logical_scalar(call.arg(1)) != 0;
+    let seconds = values::as_real_scalar(call.arg(3));
+    let timeout =
+        (seconds > 0.0 && seconds.is_finite()).then(|| std::time::Duration::from_secs_f64(seconds));
+    match crate::http::header_lines(&url, follow, timeout) {
+        Ok((lines, status)) => {
+            let result = string_vector(&lines)?;
+            values::set_attr(
+                result,
+                values::install("status")?,
+                scalar_integer(i32::from(status))?,
+            )?;
+            Ok(result)
+        }
+        Err(FetchError::Status(status)) => Err(call.error(format!(
+            "libcurl error code 22:\n\tThe requested URL returned error: {}\n",
+            status.as_u16()
+        ))),
+        Err(FetchError::Transport { code, detail, .. }) => {
+            let detail = if code == 6 {
+                let host = reqwest::Url::parse(&url)
+                    .ok()
+                    .and_then(|parsed| parsed.host_str().map(str::to_owned))
+                    .unwrap_or_default();
+                format!("Could not resolve host: {host}")
+            } else {
+                detail
+            };
+            Err(call.error(format!("libcurl error code {code}:\n\t{detail}\n")))
+        }
+    }
+}
+
 unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
     crate::heap().collect(heap::Collection::Major);
     (interp().hooks.run_finalizers)();
+    crate::frame::release_worker_memory();
     let stats = crate::heap().stats();
     let result = values::real_vector(&[
         stats.live_objects as f64,
@@ -2916,6 +3244,25 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
 /// A conversion for `iconv()`, with R's handling of the bytes it cannot convert.
 struct Converter(Iconv);
 
+/// `bytes` converted from `from` to UTF-8 up to the first sequence that is invalid in `from`,
+/// and whether the conversion reached the end. `None` means the encoding is unknown. A
+/// connection reads its re-encoded text this way, stopping where GNU R does.
+pub fn convert_to_utf8_prefix(from: &str, bytes: &[u8]) -> Option<(Vec<u8>, bool)> {
+    let mut converter = Converter::open(from, "UTF-8")?;
+    let mut output = Vec::with_capacity(bytes.len() + 16);
+    let mut buffer = vec![0u8; bytes.len() * 4 + 16];
+    let mut rest = bytes;
+    loop {
+        let (written, stop) = converter.0.convert(&mut rest, &mut buffer);
+        output.extend_from_slice(&buffer[..written]);
+        match stop {
+            Ok(_) => return Some((output, true)),
+            Err(IconvStop::OutputFull) => {}
+            Err(_) => return Some((output, false)),
+        }
+    }
+}
+
 impl Converter {
     fn open(from: &str, to: &str) -> Option<Converter> {
         Iconv::open(from, to).map(Converter)
@@ -3172,6 +3519,27 @@ unsafe fn link_paths(call: &Call<'_>, function: impl Fn(&str, &str) -> bool) -> 
     Ok(result)
 }
 
+thread_local! {
+    /// Whether `trace()`'s inserted calls run. `.doTrace` turns it off while a tracer runs,
+    /// so a tracer that calls the traced function does not recurse.
+    static TRACING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
+/// unless that is `NULL`.
+unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
+    let state = call.arg(0);
+    let previous = TRACING.with(|tracing| tracing.get());
+    if state != nil() {
+        let value = values::as_logical_scalar(state);
+        if value == NA_LOGICAL {
+            return Err(call.error("Value for 'tracingState' must be TRUE or FALSE"));
+        }
+        TRACING.with(|tracing| tracing.set(value != 0));
+    }
+    scalar_bool(previous)
+}
+
 /// `Sys.glob` calls the C library's `glob`, as GNU R does, so wildcards work in every path
 /// component and each pattern's matches stay in pattern order, sorted only among themselves.
 unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
@@ -3252,8 +3620,30 @@ pub unsafe fn init_locale() {
         LC_MEASUREMENT,
     ] {
         set_locale(category, c"".as_ptr());
+        #[cfg(windows)]
+        use_utf8_codeset(category);
     }
     crate::sort::refresh_collation();
+}
+
+/// Moves a Windows locale category to the UTF-8 codeset of the same language and region
+/// (`English_United States.1252` becomes `English_United States.utf8`). ry's native encoding is
+/// UTF-8 on Windows, as GNU R's is from 4.2 on, and `ry.exe` asks Windows for the UTF-8 code page
+/// in its manifest. A system that ignores the manifest (older Windows, Wine) still starts the C
+/// runtime in the ANSI code page, which would convert native strings as Latin-1 and report a
+/// locale that contradicts `l10n_info()`.
+#[cfg(windows)]
+unsafe fn use_utf8_codeset(category: libc::c_int) {
+    let current = current_locale(category);
+    let Some((language, codeset)) = current.rsplit_once('.') else {
+        return;
+    };
+    if codeset.eq_ignore_ascii_case("utf8") || codeset.eq_ignore_ascii_case("utf-8") {
+        return;
+    }
+    if let Ok(name) = std::ffi::CString::new(format!("{language}.UTF-8")) {
+        set_locale(category, name.as_ptr());
+    }
 }
 
 /// macOS's C library has no paper or measurement category, and Windows's has no messages
@@ -3302,12 +3692,27 @@ unsafe fn set_locale(category: libc::c_int, name: *const libc::c_char) -> *mut l
 unsafe fn current_locale(category: libc::c_int) -> String {
     let current = set_locale(category, std::ptr::null());
     if current.is_null() {
-        String::new()
-    } else {
-        std::ffi::CStr::from_ptr(current)
-            .to_string_lossy()
-            .into_owned()
+        return String::new();
     }
+    let name = std::ffi::CStr::from_ptr(current)
+        .to_string_lossy()
+        .into_owned();
+    // Some C runtimes (Wine's) name the UTF-8 codeset by its code page number; Microsoft's
+    // reports `.utf8`, which code testing the locale name for UTF-8 expects and which `setlocale`
+    // accepts back.
+    // The composite `LC_ALL` name joins every category as `LC_COLLATE=...;LC_CTYPE=...`.
+    #[cfg(windows)]
+    if name.contains(".65001") {
+        return name
+            .split(';')
+            .map(|part| match part.strip_suffix(".65001") {
+                Some(language) => format!("{language}.utf8"),
+                None => part.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+    }
+    name
 }
 
 unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {

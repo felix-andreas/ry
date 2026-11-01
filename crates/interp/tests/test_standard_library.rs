@@ -178,6 +178,10 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     ("List.sum(xs)", "[1] 6\n"),
     ("List.sum(list())", "[1] 0\n"),
+    (
+        "identical(List.sum(as.Array((0:999999) / 999999 * 2 + 1)), sum((0:999999) / 999999 * 2 + 1))",
+        "[1] TRUE\n",
+    ),
     ("List.product(list(2, 2.5))", "[1] 5\n"),
     ("List.min(xs)", ":Ok(1L)\n"),
     ("List.max(list())", ":Err(:ListWasEmpty)\n"),
