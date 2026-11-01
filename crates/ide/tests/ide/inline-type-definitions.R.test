@@ -67,7 +67,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (12): Any, character, complex, double, fn, integer, list, logical
+completion (15): Any, character, complex, double, fn, integer, list, logical
 
 #---- nominal_constructor_name_navigates
 type UserId = integer

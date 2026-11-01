@@ -1177,9 +1177,14 @@ fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
-    let mut definitions = ProjectFiles::try_get(db)
-        .map(|files| project_type_definitions(db, files).clone())
+    let mut definitions = stubs::stubs(db)
+        .map(|library| library.type_definitions.clone())
         .unwrap_or_default();
+    if let Some(files) = ProjectFiles::try_get(db) {
+        for (name, definition) in project_type_definitions(db, files) {
+            definitions.insert(*name, definition.clone());
+        }
+    }
     if *file.kind(db) == DocumentKind::Script {
         for definition in file_type_definitions(db, file) {
             definitions.insert(definition.name, definition);

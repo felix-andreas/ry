@@ -759,12 +759,17 @@ fn file_annotations<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Annotation<'d
     annotations
 }
 
-/// The project's declarations, with a script's own declarations shadowing them.
+/// The stubs' and the project's declarations, with a script's own declarations shadowing them.
 fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> BTreeMap<String, NamedDefinition<'db>> {
     let mut definitions = BTreeMap::new();
+    if let Some(library) = stubs(db) {
+        for (name, definition) in &library.type_definitions {
+            definitions.insert(name.text(db).to_owned(), definition.clone());
+        }
+    }
     if let Some(files) = ProjectFiles::try_get(db) {
         for (name, definition) in project_type_definitions(db, files) {
             definitions.insert(name.text(db).to_owned(), definition.clone());
@@ -2295,6 +2300,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 NativeValueKind::Record => "record",
                 NativeValueKind::Tuple => "tuple",
                 NativeValueKind::Tag => "tag",
+                NativeValueKind::Dict => "dict",
+                NativeValueKind::Set => "set",
             };
             format!(
                 "`{function}` is an R function, and this value is a ry {kind}, not an R object. Convert it with `as.list()` first"
@@ -2546,6 +2553,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"
         }
+        Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
     }
 }

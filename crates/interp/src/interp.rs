@@ -47,6 +47,7 @@ pub mod records;
 pub mod serialize;
 pub mod session;
 pub mod sort;
+pub mod standard_library;
 pub mod strings;
 pub mod subset;
 pub mod system;

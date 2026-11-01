@@ -252,6 +252,21 @@ Error in sum(point) :
 Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
 `as.record()`, `as.tuple()` and `as.tag()` turn a list back.
 
+## The standard library
+
+The [standard library](/reference/standard-library/) is built on these values. Its functions return
+`:Ok(value)` or `:Err(:Reason)` where R would return `NA` or warn, so `match` handles both cases:
+
+```r
+match (List.first(xs)) {
+  :Ok(x) => x
+  :Err(:ListWasEmpty) => 0L
+}
+```
+
+It also adds `Dict` and `Set`, a dictionary and a set with value semantics, and `Result<T, E>`, the
+type of those results, which every annotation can use.
+
 ## Instead of S4, R6 and Reference Classes
 
 S4, R6 and Reference Classes keep working, but each class definition gets an `object-system`
