@@ -58,6 +58,12 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         values::set_attr(result, symbols().srcref, srcrefs)?;
         values::set_attr(result, symbols().srcfile, srcfile)?;
         values::set_attr(result, symbols().whole_srcref, whole)?;
+        // GNU R keeps parse data unless `keep.parse.data` is FALSE.
+        if values::as_logical_scalar(crate::envir::get_option("keep.parse.data")) != 0
+            && let Some(data) = crate::parse_data::parse_data(&script.root, source)?
+        {
+            crate::heap().define(srcfile, install("parseData")?, data)?;
+        }
     }
     Ok(result)
 }
@@ -67,6 +73,7 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
 /// between two of them.
 pub struct Script<'text> {
     text: &'text str,
+    root: SyntaxNode,
     pub expressions: Vec<SyntaxNode>,
 }
 
@@ -107,8 +114,9 @@ pub fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
             message: failure.message.clone(),
         });
     let may_hold_placeholder = text.contains('_');
+    let root = parse.syntax_node();
     let mut expressions = Vec::new();
-    for child in parse.syntax_node().children() {
+    for child in root.children() {
         if is_skipped(&child) {
             continue;
         }
@@ -130,7 +138,14 @@ pub fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
         }
         expressions.push(child);
     }
-    (Script { text, expressions }, failure)
+    (
+        Script {
+            text,
+            root,
+            expressions,
+        },
+        failure,
+    )
 }
 
 /// GNU R's message for `failure` in `text`, whose first line is line `line_offset + 1` of the
@@ -195,7 +210,7 @@ pub unsafe fn lower_script_expression(
 /// What the lowering needs to build source references: the text with an index of its line
 /// starts, the line that is line 1 of the srcfile, and the srcfile environment itself.
 pub struct SourceMap<'text> {
-    text: &'text str,
+    pub(crate) text: &'text str,
     line_starts: Vec<usize>,
     first_line: usize,
     srcfile: Sexp,
@@ -257,7 +272,7 @@ unsafe fn srcref_object(source: &SourceMap, fields: [i32; 8]) -> R<Sexp> {
 
 /// The srcfile line, byte and column of the character at byte `offset`. A tab advances the column
 /// to the next multiple of 8, as in GNU R's parser.
-fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
+pub(crate) fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
     let line = source
         .line_starts
         .partition_point(|&start| start <= offset)
@@ -310,7 +325,7 @@ pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
     lower(node, None)
 }
 
-fn is_skipped(node: &SyntaxNode) -> bool {
+pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
         SyntaxKind::ANNOTATION

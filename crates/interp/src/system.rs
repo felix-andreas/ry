@@ -1935,6 +1935,16 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
         let Some(path) = values::string_at(paths, index) else {
+            // NA names no file, so it fails like a missing one. GNU R reports it against the
+            // closure's call rather than the internal one.
+            let message = format!("path[{}]=NA", index + 1);
+            let closure_call = crate::unwind::current_call();
+            if must_work == 1 {
+                return Err(crate::unwind::error_in(closure_call, message));
+            }
+            if must_work == NA_INTEGER {
+                crate::conditions::warning_call(closure_call, message)?;
+            }
             values::set_elt(result, index, values::na_string());
             continue;
         };

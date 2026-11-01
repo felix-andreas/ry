@@ -206,6 +206,22 @@ pub unsafe fn closure_body(function: Sexp) -> Sexp {
     body
 }
 
+/// A closure's body compiled to byte code, compiling it now if it has not run often enough to
+/// compile yet. A body the compiler cannot handle stays an expression.
+pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
+    let body = function.cdr();
+    if body.kind() == SexpType::Bytecode {
+        return Ok(body);
+    }
+    match compile(body, function)? {
+        Some(code) => {
+            crate::heap().set_cdr(function, code);
+            Ok(code)
+        }
+        None => Ok(body),
+    }
+}
+
 pub unsafe fn is_compiled(function: Sexp) -> bool {
     function.cdr().kind() == SexpType::Bytecode
 }

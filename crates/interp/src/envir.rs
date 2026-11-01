@@ -111,7 +111,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
     internal("args", 1, do_args),
-    internal("bodyCode", 1, do_body),
+    internal("bodyCode", 1, do_body_code),
     internal("match.call", 4, do_match_call),
     internal("sys.source", -1, |_| unsafe { Ok(nil()) }),
 ];
@@ -1722,6 +1722,16 @@ unsafe fn do_body(call: &Call<'_>) -> R<Sexp> {
         }
         Ok(nil())
     }
+}
+
+/// A closure's body as GNU R stores it, which is byte code for every function GNU R ships. ry
+/// compiles a closure on demand here so that code inspecting the body sees the same type.
+unsafe fn do_body_code(call: &Call<'_>) -> R<Sexp> {
+    let function = call.arg(0);
+    if function.kind() != SexpType::Closure {
+        return Ok(nil());
+    }
+    crate::bytecode::compiled_body(function)
 }
 
 unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {

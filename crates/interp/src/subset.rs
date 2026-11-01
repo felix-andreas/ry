@@ -47,6 +47,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("matrix", 7, do_matrix),
     internal("array", 3, do_array),
     internal("t.default", 1, do_transpose),
+    internal("max.col", 2, do_max_col),
     internal("aperm", 3, do_aperm),
     internal("drop", 1, do_drop),
     internal_special("cbind", -1, |call| unsafe { bind(call, false) }),
@@ -66,9 +67,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("row", 1, |call| unsafe { row_col(call, true) }),
     internal("col", 1, |call| unsafe { row_col(call, false) }),
     internal("diag", 3, do_diag),
-    internal("max.col", 2, |call| unsafe {
-        Err(call.error("max.col is not supported"))
-    }),
     internal("shortRowNames", 2, do_short_row_names),
     internal("copyDFattr", 2, do_copy_df_attr),
 ];
@@ -2542,6 +2540,7 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
             copy_element(object, row + col * rows, result, col + row * cols)?;
         }
     }
+    values::copy_most_attributes(object, result, false)?;
     let dim = values::integer_vector(&[cols as i32, rows as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
     if dimnames != nil() {
@@ -2554,14 +2553,71 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
         let swapped = values::list_vector(&[first, second])?;
         let names = values::names(dimnames);
         if names != nil() && length(names) == 2 {
-            let swapped_names = values::list_vector(&[])?;
-            drop(swapped_names);
             let new_names = alloc(SexpType::String, 2)?;
             values::set_elt(new_names, 0, names.element(1));
             values::set_elt(new_names, 1, names.element(0));
             values::set_attr(swapped, symbols().names, new_names)?;
         }
         values::set_attr(result, symbols().dimnames, swapped)?;
+    }
+    Ok(result)
+}
+
+/// The column of each row's maximum. Ties are broken at random, first or last
+/// (`ties.method` 1, 2 or 3). At random, values within a relative tolerance of the row's
+/// largest magnitude count as tied, and each tied column replaces the choice so far with
+/// probability one over the number of ties seen, so every tied column is equally likely.
+unsafe fn do_max_col(call: &Call<'_>) -> R<Sexp> {
+    let matrix = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
+    let (rows, cols) = match values::dims(call.arg(0)) {
+        Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
+        _ => return Err(call.error("'m' must be a matrix")),
+    };
+    let ties = values::as_integer_scalar(call.arg(1));
+    let values: &[f64] = matrix.slice();
+    let at = |row: usize, col: usize| values.get(row + col * rows).copied().unwrap_or(f64::NAN);
+    let random = ties == 1;
+    if random {
+        crate::random::get_rng_state()?;
+    }
+    let result = alloc(SexpType::Integer, rows)?;
+    for row in 0..rows {
+        if cols == 0 || (0..cols).any(|col| at(row, col).is_nan()) {
+            result.slice_mut::<i32>()[row] = NA_INTEGER;
+            continue;
+        }
+        let mut best = 0;
+        let mut best_value = at(row, 0);
+        if random {
+            let largest = (0..cols).map(|col| at(row, col).abs()).fold(0.0, f64::max);
+            let tolerance = 1e-5 * largest;
+            let mut tied = 1.0;
+            for col in 1..cols {
+                let value = at(row, col);
+                if value > best_value + tolerance {
+                    tied = 1.0;
+                    best_value = value;
+                    best = col;
+                } else if value >= best_value - tolerance {
+                    tied += 1.0;
+                    if tied * crate::random::unif_rand()? < 1.0 {
+                        best = col;
+                    }
+                }
+            }
+        } else {
+            for col in 1..cols {
+                let value = at(row, col);
+                if value > best_value || (ties == 3 && value == best_value) {
+                    best_value = value;
+                    best = col;
+                }
+            }
+        }
+        result.slice_mut::<i32>()[row] = best as i32 + 1;
+    }
+    if random {
+        crate::random::put_rng_state()?;
     }
     Ok(result)
 }
