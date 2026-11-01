@@ -185,6 +185,8 @@ pub enum TypeErrorKind<'db> {
     /// A `match` pattern that no value of the scrutinee's type fits.
     PatternNeverMatches {
         found: Ty<'db>,
+        /// The likely mistake in a tag pattern: an unknown tag, or an unknown payload field.
+        hint: Option<String>,
     },
     /// Two branches build one tag with two payload shapes.
     ConflictingTags {
@@ -2635,9 +2637,13 @@ impl<'db> Checker<'db, '_> {
                 members.retain(|member| !matches!(member.kind(self.db), TyKind::OtherTags));
             }
             if members.is_empty() {
+                let hint = self.pattern_mismatch_hint(pattern, subject);
                 self.errors.push(TypeError {
                     range: node.range,
-                    kind: TypeErrorKind::PatternNeverMatches { found: subject },
+                    kind: TypeErrorKind::PatternNeverMatches {
+                        found: subject,
+                        hint,
+                    },
                 });
                 self.bind_unknown(pattern, bindings);
                 return;
@@ -2651,14 +2657,61 @@ impl<'db> Checker<'db, '_> {
             return self.check_pattern_components(pattern, narrowed, bindings);
         }
         if !self.pattern_admits(pattern, subject) {
+            let hint = self.pattern_mismatch_hint(pattern, subject);
             self.errors.push(TypeError {
                 range: node.range,
-                kind: TypeErrorKind::PatternNeverMatches { found: subject },
+                kind: TypeErrorKind::PatternNeverMatches {
+                    found: subject,
+                    hint,
+                },
             });
             self.bind_unknown(pattern, bindings);
             return;
         }
         self.check_pattern_components(pattern, subject, bindings);
+    }
+
+    fn pattern_mismatch_hint(&self, pattern: PatId, subject: Ty<'db>) -> Option<String> {
+        let PatternKind::Tag { name, payload, .. } = &self.module.pattern(pattern).kind else {
+            return None;
+        };
+        let subject = self.table.resolve(self.db, subject);
+        let members = match subject.kind(self.db) {
+            TyKind::Union(members) => members.clone(),
+            _ => vec![subject],
+        };
+        let tags: Vec<(&str, Option<Ty<'db>>)> = members
+            .iter()
+            .filter_map(|member| match member.kind(self.db) {
+                TyKind::Tag(tag, payload) => Some((tag.text(self.db), *payload)),
+                _ => None,
+            })
+            .collect();
+        let Some((_, Some(tag_payload))) = tags.iter().find(|(tag, _)| *tag == name.as_str())
+        else {
+            let nearest = nearest_name(
+                name.as_str(),
+                tags.iter().map(|(tag, _)| *tag),
+            )?;
+            return Some(format!("The value has no tag `:{}`. Did you mean `:{nearest}`?", name.as_str()));
+        };
+        let payload = (*payload)?;
+        let PatternKind::Record { fields, .. } = &self.module.pattern(payload).kind else {
+            return None;
+        };
+        let TyKind::NativeRecord(native) = tag_payload.kind(self.db) else {
+            return None;
+        };
+        let known: Vec<&str> = native.iter().map(|field| field.name.text(self.db)).collect();
+        let unknown = fields.iter().find(|field| !known.contains(&field.name.as_str()))?;
+        let suggestion = nearest_name(unknown.name.as_str(), known.iter().copied())
+            .map(|nearest| format!(" Did you mean `{nearest}`?"))
+            .unwrap_or_default();
+        Some(format!(
+            "`:{}` has no field `{}`.{suggestion}",
+            name.as_str(),
+            unknown.name.as_str()
+        ))
     }
 
     fn check_pattern_components(

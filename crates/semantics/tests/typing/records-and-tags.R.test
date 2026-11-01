@@ -443,6 +443,31 @@ f <- function(o) {
 f: fn(o: :Some(integer) | :None) -> integer
 99..107 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`
 
+#---- misspelled_payload_field_is_named
+#: fn(r: :Ok(value: integer) | :Err(message: character)) -> character
+f <- function(r) {
+  match (r) {
+    :Ok(value = v) => as.character(v)
+    :Err(mesage = m) => m
+  }
+}
+#++++
+f: fn(r: :Ok(value: integer) | :Err(message: character)) -> character
+91..100 error[non-exhaustive-match] this `match` does not handle `:Err(message = _)`: add an arm for it, or a catch-all `_ => ...` arm
+145..161 error[type-mismatch] this pattern can never match: the value is `:Ok(value: integer) | :Err(message: character)`. `:Err` has no field `mesage`. Did you mean `message`?
+
+#---- misspelled_tag_suggests_the_nearest
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Somee(v) => v
+    _ => 1L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+81..90 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. The value has no tag `:Somee`. Did you mean `:Some`?
+
 #---- payload_of_the_wrong_length
 #: fn(o: :Some(integer) | :None) -> integer
 f <- function(o) {
