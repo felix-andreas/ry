@@ -4,9 +4,11 @@
 //! plain `#~~~~ <path>` file is the same on both sides.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use loader::{Loader, PackageInputs, Plan, SysdataChange};
-use std::path::{Path, PathBuf};
-use syntax::testing::{run_fixture_suite, split_files};
+use {
+    loader::{Loader, PackageInputs, Plan, SysdataChange},
+    std::path::{Path, PathBuf},
+    syntax::testing::{run_fixture_suite, split_files},
+};
 
 #[test]
 fn reload_fixtures() {

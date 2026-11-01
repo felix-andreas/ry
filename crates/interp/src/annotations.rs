@@ -20,17 +20,19 @@
 //! that object and whose value is the signature, so an entry can never outlive its definition
 //! and be mistaken for another object at a reused address.
 
-use crate::{
-    RError, conditions, interp,
-    unwind::R,
-    values::{self, nil},
+use {
+    crate::{
+        RError, conditions, interp,
+        unwind::R,
+        values::{self, nil},
+    },
+    heap::{
+        Marker,
+        object::{Sexp, SexpType, gp},
+    },
+    rustc_hash::FxHashMap,
+    syntax::{SyntaxKind, SyntaxNode},
 };
-use heap::{
-    Marker,
-    object::{Sexp, SexpType, gp},
-};
-use rustc_hash::FxHashMap;
-use syntax::{SyntaxKind, SyntaxNode};
 
 /// The runtime's annotation state.
 pub struct State {
@@ -192,12 +194,18 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
     let Some(signature) = signature_of(function) else {
         return Ok(None);
     };
-    let masks = signature.element(MASKS);
+    let masks = values::ints(signature.element(MASKS));
+    let Some(parameters) = masks.get(FIRST_FORMAL_SLOT..) else {
+        return Ok(Some(signature));
+    };
+    if parameters.iter().all(|&mask| mask == 0) {
+        return Ok(Some(signature));
+    }
     let heap = crate::heap();
     let mut formal = function.car();
     let mut slot = FIRST_FORMAL_SLOT;
     while formal.kind() == SexpType::Pairlist {
-        let mask = mask_at(masks, slot);
+        let mask = masks.get(slot).map_or(0, |&mask| mask as Mask);
         if mask != 0 {
             if formal.tag() == values::symbols().dots {
                 if let Some(cell) = heap.frame_cell(env, formal.tag()) {
@@ -340,10 +348,9 @@ unsafe fn failure(call: Sexp, message: String) -> crate::unwind::Unwind {
 }
 
 unsafe fn mask_at(masks: Sexp, slot: usize) -> Mask {
-    if slot >= values::length(masks) {
-        return 0;
-    }
-    *(masks.data() as *const i32).add(slot) as Mask
+    values::ints(masks)
+        .get(slot)
+        .map_or(0, |&mask| mask as Mask)
 }
 
 unsafe fn text_at(signature: Sexp, slot: usize) -> String {
@@ -401,7 +408,10 @@ fn mask_of(node: &SyntaxNode) -> Mask {
         // and a plan or a grouping is no list either.
         SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE
             if node.first_token().is_some_and(|token| {
-                matches!(token.text(), "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy")
+                matches!(
+                    token.text(),
+                    "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+                )
             }) =>
         {
             0

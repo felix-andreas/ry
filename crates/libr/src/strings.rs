@@ -1,17 +1,19 @@
 //! `CHARSXP`s, encodings and symbols.
 
-use crate::{
-    Rboolean,
-    boundary::{ApiResult, enter, error},
-    runtime,
-};
-use heap::{
-    object::{Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use std::{
-    borrow::Cow,
-    ffi::{CStr, c_char, c_int},
+use {
+    crate::{
+        Rboolean,
+        boundary::{ApiResult, enter, error},
+        runtime,
+    },
+    heap::{
+        object::{Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    std::{
+        borrow::Cow,
+        ffi::{CStr, c_char, c_int},
+    },
 };
 
 /// The bytes of a C string, without its NUL. A null pointer reads as empty.
@@ -118,6 +120,11 @@ pub fn type_c_name(kind: SexpType) -> &'static CStr {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_CHAR(object: Sexp) -> *const c_char {
+    // Packages read strings from worker threads (data.table's `fwrite` does), and the boundary
+    // touches the runtime's handle stack, so the common case must not enter it.
+    if object.kind() == SexpType::Char {
+        return object.data() as *const c_char;
+    }
     enter(|| {
         check_charsxp(object, "CHAR")?;
         Ok(object.data() as *const c_char)

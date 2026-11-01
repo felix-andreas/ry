@@ -1,5 +1,5 @@
 # The in-tree property fuzzers' invariants under libFuzzer, which follows branch coverage where
-# deterministic-random inputs cannot. Needs nightly and cargo-fuzz (see contributing/testing.md).
+# deterministic-random inputs cannot. Needs cargo-fuzz (see contributing/testing.md).
 [package]
 name = "ry-fuzz"
 version = "0.0.0"
@@ -36,5 +36,5 @@ test = false
 doc = false
 bench = false
 
-# Its own workspace: it needs nightly, so it stays out of the stable battery.
+# Its own workspace, so the libFuzzer build and its sanitizer flags stay out of the main one.
 [workspace]

@@ -50,7 +50,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
-completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 hint @1: <T: numeric> fn(count: T) -> double
 
 #---- function_name
@@ -69,7 +69,7 @@ action: Add inferred type annotation for `g`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
   edit 28..28 -> "#: fn() -> double\n"
-completion (26): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Str.to_double
+completion (27): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Num.to_double
 hint @6: <T: numeric> fn(x: T) -> T
 hint @29: fn() -> double
 
@@ -111,7 +111,7 @@ action: Add inferred type annotation for `caller`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
   edit 24..24 -> "#: fn() -> double\n"
-completion (28): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @6: <T> fn(x: T) -> T
 hint @30: fn() -> double
 
@@ -162,7 +162,7 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> "  #: double\n"
   edit 27..27 -> "  #: double\n"
   edit 0..0 -> "#: fn() -> double\n"
-completion (91): n, NA, NA_character_, NA_complex_, NA_integer_, NA_real_, NaN, next
+completion (116): n, NA, NA_character_, NA_complex_, NA_integer_, NA_real_, NaN, next
 hint @1: fn() -> double
 hint @21: double
 hint @30: double
@@ -182,7 +182,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
-completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 hint @1: <T: numeric> fn(count: T) -> double
 
 #---- global_cross_item
@@ -223,7 +223,7 @@ action: Add inferred type annotation for `helper`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
   edit 24..24 -> "#: fn() -> double\n"
-completion (28): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @6: <T> fn(x: T) -> T
 hint @30: fn() -> double
 
@@ -274,7 +274,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
   edit 42..42 -> "  #: double\n"
   edit 24..24 -> "#: fn() -> double\n"
-completion (28): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
 hint @6: <T> fn(x: T) -> T
 hint @25: fn() -> double
 hint @50: double
@@ -541,7 +541,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (55): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
+completion (56): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
 
 #==== annotation_types
 #---- goto_type_definition
@@ -785,7 +785,7 @@ action: Add inferred type annotation for `count`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 hint @5: integer
 
 #---- string_subscript_fields
@@ -835,7 +835,7 @@ definition 0..2
 references: 0..2*, 56..58, 71..73
 rename: 3 edit(s)
 signature: none
-completion (43): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_top_level_update_keeps_the_first_definition
 DT <- data.table::data.table(x = 1)
@@ -848,7 +848,7 @@ definition 0..2
 references: 0..2*, 36..38, 49..51
 rename: 3 edit(s)
 signature: none
-completion (43): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
+completion (47): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_frame_update_types_later_reads
 sales <- DataFrame(a = 1)

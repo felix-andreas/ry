@@ -1,11 +1,11 @@
-# Runs the table benchmark's questions as R code on ry's DataFrame, under `ry run --runtime ry`,
+# Runs the table benchmark's questions as R code on ry's DataFrame, under `ry run`,
 # and prints one tab-separated line per run:
 # `question  run  seconds  rows  cols  checksum`. Loading is not timed, as in db-benchmark, and
 # every question runs twice so the second run shows warm-cache behavior. The questions use the
 # Polars-style API. The `:=` loops use the data.table syntax the DataFrame keeps for
 # compatibility, because they measure in-place updates, which the Polars-style API does not do.
 #
-# Usage: ry run --runtime ry ry.R <data-dir>
+# Usage: ry run ry.R <data-dir>
 
 args <- commandArgs(trailingOnly = TRUE)
 dir <- args[[1]]

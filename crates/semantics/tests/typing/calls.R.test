@@ -609,7 +609,7 @@ f: <T, U> fn(a: T, b: U) -> Unknown
 fail_with <- function(x) stop(paste0("bad: ", class(x)[1]))
 checked <- function(x) paste0("bad: ", class(x)[1])
 #++++
-fail_with: fn(x: Unknown) -> Unknown
+fail_with: fn(x: Unknown) -> Any
 checked: fn(x: Unknown) -> character
 
 #---- a_callback_names_the_parameter_that_refuses_the_element

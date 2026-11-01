@@ -15,22 +15,22 @@
 //! selection or a grouping) and executes it through [`query::execute`], so every verb runs on the
 //! same kernels as `tbl[i, j, by]`.
 
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-};
-
-use polars::prelude::{
-    IntoLazy, JoinArgs, JoinCoalesce, JoinType, ParquetReader, PlSmallStr, SerReader, col,
-};
-use rustc_hash::FxHashSet;
-
-use crate::{
-    Error, Result, Schema, Table,
-    io::{self, ReadOptions},
-    query::{
-        self, Aggregate, BinaryOp, Expr, Join, On, Output, Query, ResultType, Roll, Rows,
-        Select, SortKey, UnaryOp, Warning, collapses, join_layout,
+use {
+    crate::{
+        Error, Result, Schema, Table,
+        io::{self, ReadOptions},
+        query::{
+            self, Aggregate, BinaryOp, Expr, Join, On, Output, Query, ResultType, Roll, Rows,
+            Select, SortKey, UnaryOp, Warning, collapses, join_layout,
+        },
+    },
+    polars::prelude::{
+        IntoLazy, JoinArgs, JoinCoalesce, JoinType, ParquetReader, PlSmallStr, SerReader, col,
+    },
+    rustc_hash::FxHashSet,
+    std::{
+        fmt,
+        path::{Path, PathBuf},
     },
 };
 
@@ -284,8 +284,10 @@ pub fn optimize(plan: Plan) -> Result<Plan> {
         .collect::<Result<Vec<_>>>()?;
     let source_schema = source_schema(&source)?;
     push_down_predicates(&source_schema, &mut steps)?;
-    if let (Source::Csv { options, .. } | Source::Parquet { options, .. }, Some(Step::Head(count))) =
-        (&mut source, steps.first())
+    if let (
+        Source::Csv { options, .. } | Source::Parquet { options, .. },
+        Some(Step::Head(count)),
+    ) = (&mut source, steps.first())
     {
         options.rows = Some(options.rows.map_or(*count, |rows| rows.min(*count)));
         steps.remove(0);
@@ -317,7 +319,11 @@ fn push_down_predicates(source_schema: &Schema, steps: &mut Vec<Step>) -> Result
         let row_wise = !contains_aggregate(&predicate);
         let moved = match &steps[before] {
             Step::Filter(earlier) if row_wise => {
-                let merged = Expr::Binary(BinaryOp::And, Box::new(earlier.clone()), Box::new(predicate));
+                let merged = Expr::Binary(
+                    BinaryOp::And,
+                    Box::new(earlier.clone()),
+                    Box::new(predicate),
+                );
                 steps[before] = Step::Filter(merged);
                 steps.remove(index);
                 index = before;
@@ -332,7 +338,10 @@ fn push_down_predicates(source_schema: &Schema, steps: &mut Vec<Step>) -> Result
                 Some(predicate)
             }
             Step::Select(columns)
-                if row_wise && columns.iter().all(|(_, expr)| matches!(expr, Expr::Column(_))) =>
+                if row_wise
+                    && columns
+                        .iter()
+                        .all(|(_, expr)| matches!(expr, Expr::Column(_))) =>
             {
                 Some(rename_columns(&predicate, columns))
             }
@@ -692,7 +701,15 @@ fn run(plan: Plan) -> Result<Collected> {
             } => {
                 let right = run(*other)?;
                 warnings.extend(right.warnings);
-                table = join(table, right.table, &left_on, &right_on, how, &suffix, &mut warnings)?;
+                table = join(
+                    table,
+                    right.table,
+                    &left_on,
+                    &right_on,
+                    how,
+                    &suffix,
+                    &mut warnings,
+                )?;
                 continue;
             }
             step => {
@@ -743,7 +760,11 @@ fn selection(schema: &Schema, step: Step, rows: Rows) -> Result<Query> {
         Step::Select(columns) => (columns, Vec::new()),
         Step::WithColumns(columns) => (with_columns(schema, &columns), Vec::new()),
         Step::Aggregate { keys, aggregates } => (aggregates, keys),
-        _ => return Err(Error::Query("only a selection or an aggregation runs as a selection".to_string())),
+        _ => {
+            return Err(Error::Query(
+                "only a selection or an aggregation runs as a selection".to_string(),
+            ));
+        }
     };
     Ok(Query {
         rows,
@@ -913,7 +934,11 @@ fn write_plan(text: &mut String, plan: &Plan, depth: usize) {
                         keys.join(", "),
                         strategy.name().to_uppercase()
                     )),
-                    _ => text.push_str(&format!("{} JOIN ON [{}]\n", how.name().to_uppercase(), keys.join(", "))),
+                    _ => text.push_str(&format!(
+                        "{} JOIN ON [{}]\n",
+                        how.name().to_uppercase(),
+                        keys.join(", ")
+                    )),
                 }
                 indent(text, depth + 1);
                 text.push_str("RIGHT:\n");

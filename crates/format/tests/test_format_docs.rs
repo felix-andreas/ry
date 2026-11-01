@@ -1,10 +1,12 @@
 //! Generates the formatting-rules docs page from `tests/formatter.template.md`
 //! by running every ```r example through the formatter.
 
-use format::{Config, format};
-use regex::{Captures, Regex};
-use std::fs;
-use syntax::testing::env_var;
+use {
+    format::{Config, format},
+    regex::{Captures, Regex},
+    std::fs,
+    syntax::testing::env_var,
+};
 
 #[test]
 fn documentation_examples() {

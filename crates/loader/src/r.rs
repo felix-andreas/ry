@@ -3,9 +3,13 @@
 //! uncompressed RDS file ([`rds`]), which `readRDS` reads without parsing any R code; on ry's
 //! runtime [`crate::ry_runtime`] builds it on the heap.
 
-use crate::{Code, Plan, SysdataChange};
-use semantics::load_index::Registration;
-use semantics::metadata::{NamespaceImportDirective, S3MethodDirective};
+use {
+    crate::{Code, Plan, SysdataChange},
+    semantics::{
+        load_index::Registration,
+        metadata::{NamespaceImportDirective, S3MethodDirective},
+    },
+};
 
 /// The R side for GNU R. A host evaluates it once per session into the environment it attaches
 /// as `tools:ry`, after defining `.ry_request(root, full)`, which returns the plan, and

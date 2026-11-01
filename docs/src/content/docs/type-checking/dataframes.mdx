@@ -8,8 +8,8 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 A `DataFrame` is ry's built-in table, and the checker knows every column. Each verb produces a new
 column list, so the types follow the data through a whole query, and a misspelled column, a join on
 a column that does not exist, or a column that `agg` forgets to aggregate is reported before the
-query runs. The [DataFrames guide](/guides/dataframes) covers the API and running it, which needs
-`ry run --runtime ry`.
+query runs. The [DataFrames guide](/guides/dataframes) covers the API and running it with `ry run`,
+because DataFrames need ry's own runtime.
 
 ```r
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
@@ -100,7 +100,8 @@ type-mismatch
   x expected `DataFrame{region: character[], units: integer[]}`, found `DataFrame{region: character[], unit: integer[]}`
 ```
 
-The columns must match exactly: a DataFrame with an extra column is not accepted either. A bare
+The columns must match exactly, as a record's fields do, so a DataFrame with an extra column is not
+accepted either: an unexpected column is usually a misspelled one. A bare
 `DataFrame` accepts any DataFrame and leaves its columns unknown, and so do `LazyFrame`,
 `GroupBy` and `LazyGroupBy`. A DataFrame is not a `data.frame`, so a `data.frame` parameter
 rejects it: convert with `as.data.frame()` first.

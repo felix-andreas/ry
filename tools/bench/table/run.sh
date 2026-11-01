@@ -20,6 +20,6 @@ binary="$(ls -t "$root"/target/release/deps/db_benchmark-* | grep -v '\.d$' | gr
 echo "== data.table"
 Rscript "$here/datatable.R" "$dir"
 echo "== ry DataFrame, from R code under ry's runtime"
-"$root/target/release/ry" run --runtime ry "$here/ry.R" "$dir"
+"$root/target/release/ry" run "$here/ry.R" "$dir"
 echo "== ry engine, from Rust"
 "$binary" "$dir"

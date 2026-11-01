@@ -19,17 +19,21 @@
 //! `length` and `.N`, with arithmetic on top of them), plus the `x[order(v), head(v, k), by]`
 //! top-k shape. Anything else returns `None`, and the query runs as a Polars plan.
 
-use polars::prelude::{Column, DataFrame, PlSmallStr};
-use polars_arrow::bitmap::Bitmap;
-use polars_buffer::Buffer;
-use polars_core::runtime::THREAD_POOL;
-use rayon::prelude::*;
-
-use crate::kernel::{
-    CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, and, fill, gather_column,
+use {
+    crate::{
+        ColumnType, Result, Schema, Table,
+        kernel::{
+            CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, and, fill,
+            gather_column,
+        },
+        query::{Aggregate, Expr, Query, Rows, Select, SortKey},
+    },
+    polars::prelude::{Column, DataFrame, PlSmallStr},
+    polars_arrow::bitmap::Bitmap,
+    polars_buffer::Buffer,
+    polars_core::runtime::THREAD_POOL,
+    rayon::prelude::*,
 };
-use crate::query::{Aggregate, Expr, Query, Rows, Select, SortKey};
-use crate::{ColumnType, Result, Schema, Table};
 
 /// The widest code range whose group states are indexed by code directly. Each thread holds one
 /// state per possible code, so this bounds that memory.
@@ -1496,10 +1500,7 @@ fn update(
                 }
             }
         }
-        (
-            State::Values { runs, missing, .. },
-            Input::Double { values, validity },
-        ) => {
+        (State::Values { runs, missing, .. }, Input::Double { values, validity }) => {
             let mut entries = Vec::with_capacity(len);
             for index in 0..len {
                 let (row, slot) = (row_of(index), slot_of(index));

@@ -5,11 +5,12 @@
 //!
 //! The interpreter runs here without base R, so the setup defines the few functions base R would.
 
-use std::{cell::RefCell, collections::BTreeSet, fs, path::Path};
-
-use heap::{Heap, object::Sexp};
-use interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values};
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    heap::{Heap, object::Sexp},
+    interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values},
+    std::{cell::RefCell, collections::BTreeSet, fs, path::Path},
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 const SETUP: &str = r#"
 print <- function(x, ...) UseMethod("print")
@@ -31,14 +32,26 @@ const PRINTS: &[(&str, &str)] = &[
     ("Result.is_err(:Ok(1L))", "[1] FALSE\n"),
     ("Result.with_default(:Err(:Oops), 0L)", "[1] 0\n"),
     ("Result.map(:Ok(2L), function(x) x * 10L)", ":Ok(20L)\n"),
-    ("Result.map(:Err(:Oops), function(x) x * 10L)", ":Err(:Oops)\n"),
-    ("Result.map_err(:Err(:Oops), function(e) :Wrapped(e))", ":Err(:Wrapped(:Oops))\n"),
+    (
+        "Result.map(:Err(:Oops), function(x) x * 10L)",
+        ":Err(:Oops)\n",
+    ),
+    (
+        "Result.map_err(:Err(:Oops), function(e) :Wrapped(e))",
+        ":Err(:Wrapped(:Oops))\n",
+    ),
     (
         "Result.map_both(:Err(1L), function(x) x, function(e) e + 1L)",
         ":Err(2L)\n",
     ),
-    ("Result.and_then(:Ok(4L), function(x) :Err(:TooBig))", ":Err(:TooBig)\n"),
-    ("Result.on_err(:Err(:Oops), function(e) :Ok(0L))", ":Ok(0L)\n"),
+    (
+        "Result.and_then(:Ok(4L), function(x) :Err(:TooBig))",
+        ":Err(:TooBig)\n",
+    ),
+    (
+        "Result.on_err(:Err(:Oops), function(e) :Ok(0L))",
+        ":Ok(0L)\n",
+    ),
     // List: construction and access.
     ("List.to_vector(List.from_vector(c(1, 2)))", "[1] 1 2\n"),
     ("List.to_vector(list())", "logical(0)\n"),
@@ -49,16 +62,25 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.get(xs, 0L)", ":Err(:OutOfBounds)\n"),
     ("List.to_vector(List.set(xs, 1L, 9L))", "[1] 9 1 2\n"),
     ("List.to_vector(List.set(xs, 9L, 9L))", "[1] 3 1 2\n"),
-    ("List.to_vector(List.update(xs, 2L, function(x) x + 1L))", "[1] 3 2 2\n"),
+    (
+        "List.to_vector(List.update(xs, 2L, function(x) x + 1L))",
+        "[1] 3 2 2\n",
+    ),
     ("List.to_vector(List.append(xs, 4L))", "[1] 3 1 2 4\n"),
     ("List.to_vector(List.prepend(xs, 0L))", "[1] 0 3 1 2\n"),
     ("List.to_vector(List.concat(xs, list(7L)))", "[1] 3 1 2 7\n"),
     ("List.single(\"a\")", "[[1]]\n[1] \"a\"\n\n"),
     ("List.to_vector(List.repeat(0L, 3L))", "[1] 0 0 0\n"),
     ("List.to_vector(List.reverse(xs))", "[1] 2 1 3\n"),
-    ("List.to_vector(List.join(list(list(1L), list(), list(2L, 3L))))", "[1] 1 2 3\n"),
+    (
+        "List.to_vector(List.join(list(list(1L), list(), list(2L, 3L))))",
+        "[1] 1 2 3\n",
+    ),
     // List: transformations.
-    ("List.to_vector(List.map(xs, function(x) x * 2L))", "[1] 6 2 4\n"),
+    (
+        "List.to_vector(List.map(xs, function(x) x * 2L))",
+        "[1] 6 2 4\n",
+    ),
     (
         "List.to_vector(List.map_with_index(xs, function(x, i) x * i))",
         "[1] 3 2 6\n",
@@ -71,8 +93,14 @@ const PRINTS: &[(&str, &str)] = &[
         "List.to_vector(List.join_map(xs, function(x) list(x, x)))",
         "[1] 3 3 1 1 2 2\n",
     ),
-    ("List.to_vector(List.keep_if(xs, function(x) x > 1L))", "[1] 3 2\n"),
-    ("List.to_vector(List.drop_if(xs, function(x) x > 1L))", "[1] 1\n"),
+    (
+        "List.to_vector(List.keep_if(xs, function(x) x > 1L))",
+        "[1] 3 2\n",
+    ),
+    (
+        "List.to_vector(List.drop_if(xs, function(x) x > 1L))",
+        "[1] 1\n",
+    ),
     (
         "List.to_vector(List.keep_oks(list(\"1\", \"x\", \"3\"), Str.to_integer))",
         "[1] 1 3\n",
@@ -81,13 +109,19 @@ const PRINTS: &[(&str, &str)] = &[
         "List.keep_errs(list(\"1\", \"x\"), Str.to_integer)",
         "[[1]]\n:InvalidNumStr\n\n",
     ),
-    ("List.map_try(list(\"1\", \"x\"), Str.to_integer)", ":Err(:InvalidNumStr)\n"),
+    (
+        "List.map_try(list(\"1\", \"x\"), Str.to_integer)",
+        ":Err(:InvalidNumStr)\n",
+    ),
     (
         "Result.map(List.map_try(list(\"1\", \"2\"), Str.to_integer), List.to_vector)",
         ":Ok(1:2)\n",
     ),
     // List: folds and searches.
-    ("List.walk(words, \"\", function(s, w) Str.concat(s, w))", "[1] \"pearfigapple\"\n"),
+    (
+        "List.walk(words, \"\", function(s, w) Str.concat(s, w))",
+        "[1] \"pearfigapple\"\n",
+    ),
     (
         "List.walk_backwards(words, \"\", function(s, w) Str.concat(s, w))",
         "[1] \"applefigpear\"\n",
@@ -105,7 +139,10 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.find_first(xs, function(x) x < 3L)", ":Ok(1L)\n"),
     ("List.find_last(xs, function(x) x < 3L)", ":Ok(2L)\n"),
     ("List.find_first_index(xs, function(x) x < 3L)", ":Ok(2L)\n"),
-    ("List.find_last_index(xs, function(x) x > 5L)", ":Err(:NotFound)\n"),
+    (
+        "List.find_last_index(xs, function(x) x > 5L)",
+        ":Err(:NotFound)\n",
+    ),
     ("List.first(xs)", ":Ok(3L)\n"),
     ("List.last(list())", ":Err(:ListWasEmpty)\n"),
     // List: slices.
@@ -123,8 +160,14 @@ const PRINTS: &[(&str, &str)] = &[
         "List.chunks_of(xs, 2L)",
         "[[1]]\n[[1]][[1]]\n[1] 3\n\n[[1]][[2]]\n[1] 1\n\n\n[[2]]\n[[2]][[1]]\n[1] 2\n\n\n",
     ),
-    ("List.to_vector(List.intersperse(xs, 0L))", "[1] 3 0 1 0 2\n"),
-    ("List.to_vector(List.sort_with(xs, Num.compare))", "[1] 1 2 3\n"),
+    (
+        "List.to_vector(List.intersperse(xs, 0L))",
+        "[1] 3 0 1 0 2\n",
+    ),
+    (
+        "List.to_vector(List.sort_with(xs, Num.compare))",
+        "[1] 1 2 3\n",
+    ),
     (
         "List.to_vector(List.sort_with(words, function(a, b) Num.compare(Str.count_utf8_bytes(a), Str.count_utf8_bytes(b))))",
         "[1] \"fig\"   \"pear\"  \"apple\"\n",
@@ -139,7 +182,10 @@ const PRINTS: &[(&str, &str)] = &[
     // Str.
     ("Str.is_empty(\"\")", "[1] TRUE\n"),
     ("Str.concat(\"ab\", \"cd\")", "[1] \"abcd\"\n"),
-    ("Str.join_with(list(\"a\", \"b\", \"c\"), \", \")", "[1] \"a, b, c\"\n"),
+    (
+        "Str.join_with(list(\"a\", \"b\", \"c\"), \", \")",
+        "[1] \"a, b, c\"\n",
+    ),
     (
         "List.to_vector(Str.split_on(\"a,b,,c\", \",\"))",
         "[1] \"a\" \"b\" \"\"  \"c\"\n",
@@ -153,15 +199,36 @@ const PRINTS: &[(&str, &str)] = &[
     ("Str.trim_end(\"  hi  \")", "[1] \"  hi\"\n"),
     ("Str.drop_prefix(\"v1.2\", \"v\")", "[1] \"1.2\"\n"),
     ("Str.drop_suffix(\"v1.2\", \"x\")", "[1] \"v1.2\"\n"),
-    ("Str.with_prefix(\"world\", \"hello \")", "[1] \"hello world\"\n"),
-    ("Str.replace_each(\"a.b.c\", \".\", \"-\")", "[1] \"a-b-c\"\n"),
-    ("Str.replace_first(\"a.b.c\", \".\", \"-\")", "[1] \"a-b.c\"\n"),
-    ("Str.replace_last(\"a.b.c\", \".\", \"-\")", "[1] \"a.b-c\"\n"),
-    ("Str.split_first(\"k=v=w\", \"=\")", ":Ok((after = \"v=w\", before = \"k\"))\n"),
-    ("Str.split_last(\"k=v=w\", \"=\")", ":Ok((after = \"w\", before = \"k=v\"))\n"),
+    (
+        "Str.with_prefix(\"world\", \"hello \")",
+        "[1] \"hello world\"\n",
+    ),
+    (
+        "Str.replace_each(\"a.b.c\", \".\", \"-\")",
+        "[1] \"a-b-c\"\n",
+    ),
+    (
+        "Str.replace_first(\"a.b.c\", \".\", \"-\")",
+        "[1] \"a-b.c\"\n",
+    ),
+    (
+        "Str.replace_last(\"a.b.c\", \".\", \"-\")",
+        "[1] \"a.b-c\"\n",
+    ),
+    (
+        "Str.split_first(\"k=v=w\", \"=\")",
+        ":Ok((after = \"v=w\", before = \"k\"))\n",
+    ),
+    (
+        "Str.split_last(\"k=v=w\", \"=\")",
+        ":Ok((after = \"w\", before = \"k=v\"))\n",
+    ),
     ("Str.split_first(\"kv\", \"=\")", ":Err(:NotFound)\n"),
     ("Str.count_utf8_bytes(\"h\u{e9}\")", "[1] 3\n"),
-    ("List.to_vector(Str.to_utf8(\"h\u{e9}\"))", "[1] 104 195 169\n"),
+    (
+        "List.to_vector(Str.to_utf8(\"h\u{e9}\"))",
+        "[1] 104 195 169\n",
+    ),
     ("Str.from_utf8(list(104L, 105L))", ":Ok(\"hi\")\n"),
     ("Str.from_utf8(list(255L))", ":Err(:BadUtf8)\n"),
     ("Str.to_integer(\"42\")", ":Ok(42L)\n"),
@@ -198,7 +265,10 @@ const PRINTS: &[(&str, &str)] = &[
     ("Num.log_checked(0)", ":Err(:LogNeedsPositive)\n"),
     // Dict.
     ("Dict.empty()", "Dict.empty()\n"),
-    ("Dict.single(1L, \"one\")", "Dict.from_list(list((1L, \"one\")))\n"),
+    (
+        "Dict.single(1L, \"one\")",
+        "Dict.from_list(list((1L, \"one\")))\n",
+    ),
     ("d", "Dict.from_list(list((\"a\", 1), (\"b\", 2)))\n"),
     (
         "Dict.to_list(d)",
@@ -217,8 +287,14 @@ const PRINTS: &[(&str, &str)] = &[
         "Dict.insert(d, \"a\", 10)",
         "Dict.from_list(list((\"a\", 10), (\"b\", 2)))\n",
     ),
-    ("Dict.remove(d, \"a\")", "Dict.from_list(list((\"b\", 2)))\n"),
-    ("Dict.remove(d, \"z\")", "Dict.from_list(list((\"a\", 1), (\"b\", 2)))\n"),
+    (
+        "Dict.remove(d, \"a\")",
+        "Dict.from_list(list((\"b\", 2)))\n",
+    ),
+    (
+        "Dict.remove(d, \"z\")",
+        "Dict.from_list(list((\"a\", 1), (\"b\", 2)))\n",
+    ),
     (
         "Dict.update(d, \"c\", function(r) :Ok(Result.with_default(r, 0) + 1))",
         "Dict.from_list(list((\"a\", 1), (\"b\", 2), (\"c\", 1)))\n",
@@ -269,12 +345,18 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     ("Dict.get(Dict.single(1L, \"a\"), 1)", ":Ok(\"a\")\n"),
     ("Dict.get(Dict.single(-0, \"zero\"), 0)", ":Ok(\"zero\")\n"),
-    ("Dict.from_list(list((\"a\", 1), (\"a\", 2)))", "Dict.from_list(list((\"a\", 2)))\n"),
+    (
+        "Dict.from_list(list((\"a\", 1), (\"a\", 2)))",
+        "Dict.from_list(list((\"a\", 2)))\n",
+    ),
     ("list(d = Dict.empty())", "$d\nDict.empty()\n\n"),
     // Set.
     ("Set.empty()", "Set.empty()\n"),
     ("Set.single(\"a\")", "Set.from_list(list(\"a\"))\n"),
-    ("Set.from_list(list(2L, 1L, 2L))", "Set.from_list(list(2L, 1L))\n"),
+    (
+        "Set.from_list(list(2L, 1L, 2L))",
+        "Set.from_list(list(2L, 1L))\n",
+    ),
     ("List.to_vector(Set.to_list(s))", "[1] 1 2 3\n"),
     ("Set.len(s)", "[1] 3\n"),
     ("Set.is_empty(Set.empty())", "[1] TRUE\n"),
@@ -294,39 +376,331 @@ const PRINTS: &[(&str, &str)] = &[
         "Set.from_list(list(1L, 2L))\n",
     ),
     ("Set.walk(s, 0L, function(acc, x) acc + x)", "[1] 6\n"),
-    ("Set.map(s, function(x) x %% 2L)", "Set.from_list(list(1L, 0L))\n"),
-    ("Set.keep_if(s, function(x) x > 1L)", "Set.from_list(list(2L, 3L))\n"),
-    ("Set.drop_if(s, function(x) x > 1L)", "Set.from_list(list(1L))\n"),
+    (
+        "Set.map(s, function(x) x %% 2L)",
+        "Set.from_list(list(1L, 0L))\n",
+    ),
+    (
+        "Set.keep_if(s, function(x) x > 1L)",
+        "Set.from_list(list(2L, 3L))\n",
+    ),
+    (
+        "Set.drop_if(s, function(x) x > 1L)",
+        "Set.from_list(list(1L))\n",
+    ),
     (
         "identical(s, Set.from_list(list(3L, 2L, 1L)))",
         "[1] TRUE\n",
     ),
     ("typeof(s)", "[1] \"set\"\n"),
     // A program's own definition comes before the library's.
-    ("(function() { List.len <- function(list) -1L; List.len(xs) })()", "[1] -1\n"),
+    (
+        "(function() { List.len <- function(list) -1L; List.len(xs) })()",
+        "[1] -1\n",
+    ),
     // An emptied collection is `Dict.empty()` again, key type included.
     (
         "Dict.insert(Dict.remove(Dict.single(1L, \"a\"), 1L), \"x\", 2)",
         "Dict.from_list(list((\"x\", 2)))\n",
     ),
-    ("Set.insert(Set.remove(Set.single(1L), 1L), \"x\")", "Set.from_list(list(\"x\"))\n"),
-    ("identical(Set.from_list(list(1L)), Set.from_list(list(1)))", "[1] FALSE\n"),
+    (
+        "Set.insert(Set.remove(Set.single(1L), 1L), \"x\")",
+        "Set.from_list(list(\"x\"))\n",
+    ),
+    (
+        "identical(Set.from_list(list(1L)), Set.from_list(list(1)))",
+        "[1] FALSE\n",
+    ),
     (
         "all.equal.ry_dict(Dict.single(\"a\", 1), Dict.single(\"a\", 2))",
         "[1] \"Key \\\"a\\\": target and current differ\"\n",
     ),
-    ("all.equal.ry_set(Set.single(1L), Set.single(2L))", "[1] \"target and current hold different keys\"\n"),
+    (
+        "all.equal.ry_set(Set.single(1L), Set.single(2L))",
+        "[1] \"target and current hold different keys\"\n",
+    ),
+    // An update reuses its first argument only when nothing else can observe it.
+    (
+        "{ a <- Dict.from_list(list((\"x\", 1))); b <- a; a <- Dict.insert(a, \"y\", 2); c(Dict.len(a), Dict.len(b)) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ p <- list(1L); q <- p; for (i in 1:3) p <- List.append(p, i); c(List.len(p), List.len(q)) }",
+        "[1] 4 1\n",
+    ),
+    (
+        "{ p <- list(1L); holder <- list(p); p <- List.append(p, 2L); c(List.len(p), List.len(holder[[1]])) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ p <- list(1L, 2L); q <- p; p <- List.set(p, 1L, 9L); c(p[[1]], q[[1]]) }",
+        "[1] 9 1\n",
+    ),
+    (
+        "{ p <- list(1L); for (i in 1:3) p <- List.concat(p, list(i, i)); List.to_vector(p) }",
+        "[1] 1 1 1 2 2 3 3\n",
+    ),
+    (
+        "{ grow <- function(n) { s <- Set.empty(); keep <- NULL; for (i in 1:n) { s <- Set.insert(s, i); if (i == 3L) keep <- s }; c(Set.len(s), Set.len(keep)) }; grow(10L); grow(10L) }",
+        "[1] 10  3\n",
+    ),
+    (
+        "{ g <- function(p) { p <- List.append(p, 0L); List.len(p) }; z <- list(1L); c(g(z), g(z), List.len(z)) }",
+        "[1] 2 2 1\n",
+    ),
+    (
+        "{ u <- Set.single(1L); v <- u; u <- Set.union(u, Set.single(2L)); c(Set.len(u), Set.len(v)) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ a <- Dict.single(\"k\", 1); a <- Dict.insert(a, \"self\", a); c(Dict.len(a), Dict.len(Result.with_default(Dict.get(a, \"self\"), NULL))) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ e <- Dict.single(1L, \"a\"); e <- Dict.insert(e, 2L, \"b\"); e <- Dict.insert(e, 2.5, \"c\"); List.to_vector(Dict.keys(e)) }",
+        "[1] 1.0 2.0 2.5\n",
+    ),
+    (
+        "{ m <- Dict.empty(); for (i in 1:100) m <- Dict.insert(m, i %% 10L, i); List.to_vector(Dict.values(m)) }",
+        " [1]  91  92  93  94  95  96  97  98  99 100\n",
+    ), // Breadth: Result.
+    (
+        "Result.map2(:Ok(2L), :Ok(3L), function(a, b) a * b)",
+        ":Ok(6L)\n",
+    ),
+    (
+        "Result.map2(:Ok(2L), :Err(:Second), function(a, b) a * b)",
+        ":Err(:Second)\n",
+    ),
+    (
+        "Result.map2(:Err(:First), :Err(:Second), function(a, b) a * b)",
+        ":Err(:First)\n",
+    ),
+    // Breadth: List walks.
+    (
+        "List.walk_backwards_until(xs, 0L, function(s, x) if (x == 3L) :Break(s) else :Continue(s + x))",
+        "[1] 3\n",
+    ),
+    (
+        "List.walk_with_index(words, \"\", function(s, w, i) Str.concat(s, Str.concat(Num.to_str(i), w)))",
+        "[1] \"1pear2fig3apple\"\n",
+    ),
+    (
+        "List.walk_with_index_until(xs, 0L, function(s, x, i) if (i == 3L) :Break(s) else :Continue(s + x))",
+        "[1] 4\n",
+    ),
+    (
+        "List.walk_from(xs, 2L, 0L, function(s, x) s + x)",
+        "[1] 3\n",
+    ),
+    (
+        "List.walk_from(xs, 9L, 0L, function(s, x) s + x)",
+        "[1] 0\n",
+    ),
+    (
+        "List.walk_from_until(xs, 2L, 0L, function(s, x) :Break(x))",
+        "[1] 1\n",
+    ),
+    (
+        "List.walk_try(xs, 0L, function(s, x) :Ok(s + x))",
+        ":Ok(6L)\n",
+    ),
+    (
+        "List.walk_try(xs, 0L, function(s, x) if (x == 1L) :Err(:One) else :Ok(s + x))",
+        ":Err(:One)\n",
+    ),
+    ("List.for_each(xs, function(x) x)", ""),
+    (
+        "List.for_each_try(xs, function(x) if (x < 3L) :Err(x) else :Ok(NULL))",
+        ":Err(1L)\n",
+    ),
+    ("List.for_each_try(xs, function(x) :Ok(x))", ":Ok(NULL)\n"),
+    // Breadth: List mapping, sorting and reshaping.
+    (
+        "List.to_vector(List.map3(xs, xs, list(1L, 1L), function(a, b, c) a + b + c))",
+        "[1] 7 3\n",
+    ),
+    (
+        "List.to_vector(List.map4(xs, xs, xs, xs, function(a, b, c, d) a + b + c + d))",
+        "[1] 12  4  8\n",
+    ),
+    ("List.to_vector(List.sort_asc(xs))", "[1] 1 2 3\n"),
+    (
+        "List.to_vector(List.sort_desc(list(2, 10L, 1.5)))",
+        "[1] 10.0  2.0  1.5\n",
+    ),
+    ("List.to_vector(List.swap(xs, 1L, 3L))", "[1] 2 1 3\n"),
+    ("List.to_vector(List.swap(xs, 1L, 4L))", "[1] 3 1 2\n"),
+    (
+        "{ r <- List.replace(xs, 2L, 9L); c(List.to_vector(r$list), r$value) }",
+        "[1] 3 9 2 1\n",
+    ),
+    ("List.replace(xs, 5L, 9L)$value", "[1] 9\n"),
+    (
+        "List.split_first(list(1L, 0L, 2L, 0L, 3L), 0L)",
+        ":Ok((after = list(2L, 0L, 3L), before = list(1L)))\n",
+    ),
+    (
+        "List.split_last(list(1L, 0L, 2L, 0L, 3L), 0L)",
+        ":Ok((after = list(3L), before = list(1L, 0L, 2L)))\n",
+    ),
+    ("List.split_first(xs, 9L)", ":Err(:NotFound)\n"),
+    ("length(List.split_on(list(1L, 0L, 2L, 0L), 0L))", "[1] 3\n"),
+    (
+        "List.to_vector(List.split_on(list(1L, 0L, 2L, 3L), 0L)[[2]])",
+        "[1] 2 3\n",
+    ),
+    ("length(List.split_on(list(), 0L))", "[1] 1\n"),
+    (
+        "List.to_vector(List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))[[2]])",
+        "[1] 2 0 3\n",
+    ),
+    ("length(List.split_on_list(xs, list()))", "[1] 1\n"),
+    (
+        "List.to_vector(List.append_if_ok(xs, :Ok(4L)))",
+        "[1] 3 1 2 4\n",
+    ),
+    (
+        "List.to_vector(List.append_if_ok(xs, :Err(:No)))",
+        "[1] 3 1 2\n",
+    ),
+    (
+        "List.to_vector(List.prepend_if_ok(xs, :Ok(0L)))",
+        "[1] 0 3 1 2\n",
+    ),
+    (
+        "List.to_vector(List.concat_utf8(list(104L), \"i!\"))",
+        "[1] 104 105  33\n",
+    ),
+    ("List.len(List.with_capacity(10L))", "[1] 0\n"),
+    (
+        "{ p <- List.with_capacity(4L); for (i in 1:6) p <- List.append(p, i); List.to_vector(p) }",
+        "[1] 1 2 3 4 5 6\n",
+    ),
+    ("List.to_vector(List.reserve(xs, 100L))", "[1] 3 1 2\n"),
+    (
+        "{ p <- list(1L, 2L); q <- p; p <- List.swap(p, 1L, 2L); c(List.to_vector(p), List.to_vector(q)) }",
+        "[1] 2 1 1 2\n",
+    ),
+    // Breadth: Str.
+    (
+        "Str.caseless_ascii_equals(\"Hello\", \"hELLO\")",
+        "[1] TRUE\n",
+    ),
+    (
+        "Str.caseless_ascii_equals(\"Hello\", \"Help\")",
+        "[1] FALSE\n",
+    ),
+    (
+        "Str.walk_utf8(\"abc\", 0L, function(s, b) s + b)",
+        "[1] 294\n",
+    ),
+    (
+        "Str.walk_utf8_with_index(\"ab\", 0L, function(s, b, i) s + b * i)",
+        "[1] 293\n",
+    ),
+    (
+        "Str.from_utf8_lossy(list(104L, 255L, 105L))",
+        "[1] \"h�i\"\n",
+    ),
+    ("Str.from_utf8_lossy(list(104L, 0L))", "[1] \"h�\"\n"),
+    // Breadth: Num.
+    (
+        "c(Num.is_lt(1L, 2L), Num.is_gt(1L, 2L), Num.is_lte(2, 2L), Num.is_gte(1, 2))",
+        "[1]  TRUE FALSE  TRUE FALSE\n",
+    ),
+    ("Num.is_approx_eq(1, 1 + 1e-9)", "[1] TRUE\n"),
+    ("Num.is_approx_eq(1, 1.1)", "[1] FALSE\n"),
+    ("Num.is_approx_eq(1, 1.1, rtol = 0.2)", "[1] TRUE\n"),
+    ("Num.is_approx_eq(0, 1e-3, atol = 1e-2)", "[1] TRUE\n"),
+    (
+        "c(Num.is_multiple_of(12L, 4L), Num.is_multiple_of(12L, 5L), Num.is_multiple_of(0L, 0L), Num.is_multiple_of(3L, 0L))",
+        "[1]  TRUE FALSE  TRUE FALSE\n",
+    ),
+    (
+        "c(Num.is_finite(1), Num.is_finite(Inf), Num.is_infinite(-Inf), Num.is_infinite(3L))",
+        "[1]  TRUE FALSE  TRUE FALSE\n",
+    ),
+    ("Num.abs(-3L)", "[1] 3\n"),
+    ("Num.abs(-2.5)", "[1] 2.5\n"),
+    ("Num.abs_diff(3L, 10L)", "[1] 7\n"),
+    ("Num.neg(4L)", "[1] -4\n"),
+    (
+        "c(Num.ceiling(1.2), Num.floor(-1.2), Num.round(2.5), Num.round(-2.5))",
+        "[1]  2 -2  3 -3\n",
+    ),
+    ("typeof(Num.floor(3L))", "[1] \"integer\"\n"),
+    ("Num.pow(2L, 10L)", "[1] 1024\n"),
+    (
+        "c(Num.sin(0), Num.cos(0), Num.tan(0), Num.atan(1) * 4)",
+        "[1] 0.000000 1.000000 0.000000 3.141593\n",
+    ),
+    ("Num.add_saturated(2147483647L, 1L)", "[1] 2147483647\n"),
+    ("Num.sub_saturated(-2147483647L, 1L)", "[1] -2147483647\n"),
+    ("Num.mul_saturated(100000L, 100000L)", "[1] 2147483647\n"),
+    ("Num.add_saturated(1.5, 1L)", "[1] 2.5\n"),
+    ("Num.div_ceil_checked(7L, 2L)", ":Ok(4L)\n"),
+    ("Num.div_ceil_checked(-7L, 2L)", ":Ok(-3L)\n"),
+    ("Num.div_ceil_checked(7, 2)", ":Ok(4)\n"),
+    ("Num.div_ceil_checked(7L, 0L)", ":Err(:DivByZero)\n"),
+    ("Num.to_double(3L)", "[1] 3\n"),
+    ("typeof(Num.to_double(3L))", "[1] \"double\"\n"),
+    ("Num.to_integer_checked(-3.7)", ":Ok(-3L)\n"),
+    ("Num.to_integer_checked(1e10)", ":Err(:OutOfBounds)\n"),
+    // Breadth: Dict and Set.
+    (
+        "Dict.walk_until(d, 0, function(s, k, v) if (k == \"b\") :Break(s) else :Continue(s + v))",
+        "[1] 1\n",
+    ),
+    (
+        "Dict.join_map(d, function(k, v) Dict.single(v, k))",
+        "Dict.from_list(list((1, \"a\"), (2, \"b\")))\n",
+    ),
+    ("Dict.len(Dict.reserve(d, 100L))", "[1] 2\n"),
+    (
+        "{ r <- Dict.reserve(d, 100L); r <- Dict.insert(r, \"c\", 3); c(Dict.len(r), Dict.len(d)) }",
+        "[1] 3 2\n",
+    ),
+    ("Dict.len(Dict.reserve(Dict.empty(), 10L))", "[1] 0\n"),
+    ("Dict.clear(d)", "Dict.empty()\n"),
+    (
+        "Set.walk_until(s, 0L, function(t, e) if (e == 3L) :Break(t) else :Continue(t + e))",
+        "[1] 3\n",
+    ),
+    (
+        "Set.join_map(s, function(e) Set.from_list(list(e, e * 10L)))",
+        "Set.from_list(list(1L, 10L, 2L, 20L, 3L, 30L))\n",
+    ),
+    (
+        "{ r <- Set.reserve(s, 50L); for (i in 4:60) r <- Set.insert(r, i); c(Set.len(r), Set.len(s)) }",
+        "[1] 60  3\n",
+    ),
 ];
 
 /// Each case's code and the error message it raises.
 const ERRORS: &[(&str, &str)] = &[
-    ("List.len(c(1, 2))", "`list` must be a list, not a double vector of length 2"),
+    (
+        "List.len(c(1, 2))",
+        "`list` must be a list, not a double vector of length 2",
+    ),
     ("List.len()", "`List.len()` needs the argument `list`"),
     ("List.get(xs, 1L, 2L)", "unused argument (2L)"),
-    ("List.get(xs, 1.5)", "`index` must be a whole number, not a double value"),
-    ("List.get(xs, NA_integer_)", "`index` must be a whole number, not `NA`"),
-    ("List.map(xs, 1)", "`f` must be a function, not a double value"),
-    ("List.keep_if(xs, function(x) NA)", "`predicate` must return `TRUE` or `FALSE`, not `NA`"),
+    (
+        "List.get(xs, 1.5)",
+        "`index` must be a whole number, not a double value",
+    ),
+    (
+        "List.get(xs, NA_integer_)",
+        "`index` must be a whole number, not `NA`",
+    ),
+    (
+        "List.map(xs, 1)",
+        "`f` must be a function, not a double value",
+    ),
+    (
+        "List.keep_if(xs, function(x) NA)",
+        "`predicate` must return `TRUE` or `FALSE`, not `NA`",
+    ),
     (
         "List.walk_until(xs, 0L, function(s, x) s)",
         "`f` must return `:Continue(state)` or `:Break(state)`, not an integer value",
@@ -340,23 +714,88 @@ const ERRORS: &[(&str, &str)] = &[
         "List.to_vector(list(1L, \"a\"))",
         "`list` must hold elements of one atomic type, and it mixes integer and character",
     ),
-    ("Result.map(5, function(x) x)", "`result` must be a result, `:Ok(value)` or `:Err(error)`"),
-    ("Str.trim(1L)", "`string` must be a single string, not an integer value"),
-    ("Str.trim(NA_character_)", "`string` must be a single string, not `NA`"),
+    (
+        "Result.map(5, function(x) x)",
+        "`result` must be a result, `:Ok(value)` or `:Err(error)`",
+    ),
+    (
+        "Str.trim(1L)",
+        "`string` must be a single string, not an integer value",
+    ),
+    (
+        "Str.trim(NA_character_)",
+        "`string` must be a single string, not `NA`",
+    ),
     ("Str.repeat(\"a\", -1L)", "`count` must be"),
-    ("Num.to_str(\"1\")", "`number` must be a single number, not a character value"),
-    ("Num.is_zero(NaN)", "`number` must be a single number, not `NaN`"),
-    ("Dict.insert(d, 1L, 3)", "the dict's keys are character, and this one is integer"),
-    ("Dict.insert(d, NA_character_, 1)", "`key` must be a single logical, number or string, not `NA`"),
-    ("Dict.insert(d, 1i, 1)", "`key` must be a single logical, number or string, not a complex value"),
+    (
+        "Num.to_str(\"1\")",
+        "`number` must be a single number, not a character value",
+    ),
+    (
+        "Num.is_zero(NaN)",
+        "`number` must be a single number, not `NaN`",
+    ),
+    (
+        "Dict.insert(d, 1L, 3)",
+        "the dict's keys are character, and this one is integer",
+    ),
+    (
+        "Dict.insert(d, NA_character_, 1)",
+        "`key` must be a single logical, number or string, not `NA`",
+    ),
+    (
+        "Dict.insert(d, 1i, 1)",
+        "`key` must be a single logical, number or string, not a complex value",
+    ),
     ("Dict.get(s, 1L)", "`dict` must be a dict, not a ry set"),
-    ("Dict.from_list(list(1))", "`pairs` must be a list of `(key, value)` tuples, not a double value"),
-    ("Set.insert(s, NaN)", "`element` must be a single logical, number or string, not `NaN`"),
-    ("d$a", "a dict has no fields; read a value with `Dict.get(dict, key)`"),
-    ("d[[1]]", "a dict cannot be indexed; read a value with `Dict.get(dict, key)`"),
-    ("s[[1]]", "a set cannot be indexed; test an element with `Set.contains(set, element)`"),
-    ("sum(d)", "`d` is a ry dict, not an R object; convert it with `as.list()`"),
-    ("c(s, 1)", "`s` is a ry set, not an R object; convert it with `as.list()`"),
+    (
+        "Dict.from_list(list(1))",
+        "`pairs` must be a list of `(key, value)` tuples, not a double value",
+    ),
+    (
+        "Set.insert(s, NaN)",
+        "`element` must be a single logical, number or string, not `NaN`",
+    ),
+    (
+        "d$a",
+        "a dict has no fields; read a value with `Dict.get(dict, key)`",
+    ),
+    (
+        "d[[1]]",
+        "a dict cannot be indexed; read a value with `Dict.get(dict, key)`",
+    ),
+    (
+        "s[[1]]",
+        "a set cannot be indexed; test an element with `Set.contains(set, element)`",
+    ),
+    (
+        "sum(d)",
+        "`d` is a ry dict, not an R object; convert it with `as.list()`",
+    ),
+    (
+        "c(s, 1)",
+        "`s` is a ry set, not an R object; convert it with `as.list()`",
+    ),
+    (
+        "Num.to_integer_checked(NaN)",
+        "`number` must be a single number, not `NaN`",
+    ),
+    (
+        "List.walk_from(xs, 0L, 0L, function(s, x) s)",
+        "`index` must be a position of 1 or more",
+    ),
+    (
+        "Num.abs_diff(2147483647L, -2147483647L)",
+        "the integer result overflows",
+    ),
+    (
+        "List.walk_try(xs, 0L, function(s, x) s)",
+        "`f` must return a result",
+    ),
+    (
+        "Dict.join_map(d, function(k, v) v)",
+        "`f` must return a dict, not a double value",
+    ),
     (
         "List.sum(list(2147483647L, 1L))",
         "the integer result overflows; convert the elements to doubles first",
@@ -383,8 +822,9 @@ fn declarations() -> Vec<(String, Vec<String>)> {
     text.lines()
         .filter_map(|line| {
             let (name, signature) = line.split_once(" : ")?;
-            // The list conversions are base builtins, declared here only for the checker.
-            if name.starts_with("as.") {
+            // The list conversions are base builtins and `Ops.Expr` is an S3 method of a group
+            // generic, declared here only for the checker.
+            if name.starts_with("as.") || name.starts_with("Ops.") {
                 return None;
             }
             let parameters = &signature[signature.find("fn(")? + 3..];
@@ -424,7 +864,9 @@ fn declarations_and_runtime_bind_the_same_names() {
     // The list conversions are base builtins, listed in the manifest only for the checker.
     let exported: BTreeSet<String> = manifest
         .lines()
-        .filter(|line| !line.starts_with('#') && !matches!(*line, "as.record" | "as.tuple" | "as.tag"))
+        .filter(|line| {
+            !line.starts_with('#') && !matches!(*line, "as.record" | "as.tuple" | "as.tag")
+        })
         .map(str::to_owned)
         .collect();
     // An S3 method such as `Ops.Expr` is declared for the checker but registered, not exported.
@@ -460,9 +902,13 @@ fn no_shipped_package_exports_a_library_name() {
     let entries = fs::read_dir(&directory)
         .unwrap_or_else(|failure| panic!("cannot list {}: {failure}", directory.display()));
     for entry in entries {
-        let path = entry.unwrap_or_else(|failure| panic!("cannot read an entry: {failure}")).path();
+        let path = entry
+            .unwrap_or_else(|failure| panic!("cannot read an entry: {failure}"))
+            .path();
         // `ry.exports` is the library's own list.
-        if path.extension().is_none_or(|extension| extension != "exports")
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "exports")
             || path.file_stem().is_some_and(|stem| stem == "ry")
         {
             continue;
@@ -589,7 +1035,9 @@ unsafe fn collection_model_failures() -> Vec<String> {
         // SAFETY: the interpreter is installed.
         let checks = unsafe { printed(&code) };
         if checks != "[1] TRUE TRUE TRUE TRUE TRUE\n" {
-            failures.push(format!("round {round}: the collections disagree with the model: {checks:?}"));
+            failures.push(format!(
+                "round {round}: the collections disagree with the model: {checks:?}"
+            ));
         }
         for (variable, expected) in probes {
             // SAFETY: the interpreter is installed.

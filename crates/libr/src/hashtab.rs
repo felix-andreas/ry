@@ -6,16 +6,18 @@
 //! traces the table like any other object and no memory lives outside the heap. The R-level
 //! object is a one-element list of class `hashtab` holding the pointer.
 
-use crate::{
-    boundary::{ApiResult, Handout, enter, error},
-    globals::R_ClassSymbol,
-    runtime,
-    vectors::{identical, xlength},
-};
-use heap::object::{Sexp, SexpType, is_na_real};
-use std::{
-    ffi::{c_int, c_void},
-    hash::{Hash, Hasher},
+use {
+    crate::{
+        boundary::{ApiResult, Handout, enter, error},
+        globals::R_ClassSymbol,
+        runtime,
+        vectors::{identical, xlength},
+    },
+    heap::object::{Sexp, SexpType, is_na_real},
+    std::{
+        ffi::{c_int, c_void},
+        hash::{Hash, Hasher},
+    },
 };
 
 /// `R_hashtab_type`, which C passes by value: the table's external pointer.

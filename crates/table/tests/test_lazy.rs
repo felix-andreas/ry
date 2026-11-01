@@ -1,15 +1,17 @@
 //! The Polars-style verbs and the lazy planner, driven from Rust. Expected layouts (join column
 //! order, suffixes, group order) follow Polars, which the `DataFrame` API mirrors.
 
-use syntax::testing::{SplitMix64, fuzz_iterations};
-use table::{
-    Table,
-    convert::{RVector, is_na_real, to_r},
-    lazy::{self, How, Plan, Source, Step, Strategy},
-    polars::prelude::PlSmallStr,
-    query::{
-        Aggregate, BinaryOp, Expr, SortKey,
-        build::{aggregate, binary, column},
+use {
+    syntax::testing::{SplitMix64, fuzz_iterations},
+    table::{
+        Table,
+        convert::{RVector, is_na_real, to_r},
+        lazy::{self, How, Plan, Source, Step, Strategy},
+        polars::prelude::PlSmallStr,
+        query::{
+            Aggregate, BinaryOp, Expr, SortKey,
+            build::{aggregate, binary, column},
+        },
     },
 };
 
@@ -88,7 +90,11 @@ fn sum(name: &str) -> Expr {
 #[test]
 fn verbs_compose_eagerly_and_lazily() {
     let plan = Plan::new(Source::Table(sales()))
-        .with(Step::Filter(binary(BinaryOp::Greater, column("units"), Expr::Integer(1))))
+        .with(Step::Filter(binary(
+            BinaryOp::Greater,
+            column("units"),
+            Expr::Integer(1),
+        )))
         .with(Step::WithColumns(vec![named(
             "revenue",
             binary(BinaryOp::Multiply, column("units"), column("price")),
@@ -103,8 +109,14 @@ fn verbs_compose_eagerly_and_lazily() {
         }]));
     let result = collect(plan);
     assert_eq!(names(&result), ["region", "revenue", "n"]);
-    assert_eq!(column_values(&result, "region"), strings(&["eu", "us", "asia"]));
-    assert_eq!(column_values(&result, "revenue"), doubles(&[10.5, 10.0, 3.5]));
+    assert_eq!(
+        column_values(&result, "region"),
+        strings(&["eu", "us", "asia"])
+    );
+    assert_eq!(
+        column_values(&result, "revenue"),
+        doubles(&[10.5, 10.0, 3.5])
+    );
     assert_eq!(column_values(&result, "n"), ints(&[2, 1, 1]));
 }
 
@@ -144,7 +156,10 @@ fn joins_follow_polars_layout() {
     let inner = join(How::Inner);
     assert_eq!(names(&inner), ["id", "name", "score", "score_right"]);
     assert_eq!(column_values(&inner, "id"), ints(&[1, 3, 3]));
-    assert_eq!(column_values(&inner, "score_right"), doubles(&[10.0, 30.0, 31.0]));
+    assert_eq!(
+        column_values(&inner, "score_right"),
+        doubles(&[10.0, 30.0, 31.0])
+    );
     let left_join = join(How::Left);
     assert_eq!(column_values(&left_join, "id"), ints(&[1, 2, 3, 3]));
     assert_eq!(names(&join(How::Semi)), ["id", "name", "score"]);
@@ -175,7 +190,10 @@ fn an_asof_join_takes_the_nearest_row_within_each_by_group() {
     let backward = join(Strategy::Backward);
     assert_eq!(names(&backward), ["ticker", "time", "bid"]);
     assert_eq!(column_values(&backward, "time"), ints(&[5, 3, 1, 9]));
-    assert_eq!(na_doubles(&backward, "bid"), [Some(1.6), Some(7.0), None, None]);
+    assert_eq!(
+        na_doubles(&backward, "bid"),
+        [Some(1.6), Some(7.0), None, None]
+    );
     assert_eq!(
         na_doubles(&join(Strategy::Forward), "bid"),
         [None, Some(7.5), Some(1.5), None]
@@ -212,15 +230,25 @@ fn the_optimizer_pushes_filters_and_projections() {
     let directory = std::env::temp_dir().join(format!("ry-lazy-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap_or_else(|error| panic!("{error}"));
     let path = directory.join("sales.csv");
-    std::fs::write(&path, "region,units,price,note\neu,3,1.5,x\nus,5,2,y\neu,2,3,z\n")
-        .unwrap_or_else(|error| panic!("{error}"));
+    std::fs::write(
+        &path,
+        "region,units,price,note\neu,3,1.5,x\nus,5,2,y\neu,2,3,z\n",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     let plan = Plan::scan_csv(&path)
         .with(Step::WithColumns(vec![named(
             "double_price",
             binary(BinaryOp::Multiply, column("price"), Expr::Double(2.0)),
         )]))
-        .with(Step::Filter(binary(BinaryOp::Greater, column("units"), Expr::Integer(2))))
-        .with(Step::Select(vec![named("region", column("region")), named("double_price", column("double_price"))]));
+        .with(Step::Filter(binary(
+            BinaryOp::Greater,
+            column("units"),
+            Expr::Integer(2),
+        )))
+        .with(Step::Select(vec![
+            named("region", column("region")),
+            named("double_price", column("double_price")),
+        ]));
     let explained = lazy::explain(plan.clone()).unwrap_or_else(|error| panic!("{error}"));
     let expected = format!(
         "SELECT [col(\"region\"), col(\"double_price\")]\n  WITH_COLUMNS [(col(\"price\") * 2.0).alias(\"double_price\")]\n    FILTER col(\"units\") > 2L\n      SCAN CSV \"{}\" COLUMNS [\"region\", \"units\", \"price\"]\n",
@@ -247,10 +275,20 @@ fn optimizing_never_changes_the_result() {
         let table = frame(vec![
             (
                 "g",
-                RVector::Character((0..height).map(|_| Some(groups[rng.below(3)].to_string())).collect()),
+                RVector::Character(
+                    (0..height)
+                        .map(|_| Some(groups[rng.below(3)].to_string()))
+                        .collect(),
+                ),
             ),
-            ("x", RVector::Integer((0..height).map(|_| rng.below(10) as i32).collect())),
-            ("y", RVector::Double((0..height).map(|_| rng.below(100) as f64 / 4.0).collect())),
+            (
+                "x",
+                RVector::Integer((0..height).map(|_| rng.below(10) as i32).collect()),
+            ),
+            (
+                "y",
+                RVector::Double((0..height).map(|_| rng.below(100) as f64 / 4.0).collect()),
+            ),
         ]);
         let other = frame(vec![
             ("g", strings(&["a", "c"])),
@@ -260,12 +298,19 @@ fn optimizing_never_changes_the_result() {
         let mut has_w = false;
         for _ in 0..rng.below(6) {
             let step = match rng.below(7) {
-                0 => Step::Filter(binary(BinaryOp::Greater, column("x"), Expr::Integer(rng.below(10) as i32))),
+                0 => Step::Filter(binary(
+                    BinaryOp::Greater,
+                    column("x"),
+                    Expr::Integer(rng.below(10) as i32),
+                )),
                 1 => Step::Sort(vec![SortKey {
                     expr: column(if rng.chance(1, 2) { "x" } else { "y" }),
                     descending: rng.chance(1, 2),
                 }]),
-                2 => Step::WithColumns(vec![named("y", binary(BinaryOp::Add, column("y"), Expr::Double(1.0)))]),
+                2 => Step::WithColumns(vec![named(
+                    "y",
+                    binary(BinaryOp::Add, column("y"), Expr::Double(1.0)),
+                )]),
                 3 => Step::Head(rng.below(8)),
                 4 => Step::Tail(rng.below(8)),
                 5 if !has_w => {
@@ -286,8 +331,10 @@ fn optimizing_never_changes_the_result() {
             };
             plan = plan.with(step);
         }
-        let optimized = lazy::collect(plan.clone()).map(|collected| collected.table.frame().clone());
-        let plain = lazy::collect_unoptimized(plan.clone()).map(|collected| collected.table.frame().clone());
+        let optimized =
+            lazy::collect(plan.clone()).map(|collected| collected.table.frame().clone());
+        let plain = lazy::collect_unoptimized(plan.clone())
+            .map(|collected| collected.table.frame().clone());
         match (optimized, plain) {
             (Ok(optimized), Ok(plain)) => assert!(
                 optimized.equals_missing(&plain),

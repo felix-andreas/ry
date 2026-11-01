@@ -5,21 +5,23 @@
 //! the class registry (`R_do_MAKE_CLASS`, `R_getClassDef`) call into the `methods` package
 //! through the interpreter, as GNU R does.
 
-use crate::{
-    Rboolean,
-    attributes::{get_attrib, install_attribute, raw_attribute, remove_attribute},
-    boundary::{ApiResult, enter, error},
-    eval::call_namespaced,
-    globals::{R_ClassSymbol, R_DimSymbol, R_PackageSymbol},
-    memory::{duplicate, scalar_string},
-    runtime,
-    strings::{c_bytes, utf8_text},
+use {
+    crate::{
+        Rboolean,
+        attributes::{get_attrib, install_attribute, raw_attribute, remove_attribute},
+        boundary::{ApiResult, enter, error},
+        eval::call_namespaced,
+        globals::{R_ClassSymbol, R_DimSymbol, R_PackageSymbol},
+        memory::{duplicate, scalar_string},
+        runtime,
+        strings::{c_bytes, utf8_text},
+    },
+    heap::{
+        object::{Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    std::ffi::{c_char, c_int},
 };
-use heap::{
-    object::{Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use std::ffi::{c_char, c_int};
 
 /// The implicit class of `object`: its `class` attribute when it has one, otherwise the class
 /// R derives from its dimensions and type (`R_data_class`). With `single`, only the first
