@@ -467,6 +467,7 @@ pub fn check_item_with_annotation<'db>(
         non_local_slots: FxHashMap::default(),
         string_values: FxHashMap::default(),
         value_read_slots: None,
+        computed_slots: FxHashSet::default(),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -899,6 +900,9 @@ struct Checker<'db, 'a> {
     string_values: FxHashMap<BindingId, Option<StringWrite>>,
     /// Slots read somewhere other than as a call head, built on first need.
     value_read_slots: Option<FxHashSet<BindingId>>,
+    /// Slots an unannotated assignment in the body has written so far, whose `NULL` the
+    /// body computed rather than a caller or a declaration supplied.
+    computed_slots: FxHashSet<BindingId>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -1684,6 +1688,8 @@ impl<'db> Checker<'db, '_> {
                         ExpressionKind::Function { .. }
                     ) && !self.expression_annotations.contains_key(&value)
                 });
+                let computed = declares_function.is_none()
+                    && !self.expression_annotations.contains_key(&id);
                 let value_ty = match declares_function {
                     Some(declared) => {
                         for (name, constraint) in &declared.binders {
@@ -1714,6 +1720,10 @@ impl<'db> Checker<'db, '_> {
                         self.apply_expression_annotation(id, value, value_ty)
                     }
                 };
+                if computed && let Some(&slot) = self.naming.resolutions.get(&target)
+                {
+                    self.computed_slots.insert(slot);
+                }
                 self.write_target(spelling, target, value, value_ty);
                 value_ty
             }
@@ -8511,7 +8521,53 @@ impl<'db> Checker<'db, '_> {
         {
             return Some(named);
         }
-        argument.ty
+        let ty = argument.ty?;
+        match argument.value {
+            Some(value) if self.names_computed_value(value) => Some(self.without_inferred_null(expected, ty)),
+            _ => Some(ty),
+        }
+    }
+
+    fn names_computed_value(&self, value: ExprId) -> bool {
+        matches!(self.module.expression(value).kind, ExpressionKind::NameRef(_))
+            && self
+                .naming
+                .resolutions
+                .get(&value)
+                .is_some_and(|slot| self.computed_slots.contains(slot))
+    }
+
+    /// A variable the body assigns, from a `switch` without a default, an `if` without `else`
+    /// or a helper that returns `NULL` on some path, is `NULL` only where the code presumably
+    /// does not pass it on: rlang's `type <- switch(type, ...)` feeds `sprintf(type, kind)`
+    /// after every type has an arm. So an argument naming such a variable drops its `NULL`
+    /// when the parameter's type is settled and admits no `NULL`. The `NULL` of a parameter
+    /// the body never reassigns, or of an annotated assignment, is declared and stays.
+    fn without_inferred_null(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
+        let expected = self.table.resolve(self.db, expected);
+        let admits_null = |ty: Ty<'db>| match ty.kind(self.db) {
+            TyKind::Null => true,
+            TyKind::Union(members) => {
+                members.iter().any(|member| matches!(member.kind(self.db), TyKind::Null))
+            }
+            _ => false,
+        };
+        if admits_null(expected) || contains_inference_var(self.db, expected) {
+            return ty;
+        }
+        let resolved = self.table.resolve(self.db, ty);
+        let TyKind::Union(members) = resolved.kind(self.db) else {
+            return ty;
+        };
+        if !members.iter().any(|member| matches!(member.kind(self.db), TyKind::Null)) {
+            return ty;
+        }
+        let kept: Vec<Ty<'db>> = members
+            .iter()
+            .copied()
+            .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+            .collect();
+        union_of(self.db, kept)
     }
 
     /// R matches exact names before placing positionals, so `vapply(xs, character(1),

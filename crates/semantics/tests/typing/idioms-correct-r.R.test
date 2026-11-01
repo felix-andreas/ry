@@ -588,3 +588,22 @@ scoped <- function(namespace, name) {
 #++++
 prefixer: <T, U, V> fn(namespace: T, [id]: U) -> (fn(id: V) -> character) | character
 scoped: <T, U> fn(namespace: T, name: U) -> Unknown
+
+#---- a_local_that_a_switch_may_leave_null_is_passed_as_its_value
+friendly <- function(type, n_dim) {
+  type <- switch(type, logical = "a logical %s", integer = "an integer %s")
+  kind <- if (n_dim < 2) "vector" else "matrix"
+  sprintf(type, kind)
+}
+#++++
+friendly: <T, U> fn(type: T, n_dim: U) -> character
+
+#---- a_parameter_that_may_be_null_is_still_checked_as_an_argument
+#: fn(name: character) -> character
+shout <- function(name) toupper(name)
+#: fn(name: character | NULL) -> character
+greet <- function(name) shout(name)
+#++++
+shout: fn(name: character) -> character
+greet: fn(name: character | NULL) -> character
+147..151 error[type-mismatch] expected `character`, found `character | NULL`

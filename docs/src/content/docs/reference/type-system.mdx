@@ -1787,6 +1787,14 @@ prefixer <- function(namespace, id) {
 scoped <- function(namespace, name) prefixer(namespace)(name)
 ```
 
+An argument that names a variable the body assigns without an annotation drops its `NULL` member
+when the parameter's type admits no `NULL`. The `NULL` there comes from a `switch` without a default,
+an `if` without `else`, or a helper that returns `NULL` on some path, and the code presumably does
+not reach the call on that path. So `type <- switch(type, logical = "a logical %s", integer =
+"an integer %s")` followed by `sprintf(type, kind)` is clean. A parameter the body does not
+reassign, and a variable whose assignment is annotated, keep their `NULL`, so passing a
+`name: character | NULL` parameter on to a `character` parameter is still reported.
+
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The
 [named and positional parameter rules](#named-and-positional-parameters) apply throughout. A missing

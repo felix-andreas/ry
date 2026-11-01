@@ -69,3 +69,8 @@ The guard *narrows* `config` to the list for the rest of the function. `is.chara
 
 Narrowing applies to variables only, so to test a field, copy it into a variable first:
 `r <- config$retries; if (is.null(r)) ...`.
+
+ry checks the `NULL` you declare. A variable that the body computes without an annotation, such as
+the result of a `switch` without a default, is passed on as its value without the `NULL`, because the
+code presumably never reaches the call on the `NULL` path. To have such a variable checked, annotate
+its assignment.
