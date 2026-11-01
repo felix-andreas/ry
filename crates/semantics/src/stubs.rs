@@ -677,7 +677,7 @@ mod tests {
         assert!(library.nominals.contains("data.frame"));
         assert_eq!(
             library.schemes["sum"].len(),
-            3,
+            5,
             "sum keeps its ordered overload candidates"
         );
         assert_eq!(library.schemes["length"].len(), 1);
@@ -1069,18 +1069,17 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_argument_falls_back_to_the_general_candidate() {
+    fn an_open_argument_the_candidates_narrow_differently_stays_unchecked() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         let check = first_item_check(&db, "f <- function(x) sum(x)\n");
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = check.scheme.clone().expect("scheme");
-        assert_eq!(
-            scheme.binders.len(),
-            1,
-            "the parameter must stay generic: {scheme:?}"
-        );
-        assert!(matches!(scheme_return(&db, &check).kind(&db), TyKind::Any));
+        assert!(scheme.binders.is_empty(), "{scheme:?}");
+        assert!(matches!(
+            scheme_return(&db, &check).kind(&db),
+            TyKind::Unknown
+        ));
     }
 
     #[test]

@@ -203,7 +203,24 @@ sum(1L, 2L, extra = 2L)
 sum(1L, 2L, extra = "x")
 #++++
 integer
-Any
+Unknown
+24..48 error[type-mismatch] no overload of `sum` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `integer[] | logical[]`, found `character`
+
+#---- sum_follows_r_coercion_and_rejects_strings
+sum(1L, TRUE)
+sum(1L, 2.5)
+sum(1L, 2i)
+sum(data.frame(a = 1:2))
+sum(as.difftime(1, units = "mins"))
+sum(c("a", "b"))
+#++++
+integer
+double
+complex
+Unknown
+difftime
+Unknown
+100..116 error[type-mismatch] no overload of `sum` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `integer[] | logical[]`, found `character[]`
 
 #---- duplicated_declared_parameter_is_rejected_despite_rest
 paste("a", sep = "-", sep = "_")
@@ -325,12 +342,12 @@ cumsum(c(1L, 2L, 3L))
 #++++
 integer[]
 
-#---- unresolved_argument_selects_general_fallback
+#---- a_wrapper_the_candidates_narrow_differently_stays_unknown
 f <- function(x) sum(x)
 f(c("a", "b"))
 #++++
-f: <T> fn(x: T) -> Any
-Any
+f: fn(x: Unknown) -> Unknown
+Unknown
 
 #==== precise_strings
 #---- trimws_is_character
