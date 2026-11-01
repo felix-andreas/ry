@@ -403,10 +403,7 @@ impl Context<'_> {
                     BinaryOperator::Tilde | BinaryOperator::Help => {}
                     // Operands of unmodeled operators still resolve (for IDE navigation), but
                     // unresolved reads stay quiet: the construct is opaque to the checker.
-                    BinaryOperator::And
-                    | BinaryOperator::Or
-                    | BinaryOperator::Pipe
-                    | BinaryOperator::Special => {
+                    BinaryOperator::Pipe | BinaryOperator::Special => {
                         self.quiet_depth += 1;
                         self.resolve(*lhs);
                         self.resolve(*rhs);

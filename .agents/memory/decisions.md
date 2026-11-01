@@ -325,6 +325,14 @@ incrementality holds.
 
 Refusing an unsupported construct loudly is acceptable policy. Mistyping one silently is not.
 
+`stop(...)` types as `Any`, not `NULL` or `Unknown`. There is no bottom type, and `Any` is the one
+type that fits every branch and return position without strict mode reporting it, so a
+`if (bad) stop(...)` guard costs strict users nothing. `&` and `|` are typed elementwise (logical
+scalar or vector) rather than opaque, so their operands resolve normally in naming. An operand
+whose type is still a variable is not unified with scalar `logical`, as `!`'s operand is, because
+`&` is mostly used on vectors and the unification made `h(c(TRUE, FALSE), TRUE)` an error; the
+operator is opaque for it instead.
+
 ## A reported column counts characters, and caret art counts terminal cells
 
 The CLI reported byte columns in the rendered header and in `--output json` alike, and padded the
@@ -2679,10 +2687,47 @@ first lines R had already read, leaving R mid-command.
 - **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
   feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
   never to compile.
-- **The default mode compiles only bodies with loops.** Measured on `micro/closures`, compiling
-  `function(a, b) a + b` made each call slower, because entering compiled code and forcing two
-  promises through helpers cost more than tier 0's dispatch. Straight-line bodies wait for direct
-  calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
+- **Every hot body compiles, loop or not.** Loop-only compilation was a stopgap while entering
+  compiled code meant forcing every argument through a promise helper, which made
+  `function(a, b) a + b` slower compiled than in tier 0. Direct calls removed that cost, so the
+  loop-only rule went with it.
+- **Function speculation is validated by the binding epoch alone.** Compiling marks each
+  speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
+  cell is assigned or a watched symbol is defined in any function frame (which could shadow the
+  speculated binding). A call site then checks one integer instead of re-walking the environment
+  chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
+  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
+  re-resolved from the environment its lookup started in, which for a function looked up inside an
+  inlined or directly called closure is that closure's environment, not the compiled body's.
+- **A call to a speculated closure is direct and passes forced promises.** Arguments that are
+  effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
+  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
+  invisible when the callee cannot assign anything an argument reads before forcing it
+  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
+  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+  lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
+  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
+  the one accepted hole. A promise object is still
+  allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
+  needs compiled-to-compiled calls that know the callee never reflects.
+- **Small local closures inline.** A call of a closure defined by a function expression in the same
+  body, whose arguments and body compute a scalar from scalars without effects, runs inline on
+  unboxed registers. Any failed check hands the call back to tier 0, which evaluates it lazily.
+- **Environment frames live inline in the environment object.** Small binding sets are stored
+  without a separate allocation, which cut a call's allocations, the dominant per-call cost.
+- **A value boxed on an edge into a join is dirty.** A slot that is an unboxed local on one path and
+  boxed on another gets a fresh box the frame does not hold, so the slot must be written back before
+  an in-place element write is visible to the frame (`x[1] <- 9; get("x")`). The oracle case in
+  `bytecode__hot_loops.R` pins it.
+- **A helper that cannot allocate parks the error.** Compiled code does not branch on a nil box;
+  later helpers return their fallback while an error is parked, and the return from compiled code
+  raises it.
+- **Static types do not remove guards.** A static `double` still admits an integer or a logical
+  through promotion, and stubs claim scalar results for functions that can return vectors, so a
+  static type proves neither the storage type nor the length the compiled code specializes on.
+  Strict typing costs a little at run time instead (about 200 instructions per annotated call for
+  the boundary checks). Using types as early profiles, or as guarantees backed by boundary checks,
+  is still the plan in `r-runtime.md`.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
 
@@ -2727,6 +2772,7 @@ first lines R had already read, leaving R mid-command.
 
 - **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
 - **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
+- **Bytecode.** A call of a dispatch-or-eval special (`bytecode.rs`, `subject_call`) evaluates the subject into a register, branches on `BranchIfObject` to `DispatchSubject` (which runs `dispatch::dispatch_evaluated_subject`, so a method still gets promises and the subject's expression), and otherwise evaluates the rest into registers and runs `CallBuiltin`, which the JIT turns into its element intrinsic. A `BranchUnlessPrimitive` guard sends a rebound `[` to the generic call. A formal in an index position takes the generic path too, because a register cannot hold the empty argument a missing formal stands for. Without this shape `x[i]` in a loop ran as a generic call and compiled loops fell to tier-0 speed.
 - **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
 
 ## libr reads options from base's `.Options`
@@ -3136,3 +3182,62 @@ first lines R had already read, leaving R mid-command.
 - **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
   right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
   finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
+
+# Decision record: data-oriented design and explicit allocators
+
+Performance comes first (user directive, `AGENTS.md` "Goals"), so hot data is laid out for the
+cache and allocated in bulk. The open audit list is `backlog.md`, "Open: data-oriented layouts and
+explicit allocators".
+
+- **The rule.** Hot data is a set of dense arrays indexed by small `Copy` ids (`u32`), not a graph
+  of individually boxed nodes. Split a record into parallel arrays when a hot loop reads only some
+  of its fields, keep variable-length children in one flat side array addressed by ranges, and use
+  bitsets for per-element flags. Memory that lives exactly as long as one phase (one item check,
+  one parse, one JIT compilation, one query plan) comes from an arena or bump allocator that is
+  reset or dropped as a whole, so the phase pays neither per-node `malloc` nor per-node `free`.
+  Long-lived objects of one shape come from pools of that shape. A new hot structure that holds
+  `Box`, `Vec` or `String` per node needs a reason.
+- **Where it applies first.** The checker's per-item inference (types built mid-check), HIR
+  lowering, the JIT's analysis plan, and the heap's mark and sweep. The table engine already keeps
+  columns in Arrow buffers and accumulators as struct-of-arrays, so it changes only at the edges.
+- **Allocator API status (checked against the Rust docs, the tracking issue and releases.rs).**
+  `std::alloc::Allocator` was nightly-only (`allocator_api`, rust-lang/rust#32838) until
+  rust-lang/rust#156882 stabilized a subset for Rust 1.100.0: the `Allocator` trait, `Global`,
+  `System`, and the allocator parameter of `Box<T, A>` and `Vec<T, A>` with their `new_in` and
+  `with_capacity_in` families. 1.100.0 is scheduled for stable on 12 November 2026. The
+  `Store` API, `StaticAllocator`, and `Box::into_pin` with a custom allocator stay unstable, and
+  std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter. CI builds with
+  `dtolnay/rust-toolchain@stable`, the dev container has rustc 1.97.0 (which rejects
+  `Vec::new_in`), and the nix flake uses the latest nightly. The workspace has no
+  `rust-toolchain` file and no `rust-version`.
+- **The route that works on every toolchain.** `allocator-api2` is the stable polyfill of the
+  trait and of `Vec`/`Box`, and `hashbrown` (already a `heap` dependency) accepts it for its maps.
+  `bumpalo` with its `allocator-api2` feature gives a bump arena those collections can allocate
+  in, so `hashbrown::HashMap::new_in(&bump)` and `allocator_api2::vec::Vec::new_in(&bump)` build and
+  run on stable rustc 1.97.0 (bumpalo 3.20, hashbrown 0.16, allocator-api2 0.2). Move to std's `Vec<T, A>` and
+  `Box<T, A>` once every toolchain the project builds with is 1.100 or newer; maps stay on
+  `hashbrown`. Whether `bumpalo` implements the stabilized std trait without its nightly
+  `allocator_api` feature is unverified.
+- **The global allocator stays mimalloc.** The `ry` binary sets it as `#[global_allocator]`
+  (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
+  own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
+  TLS model fails `dlopen`, and v3 crashes in `mi_thread_init` on the second thread that allocates
+  after the first one exits. Arenas sit on top of the global allocator, not in place of it.
+- **Salsa.** Values a tracked query returns, and interned data, must own their memory and compare
+  by value, because salsa stores them across revisions and backdates by equality. So an arena
+  never leaks into a memoized result: a query does its work in a scratch arena and copies the
+  result out into a compact owned form (boxed slices, dense tables indexed by `ExprId`). Interned
+  ids (`Ty`, `Name`) are already dense indices, but every intern goes through salsa's shared
+  table. Types an item check builds and throws away belong in a per-check store, and only
+  exported schemes and recorded expression types get interned.
+- **R's C API.** Every `SEXP` lives in `heap`'s collector, because native code holds it for an
+  unknown time, through `PROTECT`, preserved objects and external pointers, and R's semantics
+  decide when it dies. A phase arena must never back an R object that can escape to C. The heap's
+  own size-class pages are already per-shape pools, and data-oriented design applies inside it
+  (side mark bitmaps, allocation fast paths) as long as a `SEXP` stays a stable, non-moving
+  pointer to its header. `R_alloc` is the one arena R itself defines (`crates/heap/src/arena.rs`).
+  Arenas suit analysis, the parser, and the JIT's compile-time data.
+- **Impact.** Fewer allocations and frees per phase, smaller memos, and scans that read contiguous
+  memory. Incremental analysis is unaffected as long as memoized results stay owned and
+  value-compared, which this rule requires. Each audit item is measured before and after, and a
+  layout change that does not pay is reverted.

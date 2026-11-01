@@ -13,13 +13,13 @@
 //! instruction already ran).
 
 use crate::{
-    analysis::{Action, Effect, Intrinsic, Numeric, Plan, Refusal, State, Ty, jump_target, status},
+    analysis::{Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, State, Ty, jump_target, status},
     runtime::{self, Activation, offset, outcome, reason, representation},
 };
 use cranelift_codegen::{
 
     ir::{
-        AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, Type, Value,
+        AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, StackSlotData, StackSlotKind, Type, Value,
         condcodes::{FloatCC, IntCC},
         immediates::Ieee64,
         types::{F64, I8, I32, I64},
@@ -104,6 +104,9 @@ fn new_module() -> Result<JITModule, Refusal> {
         flags.set("opt_level", "speed")?;
         flags.set("use_colocated_libcalls", "false")?;
         flags.set("is_pic", "false")?;
+        // The verifier rechecks every function's IR and costs as much as the rest of
+        // compilation, so only debug builds, where the tests run, pay for it.
+        flags.set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })?;
         Ok(())
     };
     configure(&mut flags).map_err(|_| Refusal("Cranelift rejected the settings"))?;
@@ -160,8 +163,8 @@ fn flags() -> MemFlagsData {
 impl<'p, 'b> Translator<'p, 'b> {
     fn new(plan: &'p Plan, code: Sexp, mut builder: FunctionBuilder<'b>, call_conv: CallConv) -> Translator<'p, 'b> {
         let mut declare = |count: usize, ty: Type| (0..count).map(|_| builder.declare_var(ty)).collect::<Vec<_>>();
-        let integers = declare(plan.registers, I32);
-        let doubles = declare(plan.registers, F64);
+        let integers = declare(plan.registers + plan.temporaries, I32);
+        let doubles = declare(plan.registers + plan.temporaries, F64);
         let slot_integers = declare(plan.slots.len(), I32);
         let slot_doubles = declare(plan.slots.len(), F64);
         let statuses = declare(plan.slots.len(), I32);
@@ -295,12 +298,20 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Translates one instruction; returns whether it emitted the block's terminator.
     unsafe fn instruction(&mut self, position: usize) -> Result<bool, Refusal> {
         let plan = self.plan;
-        let inst = &plan.insts[position];
         let Some(before) = plan.before[position].clone() else {
             return Ok(false);
         };
+        self.action(position, before, plan.actions[position].clone())
+    }
+
+    /// Translates one action with the state before it; returns whether it emitted the block's
+    /// terminator. The steps of an inlined call come here too, with the call's position, so
+    /// every exit they take leaves at the call.
+    unsafe fn action(&mut self, position: usize, before: State, action: Action) -> Result<bool, Refusal> {
+        let plan = self.plan;
+        let inst = &plan.insts[position];
         let pc = inst.pc;
-        match plan.actions[position].clone() {
+        match action {
             Action::Skip | Action::FallThrough => {}
             Action::Constant { dst, value, ty } => {
                 match ty {
@@ -321,10 +332,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.set_visible(&before, true);
             }
             Action::GetVar { dst, slot, load, forcing } => {
+                self.set_visible(&before, true);
                 if let Some(ty) = load {
                     self.load_slot(position, &before, slot, ty, forcing)?;
                 }
-                let ty = self.after(position)?.slots[slot].ty;
+                let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.is_unboxed() {
                     let value = self.use_slot(slot, ty);
                     self.def_register(dst, ty, value);
@@ -332,7 +344,6 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let value = self.load_slot_cell(slot);
                     self.store_register(dst, value);
                 }
-                self.set_visible(&before, true);
             }
             Action::SetVar { slot, src } => {
                 let ty = match before.registers[src] {
@@ -346,6 +357,27 @@ impl<'p, 'b> Translator<'p, 'b> {
             Action::GetFun { dst, function } => {
                 let pointer = self.builder.ins().iconst(I64, function.as_ptr() as i64);
                 self.store_register(dst, pointer);
+            }
+            Action::GetFunSlot { dst, slot, load } => {
+                if let Some(ty) = load {
+                    self.load_slot(position, &before, slot, ty, false)?;
+                }
+                let value = self.load_slot_cell(slot);
+                self.store_register(dst, value);
+            }
+            Action::Inline { steps } => {
+                for (step, state) in steps {
+                    self.action(position, state, step)?;
+                }
+                self.set_visible(&before, true);
+            }
+            Action::Call { steps, function, call, args, dst } => {
+                self.direct_call(position, before, steps, function, call, &args, dst)?;
+            }
+            Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
+            Action::Move { dst, src, ty } => {
+                let value = self.use_register(src, ty);
+                self.def_register(dst, ty, value);
             }
             Action::Step { effect, objects, dst } => self.step(position, &before, effect, &objects, dst)?,
             Action::Branch => {
@@ -364,6 +396,29 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let next = self.next_pc(position)?;
                 let fall = self.edge(position, next)?;
                 self.builder.ins().brif(builtin, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchUnlessPrimitive { function, expected } => {
+                let value = self.load_register(function);
+                let same = self.builder.ins().icmp_imm(IntCC::Equal, value, expected.as_ptr() as i64);
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchIfObject { src } => {
+                let value = self.load_register(src);
+                let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+                let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(object, taken, &[], fall, &[]);
                 self.fill_edges()?;
                 return Ok(true);
             }
@@ -603,10 +658,73 @@ impl<'p, 'b> Translator<'p, 'b> {
         Ok(())
     }
 
+    /// Calls a closure with arguments evaluated in compiled code. The callee may reach this
+    /// frame, so the variables are written back before the call and forgotten after it.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn direct_call(&mut self, position: usize, before: State, steps: Vec<(Action, State)>, function: Sexp, call: Sexp, args: &[Argument], dst: (usize, Ty)) -> Result<(), Refusal> {
+        let pc = self.plan.insts[position].pc;
+        // A calling handler could run R code during the callee, before it forces an argument
+        // that this call evaluates early, so tier 0 makes such a call lazily.
+        let handlers = self
+            .call(runtime::jit_handlers_present as *const () as usize, &[], Some(I32), &[])
+            .ok_or(Refusal("a helper without a result"))?;
+        let observed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::HANDOFF);
+        let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, handlers, 0);
+        self.guard(unobserved, observed);
+        for (step, state) in steps {
+            self.action(position, state, step)?;
+        }
+        let failed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::PENDING);
+        self.flush_all(&before, failed);
+        let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (16 * args.len().max(1)) as u32, 3));
+        for (index, argument) in args.iter().enumerate() {
+            let (kind, bits) = match *argument {
+                Argument::Slot(slot) => (representation::BOXED, self.load_slot_cell(slot)),
+                Argument::Unboxed { register, ty } => {
+                    let value = self.use_register(register, ty);
+                    let (kind, bits) = match ty {
+                        Ty::Dbl => (representation::DOUBLE, self.builder.ins().bitcast(I64, MemFlagsData::new(), value)),
+                        Ty::Int => (representation::INTEGER, self.builder.ins().sextend(I64, value)),
+                        _ => (representation::LOGICAL, self.builder.ins().sextend(I64, value)),
+                    };
+                    (kind, bits)
+                }
+            };
+            let kind = self.builder.ins().iconst(I64, kind as i64);
+            self.builder.ins().stack_store(I64, kind, buffer, (16 * index) as i32);
+            self.builder.ins().stack_store(I64, bits, buffer, (16 * index + 8) as i32);
+        }
+        let pointer = self.builder.ins().stack_addr(I64, buffer, 0);
+        let function = self.builder.ins().iconst(I64, function.as_ptr() as i64);
+        let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
+        let count = iconst(&mut self.builder, args.len());
+        let register = iconst(&mut self.builder, dst.0);
+        let result = self
+            .call(runtime::jit_call as *const () as usize, &[I64, I64, I64, I64, I64, I64], Some(I32), &[self.activation, function, call, pointer, count, register])
+            .ok_or(Refusal("a helper without a result"))?;
+        let after = self.after_with_boxed(position, Some(dst.0))?;
+        let next = self.next_pc(position)?;
+        let next_live = self.plan.live.get(position + 1).cloned().unwrap_or_default();
+        let invalidated = self.deopt(next, after.clone(), next_live.clone(), reason::SPECULATION);
+        let ok = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
+        let continued = self.builder.create_block();
+        let problem = self.builder.create_block();
+        self.builder.ins().brif(ok, continued, &[], problem, &[]);
+        self.builder.switch_to_block(problem);
+        self.builder.set_cold_block(problem);
+        let errored = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::FAILED as i64);
+        self.builder.ins().brif(errored, failed, &[], invalidated, &[]);
+        self.builder.switch_to_block(continued);
+        self.forget_slots();
+        self.refine(dst.0, dst.1, next, after, next_live);
+        Ok(())
+    }
+
     /// Checks that the value an instruction left in `register` has type `ty` and unboxes it,
     /// deoptimizing to `next` otherwise.
     unsafe fn refine(&mut self, register: usize, ty: Ty, next: usize, after: State, live: Vec<bool>) {
-        if matches!(ty, Ty::Boxed | Ty::Bottom) {
+        // A closure an instruction just made has its type by construction.
+        if matches!(ty, Ty::Boxed | Ty::Bottom | Ty::Closure(..)) {
             return;
         }
         let value = self.load_register(register);
@@ -1173,6 +1291,53 @@ impl<'p, 'b> Translator<'p, 'b> {
         Ok(())
     }
 
+    /// Loads a slot for an inlined call without forcing anything, handing the call back to
+    /// tier 0 when the variable is not a plain value already.
+    unsafe fn peek(&mut self, position: usize, before: &State, slot: usize, ty: Ty) -> Result<(), Refusal> {
+        let pc = self.plan.insts[position].pc;
+        let mismatch = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::SPECULATION);
+        let done = self.builder.create_block();
+        let load = self.builder.create_block();
+        if before.slots[slot].may_be(status::LOADED) {
+            let status = self.builder.use_var(self.statuses[slot]);
+            let unloaded = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+            self.builder.ins().brif(unloaded, load, &[], done, &[]);
+        } else {
+            self.builder.ins().jump(load, &[]);
+        }
+        self.builder.switch_to_block(load);
+        let slot_constant = iconst(&mut self.builder, slot);
+        let result = self
+            .call(runtime::jit_peek_slot as *const () as usize, &[I64, I64], Some(I32), &[self.activation, slot_constant])
+            .ok_or(Refusal("a helper without a result"))?;
+        let declined = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
+        let peeked = self.builder.create_block();
+        let slow = self.builder.create_block();
+        self.builder.ins().brif(declined, slow, &[], peeked, &[]);
+        self.builder.switch_to_block(slow);
+        self.builder.set_cold_block(slow);
+        self.hand_off(position, before);
+        self.builder.switch_to_block(peeked);
+        let value = self.load_slot_cell(slot);
+        let fits = self.check(value, ty);
+        self.guard(fits, mismatch);
+        self.builder.def_var(self.statuses[slot], result);
+        match ty {
+            Ty::Int | Ty::Lgl => {
+                let unboxed = self.unbox(value, ty);
+                self.builder.def_var(self.slot_integers[slot], unboxed);
+            }
+            Ty::Dbl => {
+                let unboxed = self.unbox(value, ty);
+                self.builder.def_var(self.slot_doubles[slot], unboxed);
+            }
+            _ => {}
+        }
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
+        Ok(())
+    }
+
     /// Makes `slot` dirty with `value`: unboxed for an unboxed `ty`, else an object the slot
     /// then owns a reference to. Releases the reference the slot held to its old value, if it
     /// was dirty and boxed, after counting the new one, since the two may be the same object.
@@ -1300,6 +1465,10 @@ impl<'p, 'b> Translator<'p, 'b> {
     }
 
     /// Moves a loaded slot's unboxed value into its root cell. A dirty slot owns a reference.
+    ///
+    /// The box is a fresh object, not the one the frame binds, so a local slot becomes dirty:
+    /// an element write into the box edits it in place, and only a write-back makes the frame
+    /// see that. The analysis marks the join it flows into as possibly dirty to match.
     unsafe fn box_slot(&mut self, slot: usize, ty: Ty) {
         let status = self.builder.use_var(self.statuses[slot]);
         let loaded = self.builder.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
@@ -1310,6 +1479,10 @@ impl<'p, 'b> Translator<'p, 'b> {
         let value = self.use_slot(slot, ty);
         let boxed = self.box_value(ty, value);
         self.store_slot_cell(slot, boxed);
+        let local = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_LOCAL);
+        let dirty_status = self.builder.ins().iconst(I32, status::RUNTIME_DIRTY);
+        let status = self.builder.ins().select(local, dirty_status, status);
+        self.builder.def_var(self.statuses[slot], status);
         let dirty = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
         self.increment_if(boxed, dirty);
         self.builder.ins().jump(done, &[]);
@@ -1453,6 +1626,16 @@ impl<'p, 'b> Translator<'p, 'b> {
     fn check(&mut self, value: Value, ty: Ty) -> Value {
         let (kind, scalar) = match ty {
             Ty::Fun(function) => return self.builder.ins().icmp_imm_s(IntCC::Equal, value, function.as_ptr() as i64),
+            Ty::Closure(formals, body) => {
+                let formals = self.builder.ins().iconst(I64, formals.as_ptr() as i64);
+                let body = self.builder.ins().iconst(I64, body.as_ptr() as i64);
+                // A helper call without a result cannot happen for a helper declared with one,
+                // and failing the check keeps the code correct if it ever did.
+                return match self.call(runtime::jit_closure_matches as *const () as usize, &[I64, I64, I64, I64], Some(I32), &[self.activation, value, formals, body]) {
+                    Some(matches) => self.builder.ins().icmp_imm_s(IntCC::NotEqual, matches, 0),
+                    None => self.builder.ins().iconst(I8, 0),
+                };
+            }
             Ty::Int => (SexpType::Integer, true),
             Ty::Dbl => (SexpType::Real, true),
             Ty::Lgl => (SexpType::Logical, true),
@@ -1561,7 +1744,8 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
     match inst.op {
         Op::CallBuiltin => std::iter::once(operand(1)).chain(operand(3)..operand(3) + operand(4)).collect(),
         Op::CallGeneric => vec![operand(1)],
-        Op::BranchUnlessBuiltin => vec![operand(0)],
+        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => vec![operand(0)],
+        Op::DispatchSubject => vec![operand(1), operand(3)],
         Op::Arithmetic => vec![operand(2), operand(3)],
         Op::SubAssign => vec![operand(2), operand(3)],
         Op::JumpUnless | Op::Return | Op::ForEnd => vec![operand(0)],
