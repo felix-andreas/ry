@@ -588,14 +588,12 @@ pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Vec<Arg>> {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {
-            let value = match expression.kind() {
-                SexpType::Symbol | SexpType::Language | SexpType::Promise
-                    if expression != missing_arg() =>
-                {
-                    make_promise(expression, env)?
-                }
-                SexpType::Bytecode => make_promise(expression, env)?,
-                _ => expression,
+            // A constant gets a promise too, as in GNU R: native code such as lazyeval reads a
+            // promise's environment to tell whether it was forced.
+            let value = if expression == missing_arg() {
+                expression
+            } else {
+                make_promise(expression, env)?
             };
             args.push(Arg {
                 tag: arguments.tag(),
@@ -712,6 +710,7 @@ pub unsafe fn apply_closure(
         formal = formal.cdr();
         index += 1;
     }
+    heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
@@ -843,9 +842,21 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         interp().handlers = interp().frames[depth - 1].handlers.clone();
         let exit = eval(expression, env);
         interp().handlers = saved_handlers;
-        if let Err(unwind) = exit {
-            outcome = Err(unwind);
-            break;
+        match exit {
+            // `on.exit(return(x))` makes `x` the frame's value.
+            Err(unwind) if unwind.returns_to(env) => {
+                let Unwind::Jump(jump) = unwind else {
+                    unreachable!()
+                };
+                if let Jump::Return { value, .. } = *jump {
+                    outcome = Ok(value);
+                }
+            }
+            Err(unwind) => {
+                outcome = Err(unwind);
+                break;
+            }
+            Ok(_) => {}
         }
     }
     crate::heap().release_handles(mark);
@@ -1238,20 +1249,29 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     let mut value = nil();
     interp().visible = true;
     let srcrefs = values::get_attr(call.call, symbols().srcref);
-    if srcrefs == nil() {
-        for arg in call.args {
-            value = eval(arg.value, call.env)?;
-        }
-        return Ok(value);
-    }
     // The first srcref is the brace's own; each statement runs with its srcref current, which
     // the calls it makes record for `sys.call` and `traceback`.
     let saved = interp().srcref;
+    // Only the last value stays rooted, so an object a statement drops can be collected (and
+    // finalized) by a `gc()` later in the same block.
+    let mark = crate::heap().handle_mark();
     for (index, arg) in call.args.iter().enumerate() {
-        interp().srcref = statement_srcref(srcrefs, index + 1);
+        if srcrefs != nil() {
+            interp().srcref = statement_srcref(srcrefs, index + 1);
+        }
         let result = eval(arg.value, call.env);
         interp().srcref = saved;
-        value = result?;
+        crate::heap().release_handles(mark);
+        match result {
+            Ok(next) => {
+                crate::heap().root(next);
+                value = next;
+            }
+            Err(unwind) => {
+                unwind.root();
+                return Err(unwind);
+            }
+        }
     }
     Ok(value)
 }
@@ -2085,7 +2105,11 @@ pub unsafe fn complex_assign(
         }
         items.push((symbols.value, value_promise));
         let setter_call = values::pairlist(&items, SexpType::Language)?;
-        replacement = apply_setter(setter_call, whole, env)?;
+        let depth = interp().frames.len();
+        let outer = interp().assignment_call.replace((setter_call, whole, depth));
+        let result = apply_setter(setter_call, whole, env);
+        interp().assignment_call = outer;
+        replacement = result?;
     }
     assign_symbol(inner, replacement, env, superassign)
 }

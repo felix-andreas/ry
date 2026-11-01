@@ -389,7 +389,12 @@ unsafe fn do_new_env(call: &Call<'_>) -> R<Sexp> {
     } else {
         environment_arg(parent, "enclos")?
     };
-    new_env(parent)
+    let env = new_env(parent)?;
+    if values::as_logical_scalar(call.arg(0)) == 1 {
+        let size = values::as_integer_scalar(call.arg(2));
+        crate::heap().set_frame_hashed(env, if size == NA_INTEGER { 0 } else { size });
+    }
+    Ok(env)
 }
 
 unsafe fn do_parent_env(call: &Call<'_>) -> R<Sexp> {

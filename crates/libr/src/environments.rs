@@ -241,10 +241,14 @@ pub unsafe extern "C" fn R_removeVarFromFrame(symbol: Sexp, env: Sexp) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn R_NewEnv(enclosure: Sexp, _hash: c_int, _size: c_int) -> Sexp {
+pub unsafe extern "C" fn R_NewEnv(enclosure: Sexp, hash: c_int, size: c_int) -> Sexp {
     enter(|| {
         let enclosure = environment(enclosure, "R_NewEnv")?;
-        Ok(runtime().heap.alloc_environment(enclosure)?)
+        let env = runtime().heap.alloc_environment(enclosure)?;
+        if hash != 0 {
+            runtime().heap.set_frame_hashed(env, size);
+        }
+        Ok(env)
     })
 }
 

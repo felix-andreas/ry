@@ -10,7 +10,10 @@ use crate::{
         string_vector, symbols,
     },
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real};
+use heap::{
+    GcStress,
+    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+};
 use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -128,8 +131,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("capabilitiesX11", 0, |_| unsafe { scalar_bool(false) }),
     internal("gc", 3, do_gc),
     internal("gcinfo", 1, |_| unsafe { scalar_bool(false) }).invisible(),
-    internal("gctorture", 1, |_| unsafe { scalar_bool(false) }).invisible(),
-    internal("gctorture2", 3, |_| unsafe { scalar_integer(0) }).invisible(),
+    internal("gctorture", 1, do_gctorture).invisible(),
+    internal("gctorture2", 3, do_gctorture2).invisible(),
     builtin("gc.time", -1, |_| unsafe { values::real_vector(&[0.0; 5]) }),
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
@@ -138,7 +141,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Cstack_info", 0, |_| unsafe { values::integer_vector(&[7969177, 0, 1, NA_INTEGER]) }),
     internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("reg.finalizer", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("reg.finalizer", 3, do_reg_finalizer),
     internal("traceback", 1, |call| unsafe {
         crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
     }),
@@ -1275,6 +1278,45 @@ unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
         0.0,
     ])?;
     Ok(result)
+}
+
+/// `gctorture(on)`: with `on`, every allocation collects first, which turns a missing root into
+/// a crash where it happens. Returns the previous setting.
+unsafe fn do_gctorture(call: &Call<'_>) -> R<Sexp> {
+    let previous = set_gc_stress(values::as_logical_scalar(call.arg(0)) == 1);
+    scalar_bool(previous)
+}
+
+/// `gctorture2(step, wait, inhibit_release)`: any positive `step` turns the stress on, since the
+/// heap collects either before every allocation or by its normal policy.
+unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
+    let step = values::as_integer_scalar(call.arg(0));
+    let previous = set_gc_stress(step != NA_INTEGER && step > 0);
+    scalar_integer(i32::from(previous))
+}
+
+unsafe fn set_gc_stress(on: bool) -> bool {
+    let policy = crate::heap().policy_mut();
+    let previous = matches!(policy.stress, GcStress::EveryAllocation);
+    policy.stress = if on { GcStress::EveryAllocation } else { GcStress::Off };
+    previous
+}
+
+unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
+    let key = call.arg(0);
+    let finalizer = call.arg(1);
+    if !matches!(key.kind(), SexpType::Environment | SexpType::ExternalPtr) {
+        return Err(call.error("first argument must be environment or external pointer"));
+    }
+    if !matches!(finalizer.kind(), SexpType::Closure | SexpType::Builtin | SexpType::Special) {
+        return Err(call.error("second argument must be a function"));
+    }
+    let on_exit = values::as_logical_scalar(call.arg(2));
+    if on_exit == NA_LOGICAL {
+        return Err(call.error("third argument must be 'TRUE' or 'FALSE'"));
+    }
+    crate::heap().alloc_weak_ref(key, nil(), finalizer, 0, on_exit != 0)?;
+    Ok(nil())
 }
 
 unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
