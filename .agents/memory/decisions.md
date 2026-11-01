@@ -2937,6 +2937,13 @@ first lines R had already read, leaving R mid-command.
   inputs, so memos that hold one compare it by pointer exactly as they compared ids. The table is
   process-global, so two databases in one process share it, which is harmless because entries are
   immutable and structural.
+- **Why the table is never swept.** The type universe saturates under real editing. `TyKind` has
+  no literal variant, so changing a literal's value builds no new type. In 5,000 `ry server` body
+  edits on the finance benchmark, RSS levels off at about 373 MB whether the edits change
+  literals or add one new record field name each time. Only edits that keep inventing names grow
+  memory, by about 240 B per new name (main's salsa-interned types took about 380 B), which is
+  about 25 MB over 100,000 such edits. Add revision-scoped sweeping only if a workload shows growth
+  past that.
 
 ## The checker presumes R code is correct where R's semantics leave the question open
 
