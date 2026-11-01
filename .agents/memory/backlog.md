@@ -402,8 +402,6 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
-- **The loader never creates `PackageMetadata`** (`crates/loader/src/loader.rs`), so no namespace is active there and purity from conditional or qualified-only stubs (`tools::file_ext`) is invisible to load planning. Only an optimization is lost: such constants load eagerly.
-- **`seq(1, 10)` is typed `double[]`**, but R returns an integer vector when `by` is missing and the bounds are whole numbers. The stub cannot tell `1` from `1.5`, so a function declared `-> integer[]` returning it is refused.
 - **An overload set called with an `Any` argument is `Unknown`.** When no candidate is a catch-all, an `Any` argument (a forwarded `...` included) selects nothing, so the call is reported although every candidate accepts it. Joining the candidates' results was rejected (`decisions.md`, "An all-`Any` overload does not veto agreement among unchecked fits"); the open direction is a per-candidate result that does not depend on the unknown argument. The generator's `R/dependencies.R` registry avoids overloaded entry points for this reason (`function(...) YieldCurve::Nelson.Siegel(...)` and `digest::digest(...)` hit it), and it is why a callback parameter typed `Any` by its callee's stub poisons `sum(row)`.
   ```r
   #: fn(x: Any) -> double

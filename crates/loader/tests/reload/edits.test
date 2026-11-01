@@ -362,3 +362,18 @@ source R/b.R
 bind .onLoad from R/b.R:3:11
 run R/b.R:2 y <- z + 1
 run .onLoad
+
+#---- a_constant_calling_a_pure_function_of_an_imported_package_stays_lazy
+#~~~~ DESCRIPTION
+Package: demo
+Version: 0.1.0
+Imports: tools
+#~~~~ before R/a.R
+# typing: strict
+extension <- tools::file_ext("data.csv")
+#~~~~ after R/a.R
+# typing: strict
+extension <- tools::file_ext("data.tsv")
+#++++
+source R/a.R
+bind extension from R/a.R:2:13
