@@ -2863,3 +2863,34 @@ first lines R had already read, leaving R mid-command.
 - **Impact:** every feature reads per-item query results, so incremental analysis is unchanged; the
   fixtures in `crates/ide/tests/ide/records-and-tags.R.test`, `frames.R.test` and the typing suite's
   `mismatch_blame` group pin the behavior.
+
+
+# Decision record: positioning
+
+- **Audience.** Teams with large, old R code bases that now want agents to write and change that
+  code. Code an agent writes needs verification that does not depend on a human reading every line,
+  and a type checker gives it on every edit. The pitch leads with this, because "a language server
+  for R" undersells why the project exists.
+- **The shape of the pitch: one toolchain, R plus types, then R++ and R--.** ry is one toolchain for
+  R (checker, language server, formatter, loader, console, runtime). Its type system sits on top of
+  R and checks the code a project already has. ry's runtime adds features plain R does not have
+  (records, tags and `match`, frames, the standard library, inline annotations), which the pitch
+  calls R++. Strict mode keeps only typed code, which the pitch calls R--. A two-circle Venn
+  diagram shows this: R on the left, ry's types and features on the right, typed R (`#:` comments)
+  in the overlap, the union is R++ and the right circle is strict mode.
+- **The migration story is the spine of the pitch,** in four steps that each show a real snippet
+  and real output: it works on your code today, add types as `#:` comments, switch to inline types,
+  then move data to ry's records, tags and frames under strict mode. Each step is optional and
+  reversible, which is what makes adopting ry safe for an existing code base.
+- **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
+  GNU R loses only the runtime features. The pitch says so in one sentence and does not dwell.
+- **The benchmark is honest about typing.** Its three columns are GNU R, ry on the same untyped
+  code, and ry on typed strict code. Typed code is not faster yet (`backlog.md`), and the pitch
+  says so instead of implying that types buy speed. When typed runtime features do get faster, the
+  third column shows it without a rewrite of the copy.
+- **Rejected:** leading with editor features (rust-analyzer-style tooling is table stakes, not a
+  reason to switch), and leading with "a reimplementation of R" (true, but a reader cannot use the
+  incomplete runtime for real work today, so it is the destination, not the pitch).
+- **Rationale for the user's framing being kept:** the user proposed this structure. It was kept
+  because each step maps to a real, shipped feature with real output, and because R++/R-- is a
+  compact way to say "a superset you can opt into, and a safe subset you can enforce".
