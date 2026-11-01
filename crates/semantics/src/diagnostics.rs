@@ -566,6 +566,9 @@ fn classify_non_local_read(
     if R6_INJECTED_BINDINGS.contains(&name) && *file_defines_r6_class(db, file) {
         return NonLocalRead::Resolvable;
     }
+    if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
+        return NonLocalRead::Resolvable;
+    }
     let files = ProjectFiles::try_get(db);
     let test_files = files.filter(|_| *file.kind(db) == DocumentKind::Test);
     if crate::package_scheme_exists(db, name)
@@ -1788,6 +1791,17 @@ fn project_global_variable_declarations(db: &dyn Db, files: ProjectFiles) -> BTr
 /// R6 injects these into every method's environment at construction, so they
 /// resolve nowhere lexically.
 const R6_INJECTED_BINDINGS: [&str; 3] = ["self", "private", "super"];
+
+/// `UseMethod`, `NextMethod` and group-generic dispatch bind these in the method's frame, and
+/// any function can be a method, so a read inside a function body may see them.
+const DISPATCH_VARIABLES: [&str; 6] = [
+    ".Generic",
+    ".Method",
+    ".Class",
+    ".Group",
+    ".GenericCallEnv",
+    ".GenericDefEnv",
+];
 
 /// Purely syntactic: a local binding shadowing `R6Class` is not honored.
 #[salsa::tracked]

@@ -2235,6 +2235,11 @@ In a file that calls `R6Class`, the names `self`, `private`, and `super` resolve
 syntactic, so a local binding that shadows `R6Class` is not honored, and it is scoped to the file, so
 a file that defines no R6 class still warns about `self`.
 
+Inside any function body, the S3 dispatch variables `.Generic`, `.Method`, `.Class`, `.Group`,
+`.GenericCallEnv`, and `.GenericDefEnv` resolve and type as `Unknown`, because `UseMethod`,
+`NextMethod`, and group-generic dispatch bind them in the method's frame and any function can be
+called as a method. At the top level they are unresolved names.
+
 A top-level `globalVariables(c("a", "b"))` or `utils::globalVariables(...)` call with literal string
 arguments declares those names as bound dynamically for the whole package, which suppresses the
 unresolved-name warning for them everywhere.
