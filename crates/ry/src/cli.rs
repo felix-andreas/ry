@@ -8,6 +8,7 @@ use miette::{
     GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
     Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
 };
+use rustc_hash::FxHashSet;
 use salsa::{Database, Durability};
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
 use semantics::metadata::{
@@ -357,12 +358,12 @@ pub(crate) fn analyze_project(
     // derived while they are resident.
     let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
-    let mut used_tokens = BTreeSet::new();
+    let mut used_tokens = FxHashSet::default();
     let tree_batch = workers * FILES_PER_WORKER_BATCH;
     for (_, tokens) in in_batches(&mut db, workers, &by_size, tree_batch, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
-        let mut tokens = BTreeSet::new();
+        let mut tokens = FxHashSet::default();
         if want_tokens {
             namespace::collect_used_tokens(
                 &semantics::parse(db, file).syntax_node(),
